@@ -815,6 +815,35 @@ def applyOneAdd : List StackOp → List StackOp
 
 theorem applyOneAdd_empty : applyOneAdd [] = [] := rfl
 
+/-! ### `[push N, OP_1ADD] → [push (N+1)]` rule (Phase 7.1 follow-up)
+
+In streaming mode, `applyOneAdd` may fold `[push 1, OP_ADD]` to
+`[OP_1ADD]` before the upcoming preceding `push N` has streamed
+in, blocking `applyPushPushAdd`'s 3-op fold. This rule
+consolidates the resulting `[push N, OP_1ADD]` into `[push (N+1)]`,
+producing the same minimal byte sequence the TS reference emits.
+
+Closes the `if-without-else-multi-temp` fixture's byte-74
+divergence (`push 8, OP_1ADD` → `push 9`). -/
+
+def applyPushOneAdd : List StackOp → List StackOp
+  | [] => []
+  | .push (.bigint a) :: .opcode "OP_1ADD" :: rest =>
+      .push (.bigint (a + 1)) :: applyPushOneAdd rest
+  | op :: rest => op :: applyPushOneAdd rest
+
+theorem applyPushOneAdd_empty : applyPushOneAdd [] = [] := rfl
+
+/-! ### `[push N, OP_1SUB] → [push (N-1)]` rule (symmetric to PushOneAdd) -/
+
+def applyPushOneSub : List StackOp → List StackOp
+  | [] => []
+  | .push (.bigint a) :: .opcode "OP_1SUB" :: rest =>
+      .push (.bigint (a - 1)) :: applyPushOneSub rest
+  | op :: rest => op :: applyPushOneSub rest
+
+theorem applyPushOneSub_empty : applyPushOneSub [] = [] := rfl
+
 theorem applyOneAdd_match (rest : List StackOp) :
     applyOneAdd (.push (.bigint 1) :: .opcode "OP_ADD" :: rest)
     = .opcode "OP_1ADD" :: applyOneAdd rest := rfl
@@ -9075,6 +9104,44 @@ exactly what `peepholePassAllTRgo` consumes — so we feed it directly
 without an extra `.reverse`. -/
 def peepholePassAll (ops : List StackOp) : List StackOp :=
   peepholePassAllTRgo (preprocessOpListReversedAux ops []) []
+
+/-! ## Phase 7.1 — Post-pass: catch `[push N, OP_1ADD]` and
+`[push N, OP_1SUB]` patterns left over after the streaming
+`peepholePassAll` driver.
+
+The streaming driver applies `applyOneAdd`/`applyOneSub` greedily
+when each op is consed, sometimes folding `[push 1, OP_ADD]` to
+`[OP_1ADD]` BEFORE the upcoming `[push N]` has been streamed in
+to form a `[push N, push 1, OP_ADD]` triple that
+`applyPushPushAdd` would have folded directly to `[push (N+1)]`.
+This post-pass catches the missed consolidation: any
+`[push N, OP_1ADD]` (resp. `OP_1SUB`) becomes `[push (N+1)]`
+(resp. `[push (N-1)]`).
+
+Recurses into `.ifOp` branches via `postFoldOp` (mutual). -/
+
+mutual
+
+private def postFoldOp : StackOp → StackOp
+  | .ifOp thn els =>
+      let thn' := applyPushOneSub (applyPushOneAdd (postFoldList thn))
+      let els' : Option (List StackOp) :=
+        match els with
+        | some e => some (applyPushOneSub (applyPushOneAdd (postFoldList e)))
+        | none   => none
+      .ifOp thn' els'
+  | other => other
+
+private def postFoldList : List StackOp → List StackOp
+  | [] => []
+  | op :: rest => postFoldOp op :: postFoldList rest
+
+end
+
+/-- Apply the Phase 7.1 push+1ADD / push+1SUB consolidation pass
+to `ops`, including recursive descent into `.ifOp` branches. -/
+def peepholePostFold (ops : List StackOp) : List StackOp :=
+  applyPushOneSub (applyPushOneAdd (postFoldList ops))
 
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
 

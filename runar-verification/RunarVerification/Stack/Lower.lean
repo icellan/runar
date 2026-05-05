@@ -393,13 +393,16 @@ def loadRefLive (sm : StackMap) (name : String) (currentIndex : Nat)
 /-- Liveness-aware param load. Mirrors TS `lowerLoadParam`
 (`05-stack-lower.ts:982-1003`): consumes the param on its last use
 within the current scope, without the `localBindings` check that
-`loadConst .refAlias` applies. Outer-scope params *can* be ROLLed
-inside an inner branch as long as it's the last use seen by the
-branch's `computeLastUses` table. -/
+`loadConst .refAlias` applies. Phase 7.1: also checks `outerProtected`
+to prevent consumption of params that an enclosing scope still needs
+(e.g. a param used in BOTH branches of sibling ifs — the first if's
+THEN body must NOT ROLL the param when the second if also reads it). -/
 def loadRefLiveParam (sm : StackMap) (name : String) (currentIndex : Nat)
-    (lastUses : List (String × Nat)) :
+    (lastUses : List (String × Nat)) (outerProtected : List String) :
     (List StackOp × StackMap) :=
-  bringToTop sm name (isLastUse lastUses name currentIndex)
+  let consume := !listContains outerProtected name
+              && isLastUse lastUses name currentIndex
+  bringToTop sm name consume
 
 /-- Always-copy load (`bringToTop` with `consume=false`) used by
 `loadProp` per TS `05-stack-lower.ts:1004-1029`: properties are shared
@@ -2531,9 +2534,10 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
     (sm : StackMap) (bindingName : String) :
     ANFValue → (List StackOp × StackMap × List String)
   | .loadParam n =>
-      -- TS `lowerLoadParam` does NOT apply the outerProtected check:
-      -- params can be ROLLed inside inner scopes if it's their last use.
-      let (load, sm1) := loadRefLiveParam sm n currentIndex lastUses
+      -- Phase 7.1: thread outerProtected so params used in sibling
+      -- inner scopes (e.g. both branches of separate ifs) aren't
+      -- consumed prematurely inside one branch.
+      let (load, sm1) := loadRefLiveParam sm n currentIndex lastUses outerProtected
       let sm2 := match sm1 with
                  | _ :: rest => bindingName :: rest
                  | []        => [bindingName]

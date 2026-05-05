@@ -34,11 +34,14 @@ open RunarVerification.ANF
 open RunarVerification.Stack
 open RunarVerification.Script
 
-/-- Apply the full 19-rule peephole pass to every method's ops. -/
+/-- Apply the full 19-rule peephole pass to every method's ops,
+followed by the Phase 7.1 post-fold consolidation
+(`[push N, OP_1ADD] → [push (N+1)]` and similar for OP_1SUB) that
+catches patterns left over by the streaming driver. -/
 def peepholeProgram (p : StackProgram) : StackProgram :=
   { p with
     methods := p.methods.map (fun m =>
-      { m with ops := Peephole.peepholePassAll m.ops }) }
+      { m with ops := Peephole.peepholePostFold (Peephole.peepholePassAll m.ops) }) }
 
 /-- The full ANF → bytes pipeline. Uses `Emit.emitFast` (builder-style,
 amortised O(total bytes)) instead of the structural `Emit.emit` so EC /

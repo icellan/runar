@@ -3133,6 +3133,69 @@ Stage B variants.
 
 ---
 
+## 46. Phase 7.1 — `if-without-else-multi-temp` partial close (2026-05-05)
+
+Two real lowering bugs fixed; divergence moved from byte 74 → byte 95.
+Fixture still not byte-exact (further if-else branch reconciliation
+issues remain), but the lowering correctness improved meaningfully.
+
+### 46.1 Bug 1: streaming peephole missed `[push N, OP_1ADD]` consolidation
+
+The streaming `peepholePassAllTRgo` driver applies `applyOneAdd`
+greedily on `[push 1, OP_ADD]` BEFORE the upcoming `[push N]` has
+streamed in to form a `[push N, push 1, OP_ADD]` triple that
+`applyPushPushAdd` would have folded to `[push (N+1)]`.
+
+Fix: added two new peephole rules + a recursive post-fold pass:
+
+* `applyPushOneAdd : [push N, OP_1ADD] → [push (N+1)]`
+* `applyPushOneSub : [push N, OP_1SUB] → [push (N-1)]`
+* `peepholePostFold` — applies both rules recursively (descending
+  into `.ifOp` branches) AFTER `peepholePassAll`.
+
+Wired into `Pipeline.peepholeProgram` as a post-pass.
+
+### 46.2 Bug 2: `loadRefLiveParam` ignored `outerProtected`
+
+The original implementation did NOT thread `outerProtected`,
+permitting params to be ROLLed (consumed) inside an inner branch
+on their last LOCAL use — incorrect when the param is also used
+in a SIBLING inner scope (e.g. both branches of separate ifs).
+
+Concrete failure: in `if-without-else-multi-temp`, the first if's
+THEN body consumed `rawTx` via ROLL because it was rawTx's last
+use within THEN — but the SECOND if also reads rawTx. TS reference
+correctly preserves rawTx via PICK throughout.
+
+Fix: thread `outerProtected` through `loadRefLiveParam`. Any param
+in `outerProtected` is now COPIED (PICK) instead of consumed
+(ROLL). Updated the single caller in `lowerValueP`.
+
+### 46.3 Verification
+
+```
+lake build                                  # 24/24 OK
+lake env ./.lake/build/bin/goldenLoad       # 49/49 WF
+lake env ./.lake/build/bin/roundtrip        # 49/49 round-trip
+lake env ./.lake/build/bin/pipelineGolden   # 33/49 byte-exact
+```
+
+No regressions in the 33 baseline fixtures. Trust surface
+unchanged: 62 axioms + 5 `opaque` defs. Zero `sorry`/`admit`.
+
+### 46.4 Remaining work for full close
+
+The current divergence at byte 95 is in if-else branch
+reconciliation: Lean now correctly preserves rawTx across the
+ifs but emits slightly different reconciliation ops (extra
+`OP_3` before pickStruct(3) and roll(4) patterns). Likely
+requires investigation of the post-IF SM merging logic in
+`lowerValueP`'s ifVal arm — possibly another 1-2 fixes.
+
+Deferred to a future increment.
+
+---
+
 ## 45. Phase 7.6.f / 7.6.g / 7.8.b — Depth-≥2 + longer chains + Stage D post-processing (2026-05-05)
 
 ### 45.1 Phase 7.6.f — Depth-≥2 operational variants (6 theorems + 1 helper)
