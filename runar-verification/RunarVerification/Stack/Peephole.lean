@@ -9323,6 +9323,120 @@ which run inside the TS optimizer's outer fixpoint loop. -/
 def peepholeChainFold (ops : List StackOp) : List StackOp :=
   chainFoldFixpointFlat 64 (chainFoldListTRgo ops [])
 
+/-! ## Phase 7.9.d — Roll/Pick fold post-pass
+
+The TS reference (`packages/runar-compiler/src/optimizer/peephole.ts`,
+"Roll/Pick depth simplification" block) folds 5 push-N → opcode-X pairs
+that the stack lowerer leaves behind:
+
+* `[push 0, OP_ROLL]` → `[]`        (depth-0 roll is a no-op)
+* `[push 1, OP_ROLL]` → `[OP_SWAP]` (depth-1 roll == swap)
+* `[push 2, OP_ROLL]` → `[OP_ROT]`  (depth-2 roll == rot)
+* `[push 0, OP_PICK]` → `[OP_DUP]`  (depth-0 pick == dup)
+* `[push 1, OP_PICK]` → `[OP_OVER]` (depth-1 pick == over)
+
+In the Lean port, `.roll d` and `.pick d` are SINGLE Stack-IR ops that
+bundle the depth-push into `Emit.emitStackOp` (see `Script/Emit.lean:176`:
+`.roll d → encodePushBigInt d ++ [0x7a]`). The TS reference, by contrast,
+emits two separate Stack-IR ops (`push d` then `OP_ROLL`) and the peephole
+pass folds the literal pair into a single opcode BEFORE the byte encoding.
+
+Because the Lean IR is structurally different at this layer, the existing
+`applyZeroRoll0` / `applyOneRoll1` / `applyTwoRoll2` / `applyZeroPick0` /
+`applyOnePick1` definitions (which match the TS-shaped 2-op `.push (.bigint
+N) :: .rollOrPick N :: rest` pattern) cannot fire on Lean-emitted IR. We
+therefore introduce direct StackOp-level rewrites that fold the bundled
+`.roll 0/1/2` and `.pick 0/1` ops to their byte-equivalent specialised
+opcodes:
+
+* `.roll 0` → drop (the `.roll 0` op encodes to `00 7a` which the TS
+  reference, after folding, omits entirely — its `[push 0, OP_ROLL]` pair
+  becomes `[]`)
+* `.roll 1` → `.swap`
+* `.roll 2` → `.rot`
+* `.pick 0` → `.dup`
+* `.pick 1` → `.over`
+
+Without this pass, sphincs-wallet and post-quantum-slhdsa diverge at
+byte ~44858 / ~44846 where TS emits `OP_ROT` (`7b`) but the Lean port
+leaves `.roll 2` (encoded as `52 7a`). The pattern originates in the
+SLH-DSA WOTS+ chain codegen (`Stack/SlhDsa.lean:686`,
+`Stack/SlhDsa.lean:436`, etc.). -/
+
+/-- Single-op StackOp-level rewrite for `.roll 0/1/2` / `.pick 0/1`.
+Mirrors the byte-equivalence:
+  emit (.roll 0) = `00 7a` ≡ `nothing` (the depth-push of OP_0 followed by
+                                        OP_ROLL is a no-op when the roll
+                                        consumes its own depth literal)
+  emit (.roll 1) = `51 7a` ≡ emit .swap = `7c`
+  emit (.roll 2) = `52 7a` ≡ emit .rot  = `7b`
+  emit (.pick 0) = `00 79` ≡ emit .dup  = `76`
+  emit (.pick 1) = `51 79` ≡ emit .over = `78`
+
+Note: the `.roll 0` case folds to **nothing**, not to `.drop`. The TS
+reference's `[push 0, OP_ROLL] → []` rule is byte-shrinking. -/
+private def rollPickRewriteOne : StackOp → List StackOp
+  | .roll 0 => []
+  | .roll 1 => [.swap]
+  | .roll 2 => [.rot]
+  | .pick 0 => [.dup]
+  | .pick 1 => [.over]
+  | other   => [other]
+
+/-- One pass of the 5 roll/pick rewrites over a flat op list.
+Walks left-to-right via structural recursion. Note: rewrites do not
+introduce new fold opportunities (each output is itself a
+non-roll/pick op or empty), so this single pass is already at fixpoint
+for these rules — the outer `rollPickFixpointFlat` loop is purely
+defensive against future additions. -/
+private def applyRollPickFold : List StackOp → List StackOp
+  | []          => []
+  | op :: rest  => rollPickRewriteOne op ++ applyRollPickFold rest
+
+/-- Outer driver for `applyRollPickFold`. Since `applyRollPickFold` is
+idempotent (its outputs `[]`, `[.swap]`, `[.rot]`, `[.dup]`, `[.over]`
+are not themselves roll/pick ops, so re-applying changes nothing), a
+single pass suffices. The `fuel` argument is unused and retained for
+API stability. -/
+private partial def rollPickFixpointFlat (_fuel : Nat) (ops : List StackOp) :
+    List StackOp :=
+  applyRollPickFold ops
+
+mutual
+
+/-- One step of the roll/pick post-pass: rewrite a single op, descending
+recursively into `.ifOp` branches. Recursion depth = `.ifOp` nesting
+(small). The outer list traversal is delegated to `rollPickListTRgo`. -/
+private partial def rollPickOp : StackOp → StackOp
+  | .ifOp thn els =>
+      let thn' := rollPickFixpointFlat 64 (rollPickListTRgo thn [])
+      let els' : Option (List StackOp) :=
+        match els with
+        | some e => some (rollPickFixpointFlat 64 (rollPickListTRgo e []))
+        | none   => none
+      .ifOp thn' els'
+  | other => other
+
+/-- Tail-recursive list traversal: walks `ops` and prepends `rollPickOp op`
+to `acc`. Returns the accumulator in REVERSE order — caller hands the
+result to `rollPickFixpointFlat` (order-independent up to the final
+`.reverse` already done here). -/
+private partial def rollPickListTRgo : List StackOp → List StackOp →
+    List StackOp
+  | [],         acc => acc.reverse
+  | op :: rest, acc => rollPickListTRgo rest (rollPickOp op :: acc)
+
+end
+
+/-- Apply the Phase 7.9.d roll/pick fold consolidation pass to `ops`,
+including recursive descent into `.ifOp` branches and fixpoint iteration
+of the 5 roll/pick rules at every level.
+
+Mirrors TS `peephole.ts:268-317` (Roll/Pick depth simplification block)
+which runs inside the TS optimizer's outer fixpoint loop. -/
+def peepholeRollPickFold (ops : List StackOp) : List StackOp :=
+  rollPickFixpointFlat 64 (rollPickListTRgo ops [])
+
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
 
 Composes the 19 individual `_pass_sound` results for `peepholePassAllFlat`.

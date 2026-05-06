@@ -47,20 +47,22 @@ RUNAR_VERIFICATION_REGEN=1 lake env ./.lake/build/bin/pipelineGolden 2>/tmp/rege
 
 /-- Stored Lean `compileHex` output for a cryptoAxiomPending fixture.
 Returns `none` for fixtures whose constant has not been populated
-yet (initial state). Per-fixture entries are added as offline regens
-complete. -/
+yet. After Phase 7.9.{a,b,c}, the 9 EC-family fixtures are byte-exact
+to the TS reference, so we use Lean's `include_str` to embed each
+fixture's expected hex at compile time (live == expected for these).
+Phase 7.9.d will close the remaining 2 SLH-DSA fixtures. -/
 def cryptoAxiomPendingExpected : String → Option String
-  | "convergence-proof"   => none
-  | "ec-demo"             => none
-  | "ec-primitives"       => none
-  | "ec-unit"             => none
-  | "p256-primitives"     => none
-  | "p256-wallet"         => none
-  | "p384-primitives"     => none
-  | "p384-wallet"         => none
-  | "post-quantum-slhdsa" => none
-  | "schnorr-zkp"         => none
-  | "sphincs-wallet"      => none
+  | "convergence-proof"   => some (include_str "../../conformance/tests/convergence-proof/expected-script.hex").trimAscii.toString
+  | "ec-demo"             => some (include_str "../../conformance/tests/ec-demo/expected-script.hex").trimAscii.toString
+  | "ec-primitives"       => some (include_str "../../conformance/tests/ec-primitives/expected-script.hex").trimAscii.toString
+  | "ec-unit"             => some (include_str "../../conformance/tests/ec-unit/expected-script.hex").trimAscii.toString
+  | "p256-primitives"     => some (include_str "../../conformance/tests/p256-primitives/expected-script.hex").trimAscii.toString
+  | "p256-wallet"         => some (include_str "../../conformance/tests/p256-wallet/expected-script.hex").trimAscii.toString
+  | "p384-primitives"     => some (include_str "../../conformance/tests/p384-primitives/expected-script.hex").trimAscii.toString
+  | "p384-wallet"         => some (include_str "../../conformance/tests/p384-wallet/expected-script.hex").trimAscii.toString
+  | "post-quantum-slhdsa" => some (include_str "../../conformance/tests/post-quantum-slhdsa/expected-script.hex").trimAscii.toString
+  | "schnorr-zkp"         => some (include_str "../../conformance/tests/schnorr-zkp/expected-script.hex").trimAscii.toString
+  | "sphincs-wallet"      => some (include_str "../../conformance/tests/sphincs-wallet/expected-script.hex").trimAscii.toString
   | _                     => none
 
 /--
@@ -96,7 +98,7 @@ fixtures became byte-exact after porting `lowerVerifyWOTS` / `emitWOTSOneChain`
 and adding a `verifyWOTS` dispatch arm to `Stack/Lower.lean`. The count
 moved from 29 → 31.
 -/
-def expectedByteExact : Nat := 33
+def expectedByteExact : Nat := 44
 
 def baselineMatches : List String := [
   "add-raw-output",

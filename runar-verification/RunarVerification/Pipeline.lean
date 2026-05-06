@@ -37,23 +37,33 @@ open RunarVerification.Script
 /-- Apply the full 19-rule peephole pass to every method's ops,
 followed by the Phase 7.1 post-fold consolidation
 (`[push N, OP_1ADD] → [push (N+1)]` and similar for OP_1SUB) that
-catches patterns left over by the streaming driver, and the Phase
-7.9.b chain-fold pass (`[push a, OP_ADD, push b, OP_ADD] → [push (a+b),
+catches patterns left over by the streaming driver, the Phase 7.9.b
+chain-fold pass (`[push a, OP_ADD, push b, OP_ADD] → [push (a+b),
 OP_ADD]` and similar for OP_SUB) that mirrors the TS reference's 4-op
-`chainAdd` / `chainSub` rules.
+`chainAdd` / `chainSub` rules, and the Phase 7.9.d roll/pick fold pass
+(`[push 0, .roll 0] → []`, `[push 1, .roll 1] → [.swap]`, `[push 2,
+.roll 2] → [.rot]`, `[push 0, .pick 0] → [.dup]`, `[push 1, .pick 1] →
+[.over]`).
 
 The chain-fold pass is the byte-exact fix for the EC scalar-mul `k + n
 + n + n` rebasing pattern in secp256k1 / P-256 / P-384 codegen — without
 it, the Lean port emits one push per addend instead of one push of the
 sum, producing 654-byte divergences vs the TS reference on
 `p256-primitives`, `p256-wallet`, `p384-primitives`, `p384-wallet` (and
-the analogous Phase 7.9.a secp256k1 fixtures). -/
+the analogous Phase 7.9.a secp256k1 fixtures).
+
+The roll/pick fold pass is the byte-exact fix for the SLH-DSA / WOTS+
+chain unroll, where the stack lowerer emits `[push N, .roll N]` /
+`[push N, .pick N]` pairs that TS folds to `OP_SWAP` / `OP_ROT` /
+`OP_DUP` / `OP_OVER`. Without it, sphincs-wallet and post-quantum-slhdsa
+diverge at byte ~44858. -/
 def peepholeProgram (p : StackProgram) : StackProgram :=
   { p with
     methods := p.methods.map (fun m =>
-      { m with ops := Peephole.peepholeChainFold
-                        (Peephole.peepholePostFold
-                          (Peephole.peepholePassAll m.ops)) }) }
+      { m with ops := Peephole.peepholeRollPickFold
+                        (Peephole.peepholeChainFold
+                          (Peephole.peepholePostFold
+                            (Peephole.peepholePassAll m.ops))) }) }
 
 /-- The full ANF → bytes pipeline. Uses `Emit.emitFast` (builder-style,
 amortised O(total bytes)) instead of the structural `Emit.emit` so EC /
