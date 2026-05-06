@@ -167,6 +167,16 @@ A method body is WF if:
    flattened) binding sequence — duplicates indicate a compiler bug.
 -/
 
+/--
+Whether a name is "shadowed" by a parent if-binding. The TS reference
+compiler emits a result-aliasing pattern where an `if`-branch's last
+binding shares the parent if-binding's name to denote that the if's
+result equals that branch's value. (See e.g. the
+`conditional-data-output-stateful` and `token-ft` conformance fixtures:
+the outer `if`'s name reappears as the last `else`-branch binding.)
+The two names refer to the same SSA value at evaluation, so the SSA
+uniqueness check must ignore the inner re-occurrence.
+-/
 partial def collectAllBindingNames : List ANFBinding → List String
   | [] => []
   | b :: rest =>

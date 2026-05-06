@@ -6,6 +6,8 @@ import RunarVerification.Stack.Wots
 import RunarVerification.Stack.Ec
 import RunarVerification.Stack.P256P384
 import RunarVerification.Stack.SlhDsa
+import RunarVerification.Stack.BabyBear
+import RunarVerification.Stack.Merkle
 
 /-!
 # Stack IR — Lowering pass (Phase 3a, simple-constructor subset)
@@ -157,6 +159,43 @@ def computeLastUses (bs : List ANFBinding) : List (String × Nat) :=
           (collectRefs v).foldl (init := acc) fun a r => lastUsesUpdate a r idx
         go acc' (idx + 1) rest
   go [] 0 bs
+
+/-! ### `constInts` — binding-name → integer literal map (Phase 4-K)
+
+Mirrors the `constValues` tracking in `compilers/go/codegen/stack.go:345`
+(see also `getConstantValue` in `packages/runar-compiler/src/passes/05-stack-lower.ts`).
+For every binding of the form `name = loadConst (.int i)` in the method
+body (including any nested if-branch / loop-body / methodCall-body)
+the map records `name → i`. Used by the Merkle codegen dispatch to
+extract the compile-time depth literal that becomes the unrolled-loop
+bound (`merkleRootSha256(_, _, _, depth)` etc.).
+
+The map is method-wide and immutable for the duration of one
+`lowerMethod` call; it is built once at `lowerMethod` entry and threaded
+through `lowerValueP` / `lowerBindingsP` like `lastUses`. -/
+
+mutual
+
+/-- Collect `(name, i)` pairs for every `name = loadConst (.int i)`
+binding reachable from `bs`, descending into if-branches and loop
+bodies so const literals defined in outer scopes remain visible to
+inner-scope dispatch arms. -/
+def collectConstInts : List ANFBinding → List (String × Int)
+  | []                    => []
+  | (.mk name v _) :: rest =>
+      let here : List (String × Int) :=
+        match v with
+        | .loadConst (.int i)   => [(name, i)]
+        | .ifVal _ thn els      => collectConstInts thn ++ collectConstInts els
+        | .loop _ body _        => collectConstInts body
+        | _                     => []
+      here ++ collectConstInts rest
+
+end
+
+/-- Look up `name` in the const-int map; return `none` if absent. -/
+def constIntsLookup (m : List (String × Int)) (name : String) : Option Int :=
+  (m.find? (fun p => p.1 == name)).map (·.2)
 
 /--
 Whether reading `ref` at position `currentIndex` is the **final** read
@@ -2384,6 +2423,109 @@ def lowerVerifySlhDsaOpsLive (sm : StackMap) (bindingName : String)
   let smFinal := (sm3.popN 3).push bindingName
   (loadMsg ++ loadSig ++ loadPk ++ emitVerifySLHDSABody paramKey, smFinal)
 
+/-! ## BabyBear field codegen — Phase 4-J
+
+Mirrors the TS reference dispatch at `05-stack-lower.ts` for the
+`bbField{Add,Sub,Mul,Inv}` and `bbExt4{Mul,Inv}{0..3}` builtins. The
+body op lists are precomputed in `Stack.BabyBear`. The dispatch arm
+here follows the same pattern as `lowerEcBuiltinOpsLive`. -/
+
+open RunarVerification.Stack.BabyBear in
+/-- Lowering for a BabyBear builtin. Loads each arg to TOS, then splices
+the appropriate static op list. Net stack-map effect: pop `args.length`,
+push `bindingName`. -/
+def lowerBabyBearBuiltinOpsLive (sm : StackMap) (bindingName : String)
+    (func : String) (args : List String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
+  let body : List StackOp :=
+    if func = "bbFieldAdd" then emitBBFieldAdd
+    else if func = "bbFieldSub" then emitBBFieldSub
+    else if func = "bbFieldMul" then emitBBFieldMul
+    else if func = "bbFieldInv" then emitBBFieldInv
+    else if func = "bbExt4Mul0" then emitBBExt4Mul0
+    else if func = "bbExt4Mul1" then emitBBExt4Mul1
+    else if func = "bbExt4Mul2" then emitBBExt4Mul2
+    else if func = "bbExt4Mul3" then emitBBExt4Mul3
+    else if func = "bbExt4Inv0" then emitBBExt4Inv0
+    else if func = "bbExt4Inv1" then emitBBExt4Inv1
+    else if func = "bbExt4Inv2" then emitBBExt4Inv2
+    else if func = "bbExt4Inv3" then emitBBExt4Inv3
+    else [.opcode "OP_RUNAR_UNKNOWN_BABYBEAR_BUILTIN"]
+  let smFinal := (sm1.popN args.length).push bindingName
+  (argOps ++ body, smFinal)
+
+/-! ## Merkle proof codegen — Phase 4-K
+
+Mirrors `lowerMerkleRoot` (TS `05-stack-lower.ts:4652-4706`) and its Go
+peer at `compilers/go/codegen/stack.go:4870-4919`. Both variants
+(`merkleRootSha256` and `merkleRootHash256`) take 4 args:
+`[leaf, proof, index, depth]` where `depth` MUST be a compile-time
+constant integer literal — it becomes the unrolled-loop bound for the
+Merkle climb.
+
+The TS / Go references implement this by:
+
+1. Looking up `args[3]` in the per-method `constValues` map (populated
+   while emitting `loadConst (.int _)` bindings).
+2. Bringing the depth slot to top with `consume=true`, emitting `OP_DROP`,
+   and popping the slot from the stack map (the depth literal is
+   compile-time only — it does not flow into the body op list).
+3. Bringing `[leaf, proof, index]` to top via the standard
+   `bringToTop(_, isLastUse)` dance.
+4. Splicing the precomputed body from `merkle-codegen.ts`.
+
+This Lean port reuses `Stack.Merkle.merkleRootSha256Ops` /
+`merkleRootHash256Ops` for the body. The depth comes from the new
+`constInts` parameter threaded through `lowerValueP`. -/
+
+open RunarVerification.Stack.Merkle in
+/-- Lowering for `merkleRootSha256` / `merkleRootHash256`. Args:
+`[leaf, proof, index, depth]`. Depth must be a compile-time int literal
+recorded in `constInts`. After the body: 4 args popped, 1 result pushed. -/
+def lowerMerkleRootOpsLive (sm : StackMap) (bindingName : String)
+    (func : String) (args : List String)
+    (constInts : List (String × Int))
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  match args with
+  | [leaf, proof, index, depthArg] =>
+      -- Resolve the depth literal. Out-of-range / missing constants emit
+      -- a sentinel opcode (matching the existing `OP_RUNAR_*_ARITY`
+      -- pattern); this is reachable only on malformed IR.
+      match constIntsLookup constInts depthArg with
+      | none =>
+          ([.opcode "OP_RUNAR_MERKLE_DEPTH_NOT_CONST"], sm.push bindingName)
+      | some di =>
+          if di < 1 ∨ di > 64 then
+            ([.opcode "OP_RUNAR_MERKLE_DEPTH_OUT_OF_RANGE"], sm.push bindingName)
+          else
+            let depth : Nat := di.toNat
+            -- Step 1: drop the depth slot from runtime stack.
+            -- `bringToTop(_, true)` emits ROLL/SWAP as appropriate; the
+            -- subsequent OP_DROP consumes the brought-to-top slot.
+            let (depthDropOps, smPostDepth) :=
+              match sm.depth? depthArg with
+              | some _ =>
+                  let (toTop, sm1) := bringToTop sm depthArg true
+                  (toTop ++ [StackOp.drop], sm1.popN 1)
+              | none   => ([], sm)
+            -- Step 2: bring leaf, proof, index to TOS via the standard
+            -- liveness-aware load helper. Each call updates `sm` so the
+            -- next bringToTop sees the prior arg sitting on top.
+            let (loadLeaf,  sm2) := loadRefLive smPostDepth leaf  currentIndex lastUses outerProtected
+            let (loadProof, sm3) := loadRefLive sm2        proof currentIndex lastUses outerProtected
+            let (loadIndex, sm4) := loadRefLive sm3        index currentIndex lastUses outerProtected
+            -- Step 3: splice the precomputed body. Body net: pop 3, push 1.
+            let body : List StackOp :=
+              if func = "merkleRootSha256" then merkleRootSha256Ops depth
+              else merkleRootHash256Ops depth
+            let smFinal : StackMap := (sm4.popN 3).push bindingName
+            (depthDropOps ++ loadLeaf ++ loadProof ++ loadIndex ++ body, smFinal)
+  | _ =>
+      ([.opcode "OP_RUNAR_MERKLEROOT_ARITY"], sm.push bindingName)
+
 /-! ## Mutual lowering
 
 `lowerValue` and `lowerBindings` recurse via the `ifVal` and `loop`
@@ -2531,6 +2673,7 @@ names; every other arm returns it unchanged. -/
 def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
     (currentIndex : Nat) (lastUses : List (String × Nat))
     (outerProtected : List String) (localBindings : List String)
+    (constInts : List (String × Int))
     (sm : StackMap) (bindingName : String) :
     ANFValue → (List StackOp × StackMap × List String)
   | .loadParam n =>
@@ -3004,6 +3147,26 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                 currentIndex lastUses outerProtected
         | _ =>
             ([.opcode "OP_RUNAR_VERIFYSLHDSA_ARITY"], sm.push bindingName, localBindings)
+      else if func = "bbFieldAdd" || func = "bbFieldSub" ||
+              func = "bbFieldMul" || func = "bbFieldInv" ||
+              func = "bbExt4Mul0" || func = "bbExt4Mul1" ||
+              func = "bbExt4Mul2" || func = "bbExt4Mul3" ||
+              func = "bbExt4Inv0" || func = "bbExt4Inv1" ||
+              func = "bbExt4Inv2" || func = "bbExt4Inv3" then
+        -- Phase 4-J: BabyBear prime-field + ext4 builtins (mirrors TS
+        -- `babybear-codegen.ts`).
+        withLB <|
+          lowerBabyBearBuiltinOpsLive sm bindingName func args
+            currentIndex lastUses outerProtected
+      else if func = "merkleRootSha256" || func = "merkleRootHash256" then
+        -- Phase 4-K: Merkle proof verification (mirrors TS
+        -- `lowerMerkleRoot` at `05-stack-lower.ts:4652-4706` and Go
+        -- peer at `compilers/go/codegen/stack.go:4870-4919`). The
+        -- `depth` argument is a compile-time constant resolved via the
+        -- `constInts` map.
+        withLB <|
+          lowerMerkleRootOpsLive sm bindingName func args constInts
+            currentIndex lastUses outerProtected
       else
         let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
         let opcodeOps := (builtinOpcode func).map (.opcode)
@@ -3054,9 +3217,13 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
               -- skip consumption and emit DUP/PICK.
               let innerLocalBindings := m.body.map (fun b => b.name)
               let bodyLastUses := computeLastUses m.body
+              -- Merge the callee body's const-int contributions onto the
+              -- outer-scope map. The outer map keeps its entries (visible
+              -- through scope) while the callee adds its own literals.
+              let bodyConstInts := constInts ++ collectConstInts m.body
               let (bodyOps, smAfterBody) :=
                 lowerBindingsP progMethods props budget' 0 bodyLastUses outerProtected
-                  innerLocalBindings smArgs m.body
+                  innerLocalBindings bodyConstInts smArgs m.body
               -- After inlining, the callee body has either left its return
               -- value on top (named after its last binding) or — if its
               -- last binding was an assert — left whatever was below
@@ -3102,8 +3269,8 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- 1688). Mirror that.
       let thnLocal := thn.map (fun b => b.name)
       let elsLocal := els.map (fun b => b.name)
-      let (thnOps, smThn) := lowerBindingsP progMethods props budget 0 thnLastUses innerProtected thnLocal smBranch thn
-      let (elsOps, smEls) := lowerBindingsP progMethods props budget 0 elsLastUses innerProtected elsLocal smBranch els
+      let (thnOps, smThn) := lowerBindingsP progMethods props budget 0 thnLastUses innerProtected thnLocal constInts smBranch thn
+      let (elsOps, smEls) := lowerBindingsP progMethods props budget 0 elsLastUses innerProtected elsLocal constInts smBranch els
       -- Phase 3z-F: empty-else shadow-rebind synthesis. When the THEN
       -- branch's top-of-stack name was already in `smBranch` (a property
       -- shadow-rebind like `count = @ref:t5`) and `els = []`, TS
@@ -3148,13 +3315,35 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         | _, _ => none
       match shadowRebind with
       | some (_smB, d, topName) =>
+          -- Phase 7.1.c: Mirror TS `lowerIf` (`05-stack-lower.ts:1839-1846`)
+          -- and the post-ENDIF stale-removal loop (`1905-1929`).
+          --
+          -- elseSynth: TS emits `push(d), pick(d)` where the TS `pick`
+          -- opcode is bare `OP_PICK` (`06-emit.ts:471-473`), giving
+          -- on-wire bytes `OP_<d> OP_PICK`. Our `StackOp.pick d` already
+          -- encodes as `pushBigInt(d) ++ OP_PICK` (`Script/Emit.lean:177`),
+          -- so a standalone `[.pickStruct d]` is byte-identical to TS's
+          -- `[push d, pick]` pair. Adding an explicit `[.push d]` before
+          -- it would double-emit the depth (the bug closed here).
+          --
+          -- cleanup: TS emits `push(d'), roll(d'+1), drop` where d' is
+          -- the post-ENDIF stale depth = `d + 1` (the elseSynth pushed
+          -- a new top, displacing the original `topName` by 1). Bytes:
+          -- `OP_<d+1> OP_ROLL OP_DROP`. `StackOp.roll k` already encodes
+          -- as `pushBigInt(k) ++ OP_ROLL` (`Script/Emit.lean:176`), so
+          -- `[.roll (d+1), .drop]` matches TS bytes exactly. The pre-fix
+          -- `[.push d, .roll (d+1), .drop]` emitted an extraneous leading
+          -- `OP_<d>` (4 bytes vs 3).
+          --
+          -- d == 1 cleanup (theoretical — no current fixture exercises
+          -- it): post-ENDIF stale depth = 2 ⇒ `[.roll 2, .drop]`, NOT
+          -- `[.nip]` as previously coded.
           let elseSynth : List StackOp :=
             if d == 0 then [.dup]
-            else [.push (.bigint (Int.ofNat d)), .pick d]
+            else [.pickStruct d]
           let cleanup : List StackOp :=
             if d == 0 then [.nip]
-            else if d == 1 then [.nip]
-            else [.push (.bigint (Int.ofNat d)), .roll (d + 1), .drop]
+            else [.roll (d + 1), .drop]
           let smCleaned : StackMap := (smBranch.removeAtDepth d).push topName
           (condOps ++ [.ifOp thnOps (some elseSynth)] ++ cleanup, smCleaned, localBindings)
       | none =>
@@ -3272,9 +3461,9 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       let bodyLocal := body.map (fun b => b.name)
       -- Lower the body once for non-final iters and once for the final iter.
       let (bodyOpsNF, smNF) :=
-        lowerBindingsP progMethods props budget 0 nonFinalLU innerProtected bodyLocal smInner body
+        lowerBindingsP progMethods props budget 0 nonFinalLU innerProtected bodyLocal constInts smInner body
       let (bodyOpsF, smF) :=
-        lowerBindingsP progMethods props budget 0 naturalLU innerProtected bodyLocal smInner body
+        lowerBindingsP progMethods props budget 0 naturalLU innerProtected bodyLocal constInts smInner body
       -- Detect whether the body consumed the iter var: if iterVar is no
       -- longer on the body's resulting sm, no DROP needed.
       let consumedNF : Bool := !listContains smNF iterVar
@@ -3338,14 +3527,15 @@ termination_by v => (budget, sizeOf v)
 
 def lowerBindingsP (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
     (currentIndex : Nat) (lastUses : List (String × Nat))
-    (outerProtected : List String) (localBindings : List String) (sm : StackMap) :
+    (outerProtected : List String) (localBindings : List String)
+    (constInts : List (String × Int)) (sm : StackMap) :
     List ANFBinding → (List StackOp × StackMap)
   | [] => ([], sm)
   | (.mk name v _) :: rest =>
       let (ops, sm', localBindings') :=
-        lowerValueP progMethods props budget currentIndex lastUses outerProtected localBindings sm name v
+        lowerValueP progMethods props budget currentIndex lastUses outerProtected localBindings constInts sm name v
       let (ops', sm'') :=
-        lowerBindingsP progMethods props budget (currentIndex + 1) lastUses outerProtected localBindings' sm' rest
+        lowerBindingsP progMethods props budget (currentIndex + 1) lastUses outerProtected localBindings' constInts sm' rest
       (ops ++ ops', sm'')
 termination_by bs => (budget, sizeOf bs)
 
@@ -3466,8 +3656,13 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
   -- be consumed (ROLLed away) on their last use.
   let bodyLastUses := computeLastUses m.body
   let topLevelLocal := m.body.map (fun b => b.name)
+  -- Phase 4-K: collect compile-time integer literals (binding name → int)
+  -- for the entire method body, including nested if-branches and loop
+  -- bodies. Used by the Merkle codegen dispatch arm to extract the
+  -- depth literal that becomes the unrolled-loop bound.
+  let bodyConstInts := collectConstInts m.body
   let (rawOps, finalSm) :=
-    lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal initialMap m.body
+    lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap m.body
   -- Terminal-assert elision (Gap #3 from PHASE_3W_C_GAP_ANALYSIS.md):
   -- A public method whose body ends in `.assert _` drops the trailing
   -- `OP_VERIFY` — the boolean stays on top of the stack as the script's

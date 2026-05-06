@@ -52,10 +52,13 @@ to the TS reference, so we use Lean's `include_str` to embed each
 fixture's expected hex at compile time (live == expected for these).
 Phase 7.9.d will close the remaining 2 SLH-DSA fixtures. -/
 def cryptoAxiomPendingExpected : String → Option String
+  | "babybear"            => some (include_str "../../conformance/tests/babybear/expected-script.hex").trimAscii.toString
+  | "babybear-ext4"       => some (include_str "../../conformance/tests/babybear-ext4/expected-script.hex").trimAscii.toString
   | "convergence-proof"   => some (include_str "../../conformance/tests/convergence-proof/expected-script.hex").trimAscii.toString
   | "ec-demo"             => some (include_str "../../conformance/tests/ec-demo/expected-script.hex").trimAscii.toString
   | "ec-primitives"       => some (include_str "../../conformance/tests/ec-primitives/expected-script.hex").trimAscii.toString
   | "ec-unit"             => some (include_str "../../conformance/tests/ec-unit/expected-script.hex").trimAscii.toString
+  | "merkle-proof"        => some (include_str "../../conformance/tests/merkle-proof/expected-script.hex").trimAscii.toString
   | "p256-primitives"     => some (include_str "../../conformance/tests/p256-primitives/expected-script.hex").trimAscii.toString
   | "p256-wallet"         => some (include_str "../../conformance/tests/p256-wallet/expected-script.hex").trimAscii.toString
   | "p384-primitives"     => some (include_str "../../conformance/tests/p384-primitives/expected-script.hex").trimAscii.toString
@@ -63,6 +66,7 @@ def cryptoAxiomPendingExpected : String → Option String
   | "post-quantum-slhdsa" => some (include_str "../../conformance/tests/post-quantum-slhdsa/expected-script.hex").trimAscii.toString
   | "schnorr-zkp"         => some (include_str "../../conformance/tests/schnorr-zkp/expected-script.hex").trimAscii.toString
   | "sphincs-wallet"      => some (include_str "../../conformance/tests/sphincs-wallet/expected-script.hex").trimAscii.toString
+  | "state-covenant"      => some (include_str "../../conformance/tests/state-covenant/expected-script.hex").trimAscii.toString
   | _                     => none
 
 /--
@@ -97,8 +101,34 @@ fixtures became byte-exact after porting `lowerVerifyWOTS` / `emitWOTSOneChain`
 (TS `05-stack-lower.ts:3951-4175`) to `RunarVerification/Stack/Wots.lean`
 and adding a `verifyWOTS` dispatch arm to `Stack/Lower.lean`. The count
 moved from 29 → 31.
+
+Phase 4-K (this commit): the `merkle-proof` and `state-covenant` fixtures
+became byte-exact after porting `merkle-codegen.ts` to
+`RunarVerification/Stack/Merkle.lean` and adding `merkleRootSha256` /
+`merkleRootHash256` dispatch arms to `Stack/Lower.lean`. The new
+`constInts` thread (mirroring Go's `constValues` map) lets the dispatch
+extract the compile-time depth literal that becomes the unrolled-loop
+bound. Both fixtures were previously listed under `goOnlyFixtures` (the
+Merkle codegen ships only in the Go reference compiler for non-Lean
+tiers); the Lean port now closes them. The count moved from 44 → 46.
+
+Phase 4-J (this commit): the `babybear` and `babybear-ext4` fixtures
+became byte-exact after porting `babybear-codegen.ts` to
+`RunarVerification/Stack/BabyBear.lean` and adding the
+`bbField{Add,Sub,Mul,Inv}` and `bbExt4{Mul,Inv}{0..3}` dispatch arms
+to `Stack/Lower.lean`. Both fixtures were previously listed under
+`goOnlyFixtures` (BabyBear codegen ships in the Go reference compiler
+by project policy; the Rúnar reference policy is unchanged for the 7
+user-facing tiers, but the Lean verification port DOES ship a peer
+module so the verified-pipeline byte-exact theorem covers them). The
+count moved from 46 → 48.
+
+Phase 7.1.c (this commit): `if-without-else-multi-temp` became
+byte-exact after fixing the shadow-rebind elseSynth/cleanup
+double-push bug in `lowerIf` (`Stack/Lower.lean:3149-3183`). The
+count moved from 48 → 49 and `lowerDivergencePending` is now empty.
 -/
-def expectedByteExact : Nat := 44
+def expectedByteExact : Nat := 49
 
 def baselineMatches : List String := [
   "add-raw-output",
@@ -168,29 +198,45 @@ def baselineMatches : List String := [
   -- instead of `[push 2, OP_ROLL, OP_DROP]`, saving 1 byte) and the
   -- empty-bytes else shadow-rebind detection in `lowerIf`.
   "private-helper-outputs",
-  "conditional-data-output-stateful"
+  "conditional-data-output-stateful",
+  -- Promoted in Phase 7.1.c: `if-without-else-multi-temp` exercises the
+  -- shadow-rebind path of `lowerIf` (`Stack/Lower.lean:3149-3183`) at a
+  -- non-trivial depth (d=3). The pre-fix Lean code emitted
+  -- `[.push d, .pick d]` for the elseSynth and
+  -- `[.push d, .roll (d+1), .drop]` for the post-ENDIF cleanup, but
+  -- `StackOp.pick d` / `.roll k` already encode the depth push
+  -- internally (`Script/Emit.lean:176-178`). The duplicate push caused
+  -- a +2 byte drift starting at byte 95 of the expected hex; removing
+  -- the explicit `[.push d]` and using `[.pickStruct d]` /
+  -- `[.roll (d+1), .drop]` directly makes the fixture byte-exact.
+  -- Mirrors TS `lowerIf` at `05-stack-lower.ts:1839-1846` (elseSynth)
+  -- and `1905-1929` (post-ENDIF stale removal). Trust surface unchanged.
+  "if-without-else-multi-temp"
 ]
 
 /--
 Fixtures that are intentionally **Go-only by project policy** (see
 `project_go_only_crypto_modules` memory and `CLAUDE.md`'s "Go-first
 development approach"). The Rúnar codegen modules they depend on
-(BabyBear, KoalaBear, Poseidon2*, BN254, FiatShamirKb, Merkle) ship only
-in the Go reference compiler; the other six tiers (TS/Rust/Python/Zig/
-Ruby/Java) — and therefore the Lean verified port — are explicitly
-exempt from porting them. These fixtures are tracked here so future
-contributors don't re-investigate; they will not become byte-exact
-in the Lean pipeline and must not be added to `baselineMatches`.
+(KoalaBear, Poseidon2*, BN254, FiatShamirKb) ship only in the Go
+reference compiler; the other six tiers (TS/Rust/Python/Zig/Ruby/Java)
+are explicitly exempt from porting them. These fixtures are tracked
+here so future contributors don't re-investigate.
 
-Count: 4. Combined with `baselineMatches` (27) and the pending buckets
-below, the total is 46 — matching `conformance/tests/`.
+Phase 4-J/K note: although the Rúnar reference policy keeps BabyBear
+and Merkle codegen Go-only across the 7 user-facing tiers, the Lean
+verification port DOES ship `Stack.BabyBear` (mirroring
+`compilers/go/codegen/babybear.go`) and `Stack.Merkle` (mirroring
+`compilers/go/codegen/merkle.go`) because the verified-pipeline
+byte-exact theorem benefits from covering those fixtures too.
+`babybear`, `babybear-ext4`, `merkle-proof`, and `state-covenant`
+therefore moved to `cryptoAxiomPending` (the right bucket for
+"Lean-port shipped, crypto-axiom proof still pending").
+
+Count: 0 (all former `goOnlyFixtures` have been promoted to
+`cryptoAxiomPending` after their Lean codegen modules landed).
 -/
-def goOnlyFixtures : List String := [
-  "babybear",          -- bbField{Add,Sub,Mul,Inv}
-  "babybear-ext4",     -- bbField* + bbExt4* (ext4 multiplications)
-  "merkle-proof",      -- merkleRootSha256, merkleRootHash256
-  "state-covenant"     -- bbFieldMul + merkleRootSha256 (composite)
-]
+def goOnlyFixtures : List String := []
 
 /--
 Fixtures whose codegen IS shipped across all 7 reference tiers (TS, Go,
@@ -202,29 +248,46 @@ multi-week proof effort and explicitly Phase-4 work — they are tracked
 here for triage, not gated.
 
 Per primitive:
+  * BabyBear (Go-policy):  babybear, babybear-ext4
+    (project policy keeps BabyBear codegen Go-only across the 7
+    reference user-facing tiers, but the Lean verification port DOES
+    ship `Stack/BabyBear.lean`.)
   * EC (secp256k1):       ec-demo, ec-primitives, ec-unit, schnorr-zkp,
                           convergence-proof
   * NIST P-256:           p256-primitives, p256-wallet
   * NIST P-384:           p384-primitives, p384-wallet
   * SLH-DSA (FIPS 205):   post-quantum-slhdsa, sphincs-wallet
+  * Merkle (SHA-256/Hash256): merkle-proof, state-covenant
+    (project policy keeps Merkle codegen Go-only across the 7 reference
+    user-facing tiers, but the Lean verification port DOES ship
+    `Stack/Merkle.lean` because the verified-pipeline byte-exact theorem
+    benefits from covering those fixtures.)
 
-Count: 11. (`blake3` was promoted out of this bucket once
+Count: 15. (`blake3` was promoted out of this bucket once
 `RunarVerification/Stack/Blake3.lean` landed; see Step-6 Item 4.
 `post-quantum-wots` and `post-quantum-wallet` were promoted out
-once `RunarVerification/Stack/Wots.lean` landed; see Step-6 Item 5.)
+once `RunarVerification/Stack/Wots.lean` landed; see Step-6 Item 5.
+`merkle-proof` and `state-covenant` joined this bucket in Phase 4-K
+once `RunarVerification/Stack/Merkle.lean` landed.
+`babybear` and `babybear-ext4` joined this bucket in Phase 4-J once
+`RunarVerification/Stack/BabyBear.lean` landed.)
 -/
 def cryptoAxiomPending : List String := [
+  "babybear",
+  "babybear-ext4",
   "convergence-proof",
   "ec-demo",
   "ec-primitives",
   "ec-unit",
+  "merkle-proof",
   "p256-primitives",
   "p256-wallet",
   "p384-primitives",
   "p384-wallet",
   "post-quantum-slhdsa",
   "schnorr-zkp",
-  "sphincs-wallet"
+  "sphincs-wallet",
+  "state-covenant"
 ]
 
 /--
@@ -251,25 +314,28 @@ are tracked here so the sanity-check sum matches `conformance/tests/`
 without forcing a `baselineMatches` promotion before the divergence
 is closed.
 
-Count: 1.
-
-* `if-without-else-multi-temp` — uses an if-without-else where the
-  THEN branch produces a multi-temp value (not a simple shadow rebind);
-  Lean's `lowerIf` empty-else synthesis path handles only the
-  single-shadow case, so the multi-temp variant produces a divergent
-  PICK/ROLL sequence. Closing this requires extending the empty-else
-  detection to the multi-temp shape (mirrors TS `lowerIf` at
-  `05-stack-lower.ts:1782-1800`).
+Count: 0. (Phase 7.1.c: `if-without-else-multi-temp` was promoted to
+`baselineMatches` after fixing the shadow-rebind elseSynth/cleanup
+double-push bug in `Stack/Lower.lean`. The pre-fix code emitted an
+extraneous `[push d]` before `.pick d` / `.roll (d+1)`, but those
+StackOps already encode the depth push internally — see
+`Script/Emit.lean:176-178`.)
 -/
-def lowerDivergencePending : List String := [
-  "if-without-else-multi-temp"
-]
+def lowerDivergencePending : List String := []
 
 /--
-Sanity check: 33 baseline + 4 Go-only + 11 crypto-pending + 0 math-pending
-+ 1 lower-divergence = 49, matching `conformance/tests/` after commit
-3fed3295 added 3 fixtures (`conditional-data-output-stateful`,
-`if-without-else-multi-temp`, `private-helper-outputs`).
+Sanity check: 34 baseline + 0 Go-only + 15 crypto-pending + 0 math-pending
++ 0 lower-divergence = 49, matching `conformance/tests/`.
+
+Phase 4-J moved `babybear` and `babybear-ext4` from the Go-only bucket to
+`cryptoAxiomPending` after `RunarVerification/Stack/BabyBear.lean` landed.
+
+Phase 4-K moved `merkle-proof` and `state-covenant` from the Go-only bucket
+to `cryptoAxiomPending` after `RunarVerification/Stack/Merkle.lean` landed.
+
+Phase 7.1.c (this commit) moved `if-without-else-multi-temp` from
+`lowerDivergencePending` to `baselineMatches` after the shadow-rebind
+double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
