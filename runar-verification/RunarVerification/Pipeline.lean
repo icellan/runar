@@ -37,11 +37,23 @@ open RunarVerification.Script
 /-- Apply the full 19-rule peephole pass to every method's ops,
 followed by the Phase 7.1 post-fold consolidation
 (`[push N, OP_1ADD] → [push (N+1)]` and similar for OP_1SUB) that
-catches patterns left over by the streaming driver. -/
+catches patterns left over by the streaming driver, and the Phase
+7.9.b chain-fold pass (`[push a, OP_ADD, push b, OP_ADD] → [push (a+b),
+OP_ADD]` and similar for OP_SUB) that mirrors the TS reference's 4-op
+`chainAdd` / `chainSub` rules.
+
+The chain-fold pass is the byte-exact fix for the EC scalar-mul `k + n
++ n + n` rebasing pattern in secp256k1 / P-256 / P-384 codegen — without
+it, the Lean port emits one push per addend instead of one push of the
+sum, producing 654-byte divergences vs the TS reference on
+`p256-primitives`, `p256-wallet`, `p384-primitives`, `p384-wallet` (and
+the analogous Phase 7.9.a secp256k1 fixtures). -/
 def peepholeProgram (p : StackProgram) : StackProgram :=
   { p with
     methods := p.methods.map (fun m =>
-      { m with ops := Peephole.peepholePostFold (Peephole.peepholePassAll m.ops) }) }
+      { m with ops := Peephole.peepholeChainFold
+                        (Peephole.peepholePostFold
+                          (Peephole.peepholePassAll m.ops)) }) }
 
 /-- The full ANF → bytes pipeline. Uses `Emit.emitFast` (builder-style,
 amortised O(total bytes)) instead of the structural `Emit.emit` so EC /

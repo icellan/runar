@@ -3133,6 +3133,120 @@ Stage B variants.
 
 ---
 
+## 47. Phase 7.2 — Crypto regen findings (2026-05-06)
+
+Ran `RUNAR_VERIFICATION_REGEN=1 pipelineGolden` with `ulimit -s
+65520` (stack max 64MB; the default 8MB stack overflows on the
+larger crypto fixtures). Processed 5/11 fixtures over 4h40m before
+the 6th (likely `p384-primitives` at 3.76MB hex or `p384-wallet`
+at 3.92MB) entered a 2.5+ hour single-fixture runtime, suggesting
+the remaining 6 fixtures would take 10+ additional hours.
+
+Stopped the regen since the partial findings already answer the
+core question: **none of the cryptoAxiomPending fixtures are
+byte-exact via the current Lean lowering**.
+
+### 47.1 Per-fixture findings (5 completed)
+
+* `p256-primitives`: NOT byte-exact. First divergence at byte
+  474 inside a `21` (push 33 bytes) literal. Lean produces
+  `512563fcc2cab9f3849e17a7adfae6...` where TS produces
+  `f36f29f548602ddb8edb46f508f0b4...`.
+* `p256-wallet`: NOT byte-exact. Same divergence pattern as
+  `p256-primitives` (byte 33277, identical bytes). Shared P-256
+  curve-constant bug.
+* `ec-primitives`: NOT byte-exact. Different divergence
+  constants (`414136d08c5ed2bf...` vs `c3c3a270a61b773f...`).
+  secp256k1 curve-constant family bug.
+* `convergence-proof`: NOT byte-exact. SAME divergence bytes as
+  `ec-primitives` — confirms the secp256k1 family bug is shared.
+* `sphincs-wallet`: NOT byte-exact. Different bug shape — at
+  byte 22208 Lean emits `OP_DROP, OP_2DROP, OP_2DUP` where TS
+  emits `OP_2DROP, OP_DROP, OP_2DUP`. This is a WOTS+/SLH-DSA
+  codegen op-order divergence.
+
+### 47.2 Three distinct bugs
+
+The 5 completed fixtures cluster into 3 distinct lowering bugs:
+
+1. **secp256k1 curve-constants** — `ec-primitives`,
+   `convergence-proof` (and likely `ec-demo`, `ec-unit`).
+   Lean's `Stack.Ec` codegen produces different curve-related
+   constants than the TS reference at one specific subroutine.
+2. **P-256 curve-constants** — `p256-primitives`, `p256-wallet`.
+   Lean's `Stack.P256P384` codegen produces different P-256
+   constants. Likely the same kind of bug as #1, just for a
+   different curve. P-384 fixtures probably affected similarly.
+3. **WOTS+/SLH-DSA op order** — `sphincs-wallet` (and likely
+   `post-quantum-slhdsa`). Lean's `Stack.Wots` / SLH-DSA codegen
+   emits a 3-op sequence in different order than TS.
+
+### 47.3 What this means for Phase 7.2
+
+Phase 7.2 was scoped as "populate the cryptoAxiomPendingExpected
+constants and promote byte-exact fixtures to baselineMatches."
+The findings show:
+
+* **Populating the constants is mechanical** but the stored hex
+  would be the (divergent) Lean output, not the (canonical) TS
+  expected hex. The default-mode check (`stored ≡ expected`)
+  would still fail, so populating doesn't promote any fixture.
+* **The real blocker is fixing the 3 lowering bugs**, NOT the
+  regen pipeline. Each bug requires investigation of the
+  specific codegen module (Ec.lean / P256P384.lean / Wots.lean)
+  + comparison with the TS reference.
+
+**Net Phase 7.2 outcome**: 33/49 byte-exact ceiling unchanged;
+the 11 cryptoAxiomPending fixtures remain at `none` constants.
+True progress requires Phase 7.9 (codegen-bug investigation) on
+each crypto family.
+
+### 47.4 Stack-overflow workaround
+
+The default 8MB stack overflows during regen of the larger
+fixtures (3MB+ hex output) due to non-tail-recursive structural
+recursion in the peephole rules. Workaround: `ulimit -s 65520`
+before invoking pipelineGolden.
+
+A long-term fix would convert `applyPushOneAdd`, `applyPushOneSub`,
+and `postFoldList` (Phase 7.1 additions) plus the existing
+peephole rules to tail-recursive accumulator-based variants. Not
+required for the default mode (which doesn't process the
+cryptoPending fixtures live).
+
+### 47.5 Verification
+
+```
+lake build                                  # 24/24 OK
+lake env ./.lake/build/bin/goldenLoad       # 49/49 WF
+lake env ./.lake/build/bin/roundtrip        # 49/49 round-trip
+lake env ./.lake/build/bin/pipelineGolden   # 33/49 byte-exact
+```
+
+Trust surface unchanged: 62 axioms + 5 `opaque` defs.
+Zero `sorry`/`admit`. No new global axioms.
+
+### 47.6 Phase 7.9 candidates (next steps)
+
+* **Phase 7.9.a** — Investigate secp256k1 curve-constant bug.
+  Trace the divergent bytes back to a specific Stack.Ec
+  subroutine. Compare with TS `05-stack-lower.ts`'s EC arm.
+  Estimated 1-2 days. If fixed, unblocks 2-4 fixtures
+  (ec-primitives, convergence-proof, ec-demo, ec-unit).
+* **Phase 7.9.b** — Investigate P-256/P-384 curve-constant bug.
+  Likely same root cause as 7.9.a, applied to different curve.
+  Could be fixed simultaneously. Unblocks 2-4 fixtures.
+* **Phase 7.9.c** — Investigate WOTS+/SLH-DSA op-order bug.
+  Compare Stack.Wots emission order to TS reference.
+  Estimated 0.5-1 day. Unblocks 1-2 fixtures.
+
+After 7.9.{a,b,c}, the regen run would produce byte-exact output
+and Phase 7.2 (populate constants) would meaningfully promote
+fixtures. Total potential: 33/49 → up to 44/49 (if all 11
+crypto fixtures unblock; the 4 goOnly remain by project policy).
+
+---
+
 ## 46. Phase 7.1 — `if-without-else-multi-temp` partial close (2026-05-05)
 
 Two real lowering bugs fixed; divergence moved from byte 74 → byte 95.

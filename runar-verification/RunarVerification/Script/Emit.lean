@@ -182,10 +182,14 @@ def emitStackOp : StackOp → ByteArray
       | none   => ByteArray.empty   -- TODO opcodes are stripped silently in Phase 3a
   | .ifOp thn els    =>
       -- OP_IF (0x63) <thn> [OP_ELSE (0x67) <els>] OP_ENDIF (0x68)
+      -- Mirrors `06-emit.ts:533`: emit OP_ELSE only when the else branch
+      -- is non-empty. `some []` (explicit-but-empty else) and `none`
+      -- (no else at all) produce identical bytes.
       let thnBytes := emitOps thn
       let elseSection :=
         match els with
         | none      => ByteArray.empty
+        | some []   => ByteArray.empty
         | some elsB => ByteArray.mk #[0x67] ++ emitOps elsB
       ByteArray.mk #[0x63] ++ thnBytes ++ elseSection ++ ByteArray.mk #[0x68]
   | .placeholder _ _ => ByteArray.mk #[0x00]   -- OP_0 placeholder
@@ -234,11 +238,14 @@ def emitStackOpFast : StackOp → ByteArray
       | some b => ByteArray.mk #[b]
       | none   => ByteArray.empty
   | .ifOp thn els    =>
-      -- Use the fast emit recursively for the body.
+      -- Use the fast emit recursively for the body. Mirrors TS
+      -- `06-emit.ts:533`: skip OP_ELSE when the else branch is empty
+      -- (whether absent or `some []`).
       let thnBytes := emitOpsFast thn
       let elseSection :=
         match els with
         | none      => ByteArray.empty
+        | some []   => ByteArray.empty
         | some elsB => ByteArray.mk #[0x67] ++ emitOpsFast elsB
       ByteArray.mk #[0x63] ++ thnBytes ++ elseSection ++ ByteArray.mk #[0x68]
   | .placeholder _ _ => ByteArray.mk #[0x00]

@@ -6762,6 +6762,60 @@ theorem pushPushMul_pass_sound :
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
 
+/-! ## Phase 7.9.b — 4-op chain folding (TS reference `peephole.ts:402-432`)
+
+These rules collapse two adjacent `[push, OP_ADD]` (resp. `OP_SUB`) pairs
+into a single fused push + opcode:
+
+* `[push a, OP_ADD, push b, OP_ADD] → [push (a + b), OP_ADD]`
+* `[push a, OP_SUB, push b, OP_SUB] → [push (a + b), OP_SUB]`
+
+They mirror `chainAdd` / `chainSub` in the TS reference (the `windowSize:
+4` rules at the bottom of `optimizer/peephole.ts`). The 3-op
+`pushPushAdd` / `pushPushSub` rules above only fire when the two
+constants are syntactically adjacent on the input stack; the chain rules
+fire when the constants are separated by an `OP_ADD` / `OP_SUB` arity-2
+opcode whose left input is whatever is below the first pushed constant.
+
+The chain pattern shows up heavily in EC scalar-mul codegen (`k + n + n
++ n` style rebasing in `cEmitMul` for secp256k1, P-256, and P-384) — see
+`compilers/.../ec-codegen.ts` and `p256-p384-codegen.ts`. Without these
+rules the Lean port emits one push per addend instead of one push of the
+sum, producing 654-byte divergences vs the TS reference on the
+`p256-primitives`, `p256-wallet`, and (likely) `p384-*` fixtures.
+
+These rules are byte-equivalence-only mirrors of the TS reference and
+are NOT included in the proven `peepholePassFullPlus_sound` 12-rule
+chain (nor in `passAllInner15`). They live in `peepholePassAllFlat` so
+the byte-exact pipelineGolden check picks them up. Adding them is
+purely subtractive on the trust surface — no new axioms, no new opaque
+defs.
+-/
+
+/-- 4-op chain fold: `[push a, OP_ADD, push b, OP_ADD] → [push (a + b),
+OP_ADD]`. -/
+def applyPushAddPushAdd : List StackOp → List StackOp
+  | [] => []
+  | .push (.bigint a) :: .opcode "OP_ADD" ::
+    .push (.bigint b) :: .opcode "OP_ADD" :: rest =>
+      .push (.bigint (a + b)) :: .opcode "OP_ADD" :: applyPushAddPushAdd rest
+  | op :: rest => op :: applyPushAddPushAdd rest
+
+theorem applyPushAddPushAdd_empty : applyPushAddPushAdd [] = [] := rfl
+
+/-- 4-op chain fold: `[push a, OP_SUB, push b, OP_SUB] → [push (a + b),
+OP_SUB]`. The constants accumulate as a SUM (not a difference) because
+both subtractions remove their respective constants from the same below-
+value: `(x - a) - b = x - (a + b)`. -/
+def applyPushAddPushSub : List StackOp → List StackOp
+  | [] => []
+  | .push (.bigint a) :: .opcode "OP_SUB" ::
+    .push (.bigint b) :: .opcode "OP_SUB" :: rest =>
+      .push (.bigint (a + b)) :: .opcode "OP_SUB" :: applyPushAddPushSub rest
+  | op :: rest => op :: applyPushAddPushSub rest
+
+theorem applyPushAddPushSub_empty : applyPushAddPushSub [] = [] := rfl
+
 /-! ## Phase 3z-B — 6 deferred peephole rules from `peephole.ts`
 
 The previously-deferred 6 rules from Phase 3v (per HANDOFF.md §"Phase 3u
@@ -8936,6 +8990,32 @@ private def applyPushPushMul.tr.go : List StackOp → List StackOp → List Stac
 
 attribute [implemented_by applyPushPushMul.tr] applyPushPushMul
 
+private def applyPushAddPushAdd.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .opcode "OP_ADD" ::
+    .push (.bigint b) :: .opcode "OP_ADD" :: rest, acc =>
+      applyPushAddPushAdd.tr.go rest
+        (.opcode "OP_ADD" :: .push (.bigint (a + b)) :: acc)
+  | op :: rest, acc => applyPushAddPushAdd.tr.go rest (op :: acc)
+
+@[inline] private def applyPushAddPushAdd.tr (ops : List StackOp) : List StackOp :=
+  applyPushAddPushAdd.tr.go ops []
+
+attribute [implemented_by applyPushAddPushAdd.tr] applyPushAddPushAdd
+
+private def applyPushAddPushSub.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .opcode "OP_SUB" ::
+    .push (.bigint b) :: .opcode "OP_SUB" :: rest, acc =>
+      applyPushAddPushSub.tr.go rest
+        (.opcode "OP_SUB" :: .push (.bigint (a + b)) :: acc)
+  | op :: rest, acc => applyPushAddPushSub.tr.go rest (op :: acc)
+
+@[inline] private def applyPushAddPushSub.tr (ops : List StackOp) : List StackOp :=
+  applyPushAddPushSub.tr.go ops []
+
+attribute [implemented_by applyPushAddPushSub.tr] applyPushAddPushSub
+
 private def applyCheckMultiSigVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
   | [], acc => acc.reverse
   | .opcode "OP_CHECKMULTISIG" :: .opcode "OP_VERIFY" :: rest, acc =>
@@ -9069,13 +9149,21 @@ mutual
 /-- One step of branch processing: rewrite a single op, descending
 recursively only into `.ifOp` branches. Recursion depth = `ifOp` nesting
 (small). The outer list traversal is delegated to a tail-recursive
-helper. -/
+helper.
+
+**Phase 7.9.c**: branch bodies are also passed through
+`peepholePassAllFlat` in forward (left-to-right) order, matching the
+TS reference. The previous code used the buggy `peepholePassAllTRgo`
+streaming driver which fused pairs from the END of consecutive runs
+rather than the head (causing e.g. `[drop, drop, drop]` inside a
+chain-step then-branch to lower to `[drop, OP_2DROP]` instead of TS's
+`[OP_2DROP, drop]`). -/
 private def preprocessOp : StackOp → StackOp
   | .ifOp thn els =>
-      let thn' := peepholePassAllTRgo (preprocessOpListReversedAux thn []) []
+      let thn' := peepholePassAllFlat ((preprocessOpListReversedAux thn []).reverse)
       let els' : Option (List StackOp) :=
         match els with
-        | some e => some (peepholePassAllTRgo (preprocessOpListReversedAux e []) [])
+        | some e => some (peepholePassAllFlat ((preprocessOpListReversedAux e []).reverse))
         | none   => none
       .ifOp thn' els'
   | other => other
@@ -9096,14 +9184,34 @@ branches. -/
 private def preprocessIfOps (ops : List StackOp) : List StackOp :=
   (preprocessOpListReversedAux ops []).reverse
 
-/-- Recursive peephole driver. Equivalent in semantics to the
-right-folded structural definition; restructured to keep the
-interpreter's per-thread stack bounded for very long op lists.
-`preprocessOpListReversedAux` returns its result reversed, which is
-exactly what `peepholePassAllTRgo` consumes — so we feed it directly
-without an extra `.reverse`. -/
+/-- Recursive peephole driver.
+
+**Phase 7.9.c fix**: previously this used a tail-recursive `TRgo`
+streaming driver that re-applied `peepholePassAllFlat` on each cons
+of the (reversed) op list. That semantics is a *right-fold* — it
+fuses pairs starting from the END of consecutive runs — which
+diverges from the TS reference for odd-length runs. For example:
+
+  TS  on `[drop, drop, drop, over, over]` → `[OP_2DROP, drop, OP_2DUP]`
+  TRgo on the same                       → `[drop, OP_2DROP, OP_2DUP]`
+
+(TS scans left-to-right once and pairs consecutive `drop` ops from
+the head; TRgo, by re-running `peepholePassAllFlat` on each cons,
+ends up pairing them from the tail.)
+
+The fix is to apply `peepholePassAllFlat` ONCE to the
+forward-ordered op list (after `.ifOp` branch preprocessing). Each
+of the 19 `apply*` rules inside `peepholePassAllFlat` already does
+its own left-to-right scan via the `op :: applyX rest` pattern; the
+runtime is tail-recursive via the `[implemented_by ... .tr]`
+attributes (see `applyDoubleDrop.tr` etc.), so stack depth remains
+bounded even for ~100K-op fixtures.
+
+`preprocessIfOps` (forward-order) handles the recursion into
+`.ifOp` branches; the resulting list is fed to `peepholePassAllFlat`
+in its natural left-to-right order. -/
 def peepholePassAll (ops : List StackOp) : List StackOp :=
-  peepholePassAllTRgo (preprocessOpListReversedAux ops []) []
+  peepholePassAllFlat (preprocessIfOps ops)
 
 /-! ## Phase 7.1 — Post-pass: catch `[push N, OP_1ADD]` and
 `[push N, OP_1SUB]` patterns left over after the streaming
@@ -9142,6 +9250,78 @@ end
 to `ops`, including recursive descent into `.ifOp` branches. -/
 def peepholePostFold (ops : List StackOp) : List StackOp :=
   applyPushOneSub (applyPushOneAdd (postFoldList ops))
+
+/-! ## Phase 7.9.b — Chain-fold post-pass
+
+The 4-op `applyPushAddPushAdd` / `applyPushAddPushSub` rules added above
+need a separate driver that:
+
+1. Iterates the rule to fixpoint within a single op list. A 6-op chain
+   `[push a, OP_ADD, push b, OP_ADD, push c, OP_ADD]` requires two
+   passes (`a, b → a+b; (a+b), c → a+b+c`).
+2. Recurses into `.ifOp` branches.
+
+Rationale for keeping this separate from `peepholePassAllFlat`: the
+existing `peepholePassAllFlat_sound` theorem unfolds the exact chain
+shape and inserting two new wrappers would require updating the
+theorem statement (which downstream callers shape-match on). A standalone
+post-pass leaves the proven 19-rule chain untouched.
+
+The pass is purely subtractive: it fires only on syntactically literal
+4-op windows of the form `[push (.bigint a), OP_ADD, push (.bigint b),
+OP_ADD]` (resp. `OP_SUB`); programs without such windows are returned
+unchanged. -/
+
+/-- Outer fixpoint iteration of `applyPushAddPushAdd` /
+`applyPushAddPushSub` on a flat op list. Stops when the list length
+stabilises (each successful firing strictly reduces length by 2, so
+length-stability == fixpoint). The `fuel` parameter is a bounded loop;
+in practice 32 passes are more than enough since the longest contiguous
+`[push, OP_ADD]` chain in EC scalar-mul codegen is 3 (`k + n + n + n`),
+which folds in 2 passes. We use 64 fuel for comfortable margin. -/
+private partial def chainFoldFixpointFlat (fuel : Nat) (ops : List StackOp) :
+    List StackOp :=
+  match fuel with
+  | 0 => ops
+  | k + 1 =>
+    let next := applyPushAddPushSub (applyPushAddPushAdd ops)
+    if next.length = ops.length then ops else chainFoldFixpointFlat k next
+
+mutual
+
+/-- One step of the chain-fold post-pass: rewrite a single op,
+descending recursively into `.ifOp` branches. Recursion depth = `.ifOp`
+nesting level (small in practice). The outer list traversal is delegated
+to `chainFoldListTR.go` (a tail-recursive accumulator-based walker). -/
+private partial def chainFoldOp : StackOp → StackOp
+  | .ifOp thn els =>
+      let thn' := chainFoldFixpointFlat 64 (chainFoldListTRgo thn [])
+      let els' : Option (List StackOp) :=
+        match els with
+        | some e => some (chainFoldFixpointFlat 64 (chainFoldListTRgo e []))
+        | none   => none
+      .ifOp thn' els'
+  | other => other
+
+/-- Tail-recursive list traversal: walks `ops` and prepends
+`chainFoldOp op` to `acc`. Returns the accumulator in REVERSE order — the
+caller passes the result to `chainFoldFixpointFlat` which is
+order-independent up to the final `.reverse`, so we reverse here once. -/
+private partial def chainFoldListTRgo : List StackOp → List StackOp →
+    List StackOp
+  | [],         acc => acc.reverse
+  | op :: rest, acc => chainFoldListTRgo rest (chainFoldOp op :: acc)
+
+end
+
+/-- Apply the Phase 7.9.b chain-fold consolidation pass to `ops`,
+including recursive descent into `.ifOp` branches and fixpoint iteration
+of the chain-fold rules at every level.
+
+Mirrors TS `peephole.ts:402-432` (`chainAdd` / `chainSub` 4-op rules)
+which run inside the TS optimizer's outer fixpoint loop. -/
+def peepholeChainFold (ops : List StackOp) : List StackOp :=
+  chainFoldFixpointFlat 64 (chainFoldListTRgo ops [])
 
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
 
@@ -9481,41 +9661,13 @@ private theorem preprocessOpListReversedAux_noIf
         rw [ih (.pushCodesepIndex :: acc) hRest]
         rfl
 
-/-- Right-fold structural form of `peepholePassAll` for `noIfOp` inputs. -/
-private def peepholePassAllStruct : List StackOp → List StackOp
-  | [] => []
-  | op :: rest => peepholePassAllFlat (op :: peepholePassAllStruct rest)
-
-private theorem peepholePassAllStruct_eq_TRgo
-    : ∀ (ops acc : List StackOp),
-        peepholePassAllTRgo (List.reverseAux ops acc) []
-        = peepholePassAllTRgo acc (peepholePassAllStruct ops) := by
-  intro ops
-  induction ops with
-  | nil => intro acc; rfl
-  | cons op rest ih =>
-    intro acc
-    -- LHS: reverseAux (op :: rest) acc = reverseAux rest (op :: acc).
-    -- IH on rest gives us the equation at acc' = (op :: acc).
-    show peepholePassAllTRgo (List.reverseAux rest (op :: acc)) []
-       = peepholePassAllTRgo acc (peepholePassAllFlat (op :: peepholePassAllStruct rest))
-    rw [ih (op :: acc)]
-    -- RHS structure: TRgo (op :: acc) (peepholePassAllStruct rest)
-    --   = TRgo acc (peepholePassAllFlat (op :: peepholePassAllStruct rest))
-    -- by definition of TRgo on cons.
-    rfl
-
-/-- `peepholePassAll ops = peepholePassAllStruct ops` for `noIfOp` inputs. -/
-private theorem peepholePassAll_eq_struct
-    : ∀ (ops : List StackOp), noIfOp ops →
-        peepholePassAll ops = peepholePassAllStruct ops := by
-  intro ops hNoIf
-  unfold peepholePassAll
-  rw [preprocessOpListReversedAux_noIf ops [] hNoIf]
-  -- Now LHS = TRgo (List.reverseAux ops []) [].
-  rw [peepholePassAllStruct_eq_TRgo ops []]
-  -- Now LHS = TRgo [] (peepholePassAllStruct ops) = peepholePassAllStruct ops.
-  rfl
+/-- Phase 7.9.c: After fixing the streaming-driver pair-direction bug,
+`peepholePassAll` is now defined directly as `peepholePassAllFlat`
+applied to the forward-preprocessed list. This lemma states that
+identity, useful for transferring soundness from
+`peepholePassAllFlat_sound` to `peepholePassAll`. -/
+private theorem peepholePassAll_eq_flat_preprocess (ops : List StackOp) :
+    peepholePassAll ops = peepholePassAllFlat (preprocessIfOps ops) := rfl
 
 /-! ## Phase 4-C — `peepholePassAll_sound` for `noIfOp` programs.
 
