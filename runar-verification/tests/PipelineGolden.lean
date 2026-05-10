@@ -2,10 +2,9 @@ import RunarVerification.Pipeline
 import RunarVerification.ANF.Json
 open RunarVerification ANF Pipeline
 
-/-! ## Pre-computed Lean compileHex output for the cryptoAxiomPending bucket
+/-! ## Optional stored Lean compileHex output for the cryptoAxiomPending bucket
 
-The 11 cryptoAxiomPending fixtures (EC × 5, P-256 × 2, P-384 × 2,
-SLH-DSA × 2) take >25 min/fixture to evaluate via `compileHex` in
+The 15 cryptoAxiomPending fixtures take >25 min/fixture to evaluate via `compileHex` in
 Lean's runtime — too slow for default-mode CI. This section stores
 the pre-computed `compileHex` output as a Lean `String` constant per
 fixture, so default-mode `pipelineGolden` can compare each constant
@@ -13,11 +12,10 @@ against `expected-script.hex` instantly (constant-time string equality).
 
 ### Two-tier gating
 
-* **Default mode** (Gate "constant ≡ expected"): for each
-  cryptoAxiomPending fixture, compare the stored constant against the
-  on-disk `expected-script.hex`. If they match, the fixture is treated
-  as byte-exact for the regression count. If the constant is `none`,
-  the fixture is reported as "unpopulated, regen needed".
+* **Default mode**: cryptoAxiomPending fixtures are not counted unless
+  this file contains a stored Lean-produced constant for that fixture.
+  A fixture with `none` is reported as "unpopulated, regen needed" and
+  remains outside the byte-exact gate.
 
 * **Regen mode** (`RUNAR_VERIFICATION_REGEN=1`): for each fixture,
   re-run `compileHex` on the parsed IR and compare the live output
@@ -32,7 +30,7 @@ against `expected-script.hex` instantly (constant-time string equality).
 
 Empirical timing: even the smallest cryptoAxiomPending fixture
 (post-quantum-slhdsa, 377KB hex) takes >25 min on M-series mac.
-A full regen of all 11 fixtures is a multi-hour batch.
+A full regen of all 15 fixtures is a multi-hour batch.
 
 ### How to (re)generate
 
@@ -46,28 +44,15 @@ RUNAR_VERIFICATION_REGEN=1 lake env ./.lake/build/bin/pipelineGolden 2>/tmp/rege
 -/
 
 /-- Stored Lean `compileHex` output for a cryptoAxiomPending fixture.
-Returns `none` for fixtures whose constant has not been populated
-yet. After Phase 7.9.{a,b,c}, the 9 EC-family fixtures are byte-exact
-to the TS reference, so we use Lean's `include_str` to embed each
-fixture's expected hex at compile time (live == expected for these).
-Phase 7.9.d will close the remaining 2 SLH-DSA fixtures. -/
+Returns `none` for fixtures whose Lean-produced constant has not been
+populated yet.
+
+Do not use `include_str` over `expected-script.hex` here: that compares
+the reference output to itself and would make the default byte-exact gate
+tautological. Populate this table only with hex emitted by regen/full
+mode from the Lean compiler. -/
 def cryptoAxiomPendingExpected : String → Option String
-  | "babybear"            => some (include_str "../../conformance/tests/babybear/expected-script.hex").trimAscii.toString
-  | "babybear-ext4"       => some (include_str "../../conformance/tests/babybear-ext4/expected-script.hex").trimAscii.toString
-  | "convergence-proof"   => some (include_str "../../conformance/tests/convergence-proof/expected-script.hex").trimAscii.toString
-  | "ec-demo"             => some (include_str "../../conformance/tests/ec-demo/expected-script.hex").trimAscii.toString
-  | "ec-primitives"       => some (include_str "../../conformance/tests/ec-primitives/expected-script.hex").trimAscii.toString
-  | "ec-unit"             => some (include_str "../../conformance/tests/ec-unit/expected-script.hex").trimAscii.toString
-  | "merkle-proof"        => some (include_str "../../conformance/tests/merkle-proof/expected-script.hex").trimAscii.toString
-  | "p256-primitives"     => some (include_str "../../conformance/tests/p256-primitives/expected-script.hex").trimAscii.toString
-  | "p256-wallet"         => some (include_str "../../conformance/tests/p256-wallet/expected-script.hex").trimAscii.toString
-  | "p384-primitives"     => some (include_str "../../conformance/tests/p384-primitives/expected-script.hex").trimAscii.toString
-  | "p384-wallet"         => some (include_str "../../conformance/tests/p384-wallet/expected-script.hex").trimAscii.toString
-  | "post-quantum-slhdsa" => some (include_str "../../conformance/tests/post-quantum-slhdsa/expected-script.hex").trimAscii.toString
-  | "schnorr-zkp"         => some (include_str "../../conformance/tests/schnorr-zkp/expected-script.hex").trimAscii.toString
-  | "sphincs-wallet"      => some (include_str "../../conformance/tests/sphincs-wallet/expected-script.hex").trimAscii.toString
-  | "state-covenant"      => some (include_str "../../conformance/tests/state-covenant/expected-script.hex").trimAscii.toString
-  | _                     => none
+  | _ => none
 
 /--
 Phase 3 baseline: fixtures that compile byte-exact through the verified Lean
@@ -123,12 +108,14 @@ user-facing tiers, but the Lean verification port DOES ship a peer
 module so the verified-pipeline byte-exact theorem covers them). The
 count moved from 46 → 48.
 
-Phase 7.1.c (this commit): `if-without-else-multi-temp` became
-byte-exact after fixing the shadow-rebind elseSynth/cleanup
-double-push bug in `lowerIf` (`Stack/Lower.lean:3149-3183`). The
-count moved from 48 → 49 and `lowerDivergencePending` is now empty.
+Phase 7.1.c: `if-without-else-multi-temp` became byte-exact after
+fixing the shadow-rebind elseSynth/cleanup double-push bug in
+`lowerIf` (`Stack/Lower.lean:3149-3183`). The live baseline is now 34
+fixtures. The 15 cryptoAxiomPending fixtures are not counted by default
+until populated with stored Lean-produced constants or checked in full
+mode.
 -/
-def expectedByteExact : Nat := 49
+def expectedByteExact : Nat := 34
 
 def baselineMatches : List String := [
   "add-raw-output",
@@ -243,7 +230,7 @@ Fixtures whose codegen IS shipped across all 7 reference tiers (TS, Go,
 Rust, Python, Zig, Ruby, Java) but whose Lean Stack.Lower path is not
 yet extended to the relevant primitive AND whose end-to-end correctness
 will require discharging per-primitive crypto axioms (analogous to the
-`agrees`/`lower_observational_correct` blocker). Each of these is a
+`agrees`/`lower_observational_correct_skeleton` blocker). Each of these is a
 multi-week proof effort and explicitly Phase-4 work — they are tracked
 here for triage, not gated.
 
@@ -378,7 +365,7 @@ def main : IO Unit := do
     if (← System.FilePath.pathExists ir) && (← System.FilePath.pathExists hex) then
       try
         let irJson ← IO.FS.readFile ir.toString
-        let expected := (← IO.FS.readFile hex.toString).trim
+        let expected := (← IO.FS.readFile hex.toString).trimAscii.toString
         match ANFProgram.fromString irJson with
         | .ok p =>
             total := total + 1
@@ -412,33 +399,37 @@ def main : IO Unit := do
               -- per-fixture progress so users see what's happening
               -- during multi-hour runs.
               let t0 ← IO.monoMsNow
-              let actual := compileHex p
-              let isMatch := expected == actual
-              let t1 ← IO.monoMsNow
-              let elapsedMs := t1 - t0
-              if (full || regen) && isCryptoPending then
-                fullTimings := (e.fileName, elapsedMs, isMatch) :: fullTimings
-                IO.eprintln s!"  [{if regen then "regen" else "full"}] {e.fileName} compiled in {elapsedMs}ms (byte-exact={isMatch})"
-                (← IO.getStderr).flush
-              if regen && isCryptoPending then
-                -- Compare live hex against stored constant.
-                let status :=
-                  match cryptoAxiomPendingExpected e.fileName with
-                  | some storedHex =>
-                      if storedHex == actual then "fresh" else "stale"
-                  | none => "unpopulated"
-                regenStatus := (e.fileName, status) :: regenStatus
-                -- Dump live hex to /tmp/regen-<name>.hex for offline
-                -- copy-paste into `cryptoAxiomPendingExpected`. Keeps
-                -- stderr human-readable while preserving the full
-                -- multi-MB hex per fixture.
-                let outFile := s!"/tmp/regen-{e.fileName}.hex"
-                IO.FS.writeFile outFile actual
-                IO.eprintln s!"REGEN {e.fileName}: live hex written to {outFile} ({actual.length} chars)"
-                (← IO.getStderr).flush
-              if isMatch then
-                matched := matched + 1
-                matchedNames := e.fileName :: matchedNames
+              match compileHexSafe p with
+              | .error err =>
+                  IO.eprintln s!"  COMPILE FAIL: {e.fileName}: {toString (repr err)}"
+                  IO.Process.exit 1
+              | .ok actual =>
+                  let isMatch := expected == actual
+                  let t1 ← IO.monoMsNow
+                  let elapsedMs := t1 - t0
+                  if (full || regen) && isCryptoPending then
+                    fullTimings := (e.fileName, elapsedMs, isMatch) :: fullTimings
+                    IO.eprintln s!"  [{if regen then "regen" else "full"}] {e.fileName} compiled in {elapsedMs}ms (byte-exact={isMatch})"
+                    (← IO.getStderr).flush
+                  if regen && isCryptoPending then
+                    -- Compare live hex against stored constant.
+                    let status :=
+                      match cryptoAxiomPendingExpected e.fileName with
+                      | some storedHex =>
+                          if storedHex == actual then "fresh" else "stale"
+                      | none => "unpopulated"
+                    regenStatus := (e.fileName, status) :: regenStatus
+                    -- Dump live hex to /tmp/regen-<name>.hex for offline
+                    -- copy-paste into `cryptoAxiomPendingExpected`. Keeps
+                    -- stderr human-readable while preserving the full
+                    -- multi-MB hex per fixture.
+                    let outFile := s!"/tmp/regen-{e.fileName}.hex"
+                    IO.FS.writeFile outFile actual
+                    IO.eprintln s!"REGEN {e.fileName}: live hex written to {outFile} ({actual.length} chars)"
+                    (← IO.getStderr).flush
+                  if isMatch then
+                    matched := matched + 1
+                    matchedNames := e.fileName :: matchedNames
         | _ => pure ()
       catch _ => pure ()
   IO.println s!"PIPELINE GOLDEN: {matched}/{total} byte-exact"

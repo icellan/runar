@@ -22,3 +22,7 @@ lean_exe roundtrip where
 lean_exe pipelineGolden where
   root := `tests.PipelineGolden
   supportInterpreter := true
+
+lean_exe differential where
+  root := `tests.Differential
+  supportInterpreter := true

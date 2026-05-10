@@ -43,7 +43,7 @@ The axioms are **not** proved sound here. Each is documented with the
 property the verification lead should later refine into a proper
 specification.
 
-Run `lake exe goldenEval` (TODO; not part of this bootstrap) to drive
+Run `lake exe goldenEval` once that executable is added to drive
 this evaluator against the conformance fixtures once Phase 3 fills in
 the framework intrinsics like `computeStateOutput` and
 `buildChangeOutput`.
@@ -176,7 +176,7 @@ def evalBinOp (op : String) (l r : Value) (resultType : Option String) :
   | "||", .vBool a, .vBool b     => return .vBool (a || b)
   | "===", a, b =>
       -- byte equality vs numeric equality is disambiguated by
-      -- `result_type: "bytes"` — see EXPLORATION.md §9 / 04-anf-lower.ts:204
+      -- `result_type: "bytes"` — see 04-anf-lower.ts:204.
       match resultType with
       | some "bytes" =>
           match a.asBytes?, b.asBytes? with

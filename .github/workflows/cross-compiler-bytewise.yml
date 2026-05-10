@@ -8,7 +8,7 @@ name: Cross-compiler bytewise
 #   - every active tier's hex matches every other active tier's hex
 #     (peer-mode parity)
 #   - the Lean reference verifier (lake exe pipelineGolden) passes its own
-#     49/49 byte-exact regression gate
+#     default byte-exact regression gate
 #
 # Per-fixture compiler allowlists in source.json are honored; allowlisted
 # fixtures (e.g. babybear, babybear-ext4, merkle-proof, state-covenant)
@@ -104,27 +104,28 @@ jobs:
 
       # ----- the diff itself -----
       - name: Run cross-compiler bytewise diff
-        run: bash runar-verification/scripts/cross-compiler-diff.sh
+        run: bash runar-verification/scripts/cross-compiler-diff.sh --report /tmp/runar-verification-cross-compiler-report.json
 
       - name: Upload cross-compiler matrix report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cross-compiler-report
-          path: runar-verification/cross-compiler-report.json
+          path: /tmp/runar-verification-cross-compiler-report.json
 
       - name: Emit bytewise summary
         if: always()
         run: |
           {
             printf '## Cross-compiler bytewise diff\n\n'
-            if [ -f runar-verification/cross-compiler-report.json ]; then
-              total=$(jq -r '.summary.total_fixtures // 0' runar-verification/cross-compiler-report.json)
-              runs=$(jq -r '.summary.total_compiler_runs // 0' runar-verification/cross-compiler-report.json)
-              matches=$(jq -r '.summary.total_matches_expected // 0' runar-verification/cross-compiler-report.json)
-              peer=$(jq -r '.summary.total_peer_mismatches // 0' runar-verification/cross-compiler-report.json)
-              lean_pass=$(jq -r '.summary.lean.pass // false' runar-verification/cross-compiler-report.json)
-              lean_line=$(jq -r '.summary.lean.line // ""' runar-verification/cross-compiler-report.json)
+            report=/tmp/runar-verification-cross-compiler-report.json
+            if [ -f "$report" ]; then
+              total=$(jq -r '.summary.total_fixtures // 0' "$report")
+              runs=$(jq -r '.summary.total_compiler_runs // 0' "$report")
+              matches=$(jq -r '.summary.total_matches_expected // 0' "$report")
+              peer=$(jq -r '.summary.total_peer_mismatches // 0' "$report")
+              lean_pass=$(jq -r '.summary.lean.pass // false' "$report")
+              lean_line=$(jq -r '.summary.lean.line // ""' "$report")
               printf '| Metric | Value |\n'
               printf '|--------|-------|\n'
               printf '| Fixtures | %s |\n' "$total"

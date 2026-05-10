@@ -18,7 +18,9 @@ For each of the 49 conformance fixtures:
    `StackState` with the BIP-143 preimage installed.
 6. Record `(success, stackTopHex, errorTag)` per fixture.
 
-Output is written to `tests/differential-results.json` with the schema:
+Output is written to the path in `RUNAR_DIFFERENTIAL_OUT`, or to
+`/tmp/runar-verification-differential-results.json` by default, with
+the schema:
 
 ```
 { "fixtures": [
@@ -274,6 +276,10 @@ def main : IO Unit := do
       if r.success then succ := succ + 1
       results := r :: results
   let report := renderReport results
-  IO.FS.writeFile "tests/differential-results.json" report
+  let outPath :=
+    match (← IO.getEnv "RUNAR_DIFFERENTIAL_OUT") with
+    | some p => p
+    | none => "/tmp/runar-verification-differential-results.json"
+  IO.FS.writeFile outPath report
   IO.println s!"DIFFERENTIAL: {succ}/{total} fixtures evaluated successfully"
-  IO.println s!"  report written to tests/differential-results.json"
+  IO.println s!"  report written to {outPath}"

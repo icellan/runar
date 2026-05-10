@@ -6,11 +6,11 @@ import RunarVerification.ANF.WF
 
 A typed view of ANF programs.
 
-OQ-2 decision (recorded in `EXPLORATION.md`): the contract state is
-modelled as a **uniform typed environment** — a single map from binding
-name → `ANFType` — rather than a contract-specific record type. This
-keeps the `Eval` machinery polymorphic over `ANFProgram` instead of
-parameterised over a per-program record.
+The contract state is modelled as a **uniform typed environment** — a
+single map from binding name → `ANFType` — rather than a
+contract-specific record type. This keeps the `Eval` machinery
+polymorphic over `ANFProgram` instead of parameterised over a
+per-program record.
 
 This module provides:
 
@@ -61,7 +61,7 @@ def extend (Γ : TypeEnv) (name : String) (τ : ANFType) : TypeEnv :=
 
 theorem lookup_extend_self (Γ : TypeEnv) (n : String) (τ : ANFType) :
     (Γ.extend n τ).lookup n = some τ := by
-  simp [extend, lookup, List.find?]
+  simp [extend, lookup]
 
 theorem lookup_extend_other (Γ : TypeEnv) (n m : String) (τ : ANFType)
     (h : n ≠ m) :
@@ -129,9 +129,9 @@ caveats:
   ANF `ANFType` vocabulary does not model array types (see
   `Syntax.lean`'s closed-sum `ANFType`), so `checkMultiSig` is the
   one TS-table entry that returns `none` here. Conformance fixtures
-  that exercise `checkMultiSig` are TypeScript-only (per
-  `EXPLORATION.md` §"array_literal") and the typing judgment for
-  them is intentionally incomplete.
+  that exercise `checkMultiSig` are TypeScript-only today, and the
+  typing judgment for them is intentionally incomplete until array
+  operand types are modelled.
 * TS's `'void'` return for `assert` / `exit` is rendered as `.bool`
   here — the Lean `assertT` rule already types `assert` as `.bool`,
   and we never need to *return* `void` since `call` is only invoked

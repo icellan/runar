@@ -14,7 +14,7 @@ fixture, this script:
      output hashes, sigHashType=0x41, amount=100000.
   5. Records ``(success, finalStackTop, error)`` per fixture.
 
-Output JSON schema mirrors ``tests/differential-results.json`` so the diff
+Output JSON schema mirrors the Lean differential report so the diff
 in ``scripts/differential.sh`` is a straight key-by-key compare.
 
 Important: ``python-bitcoinlib``'s ``EvalScript`` is the legacy-Bitcoin
@@ -147,7 +147,7 @@ def main(argv: list[str]) -> int:
     out_path = (
         Path(argv[1])
         if len(argv) > 1
-        else repo_root / "runar-verification" / "tests" / "differential-external.json"
+        else Path("/tmp") / "runar-verification-differential" / "differential-external.json"
     )
 
     results: list[FixtureResult] = []

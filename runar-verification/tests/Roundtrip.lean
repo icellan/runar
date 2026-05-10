@@ -18,14 +18,20 @@ Run with `lake exe roundtrip`.
 
 open RunarVerification.ANF
 
-partial def findGoldens (root : System.FilePath) : IO (Array System.FilePath) := do
+def findGoldens (root : System.FilePath) : IO (Array System.FilePath) := do
   let mut acc : Array System.FilePath := #[]
-  for entry in (← root.readDir) do
-    let path := entry.path
-    if (← path.isDir) then
-      acc := acc ++ (← findGoldens path)
-    else if entry.fileName == "expected-ir.json" then
-      acc := acc.push path
+  let mut pending : List System.FilePath := [root]
+  while !pending.isEmpty do
+    match pending with
+    | [] => pure ()
+    | dir :: rest =>
+        pending := rest
+        for entry in (← dir.readDir) do
+          let path := entry.path
+          if (← path.isDir) then
+            pending := path :: pending
+          else if entry.fileName == "expected-ir.json" then
+            acc := acc.push path
   return acc
 
 /-- Structural equality on ANFProgram via JSON canonicalisation. -/

@@ -129,8 +129,8 @@ describe('ArrayLiteralExpression', () => {
     // ANF and script bytes that match the pinned fixture. This is the only
     // golden coverage for the `array_literal` ANF kind today — peer compilers'
     // parsers do not yet support array literal expressions, so a cross-compiler
-    // conformance fixture is not viable. See runar-verification/EXPLORATION.md
-    // §9 for the broader status of array_literal coverage.
+    // conformance fixture is not viable until the peer compilers support
+    // array literal expressions.
     const exampleSource = readFileSync(
       join(__dirname, '../../../../examples/ts/multisig-2of3/MultiSig2of3.runar.ts'),
       'utf8',

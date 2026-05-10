@@ -40,7 +40,7 @@ private def nibbleToHex (n : UInt8) : Char :=
 def byteToHex (b : UInt8) : String :=
   let hi := nibbleToHex (b >>> 4)
   let lo := nibbleToHex b
-  String.mk [hi, lo]
+  String.ofList [hi, lo]
 
 def bytesToHex (b : ByteArray) : String :=
   b.toList.foldl (fun acc x => acc ++ byteToHex x) ""
@@ -186,7 +186,7 @@ def emitStackOp : StackOp → ByteArray
   | .opcode name     =>
       match opcodeByName? name with
       | some b => ByteArray.mk #[b]
-      | none   => ByteArray.empty   -- TODO opcodes are stripped silently in Phase 3a
+      | none   => ByteArray.empty   -- legacy total path; `compileSafe` rejects this first
   | .ifOp thn els    =>
       -- OP_IF (0x63) <thn> [OP_ELSE (0x67) <els>] OP_ENDIF (0x68)
       -- Mirrors `06-emit.ts:533`: emit OP_ELSE only when the else branch

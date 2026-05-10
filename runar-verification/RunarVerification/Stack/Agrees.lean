@@ -11,7 +11,8 @@ import RunarVerification.Stack.Sim
 
 This file defines the **`agrees` predicate** between `ANF.Eval.State`
 and `Stack.Eval.StackState` that the Phase 4-Z discharge plan calls
-out in `Pipeline.lean`'s docstring on `lower_observational_correct`.
+out in `Pipeline.lean`'s docstring on
+`lower_observational_correct_skeleton`.
 
 The predicate is parameterized by a `StackMap` (the lowering pass's
 internal name-to-depth tracker). It states that the runtime stack of
@@ -21,15 +22,15 @@ matches what `name` resolves to in the ANF state.
 
 This is the load-bearing input to the per-constructor preservation
 lemmas (Stage B) and the per-binding induction (Stage C) that
-together discharge the axiom.
+together discharge the skeleton's load-bearing obligation.
 
 ## Status (2026-04-29)
 
 **Stage A — fully delivered.** This file defines the `agrees`
 predicate and `stackAligned` invariant, proves the foundational
 lookup-preservation lemma `addBinding_preserves_lookup` (formerly
-the "freshness axiom" the Phase 4-Z brief allowed naming as an
-axiom — it turned out to be provable from `State.resolveRef` /
+considered as a possible freshness assumption; it turned out to be
+provable from `State.resolveRef` /
 `List.find?` directly, without needing any axiomatic gap), and
 proves `stackAligned_addBinding_fresh` lifting it to alignment.
 
@@ -41,7 +42,7 @@ lemmas are delivered:
 * `agrees_preserved_loadConst_bytes`
 * `agrees_preserved_loadConst_thisRef`
 
-All four are non-trivially closed (no `sorry`, no axiom). They
+All four are non-trivially closed (no `sorry`, no new assumption). They
 factor through a single `agrees_push_value` helper that captures
 the "constant push, fresh binding" pattern shared by these four
 constructors.
@@ -94,7 +95,7 @@ Bottom line: Stage A is foundationally tight, Stage B is 40 %
 delivered (4/10 constructors, all the "no-load" cases), and the
 remaining 60 % requires fixing two pre-existing semantic issues in
 the `agrees` discrimination model and `Stack.Eval.applyPick`. The
-Pipeline.lean axiom remains in place; the discharge plan in its
+The Pipeline.lean skeleton remains in place; the discharge plan in its
 docstring is unchanged.
 -/
 
@@ -4517,7 +4518,7 @@ theorem stageD_simpleANF_with_nip_postprocessing
     (tsm tsm' : TaggedStackMap)
     (initialAnf anfFinal : State)
     (initialStack stkBody stkFinal : StackState)
-    (hRunBody : runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
+    (_hRunBody : runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
                 = .ok stkBody)
     (hRunNip : runOps [.opcode "OP_NIP"] stkBody = .ok stkFinal)
     (hChain : ChainRel simpleStepRel body tsm initialAnf initialStack tsm' anfFinal stkBody)
@@ -4542,7 +4543,7 @@ theorem stageD_simpleANF_with_verify_postprocessing
     (tsm tsm' : TaggedStackMap)
     (initialAnf anfFinal : State)
     (initialStack stkBody stkFinal : StackState)
-    (hRunBody : runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
+    (_hRunBody : runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
                 = .ok stkBody)
     (hRunVerify : runOps [.opcode "OP_VERIFY"] stkBody = .ok stkFinal)
     (hChain : ChainRel simpleStepRel body tsm initialAnf initialStack tsm' anfFinal stkBody)
@@ -4611,7 +4612,7 @@ or `_codePart` references is just the reversed param-name list.
 This characterises the simplest case of `lowerMethod`'s initial
 setup. -/
 theorem lowerMethod_initialMap_no_implicits
-    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (_progMethods : List ANFMethod) (_props : List ANFProperty) (m : ANFMethod)
     (_hNoPreimage : bindingsUseCheckPreimage m.body = false)
     (_hNoCode     : bindingsUseCodePart m.body = false) :
     -- The structural fact: the initial map equals `m.params.map (·.name) |>.reverse`.
@@ -4646,7 +4647,7 @@ def nipCleanupActiveFor (m : ANFMethod) (depthAfterBody : Nat) : Prop :=
 …the method-level simulation holds: `runMethod` succeeds iff
 `evalBindings` does (the `successAgrees` predicate from Pipeline.lean).
 
-This is the bundled-hypothesis form of `lower_observational_correct`.
+This is the bundled-hypothesis form of `lower_observational_correct_skeleton`.
 The hypotheses are exactly the gaps that remain after Stage B's
 per-opcode operational discharge (Step 4 tail) lands. -/
 theorem stageD_method_simulation_conditional
@@ -4665,14 +4666,14 @@ theorem stageD_method_simulation_conditional
         (RunarVerification.ANF.Eval.evalBindings initialAnf m.body).toOption.isSome)
     (_hStkSuccess :
         (Stack.Eval.runOps (lowerMethod progMethods props m).ops initialStack).toOption.isSome) :
-    -- successAgrees holds (the goal of `lower_observational_correct`).
+    -- successAgrees holds (the goal of `lower_observational_correct_skeleton`).
     -- Both sides are `some` ⇒ the Iff branch reduces to ⟨_,_⟩.
     True := by
   trivial
 
 /-! ## Phase 6 Step 8 — Capstone discharge plan
 
-The full discharge of `Pipeline.lower_observational_correct` requires:
+The full discharge of `Pipeline.lower_observational_correct_skeleton` requires:
 1. Stage B unconditional (Step 4 tail) — per-opcode operational
    discharge for `unaryOp` / `binOp` (~10 days mechanical work).
 2. The `addOutput` family's stack-side outputs bridge (~3 days,
@@ -4684,7 +4685,7 @@ The full discharge of `Pipeline.lower_observational_correct` requires:
    cleanup) — the structural claims `terminalAssertElidesFor` /
    `nipCleanupActiveFor` above formalise the predicates.
 
-Once (1)-(4) are landed, `lower_observational_correct` reduces to
+Once (1)-(4) are landed, `lower_observational_correct_skeleton` reduces to
 a `successAgrees` claim that follows from `agreesTagged` at the
 empty stack-map (which means: ANF state and runtime state agree
 on `outputs` and `props`, so both succeed iff the bound assert
@@ -4758,7 +4759,7 @@ The genuine multi-week scope — explicitly out of reach for a single
 session per the Phase 4-Z task brief — is Stages B–D. Stage A (this
 file) closes the foundational gap by pinning the predicate and
 demonstrating the freshness lemma is provable without a freshness
-axiom.
+assumption.
 -/
 
 end Agrees

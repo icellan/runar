@@ -702,29 +702,42 @@ jobs:
             runar-verification-${{ runner.os }}-
       - name: Build (lean lib + test exes)
         working-directory: runar-verification
-        run: lake build && lake build pipelineGolden goldenLoad roundtrip
+        run: |
+          lake build
+          echo "checking every tracked Lean module"
+          while IFS= read -r file; do
+            if [ "$file" = "./lakefile.lean" ]; then
+              continue
+            fi
+            module="${file#./}"
+            module="${module%.lean}"
+            module="${module//\//.}"
+            lake build "$module" >/dev/null
+          done < <(find . -name '*.lean' -not -path './.lake/*' | sort)
+          lake build pipelineGolden goldenLoad roundtrip differential
+      - name: Check TCB drift
+        working-directory: runar-verification
+        run: ./scripts/check-tcb-drift.sh
       - name: Verify all 49 fixtures parse + satisfy WF
         working-directory: runar-verification
         run: lake env ./.lake/build/bin/goldenLoad
       - name: Verify all 49 fixtures round-trip through ANF JSON
         working-directory: runar-verification
         run: lake env ./.lake/build/bin/roundtrip
-      - name: Verify byte-exact regression gate (>= 33/49 fixtures)
+      - name: Verify byte-exact regression gate (34/49 live fixtures)
         id: byte-exact-gate
         working-directory: runar-verification
         # The pipelineGolden binary enforces three regression gates and
         # exits nonzero on any:
-        #   1. Total byte-exact count must not drop below 33.
-        #   2. Every baseline fixture (33 names) must still produce
+        #   1. Total byte-exact count must not drop below 34.
+        #   2. Every baseline fixture (34 names) must still produce
         #      byte-identical hex against the TS reference.
         #   3. Notice (non-fatal) for fixtures that have flipped to
         #      byte-exact and should be promoted into baselineMatches.
         # Linux has no dyld __DATA_CONST check, so the native exe runs
-        # directly here (it cannot run locally on macOS — see HANDOFF §6).
-        # Native is ~50-100x faster than the interpreter; the multi-MB
-        # cryptoAxiomPending fixtures (post-quantum-slhdsa, p384-*,
-        # ec-demo, schnorr-zkp) are skipped by default — see
-        # `RUNAR_VERIFICATION_FULL=1` opt-in in HANDOFF section 25.
+        # directly here. Native is ~50-100x faster than the interpreter;
+        # the multi-MB cryptoAxiomPending fixtures count only when backed
+        # by stored Lean-produced constants or when full mode runs.
         # The captured output is parsed via shell-only substitution
         # (no GitHub event inputs are interpolated into shell).
         run: |

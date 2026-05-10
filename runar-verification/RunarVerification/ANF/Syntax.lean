@@ -5,8 +5,7 @@ Lean 4 inductive definitions for the Rúnar ANF IR.
 
 Mirrors `packages/runar-ir-schema/src/anf-ir.ts` and the JSON Schema at
 `packages/runar-ir-schema/src/schemas/anf-ir.schema.json` 1:1, with two
-deliberate refinements (decided as open questions OQ-1 and OQ-6 in
-`EXPLORATION.md`):
+deliberate refinements:
 
 * `ConstValue` is a closed sum that distinguishes literal integers / bools /
   byte-strings from the two compile-time markers `@ref:NAME` and `@this`

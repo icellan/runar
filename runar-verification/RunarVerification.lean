@@ -3,16 +3,27 @@ import RunarVerification.ANF.Json
 import RunarVerification.ANF.WF
 import RunarVerification.ANF.Typed
 import RunarVerification.ANF.Eval
+import RunarVerification.Crypto.Spec
 import RunarVerification.Stack.Syntax
 import RunarVerification.Stack.Eval
 import RunarVerification.Stack.Lower
 import RunarVerification.Stack.Sim
 import RunarVerification.Stack.Agrees
 import RunarVerification.Stack.Peephole
+import RunarVerification.Stack.TxContext
+import RunarVerification.Stack.NumEncoding
+import RunarVerification.Stack.BabyBear
+import RunarVerification.Stack.Blake3
+import RunarVerification.Stack.Merkle
+import RunarVerification.Stack.Ec
+import RunarVerification.Stack.P256P384
+import RunarVerification.Stack.SlhDsa
+import RunarVerification.Stack.Wots
 import RunarVerification.Script.Syntax
 import RunarVerification.Script.Eval
 import RunarVerification.Script.Emit
 import RunarVerification.Script.EmitCorrect
+import RunarVerification.Script.Parse
 import RunarVerification.Pipeline
 
 /-!

@@ -71,6 +71,6 @@ jobs:
         with:
           name: differential-reports
           path: |
-            runar-verification/tests/differential-results.json
-            runar-verification/tests/differential-external.json
+            /tmp/runar-verification-differential/differential-results.json
+            /tmp/runar-verification-differential/differential-external.json
           if-no-files-found: ignore

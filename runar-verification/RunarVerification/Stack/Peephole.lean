@@ -354,7 +354,7 @@ theorem popN_two_cons (s : StackState) (b a : ANF.Eval.Value)
 
 /-! Single-arm projections of `runOpcode` for the opcodes used below.
 
-Each `runOpcode_XXX_def` is `rfl`-provable because Lean's match arm
+Each `runOpcode_<OP>_def` is `rfl`-provable because Lean's match arm
 selects the corresponding case directly. We use them to avoid having
 `unfold runOpcode` pull in the entire ~200-line match in a single
 tactic step (which exhausts `maxHeartbeats`).
@@ -1585,7 +1585,7 @@ theorem runOpcode_equal_bytes
     = .ok (({ s with stack := rest_top } : StackState).push
             (.vBool (decide (a.toList = b.toList)))) := by
   rw [runOpcode_EQUAL_def, popN_two_cons s (.vBytes b) (.vBytes a) rest_top hs]
-  simp [asBytes?, asInt?]
+  simp [asBytes?]
 
 theorem runOpcode_equalVerify_bytes
     (s : StackState) (a b : ByteArray) (rest_top : List ANF.Eval.Value)
@@ -1594,7 +1594,7 @@ theorem runOpcode_equalVerify_bytes
     = if decide (a.toList = b.toList) then .ok ({ s with stack := rest_top } : StackState)
                                         else .error .assertFailed := by
   rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vBytes b) (.vBytes a) rest_top hs]
-  simp [asBytes?, asInt?]
+  simp [asBytes?]
 
 theorem equalVerifyFuse_extends_bytes
     (s : StackState) (a b : ByteArray) (rest_top : List ANF.Eval.Value)
@@ -1662,7 +1662,7 @@ The expectation an op imposes on the stack at its execution position.
 Most ops have `.none` (no precondition); the table below lists every
 op the conditional peephole rules' atom-sound proofs depend on.
 
-Entries marked TODO are conservative `.none` defaults — Phase 3n
+Entries not yet classified are conservative `.none` defaults — Phase 3n
 tightens them once additional rule soundness proofs require it.
 -/
 
@@ -5164,7 +5164,7 @@ private theorem equalVerifyFuse_extends_anyBytes
           = .ok (({ s with stack := rest_top } : StackState).push
                   (.vBool (decide (a.toList = b.toList)))) from by
             rw [runOpcode_EQUAL_def, popN_two_cons s (.vBytes b) (.vOpaque a) rest_top hBO]
-            simp [asBytes?, asInt?]]
+            simp [asBytes?]]
     show runOps (.opcode "OP_VERIFY" :: rest)
           ((({ s with stack := rest_top } : StackState).push
               (.vBool (decide (a.toList = b.toList))))) = _
@@ -5176,14 +5176,14 @@ private theorem equalVerifyFuse_extends_anyBytes
               else .error .assertFailed) from by
             rw [runOpcode_EQUALVERIFY_def,
                 popN_two_cons s (.vBytes b) (.vOpaque a) rest_top hBO]
-            simp [asBytes?, asInt?]]
+            simp [asBytes?]]
   · -- vOpaque :: vBytes
     rw [runOps_cons_opcode_eq, stepNonIf_opcode]
     rw [show runOpcode "OP_EQUAL" s
           = .ok (({ s with stack := rest_top } : StackState).push
                   (.vBool (decide (a.toList = b.toList)))) from by
             rw [runOpcode_EQUAL_def, popN_two_cons s (.vOpaque b) (.vBytes a) rest_top hOB]
-            simp [asBytes?, asInt?]]
+            simp [asBytes?]]
     show runOps (.opcode "OP_VERIFY" :: rest)
           ((({ s with stack := rest_top } : StackState).push
               (.vBool (decide (a.toList = b.toList))))) = _
@@ -5195,14 +5195,14 @@ private theorem equalVerifyFuse_extends_anyBytes
               else .error .assertFailed) from by
             rw [runOpcode_EQUALVERIFY_def,
                 popN_two_cons s (.vOpaque b) (.vBytes a) rest_top hOB]
-            simp [asBytes?, asInt?]]
+            simp [asBytes?]]
   · -- vOpaque :: vOpaque
     rw [runOps_cons_opcode_eq, stepNonIf_opcode]
     rw [show runOpcode "OP_EQUAL" s
           = .ok (({ s with stack := rest_top } : StackState).push
                   (.vBool (decide (a.toList = b.toList)))) from by
             rw [runOpcode_EQUAL_def, popN_two_cons s (.vOpaque b) (.vOpaque a) rest_top hOO]
-            simp [asBytes?, asInt?]]
+            simp [asBytes?]]
     show runOps (.opcode "OP_VERIFY" :: rest)
           ((({ s with stack := rest_top } : StackState).push
               (.vBool (decide (a.toList = b.toList))))) = _
@@ -5214,7 +5214,7 @@ private theorem equalVerifyFuse_extends_anyBytes
               else .error .assertFailed) from by
             rw [runOpcode_EQUALVERIFY_def,
                 popN_two_cons s (.vOpaque b) (.vOpaque a) rest_top hOO]
-            simp [asBytes?, asInt?]]
+            simp [asBytes?]]
 
 /-- Helper: reduce stepNonIf OP_EQUAL on two-bytes-mixed stacks to a uniform shape. -/
 private theorem stepNonIf_OPEQUAL_anyBytes
@@ -5229,13 +5229,13 @@ private theorem stepNonIf_OPEQUAL_anyBytes
   rw [stepNonIf_opcode]
   rcases hs with hBB | hBO | hOB | hOO
   · rw [runOpcode_EQUAL_def, popN_two_cons s (.vBytes b) (.vBytes a) rest_top hBB]
-    simp [asBytes?, asInt?]
+    simp [asBytes?]
   · rw [runOpcode_EQUAL_def, popN_two_cons s (.vBytes b) (.vOpaque a) rest_top hBO]
-    simp [asBytes?, asInt?]
+    simp [asBytes?]
   · rw [runOpcode_EQUAL_def, popN_two_cons s (.vOpaque b) (.vBytes a) rest_top hOB]
-    simp [asBytes?, asInt?]
+    simp [asBytes?]
   · rw [runOpcode_EQUAL_def, popN_two_cons s (.vOpaque b) (.vOpaque a) rest_top hOO]
-    simp [asBytes?, asInt?]
+    simp [asBytes?]
 
 /-! ### `equalVerifyFuse_bytesStrict` precondition
 
@@ -5297,13 +5297,13 @@ theorem equalVerifyFuse_pass_sound_bytes :
       rw [stepNonIf_opcode]
       rcases hStack with hBB | hBO | hOB | hOO
       · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vBytes b) (.vBytes a) rest_top hBB]
-        simp [asBytes?, asInt?]
+        simp [asBytes?]
       · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vBytes b) (.vOpaque a) rest_top hBO]
-        simp [asBytes?, asInt?]
+        simp [asBytes?]
       · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vOpaque b) (.vBytes a) rest_top hOB]
-        simp [asBytes?, asInt?]
+        simp [asBytes?]
       · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vOpaque b) (.vOpaque a) rest_top hOO]
-        simp [asBytes?, asInt?]
+        simp [asBytes?]
     rw [hStepDef] at hStepEV
     by_cases hEq : decide (a.toList = b.toList) = true
     · rw [hEq] at hStepEV
@@ -5510,13 +5510,13 @@ theorem equalVerifyFuse_pass_sound :
         rw [stepNonIf_opcode]
         rcases hStack with hBB | hBO | hOB | hOO
         · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vBytes b) (.vBytes a) rest_top hBB]
-          simp [asBytes?, asInt?]
+          simp [asBytes?]
         · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vBytes b) (.vOpaque a) rest_top hBO]
-          simp [asBytes?, asInt?]
+          simp [asBytes?]
         · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vOpaque b) (.vBytes a) rest_top hOB]
-          simp [asBytes?, asInt?]
+          simp [asBytes?]
         · rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vOpaque b) (.vOpaque a) rest_top hOO]
-          simp [asBytes?, asInt?]
+          simp [asBytes?]
       rw [hStepDef] at hStepEV
       by_cases hEq : decide (a.toList = b.toList) = true
       · rw [hEq] at hStepEV

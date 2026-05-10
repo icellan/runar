@@ -21,7 +21,18 @@ fi
 
 cd runar-verification
 lake build
-lake build pipelineGolden goldenLoad roundtrip
+echo "lean-verify: checking every tracked Lean module"
+while IFS= read -r file; do
+  if [ "$file" = "./lakefile.lean" ]; then
+    continue
+  fi
+  module="${file#./}"
+  module="${module%.lean}"
+  module="${module//\//.}"
+  lake build "$module" >/dev/null
+done < <(find . -name '*.lean' -not -path './.lake/*' | sort)
+lake build pipelineGolden goldenLoad roundtrip differential
+./scripts/check-tcb-drift.sh
 lake env ./.lake/build/bin/goldenLoad
 lake env ./.lake/build/bin/roundtrip
 lake env ./.lake/build/bin/pipelineGolden

@@ -34,11 +34,11 @@ fi
 # We don't ship deferred work as a TODO comment in source code OR markdown
 # documentation: deferred items go in the project tracker, not in the repo.
 # Docs that need to *describe* the marker convention (e.g. test-skips.md)
-# do so via prose without using the literal markers. runar-verification
-# (owned by a separate agent) and generated build dirs are excluded.
+# do so via prose without using the literal markers. Generated build dirs
+# are excluded.
 # ---------------------------------------------------------------------------
-roots=( compilers packages conformance integration examples scripts .github tests docs README.md )
-exclude_re='(/dist/|/target/|/build/|/node_modules/|\.zig-cache|/\.gradle/|/zig-out/|/coverage/|/\.venv/|/site-packages/|/__pycache__/|\.egg-info/|/vendor/|/runar-verification/)'
+roots=( compilers packages conformance integration examples scripts .github tests docs runar-verification README.md )
+exclude_re='(/dist/|/target/|/build/|/node_modules/|\.zig-cache|/\.gradle/|/zig-out/|/coverage/|/\.venv/|/site-packages/|/__pycache__/|\.egg-info/|/vendor/|/runar-verification/\.lake/)'
 include_re='\.(go|rs|ts|tsx|py|zig|rb|java|sh|yml|yaml|md|markdown)$'
 
 # `XXX\b` matches the word XXX but not `\uXXXX` etc. The leading `\b` keeps

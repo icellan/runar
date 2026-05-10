@@ -41,7 +41,7 @@ shape-preservation level, not byte-exact):
 * `arrayLiteral` — packed byte layout
 
 For these out-of-scope cases the lower emits a single
-`StackOp.opcode "OP_RUNAR_TODO"` placeholder so the program type
+`StackOp.opcode "OP_RUNAR_UNSUPPORTED"` sentinel so the program type
 checks; the `SimpleANF` predicate forbids their occurrence so the
 simulation theorem never has to reason about them.
 -/
@@ -2579,7 +2579,7 @@ def lowerValue (sm : StackMap) (bindingName : String) :
   | .assert ref =>
       (loadRef sm ref ++ [.opcode "OP_VERIFY"], sm)
   | .updateProp _ ref =>
-      (loadRef sm ref ++ [.opcode "OP_RUNAR_UPDATEPROP_TODO"], sm)
+      (loadRef sm ref ++ [.opcode "OP_RUNAR_UPDATEPROP_UNSUPPORTED"], sm)
   | .loop count body iterVar =>
       -- Phase 3d: full count-bounded unroll. The body is lowered once
       -- (with `iterVar` registered as a synthetic param at depth 0);
@@ -2598,9 +2598,9 @@ def lowerValue (sm : StackMap) (bindingName : String) :
   | .checkPreimage pre       => lowerCheckPreimageOps sm bindingName pre
   -- Out-of-scope: depend on the program's property table (which
   -- `lowerValue` doesn't have access to). Tracked as Phase 3y deferred.
-  | .getStateScript          => ([.opcode "OP_RUNAR_GETSTATESCRIPT_TODO"], sm.push bindingName)
-  | .deserializeState _      => ([.opcode "OP_RUNAR_DESERIALIZESTATE_TODO"], sm)
-  | .addOutput _ _ _         => ([.opcode "OP_RUNAR_ADDOUTPUT_TODO"], sm)
+  | .getStateScript          => ([.opcode "OP_RUNAR_GETSTATESCRIPT_UNSUPPORTED"], sm.push bindingName)
+  | .deserializeState _      => ([.opcode "OP_RUNAR_DESERIALIZESTATE_UNSUPPORTED"], sm)
+  | .addOutput _ _ _         => ([.opcode "OP_RUNAR_ADDOUTPUT_UNSUPPORTED"], sm)
 
 def lowerBindings (sm : StackMap) :
     List ANFBinding → (List StackOp × StackMap)
@@ -3663,7 +3663,7 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
   let bodyConstInts := collectConstInts m.body
   let (rawOps, finalSm) :=
     lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap m.body
-  -- Terminal-assert elision (Gap #3 from PHASE_3W_C_GAP_ANALYSIS.md):
+  -- Terminal-assert elision:
   -- A public method whose body ends in `.assert _` drops the trailing
   -- `OP_VERIFY` — the boolean stays on top of the stack as the script's
   -- implicit return value.
@@ -3730,7 +3730,7 @@ The predicate doesn't recursively check the *callee's* body — that
 check is performed during top-level lowering when the callee itself
 is visited as a method in the program.
 
-Out-of-scope (`OP_RUNAR_*_TODO` placeholders): `getStateScript`,
+Out-of-scope (`OP_RUNAR_*_UNSUPPORTED` sentinels): `getStateScript`,
 `checkPreimage`, `deserializeState`, `addOutput`, `addRawOutput`,
 `addDataOutput`. These require full BIP-143 byte construction.
 -/

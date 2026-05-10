@@ -60,8 +60,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-LEAN_REPORT="tests/differential-results.json"
-EXT_REPORT="tests/differential-external.json"
+REPORT_DIR="${RUNAR_DIFFERENTIAL_DIR:-${TMPDIR:-/tmp}/runar-verification-differential}"
+mkdir -p "$REPORT_DIR"
+LEAN_REPORT="${RUNAR_DIFFERENTIAL_LEAN_OUT:-$REPORT_DIR/differential-results.json}"
+EXT_REPORT="${RUNAR_DIFFERENTIAL_EXT_OUT:-$REPORT_DIR/differential-external.json}"
 
 # ----------------------------------------------------------------------
 # 1. Build the Lean executable and produce the Lean-side report.
@@ -77,7 +79,7 @@ echo "[differential] running Lean side..."
 # parse every fixture. CI Linux runners typically have an 8 MB default
 # too; the unlimited-or-65520 ceiling is standard.
 ulimit -s 65520 2>/dev/null || true
-lake env ./.lake/build/bin/differential
+RUNAR_DIFFERENTIAL_OUT="$LEAN_REPORT" lake env ./.lake/build/bin/differential
 
 if [ ! -f "$LEAN_REPORT" ]; then
   echo "[differential] FAIL: Lean side did not produce $LEAN_REPORT" >&2

@@ -7,7 +7,8 @@ import RunarVerification.ANF.Syntax
 invariants that the lowering pass guarantees, so that downstream passes
 (typing, evaluation, simulation) can rely on them.
 
-The rules formalise EXPLORATION.md §4:
+The rules formalise the ANF scoping and binding-name decisions used by
+the compiler:
 
 * SSA-temporary names matching `^t\d+$` are unique across the
   transitively-flattened binding sequence of each method.
@@ -148,14 +149,15 @@ def valueIsWFAux (fuel : Nat) (env : ScopeEnv) : ANFValue → Bool
   | .deserializeState p => env.resolves p
   | .addOutput sats sv pre =>
       env.resolves sats && sv.all env.resolves
-      -- The `preimage` field is empty-string in 3 of the 46 goldens
+      -- The `preimage` field is empty-string in 3 fixtures
       -- (`add-raw-output`, `token-ft`, `token-nft` — TS-only fixtures).
       -- The empty string is a sentinel meaning "preimage not directly
       -- referenced — the framework derives it from `txPreimage`".
       -- The schema declares `minLength: 1` so the goldens technically
       -- violate it, but accommodating the sentinel here keeps WF
       -- compatible with the actual conformance corpus.
-      -- See HANDOFF.md "Findings" for the upstream issue.
+      -- Kept here as an explicit compatibility rule for the current
+      -- conformance corpus.
       && (pre = "" || env.resolves pre)
   | .addRawOutput sats sb => env.resolves sats && env.resolves sb
   | .addDataOutput sats sb => env.resolves sats && env.resolves sb

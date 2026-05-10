@@ -903,7 +903,7 @@ Mirrors TS `emitVerifySLHDSA`. Stack in: `msg sig pubkey`. Stack out: bool.
 
 The body is built using the `Tracker`. -/
 
-private def applyHmsg (t : Tracker) (n outLen : Nat) : Tracker :=
+private def applyHmsg (t : Tracker) (_n outLen : Nat) : Tracker :=
   -- Bring R, pkSeed, pkRoot, msg copies to top in order.
   let t := t.copyToTop "R" (some "_R")
   let t := t.copyToTop "pkSeed" (some "_pks")
@@ -1042,7 +1042,7 @@ def emitVerifySLHDSABody (paramKey : String) : List StackOp :=
   match paramsByKey paramKey with
   | none   => [.opcode "OP_RUNAR_UNKNOWN_SLHDSA_PARAMS"]
   | some p =>
-    let { n, h, hp, k, a, len, d, .. } := p
+    let { n, h, hp, k, a, d, .. } := p
     let forsSigLen := k * (1 + a) * n
     let mdLen      := (k * a + 7) / 8
     let treeIdxLen := (h - hp + 7) / 8

@@ -18,7 +18,7 @@
 # compilers for that fixture rather than counting them as a divergence. This
 # matches the CLAUDE.md project policy on Go-only crypto codegen modules.
 #
-# A JSON matrix report is written to runar-verification/cross-compiler-report.json
+# A JSON matrix report is written to /tmp by default, or to --report PATH.
 # for downstream tooling. The script exits non-zero on any mismatch
 # (compiler-vs-expected, compiler-vs-compiler, or compiler invocation failure).
 #
@@ -44,7 +44,7 @@
 # Lean note: lake's `pipelineGolden` exe runs its own byte-exact regression
 # gate against expected-script.hex (the reference hex file). This script
 # therefore treats the Lean tier's verdict as PASS / FAIL based on the
-# pipelineGolden process exit code (0 = all 49/49 byte-exact). Per-fixture
+# pipelineGolden process exit code (0 = default byte-exact gate passed). Per-fixture
 # Lean hex extraction is not exposed by the existing exe; the all-or-nothing
 # verdict is recorded under the special pseudo-fixture `"_global"` in the
 # JSON report. Use `--no-lean` to skip if Lean toolchain is unavailable.
@@ -61,7 +61,7 @@ VERIFICATION_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${VERIFICATION_DIR}/.." && pwd)"
 TESTS_DIR="${REPO_ROOT}/conformance/tests"
 
-REPORT_PATH_DEFAULT="${VERIFICATION_DIR}/cross-compiler-report.json"
+REPORT_PATH_DEFAULT="${TMPDIR:-/tmp}/runar-verification-cross-compiler-report.json"
 REPORT_PATH=""
 FOLD_OFF=1
 RUN_LEAN=1
@@ -443,7 +443,7 @@ run_lean_reference() {
     log "Lean: lake not on PATH; skipping"
     return 0
   fi
-  log "Lean: invoking pipelineGolden (49-fixture regression gate)..."
+  log "Lean: invoking pipelineGolden (default regression gate)..."
   LEAN_VERDICT_RAN=1
   local out
   if out=$( ( cd "$VERIFICATION_DIR" && lake env "$lean_bin" ) 2>&1 ); then

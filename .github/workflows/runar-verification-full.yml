@@ -9,8 +9,7 @@
 name: Runar Verification (full mode — cryptoAxiomPending bucket)
 
 # Runs the Lean PipelineGolden test with `RUNAR_VERIFICATION_FULL=1`,
-# which also exercises the 11 cryptoAxiomPending fixtures
-# (EC × 5, P-256 × 2, P-384 × 2, SLH-DSA × 2). These are skipped by
+# which also exercises the 15 cryptoAxiomPending fixtures. These are skipped by
 # default in the standard `runar-verification` job because the multi-MB
 # script outputs take >1h to evaluate (per HANDOFF section 25; the
 # bottleneck is `compileHex` evaluating ~10^5+ Stack ops × pure
@@ -21,7 +20,7 @@ name: Runar Verification (full mode — cryptoAxiomPending bucket)
 # Empirical measurement (2026-05-04 on dev hardware, M-series mac):
 # even the smallest cryptoAxiomPending fixture (post-quantum-slhdsa,
 # 377KB hex) had not produced any progress output after 25 minutes
-# of CPU time. With 11 fixtures in the bucket and the per-fixture
+# of CPU time. With 15 fixtures in the bucket and the per-fixture
 # cost of that magnitude, a full run does NOT fit in the 6h GitHub
 # Actions timeout when run sequentially. The instrumented binary
 # now streams per-fixture timing as each completes — useful for
@@ -34,7 +33,7 @@ name: Runar Verification (full mode — cryptoAxiomPending bucket)
 # in <30 min on the GitHub runner.
 #
 # This workflow does NOT gate PR merges. The standard runar-verification
-# job in ci.yml is the per-PR gate (33/49 byte-exact baseline).
+# job in ci.yml is the per-PR gate (34/49 live byte-exact baseline).
 
 on:
   workflow_dispatch:
@@ -100,7 +99,7 @@ jobs:
               printf '| Byte-exact (incl. cryptoAxiomPending) | (binary did not complete) |\n'
             fi
             printf '\n'
-            printf 'Standard mode (per-PR gate) sits at 33/49 byte-exact.\n'
+            printf 'Standard mode (per-PR gate) sits at 34/49 live byte-exact.\n'
             printf 'Any uplift here means promotable cryptoAxiomPending fixtures —\n'
             printf 'see runar-verification/tests/PipelineGolden.lean and HANDOFF.md.\n'
           } >> "$GITHUB_STEP_SUMMARY"
