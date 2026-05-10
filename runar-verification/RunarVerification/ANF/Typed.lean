@@ -117,12 +117,25 @@ def freeNames : ANFValue → List String
   | .addDataOutput sats sb => [sats, sb]
   | .arrayLiteral elems => elems
 
-/-! ## Builtin signatures (left abstract for the verification lead)
+/-! ## Builtin signatures
 
 Each entry maps a `func` name to its `(argTypes, returnType)` signature.
-The full table will be filled in during Phase 3 — see EXPLORATION.md §7
-for the categorisation. The Lean type system below only assumes the
-existence of such a function, *not* its implementation.
+The canonical reference is the TypeScript compiler's `BUILTIN_FUNCTIONS`
+table at `packages/runar-compiler/src/passes/03-typecheck.ts:67-212`
+(122 entries). We mirror that table exactly here, with the following
+caveats:
+
+* `checkMultiSig` takes `Sig[]` / `PubKey[]` array operands. The Lean
+  ANF `ANFType` vocabulary does not model array types (see
+  `Syntax.lean`'s closed-sum `ANFType`), so `checkMultiSig` is the
+  one TS-table entry that returns `none` here. Conformance fixtures
+  that exercise `checkMultiSig` are TypeScript-only (per
+  `EXPLORATION.md` §"array_literal") and the typing judgment for
+  them is intentionally incomplete.
+* TS's `'void'` return for `assert` / `exit` is rendered as `.bool`
+  here — the Lean `assertT` rule already types `assert` as `.bool`,
+  and we never need to *return* `void` since `call` is only invoked
+  on builtins that produce a value-typed binding.
 -/
 
 structure FuncSig where
@@ -130,7 +143,156 @@ structure FuncSig where
   returnType : ANFType
   deriving Repr, BEq
 
-opaque builtinSig (func : String) : Option FuncSig
+/--
+Concrete typing table for every Rúnar built-in the compiler emits as
+`call(name, args)`. Mirrors the TS reference table at
+`packages/runar-compiler/src/passes/03-typecheck.ts` line-for-line.
+Returns `none` for any name not in the table (so unknown builtins are
+simply un-typeable, not mis-typeable).
+-/
+def builtinSig (func : String) : Option FuncSig :=
+  match func with
+  -- Hashes
+  | "sha256"          => some { argTypes := [.byteString],                        returnType := .sha256 }
+  | "ripemd160"       => some { argTypes := [.byteString],                        returnType := .ripemd160 }
+  | "hash160"         => some { argTypes := [.byteString],                        returnType := .ripemd160 }
+  | "hash256"         => some { argTypes := [.byteString],                        returnType := .sha256 }
+  -- Signature / preimage / multisig
+  | "checkSig"        => some { argTypes := [.sig, .pubKey],                      returnType := .bool }
+  -- "checkMultiSig" elided — needs array types
+  | "assert"          => some { argTypes := [.bool],                              returnType := .bool }
+  | "checkPreimage"   => some { argTypes := [.sigHashPreimage],                   returnType := .bool }
+  -- Byte-string primitives
+  | "len"             => some { argTypes := [.byteString],                        returnType := .bigint }
+  | "cat"             => some { argTypes := [.byteString, .byteString],           returnType := .byteString }
+  | "substr"          => some { argTypes := [.byteString, .bigint, .bigint],      returnType := .byteString }
+  | "num2bin"         => some { argTypes := [.bigint, .bigint],                   returnType := .byteString }
+  | "bin2num"         => some { argTypes := [.byteString],                        returnType := .bigint }
+  -- Rabin / WOTS+ / SLH-DSA verifiers
+  | "verifyRabinSig"  => some { argTypes := [.byteString, .rabinSig, .byteString, .rabinPubKey], returnType := .bool }
+  | "verifyWOTS"               => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  | "verifySLHDSA_SHA2_128s"   => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  | "verifySLHDSA_SHA2_128f"   => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  | "verifySLHDSA_SHA2_192s"   => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  | "verifySLHDSA_SHA2_192f"   => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  | "verifySLHDSA_SHA2_256s"   => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  | "verifySLHDSA_SHA2_256f"   => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  -- Partial-hash primitives
+  | "sha256Compress"  => some { argTypes := [.byteString, .byteString],           returnType := .byteString }
+  | "sha256Finalize"  => some { argTypes := [.byteString, .byteString, .bigint],  returnType := .byteString }
+  | "blake3Compress"  => some { argTypes := [.byteString, .byteString],           returnType := .byteString }
+  | "blake3Hash"      => some { argTypes := [.byteString],                        returnType := .byteString }
+  -- Math
+  | "abs"             => some { argTypes := [.bigint],                            returnType := .bigint }
+  | "min"             => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "max"             => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "within"          => some { argTypes := [.bigint, .bigint, .bigint],          returnType := .bool }
+  | "safediv"         => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "safemod"         => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "clamp"           => some { argTypes := [.bigint, .bigint, .bigint],          returnType := .bigint }
+  | "sign"            => some { argTypes := [.bigint],                            returnType := .bigint }
+  | "pow"             => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "mulDiv"          => some { argTypes := [.bigint, .bigint, .bigint],          returnType := .bigint }
+  | "percentOf"       => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "sqrt"            => some { argTypes := [.bigint],                            returnType := .bigint }
+  | "gcd"             => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "divmod"          => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "log2"            => some { argTypes := [.bigint],                            returnType := .bigint }
+  | "bool"            => some { argTypes := [.bigint],                            returnType := .bool }
+  -- Byte-string slicing helpers
+  | "split"           => some { argTypes := [.byteString, .bigint],               returnType := .byteString }
+  | "reverseBytes"    => some { argTypes := [.byteString],                        returnType := .byteString }
+  | "left"            => some { argTypes := [.byteString, .bigint],               returnType := .byteString }
+  | "right"           => some { argTypes := [.byteString, .bigint],               returnType := .byteString }
+  | "int2str"         => some { argTypes := [.bigint, .bigint],                   returnType := .byteString }
+  | "toByteString"    => some { argTypes := [.byteString],                        returnType := .byteString }
+  | "exit"            => some { argTypes := [.bool],                              returnType := .bool }
+  | "pack"            => some { argTypes := [.bigint],                            returnType := .byteString }
+  | "unpack"          => some { argTypes := [.byteString],                        returnType := .bigint }
+  -- secp256k1 EC
+  | "ecAdd"              => some { argTypes := [.point, .point],                  returnType := .point }
+  | "ecMul"              => some { argTypes := [.point, .bigint],                 returnType := .point }
+  | "ecMulGen"           => some { argTypes := [.bigint],                         returnType := .point }
+  | "ecNegate"           => some { argTypes := [.point],                          returnType := .point }
+  | "ecOnCurve"          => some { argTypes := [.point],                          returnType := .bool }
+  | "ecModReduce"        => some { argTypes := [.bigint, .bigint],                returnType := .bigint }
+  | "ecEncodeCompressed" => some { argTypes := [.point],                          returnType := .byteString }
+  | "ecMakePoint"        => some { argTypes := [.bigint, .bigint],                returnType := .point }
+  | "ecPointX"           => some { argTypes := [.point],                          returnType := .bigint }
+  | "ecPointY"           => some { argTypes := [.point],                          returnType := .bigint }
+  -- NIST P-256
+  | "p256Add"              => some { argTypes := [.p256Point, .p256Point],        returnType := .p256Point }
+  | "p256Mul"              => some { argTypes := [.p256Point, .bigint],           returnType := .p256Point }
+  | "p256MulGen"           => some { argTypes := [.bigint],                       returnType := .p256Point }
+  | "p256Negate"           => some { argTypes := [.p256Point],                    returnType := .p256Point }
+  | "p256OnCurve"          => some { argTypes := [.p256Point],                    returnType := .bool }
+  | "p256EncodeCompressed" => some { argTypes := [.p256Point],                    returnType := .byteString }
+  | "verifyECDSA_P256"     => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  -- NIST P-384
+  | "p384Add"              => some { argTypes := [.p384Point, .p384Point],        returnType := .p384Point }
+  | "p384Mul"              => some { argTypes := [.p384Point, .bigint],           returnType := .p384Point }
+  | "p384MulGen"           => some { argTypes := [.bigint],                       returnType := .p384Point }
+  | "p384Negate"           => some { argTypes := [.p384Point],                    returnType := .p384Point }
+  | "p384OnCurve"          => some { argTypes := [.p384Point],                    returnType := .bool }
+  | "p384EncodeCompressed" => some { argTypes := [.p384Point],                    returnType := .byteString }
+  | "verifyECDSA_P384"     => some { argTypes := [.byteString, .byteString, .byteString], returnType := .bool }
+  -- BabyBear field
+  | "bbFieldAdd"      => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "bbFieldSub"      => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "bbFieldMul"      => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "bbFieldInv"      => some { argTypes := [.bigint],                            returnType := .bigint }
+  -- BabyBear quartic extension
+  | "bbExt4Mul0"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Mul1"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Mul2"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Mul3"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Inv0"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Inv1"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Inv2"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "bbExt4Inv3"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  -- KoalaBear field
+  | "kbFieldAdd"      => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "kbFieldSub"      => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "kbFieldMul"      => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "kbFieldInv"      => some { argTypes := [.bigint],                            returnType := .bigint }
+  -- KoalaBear quartic extension
+  | "kbExt4Mul0"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Mul1"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Mul2"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Mul3"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Inv0"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Inv1"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Inv2"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  | "kbExt4Inv3"      => some { argTypes := [.bigint, .bigint, .bigint, .bigint], returnType := .bigint }
+  -- BN254 field
+  | "bn254FieldAdd"   => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "bn254FieldSub"   => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "bn254FieldMul"   => some { argTypes := [.bigint, .bigint],                   returnType := .bigint }
+  | "bn254FieldInv"   => some { argTypes := [.bigint],                            returnType := .bigint }
+  | "bn254FieldNeg"   => some { argTypes := [.bigint],                            returnType := .bigint }
+  -- BN254 G1
+  | "bn254G1Add"        => some { argTypes := [.point, .point],                   returnType := .point }
+  | "bn254G1ScalarMul"  => some { argTypes := [.point, .bigint],                  returnType := .point }
+  | "bn254G1Negate"     => some { argTypes := [.point],                           returnType := .point }
+  | "bn254G1OnCurve"    => some { argTypes := [.point],                           returnType := .bool }
+  -- Merkle
+  | "merkleRootSha256"  => some { argTypes := [.byteString, .byteString, .bigint, .bigint], returnType := .byteString }
+  | "merkleRootHash256" => some { argTypes := [.byteString, .byteString, .bigint, .bigint], returnType := .byteString }
+  -- Preimage extractors
+  | "extractVersion"       => some { argTypes := [.sigHashPreimage], returnType := .bigint }
+  | "extractHashPrevouts"  => some { argTypes := [.sigHashPreimage], returnType := .sha256 }
+  | "extractHashSequence"  => some { argTypes := [.sigHashPreimage], returnType := .sha256 }
+  | "extractOutpoint"      => some { argTypes := [.sigHashPreimage], returnType := .byteString }
+  | "extractInputIndex"    => some { argTypes := [.sigHashPreimage], returnType := .bigint }
+  | "extractScriptCode"    => some { argTypes := [.sigHashPreimage], returnType := .byteString }
+  | "extractAmount"        => some { argTypes := [.sigHashPreimage], returnType := .bigint }
+  | "extractSequence"      => some { argTypes := [.sigHashPreimage], returnType := .bigint }
+  | "extractOutputHash"    => some { argTypes := [.sigHashPreimage], returnType := .sha256 }
+  | "extractOutputs"       => some { argTypes := [.sigHashPreimage], returnType := .sha256 }
+  | "extractLocktime"      => some { argTypes := [.sigHashPreimage], returnType := .bigint }
+  | "extractSigHashType"   => some { argTypes := [.sigHashPreimage], returnType := .bigint }
+  | "buildChangeOutput"    => some { argTypes := [.byteString, .bigint], returnType := .byteString }
+  | _                  => none
 
 /-! ## The typing judgment
 

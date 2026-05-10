@@ -110,6 +110,12 @@ def constIsWF (env : ScopeEnv) : ConstValue → Bool
 
 /-! ## ANFValue well-formedness (mutual with bindings) -/
 
+/-- Recursion-depth fuel for the WF traversal. ANF programs nest at most a few
+levels deep (the deepest fixture in the conformance corpus has < 50 nested
+binding/value frames), so a 100k cap is effectively infinite for any
+realistic input while still giving Lean a structurally-decreasing measure. -/
+private def wfRecFuel : Nat := 100000
+
 mutual
 
 /-- Every `TempRef` in `v` resolves in `env`, and any nested binding lists are themselves WF.
@@ -118,7 +124,7 @@ Phase 6 Step 2: `loadParam name` requires `name ∈ env.params`, and
 `loadProp name` requires `name ∈ env.props`. These were previously
 unconditionally `true`; tightening lets downstream simulation lemmas
 extract the property/parameter from `env` without re-checking. -/
-partial def valueIsWF (env : ScopeEnv) : ANFValue → Bool
+def valueIsWFAux (fuel : Nat) (env : ScopeEnv) : ANFValue → Bool
   | .loadParam n => env.params.contains n
   | .loadProp n  => env.props.contains n
   | .loadConst c => constIsWF env c
@@ -127,9 +133,14 @@ partial def valueIsWF (env : ScopeEnv) : ANFValue → Bool
   | .call _ args => args.all env.resolves
   | .methodCall obj _ args => env.resolves obj && args.all env.resolves
   | .ifVal cond t e =>
-      env.resolves cond && bindingsAreWF env t && bindingsAreWF env e
+      match fuel with
+      | 0 => false
+      | f + 1 =>
+          env.resolves cond && bindingsAreWFAux f env t && bindingsAreWFAux f env e
   | .loop _ body iterVar =>
-      bindingsAreWF (env.addParam iterVar) body
+      match fuel with
+      | 0 => false
+      | f + 1 => bindingsAreWFAux f (env.addParam iterVar) body
   | .assert v => env.resolves v
   | .updateProp _ v => env.resolves v
   | .getStateScript => true
@@ -151,12 +162,20 @@ partial def valueIsWF (env : ScopeEnv) : ANFValue → Bool
   | .arrayLiteral elems => elems.all env.resolves
 
 /-- A binding list is WF when every binding's value is WF in the cumulative scope. -/
-partial def bindingsAreWF (env : ScopeEnv) : List ANFBinding → Bool
+def bindingsAreWFAux (fuel : Nat) (env : ScopeEnv) : List ANFBinding → Bool
   | [] => true
   | b :: rest =>
-      valueIsWF env b.value && bindingsAreWF (env.addDefined b.name) rest
+      valueIsWFAux fuel env b.value && bindingsAreWFAux fuel (env.addDefined b.name) rest
 
 end
+
+/-- Public wrapper: `valueIsWF` with the default fuel cap. -/
+def valueIsWF (env : ScopeEnv) (v : ANFValue) : Bool :=
+  valueIsWFAux wfRecFuel env v
+
+/-- Public wrapper: `bindingsAreWF` with the default fuel cap. -/
+def bindingsAreWF (env : ScopeEnv) (bs : List ANFBinding) : Bool :=
+  bindingsAreWFAux wfRecFuel env bs
 
 /-! ## Method-level rules
 
@@ -177,9 +196,10 @@ the outer `if`'s name reappears as the last `else`-branch binding.)
 The two names refer to the same SSA value at evaluation, so the SSA
 uniqueness check must ignore the inner re-occurrence.
 -/
-partial def collectAllBindingNames : List ANFBinding → List String
-  | [] => []
-  | b :: rest =>
+private def collectAllBindingNamesAux : Nat → List ANFBinding → List String
+  | _, [] => []
+  | 0, _ :: _ => []
+  | f + 1, b :: rest =>
       let here :=
         match b.value with
         | .ifVal _ t e =>
@@ -192,10 +212,14 @@ partial def collectAllBindingNames : List ANFBinding → List String
             -- not be counted as a separate SSA def.
             let dropPhi (bs : List ANFBinding) : List ANFBinding :=
               bs.filter (fun bi => bi.name ≠ b.name)
-            collectAllBindingNames (dropPhi t) ++ collectAllBindingNames (dropPhi e)
-        | .loop _ body _ => collectAllBindingNames body
+            collectAllBindingNamesAux f (dropPhi t) ++ collectAllBindingNamesAux f (dropPhi e)
+        | .loop _ body _ => collectAllBindingNamesAux f body
         | _ => []
-      b.name :: (here ++ collectAllBindingNames rest)
+      b.name :: (here ++ collectAllBindingNamesAux f rest)
+
+/-- Public wrapper: collects all SSA temporary names with the default fuel cap. -/
+def collectAllBindingNames (bs : List ANFBinding) : List String :=
+  collectAllBindingNamesAux wfRecFuel bs
 
 /-- All `tN`-style names in `xs` are unique. -/
 def tempNamesUnique (xs : List String) : Bool :=

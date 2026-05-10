@@ -1,0 +1,141 @@
+name: Cross-compiler bytewise
+
+# Tier 6.1 — six-tier (plus TS reference and Lean) byte-exact cross-compiler
+# CI. Runs `runar-verification/scripts/cross-compiler-diff.sh` against the
+# full 49-fixture conformance corpus. Each fixture is compiled by every
+# available tier, and the script asserts:
+#   - each tier's hex output equals the on-disk expected-script.hex golden
+#   - every active tier's hex matches every other active tier's hex
+#     (peer-mode parity)
+#   - the Lean reference verifier (lake exe pipelineGolden) passes its own
+#     49/49 byte-exact regression gate
+#
+# Per-fixture compiler allowlists in source.json are honored; allowlisted
+# fixtures (e.g. babybear, babybear-ext4, merkle-proof, state-covenant)
+# only require the listed tiers to agree.
+#
+# This workflow takes only `pull_request` and manual-dispatch triggers and
+# does not interpolate any github.event.* inputs into shell commands. All
+# values fed into `run:` blocks come from in-repo files (the diff script
+# and its JSON report), so there is no command-injection surface.
+
+on:
+  pull_request:
+    branches: [main, 'release/v*']
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  cross-compiler-bytewise:
+    name: Cross-compiler bytewise diff (49 fixtures x 7 tiers + Lean)
+    runs-on: ubuntu-latest
+    # The full 49-fixture x 7-tier matrix runs every compiler twice per
+    # fixture (source -> hex). Even with the Java daemon disabled (the diff
+    # script invokes `java -jar` per fixture for portability) and warm
+    # caches, the typical wall-clock is ~25-40 minutes; budget 60 to absorb
+    # the heaviest crypto fixtures (post-quantum-slhdsa, sphincs-wallet).
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----- toolchains (mirrors the ts-compiler job's matrix) -----
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: compilers/go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      # ----- Lean toolchain (elan + lake) -----
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Cache elan + Lake build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            runar-verification/.lake/build
+          key: cross-compiler-bytewise-${{ runner.os }}-${{ hashFiles('runar-verification/lean-toolchain', 'runar-verification/lakefile.lean', 'runar-verification/lake-manifest.json') }}
+          restore-keys: |
+            cross-compiler-bytewise-${{ runner.os }}-
+
+      # ----- build all 7 compilers (parser + emit-hex via --source/--hex) -----
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      # tsx + the conformance/ runner deps power the TS compiler invocation
+      # (the diff script uses `node --import tsx packages/runar-cli/src/bin.ts`,
+      # matching the conformance runner). The package isn't a pnpm workspace
+      # member, so install its deps explicitly.
+      - run: cd conformance && npm ci
+
+      - name: Build Go compiler
+        run: cd compilers/go && go build -o runar-go .
+      - name: Build Rust compiler
+        run: cd compilers/rust && cargo build --release
+      - name: Build Zig compiler
+        run: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline
+      - name: Build Java compiler jar
+        run: cd compilers/java && gradle jar --no-daemon
+      - name: Build Lean verifier (lake build pipelineGolden)
+        working-directory: runar-verification
+        run: lake build && lake build pipelineGolden
+
+      # ----- the diff itself -----
+      - name: Run cross-compiler bytewise diff
+        run: bash runar-verification/scripts/cross-compiler-diff.sh
+
+      - name: Upload cross-compiler matrix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-compiler-report
+          path: runar-verification/cross-compiler-report.json
+
+      - name: Emit bytewise summary
+        if: always()
+        run: |
+          {
+            printf '## Cross-compiler bytewise diff\n\n'
+            if [ -f runar-verification/cross-compiler-report.json ]; then
+              total=$(jq -r '.summary.total_fixtures // 0' runar-verification/cross-compiler-report.json)
+              runs=$(jq -r '.summary.total_compiler_runs // 0' runar-verification/cross-compiler-report.json)
+              matches=$(jq -r '.summary.total_matches_expected // 0' runar-verification/cross-compiler-report.json)
+              peer=$(jq -r '.summary.total_peer_mismatches // 0' runar-verification/cross-compiler-report.json)
+              lean_pass=$(jq -r '.summary.lean.pass // false' runar-verification/cross-compiler-report.json)
+              lean_line=$(jq -r '.summary.lean.line // ""' runar-verification/cross-compiler-report.json)
+              printf '| Metric | Value |\n'
+              printf '|--------|-------|\n'
+              printf '| Fixtures | %s |\n' "$total"
+              printf '| Compiler runs | %s |\n' "$runs"
+              printf '| Matches-expected | %s |\n' "$matches"
+              printf '| Peer mismatches | %s |\n' "$peer"
+              printf '| Lean pipelineGolden | %s |\n' "$lean_pass"
+              if [ -n "$lean_line" ]; then
+                printf '| Lean line | `%s` |\n' "$lean_line"
+              fi
+            else
+              printf '_no report produced_\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

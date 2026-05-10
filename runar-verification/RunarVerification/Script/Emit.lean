@@ -58,9 +58,16 @@ Mirrors `encodeScriptNumber` in `06-emit.ts:189-213`.
 
 private def absNat (n : Int) : Nat := n.natAbs
 
-private partial def absToBytesLE (n : Nat) : List UInt8 :=
-  if n = 0 then []
+set_option linter.unusedVariables false in
+private def absToBytesLE (n : Nat) : List UInt8 :=
+  if h : n = 0 then []
   else (UInt8.ofNat (n &&& 0xff)) :: absToBytesLE (n >>> 8)
+termination_by n
+decreasing_by
+  -- n >>> 8 = n / 2^8 < n when n > 0
+  simp_wf
+  rw [Nat.shiftRight_eq_div_pow]
+  exact Nat.div_lt_self (Nat.pos_of_ne_zero h) (by decide)
 
 def encodeScriptNumber (n : Int) : ByteArray :=
   if n = 0 then ByteArray.empty

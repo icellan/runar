@@ -1,0 +1,76 @@
+name: Differential test
+
+# Tier 4.6 — runs each conformance fixture's expected-script.hex
+# through the Lean Stack VM and an external Bitcoin Script reference
+# (python-bitcoinlib in CI), then fails on any per-fixture
+# success-bit / stack-top-hex / error-category mismatch.
+#
+# Build constraints:
+#   - 0 sorries / 0 admits in the Lean test harness
+#   - 0 new axioms or opaques (this is a test, not a verification claim)
+#   - lake build clean including the new differential exe
+#   - bash scripts/check-tcb-drift.sh shows 0 drift
+#   - bash scripts/differential.sh exits 0 on the 49 fixtures
+#     (or with the "no external reference" skip path).
+#
+# Security note: this workflow does not consume any untrusted GitHub
+# event payloads (issue titles, PR bodies, comment text, head_ref, etc.)
+# in shell run: blocks. All inputs are derived from the checked-in
+# repository tree.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  differential:
+    name: Differential vs external Bitcoin Script reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache elan and Lake build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            runar-verification/.lake/build
+          key: differential-${{ runner.os }}-${{ hashFiles('runar-verification/lean-toolchain', 'runar-verification/lakefile.lean', 'runar-verification/lake-manifest.json') }}
+          restore-keys: |
+            differential-${{ runner.os }}-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install python-bitcoinlib
+        run: pip install python-bitcoinlib
+
+      - name: Verify TCB counts (no drift)
+        working-directory: runar-verification
+        run: bash scripts/check-tcb-drift.sh
+
+      - name: Build Lean library + differential exe
+        working-directory: runar-verification
+        run: lake build && lake build differential
+
+      - name: Run differential
+        working-directory: runar-verification
+        run: bash scripts/differential.sh --reference python --strict
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: differential-reports
+          path: |
+            runar-verification/tests/differential-results.json
+            runar-verification/tests/differential-external.json
+          if-no-files-found: ignore

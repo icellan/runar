@@ -230,8 +230,16 @@ namespace Crypto
 -- the type signature, the body is hidden from proofs (the stub is unobservable).
 opaque sha256 (_ : ByteArray) : ByteArray := ByteArray.empty
 opaque ripemd160 (_ : ByteArray) : ByteArray := ByteArray.empty
-opaque hash160 (_ : ByteArray) : ByteArray := ByteArray.empty
-opaque hash256 (_ : ByteArray) : ByteArray := ByteArray.empty
+/-- `OP_HASH160` consensus definition: RIPEMD-160 ∘ SHA-256.
+Concrete `def` (Tier 5.3, 2026-05-10): composes the two hash opaques.
+The linking lemma `hash160_eq_ripemd160_sha256` in `Crypto/Spec.lean`
+is now provable by `rfl`. -/
+def hash160 (b : ByteArray) : ByteArray := ripemd160 (sha256 b)
+/-- `OP_HASH256` consensus definition: SHA-256 ∘ SHA-256.
+Concrete `def` (Tier 5.3, 2026-05-10): composes the SHA-256 opaque
+with itself. The linking lemma `hash256_eq_double_sha256` in
+`Crypto/Spec.lean` is now provable by `rfl`. -/
+def hash256 (b : ByteArray) : ByteArray := sha256 (sha256 b)
 axiom sha256Compress  : ByteArray → ByteArray → ByteArray
 axiom sha256Finalize  : ByteArray → ByteArray → Int → ByteArray
 axiom blake3Compress  : ByteArray → ByteArray → ByteArray
@@ -283,18 +291,74 @@ axiom verifySLHDSA_SHA2_192f  : ByteArray → ByteArray → ByteArray → Bool
 axiom verifySLHDSA_SHA2_256s  : ByteArray → ByteArray → ByteArray → Bool
 axiom verifySLHDSA_SHA2_256f  : ByteArray → ByteArray → ByteArray → Bool
 
--- Bitcoin BIP-143 preimage projections (operate on opaque SigHashPreimage bytes)
-axiom extractVersion       : ByteArray → Int
-axiom extractHashPrevouts  : ByteArray → ByteArray
-axiom extractHashSequence  : ByteArray → ByteArray
-axiom extractOutpoint      : ByteArray → ByteArray
-axiom extractInputIndex    : ByteArray → Int
-axiom extractScriptCode    : ByteArray → ByteArray
-axiom extractAmount        : ByteArray → Int
-axiom extractSequence      : ByteArray → Int
-axiom extractOutputHash    : ByteArray → ByteArray
-axiom extractLocktime      : ByteArray → Int
-axiom extractSigHashType   : ByteArray → Int
+-- Bitcoin BIP-143 preimage projections (operate on opaque SigHashPreimage bytes).
+--
+-- These were `axiom`s in earlier tiers. Tier 4.3.b (2026-05-10) converts each
+-- to a concrete `def` over the BIP-143 byte layout. The layout (per
+-- `Stack/TxContext.lean#buildPreimage`) is:
+--
+--   [ 0..  3] version       (4 bytes LE Int)
+--   [ 4.. 35] hashPrevouts  (32 bytes)
+--   [36.. 67] hashSequence  (32 bytes)
+--   [68..103] outpoint      (36 bytes)
+--   [104..  ] VarInt(scriptCodeLen) and scriptCode (variable)
+--   [..]      amount        (8 bytes LE Int)
+--   [..]      sequence      (4 bytes LE Int)
+--   [..]      hashOutputs   (32 bytes)
+--   [..]      locktime      (4 bytes LE Int)
+--   [..]      sigHashType   (4 bytes LE Int)
+--
+-- The trailing five fields together occupy exactly
+-- 8 + 4 + 32 + 4 + 4 = 52 bytes, so they can be addressed by
+-- `preimage.size - N` offsets without needing to decode the scriptCode
+-- VarInt prefix.
+--
+-- `extractInputIndex` is not actually present in the BIP-143 preimage bytes
+-- (the input index is the consumer of `OP_CHECKSIG`, not in the digest).
+-- It is kept as a `def` returning 0 for backward compatibility with the
+-- builtin table in `ANF/Typed.lean#builtinSig`.
+
+/-- Read the byte at offset `i` of `preimage`, returning 0 if out of bounds.
+Used by `decodeLE32` / `decodeLE64` to avoid carrying bounds proofs through
+the let-bindings. -/
+def readByte (preimage : ByteArray) (i : Nat) : Nat :=
+  if h : i < preimage.size then (preimage.get i h).toNat else 0
+
+/-- Decode 4 bytes at offset `i` of `preimage` as a little-endian `Int`.
+Out-of-range bytes are treated as 0 (per `readByte`). -/
+def decodeLE32 (preimage : ByteArray) (i : Nat) : Int :=
+  let b0 := readByte preimage i
+  let b1 := readByte preimage (i + 1)
+  let b2 := readByte preimage (i + 2)
+  let b3 := readByte preimage (i + 3)
+  (Int.ofNat (b0 + (b1 <<< 8) + (b2 <<< 16) + (b3 <<< 24)))
+
+/-- Decode 8 bytes at offset `i` of `preimage` as a little-endian `Int`.
+Out-of-range bytes are treated as 0 (per `readByte`). -/
+def decodeLE64 (preimage : ByteArray) (i : Nat) : Int :=
+  let b0 := readByte preimage i
+  let b1 := readByte preimage (i + 1)
+  let b2 := readByte preimage (i + 2)
+  let b3 := readByte preimage (i + 3)
+  let b4 := readByte preimage (i + 4)
+  let b5 := readByte preimage (i + 5)
+  let b6 := readByte preimage (i + 6)
+  let b7 := readByte preimage (i + 7)
+  (Int.ofNat (b0 + (b1 <<< 8) + (b2 <<< 16) + (b3 <<< 24)
+            + (b4 <<< 32) + (b5 <<< 40) + (b6 <<< 48) + (b7 <<< 56)))
+
+def extractVersion      (preimage : ByteArray) : Int       := decodeLE32 preimage 0
+def extractHashPrevouts (preimage : ByteArray) : ByteArray := preimage.extract 4 36
+def extractHashSequence (preimage : ByteArray) : ByteArray := preimage.extract 36 68
+def extractOutpoint     (preimage : ByteArray) : ByteArray := preimage.extract 68 104
+def extractInputIndex   (_preimage : ByteArray) : Int      := 0
+def extractScriptCode   (preimage : ByteArray) : ByteArray :=
+  preimage.extract 104 (preimage.size - 52)
+def extractAmount       (preimage : ByteArray) : Int       := decodeLE64 preimage (preimage.size - 52)
+def extractSequence     (preimage : ByteArray) : Int       := decodeLE32 preimage (preimage.size - 44)
+def extractOutputHash   (preimage : ByteArray) : ByteArray := preimage.extract (preimage.size - 40) (preimage.size - 8)
+def extractLocktime     (preimage : ByteArray) : Int       := decodeLE32 preimage (preimage.size - 8)
+def extractSigHashType  (preimage : ByteArray) : Int       := decodeLE32 preimage (preimage.size - 4)
 
 -- Signature & preimage verifiers (the two are mocked-true in the TS interpreters,
 -- but for the Lean model we leave them axiomatized so a future
@@ -413,7 +477,7 @@ Concrete cases handled (all non-cryptographic constructors):
 Bitwise `&|^~` on `Int` and every cryptographic primitive return
 `.error .unsupported` and are listed as axioms in `Eval.Crypto`.
 -/
-partial def evalValue (s : State) : ANFValue → EvalResult (Value × State)
+def evalValue (s : State) : ANFValue → EvalResult (Value × State)
   | .loadParam name =>
       match s.lookupParam name with
       | some v => .ok (v, s)
@@ -473,7 +537,11 @@ partial def evalValue (s : State) : ANFValue → EvalResult (Value × State)
       -- Unroll exactly `count` iterations, registering iterVar as a
       -- synthetic param for the body's scope. Each iteration sees the
       -- accumulated bindings (loop-carry shadowing falls out for free).
-      let s' ← runLoop count body iterVar 0 s
+      -- Termination: `count` is a `Nat` — `runLoop` recurses on
+      -- `count - 1`, so the outer fuel-driven step in the unified
+      -- mutual measure decreases lexicographically before re-entering
+      -- `evalBindings`/`evalValue` on `body`.
+      let s' ← runLoop count body iterVar s
       .ok (.vBool true, s')
   | .assert ref => do
       let v ← lookupRef s ref
@@ -532,7 +600,7 @@ partial def evalValue (s : State) : ANFValue → EvalResult (Value × State)
 Evaluate a sequence of bindings, threading state through. Each binding
 adds its computed value to `state.bindings` so subsequent refs resolve.
 -/
-partial def evalBindings (s : State) : List ANFBinding → EvalResult State
+def evalBindings (s : State) : List ANFBinding → EvalResult State
   | [] => .ok s
   | .mk name v _ :: rest => do
       let (val, s') ← evalValue s v
@@ -543,20 +611,25 @@ Run `count` iterations of a loop body, registering `iterVar` as a
 synthetic parameter equal to the current iteration index (0-based).
 After each iteration the synthetic param is stripped so subsequent
 iterations bind a fresh value.
+
+`count` is the remaining iteration budget — recursion decreases it by
+one each step, giving a structural termination measure on `Nat`. The
+outer `evalValue.loop` arm passes the original count from the ANFValue
+so the iteration count exactly matches the source-level `loop` count.
 -/
-partial def runLoop (count : Nat) (body : List ANFBinding)
-    (iterVar : String) (i : Nat) (s : State) : EvalResult State :=
-  if i ≥ count then
-    .ok s
-  else
-    let withIter : State :=
-      { s with params := (iterVar, .vBigint i) :: s.params }
-    match evalBindings withIter body with
-    | .error e => .error e
-    | .ok s' =>
-        let stripped : State :=
-          { s' with params := s'.params.filter (·.fst != iterVar) }
-        runLoop count body iterVar (i + 1) stripped
+def runLoop (count : Nat) (body : List ANFBinding)
+    (iterVar : String) (s : State) : EvalResult State :=
+  match count with
+  | 0 => .ok s
+  | n + 1 =>
+      let withIter : State :=
+        { s with params := (iterVar, .vBigint n) :: s.params }
+      match evalBindings withIter body with
+      | .error e => .error e
+      | .ok s' =>
+          let stripped : State :=
+            { s' with params := s'.params.filter (·.fst != iterVar) }
+          runLoop n body iterVar stripped
 
 end
 

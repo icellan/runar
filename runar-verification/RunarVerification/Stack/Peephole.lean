@@ -957,16 +957,14 @@ theorem subZero_atom_sound
 /-! ### `[OP_SHA256, OP_SHA256] → [OP_HASH256]` rule + atom-sound (Phase 3h)
 
 Hash fusion: applying `OP_SHA256` twice equals one `OP_HASH256` call
-*by definition of the `Crypto.hash256` axiom* — i.e., we add a
-linking axiom `hash256_eq_double_sha256` that captures Bitcoin's
-well-known equality. This is the first peephole rule whose soundness
-rests on a cryptographic identity rather than purely on opcode
-semantics; we surface the identity as an explicit axiom so the trust
-boundary is visible.
+*by definition of `Crypto.hash256`*. As of Tier 5.3 (2026-05-10)
+`Crypto.hash256` is a concrete `def` over the `Crypto.sha256` opaque,
+so the linking identity is now provable by `rfl` and contributes no
+axiom to the TCB.
 -/
 
-axiom hash256_eq_double_sha256 (b : ByteArray) :
-    hash256 b = sha256 (sha256 b)
+theorem hash256_eq_double_sha256 (b : ByteArray) :
+    hash256 b = sha256 (sha256 b) := rfl
 
 def applyDoubleSha256 : List StackOp → List StackOp
   | [] => []
@@ -9279,13 +9277,14 @@ length-stability == fixpoint). The `fuel` parameter is a bounded loop;
 in practice 32 passes are more than enough since the longest contiguous
 `[push, OP_ADD]` chain in EC scalar-mul codegen is 3 (`k + n + n + n`),
 which folds in 2 passes. We use 64 fuel for comfortable margin. -/
-private partial def chainFoldFixpointFlat (fuel : Nat) (ops : List StackOp) :
+private def chainFoldFixpointFlat (fuel : Nat) (ops : List StackOp) :
     List StackOp :=
   match fuel with
   | 0 => ops
   | k + 1 =>
     let next := applyPushAddPushSub (applyPushAddPushAdd ops)
     if next.length = ops.length then ops else chainFoldFixpointFlat k next
+termination_by fuel
 
 mutual
 
@@ -9293,7 +9292,7 @@ mutual
 descending recursively into `.ifOp` branches. Recursion depth = `.ifOp`
 nesting level (small in practice). The outer list traversal is delegated
 to `chainFoldListTR.go` (a tail-recursive accumulator-based walker). -/
-private partial def chainFoldOp : StackOp → StackOp
+private def chainFoldOp : StackOp → StackOp
   | .ifOp thn els =>
       let thn' := chainFoldFixpointFlat 64 (chainFoldListTRgo thn [])
       let els' : Option (List StackOp) :=
@@ -9307,7 +9306,7 @@ private partial def chainFoldOp : StackOp → StackOp
 `chainFoldOp op` to `acc`. Returns the accumulator in REVERSE order — the
 caller passes the result to `chainFoldFixpointFlat` which is
 order-independent up to the final `.reverse`, so we reverse here once. -/
-private partial def chainFoldListTRgo : List StackOp → List StackOp →
+private def chainFoldListTRgo : List StackOp → List StackOp →
     List StackOp
   | [],         acc => acc.reverse
   | op :: rest, acc => chainFoldListTRgo rest (chainFoldOp op :: acc)
@@ -9398,7 +9397,7 @@ idempotent (its outputs `[]`, `[.swap]`, `[.rot]`, `[.dup]`, `[.over]`
 are not themselves roll/pick ops, so re-applying changes nothing), a
 single pass suffices. The `fuel` argument is unused and retained for
 API stability. -/
-private partial def rollPickFixpointFlat (_fuel : Nat) (ops : List StackOp) :
+private def rollPickFixpointFlat (_fuel : Nat) (ops : List StackOp) :
     List StackOp :=
   applyRollPickFold ops
 
@@ -9407,7 +9406,7 @@ mutual
 /-- One step of the roll/pick post-pass: rewrite a single op, descending
 recursively into `.ifOp` branches. Recursion depth = `.ifOp` nesting
 (small). The outer list traversal is delegated to `rollPickListTRgo`. -/
-private partial def rollPickOp : StackOp → StackOp
+private def rollPickOp : StackOp → StackOp
   | .ifOp thn els =>
       let thn' := rollPickFixpointFlat 64 (rollPickListTRgo thn [])
       let els' : Option (List StackOp) :=
@@ -9421,7 +9420,7 @@ private partial def rollPickOp : StackOp → StackOp
 to `acc`. Returns the accumulator in REVERSE order — caller hands the
 result to `rollPickFixpointFlat` (order-independent up to the final
 `.reverse` already done here). -/
-private partial def rollPickListTRgo : List StackOp → List StackOp →
+private def rollPickListTRgo : List StackOp → List StackOp →
     List StackOp
   | [],         acc => acc.reverse
   | op :: rest, acc => rollPickListTRgo rest (rollPickOp op :: acc)

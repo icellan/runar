@@ -1,0 +1,298 @@
+{
+  "fixtures": [
+    {
+      "name": "add-data-output",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "add-raw-output",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "arithmetic",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_2DUP; need 2 items, but only 0 on stack"
+    },
+    {
+      "name": "auction",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "babybear",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "babybear-ext4",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "basic-p2pkh",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "bitwise-ops",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "blake3",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 23320 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "boolean-logic",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_ROT; need 3 items, but only 0 on stack"
+    },
+    {
+      "name": "bounded-loop",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: Argument for OP_PICK out of bounds"
+    },
+    {
+      "name": "conditional-data-output-stateful",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "convergence-proof",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 450601 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "covenant-vault",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_SWAP; need 2 items, but only 0 on stack"
+    },
+    {
+      "name": "cross-covenant",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "ec-demo",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 1328100 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "ec-primitives",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 1328100 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "ec-unit",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 452569 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "escrow",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "function-patterns",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "go-dsl-bytestring-literal",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_ADD; need 2 items, but only 0 on stack"
+    },
+    {
+      "name": "if-else",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_SWAP; need 2 items, but only 1 on stack"
+    },
+    {
+      "name": "if-without-else",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_ROT; need 3 items, but only 1 on stack"
+    },
+    {
+      "name": "if-without-else-multi-temp",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "math-demo",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "merkle-proof",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "multi-method",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "oracle-price",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_PICK; need 2 items, but only 1 on stack"
+    },
+    {
+      "name": "p256-primitives",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 924855 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "p256-wallet",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 955310 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "p384-primitives",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 1879251 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "p384-wallet",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 1958395 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "post-quantum-slhdsa",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 188590 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "post-quantum-wallet",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 19594 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "post-quantum-wots",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 19582 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "private-helper-outputs",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "property-initializers",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "schnorr-zkp",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 872248 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "sha256-compress",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 23145 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "sha256-finalize",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 69507 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "shift-ops",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: opcode OP_LSHIFT is disabled"
+    },
+    {
+      "name": "sphincs-wallet",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:EvalScriptError:EvalScript: script too large; got 188602 bytes; maximum 10000 bytes"
+    },
+    {
+      "name": "state-covenant",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "state-ripemd160",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "stateful",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "stateful-bytestring",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "stateful-counter",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "token-ft",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    },
+    {
+      "name": "token-nft",
+      "success": false,
+      "finalStackTop": null,
+      "error": "unsupported:MissingOpArgumentsError:EvalScript: missing arguments for OP_DUP; need 1 items, but only 0 on stack"
+    }
+  ]
+}

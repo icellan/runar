@@ -166,9 +166,19 @@ private def parseTempRefList? (j : Json) : Except String (List String) := do
     | .str s => .ok s
     | _ => .error s!"expected string in ref list, got {e.compress}"
 
+/-- Recursion-depth fuel for the JSON → ANF parser. ANF programs nest
+at most a handful of levels deep (the deepest fixture in the conformance
+corpus has < 50 nested binding/value frames), so a 10k cap is effectively
+infinite for any realistic input while still letting Lean see the
+recursion as well-founded. -/
+private def jsonRecFuel : Nat := 10000
+
 mutual
 
-private partial def fromJsonANFValue? (j : Json) : Except String ANFValue := do
+private def fromJsonANFValueAux? (fuel : Nat) (j : Json) : Except String ANFValue := do
+  match fuel with
+  | 0 => .error "json recursion too deep"
+  | f + 1 =>
   let kind ← j.getObjValAs? String "kind"
   match kind with
   | "load_param" =>
@@ -211,14 +221,14 @@ private partial def fromJsonANFValue? (j : Json) : Except String ANFValue := do
       let elseJ ← j.getObjVal? "else"
       let thenArr ← thenJ.getArr?
       let elseArr ← elseJ.getArr?
-      let thenBranch ← thenArr.toList.mapM fromJsonANFBinding?
-      let elseBranch ← elseArr.toList.mapM fromJsonANFBinding?
+      let thenBranch ← thenArr.toList.mapM (fromJsonANFBindingAux? f)
+      let elseBranch ← elseArr.toList.mapM (fromJsonANFBindingAux? f)
       return .ifVal cond thenBranch elseBranch
   | "loop" =>
       let count ← j.getObjValAs? Nat "count"
       let bodyJ ← j.getObjVal? "body"
       let bodyArr ← bodyJ.getArr?
-      let body ← bodyArr.toList.mapM fromJsonANFBinding?
+      let body ← bodyArr.toList.mapM (fromJsonANFBindingAux? f)
       let iterVar ← j.getObjValAs? String "iterVar"
       return .loop count body iterVar
   | "assert" =>
@@ -256,10 +266,10 @@ private partial def fromJsonANFValue? (j : Json) : Except String ANFValue := do
       return .arrayLiteral elements
   | other => .error s!"unknown ANFValue kind: {other}"
 
-private partial def fromJsonANFBinding? (j : Json) : Except String ANFBinding := do
+private def fromJsonANFBindingAux? (fuel : Nat) (j : Json) : Except String ANFBinding := do
   let name ← j.getObjValAs? String "name"
   let valueJ ← j.getObjVal? "value"
-  let value ← fromJsonANFValue? valueJ
+  let value ← fromJsonANFValueAux? fuel valueJ
   let sourceLoc ← match j.getObjVal? "sourceLoc" with
     | .ok sl =>
         match FromJson.fromJson? (α := SourceLoc) sl with
@@ -269,6 +279,14 @@ private partial def fromJsonANFBinding? (j : Json) : Except String ANFBinding :=
   return .mk name value sourceLoc
 
 end
+
+/-- Public wrapper: parse JSON to `ANFValue` with the default fuel cap. -/
+def fromJsonANFValue? (j : Json) : Except String ANFValue :=
+  fromJsonANFValueAux? jsonRecFuel j
+
+/-- Public wrapper: parse JSON to `ANFBinding` with the default fuel cap. -/
+def fromJsonANFBinding? (j : Json) : Except String ANFBinding :=
+  fromJsonANFBindingAux? jsonRecFuel j
 
 instance : FromJson ANFValue where
   fromJson? := fromJsonANFValue?
@@ -281,7 +299,7 @@ private def refList (xs : List String) : Json :=
 
 mutual
 
-private partial def toJsonANFValue : ANFValue → Json
+private def toJsonANFValue : ANFValue → Json
   | .loadParam name => mkObj [("kind", .str "load_param"), ("name", .str name)]
   | .loadProp name  => mkObj [("kind", .str "load_prop"),  ("name", .str name)]
   | .loadConst cv   => mkObj [("kind", .str "load_const"), ("value", ToJson.toJson cv)]
@@ -328,7 +346,7 @@ private partial def toJsonANFValue : ANFValue → Json
   | .arrayLiteral elems =>
       mkObj [("kind", .str "array_literal"), ("elements", refList elems)]
 
-private partial def toJsonANFBinding : ANFBinding → Json
+private def toJsonANFBinding : ANFBinding → Json
   | .mk name value sourceLoc =>
       let base : List (String × Json) := [("name", .str name), ("value", toJsonANFValue value)]
       mkObj (match sourceLoc with
