@@ -20,6 +20,7 @@ import type {
   StackOp,
 } from '../ir/index.js';
 import { emitVerifySLHDSA } from './slh-dsa-codegen.js';
+import { emitVerifyWOTS } from './wots-codegen.js';
 import {
   emitEcAdd, emitEcMul, emitEcMulGen, emitEcNegate,
   emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
@@ -3985,94 +3986,9 @@ class LoweringContext {
     this.trackDepth();
   }
 
-  // -------------------------------------------------------------------------
-  // WOTS+ verification (post-quantum hash-based signature)
-  // w=16, n=32 (SHA-256), len1=64, len2=3, len=67
-  // Input:  <msg> <sig> <pubkey>
-  // Output: <boolean>
-  //
-  // Canonical stack between chains: sig_rem(0) csum(1) endpt_acc(2)
-  // Alt stack: pubkey only (plus balanced temp saves inside chain processing)
-  // -------------------------------------------------------------------------
-
-  /**
-   * Emit one WOTS+ chain with RFC 8391 tweakable hashing.
-   * Input:  pubSeed(bottom) sig(1) csum(2) endpt(3) digit(top)
-   * Output: pubSeed(bottom) sigRest(1) newCsum(2) newEndpt(top)
-   * Alt stack pushes/pops are balanced (4 push, 4 pop).
-   *
-   * F(pubSeed, chainIdx, stepIdx, X) = SHA-256(pubSeed || byte(chainIdx) || byte(stepIdx) || X)
-   */
-  private emitWOTSOneChain(chainIndex: number): void {
-    // Entry stack: pubSeed(bottom) sig csum endpt digit(top)
-    // Save steps_copy = 15 - digit to alt (for checksum accumulation later)
-    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-    this.emitOp({ op: 'push', value: 15n });
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#1: steps_copy
-    // main: pubSeed sig csum endpt digit
-
-    // Save endpt, csum to alt. Leave pubSeed+sig+digit on main.
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#2: endpt
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#3: csum
-    // main: pubSeed sig digit
-
-    // Split 32B sig element
-    this.emitOp({ op: 'swap' });                            // pubSeed digit sig
-    this.emitOp({ op: 'push', value: 32n });
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });       // pubSeed digit sigElem sigRest
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#4: sigRest
-    this.emitOp({ op: 'swap' });                            // pubSeed sigElem digit
-
-    // Hash loop: skip first `digit` iterations, then apply F for the rest.
-    // When digit > 0: decrement (skip). When digit == 0: hash at step j.
-    // Stack at loop entry: pubSeed(depth2) sigElem(depth1) digit(depth0=top)
-    for (let j = 0; j < 15; j++) {
-      const adrsBytes = new Uint8Array([chainIndex, j]);
-      this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-      this.emitOp({ op: 'opcode', code: 'OP_0NOTEQUAL' });
-      this.emitOp({
-        op: 'if',
-        then: [
-          { op: 'opcode', code: 'OP_1SUB' },                // skip: digit--
-        ],
-        else: [
-          { op: 'swap' },                                    // pubSeed digit X
-          { op: 'push', value: 2n },
-          { op: 'opcode', code: 'OP_PICK' },                // copy pubSeed from depth 2
-          { op: 'push', value: adrsBytes },                  // push ADRS [chainIndex, j]
-          { op: 'opcode', code: 'OP_CAT' },                 // pubSeed || adrs
-          { op: 'swap' },                                    // bring X to top
-          { op: 'opcode', code: 'OP_CAT' },                 // pubSeed || adrs || X
-          { op: 'opcode', code: 'OP_SHA256' },              // F result
-          { op: 'swap' },                                    // pubSeed new_X digit(=0)
-        ],
-      });
-    }
-    this.emitOp({ op: 'drop' }); // drop digit (now 0)
-    // main: pubSeed endpoint
-
-    // Restore from alt (LIFO): sigRest, csum, endpt_acc, steps_copy
-    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#4: sigRest
-    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#3: csum
-    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#2: endpt_acc
-    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#1: steps_copy
-    // main b→t: pubSeed endpoint sigRest csum endpt_acc steps_copy
-
-    // csum += steps_copy
-    this.emitOp({ op: 'opcode', code: 'OP_ROT' });
-    this.emitOp({ op: 'opcode', code: 'OP_ADD' });
-
-    // Concat endpoint to endpt_acc
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'push', value: 3n });
-    this.emitOp({ op: 'opcode', code: 'OP_ROLL' });
-    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
-    // pubSeed sigRest newCsum newEndptAcc
-  }
+  // =========================================================================
+  // WOTS+ verification — delegates to wots-codegen.ts
+  // =========================================================================
 
   private lowerVerifyWOTS(
     bindingName: string,
@@ -4083,147 +3999,12 @@ class LoweringContext {
     if (args.length < 3) {
       throw new Error('verifyWOTS requires 3 arguments: msg, sig, pubkey');
     }
-
-    // Bring args to top: msg, sig, pubkey
     for (const arg of args) {
       this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
     }
     for (let i = 0; i < 3; i++) this.stackMap.pop();
-    // main: msg(0) sig(1) pubkey(2)  (pubkey is 64 bytes: pubSeed||pkRoot)
 
-    // Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
-    this.emitOp({ op: 'push', value: 32n });
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });         // msg sig pubSeed pkRoot
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });   // pkRoot → alt
-
-    // Rearrange: put pubSeed at bottom, hash msg
-    // main: msg sig pubSeed
-    this.emitOp({ op: 'opcode', code: 'OP_ROT' });           // sig pubSeed msg
-    this.emitOp({ op: 'opcode', code: 'OP_ROT' });           // pubSeed msg sig
-    this.emitOp({ op: 'swap' });                               // pubSeed sig msg
-    this.emitOp({ op: 'opcode', code: 'OP_SHA256' });        // pubSeed sig msgHash
-
-    // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
-    this.emitOp({ op: 'swap' });                // pubSeed msgHash sig
-    this.emitOp({ op: 'push', value: 0n });     // pubSeed msgHash sig 0
-    this.emitOp({ op: 'opcode', code: 'OP_0' }); // pubSeed msgHash sig 0 empty
-    this.emitOp({ op: 'push', value: 3n });
-    this.emitOp({ op: 'opcode', code: 'OP_ROLL' }); // pubSeed sig 0 empty msgHash
-
-    // Process 32 bytes → 64 message chains
-    // Chain indices: byteIdx*2 for high nibble, byteIdx*2+1 for low nibble
-    for (let byteIdx = 0; byteIdx < 32; byteIdx++) {
-      // main: pubSeed sig csum endptAcc hashRem
-      if (byteIdx < 31) {
-        this.emitOp({ op: 'push', value: 1n });
-        this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-        this.emitOp({ op: 'swap' });
-      }
-      // Convert 1-byte string to unsigned integer.
-      this.emitOp({ op: 'push', value: 0n });
-      this.emitOp({ op: 'push', value: 1n });
-      this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
-      this.emitOp({ op: 'opcode', code: 'OP_CAT' });
-      this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
-      this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-      this.emitOp({ op: 'push', value: 16n });
-      this.emitOp({ op: 'opcode', code: 'OP_DIV' });  // high
-      this.emitOp({ op: 'swap' });
-      this.emitOp({ op: 'push', value: 16n });
-      this.emitOp({ op: 'opcode', code: 'OP_MOD' });  // low
-
-      // Save low (and hashRest if present) to alt
-      if (byteIdx < 31) {
-        this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // low → alt
-        this.emitOp({ op: 'swap' });
-        this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // hashRest → alt
-      } else {
-        this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // low → alt
-      }
-      // main: pubSeed sig csum endptAcc high
-
-      this.emitWOTSOneChain(byteIdx * 2); // chain index for high nibble
-
-      // Retrieve low from alt (and hashRest)
-      if (byteIdx < 31) {
-        this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // hashRest
-        this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // low
-        this.emitOp({ op: 'swap' });
-        this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // hashRest → alt
-      } else {
-        this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // low
-      }
-      // main: pubSeed sigRest csum endptAcc low
-
-      this.emitWOTSOneChain(byteIdx * 2 + 1); // chain index for low nibble
-
-      if (byteIdx < 31) {
-        this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // hashRest
-      }
-    }
-
-    // main: pubSeed sigRest(96B) totalCsum endptAcc  |  alt: pkRoot
-
-    // Compute 3 checksum digits
-    this.emitOp({ op: 'swap' }); // pubSeed sigRest endptAcc totalCsum
-
-    // d66 = csum % 16
-    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-    this.emitOp({ op: 'push', value: 16n });
-    this.emitOp({ op: 'opcode', code: 'OP_MOD' });
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
-
-    // d65 = (csum/16) % 16
-    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-    this.emitOp({ op: 'push', value: 16n });
-    this.emitOp({ op: 'opcode', code: 'OP_DIV' });
-    this.emitOp({ op: 'push', value: 16n });
-    this.emitOp({ op: 'opcode', code: 'OP_MOD' });
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
-
-    // d64 = (csum/256) % 16
-    this.emitOp({ op: 'push', value: 256n });
-    this.emitOp({ op: 'opcode', code: 'OP_DIV' });
-    this.emitOp({ op: 'push', value: 16n });
-    this.emitOp({ op: 'opcode', code: 'OP_MOD' });
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
-    // main: pubSeed sigRest endptAcc  |  alt: pkRoot, d66, d65, d64
-
-    // Process 3 checksum chains (indices 64, 65, 66)
-    for (let ci = 0; ci < 3; ci++) {
-      // main: pubSeed sigRest endptAcc
-      // Set up: pubSeed sigRest dummyCsum=0 endptAcc digit
-      this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // endptAcc → alt (temp)
-      this.emitOp({ op: 'push', value: 0n });                // pubSeed sigRest 0
-      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pubSeed sigRest 0 endptAcc
-      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pubSeed sigRest 0 endptAcc digit
-
-      this.emitWOTSOneChain(64 + ci);
-      // main: pubSeed sigRest dummyCsum newEndptAcc
-
-      // Drop dummy csum
-      this.emitOp({ op: 'swap' }); // pubSeed sigRest newEndptAcc dummyCsum
-      this.emitOp({ op: 'drop' }); // pubSeed sigRest newEndptAcc
-    }
-
-    // main: pubSeed sigRest(empty) endptAcc  |  alt: pkRoot
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'drop' }); // drop empty sigRest
-    // main: pubSeed endptAcc
-
-    // Hash concatenated endpoints → computed pkRoot
-    this.emitOp({ op: 'opcode', code: 'OP_SHA256' });
-    // main: pubSeed computedPkRoot
-
-    // Compare to pkRoot from alt
-    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pkRoot
-    this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
-    // main: pubSeed bool
-
-    // Clean up pubSeed
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'drop' }); // drop pubSeed
-    // main: bool
+    emitVerifyWOTS((op) => this.emitOp(op));
 
     this.stackMap.push(bindingName);
     this.trackDepth();
