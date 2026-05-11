@@ -2111,14 +2111,14 @@ module RunarCompiler::Codegen
     end
 
     def _lower_verify_wots(binding_name, args, binding_index, last_uses)
-      require_relative "slh_dsa"
+      require_relative "wots"
       args.each do |arg|
         is_last = _is_last_use(arg, binding_index, last_uses)
         bring_to_top(arg, is_last)
       end
       args.length.times { @sm.pop }
       emit_fn = ->(op) { emit_op(op) }
-      SLHDSA.emit_verify_wots(emit_fn)
+      RunarCompiler::Codegen::WOTS.emit_verify_wots(emit_fn)
       @sm.push(binding_name)
       _track_depth
     end

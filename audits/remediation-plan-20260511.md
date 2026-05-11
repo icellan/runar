@@ -26,7 +26,7 @@ Format: `ID | source | language(s) | files touched (anchor) | severity | dispatc
 | ID | Source row | Lang | Files (anchor) | Severity | Order | Status |
 |---|---|---|---|---|---|---|
 | GAP-001 | G1 / F-3 (BUG-003) | TS | `packages/runar-compiler/src/passes/wots-codegen.ts` (new) + `05-stack-lower.ts` (extract) | major | 1 | resolved 2026-05-11 |
-| GAP-002 | G1 | Ruby | `compilers/ruby/lib/runar_compiler/codegen/wots.rb` (new) + `slh_dsa.rb` (extract) | major | 2 | pending |
+| GAP-002 | G1 | Ruby | `compilers/ruby/lib/runar_compiler/codegen/wots.rb` (new) + `slh_dsa.rb` (extract) | major | 2 | resolved 2026-05-11 |
 | GAP-003 | G2 / F-1 (BUG-001 TS-half) | TS | `packages/runar-compiler/src/passes/rabin-codegen.ts` (new) + `05-stack-lower.ts` dispatch + conformance fixture | major | 3 | pending |
 | GAP-004 | G2 / F-1 (BUG-001 Py-half) | Python | `compilers/python/runar_compiler/codegen/rabin.py` (new) + stack.py dispatch | major | 4 | pending |
 | GAP-005 | G3 / F-5 (BUG-005) | Zig | `compilers/zig/src/passes/anf_lower.zig` (initializer expression lowering) | major | 5 | pending |
