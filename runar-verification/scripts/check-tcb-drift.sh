@@ -20,10 +20,12 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=81        # Breakdown (2026-05-10):
-                        #   44 in RunarVerification/ANF/Eval.lean (55
-                        #     baseline crypto axioms minus 11 BIP-143
-                        #     extractors converted to `def`s in Tier 4.3.b).
+TARGET_AXIOMS=82        # Breakdown (2026-05-11):
+                        #   45 in RunarVerification/ANF/Eval.lean (44 from
+                        #     the previous target plus the explicit
+                        #     `hashBackend` parameter for SHA-256 /
+                        #     RIPEMD-160; codegen uses a fail-fast
+                        #     `implemented_by` backend).
                         #   26 in RunarVerification/Crypto/Spec.lean
                         #     (Tier 5.1 spec companions): 10 EC group /
                         #     projection axioms, 5 auxiliary primitive
@@ -43,11 +45,10 @@ TARGET_AXIOMS=81        # Breakdown (2026-05-10):
                         # `Crypto/Spec.lean` both converted to `rfl`
                         # theorems once `Crypto.hash160`/`hash256` became
                         # `def`s).
-TARGET_OPAQUES=4        # 4 executable stub bodies (`sha256`,
-                        # `ripemd160` in `ANF/Eval.lean` defaulting to
-                        # `ByteArray.empty`; `checkSig` in `ANF/Eval.lean`
-                        # and `checkMultiSigStub` in `Stack/Eval.lean`
-                        # defaulting to `false`). Tier 2.9 (2026-05-10)
+TARGET_OPAQUES=2        # 2 executable stub bodies (`checkSig` in
+                        # `ANF/Eval.lean` and `checkMultiSigStub` in
+                        # `Stack/Eval.lean` defaulting to `false`). Tier
+                        # 2.9 (2026-05-10)
                         # converted `builtinSig` from `opaque` to a
                         # concrete `def` with 121 Rúnar builtin entries
                         # (matches TS reference table in
@@ -59,10 +60,12 @@ TARGET_OPAQUES=4        # 4 executable stub bodies (`sha256`,
                         # `opaque := ByteArray.empty` to concrete `def`s
                         # (`hash160 b := ripemd160 (sha256 b)`,
                         # `hash256 b := sha256 (sha256 b)`).
-TARGET_OPAQUE_STUBS=4   # all 4 remaining opaques carry stub bodies
-                        # (`sha256`, `ripemd160` defaulting to
-                        # `ByteArray.empty`; `checkSig`,
-                        # `checkMultiSig` defaulting to `false`).
+                        # Tier 5.4 (2026-05-11) replaced the `sha256`
+                        # and `ripemd160` fake executable defaults with
+                        # the explicit `hashBackend` assumption.
+TARGET_OPAQUE_STUBS=2   # both remaining opaques carry stub bodies
+                        # (`checkSig`, `checkMultiSig` defaulting to
+                        # `false`).
 TARGET_PARTIALS=0       # 0 partials remaining: every executable in
                         # `RunarVerification/` is now a total `def`.
                         # Tier 2 item 2.6 closed the remaining 6

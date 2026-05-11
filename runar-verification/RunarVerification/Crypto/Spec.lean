@@ -2,17 +2,17 @@ import RunarVerification.ANF.Eval
 import RunarVerification.Stack.Peephole
 
 /-!
-# Crypto axiom specifications — paired `_correct` companions
+# Crypto assumption specifications — paired `_correct` companions
 
-This module pairs the bare crypto axioms in `RunarVerification.ANF.Eval`
+This module pairs the bare crypto assumptions in `RunarVerification.ANF.Eval`
 with **specification companions** that ground each primitive in the
 cryptographic semantics it claims to implement.
 
 ## Why this exists (Tier 5.1 of the remediation plan)
 
-The 55 crypto axioms in `ANF/Eval.lean:235-313` are bare function
-signatures with no soundness lemmas attached. A hypothetical attacker
-who controls the meaning of these axioms could specialize, for
+The primitive symbols in `ANF/Eval.lean` are bare function signatures
+with no soundness lemmas attached. A hypothetical attacker who controls
+the meaning of these assumptions could specialize, for
 example,
 
 ```text
@@ -67,7 +67,7 @@ project policy forbids new opaques carrying stub bodies).
 
 This module **adds axioms** to the TCB (it does not discharge any).
 The trust commitment grows but becomes **specific**: a future
-implementation of the bare crypto axioms (e.g. via Mathlib's
+implementation of the bare crypto assumptions (e.g. via Mathlib's
 secp256k1 group, FIPS 205 SLH-DSA, etc.) must additionally satisfy
 the companion specifications stated here.
 

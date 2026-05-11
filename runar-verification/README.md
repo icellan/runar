@@ -18,8 +18,8 @@ pipeline. The package is useful in two roles:
 | Default byte-exact gate | 34/49 live fixtures |
 | Crypto-heavy fixtures | 15/49 explicit pending-assumption bucket |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
-| Project axioms | 81 |
-| Opaque executable defaults | 4 |
+| Project axioms | 82 |
+| Opaque executable defaults | 2 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
 
@@ -61,7 +61,10 @@ bytes. The current proof surface is deliberately split:
   peephole rules, and the `SimpleANF` proof substrate;
 * skeleton theorem names in `Pipeline.lean` for lower/peephole/emit
   composition points whose hypotheses still carry the load-bearing
-  obligations; and
+  obligations;
+* backend-parametric SHA-256 / RIPEMD-160 semantics, with fail-fast Lean
+  codegen and Runar runtime implementations checked against external
+  vectors; and
 * explicit assumptions listed in `TRUST_MANIFEST.md`.
 
 The proof-facing compiler entrypoint is `Pipeline.compileSafe`, which

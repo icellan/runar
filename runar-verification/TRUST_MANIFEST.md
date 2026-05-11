@@ -9,16 +9,16 @@ counts:
 
 | Item | Count | Meaning |
 |---|---:|---|
-| Project axioms | 81 | Named assumptions in Lean code |
-| Opaque executable defaults | 4 | Executable bodies hidden from proofs |
-| Opaque defaults with bodies | 4 | Same 4 values, all intentional |
+| Project axioms | 82 | Named assumptions in Lean code |
+| Opaque executable defaults | 2 | Executable bodies hidden from proofs |
+| Opaque defaults with bodies | 2 | Same 2 values, all intentional |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
 
 ## Axiom Inventory
 
 | File | Count | Role |
 |---|---:|---|
-| `RunarVerification/ANF/Eval.lean` | 44 | Crypto and builtin primitive symbols |
+| `RunarVerification/ANF/Eval.lean` | 45 | Crypto and builtin primitive symbols, including the external hash backend |
 | `RunarVerification/Crypto/Spec.lean` | 26 | EC laws, auxiliary key functions, EUF-CMA-style companions |
 | `RunarVerification/Stack/TxContext.lean` | 11 | BIP-143 `buildPreimage` extractor companions |
 
@@ -26,12 +26,26 @@ These axioms are permitted by the current policy, but every theorem or
 status claim that depends on them must say so. They are not hidden by
 the top-level theorem names.
 
+## External Hash Backend
+
+`Crypto.HashBackend` supplies SHA-256 and RIPEMD-160 to the Lean model.
+Lean does not prove or implement those algorithms; proofs quantify over
+the backend. `Crypto.hash160` and `Crypto.hash256` remain concrete
+definitions over that backend, so their linking lemmas are `rfl`.
+Lean code generation uses a fail-fast backend via `implemented_by`; if a
+Lean executable reaches these hashes without an external backend model,
+it aborts instead of producing a placeholder digest.
+
+Runtime confidence for the Runar implementations is handled outside
+Lean: `conformance/runtime-vectors/hashes.json` carries fixed vectors
+for `sha256`, `ripemd160`, `hash160`, and `hash256`, and
+`packages/runar-testing/src/__tests__/runtime-vectors.test.ts` checks
+those vectors against Node.js `crypto` plus the Runar runtime.
+
 ## Opaque Executable Defaults
 
 | Symbol | File | Default body | Status |
 |---|---|---|---|
-| `Crypto.sha256` | `ANF/Eval.lean` | `ByteArray.empty` | Must be replaced or parameterized before real crypto execution claims |
-| `Crypto.ripemd160` | `ANF/Eval.lean` | `ByteArray.empty` | Must be replaced or parameterized before real crypto execution claims |
 | `Crypto.checkSig` | `ANF/Eval.lean` | `false` | Must become an explicit oracle/assumption for proof-facing execution |
 | `Stack.Eval.checkMultiSigStub` | `Stack/Eval.lean` | `false` | Must become real multisig semantics or an explicit oracle |
 
@@ -60,7 +74,8 @@ These are active proof obligations, not historical notes:
 * Emit/parse round-trip for the complete emitted subset.
 * Consensus-faithful semantics for sighash, `OP_CODESEPARATOR`,
   authentication opcodes, and byte/number conversion opcodes.
-* Replacement or parameterization of the four executable defaults above.
+* Replacement or parameterization of the two authentication executable
+  defaults above.
 * Live or stored-Lean-constant verification for the 15 crypto-heavy
   fixtures currently outside the default byte-exact count.
 

@@ -10,10 +10,10 @@ A starter executable big-step semantics for ANF programs.
 **Scope of this module (Phase 1 / Phase 2 only).** Per the spec, this
 file lays down the dispatch shape and fills in the **non-cryptographic**
 constructors only. Hashes, EC primitives, ECDSA / Rabin / WOTS / SLH-DSA
-verifiers, and the BIP-143 preimage extractors are all introduced as
-`axiom` declarations in the dedicated `Crypto` namespace at the bottom
-of this file. Each axiom is documented with the assumed property and
-where it sits in the larger Phase 3 plan.
+verifiers, and the BIP-143 preimage extractors are introduced as
+explicit assumptions or backend-parametric definitions in the dedicated
+`Crypto` namespace at the bottom of this file. Each assumption is
+documented with its role and where it sits in the larger Phase 3 plan.
 
 **What is concrete here:**
 
@@ -30,8 +30,8 @@ where it sits in the larger Phase 3 plan.
 
 **What is axiomatized:**
 
-* every hash function (`sha256`, `ripemd160`, `hash160`, `hash256`,
-  `sha256Compress`, `sha256Finalize`, `blake3*`)
+* the external hash backend for `sha256` / `ripemd160`, plus
+  `sha256Compress`, `sha256Finalize`, and `blake3*`
 * every EC primitive (secp256k1, P-256, P-384, BN254-G1)
 * every signature verifier (ECDSA, Rabin, WOTS+, SLH-DSA-SHA2-{128,192,256}{s,f})
 * every `extract*` preimage projection (BIP-143)
@@ -205,38 +205,46 @@ def evalUnaryOp (op : String) (operand : Value) (_resultType : Option String) :
   | "~", _ => .error (.unsupported "unary_op ~ on Int (axiomatized in Phase 3)")
   | _, _ => .error (.unsupported s!"unary_op {op}")
 
-/-! ## Cryptographic primitives — axioms
+/-! ## Cryptographic primitives — assumptions
 
 Each axiom takes opaque `ByteArray` payloads and returns a deterministic
 `ByteArray` (or `Bool`). Determinism is implicit (axioms are total
-functions). Soundness specifications are deferred to Phase 3.
-
-The verification lead should refine these by:
-
-1. Replacing `axiom` with `def` and an actual algorithm where feasible
-   (e.g. `sha256` against a Lean SHA-256 reference implementation).
-2. Adding *assumed property* lemmas (`axiom sha256_collision_resistance`
-   or similar) for primitives that cannot be implemented in Lean
-   (cryptographic verifiers).
+functions). SHA-256 and RIPEMD-160 are external consensus primitives:
+Lean proofs quantify over a hash backend, while the Runar implementations
+are tested against independent reference algorithms outside Lean.
+Soundness specifications for the remaining primitives are deferred to
+Phase 3.
 -/
 
 namespace Crypto
 
 -- Hashes
--- Five hashes used by Bitcoin Script opcodes (`OP_SHA256`, `OP_HASH160`, etc.)
--- are declared as `opaque` rather than `axiom` so the Stack VM in
--- `RunarVerification.Stack.Eval` can call them without becoming noncomputable.
--- Mathematically the two forms are equivalent: `opaque f := stub` exposes only
--- the type signature, the body is hidden from proofs (the stub is unobservable).
-opaque sha256 (_ : ByteArray) : ByteArray := ByteArray.empty
-opaque ripemd160 (_ : ByteArray) : ByteArray := ByteArray.empty
+-- SHA-256 and RIPEMD-160 are supplied by the execution environment. The
+-- Lean model is parametric in these functions instead of carrying fake
+-- executable defaults or attempting to prove the algorithms themselves.
+structure HashBackend where
+  sha256 : ByteArray → ByteArray
+  ripemd160 : ByteArray → ByteArray
+
+private def missingHashBackend (name : String) (_ : ByteArray) : ByteArray :=
+  panic! s!"external {name} hash backend required for Lean execution"
+
+private def executableHashBackend : HashBackend where
+  sha256 := missingHashBackend "sha256"
+  ripemd160 := missingHashBackend "ripemd160"
+
+@[implemented_by executableHashBackend]
+axiom hashBackend : HashBackend
+
+def sha256 (b : ByteArray) : ByteArray := hashBackend.sha256 b
+def ripemd160 (b : ByteArray) : ByteArray := hashBackend.ripemd160 b
 /-- `OP_HASH160` consensus definition: RIPEMD-160 ∘ SHA-256.
-Concrete `def` (Tier 5.3, 2026-05-10): composes the two hash opaques.
+Concrete `def` (Tier 5.3, 2026-05-10): composes the two backend hashes.
 The linking lemma `hash160_eq_ripemd160_sha256` in `Crypto/Spec.lean`
 is now provable by `rfl`. -/
 def hash160 (b : ByteArray) : ByteArray := ripemd160 (sha256 b)
 /-- `OP_HASH256` consensus definition: SHA-256 ∘ SHA-256.
-Concrete `def` (Tier 5.3, 2026-05-10): composes the SHA-256 opaque
+Concrete `def` (Tier 5.3, 2026-05-10): composes the backend SHA-256
 with itself. The linking lemma `hash256_eq_double_sha256` in
 `Crypto/Spec.lean` is now provable by `rfl`. -/
 def hash256 (b : ByteArray) : ByteArray := sha256 (sha256 b)

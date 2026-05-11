@@ -958,9 +958,9 @@ theorem subZero_atom_sound
 
 Hash fusion: applying `OP_SHA256` twice equals one `OP_HASH256` call
 *by definition of `Crypto.hash256`*. As of Tier 5.3 (2026-05-10)
-`Crypto.hash256` is a concrete `def` over the `Crypto.sha256` opaque,
-so the linking identity is now provable by `rfl` and contributes no
-axiom to the TCB.
+`Crypto.hash256` is a concrete `def` over the backend-parametric
+`Crypto.sha256`, so the linking identity is now provable by `rfl` and
+contributes no separate axiom to the TCB.
 -/
 
 theorem hash256_eq_double_sha256 (b : ByteArray) :

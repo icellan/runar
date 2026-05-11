@@ -12,6 +12,7 @@
     },
     "./runtime": {
       "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js",
       "default": "./dist/runtime/index.js"
     },
     "./tokens": {

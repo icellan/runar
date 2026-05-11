@@ -27,7 +27,7 @@ path in this tier:
   every downstream reference site; it is scheduled as Tier 4
   follow-up work, not Tier 4.3.
 * The companion-axiom pattern matches `RunarVerification/Crypto/Spec.lean`
-  (Tier 5.1, 2026-05-10), which paired the bare crypto axioms with
+  (Tier 5.1, 2026-05-10), which paired the bare crypto assumptions with
   `_correct` companions instead of replacing them with concrete
   implementations.
 * Keeping the extractors as axioms preserves the option to ground them
@@ -49,9 +49,8 @@ return 0".
 * +11 companion axioms (one per BIP-143 extractor).
 * +0 opaques.
 
-After this module lands, `TRUST_MANIFEST.md`'s axiom count rises from
-83 → 94 (83 baseline + 11 BIP-143 companions). The drift script's
-`TARGET_AXIOMS` updates correspondingly.
+The current repository-wide count is enforced by
+`scripts/check-tcb-drift.sh` and recorded in `TRUST_MANIFEST.md`.
 
 ## Forward compatibility with the Stack VM `txCtx` field
 
