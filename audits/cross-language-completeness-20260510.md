@@ -11,7 +11,7 @@ Tracks the work of `audits/remediation-plan-20260511.md`. One row per resolved/r
 
 | Date | ID | Status | Commit | One-line summary |
 |---|---|---|---|---|
-| 2026-05-11 | GAP-001 / BUG-003 (TS half) | resolved | (pending commit) | TS WOTS+ codegen extracted to `packages/runar-compiler/src/passes/wots-codegen.ts`; byte-frozen golden test added; conformance `post-quantum-wots` passes. |
+| 2026-05-11 | GAP-001 / BUG-003 (TS half) | resolved | `977168ed` | TS WOTS+ codegen extracted to `packages/runar-compiler/src/passes/wots-codegen.ts`; byte-frozen golden test added; conformance `post-quantum-wots` passes. |
 
 ---
 
