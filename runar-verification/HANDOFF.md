@@ -28,8 +28,8 @@ remaining active proof obligations live in `Pipeline.lean`,
 ## Finish Order
 
 1. **Proof-facing execution model**
-   * Replace authentication and hash executable defaults with explicit
-     oracle parameters or real implementations.
+   * Keep the hash and authentication backends explicit and fail-fast;
+     no opaque executable defaults remain.
    * Complete Script-number and byte semantics for all Rúnar-emitted
      opcodes.
    * Model tx context, sighash coverage, and `OP_CODESEPARATOR` well

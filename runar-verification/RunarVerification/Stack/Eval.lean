@@ -10,9 +10,9 @@ The semantics is designed to make the simulation theorem in `Sim.lean`
 straightforward: every primitive opcode either manipulates the stack
 typewise (`dup`, `swap`, …) or computes a concrete arithmetic / bytes
 operation. Cryptographic opcodes (`OP_SHA256`, `OP_CHECKSIG`, …)
-delegate to the existing axioms in `RunarVerification.ANF.Eval.Crypto`
-so that the Stack VM and the ANF evaluator share a single trusted
-crypto base.
+delegate to the existing assumptions and backend parameters in
+`RunarVerification.ANF.Eval.Crypto` so that the Stack VM and the ANF
+evaluator share a single trusted crypto base.
 
 **Scope.** The opcode dispatch covers exactly the ~52 opcodes the Rúnar
 emit pass can produce (see `06-emit.ts:20–123`). Any other opcode name
@@ -224,23 +224,21 @@ def liftBytesUnary (s : StackState) (f : ByteArray → Value) : EvalResult Stack
 
 Each named opcode either:
 1. consumes/produces stack values via a small helper above,
-2. delegates to a `Crypto.*` axiom (hashes, signature verifiers), or
+2. delegates to a `Crypto.*` assumption/backend function, or
 3. is unsupported (returns `.error .unsupported`).
 
 This dispatch table mirrors the **Rúnar-emitted subset** identified in
 `06-emit.ts:20–123` plus the Chronicle extensions (l:82–121).
 -/
 
-/-- Local stub for `OP_CHECKMULTISIG` / `OP_CHECKMULTISIGVERIFY` semantics.
+/-- Local adapter for `OP_CHECKMULTISIG` / `OP_CHECKMULTISIGVERIFY` semantics.
 
-Wraps `Crypto.checkMultiSig` via a single-bytes argument so the Stack VM
-can model multi-sig under abstract single-pop semantics (see comment on
-`OP_CHECKMULTISIG` in `runOpcode` below). Marked `opaque` (rather than
-forwarded to the underlying axiom) so that `runOpcode` retains compiled
-IR — `Crypto.checkMultiSig` is `axiom`-only and would otherwise force
-`runOpcode` to be `noncomputable`. The chosen default is `false`,
-matching `Crypto.checkSig`'s default. -/
-opaque checkMultiSigStub (_ : ByteArray) : Bool := false
+The Stack VM still models multisig under abstract single-pop semantics
+(see comment on `OP_CHECKMULTISIG` in `runOpcode` below), so this adapter
+routes the raw stack payload into the explicit auth backend field. The
+backend has fail-fast codegen; there is no executable `false` default. -/
+def checkMultiSigStub (payload : ByteArray) : Bool :=
+  checkMultiSigStack payload
 
 def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
   match code with
@@ -472,7 +470,7 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
       -- Abstract single-pop semantics. The full Bitcoin opcode pops `n + m + 3`
       -- items (m sigs, n pubkeys, the two counts, and a dummy null), which the
       -- IR can't express without dependent typing on the count values. We take a
-      -- pragmatic stub: pop one bytes value `b` and produce
+      -- pragmatic adapter: pop one bytes value `b` and produce
       -- `vBool (checkMultiSigStub b)`. This is sufficient to express the
       -- `[OP_CHECKMULTISIG, OP_VERIFY] → [OP_CHECKMULTISIGVERIFY]` fusion,
       -- which is the only program-level invariant Rúnar's compiler claims.
@@ -484,7 +482,7 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
           | none   => .error (.typeError "OP_CHECKMULTISIG expects bytes")
   | "OP_CHECKMULTISIGVERIFY" =>
       -- Mirrors `OP_CHECKMULTISIG` then `OP_VERIFY` under the same pragmatic
-      -- stub. See the `OP_CHECKMULTISIG` comment above for rationale.
+      -- adapter. See the `OP_CHECKMULTISIG` comment above for rationale.
       match s.pop? with
       | none => .error (.unsupported "OP_CHECKMULTISIGVERIFY: empty stack")
       | some (v, s') =>

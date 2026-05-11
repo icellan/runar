@@ -10,8 +10,8 @@ counts:
 | Item | Count | Meaning |
 |---|---:|---|
 | Project axioms | 82 | Named assumptions in Lean code |
-| Opaque executable defaults | 2 | Executable bodies hidden from proofs |
-| Opaque defaults with bodies | 2 | Same 2 values, all intentional |
+| Opaque executable defaults | 0 | No executable bodies hidden from proofs |
+| Opaque defaults with bodies | 0 | No opaque declarations carry defaults |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
 
 ## Axiom Inventory
@@ -42,15 +42,20 @@ for `sha256`, `ripemd160`, `hash160`, and `hash256`, and
 `packages/runar-testing/src/__tests__/runtime-vectors.test.ts` checks
 those vectors against Node.js `crypto` plus the Runar runtime.
 
+## External Auth Backend
+
+`Crypto.AuthBackend` supplies `checkSig`, `checkMultiSig`, and the
+current Stack VM's single-payload `checkMultiSigStack` abstraction.
+Lean does not implement ECDSA or multisig verification here; proofs
+quantify over the backend. Lean code generation uses a fail-fast backend
+via `implemented_by`, so authentication execution aborts unless a real
+backend model is supplied.
+
 ## Opaque Executable Defaults
 
-| Symbol | File | Default body | Status |
-|---|---|---|---|
-| `Crypto.checkSig` | `ANF/Eval.lean` | `false` | Must become an explicit oracle/assumption for proof-facing execution |
-| `Stack.Eval.checkMultiSigStub` | `Stack/Eval.lean` | `false` | Must become real multisig semantics or an explicit oracle |
-
-These defaults make the VM executable. They are not sufficient for a
-deployed-contract soundness claim.
+There are no opaque executable defaults under `RunarVerification/`.
+Executable crypto/auth placeholders must be explicit backend
+assumptions with fail-fast codegen, not hidden `opaque := ...` bodies.
 
 ## Proven Or Empirical Anchors
 
@@ -74,8 +79,6 @@ These are active proof obligations, not historical notes:
 * Emit/parse round-trip for the complete emitted subset.
 * Consensus-faithful semantics for sighash, `OP_CODESEPARATOR`,
   authentication opcodes, and byte/number conversion opcodes.
-* Replacement or parameterization of the two authentication executable
-  defaults above.
 * Live or stored-Lean-constant verification for the 15 crypto-heavy
   fixtures currently outside the default byte-exact count.
 

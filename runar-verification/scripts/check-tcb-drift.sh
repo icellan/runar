@@ -25,7 +25,11 @@ TARGET_AXIOMS=82        # Breakdown (2026-05-11):
                         #     the previous target plus the explicit
                         #     `hashBackend` parameter for SHA-256 /
                         #     RIPEMD-160; codegen uses a fail-fast
-                        #     `implemented_by` backend).
+                        #     `implemented_by` backend. Tier 5.5 also
+                        #     replaced the `checkMultiSig` axiom with the
+                        #     explicit `authBackend` parameter, so the net
+                        #     axiom count stays unchanged while `checkSig`
+                        #     becomes backend-parametric too).
                         #   26 in RunarVerification/Crypto/Spec.lean
                         #     (Tier 5.1 spec companions): 10 EC group /
                         #     projection axioms, 5 auxiliary primitive
@@ -45,10 +49,7 @@ TARGET_AXIOMS=82        # Breakdown (2026-05-11):
                         # `Crypto/Spec.lean` both converted to `rfl`
                         # theorems once `Crypto.hash160`/`hash256` became
                         # `def`s).
-TARGET_OPAQUES=2        # 2 executable stub bodies (`checkSig` in
-                        # `ANF/Eval.lean` and `checkMultiSigStub` in
-                        # `Stack/Eval.lean` defaulting to `false`). Tier
-                        # 2.9 (2026-05-10)
+TARGET_OPAQUES=0        # Tier 2.9 (2026-05-10)
                         # converted `builtinSig` from `opaque` to a
                         # concrete `def` with 121 Rúnar builtin entries
                         # (matches TS reference table in
@@ -63,9 +64,12 @@ TARGET_OPAQUES=2        # 2 executable stub bodies (`checkSig` in
                         # Tier 5.4 (2026-05-11) replaced the `sha256`
                         # and `ripemd160` fake executable defaults with
                         # the explicit `hashBackend` assumption.
-TARGET_OPAQUE_STUBS=2   # both remaining opaques carry stub bodies
-                        # (`checkSig`, `checkMultiSig` defaulting to
-                        # `false`).
+                        # Tier 5.5 (2026-05-11) replaced `checkSig` and
+                        # `checkMultiSigStub` executable `false` defaults
+                        # with the explicit `authBackend` assumption and
+                        # fail-fast codegen.
+TARGET_OPAQUE_STUBS=0   # no opaque declarations under `RunarVerification/`
+                        # carry executable stub bodies.
 TARGET_PARTIALS=0       # 0 partials remaining: every executable in
                         # `RunarVerification/` is now a total `def`.
                         # Tier 2 item 2.6 closed the remaining 6

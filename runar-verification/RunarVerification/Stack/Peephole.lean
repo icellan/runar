@@ -6823,9 +6823,9 @@ The previously-deferred 6 rules from Phase 3v (per HANDOFF.md §"Phase 3u
    [OP_CHECKMULTISIGVERIFY]`. Path A: `Stack/Eval.lean` was extended with
    abstract single-pop semantics for both opcodes (mirroring the existing
    `OP_CHECKSIG` / `OP_CHECKSIGVERIFY` pair) so the fusion's `runOps LHS
-   = runOps RHS` shape becomes provable. The semantics use a local
-   `checkMultiSigStub : ByteArray → Bool` so `runOpcode` retains
-   compiled IR.
+   = runOps RHS` shape becomes provable. The semantics use
+   `checkMultiSigStub : ByteArray → Bool` as a local adapter into the
+   explicit auth backend.
 
 2-6. `zeroRoll0` / `oneRoll1` / `twoRoll2` / `zeroPick0` / `onePick1` —
    Path A: `Stack/Eval.lean`'s `applyRoll` and `applyPick` were
@@ -6846,7 +6846,7 @@ recipe (`.bytes` precondition on the multi-sig opcode entry).
 `[OP_CHECKMULTISIG, OP_VERIFY] → [OP_CHECKMULTISIGVERIFY]` under
 `.bytes`-on-top precondition. The opcode semantics (in `Stack/Eval.lean`)
 mirror `OP_CHECKSIG`'s single-pop abstraction with `checkMultiSigStub`
-in place of the `Crypto.checkSig` opaque. -/
+in place of parsed multisig stack operands. -/
 
 def applyCheckMultiSigVerifyFuse : List StackOp → List StackOp
   | [] => []

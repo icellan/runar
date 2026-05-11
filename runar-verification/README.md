@@ -19,7 +19,7 @@ pipeline. The package is useful in two roles:
 | Crypto-heavy fixtures | 15/49 explicit pending-assumption bucket |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
 | Project axioms | 82 |
-| Opaque executable defaults | 2 |
+| Opaque executable defaults | 0 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
 
@@ -62,9 +62,9 @@ bytes. The current proof surface is deliberately split:
 * skeleton theorem names in `Pipeline.lean` for lower/peephole/emit
   composition points whose hypotheses still carry the load-bearing
   obligations;
-* backend-parametric SHA-256 / RIPEMD-160 semantics, with fail-fast Lean
-  codegen and Runar runtime implementations checked against external
-  vectors; and
+* backend-parametric SHA-256 / RIPEMD-160 and authentication semantics,
+  with fail-fast Lean codegen and Runar runtime hash implementations
+  checked against external vectors; and
 * explicit assumptions listed in `TRUST_MANIFEST.md`.
 
 The proof-facing compiler entrypoint is `Pipeline.compileSafe`, which

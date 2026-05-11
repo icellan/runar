@@ -368,11 +368,33 @@ def extractOutputHash   (preimage : ByteArray) : ByteArray := preimage.extract (
 def extractLocktime     (preimage : ByteArray) : Int       := decodeLE32 preimage (preimage.size - 8)
 def extractSigHashType  (preimage : ByteArray) : Int       := decodeLE32 preimage (preimage.size - 4)
 
--- Signature & preimage verifiers (the two are mocked-true in the TS interpreters,
--- but for the Lean model we leave them axiomatized so a future
--- behavioural-soundness theorem can quantify over preimage validity.)
-opaque checkSig (_ _ : ByteArray) : Bool := false
-axiom checkMultiSig    : List ByteArray → List ByteArray → Bool
+-- Signature verifiers are supplied by the execution environment. The
+-- `checkMultiSigStack` field preserves the Stack VM's current single-byte
+-- abstraction for `OP_CHECKMULTISIG` until full stack parsing is modelled.
+structure AuthBackend where
+  checkSig : ByteArray → ByteArray → Bool
+  checkMultiSig : List ByteArray → List ByteArray → Bool
+  checkMultiSigStack : ByteArray → Bool
+
+private def missingAuthBackend (name : String) : Bool :=
+  panic! s!"external {name} auth backend required for Lean execution"
+
+private def executableAuthBackend : AuthBackend where
+  checkSig := fun _ _ => missingAuthBackend "checkSig"
+  checkMultiSig := fun _ _ => missingAuthBackend "checkMultiSig"
+  checkMultiSigStack := fun _ => missingAuthBackend "checkMultiSigStack"
+
+@[implemented_by executableAuthBackend]
+axiom authBackend : AuthBackend
+
+def checkSig (sig pubkey : ByteArray) : Bool :=
+  authBackend.checkSig sig pubkey
+
+def checkMultiSig (sigs pubkeys : List ByteArray) : Bool :=
+  authBackend.checkMultiSig sigs pubkeys
+
+def checkMultiSigStack (payload : ByteArray) : Bool :=
+  authBackend.checkMultiSigStack payload
 /--
 `checkPreimage` decides whether the given byte-string is a valid
 BIP-143 preimage for the implicit transaction context. Per OQ-4 we
