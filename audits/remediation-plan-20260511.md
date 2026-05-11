@@ -35,6 +35,17 @@ Format: `ID | source | language(s) | files touched (anchor) | severity | dispatc
 | GAP-008 | G6 / S-4 (BUG-009) | Rust | `packages/runar-rs/tests/sdk_providers_test.rs`, `tests/sdk_ordinals_test.rs`, `tests/sdk_brc100_test.rs` (new) | major | 8 | pending |
 | GAP-009 | G7 / S-5 (BUG-010) | Python | `packages/runar-py/tests/test_ordinals.py` (new) | major | 9 | pending |
 | GAP-010 | G8 | Zig | `packages/runar-zig/src/sdk_anf_interpreter.zig` (new) + tests | major | 10 | pending |
+| GAP-058 | new finding (out-of-audit) | conformance runner | `conformance/runner/runner.ts` — `runConformanceTest` must apply per-fixture `compilers` allowlist (currently only `runConformanceTestForFormat` does) | major | 1.5 (dispatched next, pre-empts GAP-002) | resolved 2026-05-11 |
+
+### GAP-058 details
+
+**Symptom**: `pnpm test` in `conformance/` reports `45 passed, 4 failed` (49 total). All 4 failures are Java tier on Go-only crypto fixtures (`babybear`, `babybear-ext4`, `merkle-proof`, `state-covenant`). Each fixture's `source.json` declares `"compilers": ["go"]` per CLAUDE.md "Go-only crypto codegen modules" policy.
+
+**Root cause**: `conformance/runner/runner.ts:1680-1688` (`runConformanceTest`) launches all 7 compilers in parallel without filtering by the per-fixture allowlist. The multi-format variant `runConformanceTestForFormat` at line 2049 does correctly filter via `readFixtureCompilerAllowlist`. The default entry point `runAllConformanceTests` (`index.ts:228`) routes to the legacy single-format runner, so the bug is the active path.
+
+**Fix shape**: In `runConformanceTest` (around line 1676), read `readFixtureCompilerAllowlist(testDir)` and skip non-allowlisted compilers (set their result to `undefined` so the existing `if (xResult && !xResult.success)` checks no-op, matching the multi-format pattern). Do NOT change semantics for fixtures that have no allowlist.
+
+**Test**: A test must specifically probe this bug — write a vitest test or runner unit test that loads a fixture with `compilers: ["go"]`, calls `runConformanceTest`, and asserts no `Java compiler failed` (or other non-Go) error appears in the result. Pre-fix this test would fail; post-fix it passes.
 
 ### Minors (Section 5.3) — dispatched after majors land
 

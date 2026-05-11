@@ -1676,18 +1676,50 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   const source = readFileSync(sourceFile, 'utf-8');
   const errors: string[] = [];
 
+  const allowlist = readFixtureCompilerAllowlist(testDir);
+
+  const tsPromise = !allowlist || allowlist.has('ts')
+    ? runTsCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput>({ irJson: '', scriptHex: '', scriptAsm: '', success: false, error: 'Format not supported by TS compiler', durationMs: 0 });
+
+  const goPromise = !allowlist || allowlist.has('go')
+    ? runGoCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
+  const rustPromise = !allowlist || allowlist.has('rust')
+    ? runRustCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
+  const pythonPromise = !allowlist || allowlist.has('python')
+    ? runPythonCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
+  const zigPromise = !allowlist || allowlist.has('zig')
+    ? runZigCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
+  const rubyPromise = !allowlist || allowlist.has('ruby')
+    ? runRubyCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
+  const javaPromise = !allowlist || allowlist.has('java')
+    ? runJavaCompiler(source, sourceFile)
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
   // Run all compilers in parallel — they're fully independent processes.
   const [tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult] = await Promise.all([
-    runTsCompiler(source, sourceFile),
-    runGoCompiler(source, sourceFile),
-    runRustCompiler(source, sourceFile),
-    runPythonCompiler(source, sourceFile),
-    runZigCompiler(source, sourceFile),
-    runRubyCompiler(source, sourceFile),
-    runJavaCompiler(source, sourceFile),
+    tsPromise,
+    goPromise,
+    rustPromise,
+    pythonPromise,
+    zigPromise,
+    rubyPromise,
+    javaPromise,
   ]);
 
-  if (!tsResult.success) {
+  const tsIncluded = !allowlist || allowlist.has('ts');
+
+  if (tsIncluded && !tsResult.success) {
     errors.push(`TypeScript compiler failed: ${tsResult.error ?? 'unknown error'}`);
   }
   if (goResult && !goResult.success) {
@@ -1709,14 +1741,22 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
     errors.push(`Java compiler failed: ${javaResult.error ?? 'unknown error'}`);
   }
 
+  const expectedCompilerCount = allowlist ? allowlist.size : 7;
+
   // Cross-compiler IR comparison
-  const irMatch = compareIR([tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult]);
+  const irMatch = compareIR(
+    [tsIncluded ? tsResult : undefined, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult],
+    expectedCompilerCount,
+  );
   if (!irMatch) {
     errors.push('IR mismatch between compilers');
   }
 
   // Cross-compiler script comparison
-  const scriptMatch = compareScript([tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult]);
+  const scriptMatch = compareScript(
+    [tsIncluded ? tsResult : undefined, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult],
+    expectedCompilerCount,
+  );
   if (!scriptMatch) {
     errors.push('Script hex mismatch between compilers');
   }
@@ -1727,9 +1767,10 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   // strictly enforced in fold-on mode — the goldens are merely a reference
   // for the fold-off run.
   const skipGolden = !constantFoldingDisabled();
-  if (!skipGolden && existsSync(expectedIrFile) && tsResult.success) {
+  const goldenGateOk = tsIncluded ? tsResult.success : true;
+  if (!skipGolden && existsSync(expectedIrFile) && goldenGateOk) {
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
-    if (tsResult.irJson !== expectedIr) {
+    if (tsIncluded && tsResult.irJson !== expectedIr) {
       errors.push(
         `TS compiler IR does not match golden file. ` +
         `Expected ${expectedIr.length} chars, got ${tsResult.irJson.length} chars.`,
@@ -1755,11 +1796,13 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
     }
   }
 
-  if (!skipGolden && existsSync(expectedScriptFile) && tsResult.success) {
+  if (!skipGolden && existsSync(expectedScriptFile) && goldenGateOk) {
     const expectedScript = readFileSync(expectedScriptFile, 'utf-8').trim().toLowerCase();
-    const tsScript = tsResult.scriptHex.toLowerCase().replace(/\s/g, '');
-    if (tsScript && tsScript !== expectedScript) {
-      errors.push(`TS compiler script does not match golden file`);
+    if (tsIncluded) {
+      const tsScript = tsResult.scriptHex.toLowerCase().replace(/\s/g, '');
+      if (tsScript && tsScript !== expectedScript) {
+        errors.push(`TS compiler script does not match golden file`);
+      }
     }
     if (goResult?.success && goResult.scriptHex) {
       const goScript = goResult.scriptHex.toLowerCase().replace(/\s/g, '');

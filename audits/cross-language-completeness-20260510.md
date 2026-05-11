@@ -12,6 +12,7 @@ Tracks the work of `audits/remediation-plan-20260511.md`. One row per resolved/r
 | Date | ID | Status | Commit | One-line summary |
 |---|---|---|---|---|
 | 2026-05-11 | GAP-001 / BUG-003 (TS half) | resolved | `977168ed` | TS WOTS+ codegen extracted to `packages/runar-compiler/src/passes/wots-codegen.ts`; byte-frozen golden test added; conformance `post-quantum-wots` passes. |
+| 2026-05-11 | GAP-058 (new finding) | resolved | (pending) | `runConformanceTest` now applies the per-fixture `compilers` allowlist (mirrors `runConformanceTestForFormat`). 4 prior failures (`babybear`, `babybear-ext4`, `merkle-proof`, `state-covenant` — Java tier on Go-only crypto) now pass. New regression test at `conformance/runner/__tests__/allowlist-filter.test.ts`. Conformance: 49/49 pass. |
 
 ---
 
@@ -739,6 +740,16 @@ These flagged in the matrix as `⚠️`/`❌` cells but the audit did not execut
 - **S-3. Zig C7 codeSeparatorIndices:** Audit located the OP_CODESEPARATOR opcode emission but did not confirm the artifact JSON exposes `codeSeparatorIndex`/`codeSeparatorIndices` cross-tier-identical to the TS reference.
 - **S-4. Rust SDK provider tests (G3–G5, G7 ExternalSigner, G11–G13):** `packages/runar-rs/tests/` directory exists but contains no files exercising the corresponding `src/sdk/{woc_provider,gorillapool,rpc_provider,ordinals,signer}.rs`. Suspected: silent divergence possible.
 - **S-5. Python ordinals tests (G11–G13):** No test file targets `packages/runar-py/runar/sdk/ordinals.py`. Suspected: silent divergence possible if the BSV-20/BSV-21 inscription helpers regress.
+
+### 6.4. Findings discovered during remediation (post-audit)
+
+**F-6. Conformance runner ignores per-fixture `compilers` allowlist in legacy single-format path.**
+- Discovered: 2026-05-11 during GAP-001 verification.
+- Defect site: `conformance/runner/runner.ts:1655` `runConformanceTest` — invoked all 7 compilers unconditionally at line 1680. The multi-format variant `runConformanceTestForFormat` at line 2012 correctly filtered via `readFixtureCompilerAllowlist` at line 2049. The default entry point `runAllConformanceTests` (`index.ts:228`) routes to the legacy single-format runner, so the bug was the active path.
+- Symptom: `cd conformance && pnpm test` reported `45 passed, 4 failed` (49 total). The 4 failures were Java-tier on Go-only crypto fixtures (`babybear`, `babybear-ext4`, `merkle-proof`, `state-covenant`), each declaring `"compilers": ["go"]` in `source.json`. Java was invoked anyway and threw `IllegalStateException` on the unknown Go-only builtins (`bbFieldAdd`, `bbExt4Mul0`, `merkleRootSha256`, `bbFieldMul`).
+- Severity: **major**. Conformance gate had 4 spurious failures masking real issues.
+- Reproduction: `cd conformance && pnpm test` against the pre-fix tree.
+- **RESOLVED 2026-05-11 (GAP-058)**: applied allowlist filter in `runConformanceTest` mirroring `runConformanceTestForFormat`. Added regression test `conformance/runner/__tests__/allowlist-filter.test.ts`. Conformance suite now 49/49 pass.
 
 ### 6.3. Audit-process findings (agent-report inaccuracies)
 
