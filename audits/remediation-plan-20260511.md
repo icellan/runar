@@ -32,7 +32,7 @@ Format: `ID | source | language(s) | files touched (anchor) | severity | dispatc
 | GAP-005 | G3 / F-5 (BUG-005) | Zig | `compilers/zig/src/passes/anf_lower.zig` (initializer expression lowering) | major | 5 | refuted 2026-05-12 — Zig's `extractLiteralValue` has byte-parity with TS+Py; literal-only is the language spec |
 | GAP-006 | G4 / S-3 (BUG-008) | Zig | `compilers/zig/src/codegen/emit.zig` (codeSeparatorIndex(es) artifact JSON) | major | 6 | refuted 2026-05-12 — both fields already emitted at `emit.zig:614, 623`; conformance confirms parity |
 | GAP-007 | G5 | Python | `compilers/python/tests/codegen/test_math_builtins.py` (new) | major | 7 | resolved 2026-05-12 |
-| GAP-008 | G6 / S-4 (BUG-009) | Rust | `packages/runar-rs/tests/sdk_providers_test.rs`, `tests/sdk_ordinals_test.rs`, `tests/sdk_brc100_test.rs` (new) | major | 8 | pending |
+| GAP-008 | G6 / S-4 (BUG-009) | Rust | `packages/runar-rs/tests/sdk_providers_test.rs`, `tests/sdk_ordinals_test.rs`, `tests/sdk_brc100_test.rs` (new) | major | 8 | refuted 2026-05-12 — inline `#[cfg(test)]` blocks exist; cargo test --lib 370 pass |
 | GAP-009 | G7 / S-5 (BUG-010) | Python | `packages/runar-py/tests/test_ordinals.py` (new) | major | 9 | refuted 2026-05-12 — file exists at 539 LOC |
 | GAP-010 | G8 | Zig | `packages/runar-zig/src/sdk_anf_interpreter.zig` (new) + tests | major | 10 | refuted 2026-05-12 — file exists at 2690 LOC; cross-interpreter parity-suite inclusion still TBD |
 | GAP-058 | new finding (out-of-audit) | conformance runner | `conformance/runner/runner.ts` — `runConformanceTest` must apply per-fixture `compilers` allowlist (currently only `runConformanceTestForFormat` does) | major | 1.5 (dispatched next, pre-empts GAP-002) | resolved 2026-05-11 |
@@ -64,15 +64,15 @@ Grouped by language to minimize file overlap with majors. Order column is contig
 | GAP-019 | C3 `addOutput` test | Python | `compilers/python/tests/test_addoutput.py` (new) | minor | 19 | pending |
 | GAP-020 | C4 `addRawOutput` test | Rust | `compilers/rust/tests/compiler_tests.rs` extension | minor | 20 | pending |
 | GAP-021 | C4 `addRawOutput` test | Python | `compilers/python/tests/test_addrawoutput.py` (new) | minor | 21 | pending |
-| GAP-022 | C5 property initializer test | Zig | inline test in `compilers/zig/src/passes/anf_lower.zig` (depends on GAP-005) | minor | 22 | pending |
+| GAP-022 | C5 property initializer test | Zig | inline test in `compilers/zig/src/passes/anf_lower.zig` (depends on GAP-005) | minor | 22 | folded 2026-05-12 — GAP-005 refuted, no separate test needed |
 | GAP-023 | C6 `checkPreimage` test | Python | `compilers/python/tests/test_check_preimage.py` (new) | minor | 23 | pending |
 | GAP-024 | C6 `checkPreimage` test | Zig | inline test in `stack_lower.zig` | minor | 24 | pending |
 | GAP-025 | C7 `codeSeparatorIndices` test | Python | extend `compilers/python/tests/test_emit.py` | minor | 25 | pending |
-| GAP-026 | C7 `codeSeparatorIndices` test | Zig | inline test in `emit.zig` (depends on GAP-006) | minor | 26 | pending |
+| GAP-026 | C7 `codeSeparatorIndices` test | Zig | inline test in `emit.zig` (depends on GAP-006) | minor | 26 | folded 2026-05-12 — GAP-006 refuted, inline test already exists at emit.zig:1401 |
 | GAP-027 | D4 `Point` test | Python | `compilers/python/tests/test_point_type.py` (new) | minor | 27 | pending |
 | GAP-028 | D4 `Point` test | Zig | inline test in `compilers/zig/src/passes/helpers/crypto_builtins.zig` | minor | 28 | pending |
 | GAP-029 | D9 `while` test | Python | `compilers/python/tests/test_while.py` (new) | minor | 29 | pending |
-| GAP-030 | D12 `ByteString` bitwise test | Python | extend `compilers/python/tests/test_bitwise.py` | minor | 30 | pending |
+| GAP-030 | D12 `ByteString` bitwise test | Python | extend `compilers/python/tests/test_bitwise.py` | minor | 30 | refuted 2026-05-12 — typecheck-level tests exist at `test_frontend.py:1589, 1616, 2409`; codegen-level still missing but not a strict gap |
 | GAP-031 | E1–E4 math builtin runtime tests | Zig | `packages/runar-zig/src/builtins.zig` inline | minor | 31 | pending |
 | GAP-032 | F2 `ecMakePoint`/X/Y test | Zig | inline test in `crypto_builtins.zig` | minor | 32 | pending |
 | GAP-033 | F3/F4 NIST P-256/P-384 test | Zig | inline tests in `compilers/zig/src/passes/helpers/nist_ec_emitters.zig` | minor | 33 | pending |
@@ -94,8 +94,8 @@ Grouped by language to minimize file overlap with majors. Order column is contig
 | GAP-049 | G8 ExternalSigner impl finish | Zig | `packages/runar-zig/src/sdk_signer.zig` (extend) | minor | 49 | pending |
 | GAP-050 | G8 ExternalSigner test | Python | `packages/runar-py/tests/test_external_signer.py` (new) | minor | 50 | pending |
 | GAP-051 | G13 1sat inscription test | Zig | inline test in `packages/runar-zig/src/sdk_ordinals.zig` | minor | 51 | pending |
-| GAP-052 | G14 BRC-100 test | Go | `packages/runar-go/sdk_wallet_test.go` (new) | minor | 52 | pending |
-| GAP-053 | G14 BRC-100 test | Rust | `packages/runar-rs/tests/sdk_brc100_test.rs` (new — coordinate w/ GAP-008) | minor | 53 | pending |
+| GAP-052 | G14 BRC-100 test | Go | `packages/runar-go/sdk_wallet_test.go` (new) | minor | 52 | refuted 2026-05-12 — file exists w/ MockWalletClient + BRC-100 tests; sdk_wallet_client_integration_test.go also exists |
+| GAP-053 | G14 BRC-100 test | Rust | `packages/runar-rs/tests/sdk_brc100_test.rs` (new — coordinate w/ GAP-008) | minor | 53 | refuted 2026-05-12 — wallet.rs inline `#[cfg(test)]` block (5+ tests) + `tests/wallet_client_integration.rs` (env-gated live test) |
 | GAP-054 | G14 BRC-100 test | Python | `packages/runar-py/tests/test_brc100_wallet.py` (new) | minor | 54 | pending |
 | GAP-055 | G14 BRC-100 test | Zig | `packages/runar-zig/src/sdk_wallet.zig` inline test | minor | 55 | pending |
 | GAP-056 | H1/H2 Zig runtime tests | Zig | tests for new `sdk_anf_interpreter.zig` (folded into GAP-010) | minor | — | folded |
