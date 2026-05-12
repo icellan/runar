@@ -19,7 +19,7 @@ Tracks the work of `audits/remediation-plan-20260511.md`. One row per resolved/r
 | 2026-05-12 | GAP-006 / S-3 / BUG-008 | refuted | `d6cf1cd0` | Zig's `compilers/zig/src/codegen/emit.zig:614, 623` already emits both `codeSeparatorIndex` and `codeSeparatorIndices` JSON fields (matches TS shape); inline test at line 1401 asserts presence; conformance 49/49 confirms cross-tier byte parity. |
 | 2026-05-12 | GAP-009 / S-5 / BUG-010 | refuted | `d6cf1cd0` | `packages/runar-py/tests/test_ordinals.py` exists at 539 LOC. Audit author missed the file (or it landed mid-audit). |
 | 2026-05-12 | GAP-010 | refuted | `d6cf1cd0` | `packages/runar-zig/src/sdk_anf_interpreter.zig` exists at 2690 LOC. Audit author missed the file (or it landed mid-audit). Cross-interpreter parity-suite inclusion (`conformance/anf-interpreter/cross-interpreter*.test.ts`) needs separate verification before this can be marked fully resolved at the test-coverage level (Section 4 H1/H2 row remains ⚠️ pending that check). |
-| 2026-05-12 | GAP-007 | resolved | (pending) | Added `compilers/python/tests/codegen/test_math_builtins.py` (351 LOC, 65 per-builtin tests). All 16 math builtins now have op-count goldens + load-bearing tail assertions + unrolled-iteration-count assertions (pow=32, sqrt=16, gcd=256, log2=64). Python suite 820→885 (+65). |
+| 2026-05-12 | GAP-007 | resolved | `6d1c86c2` | Added `compilers/python/tests/codegen/test_math_builtins.py` (351 LOC, 65 per-builtin tests). All 16 math builtins now have op-count goldens + load-bearing tail assertions + unrolled-iteration-count assertions (pow=32, sqrt=16, gcd=256, log2=64). Python suite 820→885 (+65). |
 
 ---
 
