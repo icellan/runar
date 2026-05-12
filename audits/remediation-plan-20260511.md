@@ -53,7 +53,7 @@ Grouped by language to minimize file overlap with majors. Order column is contig
 
 | ID | Source row | Lang | Files (anchor) | Severity | Order | Status |
 |---|---|---|---|---|---|---|
-| GAP-011 | B7 peephole extraction | Ruby | extract `compilers/ruby/lib/runar_compiler/codegen/peephole.rb` from `emit.rb:572` | minor | 11 | pending |
+| GAP-011 | B7 peephole extraction | Ruby | extract `compilers/ruby/lib/runar_compiler/codegen/peephole.rb` from `emit.rb:572` | minor | 11 | refuted 2026-05-12 — separate `compilers/ruby/lib/runar_compiler/codegen/optimizer.rb` already exists (`RunarCompiler::Codegen.optimize_stack_ops`); the `emit.rb:572` reference the audit cited is a comment pointing AT optimizer.rb, not the implementation |
 | GAP-012 | B7 peephole test | Zig | inline `test {}` in `compilers/zig/src/passes/peephole.zig` | minor | 12 | refuted 2026-05-12 — 10+ inline tests at peephole.zig:365+ ("rule 1 push+drop eliminated", etc.) |
 | GAP-013 | B8 `--parse-only` test | Go | `compilers/go/main_test.go` (or extend) | minor | 13 | pending |
 | GAP-014 | B8 `--parse-only` test | Rust | `compilers/rust/tests/cli_tests.rs` (new) | minor | 14 | refuted 2026-05-12 — Rust impl at main.rs:74 (handles --parse-only); test at conformance runner level still missing but Rust impl is verified and exercised via parser-only matrix |
