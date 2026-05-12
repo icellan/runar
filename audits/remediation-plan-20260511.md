@@ -31,7 +31,7 @@ Format: `ID | source | language(s) | files touched (anchor) | severity | dispatc
 | GAP-004 | G2 / F-1 (BUG-001 Py-half) | Python | `compilers/python/runar_compiler/codegen/rabin.py` (new) + stack.py dispatch | major | 4 | refuted 2026-05-12 — inline codegen exists at `stack.py:2922`; `oracle-price` conformance fixture confirms byte parity |
 | GAP-005 | G3 / F-5 (BUG-005) | Zig | `compilers/zig/src/passes/anf_lower.zig` (initializer expression lowering) | major | 5 | refuted 2026-05-12 — Zig's `extractLiteralValue` has byte-parity with TS+Py; literal-only is the language spec |
 | GAP-006 | G4 / S-3 (BUG-008) | Zig | `compilers/zig/src/codegen/emit.zig` (codeSeparatorIndex(es) artifact JSON) | major | 6 | refuted 2026-05-12 — both fields already emitted at `emit.zig:614, 623`; conformance confirms parity |
-| GAP-007 | G5 | Python | `compilers/python/tests/codegen/test_math_builtins.py` (new) | major | 7 | pending |
+| GAP-007 | G5 | Python | `compilers/python/tests/codegen/test_math_builtins.py` (new) | major | 7 | resolved 2026-05-12 |
 | GAP-008 | G6 / S-4 (BUG-009) | Rust | `packages/runar-rs/tests/sdk_providers_test.rs`, `tests/sdk_ordinals_test.rs`, `tests/sdk_brc100_test.rs` (new) | major | 8 | pending |
 | GAP-009 | G7 / S-5 (BUG-010) | Python | `packages/runar-py/tests/test_ordinals.py` (new) | major | 9 | refuted 2026-05-12 — file exists at 539 LOC |
 | GAP-010 | G8 | Zig | `packages/runar-zig/src/sdk_anf_interpreter.zig` (new) + tests | major | 10 | refuted 2026-05-12 — file exists at 2690 LOC; cross-interpreter parity-suite inclusion still TBD |
