@@ -263,7 +263,7 @@ def emitStackOpFast : StackOp → ByteArray
   | .placeholder _ _ => ByteArray.mk #[0x00]
   | .pushCodesepIndex => ByteArray.mk #[0x00]
 
-private def emitOpsFastAux : ByteArray → List StackOp → ByteArray
+def emitOpsFastAux : ByteArray → List StackOp → ByteArray
   | acc, [] => acc
   | acc, op :: rest =>
     emitOpsFastAux ((emitStackOpFast op).foldl (init := acc) fun a b => a.push b) rest
@@ -384,10 +384,10 @@ Used by `Pipeline.compile`. The structural `emit` / `emitOps` remain
 for proof-friendly definitional unfolding (e.g. `emitOps_nil := rfl`).
 -/
 
-private def appendBA (acc : ByteArray) (bs : ByteArray) : ByteArray :=
+def appendBA (acc : ByteArray) (bs : ByteArray) : ByteArray :=
   bs.foldl (init := acc) fun a b => a.push b
 
-private def emitDispatchChainFast : ByteArray → Nat → List StackMethod → ByteArray
+def emitDispatchChainFast : ByteArray → Nat → List StackMethod → ByteArray
   | acc, _, []         => acc
   | acc, i, [m]        =>
     let acc1 := appendBA acc (emitDispatchHeadLast i)
@@ -398,7 +398,7 @@ private def emitDispatchChainFast : ByteArray → Nat → List StackMethod → B
     let acc3 := acc2.push 0x67  -- OP_ELSE
     emitDispatchChainFast acc3 (i + 1) rest
 
-private def emitEndifsFastAux : ByteArray → Nat → ByteArray
+def emitEndifsFastAux : ByteArray → Nat → ByteArray
   | acc, 0     => acc
   | acc, n + 1 => emitEndifsFastAux (acc.push 0x68) n
 

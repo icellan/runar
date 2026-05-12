@@ -9294,6 +9294,7 @@ private def chainFoldOp : StackOp → StackOp
         | none   => none
       .ifOp thn' els'
   | other => other
+termination_by op => sizeOf op
 
 /-- Tail-recursive list traversal: walks `ops` and prepends
 `chainFoldOp op` to `acc`. Returns the accumulator in REVERSE order — the
@@ -9303,6 +9304,7 @@ private def chainFoldListTRgo : List StackOp → List StackOp →
     List StackOp
   | [],         acc => acc.reverse
   | op :: rest, acc => chainFoldListTRgo rest (chainFoldOp op :: acc)
+termination_by ops _ => sizeOf ops
 
 end
 
@@ -9789,6 +9791,926 @@ level**: the caller supplies a single quantified preserving hypothesis
 the sub-soundness obligation. Concretely, we prove the soundness shape
 that's directly usable for `peepholeProgram_sound` on top of standard
 WT preconditions. -/
+
+/-! ## Tier 3.2.b — chainFold operational soundness
+
+The 4-op chain-fold rules `[push a, OP_ADD, push b, OP_ADD] →
+[push (a+b), OP_ADD]` (resp. `OP_SUB`) are operationally sound under the
+existing `wellTypedRun` precondition. The key insight: the FIRST OP_ADD
+in the firing window requires `.twoInts` on the post-push stack, which
+forces the underlying stack to start with `.vBigint`. From that, the
+arithmetic identity `(x + a) + b = x + (a + b)` (resp. `(x - a) - b
+= x - (a + b)`) closes the operational equality.
+
+This section ports Tier 3.2.b from the chainFold post-pass spec:
+
+* atom-level `pushAddPushAdd_extends_int` / `pushAddPushSub_extends_int`
+* list-level `applyPushAddPushAdd_runOps_eq` / `applyPushAddPushSub_runOps_eq`
+* preservation `applyPushAddPushAdd_preserves_wellTypedRun` /
+  `applyPushAddPushSub_preserves_wellTypedRun`
+* preservation `applyPushAddPushAdd_preserves_noIfOp` /
+  `applyPushAddPushSub_preserves_noIfOp`
+
+The fixpoint (`chainFoldFixpointFlat`) and top-level
+(`peepholeChainFold`) compositions are documented at the end of this
+section.
+-/
+
+/-- Atom-level extension under int-stack precondition: `[push a, OP_ADD,
+push b, OP_ADD] :: rest` reduces to `[push (a+b), OP_ADD] :: rest`.
+Arithmetic: `(x + a) + b = x + (a + b)`. -/
+private theorem pushAddPushAdd_extends_int
+    (s : StackState) (a b x : Int) (rest_stack : List ANF.Eval.Value)
+    (rest : List StackOp)
+    (hs : s.stack = .vBigint x :: rest_stack) :
+    runOps (.push (.bigint a) :: .opcode "OP_ADD" ::
+            .push (.bigint b) :: .opcode "OP_ADD" :: rest) s
+    = runOps (.push (.bigint (a + b)) :: .opcode "OP_ADD" :: rest) s := by
+  rw [runOps_cons_push_eq, stepNonIf_push_bigint]
+  show runOps (.opcode "OP_ADD" :: .push (.bigint b) :: .opcode "OP_ADD" :: rest)
+                (s.push (.vBigint a))
+       = runOps (.push (.bigint (a + b)) :: .opcode "OP_ADD" :: rest) s
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode]
+  have hStack1 : (s.push (.vBigint a)).stack = .vBigint a :: .vBigint x :: rest_stack := by
+    unfold StackState.push; simp [hs]
+  rw [runOpcode_add_int_concrete (s.push (.vBigint a)) x a rest_stack hStack1]
+  show runOps (.push (.bigint b) :: .opcode "OP_ADD" :: rest)
+                (({ s.push (.vBigint a) with stack := rest_stack } :
+                  StackState).push (.vBigint (x + a)))
+       = runOps (.push (.bigint (a + b)) :: .opcode "OP_ADD" :: rest) s
+  rw [runOps_cons_push_eq, stepNonIf_push_bigint]
+  show runOps (.opcode "OP_ADD" :: rest)
+         ((({ s.push (.vBigint a) with stack := rest_stack } :
+            StackState).push (.vBigint (x + a))).push (.vBigint b))
+       = runOps (.push (.bigint (a + b)) :: .opcode "OP_ADD" :: rest) s
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode]
+  let s1 : StackState := { s.push (.vBigint a) with stack := rest_stack }
+  let s2 : StackState := s1.push (.vBigint (x + a))
+  let s3 : StackState := s2.push (.vBigint b)
+  have hs3stack : s3.stack = .vBigint b :: .vBigint (x + a) :: rest_stack := by
+    show (s2.push (.vBigint b)).stack = _
+    unfold StackState.push
+    show .vBigint b :: s2.stack = _
+    show .vBigint b :: (s1.push (.vBigint (x + a))).stack = _
+    unfold StackState.push
+    show .vBigint b :: .vBigint (x + a) :: s1.stack = _
+    rfl
+  rw [runOpcode_add_int_concrete s3 (x + a) b rest_stack hs3stack]
+  rw [runOps_cons_push_eq, stepNonIf_push_bigint]
+  show runOps rest (({ s3 with stack := rest_stack } : StackState).push (.vBigint ((x + a) + b)))
+       = runOps (.opcode "OP_ADD" :: rest) (s.push (.vBigint (a + b)))
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode]
+  have hStack2 : (s.push (.vBigint (a + b))).stack
+               = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+    unfold StackState.push; simp [hs]
+  rw [runOpcode_add_int_concrete (s.push (.vBigint (a + b))) x (a + b) rest_stack hStack2]
+  show runOps rest (({ s3 with stack := rest_stack } : StackState).push (.vBigint ((x + a) + b)))
+       = runOps rest (({ s.push (.vBigint (a + b)) with stack := rest_stack } :
+                       StackState).push (.vBigint (x + (a + b))))
+  congr 1
+  cases s with
+  | mk stack altstack outputs props preimage =>
+      simp_all [s3, s2, s1, StackState.push]
+      omega
+
+/-- Atom-level extension for SUB chain: `[push a, OP_SUB, push b, OP_SUB] :: rest`
+reduces to `[push (a+b), OP_SUB] :: rest`. Arithmetic: `(x - a) - b = x - (a + b)`. -/
+private theorem pushAddPushSub_extends_int
+    (s : StackState) (a b x : Int) (rest_stack : List ANF.Eval.Value)
+    (rest : List StackOp)
+    (hs : s.stack = .vBigint x :: rest_stack) :
+    runOps (.push (.bigint a) :: .opcode "OP_SUB" ::
+            .push (.bigint b) :: .opcode "OP_SUB" :: rest) s
+    = runOps (.push (.bigint (a + b)) :: .opcode "OP_SUB" :: rest) s := by
+  rw [runOps_cons_push_eq, stepNonIf_push_bigint]
+  show runOps (.opcode "OP_SUB" :: .push (.bigint b) :: .opcode "OP_SUB" :: rest)
+                (s.push (.vBigint a))
+       = runOps (.push (.bigint (a + b)) :: .opcode "OP_SUB" :: rest) s
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode]
+  have hStack1 : (s.push (.vBigint a)).stack = .vBigint a :: .vBigint x :: rest_stack := by
+    unfold StackState.push; simp [hs]
+  rw [runOpcode_sub_int_concrete (s.push (.vBigint a)) x a rest_stack hStack1]
+  show runOps (.push (.bigint b) :: .opcode "OP_SUB" :: rest)
+                (({ s.push (.vBigint a) with stack := rest_stack } :
+                  StackState).push (.vBigint (x - a)))
+       = runOps (.push (.bigint (a + b)) :: .opcode "OP_SUB" :: rest) s
+  rw [runOps_cons_push_eq, stepNonIf_push_bigint]
+  show runOps (.opcode "OP_SUB" :: rest)
+         ((({ s.push (.vBigint a) with stack := rest_stack } :
+            StackState).push (.vBigint (x - a))).push (.vBigint b))
+       = runOps (.push (.bigint (a + b)) :: .opcode "OP_SUB" :: rest) s
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode]
+  let s1 : StackState := { s.push (.vBigint a) with stack := rest_stack }
+  let s2 : StackState := s1.push (.vBigint (x - a))
+  let s3 : StackState := s2.push (.vBigint b)
+  have hs3stack : s3.stack = .vBigint b :: .vBigint (x - a) :: rest_stack := by
+    show (s2.push (.vBigint b)).stack = _
+    unfold StackState.push
+    show .vBigint b :: s2.stack = _
+    show .vBigint b :: (s1.push (.vBigint (x - a))).stack = _
+    unfold StackState.push
+    show .vBigint b :: .vBigint (x - a) :: s1.stack = _
+    rfl
+  rw [runOpcode_sub_int_concrete s3 (x - a) b rest_stack hs3stack]
+  rw [runOps_cons_push_eq, stepNonIf_push_bigint]
+  show runOps rest (({ s3 with stack := rest_stack } : StackState).push (.vBigint ((x - a) - b)))
+       = runOps (.opcode "OP_SUB" :: rest) (s.push (.vBigint (a + b)))
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode]
+  have hStack2 : (s.push (.vBigint (a + b))).stack
+               = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+    unfold StackState.push; simp [hs]
+  rw [runOpcode_sub_int_concrete (s.push (.vBigint (a + b))) x (a + b) rest_stack hStack2]
+  show runOps rest (({ s3 with stack := rest_stack } : StackState).push (.vBigint ((x - a) - b)))
+       = runOps rest (({ s.push (.vBigint (a + b)) with stack := rest_stack } :
+                       StackState).push (.vBigint (x - (a + b))))
+  congr 1
+  cases s with
+  | mk stack altstack outputs props preimage =>
+      simp_all [s3, s2, s1, StackState.push]
+      omega
+
+/-! ### Stack-shape extraction from `wellTypedRun`
+
+In the firing branch, `wellTypedRun (.push (.bigint a) :: .opcode "OP_X" :: ...) s`
+forces `s.stack = .vBigint x :: rest_stack` because the post-push opcode
+requires `.twoInts`. The helper below extracts that shape. -/
+
+/-- Auxiliary: from a proof that `(.vBigint a :: L)` matches `.twoInts` shape, conclude
+`L` starts with `.vBigint`. -/
+private theorem twoInts_match_cons_int
+    (a : Int) (L : List ANF.Eval.Value)
+    (h : (match (.vBigint a :: L : List ANF.Eval.Value) with
+          | .vBigint _ :: .vBigint _ :: _ => True
+          | _ => False)) :
+    ∃ x rest_stack, L = .vBigint x :: rest_stack := by
+  cases L with
+  | nil => exact absurd h (by simp)
+  | cons v rest_stack =>
+    cases v with
+    | vBigint x => exact ⟨x, rest_stack, rfl⟩
+    | vBool _    => exact absurd h (by simp)
+    | vBytes _   => exact absurd h (by simp)
+    | vOpaque _  => exact absurd h (by simp)
+    | vThis      => exact absurd h (by simp)
+
+private theorem twoInts_after_push_bigint
+    (s : StackState) (a : Int)
+    (hPrecond : precondMet .twoInts (s.push (.vBigint a))) :
+    ∃ x rest_stack, s.stack = .vBigint x :: rest_stack := by
+  have hPushedStack : (s.push (.vBigint a)).stack = .vBigint a :: s.stack := by
+    unfold StackState.push; rfl
+  have hUnfold : precondMet .twoInts (s.push (.vBigint a))
+              = (match (s.push (.vBigint a)).stack with
+                 | .vBigint _ :: .vBigint _ :: _ => True
+                 | _ => False) := rfl
+  rw [hUnfold, hPushedStack] at hPrecond
+  exact twoInts_match_cons_int a s.stack hPrecond
+
+private theorem chainFold_extract_int_top
+    (s : StackState) (a : Int) (rest : List StackOp)
+    (hWT : wellTypedRun (.push (.bigint a) :: .opcode "OP_ADD" :: rest) s) :
+    ∃ x rest_stack, s.stack = .vBigint x :: rest_stack := by
+  have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+  have hStepPush : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+    stepNonIf_push_bigint s a
+  have hWell1 : wellTypedRun (.opcode "OP_ADD" :: rest) (s.push (.vBigint a)) :=
+    hCont _ hStepPush
+  have ⟨hPrecond1, _⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+  exact twoInts_after_push_bigint s a hPrecond1
+
+private theorem chainFold_extract_int_top_sub
+    (s : StackState) (a : Int) (rest : List StackOp)
+    (hWT : wellTypedRun (.push (.bigint a) :: .opcode "OP_SUB" :: rest) s) :
+    ∃ x rest_stack, s.stack = .vBigint x :: rest_stack := by
+  have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+  have hStepPush : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+    stepNonIf_push_bigint s a
+  have hWell1 : wellTypedRun (.opcode "OP_SUB" :: rest) (s.push (.vBigint a)) :=
+    hCont _ hStepPush
+  have ⟨hPrecond1, _⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+  exact twoInts_after_push_bigint s a hPrecond1
+
+/-! ### `applyPushAddPush*_cons_no_match` helpers (Lean-level rewrite glue) -/
+
+private theorem applyPushAddPushAdd_cons_no_match
+    (op : StackOp) (rest : List StackOp)
+    (h : ∀ a b rt, op = .push (.bigint a) →
+         rest = .opcode "OP_ADD" :: .push (.bigint b) :: .opcode "OP_ADD" :: rt → False) :
+    applyPushAddPushAdd (op :: rest) = op :: applyPushAddPushAdd rest :=
+  applyPushAddPushAdd.eq_3 op rest h
+
+private theorem applyPushAddPushSub_cons_no_match
+    (op : StackOp) (rest : List StackOp)
+    (h : ∀ a b rt, op = .push (.bigint a) →
+         rest = .opcode "OP_SUB" :: .push (.bigint b) :: .opcode "OP_SUB" :: rt → False) :
+    applyPushAddPushSub (op :: rest) = op :: applyPushAddPushSub rest :=
+  applyPushAddPushSub.eq_3 op rest h
+
+/-! ### List-level operational soundness for the chain-fold rules
+
+Under `noIfOp` + `wellTypedRun`, `applyPushAddPushAdd ops` (resp. `_Sub`)
+preserves `runOps` semantics. Induct on `applyPushAddPushAdd.induct`. -/
+
+theorem applyPushAddPushAdd_runOps_eq :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        runOps (applyPushAddPushAdd ops) s = runOps ops s := by
+  intro ops
+  induction ops using applyPushAddPushAdd.induct with
+  | case1 => intros _ _ _; rfl
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_ADD" ::
+                     .push (.bigint b) :: .opcode "OP_ADD" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    obtain ⟨x, rest_stack, hStack⟩ := chainFold_extract_int_top s a _ hWT
+    rw [show applyPushAddPushAdd
+              (.push (.bigint a) :: .opcode "OP_ADD" ::
+               .push (.bigint b) :: .opcode "OP_ADD" :: rest')
+            = .push (.bigint (a + b)) :: .opcode "OP_ADD" :: applyPushAddPushAdd rest' from rfl]
+    rw [pushAddPushAdd_extends_int s a b x rest_stack rest' hStack]
+    apply runOps_cons_push_cong_typed
+    intro s1 hStep1
+    have hStepPushDef : stepNonIf (.push (.bigint (a + b))) s = .ok (s.push (.vBigint (a + b))) :=
+      stepNonIf_push_bigint s (a + b)
+    have hS1Eq : s1 = s.push (.vBigint (a + b)) := by
+      rw [hStepPushDef] at hStep1
+      exact ((Except.ok.injEq _ _).mp hStep1).symm
+    rw [hS1Eq]
+    apply runOps_cons_opcode_cong_typed
+    intro s2 hStep2
+    have hStackPushed : (s.push (.vBigint (a + b))).stack
+                      = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+      unfold StackState.push; simp [hStack]
+    have hStepAddDef : stepNonIf (.opcode "OP_ADD") (s.push (.vBigint (a + b)))
+                = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b)))) := by
+      rw [stepNonIf_opcode]
+      rw [runOpcode_add_int_concrete _ x (a + b) rest_stack hStackPushed]
+      cases s
+      simp [StackState.push]
+    have hS2Eq : s2 = ({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b))) := by
+      rw [hStepAddDef] at hStep2
+      exact ((Except.ok.injEq _ _).mp hStep2).symm
+    rw [hS2Eq]
+    -- We need wellTypedRun rest' s2.
+    have hWTafter : wellTypedRun rest'
+        (({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b)))) := by
+      have ⟨_, hC0⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+      have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+        stepNonIf_push_bigint s a
+      have hW1 : wellTypedRun (.opcode "OP_ADD" :: .push (.bigint b) :: .opcode "OP_ADD" :: rest')
+                  (s.push (.vBigint a)) := hC0 _ hStepPushA
+      have ⟨_, hC1⟩ := wellTypedRun_cons _ _ _ |>.mp hW1
+      have hPushedA : (s.push (.vBigint a)).stack = .vBigint a :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      have hStepAddA : stepNonIf (.opcode "OP_ADD") (s.push (.vBigint a))
+                  = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_add_int_concrete _ x a rest_stack hPushedA]
+        cases s; simp [StackState.push]
+      have hW2 : wellTypedRun (.push (.bigint b) :: .opcode "OP_ADD" :: rest')
+                  (({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))) :=
+        hC1 _ hStepAddA
+      have ⟨_, hC2⟩ := wellTypedRun_cons _ _ _ |>.mp hW2
+      have hStepPushB : stepNonIf (.push (.bigint b))
+                          (({ s with stack := rest_stack } : StackState).push (.vBigint (x + a)))
+                = .ok ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                        (.vBigint b)) :=
+        stepNonIf_push_bigint _ b
+      have hW3 : wellTypedRun (.opcode "OP_ADD" :: rest')
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                    (.vBigint b)) := hC2 _ hStepPushB
+      have ⟨_, hC3⟩ := wellTypedRun_cons _ _ _ |>.mp hW3
+      have hPushedB : ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                        (.vBigint b)).stack
+                    = .vBigint b :: .vBigint (x + a) :: rest_stack := by
+        unfold StackState.push; simp
+      have hStepAddB : stepNonIf (.opcode "OP_ADD")
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                    (.vBigint b))
+                  = .ok (({ s with stack := rest_stack } : StackState).push
+                          (.vBigint ((x + a) + b))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_add_int_concrete _ (x + a) b rest_stack hPushedB]
+        cases s; simp [StackState.push]
+      have hW4 := hC3 _ hStepAddB
+      -- hW4 : wellTypedRun rest' (({ s with stack := rest_stack }).push (.vBigint ((x + a) + b)))
+      -- Goal:  wellTypedRun rest' (({ s with stack := rest_stack }).push (.vBigint (x + (a + b))))
+      have hAssoc : (x + a) + b = x + (a + b) := by omega
+      rw [hAssoc] at hW4
+      exact hW4
+    exact ih hRestNoIf _ hWTafter
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
+        runOps (applyPushAddPushAdd rest') s' = runOps rest' s' := by
+      intro s' hStep
+      exact ih hRestNoIf s' (hCont s' hStep)
+    match op with
+    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+    | .push v   =>
+        rw [applyPushAddPushAdd_cons_no_match (.push v) rest'
+              (fun a b rt hOp hRest => h_no_match a b rt hOp hRest)]
+        exact runOps_cons_push_cong_typed v _ _ s ihTyped
+    | .dup      => exact runOps_cons_dup_cong_typed _ _ s ihTyped
+    | .swap     => exact runOps_cons_swap_cong_typed _ _ s ihTyped
+    | .drop     => exact runOps_cons_drop_cong_typed _ _ s ihTyped
+    | .nip      => exact runOps_cons_nip_cong_typed _ _ s ihTyped
+    | .over     => exact runOps_cons_over_cong_typed _ _ s ihTyped
+    | .rot      => exact runOps_cons_rot_cong_typed _ _ s ihTyped
+    | .tuck     => exact runOps_cons_tuck_cong_typed _ _ s ihTyped
+    | .roll d   => exact runOps_cons_roll_cong_typed d _ _ s ihTyped
+    | .pick d   => exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d => exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
+    | .opcode code  => exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
+    | .placeholder i n => exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
+    | .pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+
+theorem applyPushAddPushSub_runOps_eq :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        runOps (applyPushAddPushSub ops) s = runOps ops s := by
+  intro ops
+  induction ops using applyPushAddPushSub.induct with
+  | case1 => intros _ _ _; rfl
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_SUB" ::
+                     .push (.bigint b) :: .opcode "OP_SUB" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    obtain ⟨x, rest_stack, hStack⟩ := chainFold_extract_int_top_sub s a _ hWT
+    rw [show applyPushAddPushSub
+              (.push (.bigint a) :: .opcode "OP_SUB" ::
+               .push (.bigint b) :: .opcode "OP_SUB" :: rest')
+            = .push (.bigint (a + b)) :: .opcode "OP_SUB" :: applyPushAddPushSub rest' from rfl]
+    rw [pushAddPushSub_extends_int s a b x rest_stack rest' hStack]
+    apply runOps_cons_push_cong_typed
+    intro s1 hStep1
+    have hStepPushDef : stepNonIf (.push (.bigint (a + b))) s = .ok (s.push (.vBigint (a + b))) :=
+      stepNonIf_push_bigint s (a + b)
+    have hS1Eq : s1 = s.push (.vBigint (a + b)) := by
+      rw [hStepPushDef] at hStep1
+      exact ((Except.ok.injEq _ _).mp hStep1).symm
+    rw [hS1Eq]
+    apply runOps_cons_opcode_cong_typed
+    intro s2 hStep2
+    have hStackPushed : (s.push (.vBigint (a + b))).stack
+                      = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+      unfold StackState.push; simp [hStack]
+    have hStepSubDef : stepNonIf (.opcode "OP_SUB") (s.push (.vBigint (a + b)))
+                = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b)))) := by
+      rw [stepNonIf_opcode]
+      rw [runOpcode_sub_int_concrete _ x (a + b) rest_stack hStackPushed]
+      cases s
+      simp [StackState.push]
+    have hS2Eq : s2 = ({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b))) := by
+      rw [hStepSubDef] at hStep2
+      exact ((Except.ok.injEq _ _).mp hStep2).symm
+    rw [hS2Eq]
+    have hWTafter : wellTypedRun rest'
+        (({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b)))) := by
+      have ⟨_, hC0⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+      have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+        stepNonIf_push_bigint s a
+      have hW1 : wellTypedRun (.opcode "OP_SUB" :: .push (.bigint b) :: .opcode "OP_SUB" :: rest')
+                  (s.push (.vBigint a)) := hC0 _ hStepPushA
+      have ⟨_, hC1⟩ := wellTypedRun_cons _ _ _ |>.mp hW1
+      have hPushedA : (s.push (.vBigint a)).stack = .vBigint a :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      have hStepSubA : stepNonIf (.opcode "OP_SUB") (s.push (.vBigint a))
+                  = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_sub_int_concrete _ x a rest_stack hPushedA]
+        cases s; simp [StackState.push]
+      have hW2 : wellTypedRun (.push (.bigint b) :: .opcode "OP_SUB" :: rest')
+                  (({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))) :=
+        hC1 _ hStepSubA
+      have ⟨_, hC2⟩ := wellTypedRun_cons _ _ _ |>.mp hW2
+      have hStepPushB : stepNonIf (.push (.bigint b))
+                          (({ s with stack := rest_stack } : StackState).push (.vBigint (x - a)))
+                = .ok ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                        (.vBigint b)) :=
+        stepNonIf_push_bigint _ b
+      have hW3 : wellTypedRun (.opcode "OP_SUB" :: rest')
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                    (.vBigint b)) := hC2 _ hStepPushB
+      have ⟨_, hC3⟩ := wellTypedRun_cons _ _ _ |>.mp hW3
+      have hPushedB : ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                        (.vBigint b)).stack
+                    = .vBigint b :: .vBigint (x - a) :: rest_stack := by
+        unfold StackState.push; simp
+      have hStepSubB : stepNonIf (.opcode "OP_SUB")
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                    (.vBigint b))
+                  = .ok (({ s with stack := rest_stack } : StackState).push
+                          (.vBigint ((x - a) - b))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_sub_int_concrete _ (x - a) b rest_stack hPushedB]
+        cases s; simp [StackState.push]
+      have hW4 := hC3 _ hStepSubB
+      have hSubAssoc : (x - a) - b = x - (a + b) := by omega
+      rw [hSubAssoc] at hW4
+      exact hW4
+    exact ih hRestNoIf _ hWTafter
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
+        runOps (applyPushAddPushSub rest') s' = runOps rest' s' := by
+      intro s' hStep
+      exact ih hRestNoIf s' (hCont s' hStep)
+    match op with
+    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+    | .push v   =>
+        rw [applyPushAddPushSub_cons_no_match (.push v) rest'
+              (fun a b rt hOp hRest => h_no_match a b rt hOp hRest)]
+        exact runOps_cons_push_cong_typed v _ _ s ihTyped
+    | .dup      => exact runOps_cons_dup_cong_typed _ _ s ihTyped
+    | .swap     => exact runOps_cons_swap_cong_typed _ _ s ihTyped
+    | .drop     => exact runOps_cons_drop_cong_typed _ _ s ihTyped
+    | .nip      => exact runOps_cons_nip_cong_typed _ _ s ihTyped
+    | .over     => exact runOps_cons_over_cong_typed _ _ s ihTyped
+    | .rot      => exact runOps_cons_rot_cong_typed _ _ s ihTyped
+    | .tuck     => exact runOps_cons_tuck_cong_typed _ _ s ihTyped
+    | .roll d   => exact runOps_cons_roll_cong_typed d _ _ s ihTyped
+    | .pick d   => exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d => exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
+    | .opcode code  => exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
+    | .placeholder i n => exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
+    | .pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+
+/-! ### `noIfOp` preservation under chain-fold rules. -/
+
+theorem applyPushAddPushAdd_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushAddPushAdd ops) := by
+  intro ops
+  induction ops using applyPushAddPushAdd.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a b rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_ADD" ::
+                     .push (.bigint b) :: .opcode "OP_ADD" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyPushAddPushAdd rest') := ih hRest'
+    show noIfOp (.push (.bigint (a + b)) :: .opcode "OP_ADD" :: applyPushAddPushAdd rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyPushAddPushAdd rest') := ih hRest'
+    have hRewrite :
+        applyPushAddPushAdd (op :: rest')
+        = op :: applyPushAddPushAdd rest' :=
+      applyPushAddPushAdd.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyPushAddPushSub_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushAddPushSub ops) := by
+  intro ops
+  induction ops using applyPushAddPushSub.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a b rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_SUB" ::
+                     .push (.bigint b) :: .opcode "OP_SUB" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyPushAddPushSub rest') := ih hRest'
+    show noIfOp (.push (.bigint (a + b)) :: .opcode "OP_SUB" :: applyPushAddPushSub rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyPushAddPushSub rest') := ih hRest'
+    have hRewrite :
+        applyPushAddPushSub (op :: rest')
+        = op :: applyPushAddPushSub rest' :=
+      applyPushAddPushSub.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+/-! ### `wellTypedRun` preservation under chain-fold rules.
+
+The rule rewrites `[push a, OP_ADD, push b, OP_ADD]` to `[push (a+b),
+OP_ADD]`. Both windows produce the same post-state (`{s with stack :=
+rest_stack}.push (.vBigint (x+a+b))`) when `s.stack = .vBigint x ::
+rest_stack`. So `wellTypedRun rest`-at-post-state lifts trivially. -/
+
+theorem applyPushAddPushAdd_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyPushAddPushAdd ops) s := by
+  intro ops
+  induction ops using applyPushAddPushAdd.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_ADD" ::
+                     .push (.bigint b) :: .opcode "OP_ADD" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    obtain ⟨x, rest_stack, hStack⟩ := chainFold_extract_int_top s a _ hWT
+    -- Compute wellTypedRun rest' at the post-4-op state: ({s with stack := rest_stack}).push (x+(a+b)).
+    have hWTafter : wellTypedRun rest'
+        (({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b)))) := by
+      have ⟨_, hC0⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+      have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+        stepNonIf_push_bigint s a
+      have hW1 : wellTypedRun (.opcode "OP_ADD" :: .push (.bigint b) :: .opcode "OP_ADD" :: rest')
+                  (s.push (.vBigint a)) := hC0 _ hStepPushA
+      have ⟨_, hC1⟩ := wellTypedRun_cons _ _ _ |>.mp hW1
+      have hPushedA : (s.push (.vBigint a)).stack = .vBigint a :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      have hStepAddA : stepNonIf (.opcode "OP_ADD") (s.push (.vBigint a))
+                  = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_add_int_concrete _ x a rest_stack hPushedA]
+        cases s; simp [StackState.push]
+      have hW2 : wellTypedRun (.push (.bigint b) :: .opcode "OP_ADD" :: rest')
+                  (({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))) :=
+        hC1 _ hStepAddA
+      have ⟨_, hC2⟩ := wellTypedRun_cons _ _ _ |>.mp hW2
+      have hStepPushB : stepNonIf (.push (.bigint b))
+                          (({ s with stack := rest_stack } : StackState).push (.vBigint (x + a)))
+                = .ok ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                        (.vBigint b)) :=
+        stepNonIf_push_bigint _ b
+      have hW3 : wellTypedRun (.opcode "OP_ADD" :: rest')
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                    (.vBigint b)) := hC2 _ hStepPushB
+      have ⟨_, hC3⟩ := wellTypedRun_cons _ _ _ |>.mp hW3
+      have hPushedB : ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                        (.vBigint b)).stack
+                    = .vBigint b :: .vBigint (x + a) :: rest_stack := by
+        unfold StackState.push; simp
+      have hStepAddB : stepNonIf (.opcode "OP_ADD")
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x + a))).push
+                    (.vBigint b))
+                  = .ok (({ s with stack := rest_stack } : StackState).push
+                          (.vBigint ((x + a) + b))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_add_int_concrete _ (x + a) b rest_stack hPushedB]
+        cases s; simp [StackState.push]
+      have hW4 := hC3 _ hStepAddB
+      have hAssoc : (x + a) + b = x + (a + b) := by omega
+      rw [hAssoc] at hW4
+      exact hW4
+    -- Recursively apply IH to get wellTypedRun (applyPushAddPushAdd rest') at the same state.
+    have ihRes : wellTypedRun (applyPushAddPushAdd rest')
+                  (({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b)))) :=
+      ih hRestNoIf _ hWTafter
+    -- Show the goal: wellTypedRun (.push (a+b) :: .opcode "OP_ADD" :: applyPushAddPushAdd rest') s.
+    show wellTypedRun (.push (.bigint (a + b)) :: .opcode "OP_ADD" :: applyPushAddPushAdd rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · exact True.intro  -- precondMet .none
+    intro s' hStepPush
+    have hStepDef : stepNonIf (.push (.bigint (a + b))) s = .ok (s.push (.vBigint (a + b))) :=
+      stepNonIf_push_bigint s (a + b)
+    have hSEq : s' = s.push (.vBigint (a + b)) := by
+      rw [hStepDef] at hStepPush
+      exact ((Except.ok.injEq _ _).mp hStepPush).symm
+    rw [hSEq]
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · -- precondMet (.twoInts) (s.push (.vBigint (a+b))). The post-push stack is
+      -- .vBigint (a+b) :: s.stack = .vBigint (a+b) :: .vBigint x :: rest_stack.
+      have hPushed : (s.push (.vBigint (a + b))).stack
+                   = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      show precondMet (opPrecondition (.opcode "OP_ADD")) (s.push (.vBigint (a + b)))
+      unfold opPrecondition
+      show precondMet .twoInts (s.push (.vBigint (a + b)))
+      have hUnfold : precondMet .twoInts (s.push (.vBigint (a + b)))
+                  = (match (s.push (.vBigint (a + b))).stack with
+                     | .vBigint _ :: .vBigint _ :: _ => True
+                     | _ => False) := rfl
+      rw [hUnfold, hPushed]
+      exact True.intro
+    · intro s'' hStepAdd
+      have hPushed : (s.push (.vBigint (a + b))).stack
+                   = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      have hStepAddDef : stepNonIf (.opcode "OP_ADD") (s.push (.vBigint (a + b)))
+                = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b)))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_add_int_concrete _ x (a + b) rest_stack hPushed]
+        cases s; simp [StackState.push]
+      have hSEq2 : s'' = ({ s with stack := rest_stack } : StackState).push (.vBigint (x + (a + b))) := by
+        rw [hStepAddDef] at hStepAdd
+        exact ((Except.ok.injEq _ _).mp hStepAdd).symm
+      rw [hSEq2]
+      exact ihRes
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyPushAddPushAdd (op :: rest')
+        = op :: applyPushAddPushAdd rest' :=
+      applyPushAddPushAdd.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyPushAddPushAdd rest') s hWT
+      (fun s' _ hWTRest => ih hRestNoIf s' hWTRest)
+
+theorem applyPushAddPushSub_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyPushAddPushSub ops) s := by
+  intro ops
+  induction ops using applyPushAddPushSub.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_SUB" ::
+                     .push (.bigint b) :: .opcode "OP_SUB" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    obtain ⟨x, rest_stack, hStack⟩ := chainFold_extract_int_top_sub s a _ hWT
+    have hWTafter : wellTypedRun rest'
+        (({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b)))) := by
+      have ⟨_, hC0⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+      have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+        stepNonIf_push_bigint s a
+      have hW1 : wellTypedRun (.opcode "OP_SUB" :: .push (.bigint b) :: .opcode "OP_SUB" :: rest')
+                  (s.push (.vBigint a)) := hC0 _ hStepPushA
+      have ⟨_, hC1⟩ := wellTypedRun_cons _ _ _ |>.mp hW1
+      have hPushedA : (s.push (.vBigint a)).stack = .vBigint a :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      have hStepSubA : stepNonIf (.opcode "OP_SUB") (s.push (.vBigint a))
+                  = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_sub_int_concrete _ x a rest_stack hPushedA]
+        cases s; simp [StackState.push]
+      have hW2 : wellTypedRun (.push (.bigint b) :: .opcode "OP_SUB" :: rest')
+                  (({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))) :=
+        hC1 _ hStepSubA
+      have ⟨_, hC2⟩ := wellTypedRun_cons _ _ _ |>.mp hW2
+      have hStepPushB : stepNonIf (.push (.bigint b))
+                          (({ s with stack := rest_stack } : StackState).push (.vBigint (x - a)))
+                = .ok ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                        (.vBigint b)) :=
+        stepNonIf_push_bigint _ b
+      have hW3 : wellTypedRun (.opcode "OP_SUB" :: rest')
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                    (.vBigint b)) := hC2 _ hStepPushB
+      have ⟨_, hC3⟩ := wellTypedRun_cons _ _ _ |>.mp hW3
+      have hPushedB : ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                        (.vBigint b)).stack
+                    = .vBigint b :: .vBigint (x - a) :: rest_stack := by
+        unfold StackState.push; simp
+      have hStepSubB : stepNonIf (.opcode "OP_SUB")
+                  ((({ s with stack := rest_stack } : StackState).push (.vBigint (x - a))).push
+                    (.vBigint b))
+                  = .ok (({ s with stack := rest_stack } : StackState).push
+                          (.vBigint ((x - a) - b))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_sub_int_concrete _ (x - a) b rest_stack hPushedB]
+        cases s; simp [StackState.push]
+      have hW4 := hC3 _ hStepSubB
+      have hSubAssoc : (x - a) - b = x - (a + b) := by omega
+      rw [hSubAssoc] at hW4
+      exact hW4
+    have ihRes : wellTypedRun (applyPushAddPushSub rest')
+                  (({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b)))) :=
+      ih hRestNoIf _ hWTafter
+    show wellTypedRun (.push (.bigint (a + b)) :: .opcode "OP_SUB" :: applyPushAddPushSub rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · exact True.intro
+    intro s' hStepPush
+    have hStepDef : stepNonIf (.push (.bigint (a + b))) s = .ok (s.push (.vBigint (a + b))) :=
+      stepNonIf_push_bigint s (a + b)
+    have hSEq : s' = s.push (.vBigint (a + b)) := by
+      rw [hStepDef] at hStepPush
+      exact ((Except.ok.injEq _ _).mp hStepPush).symm
+    rw [hSEq]
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · have hPushed : (s.push (.vBigint (a + b))).stack
+                   = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      show precondMet (opPrecondition (.opcode "OP_SUB")) (s.push (.vBigint (a + b)))
+      unfold opPrecondition
+      show precondMet .twoInts (s.push (.vBigint (a + b)))
+      have hUnfold : precondMet .twoInts (s.push (.vBigint (a + b)))
+                  = (match (s.push (.vBigint (a + b))).stack with
+                     | .vBigint _ :: .vBigint _ :: _ => True
+                     | _ => False) := rfl
+      rw [hUnfold, hPushed]
+      exact True.intro
+    · intro s'' hStepSub
+      have hPushed : (s.push (.vBigint (a + b))).stack
+                   = .vBigint (a + b) :: .vBigint x :: rest_stack := by
+        unfold StackState.push; simp [hStack]
+      have hStepSubDef : stepNonIf (.opcode "OP_SUB") (s.push (.vBigint (a + b)))
+                = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b)))) := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_sub_int_concrete _ x (a + b) rest_stack hPushed]
+        cases s; simp [StackState.push]
+      have hSEq2 : s'' = ({ s with stack := rest_stack } : StackState).push (.vBigint (x - (a + b))) := by
+        rw [hStepSubDef] at hStepSub
+        exact ((Except.ok.injEq _ _).mp hStepSub).symm
+      rw [hSEq2]
+      exact ihRes
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyPushAddPushSub (op :: rest')
+        = op :: applyPushAddPushSub rest' :=
+      applyPushAddPushSub.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyPushAddPushSub rest') s hWT
+      (fun s' _ hWTRest => ih hRestNoIf s' hWTRest)
+
+/-! ### Fixpoint operational soundness — `chainFoldFixpointFlat`. -/
+
+/-- Induct on fuel. Each iteration applies `applyPushAddPushAdd` then
+`applyPushAddPushSub`, both `_runOps_eq` under `noIfOp + wellTypedRun`.
+Both sub-rules also preserve `noIfOp` and `wellTypedRun`, so the IH at
+the next fuel step applies. -/
+theorem chainFoldFixpointFlat_runOps_eq :
+    ∀ (fuel : Nat) (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        runOps (chainFoldFixpointFlat fuel ops) s = runOps ops s := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro ops _ s _
+    show runOps (chainFoldFixpointFlat 0 ops) s = runOps ops s
+    simp [chainFoldFixpointFlat]
+  | succ k ih =>
+    intro ops hNoIf s hWT
+    show runOps (chainFoldFixpointFlat (k + 1) ops) s = runOps ops s
+    unfold chainFoldFixpointFlat
+    -- Goal: runOps (let next := ...; if next.length = ops.length then ops else chainFoldFixpointFlat k next) s = runOps ops s
+    by_cases hLen : (applyPushAddPushSub (applyPushAddPushAdd ops)).length = ops.length
+    · simp [hLen]
+    · simp [hLen]
+      -- Goal: runOps (chainFoldFixpointFlat k next) s = runOps ops s where next = applyPushAddPushSub (applyPushAddPushAdd ops)
+      -- Strategy: chain rewrites using IH, _Sub_runOps_eq, _Add_runOps_eq.
+      -- First show wellTypedRun and noIfOp for `applyPushAddPushAdd ops` and the next.
+      have hNoIfAdd : noIfOp (applyPushAddPushAdd ops) :=
+        applyPushAddPushAdd_preserves_noIfOp ops hNoIf
+      have hWTAdd : wellTypedRun (applyPushAddPushAdd ops) s :=
+        applyPushAddPushAdd_preserves_wellTypedRun ops hNoIf s hWT
+      have hNoIfSub : noIfOp (applyPushAddPushSub (applyPushAddPushAdd ops)) :=
+        applyPushAddPushSub_preserves_noIfOp _ hNoIfAdd
+      have hWTSub : wellTypedRun (applyPushAddPushSub (applyPushAddPushAdd ops)) s :=
+        applyPushAddPushSub_preserves_wellTypedRun _ hNoIfAdd s hWTAdd
+      -- Apply IH at fuel k on the next list.
+      have hIH := ih (applyPushAddPushSub (applyPushAddPushAdd ops)) hNoIfSub s hWTSub
+      -- Chain: chainFoldFixpointFlat k next preserves runOps from next, which equals
+      -- ops by _Sub then _Add.
+      rw [hIH]
+      rw [applyPushAddPushSub_runOps_eq _ hNoIfAdd s hWTAdd]
+      rw [applyPushAddPushAdd_runOps_eq ops hNoIf s hWT]
+
+theorem chainFoldFixpointFlat_preserves_noIfOp :
+    ∀ (fuel : Nat) (ops : List StackOp), noIfOp ops →
+        noIfOp (chainFoldFixpointFlat fuel ops) := by
+  intro fuel
+  induction fuel with
+  | zero => intro ops h; simpa [chainFoldFixpointFlat] using h
+  | succ k ih =>
+    intro ops h
+    unfold chainFoldFixpointFlat
+    by_cases hLen : (applyPushAddPushSub (applyPushAddPushAdd ops)).length = ops.length
+    · simp [hLen]; exact h
+    · simp [hLen]
+      have hNoIfAdd : noIfOp (applyPushAddPushAdd ops) :=
+        applyPushAddPushAdd_preserves_noIfOp ops h
+      have hNoIfSub : noIfOp (applyPushAddPushSub (applyPushAddPushAdd ops)) :=
+        applyPushAddPushSub_preserves_noIfOp _ hNoIfAdd
+      exact ih _ hNoIfSub
+
+theorem chainFoldFixpointFlat_preserves_wellTypedRun :
+    ∀ (fuel : Nat) (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (chainFoldFixpointFlat fuel ops) s := by
+  intro fuel
+  induction fuel with
+  | zero => intro ops _ s hWT; simpa [chainFoldFixpointFlat] using hWT
+  | succ k ih =>
+    intro ops hNoIf s hWT
+    unfold chainFoldFixpointFlat
+    by_cases hLen : (applyPushAddPushSub (applyPushAddPushAdd ops)).length = ops.length
+    · simp [hLen]; exact hWT
+    · simp [hLen]
+      have hNoIfAdd : noIfOp (applyPushAddPushAdd ops) :=
+        applyPushAddPushAdd_preserves_noIfOp ops hNoIf
+      have hWTAdd : wellTypedRun (applyPushAddPushAdd ops) s :=
+        applyPushAddPushAdd_preserves_wellTypedRun ops hNoIf s hWT
+      have hNoIfSub : noIfOp (applyPushAddPushSub (applyPushAddPushAdd ops)) :=
+        applyPushAddPushSub_preserves_noIfOp _ hNoIfAdd
+      have hWTSub : wellTypedRun (applyPushAddPushSub (applyPushAddPushAdd ops)) s :=
+        applyPushAddPushSub_preserves_wellTypedRun _ hNoIfAdd s hWTAdd
+      exact ih _ hNoIfSub s hWTSub
+
+/-! ### Top-level operational soundness — `peepholeChainFold`.
+
+Under `noIfOp + wellTypedRun`, `chainFoldListTRgo` is the identity:
+since `chainFoldOp` only fires on `.ifOp` constructors and the input
+has none, the tail-recursive walker simply re-orders the accumulator
+into the original list. Then `peepholeChainFold ops = chainFoldFixpointFlat
+64 ops`, and the fixpoint theorem closes the equality. -/
+
+/-- For non-`.ifOp` ops, `chainFoldOp` is the identity. -/
+private theorem chainFoldOp_id_of_not_ifOp (op : StackOp)
+    (h : ∀ thn els, op ≠ .ifOp thn els) :
+    chainFoldOp op = op := by
+  cases op with
+  | ifOp thn els => exact absurd rfl (h thn els)
+  | push v          => unfold chainFoldOp; rfl
+  | dup             => unfold chainFoldOp; rfl
+  | swap            => unfold chainFoldOp; rfl
+  | drop            => unfold chainFoldOp; rfl
+  | nip             => unfold chainFoldOp; rfl
+  | over            => unfold chainFoldOp; rfl
+  | rot             => unfold chainFoldOp; rfl
+  | tuck            => unfold chainFoldOp; rfl
+  | roll d          => unfold chainFoldOp; rfl
+  | pick d          => unfold chainFoldOp; rfl
+  | pickStruct d    => unfold chainFoldOp; rfl
+  | opcode code     => unfold chainFoldOp; rfl
+  | placeholder i n => unfold chainFoldOp; rfl
+  | pushCodesepIndex => unfold chainFoldOp; rfl
+
+/-- `chainFoldListTRgo` is left-fold-then-reverse: under `noIfOp ops`,
+each `chainFoldOp op = op`, so the walker simply prepends ops to acc and
+reverses, yielding `acc.reverse ++ ops`. -/
+private theorem chainFoldListTRgo_eq_of_noIfOp :
+    ∀ (ops : List StackOp) (acc : List StackOp), noIfOp ops →
+        chainFoldListTRgo ops acc = acc.reverse ++ ops := by
+  intro ops
+  induction ops with
+  | nil =>
+    intro acc _
+    show chainFoldListTRgo [] acc = acc.reverse ++ []
+    unfold chainFoldListTRgo
+    simp
+  | cons op rest ih =>
+    intro acc hNoIf
+    have hRest : noIfOp rest := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hOpId : chainFoldOp op = op := by
+      apply chainFoldOp_id_of_not_ifOp
+      intro thn els hEq
+      rw [hEq] at hNoIf
+      exact absurd hNoIf (by simp [noIfOp])
+    show chainFoldListTRgo (op :: rest) acc = acc.reverse ++ (op :: rest)
+    unfold chainFoldListTRgo
+    rw [hOpId]
+    have ihAcc := ih (op :: acc) hRest
+    rw [ihAcc]
+    simp
+
+/-- Specialization: `chainFoldListTRgo ops [] = ops` for `noIfOp ops`. -/
+private theorem chainFoldListTRgo_nil_acc_of_noIfOp
+    (ops : List StackOp) (h : noIfOp ops) :
+    chainFoldListTRgo ops [] = ops := by
+  rw [chainFoldListTRgo_eq_of_noIfOp ops [] h]
+  simp
+
+theorem peepholeChainFold_runOps_eq (ops : List StackOp) (s : StackState)
+    (hNoIf : noIfOp ops) (hWT : wellTypedRun ops s) :
+    runOps (peepholeChainFold ops) s = runOps ops s := by
+  unfold peepholeChainFold
+  rw [chainFoldListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  exact chainFoldFixpointFlat_runOps_eq 64 ops hNoIf s hWT
 
 end Peephole
 end RunarVerification.Stack
