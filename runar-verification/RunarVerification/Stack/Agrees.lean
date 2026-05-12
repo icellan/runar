@@ -4645,6 +4645,343 @@ def lowerMethodUserRawOps
     (m.params.map (fun p => p.name) |>.reverse)
     m.body).1
 
+/-! ### Option 1 — structural/program-aware lowering equality
+
+`lowerBindingsP` is not equal to `lowerBindings` for all SimpleANF:
+the program-aware lowerer intentionally consumes last-use refs, handles
+properties with constructor placeholders, and materializes `@this`.
+The equality bridge is valid for the const-only fragment where no
+liveness or property lookup can fire. This is the reusable base case for
+expanding the bridge one constructor family at a time.
+-/
+
+/-- Constructor fragment where `lowerValueP` and `lowerValue` agree
+definitionally: literal int/bool/bytes loads. -/
+def structuralConstValue : ANFValue → Prop
+  | .loadConst (.int _) => True
+  | .loadConst (.bool _) => True
+  | .loadConst (.bytes _) => True
+  | _ => False
+
+/-- Every binding in the body is in the structural const fragment. -/
+def structuralConstBody : List ANFBinding → Prop
+  | [] => True
+  | (.mk _ v _) :: rest => structuralConstValue v ∧ structuralConstBody rest
+
+/-- On structural literal loads, the program-aware lowerer returns the
+same ops/map as the structural lowerer and leaves `localBindings`
+unchanged. -/
+theorem lowerValueP_eq_lowerValue_structuralConst
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn : String) (v : ANFValue)
+    (h : structuralConstValue v) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bn v
+      = ((Stack.Lower.lowerValue sm bn v).1,
+         (Stack.Lower.lowerValue sm bn v).2,
+         localBindings) := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int _ =>
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          rfl
+      | bool _ =>
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          rfl
+      | bytes _ =>
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          rfl
+      | refAlias _ => simp [structuralConstValue] at h
+      | thisRef => simp [structuralConstValue] at h
+  | loadParam _ => simp [structuralConstValue] at h
+  | loadProp _ => simp [structuralConstValue] at h
+  | binOp _ _ _ _ => simp [structuralConstValue] at h
+  | unaryOp _ _ _ => simp [structuralConstValue] at h
+  | call _ _ => simp [structuralConstValue] at h
+  | methodCall _ _ _ => simp [structuralConstValue] at h
+  | ifVal _ _ _ => simp [structuralConstValue] at h
+  | loop _ _ _ => simp [structuralConstValue] at h
+  | assert _ => simp [structuralConstValue] at h
+  | updateProp _ _ => simp [structuralConstValue] at h
+  | getStateScript => simp [structuralConstValue] at h
+  | checkPreimage _ => simp [structuralConstValue] at h
+  | deserializeState _ => simp [structuralConstValue] at h
+  | addOutput _ _ _ => simp [structuralConstValue] at h
+  | addRawOutput _ _ => simp [structuralConstValue] at h
+  | addDataOutput _ _ => simp [structuralConstValue] at h
+  | arrayLiteral _ => simp [structuralConstValue] at h
+
+/-- Option 1 bridge: for const-only bodies, `lowerBindingsP` and
+`lowerBindings` produce the same op list and final stack map. -/
+theorem lowerBindingsP_eq_lowerBindings_structuralConst
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralConstBody body →
+      Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm body
+        = Stack.Lower.lowerBindings sm body
+  | [], _sm, _currentIndex, _h => by
+      simp [Stack.Lower.lowerBindingsP, Stack.Lower.lowerBindings]
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp [structuralConstBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hValue :=
+        lowerValueP_eq_lowerValue_structuralConst
+          progMethods props budget currentIndex lastUses outerProtected
+          localBindings constInts sm name v hHead
+      have hTail :=
+        lowerBindingsP_eq_lowerBindings_structuralConst
+          progMethods props budget lastUses outerProtected localBindings constInts
+          rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1) hRest
+      simp [Stack.Lower.lowerBindingsP, Stack.Lower.lowerBindings, hValue, hTail]
+
+/-- Method-shaped specialization of option 1 for the raw body ops exposed
+by `lowerMethodUserRawOps`. -/
+theorem lowerMethodUserRawOps_eq_lowerBindings_structuralConst
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hConst : structuralConstBody m.body) :
+    lowerMethodUserRawOps progMethods props m =
+      (Stack.Lower.lowerBindings
+        (m.params.map (fun p => p.name) |>.reverse) m.body).1 := by
+  unfold lowerMethodUserRawOps
+  rw [lowerBindingsP_eq_lowerBindings_structuralConst
+        progMethods props Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts m.body)
+        m.body (m.params.map (fun p => p.name) |>.reverse) 0 hConst]
+
+/-! ### Option 2 — ChainRel witnesses through `lowerBindingsP`
+
+The const-only option-1 equality lets the existing structural Stage C
+witnesses run through the actual program-aware lowerer without adding
+new assumptions.
+-/
+
+/-- If the structural lowerer produces a Stage C runtime state for a
+const-only body, the program-aware lowerer produces the same state. -/
+theorem stageC_lowerBindingsP_structuralConst_witness
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap)
+    (initialStack stkFinal : StackState)
+    (hConst : structuralConstBody body)
+    (hRunStructural :
+      runOps (Stack.Lower.lowerBindings sm body).1 initialStack = .ok stkFinal) :
+    runOps
+        (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm body).1
+        initialStack = .ok stkFinal := by
+  rw [lowerBindingsP_eq_lowerBindings_structuralConst
+        progMethods props budget lastUses outerProtected localBindings constInts
+        body sm currentIndex hConst]
+  exact hRunStructural
+
+/-! ### Option 1 extension — copied reference loads
+
+The next equality fragment covers literal loads plus reference loads that
+the liveness-aware lowerer explicitly copies instead of consuming. This
+is the common "proof-facing" subset: the program-aware lowerer may still
+choose `ROLL` / `SWAP` / `ROT` in last-use positions, but those consume
+cases are intentionally excluded here because they are not structurally
+equal to `lowerBindings`.
+-/
+
+/-- Copy-mode `bringToTop` is exactly structural `loadRef` plus a copied
+name on top, provided the reference exists in the stack map. -/
+theorem bringToTop_copy_eq_loadRef_of_depth
+    (sm : StackMap) (name : String) (d : Nat)
+    (hDepth : sm.depth? name = some d) :
+    Stack.Lower.bringToTop sm name false =
+      (Stack.Lower.loadRef sm name, sm.push name) := by
+  unfold Stack.Lower.bringToTop Stack.Lower.loadRef
+  rw [hDepth]
+  cases d with
+  | zero => rfl
+  | succ d1 =>
+      cases d1 with
+      | zero => rfl
+      | succ d2 =>
+          cases d2 with
+          | zero => rfl
+          | succ _ => rfl
+
+/-- Values for which `lowerValueP` agrees with `lowerValue`: literals and
+reference loads whose liveness decision is copy-mode. -/
+def structuralCopyValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Prop
+  | .loadConst (.int _) => True
+  | .loadConst (.bool _) => True
+  | .loadConst (.bytes _) => True
+  | .loadParam n =>
+      (∃ d, sm.depth? n = some d) ∧
+      (!Stack.Lower.listContains outerProtected n
+        && Stack.Lower.isLastUse lastUses n currentIndex) = false
+  | .loadProp n =>
+      ∃ d, sm.depth? n = some d
+  | .loadConst (.refAlias n) =>
+      (∃ d, sm.depth? n = some d) ∧
+      (Stack.Lower.listContains localBindings n
+        && !Stack.Lower.listContains outerProtected n
+        && Stack.Lower.isLastUse lastUses n currentIndex) = false
+  | _ => False
+
+/-- Body-level copy fragment, threading the same structural stack map that
+`lowerBindings` uses. -/
+def structuralCopyBody
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralCopyValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralCopyBody lastUses outerProtected localBindings rest
+        (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)
+
+/-- One-step equality for the copied-reference fragment. -/
+theorem lowerValueP_eq_lowerValue_structuralCopy
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn : String) (v : ANFValue)
+    (h : structuralCopyValue lastUses outerProtected localBindings sm currentIndex v) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bn v
+      = ((Stack.Lower.lowerValue sm bn v).1,
+         (Stack.Lower.lowerValue sm bn v).2,
+         localBindings) := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int _ =>
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          rfl
+      | bool _ =>
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          rfl
+      | bytes _ =>
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          rfl
+      | refAlias n =>
+          unfold structuralCopyValue at h
+          obtain ⟨⟨d, hDepth⟩, hNoConsume⟩ := h
+          unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue
+          simp [hDepth, hNoConsume,
+            bringToTop_copy_eq_loadRef_of_depth sm n d hDepth,
+            Stack.Lower.StackMap.push]
+      | thisRef => simp [structuralCopyValue] at h
+  | loadParam n =>
+      unfold structuralCopyValue at h
+      obtain ⟨⟨d, hDepth⟩, hNoConsume⟩ := h
+      unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue Stack.Lower.loadRefLiveParam
+      simp [hNoConsume,
+        bringToTop_copy_eq_loadRef_of_depth sm n d hDepth,
+        Stack.Lower.StackMap.push]
+  | loadProp n =>
+      unfold structuralCopyValue at h
+      obtain ⟨d, hDepth⟩ := h
+      unfold Stack.Lower.lowerValueP Stack.Lower.lowerValue Stack.Lower.loadRefLiveCopy
+      simp [hDepth,
+        bringToTop_copy_eq_loadRef_of_depth sm n d hDepth,
+        Stack.Lower.StackMap.push]
+  | binOp _ _ _ _ => simp [structuralCopyValue] at h
+  | unaryOp _ _ _ => simp [structuralCopyValue] at h
+  | call _ _ => simp [structuralCopyValue] at h
+  | methodCall _ _ _ => simp [structuralCopyValue] at h
+  | ifVal _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ => simp [structuralCopyValue] at h
+  | assert _ => simp [structuralCopyValue] at h
+  | updateProp _ _ => simp [structuralCopyValue] at h
+  | getStateScript => simp [structuralCopyValue] at h
+  | checkPreimage _ => simp [structuralCopyValue] at h
+  | deserializeState _ => simp [structuralCopyValue] at h
+  | addOutput _ _ _ => simp [structuralCopyValue] at h
+  | addRawOutput _ _ => simp [structuralCopyValue] at h
+  | addDataOutput _ _ => simp [structuralCopyValue] at h
+  | arrayLiteral _ => simp [structuralCopyValue] at h
+
+/-- Option 1 extension: on copied-reference bodies, `lowerBindingsP`
+matches structural `lowerBindings`. -/
+theorem lowerBindingsP_eq_lowerBindings_structuralCopy
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralCopyBody lastUses outerProtected localBindings body sm currentIndex →
+      Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm body
+        = Stack.Lower.lowerBindings sm body
+  | [], _sm, _currentIndex, _h => by
+      simp [Stack.Lower.lowerBindingsP, Stack.Lower.lowerBindings]
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp [structuralCopyBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hValue :=
+        lowerValueP_eq_lowerValue_structuralCopy
+          progMethods props budget currentIndex lastUses outerProtected
+          localBindings constInts sm name v hHead
+      have hTail :=
+        lowerBindingsP_eq_lowerBindings_structuralCopy
+          progMethods props budget lastUses outerProtected localBindings constInts
+          rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1) hRest
+      simp [Stack.Lower.lowerBindingsP, Stack.Lower.lowerBindings, hValue, hTail]
+
+/-- Method-shaped specialization of the copied-reference option-1 bridge. -/
+theorem lowerMethodUserRawOps_eq_lowerBindings_structuralCopy
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hCopy :
+      structuralCopyBody (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name)) m.body
+        (m.params.map (fun p => p.name) |>.reverse) 0) :
+    lowerMethodUserRawOps progMethods props m =
+      (Stack.Lower.lowerBindings
+        (m.params.map (fun p => p.name) |>.reverse) m.body).1 := by
+  unfold lowerMethodUserRawOps
+  rw [lowerBindingsP_eq_lowerBindings_structuralCopy
+        progMethods props Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts m.body)
+        m.body (m.params.map (fun p => p.name) |>.reverse) 0 hCopy]
+
+/-- Option 2 extension: structural execution witnesses also run through
+`lowerBindingsP` on copied-reference bodies. -/
+theorem stageC_lowerBindingsP_structuralCopy_witness
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap)
+    (initialStack stkFinal : StackState)
+    (hCopy : structuralCopyBody lastUses outerProtected localBindings body sm currentIndex)
+    (hRunStructural :
+      runOps (Stack.Lower.lowerBindings sm body).1 initialStack = .ok stkFinal) :
+    runOps
+        (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm body).1
+        initialStack = .ok stkFinal := by
+  rw [lowerBindingsP_eq_lowerBindings_structuralCopy
+        progMethods props budget lastUses outerProtected localBindings constInts
+        body sm currentIndex hCopy]
+  exact hRunStructural
+
 /-- If a method needs no implicit preimage/code-part entries and neither
 terminal-assert elision nor deserialize-state cleanup can fire, its
 `lowerMethod` ops are exactly the raw liveness-aware lowered body ops. -/
@@ -4730,6 +5067,87 @@ theorem stageD_public_head_no_post_bridge
     exact hRunRaw
   · exact stageD_simpleANF_outputs_preserved
       m.body tsm tsm' initialAnf anfFinal initialStack stkFinal hChain hAgrees
+
+/-- Method-level option-2 bridge for public head methods in the
+no-implicit/no-postprocessing const-only fragment. This removes the raw
+`lowerMethodUserRawOps` execution premise by reusing the structural
+`lowerBindings` execution witness. -/
+theorem stageD_public_head_no_post_structuralConst_bridge
+    (contractName : String) (props : List ANFProperty)
+    (m : ANFMethod) (rest : List ANFMethod)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkFinal : StackState)
+    (hPublic : m.isPublic = true)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hConst : structuralConstBody m.body)
+    (hRunStructural :
+      runOps
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1
+        initialStack = .ok stkFinal)
+    (hChain :
+      ChainRel simpleStepRel m.body tsm initialAnf initialStack tsm' anfFinal stkFinal)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := m :: rest })
+        m.name initialStack = .ok stkFinal
+    ∧ anfFinal.props = stkFinal.props
+    ∧ anfFinal.outputs = stkFinal.outputs := by
+  apply stageD_public_head_no_post_bridge
+    contractName props m rest tsm tsm' initialAnf anfFinal initialStack stkFinal
+    hPublic hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize
+  · rw [lowerMethodUserRawOps_eq_lowerBindings_structuralConst
+        (m :: rest) props m hConst]
+    exact hRunStructural
+  · exact hChain
+  · exact hAgrees
+
+/-- Method-level option-2 extension for public head methods in the
+no-implicit/no-postprocessing copied-reference fragment. This generalizes
+the const-only bridge to include load-param/load-prop/ref-alias bodies
+whose references remain in copy mode. -/
+theorem stageD_public_head_no_post_structuralCopy_bridge
+    (contractName : String) (props : List ANFProperty)
+    (m : ANFMethod) (rest : List ANFMethod)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkFinal : StackState)
+    (hPublic : m.isPublic = true)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hCopy :
+      structuralCopyBody (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name)) m.body
+        (m.params.map (fun p => p.name) |>.reverse) 0)
+    (hRunStructural :
+      runOps
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1
+        initialStack = .ok stkFinal)
+    (hChain :
+      ChainRel simpleStepRel m.body tsm initialAnf initialStack tsm' anfFinal stkFinal)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := m :: rest })
+        m.name initialStack = .ok stkFinal
+    ∧ anfFinal.props = stkFinal.props
+    ∧ anfFinal.outputs = stkFinal.outputs := by
+  apply stageD_public_head_no_post_bridge
+    contractName props m rest tsm tsm' initialAnf anfFinal initialStack stkFinal
+    hPublic hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize
+  · rw [lowerMethodUserRawOps_eq_lowerBindings_structuralCopy
+        (m :: rest) props m hCopy]
+    exact hRunStructural
+  · exact hChain
+  · exact hAgrees
 
 /-- Terminal-assert elision activates iff the method is public,
 the body's last binding is `.assert _`, AND the lowered body's
