@@ -16,7 +16,8 @@ remaining active proof obligations live in `Pipeline.lean`,
 * No `sorry`, no `admit`, and no `partial def` under
   `RunarVerification/`.
 * `scripts/lean-verify.sh` builds every tracked Lean module, not only
-  the default import closure.
+  the default import closure. It is the local gate for keeping proof
+  modules from rotting outside the import graph.
 * `goldenLoad` and `roundtrip` cover 49/49 conformance fixtures.
 * Default `pipelineGolden` is honest: 34/49 live byte-exact fixtures.
 * The remaining 15 fixtures are the crypto-heavy pending-assumption
@@ -24,6 +25,13 @@ remaining active proof obligations live in `Pipeline.lean`,
   constants before they can count in default CI.
 * `Pipeline.compileSafe` is the proof-facing compiler entrypoint and
   rejects sentinel or unknown opcodes before byte emission.
+* `Stack.Agrees` now has method-level bridge lemmas from binding-list
+  execution witnesses to public-head `Lower.lower` results for the
+  no-implicit/no-postprocessing fragments proved so far.
+* `lowerBindingsP = lowerBindings` is proved for the const-only
+  fragment and for copied reference loads (`loadParam`, stack-backed
+  `loadProp`, and copied `loadConst .refAlias`) under explicit copy-mode
+  hypotheses.
 
 ## Finish Order
 
@@ -60,9 +68,18 @@ remaining active proof obligations live in `Pipeline.lean`,
      peephole abstractions.
 
 2. **Lowering simulation**
-   * Finish the bridge from binding-level `Stack.Agrees` results to
-     method-level `Lower.lower`.
-   * Prove lowering simulation for all supported ANF constructors.
+   * Extend the current public-head method bridge beyond the proved
+     const-only and copied-reference fragments.
+   * Handle consume-mode liveness directly. Structural equality with
+     `lowerBindings` is false by design once `ROLL`, `SWAP`, or `ROT`
+     consumes tracked slots, so the next proofs should produce execution
+     witnesses for those cases instead of trying to reuse copy-mode
+     equality lemmas.
+   * Generalize the method bridge from public-head lookup to any public
+     method selected by name, with the needed uniqueness condition.
+   * Prove lowering simulation for the remaining supported ANF
+     constructors, especially unary, binary, assert, and consuming
+     reference-load cases.
    * Thread the slot-aware emit result through the final deployed-byte
      theorem, using the checked branch-sensitive code-separator patching
      relation.
