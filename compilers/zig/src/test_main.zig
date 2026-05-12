@@ -37,4 +37,6 @@ test {
     _ = @import("passes/helpers/merkle_emitters.zig");
     _ = @import("passes/helpers/babybear_emitters.zig");
     _ = @import("passes/helpers/stateful_templates.zig");
+    // CLI flag plumbing tests for --parse-only (GAP-015).
+    _ = @import("main.zig");
 }

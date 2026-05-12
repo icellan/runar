@@ -337,3 +337,157 @@ test "addDataOutput without state mutation still emits continuation hash" {
     try std.testing.expect(std.mem.indexOf(u8, json, "_changeAmount") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "_newAmount") != null);
 }
+
+// ---------------------------------------------------------------------------
+// Rabin signature codegen — end-to-end source -> hex pin
+// ---------------------------------------------------------------------------
+//
+// GAP-040 (audits/cross-language-completeness-20260510.md, Section 4 / F14):
+// The Zig Rabin emitter (`compilers/zig/src/passes/helpers/crypto_emitters.zig
+// :appendVerifyRabinSig`) had only a low-level instruction-list unit test
+// (line 191: "implemented crypto emitters append instructions"); there was
+// no test exercising the full source -> parse -> validate -> typecheck ->
+// ANF -> stack-lower -> emit pipeline for `verifyRabinSig`. The conformance
+// fixture `oracle-price` hits this path transitively, but a regression
+// in Zig stack-lower's dispatch (`stack_lower.zig:1465`) or in the
+// crypto-emitter dispatch (`stack_lower.zig:1580`) would only surface as a
+// hex divergence in the cross-tier conformance step rather than as a
+// targeted failure inside `zig build test`.
+//
+// The reference Rabin opcode sequence (mirrored across all 7 compilers):
+//   OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+// = bytes 7c 7b 76 95 93 7c 97 7c a8 87 (all single-byte opcodes).
+
+test "verifyRabinSig end-to-end source compiles and emits Rabin opcode sequence" {
+    // Minimal stateless contract that calls verifyRabinSig directly.
+    // Mirrors the structure of `examples/zig/oracle-price/OraclePriceFeed.runar.zig`
+    // but without the surrounding price + checkSig wiring so the assertions
+    // below isolate the Rabin opcode pattern. Stateless to avoid the
+    // checkPreimage continuation injection masking the Rabin tail.
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const RabinOnly = struct {
+        \\    pub const Contract = runar.SmartContract;
+        \\
+        \\    pubKey: runar.RabinPubKey,
+        \\
+        \\    pub fn init(pubKey: runar.RabinPubKey) RabinOnly {
+        \\        return .{ .pubKey = pubKey };
+        \\    }
+        \\
+        \\    pub fn unlock(
+        \\        self: *const RabinOnly,
+        \\        msg: runar.ByteString,
+        \\        sig: runar.RabinSig,
+        \\        padding: runar.ByteString,
+        \\    ) void {
+        \\        runar.assert(runar.verifyRabinSig(msg, sig, padding, self.pubKey));
+        \\    }
+        \\};
+    ;
+
+    const hex = try compileSourceToHex(std.testing.allocator, source, "RabinOnly.runar.zig");
+    defer std.testing.allocator.free(hex);
+
+    // 1. Hex must be non-empty.
+    try std.testing.expect(hex.len > 0);
+
+    // 2. The Rabin verifier emits 10 single-byte opcodes. Each must appear
+    //    at least once in the script. Use byte-aligned hex matching to avoid
+    //    spurious matches inside push-data payloads.
+    //    Reference (crypto_emitters.zig:67-78):
+    //      OP_SWAP=7c OP_ROT=7b OP_DUP=76 OP_MUL=95 OP_ADD=93
+    //      OP_SWAP=7c OP_MOD=97 OP_SWAP=7c OP_SHA256=a8 OP_EQUAL=87
+    //    OP_SWAP and OP_ADD also appear naturally elsewhere in stateless-contract
+    //    boilerplate; we therefore pin only the Rabin-specific pair (OP_MUL,
+    //    OP_MOD) plus the closing OP_SHA256/OP_EQUAL to disambiguate.
+    try std.testing.expect(hexContainsOpcode(hex, "95")); // OP_MUL — Rabin sig^2
+    try std.testing.expect(hexContainsOpcode(hex, "97")); // OP_MOD — sig^2 mod n
+    try std.testing.expect(hexContainsOpcode(hex, "a8")); // OP_SHA256 — hash(msg)
+    try std.testing.expect(hexContainsOpcode(hex, "87")); // OP_EQUAL — final check
+}
+
+test "verifyRabinSig hex contains contiguous Rabin opcode subsequence" {
+    // Stronger pin: assert the EXACT 10-byte Rabin opcode subsequence
+    // appears contiguously in the emitted hex. The expected substring is
+    // the byte concatenation of:
+    //   SWAP=7c ROT=7b DUP=76 MUL=95 ADD=93 SWAP=7c MOD=97 SWAP=7c
+    //   SHA256=a8 EQUAL=87
+    // = "7c7b76959 37c977ca887" -- but note we must pre-compute the contiguous
+    // string without spaces. This guards against opcode reordering inside the
+    // Rabin emitter that would still satisfy the per-opcode count check above
+    // but produce a non-conforming hex relative to the other 6 compilers.
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const RabinOnly = struct {
+        \\    pub const Contract = runar.SmartContract;
+        \\
+        \\    pubKey: runar.RabinPubKey,
+        \\
+        \\    pub fn init(pubKey: runar.RabinPubKey) RabinOnly {
+        \\        return .{ .pubKey = pubKey };
+        \\    }
+        \\
+        \\    pub fn unlock(
+        \\        self: *const RabinOnly,
+        \\        msg: runar.ByteString,
+        \\        sig: runar.RabinSig,
+        \\        padding: runar.ByteString,
+        \\    ) void {
+        \\        runar.assert(runar.verifyRabinSig(msg, sig, padding, self.pubKey));
+        \\    }
+        \\};
+    ;
+
+    const hex = try compileSourceToHex(std.testing.allocator, source, "RabinOnly.runar.zig");
+    defer std.testing.allocator.free(hex);
+
+    // Contiguous Rabin opcode subsequence (10 single-byte opcodes, 20 hex chars).
+    const rabin_subseq = "7c7b769593" ++ "7c977ca887";
+    const found = std.mem.indexOf(u8, hex, rabin_subseq);
+    if (found == null) {
+        std.debug.print(
+            "Rabin opcode subsequence {s} not found in script hex.\nFull hex:\n{s}\n",
+            .{ rabin_subseq, hex },
+        );
+    }
+    try std.testing.expect(found != null);
+}
+
+test "verifyRabinSig appendVerifyRabinSig emits exactly 10 opcodes" {
+    // Direct emitter pin: the appendVerifyRabinSig builder helper must
+    // emit exactly 10 instructions (matching the cross-tier reference).
+    // Complements the existing crypto_emitters.zig:191 test ("implemented
+    // crypto emitters append instructions") by pinning the exact count
+    // rather than just non-emptiness.
+    const crypto_emitters = @import("passes/helpers/crypto_emitters.zig");
+    const registry = @import("passes/helpers/crypto_builtins.zig");
+
+    var list: std.ArrayListUnmanaged(crypto_emitters.CryptoInstruction) = .empty;
+    defer list.deinit(std.testing.allocator);
+
+    try crypto_emitters.appendBuiltinInstructions(&list, std.testing.allocator, registry.CryptoBuiltin.verify_rabin_sig);
+    try std.testing.expectEqual(@as(usize, 10), list.items.len);
+
+    // Pin the exact opcode order (the cross-compiler reference).
+    const expected = [_][]const u8{
+        "OP_SWAP",
+        "OP_ROT",
+        "OP_DUP",
+        "OP_MUL",
+        "OP_ADD",
+        "OP_SWAP",
+        "OP_MOD",
+        "OP_SWAP",
+        "OP_SHA256",
+        "OP_EQUAL",
+    };
+    for (expected, 0..) |name, i| {
+        switch (list.items[i]) {
+            .op_name => |op| try std.testing.expectEqualStrings(name, op),
+            else => return error.UnexpectedInstructionKind,
+        }
+    }
+}

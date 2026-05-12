@@ -434,3 +434,75 @@ const UnsupportedFormat = error{UnsupportedFormat};
 const ParseFailed = error{ParseFailed};
 const ValidationFailed = error{ValidationFailed};
 const TypeCheckFailed = error{TypeCheckFailed};
+
+// ---------------------------------------------------------------------------
+// Tests — CLI flag plumbing
+// ---------------------------------------------------------------------------
+//
+// GAP-015 (audits/cross-language-completeness-20260510.md, Section 4 / B8):
+// the `--parse-only` flag is plumbed end-to-end through compileFromSource,
+// but it had no dedicated unit test. The flag is the wire used by
+// `conformance/runner/runner.ts`'s `--parser-only` universal-frontend
+// coverage check, so a silent regression here breaks the all-tier
+// parser-only matrix in CI. The tests below pin the CLI flag parsing wire.
+
+test "parseCompileOptions: --parse-only sets parse_only=true" {
+    const args = [_][]const u8{"--parse-only"};
+    const opts = try parseCompileOptions(args[0..], true);
+    try std.testing.expect(opts.parse_only);
+    // Other flags must remain at their defaults.
+    try std.testing.expect(!opts.emit_ir);
+    try std.testing.expect(!opts.hex_only);
+    try std.testing.expect(!opts.disable_constant_folding);
+}
+
+test "parseCompileOptions: default has parse_only=false" {
+    const args = [_][]const u8{};
+    const opts = try parseCompileOptions(args[0..], true);
+    try std.testing.expect(!opts.parse_only);
+}
+
+test "parseCompileOptions: --parse-only combines with other flags" {
+    // The conformance runner pairs --parse-only with no other flags, but
+    // nothing in the parser prevents combinations. Pin that --parse-only
+    // is composable with --disable-constant-folding (a no-op pairing,
+    // since parse-only stops before the optimizer runs, but the parser
+    // must still accept it without error).
+    const args = [_][]const u8{ "--parse-only", "--disable-constant-folding" };
+    const opts = try parseCompileOptions(args[0..], true);
+    try std.testing.expect(opts.parse_only);
+    try std.testing.expect(opts.disable_constant_folding);
+}
+
+test "parseCompileOptions: unknown flag rejected" {
+    const args = [_][]const u8{"--parse-onlyy"}; // typo
+    try std.testing.expectError(error.UnknownFlag, parseCompileOptions(args[0..], true));
+}
+
+test "parseCompileOptions: --parse-only accepted in compile-ir mode" {
+    // The IR consumer mode (allow_disable_constant_folding=false in main.zig
+    // when parsing args[3..] for the `compile-ir` subcommand) must still
+    // accept --parse-only — even though parse-only on IR input is a no-op
+    // shape, the flag must not be rejected as "unknown".
+    const args = [_][]const u8{"--parse-only"};
+    const opts = try parseCompileOptions(args[0..], false);
+    try std.testing.expect(opts.parse_only);
+}
+
+test "parseCompileOptions: --disable-constant-folding rejected when not allowed" {
+    // Mirror of the compile-ir guardrail: when the caller passes
+    // allow_disable_constant_folding=false, the parser must reject the flag
+    // with UnsupportedFlag (not silently accept). This keeps the IR mode's
+    // optimizer-state semantics deterministic.
+    const args = [_][]const u8{"--disable-constant-folding"};
+    try std.testing.expectError(error.UnsupportedFlag, parseCompileOptions(args[0..], false));
+}
+
+test "CompileOptions.parse_only field default is false" {
+    // Regression guard: if a future refactor changes the default value
+    // of parse_only on CompileOptions, the conformance runner's expectation
+    // ("plain compile must emit hex / IR, not 'parser ok'") would silently
+    // break.
+    const opts: CompileOptions = .{};
+    try std.testing.expect(!opts.parse_only);
+}
