@@ -27,8 +27,8 @@ Format: `ID | source | language(s) | files touched (anchor) | severity | dispatc
 |---|---|---|---|---|---|---|
 | GAP-001 | G1 / F-3 (BUG-003) | TS | `packages/runar-compiler/src/passes/wots-codegen.ts` (new) + `05-stack-lower.ts` (extract) | major | 1 | resolved 2026-05-11 |
 | GAP-002 | G1 | Ruby | `compilers/ruby/lib/runar_compiler/codegen/wots.rb` (new) + `slh_dsa.rb` (extract) | major | 2 | resolved 2026-05-11 |
-| GAP-003 | G2 / F-1 (BUG-001 TS-half) | TS | `packages/runar-compiler/src/passes/rabin-codegen.ts` (new) + `05-stack-lower.ts` dispatch + conformance fixture | major | 3 | pending |
-| GAP-004 | G2 / F-1 (BUG-001 Py-half) | Python | `compilers/python/runar_compiler/codegen/rabin.py` (new) + stack.py dispatch | major | 4 | pending |
+| GAP-003 | G2 / F-1 (BUG-001 TS-half) | TS | `packages/runar-compiler/src/passes/rabin-codegen.ts` (new) + `05-stack-lower.ts` dispatch + conformance fixture | major | 3 | refuted 2026-05-12 — inline codegen exists at `05-stack-lower.ts:3940`; `oracle-price` conformance fixture confirms byte parity |
+| GAP-004 | G2 / F-1 (BUG-001 Py-half) | Python | `compilers/python/runar_compiler/codegen/rabin.py` (new) + stack.py dispatch | major | 4 | refuted 2026-05-12 — inline codegen exists at `stack.py:2922`; `oracle-price` conformance fixture confirms byte parity |
 | GAP-005 | G3 / F-5 (BUG-005) | Zig | `compilers/zig/src/passes/anf_lower.zig` (initializer expression lowering) | major | 5 | pending |
 | GAP-006 | G4 / S-3 (BUG-008) | Zig | `compilers/zig/src/codegen/emit.zig` (codeSeparatorIndex(es) artifact JSON) | major | 6 | pending |
 | GAP-007 | G5 | Python | `compilers/python/tests/codegen/test_math_builtins.py` (new) | major | 7 | pending |
