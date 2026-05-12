@@ -4623,6 +4623,114 @@ theorem lowerMethod_initialMap_no_implicits
     True := by
   trivial
 
+/-! ### Method-level raw-body bridge
+
+The Stage C/D proofs above talk about binding-list execution. The actual
+compiler entrypoint goes through `lowerMethod`, which wraps that body in
+initial-map setup and public-method post-processing. The next bridge step
+is to expose the exact raw op list that `lowerMethod` uses before those
+post-passes and prove that, when no implicit parameters or post-passes are
+active, the method's emitted ops are exactly that raw list.
+-/
+
+/-- The liveness-aware raw body ops used by `lowerMethod` when the method
+does not need implicit `_opPushTxSig` / `_codePart` entries. -/
+def lowerMethodUserRawOps
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod) :
+    List StackOp :=
+  (Stack.Lower.lowerBindingsP progMethods props Stack.Lower.defaultInlineBudget
+    0 (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name))
+    (Stack.Lower.collectConstInts m.body)
+    (m.params.map (fun p => p.name) |>.reverse)
+    m.body).1
+
+/-- If a method needs no implicit preimage/code-part entries and neither
+terminal-assert elision nor deserialize-state cleanup can fire, its
+`lowerMethod` ops are exactly the raw liveness-aware lowered body ops. -/
+theorem lowerMethod_ops_eq_userRaw_no_implicits_no_post
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (_hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false) :
+    (lowerMethod progMethods props m).ops =
+      lowerMethodUserRawOps progMethods props m := by
+  unfold lowerMethodUserRawOps lowerMethod
+  simp [hNoPreimage, hNoTerminalAssert, hNoDeserialize]
+
+/-- For a public head method, `Lower.lower` puts that method first, so
+`runMethod` on its name reduces to running `lowerMethod`'s op list. This is
+the first structural lift from method-local facts to `Lower.lower`. -/
+theorem runMethod_lower_public_head
+    (contractName : String) (props : List ANFProperty)
+    (m : ANFMethod) (rest : List ANFMethod) (initialStack : StackState)
+    (hPublic : m.isPublic = true) :
+    Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := m :: rest })
+        m.name initialStack
+      = runOps (lowerMethod (m :: rest) props m).ops initialStack := by
+  have hHeadName : ((lowerMethod (m :: rest) props m).name == m.name) = true := by
+    unfold lowerMethod
+    exact BEq.rfl
+  unfold Stack.Eval.runMethod StackProgram.bodyOf StackProgram.findMethod Stack.Lower.lower
+  simp [hPublic, hHeadName]
+
+/-- Public-head method bridge in the no-implicit/no-postprocessing case:
+`runMethod (Lower.lower ...)` reduces to the raw liveness-aware body ops. -/
+theorem runMethod_lower_public_head_no_post_eq_userRaw
+    (contractName : String) (props : List ANFProperty)
+    (m : ANFMethod) (rest : List ANFMethod) (initialStack : StackState)
+    (hPublic : m.isPublic = true)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false) :
+    Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := m :: rest })
+        m.name initialStack
+      = runOps (lowerMethodUserRawOps (m :: rest) props m) initialStack := by
+  rw [runMethod_lower_public_head contractName props m rest initialStack hPublic]
+  rw [lowerMethod_ops_eq_userRaw_no_implicits_no_post
+        (m :: rest) props m hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+
+/-- Compose a binding-level SimpleANF witness with the public-head
+`Lower.lower` bridge for methods that do not trigger implicit parameters or
+post-processing. The remaining load-bearing premise is operational:
+the raw liveness-aware body ops must produce the same `stkFinal` that the
+`ChainRel` witness names. -/
+theorem stageD_public_head_no_post_bridge
+    (contractName : String) (props : List ANFProperty)
+    (m : ANFMethod) (rest : List ANFMethod)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkFinal : StackState)
+    (hPublic : m.isPublic = true)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hRunRaw :
+      runOps (lowerMethodUserRawOps (m :: rest) props m) initialStack = .ok stkFinal)
+    (hChain :
+      ChainRel simpleStepRel m.body tsm initialAnf initialStack tsm' anfFinal stkFinal)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := m :: rest })
+        m.name initialStack = .ok stkFinal
+    ∧ anfFinal.props = stkFinal.props
+    ∧ anfFinal.outputs = stkFinal.outputs := by
+  refine ⟨?_, ?_⟩
+  · rw [runMethod_lower_public_head_no_post_eq_userRaw
+        contractName props m rest initialStack hPublic hNoPreimage hNoCode
+        hNoTerminalAssert hNoDeserialize]
+    exact hRunRaw
+  · exact stageD_simpleANF_outputs_preserved
+      m.body tsm tsm' initialAnf anfFinal initialStack stkFinal hChain hAgrees
+
 /-- Terminal-assert elision activates iff the method is public,
 the body's last binding is `.assert _`, AND the lowered body's
 last op is `OP_VERIFY`. -/
