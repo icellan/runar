@@ -1,7 +1,7 @@
 # Runar Verification Handoff
 
 This is the active implementation roadmap. Historical exploration,
-gap-analysis, and audit Markdown files were removed after their live
+analysis, and audit Markdown files were removed after their live
 findings were folded into `README.md`, `TRUST_MANIFEST.md`, and this
 handoff.
 
@@ -29,16 +29,43 @@ remaining active proof obligations live in `Pipeline.lean`,
 
 1. **Proof-facing execution model**
    * Keep the hash and authentication backends explicit and fail-fast;
-     no opaque executable defaults remain.
-   * Complete Script-number and byte semantics for all Rúnar-emitted
-     opcodes.
-   * Model tx context, sighash coverage, and `OP_CODESEPARATOR` well
-     enough for stateful contracts.
+     no opaque executable defaults remain. `checkPreimage` is now also
+     routed through an explicit fail-fast backend instead of an
+     unconditional evaluator branch.
+   * Stack VM Script-number and bytewise semantics are concrete for
+     `OP_BIN2NUM`, `OP_NUM2BIN`, `OP_INVERT`, `OP_AND`, `OP_OR`, and
+     `OP_XOR`.
+   * ANF evaluation now reuses the same Script-number conversion helper
+     for `bin2num`, `num2bin`, `int2str`, `pack`, and `unpack`, and has
+     concrete bytewise/slicing semantics for `&`, `|`, `^`, `~`,
+     `substr`, `left`, `right`, `split`, `reverseBytes`, and
+     `toByteString`.
+   * Tx context and BIP-143 preimage construction are concrete; the old
+     11 TxContext companion axioms have been removed, and
+     `afterCodeSeparator` models the script suffix covered after
+     `OP_CODESEPARATOR`.
+   * Stack VM now has a PC-aware runner (`runOpsPc`) that records the
+     last executed `OP_CODESEPARATOR` and makes `pushCodesepIndex`
+     executable; legacy `runOps` remains stable for existing peephole
+     proofs.
+   * Slot-aware emit now has `Script.Emit.emitWithCodeSepPatches` and
+     `Pipeline.compileSafeWithCodeSepPatches`, which keep constructor
+     slot offsets and emit each `pushCodesepIndex` from the unique latest
+     emitted `OP_CODESEPARATOR` byte offset. IF branches and multi-method
+     dispatch alternatives start from the correct incoming separator
+     state; ambiguous joins are rejected.
+   * `OP_CHECKMULTISIG` / `OP_CHECKMULTISIGVERIFY` parse full
+     count-framed multisig stacks when the top item is a count, with the
+     old single-payload auth adapter kept only as a fallback for proved
+     peephole abstractions.
 
 2. **Lowering simulation**
    * Finish the bridge from binding-level `Stack.Agrees` results to
      method-level `Lower.lower`.
    * Prove lowering simulation for all supported ANF constructors.
+   * Thread the slot-aware emit result through the final deployed-byte
+     theorem, using the checked branch-sensitive code-separator patching
+     relation.
    * Keep unsupported constructs routed through `compileSafe` errors,
      never through emitted sentinel bytes.
 

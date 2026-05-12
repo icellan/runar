@@ -86,10 +86,13 @@ The legacy `compile` path is intentionally total because older golden
 tests and proof scaffolding use `ANFProgram → ByteArray`. `compileSafe`
 is the proof-facing and CI-facing entrypoint: it rejects sentinel
 `OP_RUNAR_*` opcodes and opcodes unknown to the emitter before any bytes
-are produced. -/
+are produced. `compileSafeWithCodeSepPatches` uses the same validation
+gate, then emits the slot-aware deployment shape that patches
+`pushCodesepIndex` from actual emitted `OP_CODESEPARATOR` byte offsets. -/
 inductive CompileError where
   | runarSentinelOpcode (methodName : String) (opcode : String)
   | unknownOpcode (methodName : String) (opcode : String)
+  | codeSepPatchError (error : Emit.CodeSepPatchError)
   deriving Repr, BEq, DecidableEq
 
 mutual
@@ -147,9 +150,32 @@ def compileSafe (p : ANFProgram) : Except CompileError ByteArray := do
   validateStackProgram stack
   .ok (Emit.emitFast stack)
 
+/--
+Fail-closed ANF → slot-aware bytes pipeline.
+
+This is the deployment/proof-facing companion to `compileSafe`: it
+shares the exact lowering, peephole, and validation path, then calls
+`Emit.emitWithCodeSepPatches` so constructor slots and deterministic
+`pushCodesepIndex` patches are computed from the final emitted byte
+layout. Branch-ambiguous code-separator joins are rejected.
+-/
+def compileSafeWithCodeSepPatches
+    (p : ANFProgram) : Except CompileError Emit.EmitResult := do
+  let stack := peepholeProgram (Lower.lower p)
+  validateStackProgram stack
+  match Emit.emitWithCodeSepPatches stack with
+  | .ok r => .ok r
+  | .error e => .error (.codeSepPatchError e)
+
 def compileHexSafe (p : ANFProgram) : Except CompileError String :=
   match compileSafe p with
   | .ok bytes => .ok (Emit.bytesToHex bytes)
+  | .error e => .error e
+
+def compileHexSafeWithCodeSepPatches (p : ANFProgram) :
+    Except CompileError String :=
+  match compileSafeWithCodeSepPatches p with
+  | .ok r => .ok (Emit.bytesToHex r.bytes)
   | .error e => .error e
 
 private def isRunarSentinelFixtureError : Except CompileError Unit → Bool
@@ -180,6 +206,14 @@ theorem compile_empty_program (cn : String) :
     compile { contractName := cn, properties := [], methods := [] } = ByteArray.empty := by
   unfold compile peepholeProgram Lower.lower
   simp [Emit.emitFast, Emit.publicMethodsOf]
+
+theorem compileSafeWithCodeSepPatches_empty_program (cn : String) :
+    compileSafeWithCodeSepPatches
+      { contractName := cn, properties := [], methods := [] }
+      = .ok ({ bytes := ByteArray.empty,
+               constructorSlots := [],
+               codeSepIndexSlots := [] } : Emit.EmitResult) := by
+  rfl
 
 /-! ## Soundness skeletons
 

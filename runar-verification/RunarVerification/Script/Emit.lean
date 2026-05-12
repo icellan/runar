@@ -14,15 +14,20 @@ conformance fixtures:
 * every concrete opcode from `Script/Syntax.lean`'s named table,
 * `dup` / `swap` / `nip` / `over` / `rot` / `tuck` / `drop` short-form
   stack ops,
-* `placeholder` and `pushCodesepIndex` (both emit `OP_0`),
+* `placeholder` and legacy `pushCodesepIndex` (both emit `OP_0`),
 * the `pick d` / `roll d` form which lowers to a script-number push of
   the depth followed by `OP_PICK` / `OP_ROLL`.
 
-**Out of scope (Phase 3b).** `OP_PUSHDATA2` (≥256-byte data),
-`OP_PUSHDATA4` (≥65 536-byte data), method-dispatch chain emission
-(public-method index threading via `OP_NUMEQUALVERIFY`), source-map
-construction, and the `constructorSlots` / `codeSepIndexSlots` byte
-tables (the records are still produced by the SDK at deploy time).
+The legacy `emit` / `emitFast` entrypoints intentionally keep
+`pushCodesepIndex` as a one-byte placeholder for backwards-compatible
+golden checks. `emitWithCodeSepPatches` is the proof-facing deployment
+shape: it records constructor slots, tracks byte offsets of emitted
+`OP_CODESEPARATOR`s, and emits each `pushCodesepIndex` as the script
+number for the latest separator byte offset. That path is branch-aware:
+if control-flow joins make the latest executed separator ambiguous, it
+returns a `CodeSepPatchError` instead of guessing a patch value.
+
+**Out of scope (Phase 3b).** Source-map construction.
 -/
 
 namespace RunarVerification.Script
@@ -404,6 +409,288 @@ def emitFast (p : StackProgram) : ByteArray :=
   | ms      =>
     let chainAcc := emitDispatchChainFast ByteArray.empty 0 ms
     emitEndifsFastAux chainAcc (ms.length - 1)
+
+/-! ## Slot-aware code-separator emission
+
+The deployment SDK needs two pieces of byte-level metadata that the
+plain `ByteArray` emit path cannot carry:
+
+* constructor placeholders: where an `OP_0` byte stands in for a
+  constructor argument; and
+* code-separator index pushes: where the state-method body needs the
+  byte offset of the latest emitted `OP_CODESEPARATOR`.
+
+This section provides a second emit path that computes both from the
+same byte stream it emits. It deliberately does not change `emit` or
+`emitFast`; existing golden checks continue to exercise the historical
+placeholder bytes, while `emitWithCodeSepPatches` gives the proof-facing
+path a concrete byte-offset model. The patching path treats IF branches
+as runtime alternatives: both branches start with the same incoming
+separator state, and the join is accepted only when every later
+`pushCodesepIndex` has a unique candidate offset.
+-/
+
+/-- Constructor placeholder byte-offset metadata. -/
+structure ConstructorSlot where
+  offset : Nat
+  paramIndex : Nat
+  paramName : String
+  deriving Repr, BEq, DecidableEq, Inhabited
+
+/--
+Code-separator patch metadata.
+
+`offset` is the byte offset where the script-number push begins.
+`codeSeparatorOffset` is the byte offset of the most recent emitted
+`OP_CODESEPARATOR`, or zero when no separator has appeared yet. The
+emitted byte sequence at `offset` is `encodePushBigInt codeSeparatorOffset`;
+`encodedSize` records its length so callers can map back into the byte
+stream without re-encoding.
+-/
+structure CodeSepIndexSlot where
+  offset : Nat
+  codeSeparatorOffset : Nat
+  encodedSize : Nat
+  deriving Repr, BEq, DecidableEq, Inhabited
+
+/-- Slot-aware emit result. -/
+structure EmitResult where
+  bytes : ByteArray
+  constructorSlots : List ConstructorSlot := []
+  codeSepIndexSlots : List CodeSepIndexSlot := []
+  deriving BEq, DecidableEq, Inhabited
+
+/-- Fail-closed errors for code-separator patch emission. -/
+inductive CodeSepPatchError where
+  /--
+  A `pushCodesepIndex` was reached after a control-flow join where
+  different execution paths had different latest `OP_CODESEPARATOR`
+  offsets, so no single static patch value is sound.
+  -/
+  | ambiguousCodeSepIndex (offset : Nat) (candidates : List Nat)
+  deriving Repr, BEq, DecidableEq
+
+private def natListContains (xs : List Nat) (n : Nat) : Bool :=
+  xs.any (· == n)
+
+private def natListInsert (xs : List Nat) (n : Nat) : List Nat :=
+  if natListContains xs n then xs else xs ++ [n]
+
+private def natListUnion (xs ys : List Nat) : List Nat :=
+  ys.foldl natListInsert xs
+
+private def singletonNat? : List Nat → Option Nat
+  | [n] => some n
+  | _ => none
+
+private structure PatchState where
+  bytes : ByteArray := ByteArray.empty
+  constructorSlotsRev : List ConstructorSlot := []
+  codeSepIndexSlotsRev : List CodeSepIndexSlot := []
+  possibleCodeSeparatorOffsets : List Nat := [0]
+  deriving Inhabited
+
+private def PatchState.offset (st : PatchState) : Nat :=
+  st.bytes.size
+
+private def PatchState.append (st : PatchState) (bs : ByteArray) : PatchState :=
+  { st with bytes := appendBA st.bytes bs }
+
+private def PatchState.appendByte (st : PatchState) (b : UInt8) : PatchState :=
+  { st with bytes := st.bytes.push b }
+
+private def PatchState.finish (st : PatchState) : EmitResult :=
+  { bytes := st.bytes,
+    constructorSlots := st.constructorSlotsRev.reverse,
+    codeSepIndexSlots := st.codeSepIndexSlotsRev.reverse }
+
+mutual
+
+private def emitStackOpPatchedChecked : StackOp → PatchState →
+    Except CodeSepPatchError PatchState
+  | .placeholder paramIndex paramName, st =>
+      let slot : ConstructorSlot :=
+        { offset := st.offset, paramIndex := paramIndex, paramName := paramName }
+      .ok { st with
+        bytes := st.bytes.push 0x00,
+        constructorSlotsRev := slot :: st.constructorSlotsRev }
+  | .pushCodesepIndex, st =>
+      match singletonNat? st.possibleCodeSeparatorOffsets with
+      | some value =>
+          let encoded := encodePushBigInt (Int.ofNat value)
+          let slot : CodeSepIndexSlot :=
+            { offset := st.offset,
+              codeSeparatorOffset := value,
+              encodedSize := encoded.size }
+          .ok { (st.append encoded) with
+            codeSepIndexSlotsRev := slot :: st.codeSepIndexSlotsRev }
+      | none =>
+          .error (.ambiguousCodeSepIndex st.offset st.possibleCodeSeparatorOffsets)
+  | .opcode "OP_CODESEPARATOR", st =>
+      let offset := st.offset
+      .ok { (st.appendByte 0xab) with possibleCodeSeparatorOffsets := [offset] }
+  | .ifOp thn els, st => do
+      let stIf := st.appendByte 0x63
+      let stThen ← emitOpsPatchedAuxChecked thn stIf
+      let stAfterBranches ←
+        match els with
+        | none =>
+            .ok { stThen with
+              possibleCodeSeparatorOffsets :=
+                natListUnion stThen.possibleCodeSeparatorOffsets
+                  stIf.possibleCodeSeparatorOffsets }
+        | some [] =>
+            .ok { stThen with
+              possibleCodeSeparatorOffsets :=
+                natListUnion stThen.possibleCodeSeparatorOffsets
+                  stIf.possibleCodeSeparatorOffsets }
+        | some elsB =>
+            let stElseBase := stThen.appendByte 0x67
+            let stElseStart :=
+              { stElseBase with
+                possibleCodeSeparatorOffsets := stIf.possibleCodeSeparatorOffsets }
+            let stElse ← emitOpsPatchedAuxChecked elsB stElseStart
+            .ok { stElse with
+              possibleCodeSeparatorOffsets :=
+                natListUnion stThen.possibleCodeSeparatorOffsets
+                  stElse.possibleCodeSeparatorOffsets }
+      .ok (stAfterBranches.appendByte 0x68)
+  | op, st =>
+      .ok (st.append (emitStackOp op))
+
+private def emitOpsPatchedAuxChecked : List StackOp → PatchState →
+    Except CodeSepPatchError PatchState
+  | [], st => .ok st
+  | op :: rest, st => do
+      let st' ← emitStackOpPatchedChecked op st
+      emitOpsPatchedAuxChecked rest st'
+
+end
+
+/--
+Emit one op list, replacing each `pushCodesepIndex` with the script
+number for the latest emitted `OP_CODESEPARATOR` byte offset.
+-/
+def emitOpsWithCodeSepPatches (ops : List StackOp) :
+    Except CodeSepPatchError EmitResult := do
+  let st ← emitOpsPatchedAuxChecked ops {}
+  .ok st.finish
+
+private def emitDispatchChainPatched : Nat → List StackMethod → PatchState →
+    Except CodeSepPatchError PatchState
+  | _, [], st => .ok st
+  | i, [m], st =>
+      emitOpsPatchedAuxChecked m.ops (st.append (emitDispatchHeadLast i))
+  | i, m :: rest, st => do
+      let stHead := st.append (emitDispatchHeadNonLast i)
+      let stBody ← emitOpsPatchedAuxChecked m.ops stHead
+      let stElseBase := stBody.appendByte 0x67
+      let stElseStart :=
+        { stElseBase with
+          possibleCodeSeparatorOffsets := stHead.possibleCodeSeparatorOffsets }
+      let stRest ← emitDispatchChainPatched (i + 1) rest stElseStart
+      .ok { stRest with
+        possibleCodeSeparatorOffsets :=
+          natListUnion stBody.possibleCodeSeparatorOffsets
+            stRest.possibleCodeSeparatorOffsets }
+
+private def emitEndifsPatched : Nat → PatchState → PatchState
+  | 0, st => st
+  | n + 1, st => emitEndifsPatched n (st.appendByte 0x68)
+
+/--
+Top-level slot-aware emit. Public-method dispatch bytes are included in
+the offset accounting, so code-separator slot values match the final
+deployed script layout rather than a method-local body layout.
+-/
+def emitWithCodeSepPatches (p : StackProgram) :
+    Except CodeSepPatchError EmitResult :=
+  match publicMethodsOf p with
+  | [] => .ok ({} : PatchState).finish
+  | [m] => do
+      let st ← emitOpsPatchedAuxChecked m.ops {}
+      .ok st.finish
+  | ms => do
+      let stChain ← emitDispatchChainPatched 0 ms {}
+      .ok (emitEndifsPatched (ms.length - 1) stChain).finish
+
+theorem emitOpsWithCodeSepPatches_sample :
+    (match emitOpsWithCodeSepPatches
+        [.push (.bigint 7), .opcode "OP_CODESEPARATOR", .pushCodesepIndex] with
+     | .ok r =>
+         r.bytes.toList == [0x57, 0xab, 0x51]
+           && r.constructorSlots == []
+           && r.codeSepIndexSlots ==
+                [{ offset := 2, codeSeparatorOffset := 1, encodedSize := 1 }]
+     | .error _ => false) = true := by
+  native_decide
+
+theorem emitOpsWithCodeSepPatches_constructorSlot_sample :
+    (match emitOpsWithCodeSepPatches
+        [.placeholder 3 "owner", .opcode "OP_CODESEPARATOR", .pushCodesepIndex] with
+     | .ok r =>
+         r.bytes.toList == [0x00, 0xab, 0x51]
+           && r.constructorSlots ==
+                [{ offset := 0, paramIndex := 3, paramName := "owner" }]
+           && r.codeSepIndexSlots ==
+                [{ offset := 2, codeSeparatorOffset := 1, encodedSize := 1 }]
+     | .error _ => false) = true := by
+  native_decide
+
+theorem emitWithCodeSepPatches_dispatchOffset_sample :
+    (let p : StackProgram :=
+      { contractName := "C",
+        methods :=
+          [{ name := "a",
+             ops := [.opcode "OP_CODESEPARATOR", .pushCodesepIndex],
+             maxStackDepth := 0 },
+           { name := "b", ops := [], maxStackDepth := 0 }] }
+    match emitWithCodeSepPatches p with
+    | .ok r =>
+        r.bytes.toList ==
+            [0x76, 0x00, 0x9c, 0x63, 0x75, 0xab, 0x55,
+             0x67, 0x51, 0x9d, 0x68]
+          && r.codeSepIndexSlots ==
+              [{ offset := 6, codeSeparatorOffset := 5, encodedSize := 1 }]
+     | .error _ => false) = true := by
+  native_decide
+
+theorem emitWithCodeSepPatches_dispatchBranchReset_sample :
+    (let p : StackProgram :=
+      { contractName := "C",
+        methods :=
+          [{ name := "a",
+             ops := [.opcode "OP_CODESEPARATOR"],
+             maxStackDepth := 0 },
+           { name := "b",
+             ops := [.pushCodesepIndex],
+             maxStackDepth := 0 }] }
+    match emitWithCodeSepPatches p with
+    | .ok r =>
+        r.bytes.toList ==
+            [0x76, 0x00, 0x9c, 0x63, 0x75, 0xab,
+             0x67, 0x51, 0x9d, 0x00, 0x68]
+          && r.codeSepIndexSlots ==
+              [{ offset := 9, codeSeparatorOffset := 0, encodedSize := 1 }]
+    | .error _ => false) = true := by
+  native_decide
+
+theorem emitOpsWithCodeSepPatches_branchLocalElse_sample :
+    (match emitOpsWithCodeSepPatches
+        [.ifOp [.opcode "OP_CODESEPARATOR"] (some [.pushCodesepIndex])] with
+     | .ok r =>
+         r.bytes.toList == [0x63, 0xab, 0x67, 0x00, 0x68]
+           && r.codeSepIndexSlots ==
+                [{ offset := 3, codeSeparatorOffset := 0, encodedSize := 1 }]
+     | .error _ => false) = true := by
+  native_decide
+
+theorem emitOpsWithCodeSepPatches_ambiguousJoin_sample :
+    (match emitOpsWithCodeSepPatches
+        [.ifOp [.opcode "OP_CODESEPARATOR"] none, .pushCodesepIndex] with
+     | .error (.ambiguousCodeSepIndex 3 [1, 0]) => true
+     | _ => false) = true := by
+  native_decide
 
 end Emit
 end RunarVerification.Script

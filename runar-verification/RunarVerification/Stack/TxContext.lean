@@ -3,67 +3,46 @@ import RunarVerification.ANF.Eval
 /-!
 # Transaction context + BIP-143 preimage construction
 
-Tier 4.3 of the remediation plan grounds the 11 BIP-143 preimage
-extractor axioms (`extractVersion`, `extractHashPrevouts`, …,
-`extractSigHashType` in `ANF/Eval.lean:287–297`) in a concrete
-`TxContext` structure plus an explicit `buildPreimage` constructor.
+This module is the spec-side transaction model used by the Lean Stack
+and ANF evaluators. It provides a concrete `TxContext` structure and an
+explicit `buildPreimage` constructor for the BIP-143 digest bytes.
 
-Each extractor is paired with a `_buildPreimage` companion axiom
-asserting that, when the extractor is applied to the preimage produced
-by `buildPreimage ctx`, it returns the corresponding field of `ctx`.
+The BIP-143 extractors in `ANF/Eval.lean` are concrete definitions over
+the serialized preimage. Earlier tiers carried 11 `_buildPreimage`
+companion axioms here while the extractors were still bare assumptions.
+Those axioms are intentionally gone: the executable extractor
+definitions and sample theorems below now pin the layout without adding
+trusted assumptions.
 
-## Why companion axioms instead of concrete extractor `def`s
-
-The natural alternative would be to replace each
-`axiom extractVersion : ByteArray → Int`
-with a concrete byte-offset `def extractVersion`, then prove the
-correctness lemma by `rfl` / `simp`. We deliberately do not take that
-path in this tier:
-
-* The 11 extractors land in `ANF/Eval.lean` as bare axioms, and the
-  `builtinSig` table (Tier 2 item 2.9) plus `Stack/Lower.lean`
-  reference them via the same names. Replacing the axioms with `def`s
-  is a multi-file refactor that would touch the lowering code and
-  every downstream reference site; it is scheduled as Tier 4
-  follow-up work, not Tier 4.3.
-* The companion-axiom pattern matches `RunarVerification/Crypto/Spec.lean`
-  (Tier 5.1, 2026-05-10), which paired the bare crypto assumptions with
-  `_correct` companions instead of replacing them with concrete
-  implementations.
-* Keeping the extractors as axioms preserves the option to ground them
-  later against a different preimage representation (e.g. a pre-hashed
-  digest, or a structured `BIP143Preimage` inductive) without
-  re-proving every downstream theorem.
-
-The trust commitment grows by 11 axioms (one per extractor) plus the
-`buildPreimage` definition itself — but becomes **specific**: any
-future implementation of the 11 extractors must additionally satisfy
-the 11 companion axioms, ruling out attacker-controlled
-specializations of the form "extract the wrong field" or "always
-return 0".
+`OP_CODESEPARATOR` affects which script suffix is serialized as
+`scriptCode` inside the preimage. The pure `afterCodeSeparator` helper
+models that effect by replacing `ctx.scriptCode` with the post-separator
+suffix. The Stack VM's `runOpsPc` runner records executed separator
+indices for proof-level execution, while `Script.Emit.emitWithCodeSepPatches`
+computes the byte offsets used by deployment-time `pushCodesepIndex`
+patching. Callers that need sighash-aware execution should supply the
+covered `TxContext` / preimage produced by this helper.
 
 ## TCB impact
 
-* +0 axioms for the `TxContext` structure or the `buildPreimage` `def`
-  (both are concrete Lean definitions, not axioms).
-* +11 companion axioms (one per BIP-143 extractor).
+* +0 axioms for the `TxContext` structure, the `buildPreimage` `def`,
+  `afterCodeSeparator`, or the executable sample theorems.
 * +0 opaques.
 
 The current repository-wide count is enforced by
 `scripts/check-tcb-drift.sh` and recorded in `TRUST_MANIFEST.md`.
 
-## Forward compatibility with the Stack VM `txCtx` field
+## Stack VM boundary
 
 `StackState.preimage : ByteArray := ByteArray.empty`
-(`Stack/Eval.lean:49`) is the existing carrier for the BIP-143
-preimage. The `TxContext` structure introduced here is **the
-spec-side model** — it is not yet woven into `StackState`. The
-follow-up Tier 4 task is to add an optional `txCtx : Option
-TxContext` parallel field (or a discriminated `BIP143Source`) and
-have `OP_CHECKSIG` / `OP_CHECKMULTISIG` opt to consume it via
-`txCtx.map TxContext.buildPreimage` when present, falling back to
-the existing `preimage` field when not. That refactor is scoped
-out of Tier 4.3 to keep the spec landing minimal.
+(`Stack/Eval.lean`) remains the executable carrier used by the current
+Stack VM. This avoids changing the large peephole proof surface just to
+thread extra metadata. The concrete context model here gives callers a
+single disciplined way to produce that byte payload:
+
+```lean
+TxContext.buildPreimage (TxContext.afterCodeSeparator ctx suffix)
+```
 -/
 
 namespace RunarVerification.Stack
@@ -202,97 +181,99 @@ def buildPreimage (ctx : TxContext) : ByteArray :=
     ++ encodeUInt32LE ctx.locktime
     ++ encodeUInt32LE ctx.sigHashType
 
+/-- Replace the script suffix covered by BIP-143 sighash. -/
+def withScriptCode (ctx : TxContext) (scriptCode : ByteArray) : TxContext :=
+  { ctx with scriptCode := scriptCode }
+
+/--
+Apply `OP_CODESEPARATOR`'s sighash effect by switching the covered
+`scriptCode` to the bytes after the separator.
+-/
+def afterCodeSeparator (ctx : TxContext) (postSeparatorScript : ByteArray) : TxContext :=
+  ctx.withScriptCode postSeparatorScript
+
+/-- Build the BIP-143 preimage after applying a code-separator suffix. -/
+def preimageAfterCodeSeparator
+    (ctx : TxContext) (postSeparatorScript : ByteArray) : ByteArray :=
+  buildPreimage (afterCodeSeparator ctx postSeparatorScript)
+
 end TxContext
 
-/-! ## BIP-143 extractor companion axioms
-
-For each of the 11 extractor axioms in
-`RunarVerification.ANF.Eval.Crypto`, we pair a `_buildPreimage`
-companion asserting that the extractor inverts the corresponding
-field of `buildPreimage ctx`.
-
-Together, the bare extractor axiom + the companion form a trust
-commitment: any future implementation of the extractor (e.g. via
-concrete byte-offset arithmetic over `ByteArray.get`) must satisfy
-the companion. The companion rules out the
-"specialize-to-zero" / "specialize-to-empty" attacks where an
-attacker chooses extractor specializations that ignore the input.
--/
-
-namespace TxContext
+/-! ## Executable layout samples -/
 
 open RunarVerification.ANF.Eval
 
-/-- `extractVersion` recovers the 32-bit version field from a BIP-143
-preimage built by `buildPreimage`. -/
-axiom extractVersion_buildPreimage (ctx : TxContext) :
-    Crypto.extractVersion (buildPreimage ctx) = (ctx.version.toNat : Int)
+namespace TxContext
 
-/-- `extractHashPrevouts` recovers the 32-byte `hashPrevouts` field. -/
-axiom extractHashPrevouts_buildPreimage (ctx : TxContext) :
-    Crypto.extractHashPrevouts (buildPreimage ctx) = ctx.hashPrevouts
+def repeatByte (n : Nat) (b : UInt8) : ByteArray :=
+  ByteArray.mk ((List.replicate n b).toArray)
 
-/-- `extractHashSequence` recovers the 32-byte `hashSequence` field. -/
-axiom extractHashSequence_buildPreimage (ctx : TxContext) :
-    Crypto.extractHashSequence (buildPreimage ctx) = ctx.hashSequence
+def sampleCtx : TxContext where
+  version := 2
+  hashPrevouts := repeatByte 32 0x11
+  hashSequence := repeatByte 32 0x22
+  outpoint := repeatByte 36 0x33
+  inputIndex := 7
+  scriptCode := ByteArray.mk #[0x51, 0xab, 0xac]
+  amount := 5000
+  sequence := 0xfffffffe
+  hashOutputs := repeatByte 32 0x44
+  locktime := 9
+  sigHashType := 0x41
 
-/-- `extractOutpoint` recovers the 36-byte outpoint field. -/
-axiom extractOutpoint_buildPreimage (ctx : TxContext) :
-    Crypto.extractOutpoint (buildPreimage ctx) = ctx.outpoint
+def samplePostSeparatorScript : ByteArray :=
+  ByteArray.mk #[0xac]
 
-/-- `extractInputIndex` recovers the 32-bit input index. -/
-axiom extractInputIndex_buildPreimage (ctx : TxContext) :
-    Crypto.extractInputIndex (buildPreimage ctx) = (ctx.inputIndex.toNat : Int)
+theorem extractVersion_buildPreimage_sample :
+    Crypto.extractVersion (buildPreimage sampleCtx) = 2 := by
+  native_decide
 
-/-- `extractScriptCode` recovers the variable-length `scriptCode`
-field, stripping the leading `VarInt` length prefix. -/
-axiom extractScriptCode_buildPreimage (ctx : TxContext) :
-    Crypto.extractScriptCode (buildPreimage ctx) = ctx.scriptCode
+theorem extractHashPrevouts_buildPreimage_sample :
+    (Crypto.extractHashPrevouts (buildPreimage sampleCtx)).toList
+      = sampleCtx.hashPrevouts.toList := by
+  native_decide
 
-/-- `extractAmount` recovers the 64-bit amount field. -/
-axiom extractAmount_buildPreimage (ctx : TxContext) :
-    Crypto.extractAmount (buildPreimage ctx) = (ctx.amount.toNat : Int)
+theorem extractScriptCode_buildPreimage_sample :
+    (Crypto.extractScriptCode (buildPreimage sampleCtx)).toList
+      = sampleCtx.scriptCode.toList := by
+  native_decide
 
-/-- `extractSequence` recovers the 32-bit sequence field. -/
-axiom extractSequence_buildPreimage (ctx : TxContext) :
-    Crypto.extractSequence (buildPreimage ctx) = (ctx.sequence.toNat : Int)
+theorem extractAmount_buildPreimage_sample :
+    Crypto.extractAmount (buildPreimage sampleCtx) = 5000 := by
+  native_decide
 
-/-- `extractOutputHash` recovers the 32-byte `hashOutputs` field. -/
-axiom extractOutputHash_buildPreimage (ctx : TxContext) :
-    Crypto.extractOutputHash (buildPreimage ctx) = ctx.hashOutputs
+theorem extractSequence_buildPreimage_sample :
+    Crypto.extractSequence (buildPreimage sampleCtx) = 0xfffffffe := by
+  native_decide
 
-/-- `extractLocktime` recovers the 32-bit locktime field. -/
-axiom extractLocktime_buildPreimage (ctx : TxContext) :
-    Crypto.extractLocktime (buildPreimage ctx) = (ctx.locktime.toNat : Int)
+theorem extractOutputHash_buildPreimage_sample :
+    (Crypto.extractOutputHash (buildPreimage sampleCtx)).toList
+      = sampleCtx.hashOutputs.toList := by
+  native_decide
 
-/-- `extractSigHashType` recovers the 32-bit sighash type field. -/
-axiom extractSigHashType_buildPreimage (ctx : TxContext) :
-    Crypto.extractSigHashType (buildPreimage ctx) = (ctx.sigHashType.toNat : Int)
+theorem extractLocktime_buildPreimage_sample :
+    Crypto.extractLocktime (buildPreimage sampleCtx) = 9 := by
+  native_decide
+
+theorem extractSigHashType_buildPreimage_sample :
+    Crypto.extractSigHashType (buildPreimage sampleCtx) = 0x41 := by
+  native_decide
+
+/--
+`extractInputIndex` is intentionally zero: BIP-143 signs the outpoint,
+not the input index. The `TxContext.inputIndex` field remains useful for
+callers, but it is not serialized into `buildPreimage`.
+-/
+theorem extractInputIndex_notSerialized_sample :
+    Crypto.extractInputIndex (buildPreimage sampleCtx) = 0 := by
+  native_decide
+
+theorem afterCodeSeparator_extractScriptCode_sample :
+    (Crypto.extractScriptCode
+        (preimageAfterCodeSeparator sampleCtx samplePostSeparatorScript)).toList
+      = samplePostSeparatorScript.toList := by
+  native_decide
 
 end TxContext
-
-/-! ## Robustness against extractor-specialization attacks
-
-Without the 11 companion axioms above, an attacker controlling the
-meaning of the bare extractor axioms could specialize, for example,
-
-```text
-  axiom extractVersion_always_zero : ∀ b, Crypto.extractVersion b = 0
-```
-
-which would let any future "the lock script verifies the right
-version" theorem trivially fail-open on a `ctx.version ≠ 0` context.
-
-The companion forces the extractor to honour the field of `ctx` it is
-named for. Combined with `buildPreimage` injectivity (a future Tier 4
-lemma — provable from the bijective concatenation structure once the
-`encode*LE` helpers are proven invertible), the 11 companions pin
-each extractor to its named projection.
-
-Note: `buildPreimage` injectivity is **not** in scope for this tier.
-The companion axioms alone suffice to discharge the 11 extractor
-axioms relative to a *fixed* `ctx` — which is the use case for every
-sighash-aware lemma in the verification surface.
--/
 
 end RunarVerification.Stack

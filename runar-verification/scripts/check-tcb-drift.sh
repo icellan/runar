@@ -20,7 +20,7 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=82        # Breakdown (2026-05-11):
+TARGET_AXIOMS=71        # Breakdown (2026-05-12):
                         #   45 in RunarVerification/ANF/Eval.lean (44 from
                         #     the previous target plus the explicit
                         #     `hashBackend` parameter for SHA-256 /
@@ -29,7 +29,12 @@ TARGET_AXIOMS=82        # Breakdown (2026-05-11):
                         #     replaced the `checkMultiSig` axiom with the
                         #     explicit `authBackend` parameter, so the net
                         #     axiom count stays unchanged while `checkSig`
-                        #     becomes backend-parametric too).
+                        #     becomes backend-parametric too). Tier
+                        #     5.6 routes `checkPreimage` through an
+                        #     explicit fail-fast `preimageBackend`,
+                        #     replacing the old unconditional
+                        #     evaluator branch without changing the
+                        #     count.
                         #   26 in RunarVerification/Crypto/Spec.lean
                         #     (Tier 5.1 spec companions): 10 EC group /
                         #     projection axioms, 5 auxiliary primitive
@@ -39,9 +44,10 @@ TARGET_AXIOMS=82        # Breakdown (2026-05-11):
                         #     spec companions (ECDSA + ECDSA-P256 +
                         #     ECDSA-P384, WOTS, SLH-DSA × 6 parameter
                         #     sets, Rabin).
-                        #   11 in RunarVerification/Stack/TxContext.lean
-                        #     (Tier 4.3.a `_buildPreimage` companions:
-                        #     one per BIP-143 extractor).
+                        #   0 in RunarVerification/Stack/TxContext.lean
+                        #     (the old Tier 4.3.a `_buildPreimage`
+                        #     companions were removed once BIP-143
+                        #     extractors became concrete `def`s).
                         # Tier 5.3 net delta from earlier targets: −2
                         # axioms (`hash256_eq_double_sha256` in
                         # `Stack/Peephole.lean:968` and

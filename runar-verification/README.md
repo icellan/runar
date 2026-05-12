@@ -18,7 +18,7 @@ pipeline. The package is useful in two roles:
 | Default byte-exact gate | 34/49 live fixtures |
 | Crypto-heavy fixtures | 15/49 explicit pending-assumption bucket |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
-| Project axioms | 82 |
+| Project axioms | 71 |
 | Opaque executable defaults | 0 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
@@ -62,9 +62,19 @@ bytes. The current proof surface is deliberately split:
 * skeleton theorem names in `Pipeline.lean` for lower/peephole/emit
   composition points whose hypotheses still carry the load-bearing
   obligations;
-* backend-parametric SHA-256 / RIPEMD-160 and authentication semantics,
-  with fail-fast Lean codegen and Runar runtime hash implementations
-  checked against external vectors; and
+* concrete Stack VM and ANF evaluator semantics for Script-number
+  conversions and bytewise/slicing operations used by Rúnar lowering;
+* concrete BIP-143 transaction-context preimage construction, including
+  `OP_CODESEPARATOR` script-suffix coverage at the context layer;
+* a PC-aware Stack VM runner for `OP_CODESEPARATOR` index tracking and
+  full count-framed `OP_CHECKMULTISIG` parsing with legacy fallback for
+  existing peephole proofs;
+* slot-aware emit via `Pipeline.compileSafeWithCodeSepPatches`, which
+  records constructor slots, emits `pushCodesepIndex` from final script
+  byte offsets, and rejects branch-ambiguous code-separator joins;
+* backend-parametric SHA-256 / RIPEMD-160, preimage validation, and
+  authentication semantics, with fail-fast Lean codegen and Runar
+  runtime hash implementations checked against external vectors; and
 * explicit assumptions listed in `TRUST_MANIFEST.md`.
 
 The proof-facing compiler entrypoint is `Pipeline.compileSafe`, which

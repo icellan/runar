@@ -1,4 +1,5 @@
 import RunarVerification.Stack.Syntax
+import RunarVerification.Stack.NumEncoding
 import RunarVerification.ANF.Eval
 
 /-!
@@ -37,8 +38,8 @@ Stack VM state.
 * `outputs`   — emitted `Output`s in canonical declaration order.
 * `props`     — contract property slots, used by `update_prop`-lowered ops.
 * `preimage`  — abstract BIP-143 preimage threaded for `OP_CHECKSIG` /
-                `OP_CHECKSIGVERIFY` (mocked to `ByteArray.empty` here;
-                concrete tx context is Phase 4 work).
+                `OP_CHECKSIGVERIFY`; it defaults to empty until a
+                concrete transaction context is supplied.
 -/
 structure StackState where
   stack    : List Value := []
@@ -96,6 +97,11 @@ def asBytes? : Value → Option ByteArray
   | .vBytes b  => some b
   | .vOpaque b => some b
   | _          => none
+
+def asNonNegativeNat? (v : Value) : Option Nat :=
+  match asInt? v with
+  | some i => if i < 0 then none else some i.toNat
+  | none => none
 
 /-! ## Primitive stack-manipulation ops -/
 
@@ -220,6 +226,30 @@ def liftBytesUnary (s : StackState) (f : ByteArray → Value) : EvalResult Stack
       | some b => .ok (s'.push (f b))
       | none   => .error (.typeError "unary bytes op expects bytes")
 
+def liftBytesBinChecked (s : StackState)
+    (f : ByteArray → ByteArray → EvalResult Value) : EvalResult StackState :=
+  match popN s 2 with
+  | .error e => .error e
+  | .ok (vs, s') =>
+      match vs with
+      | [b, a] =>
+          match asBytes? a, asBytes? b with
+          | some ab, some bb =>
+              match f ab bb with
+              | .ok v => .ok (s'.push v)
+              | .error e => .error e
+          | _, _ => .error (.typeError "binary bytes op expects two byte values")
+      | _ => .error (.unsupported "binary bytes op popN bug")
+
+def invertBytes (bs : ByteArray) : ByteArray :=
+  ByteArray.mk (bs.toList.map (fun b => ~~~b)).toArray
+
+def bitwiseBytes (name : String) (f : UInt8 → UInt8 → UInt8)
+    (a b : ByteArray) : EvalResult Value :=
+  match zipBytesWith? f a b with
+  | some out => .ok (.vBytes out)
+  | none => .error (.typeError s!"{name} expects equal-length byte values")
+
 /-! ## Opcode dispatch
 
 Each named opcode either:
@@ -239,6 +269,101 @@ routes the raw stack payload into the explicit auth backend field. The
 backend has fail-fast codegen; there is no executable `false` default. -/
 def checkMultiSigStub (payload : ByteArray) : Bool :=
   checkMultiSigStack payload
+
+def popBytesN (role : String) : Nat → StackState →
+    EvalResult (List ByteArray × StackState)
+  | 0, s => .ok ([], s)
+  | n + 1, s =>
+      match s.pop? with
+      | none => .error (.unsupported s!"{role}: stack underflow")
+      | some (v, s') =>
+          match asBytes? v with
+          | none => .error (.typeError s!"{role}: expected bytes")
+          | some b =>
+              match popBytesN role n s' with
+              | .error e => .error e
+              | .ok (bs, s'') => .ok (b :: bs, s'')
+
+/--
+Parse the full Bitcoin `OP_CHECKMULTISIG` stack frame.
+
+Stack head is the top. The opcode consumes:
+
+* `n`
+* `n` public keys
+* `m`
+* `m` signatures
+* the historical dummy value
+
+The byte lists are returned in source order rather than pop order.
+-/
+def parseCheckMultiSigFrame (s : StackState) :
+    EvalResult (List ByteArray × List ByteArray × StackState) :=
+  match s.pop? with
+  | none => .error (.unsupported "OP_CHECKMULTISIG: empty stack")
+  | some (nVal, s1) =>
+      match asNonNegativeNat? nVal with
+      | none => .error (.typeError "OP_CHECKMULTISIG expects pubkey count")
+      | some n =>
+          match popBytesN "OP_CHECKMULTISIG pubkeys" n s1 with
+          | .error e => .error e
+          | .ok (pubkeysPop, s2) =>
+              match s2.pop? with
+              | none => .error (.unsupported "OP_CHECKMULTISIG: missing signature count")
+              | some (mVal, s3) =>
+                  match asNonNegativeNat? mVal with
+                  | none => .error (.typeError "OP_CHECKMULTISIG expects signature count")
+                  | some m =>
+                      if m > n then
+                        .error (.typeError "OP_CHECKMULTISIG signature count exceeds pubkey count")
+                      else
+                        match popBytesN "OP_CHECKMULTISIG signatures" m s3 with
+                        | .error e => .error e
+                        | .ok (sigsPop, s4) =>
+                            match s4.pop? with
+                            | none => .error (.unsupported "OP_CHECKMULTISIG: missing dummy")
+                            | some (_dummy, s5) => .ok (sigsPop.reverse, pubkeysPop.reverse, s5)
+
+def runCheckMultiSigFull (verifyOnly : Bool) (s : StackState) :
+    EvalResult StackState :=
+  match parseCheckMultiSigFrame s with
+  | .error e => .error e
+  | .ok (sigs, pubkeys, s') =>
+      let ok := checkMultiSig sigs pubkeys
+      if verifyOnly then
+        if ok then .ok s' else .error .assertFailed
+      else
+        .ok (s'.push (.vBool ok))
+
+def runCheckMultiSigFallback (verifyOnly : Bool) (s : StackState) :
+    EvalResult StackState :=
+  match s.pop? with
+  | none =>
+      if verifyOnly then
+        .error (.unsupported "OP_CHECKMULTISIGVERIFY: empty stack")
+      else
+        .error (.unsupported "OP_CHECKMULTISIG: empty stack")
+  | some (v, s') =>
+      match asBytes? v with
+      | some b =>
+          let ok := checkMultiSigStub b
+          if verifyOnly then
+            if ok then .ok s' else .error .assertFailed
+          else
+            .ok (s'.push (.vBool ok))
+      | none =>
+          if verifyOnly then
+            .error (.typeError "OP_CHECKMULTISIGVERIFY expects frame count or bytes")
+          else
+            .error (.typeError "OP_CHECKMULTISIG expects frame count or bytes")
+
+def runCheckMultiSig (verifyOnly : Bool) (s : StackState) : EvalResult StackState :=
+  match s.stack with
+  | [] => runCheckMultiSigFallback verifyOnly s
+  | top :: _ =>
+      match asNonNegativeNat? top with
+      | some _ => runCheckMultiSigFull verifyOnly s
+      | none => runCheckMultiSigFallback verifyOnly s
 
 def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
   match code with
@@ -394,19 +519,28 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
       | none => .error (.unsupported "OP_BIN2NUM: empty stack")
       | some (v, s') =>
           match asBytes? v with
-          | some _ => .ok (s'.push (.vBigint 0))   -- abstract; concrete decoding deferred
+          | some b => .ok (s'.push (.vBigint (decodeMinimalLE b)))
           | none   => .error (.typeError "OP_BIN2NUM: not bytes")
   | "OP_NUM2BIN" =>
       match popN s 2 with
       | .error e => .error e
       | .ok (vs, s') =>
           match vs with
-          | [_size, _val] => .ok (s'.push (.vBytes ByteArray.empty))   -- abstract
+          | [size, val] =>
+              match asInt? val, asInt? size with
+              | some n, some target =>
+                  if target < 0 then
+                    .error (.typeError "OP_NUM2BIN expects non-negative size")
+                  else
+                    match num2binEncode? n target.toNat with
+                    | some encoded => .ok (s'.push (.vBytes encoded))
+                    | none => .error (.unsupported "OP_NUM2BIN: value does not fit target size")
+              | _, _ => .error (.typeError "OP_NUM2BIN expects int value and size")
           | _ => .error (.unsupported "OP_NUM2BIN popN bug")
-  | "OP_INVERT" => liftBytesUnary s (fun _ => .vBytes ByteArray.empty)   -- abstract
-  | "OP_AND"    => liftBytesBin s (fun _ _ => .vBytes ByteArray.empty)   -- abstract
-  | "OP_OR"     => liftBytesBin s (fun _ _ => .vBytes ByteArray.empty)   -- abstract
-  | "OP_XOR"    => liftBytesBin s (fun _ _ => .vBytes ByteArray.empty)   -- abstract
+  | "OP_INVERT" => liftBytesUnary s (fun b => .vBytes (invertBytes b))
+  | "OP_AND"    => liftBytesBinChecked s (bitwiseBytes "OP_AND" (· &&& ·))
+  | "OP_OR"     => liftBytesBinChecked s (bitwiseBytes "OP_OR" (· ||| ·))
+  | "OP_XOR"    => liftBytesBinChecked s (bitwiseBytes "OP_XOR" (· ^^^ ·))
   -- ---------------------------------------------------------------- crypto (delegated to Eval.Crypto)
   | "OP_SHA256"    => liftBytesUnary s (fun b => .vBytes (sha256 b))
   | "OP_HASH160"   => liftBytesUnary s (fun b => .vBytes (hash160 b))
@@ -467,32 +601,84 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
               | _, _ => .error (.typeError "OP_NUMEQUALVERIFY expects ints")
           | _ => .error (.unsupported "OP_NUMEQUALVERIFY popN bug")
   | "OP_CHECKMULTISIG" =>
-      -- Abstract single-pop semantics. The full Bitcoin opcode pops `n + m + 3`
-      -- items (m sigs, n pubkeys, the two counts, and a dummy null), which the
-      -- IR can't express without dependent typing on the count values. We take a
-      -- pragmatic adapter: pop one bytes value `b` and produce
-      -- `vBool (checkMultiSigStub b)`. This is sufficient to express the
-      -- `[OP_CHECKMULTISIG, OP_VERIFY] → [OP_CHECKMULTISIGVERIFY]` fusion,
-      -- which is the only program-level invariant Rúnar's compiler claims.
-      match s.pop? with
-      | none => .error (.unsupported "OP_CHECKMULTISIG: empty stack")
-      | some (v, s') =>
-          match asBytes? v with
-          | some b => .ok (s'.push (.vBool (checkMultiSigStub b)))
-          | none   => .error (.typeError "OP_CHECKMULTISIG expects bytes")
+      -- Full frame semantics when the top value is a count; the older
+      -- single-payload adapter remains as fallback for peephole proofs over
+      -- abstract multisig payloads.
+      runCheckMultiSig false s
   | "OP_CHECKMULTISIGVERIFY" =>
-      -- Mirrors `OP_CHECKMULTISIG` then `OP_VERIFY` under the same pragmatic
-      -- adapter. See the `OP_CHECKMULTISIG` comment above for rationale.
-      match s.pop? with
-      | none => .error (.unsupported "OP_CHECKMULTISIGVERIFY: empty stack")
-      | some (v, s') =>
-          match asBytes? v with
-          | some b =>
-              if checkMultiSigStub b then .ok s' else .error .assertFailed
-          | none   => .error (.typeError "OP_CHECKMULTISIGVERIFY expects bytes")
-  | "OP_CODESEPARATOR" => .ok s   -- modeled as a no-op; only affects script-coverage by sighash, abstract here
+      runCheckMultiSig true s
+  | "OP_CODESEPARATOR" => .ok s
+      -- Legacy `runOps` keeps the proof-facing state unchanged here.
+      -- Use `runOpsPc` when code-separator index tracking is required.
   | "OP_RETURN" => .error (.unsupported "OP_RETURN")
   | _ => .error (.unsupported s!"opcode {code} not in the Rúnar-emitted subset")
+
+/-! ### Concrete byte / number opcode samples
+
+These executable sample theorems pin the Stack VM wiring to
+`Stack.NumEncoding` and the bytewise helpers above. They avoid comparing
+whole `StackState` values, whose payload types intentionally do not carry
+global decidable equality instances.
+-/
+
+theorem runOpcode_BIN2NUM_sample :
+    (match runOpcode "OP_BIN2NUM"
+        { stack := [.vBytes (ByteArray.mk #[0x80, 0x80])] } with
+     | .ok s =>
+         match s.stack with
+         | [.vBigint n] => n == -128
+         | _ => false
+     | .error _ => false) = true := by
+  native_decide
+
+theorem runOpcode_NUM2BIN_sample :
+    (match runOpcode "OP_NUM2BIN"
+        { stack := [.vBigint 4, .vBigint (-128)] } with
+     | .ok s =>
+         match s.stack with
+         | [.vBytes out] => out.toList == [0x80, 0x00, 0x00, 0x80]
+         | _ => false
+     | .error _ => false) = true := by
+  native_decide
+
+theorem runOpcode_XOR_sample :
+    (match runOpcode "OP_XOR"
+        { stack := [.vBytes (ByteArray.mk #[0x0f]),
+                    .vBytes (ByteArray.mk #[0xf0])] } with
+     | .ok s =>
+         match s.stack with
+         | [.vBytes out] => out.toList == [0xff]
+         | _ => false
+     | .error _ => false) = true := by
+  native_decide
+
+theorem runOpcode_AND_length_mismatch_errors :
+    (match runOpcode "OP_AND"
+        { stack := [.vBytes (ByteArray.mk #[0x0f]),
+                    .vBytes (ByteArray.mk #[0xf0, 0x00])] } with
+     | .error (.typeError _) => true
+     | _ => false) = true := by
+  native_decide
+
+theorem parseCheckMultiSigFrame_sample :
+    (match parseCheckMultiSigFrame
+        { stack := [
+            .vBigint 2,
+            .vBytes (ByteArray.mk #[0x02]),
+            .vBytes (ByteArray.mk #[0x01]),
+            .vBigint 1,
+            .vBytes (ByteArray.mk #[0xaa]),
+            .vBigint 0,
+            .vBigint 99
+          ] } with
+     | .ok (sigs, pubkeys, s') =>
+         sigs.map ByteArray.toList == [[0xaa]]
+           && pubkeys.map ByteArray.toList == [[0x01], [0x02]]
+           && (match s'.stack with
+               | [.vBigint 99] => true
+               | _ => false)
+     | .error _ => false) = true := by
+  native_decide
 
 /-! ## Big-step run
 
@@ -560,6 +746,80 @@ decreasing_by
   all_goals
     simp_wf
     omega
+
+/-! ## Program-counter-aware run
+
+The legacy `runOps` relation is intentionally kept stable for the
+existing peephole proof surface. `runOpsPc` layers an executable
+instruction-index counter on top, recording the last executed
+`OP_CODESEPARATOR` and making `pushCodesepIndex` push that index instead
+of the legacy zero placeholder.
+-/
+
+structure PcState where
+  state : StackState := {}
+  pc : Nat := 0
+  lastCodeSeparator : Option Nat := none
+  deriving Inhabited
+
+def stepNonIfPc (op : StackOp) (s : PcState) : EvalResult PcState :=
+  match op with
+  | .opcode "OP_CODESEPARATOR" =>
+      .ok { s with pc := s.pc + 1, lastCodeSeparator := some s.pc }
+  | .pushCodesepIndex =>
+      .ok { s with
+        state := s.state.push (.vBigint (s.lastCodeSeparator.getD 0)),
+        pc := s.pc + 1 }
+  | .ifOp _ _ =>
+      .error (.unsupported "ifOp must be handled by runOpsPc")
+  | _ =>
+      match stepNonIf op s.state with
+      | .error e => .error e
+      | .ok state' => .ok { s with state := state', pc := s.pc + 1 }
+
+def runOpsPc : List StackOp → PcState → EvalResult PcState
+  | [],       s => .ok s
+  | .ifOp thn els :: rest, s =>
+      match s.state.pop? with
+      | none => .error (.unsupported "OP_IF: empty stack")
+      | some (v, s') =>
+          let branchStart : PcState := { s with state := s', pc := s.pc + 1 }
+          match asBool? v with
+          | some true =>
+              match runOpsPc thn branchStart with
+              | .error e => .error e
+              | .ok s''  => runOpsPc rest s''
+          | some false =>
+              match els with
+              | none =>
+                  runOpsPc rest branchStart
+              | some elsB =>
+                  match runOpsPc elsB branchStart with
+                  | .error e => .error e
+                  | .ok s''  => runOpsPc rest s''
+          | none => .error (.typeError "OP_IF: non-bool condition")
+  | op :: rest, s =>
+      match stepNonIfPc op s with
+      | .error e => .error e
+      | .ok s'   => runOpsPc rest s'
+termination_by ops _ => sizeOf ops
+decreasing_by
+  all_goals
+    simp_wf
+    omega
+
+theorem runOpsPc_codeSeparator_sample :
+    (match runOpsPc
+        [.push (.bigint 7), .opcode "OP_CODESEPARATOR", .pushCodesepIndex]
+        {} with
+     | .ok s =>
+         s.pc == 3
+           && s.lastCodeSeparator == some 1
+           && (match s.state.stack with
+               | [.vBigint idx, .vBigint value] => idx == 1 && value == 7
+               | _ => false)
+     | .error _ => false) = true := by
+  native_decide
 
 /-! ## Reduction lemmas (Phase 3c)
 

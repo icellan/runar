@@ -1,6 +1,7 @@
 import RunarVerification.ANF.Syntax
 import RunarVerification.ANF.WF
 import RunarVerification.ANF.Typed
+import RunarVerification.Stack.NumEncoding
 
 /-!
 # ANF IR — Big-step evaluation (skeleton)
@@ -8,25 +9,29 @@ import RunarVerification.ANF.Typed
 A starter executable big-step semantics for ANF programs.
 
 **Scope of this module (Phase 1 / Phase 2 only).** Per the spec, this
-file lays down the dispatch shape and fills in the **non-cryptographic**
-constructors only. Hashes, EC primitives, ECDSA / Rabin / WOTS / SLH-DSA
-verifiers, and the BIP-143 preimage extractors are introduced as
-explicit assumptions or backend-parametric definitions in the dedicated
-`Crypto` namespace at the bottom of this file. Each assumption is
-documented with its role and where it sits in the larger Phase 3 plan.
+file lays down the dispatch shape and fills in the executable
+non-cryptographic constructors. Hashes, EC primitives, and ECDSA /
+Rabin / WOTS / SLH-DSA verifiers are introduced as explicit assumptions
+or backend-parametric definitions in the dedicated `Crypto` namespace at
+the bottom of this file. Each assumption is documented with its role and
+where it sits in the larger Phase 3 plan.
 
 **What is concrete here:**
 
 * `loadParam`, `loadProp`, `loadConst` (`int`, `bool`, `bytes`,
   `refAlias`, `thisRef`)
-* arithmetic / comparison / bitwise `bin_op`s on `bigint`
+* arithmetic / comparison `bin_op`s on `bigint`
+* bytewise `&`, `|`, `^`, and `~` over equal-length byte strings
 * byte-equality and short-circuit `&&` / `||`
 * `unary_op` (`!`, `~`, `-`)
 * `assert` (script aborts iff value is `false`)
 * `update_prop` (writes the property slot)
 * the four control-flow / framework intrinsics: `super` (no-op in eval),
-  `cat` (byte concatenation), `len`, `bool` (coercion), `assert`,
-  `bin2num`, `num2bin`.
+  `cat` (byte concatenation), `len`, `bool` (coercion), `assert`.
+* byte-string conversion/slicing intrinsics: `bin2num`, `num2bin`,
+  `int2str`, `substr`, `left`, `right`, `reverseBytes`,
+  `toByteString`, `pack`, `unpack`.
+* BIP-143 preimage field extractors over the concrete serialized layout.
 
 **What is axiomatized:**
 
@@ -34,10 +39,9 @@ documented with its role and where it sits in the larger Phase 3 plan.
   `sha256Compress`, `sha256Finalize`, and `blake3*`
 * every EC primitive (secp256k1, P-256, P-384, BN254-G1)
 * every signature verifier (ECDSA, Rabin, WOTS+, SLH-DSA-SHA2-{128,192,256}{s,f})
-* every `extract*` preimage projection (BIP-143)
 * every field-arithmetic primitive (BabyBear, KoalaBear, BN254-Fp)
-* `checkPreimage` (per OQ-4)
-* `checkSig`, `checkMultiSig`
+* the external preimage-validation backend for `checkPreimage`
+* the external authentication backend for `checkSig` / `checkMultiSig`
 
 The axioms are **not** proved sound here. Each is documented with the
 property the verification lead should later refine into a proper
@@ -157,6 +161,21 @@ end State
 
 /-! ## Concrete operator semantics -/
 
+private def bitwiseBytesBin (name : String) (f : UInt8 → UInt8 → UInt8)
+    (l r : Value) : EvalResult Value :=
+  match l.asBytes?, r.asBytes? with
+  | some lb, some rb =>
+      match RunarVerification.Stack.zipBytesWith? f lb rb with
+      | some out => return .vBytes out
+      | none => .error (.typeError s!"{name} expects equal-length byte values")
+  | _, _ => .error (.typeError s!"{name} expects byte values")
+
+private def invertBytesValue (operand : Value) : EvalResult Value :=
+  match operand.asBytes? with
+  | some bs =>
+      return .vBytes (ByteArray.mk ((bs.toList.map (fun b => ~~~ b)).toArray))
+  | none => .error (.typeError "unary_op ~ expects byte value")
+
 /-- Numeric / boolean / byte primitive bin-ops on `Value`. -/
 def evalBinOp (op : String) (l r : Value) (resultType : Option String) :
     EvalResult Value := do
@@ -187,12 +206,9 @@ def evalBinOp (op : String) (l r : Value) (resultType : Option String) :
           | .vBigint x, .vBigint y => return .vBool (decide (x = y))
           | .vBool x, .vBool y => return .vBool (decide (x = y))
           | _, _ => .error (.typeError "===/numeric expects matching scalar values")
-  -- Bitwise ops on Int are not part of Lean core; the lowering pass uses them
-  -- only on `bigint` operands but the semantics match a fixed-width unsigned
-  -- representation. Phase 3 wires these through ByteArray-level helpers.
-  | "&", _, _ => .error (.unsupported "bin_op & on Int (axiomatized in Phase 3)")
-  | "|", _, _ => .error (.unsupported "bin_op | on Int (axiomatized in Phase 3)")
-  | "^", _, _ => .error (.unsupported "bin_op ^ on Int (axiomatized in Phase 3)")
+  | "&", _, _ => bitwiseBytesBin "bin_op &" (· &&& ·) l r
+  | "|", _, _ => bitwiseBytesBin "bin_op |" (· ||| ·) l r
+  | "^", _, _ => bitwiseBytesBin "bin_op ^" (· ^^^ ·) l r
   | "<<", .vBigint a, .vBigint b => return .vBigint (a * (2 ^ b.toNat))
   | ">>", .vBigint a, .vBigint b => return .vBigint (a / (2 ^ b.toNat))
   | _, _, _ => .error (.unsupported s!"bin_op {op} on these operand types")
@@ -202,7 +218,7 @@ def evalUnaryOp (op : String) (operand : Value) (_resultType : Option String) :
   match op, operand with
   | "!", .vBool b   => return .vBool (!b)
   | "-", .vBigint i => return .vBigint (-i)
-  | "~", _ => .error (.unsupported "unary_op ~ on Int (axiomatized in Phase 3)")
+  | "~", _ => invertBytesValue operand
   | _, _ => .error (.unsupported s!"unary_op {op}")
 
 /-! ## Cryptographic primitives — assumptions
@@ -355,13 +371,54 @@ def decodeLE64 (preimage : ByteArray) (i : Nat) : Int :=
   (Int.ofNat (b0 + (b1 <<< 8) + (b2 <<< 16) + (b3 <<< 24)
             + (b4 <<< 32) + (b5 <<< 40) + (b6 <<< 48) + (b7 <<< 56)))
 
+def decodeLE16Nat (preimage : ByteArray) (i : Nat) : Nat :=
+  let b0 := readByte preimage i
+  let b1 := readByte preimage (i + 1)
+  b0 + (b1 <<< 8)
+
+def decodeLE32Nat (preimage : ByteArray) (i : Nat) : Nat :=
+  let b0 := readByte preimage i
+  let b1 := readByte preimage (i + 1)
+  let b2 := readByte preimage (i + 2)
+  let b3 := readByte preimage (i + 3)
+  b0 + (b1 <<< 8) + (b2 <<< 16) + (b3 <<< 24)
+
+def decodeLE64Nat (preimage : ByteArray) (i : Nat) : Nat :=
+  let b0 := readByte preimage i
+  let b1 := readByte preimage (i + 1)
+  let b2 := readByte preimage (i + 2)
+  let b3 := readByte preimage (i + 3)
+  let b4 := readByte preimage (i + 4)
+  let b5 := readByte preimage (i + 5)
+  let b6 := readByte preimage (i + 6)
+  let b7 := readByte preimage (i + 7)
+  b0 + (b1 <<< 8) + (b2 <<< 16) + (b3 <<< 24)
+    + (b4 <<< 32) + (b5 <<< 40) + (b6 <<< 48) + (b7 <<< 56)
+
+/--
+Decode the Bitcoin CompactSize prefix at `offset`, returning
+`(payloadStart, payloadLength)`. Out-of-range bytes decode as zero via
+`readByte`, matching the total extractor convention above.
+-/
+def decodeCompactSizeAt (preimage : ByteArray) (offset : Nat) : Nat × Nat :=
+  let tag := readByte preimage offset
+  if tag < 0xfd then
+    (offset + 1, tag)
+  else if tag = 0xfd then
+    (offset + 3, decodeLE16Nat preimage (offset + 1))
+  else if tag = 0xfe then
+    (offset + 5, decodeLE32Nat preimage (offset + 1))
+  else
+    (offset + 9, decodeLE64Nat preimage (offset + 1))
+
 def extractVersion      (preimage : ByteArray) : Int       := decodeLE32 preimage 0
 def extractHashPrevouts (preimage : ByteArray) : ByteArray := preimage.extract 4 36
 def extractHashSequence (preimage : ByteArray) : ByteArray := preimage.extract 36 68
 def extractOutpoint     (preimage : ByteArray) : ByteArray := preimage.extract 68 104
 def extractInputIndex   (_preimage : ByteArray) : Int      := 0
 def extractScriptCode   (preimage : ByteArray) : ByteArray :=
-  preimage.extract 104 (preimage.size - 52)
+  let (start, len) := decodeCompactSizeAt preimage 104
+  preimage.extract start (start + len)
 def extractAmount       (preimage : ByteArray) : Int       := decodeLE64 preimage (preimage.size - 52)
 def extractSequence     (preimage : ByteArray) : Int       := decodeLE32 preimage (preimage.size - 44)
 def extractOutputHash   (preimage : ByteArray) : ByteArray := preimage.extract (preimage.size - 40) (preimage.size - 8)
@@ -395,12 +452,24 @@ def checkMultiSig (sigs pubkeys : List ByteArray) : Bool :=
 
 def checkMultiSigStack (payload : ByteArray) : Bool :=
   authBackend.checkMultiSigStack payload
-/--
-`checkPreimage` decides whether the given byte-string is a valid
-BIP-143 preimage for the implicit transaction context. Per OQ-4 we
-leave the transaction context abstract.
--/
-axiom checkPreimage    : ByteArray → Bool
+-- Preimage validation is supplied by the execution environment. The
+-- concrete BIP-143 byte layout is modelled by `Stack.TxContext`; this
+-- backend decides whether a candidate payload is valid for the implicit
+-- transaction context used by the script under evaluation.
+structure PreimageBackend where
+  checkPreimage : ByteArray → Bool
+
+private def missingPreimageBackend (name : String) : Bool :=
+  panic! s!"external {name} preimage backend required for Lean execution"
+
+private def executablePreimageBackend : PreimageBackend where
+  checkPreimage := fun _ => missingPreimageBackend "checkPreimage"
+
+@[implemented_by executablePreimageBackend]
+axiom preimageBackend : PreimageBackend
+
+def checkPreimage (preimage : ByteArray) : Bool :=
+  preimageBackend.checkPreimage preimage
 
 -- Output construction
 axiom buildChangeOutput     : ByteArray → Int → ByteArray
@@ -417,32 +486,128 @@ calls (which a future iteration of `Eval` will flesh out).
 -/
 
 private def evalCat? : List Value → Option Value
-  | [.vBytes a, .vBytes b] => some (.vBytes (a ++ b))
+  | [a, b] =>
+      match a.asBytes?, b.asBytes? with
+      | some ba, some bb => some (.vBytes (ba ++ bb))
+      | _, _ => none
   | _ => none
 
 private def evalLen? : List Value → Option Value
-  | [.vBytes b] => some (.vBigint b.size)
+  | [v] => v.asBytes?.map (fun b => .vBigint b.size)
   | _ => none
+
+private def nonNegativeNatArg (func argName : String) (i : Int) : EvalResult Nat :=
+  if i < 0 then
+    .error (.typeError s!"{func} expects non-negative {argName}")
+  else
+    return i.toNat
+
+private def evalNum2bin? (func : String) : List Value → EvalResult (Option Value)
+  | [.vBigint n, .vBigint target] => do
+      let size ← nonNegativeNatArg func "byte length" target
+      match RunarVerification.Stack.num2binEncode? n size with
+      | some out => return some (.vBytes out)
+      | none => .error (.typeError s!"{func} value does not fit byte length")
+  | _ => return none
+
+private def evalBin2num? : List Value → EvalResult (Option Value)
+  | [v] =>
+      match v.asBytes? with
+      | some bytes => return some (.vBigint (RunarVerification.Stack.decodeMinimalLE bytes))
+      | none => return none
+  | _ => return none
+
+private def sliceBytes (bs : ByteArray) (start len : Nat) : ByteArray :=
+  bs.extract start (start + len)
+
+private def evalSubstr? : List Value → EvalResult (Option Value)
+  | [v, .vBigint start, .vBigint len] => do
+      match v.asBytes? with
+      | some bs =>
+          let start' ← nonNegativeNatArg "substr" "start" start
+          let len' ← nonNegativeNatArg "substr" "length" len
+          return some (.vBytes (sliceBytes bs start' len'))
+      | none => return none
+  | _ => return none
+
+private def evalLeft? : List Value → EvalResult (Option Value)
+  | [v, .vBigint len] => do
+      match v.asBytes? with
+      | some bs =>
+          let len' ← nonNegativeNatArg "left" "length" len
+          return some (.vBytes (sliceBytes bs 0 len'))
+      | none => return none
+  | _ => return none
+
+private def evalRight? : List Value → EvalResult (Option Value)
+  | [v, .vBigint len] => do
+      match v.asBytes? with
+      | some bs =>
+          let len' ← nonNegativeNatArg "right" "length" len
+          let start := bs.size - len'
+          return some (.vBytes (bs.extract start bs.size))
+      | none => return none
+  | _ => return none
+
+private def evalSplit? : List Value → EvalResult (Option Value)
+  | [v, .vBigint index] => do
+      match v.asBytes? with
+      | some bs =>
+          let index' ← nonNegativeNatArg "split" "index" index
+          -- The compiler names the right/top OP_SPLIT result as the
+          -- builtin call value; the left part remains unnamed on the stack.
+          return some (.vBytes (bs.extract index' bs.size))
+      | none => return none
+  | _ => return none
+
+private def evalReverseBytes? : List Value → EvalResult (Option Value)
+  | [v] =>
+      match v.asBytes? with
+      | some bs => return some (.vBytes (ByteArray.mk (bs.toList.reverse.toArray)))
+      | none => return none
+  | _ => return none
+
+private def evalToByteString? : List Value → EvalResult (Option Value)
+  | [v] =>
+      match v.asBytes? with
+      | some bs => return some (.vBytes bs)
+      | none => return none
+  | _ => return none
+
+private def evalPack? : List Value → EvalResult (Option Value)
+  | [.vBigint i] => return some (.vBytes (RunarVerification.Stack.encodeMinimalLE i))
+  | _ => return none
 
 /--
 Best-effort dispatch for the documented "concrete" built-ins. Returns
 `none` for any built-in that is intentionally axiomatized at this stage;
 the caller treats `none` as `EvalError.unsupported` for now.
 -/
-def callBuiltin? (func : String) (args : List Value) : Option Value :=
+def callBuiltin? (func : String) (args : List Value) : EvalResult (Option Value) :=
   match func with
-  | "cat"  => evalCat? args
-  | "len"  => evalLen? args
+  | "cat"  => return evalCat? args
+  | "len"  => return evalLen? args
+  | "substr" => evalSubstr? args
+  | "num2bin" => evalNum2bin? "num2bin" args
+  | "bin2num" => evalBin2num? args
+  | "int2str" => evalNum2bin? "int2str" args
+  | "unpack" => evalBin2num? args
+  | "pack" => evalPack? args
+  | "split" => evalSplit? args
+  | "reverseBytes" => evalReverseBytes? args
+  | "left" => evalLeft? args
+  | "right" => evalRight? args
+  | "toByteString" => evalToByteString? args
   | "super" =>
       -- super(...) is a constructor-delegation marker with no
       -- runtime effect in eval; we return the @this marker.
-      some .vThis
+      return some .vThis
   | "bool" =>
       match args with
-      | [.vBigint i] => some (.vBool (decide (i ≠ 0)))
-      | [.vBool b]   => some (.vBool b)
-      | _ => none
-  | _ => none
+      | [.vBigint i] => return some (.vBool (decide (i ≠ 0)))
+      | [.vBool b]   => return some (.vBool b)
+      | _ => return none
+  | _ => return none
 
 /-! ## The (skeleton) evaluator -/
 
@@ -484,7 +649,8 @@ Concrete cases handled (all non-cryptographic constructors):
 
 * `loadParam` / `loadProp` — direct slot lookups.
 * `loadConst (.int / .bool / .bytes / .refAlias / .thisRef)`.
-* `bin_op` / `unary_op` — arithmetic / comparison / logical / shifts.
+* `bin_op` / `unary_op` — arithmetic / comparison / logical / shifts;
+  `&`, `|`, `^`, `~` are bytewise and match the Stack VM helpers.
 * `if` — dispatches on `cond`, recurses into the active branch via
   `evalBindings`. The if-binding's "result" is the value of the last
   binding in the active branch (or `vBool true/false` if empty).
@@ -493,8 +659,9 @@ Concrete cases handled (all non-cryptographic constructors):
 * `assert` — fails with `.assertFailed` if the operand is `false`.
 * `update_prop` — writes the property slot; returns the assigned value.
 * `call` — dispatches the cheap built-ins (`cat`, `len`, `super`,
-  `bool`); everything else returns `.error .unsupported` for the
-  Phase 3 lead to wire to `Crypto`.
+  `bool`), byte-string slicing, and script-number conversions;
+  everything else returns `.error .unsupported` for the Phase 3 lead
+  to wire to `Crypto`.
 * `getStateScript`, `deserializeState` — opaque framework intrinsics
   returning `.vOpaque ByteArray.empty`.
 * `addOutput`, `addRawOutput`, `addDataOutput` — append to
@@ -504,8 +671,8 @@ Concrete cases handled (all non-cryptographic constructors):
 * `methodCall` — `.error .unsupported`; per-program method-resolution
   table is Phase 3 work.
 
-Bitwise `&|^~` on `Int` and every cryptographic primitive return
-`.error .unsupported` and are listed as axioms in `Eval.Crypto`.
+Cryptographic primitives still return `.error .unsupported` and are
+listed as axioms in `Eval.Crypto`.
 -/
 def evalValue (s : State) : ANFValue → EvalResult (Value × State)
   | .loadParam name =>
@@ -534,7 +701,7 @@ def evalValue (s : State) : ANFValue → EvalResult (Value × State)
       return (res, s)
   | .call func args => do
       let argVs ← args.mapM (lookupRef s)
-      match callBuiltin? func argVs with
+      match ← callBuiltin? func argVs with
       | some v => return (v, s)
       | none   => .error (.unsupported s!"builtin {func} (axiomatized — see Crypto)")
   | .methodCall _obj _method _args =>
@@ -583,24 +750,21 @@ def evalValue (s : State) : ANFValue → EvalResult (Value × State)
       let v ← lookupRef s ref
       return (v, s.setProp name v)
   | .getStateScript =>
-      -- Framework intrinsic — Phase 3 will refine this against the
-      -- compiled artifact's `codePart`.
+      -- Framework intrinsic — the standalone ANF evaluator does not
+      -- carry the compiled artifact's `codePart`, so it returns an
+      -- opaque payload.
       .ok (.vOpaque ByteArray.empty, s)
   | .checkPreimage preimage => do
-      -- The TS reference interpreters mock checkPreimage to `true`
-      -- (`runar-testing/.../interpreter.ts:925`,
-      --  `runar-sdk/src/anf-interpreter.ts:351`). The Lean `Crypto`
-      -- axiom captures the abstract spec but is not computable, so
-      -- we mirror the mock here for executable evaluation. Phase 3
-      -- replaces this with the real BIP-143 preimage check once a
-      -- transaction-context model lands (per OQ-4).
-      let _pv ← lookupRef s preimage
-      .ok (.vBool true, s)
+      let pv ← lookupRef s preimage
+      match pv.asBytes? with
+      | some bytes => .ok (.vBool (Crypto.checkPreimage bytes), s)
+      | none => .error (.typeError "checkPreimage expects bytes")
   | .deserializeState _preimage =>
       -- Framework intrinsic: in production, parses the codePart bytes
       -- of the preimage into the contract's mutable property slots.
-      -- Phase 3 will replace this no-op with a real decoder once the
-      -- transaction-context model is concrete (per OQ-4).
+      -- The executable ANF evaluator keeps the parsed state payload
+      -- opaque; stack-level state extraction is modelled in
+      -- `Stack.Lower`.
       .ok (.vOpaque ByteArray.empty, s)
   | .addOutput sats sv pre => do
       let sv' ← lookupInt s sats
@@ -662,6 +826,56 @@ def runLoop (count : Nat) (body : List ANFBinding)
           runLoop n body iterVar stripped
 
 end
+
+/-! ### Concrete ANF byte / number samples
+
+Executable samples pin the ANF evaluator to the same bytewise and
+script-number helpers used by the Stack VM.
+-/
+
+theorem evalBinOp_XOR_bytes_sample :
+    (match evalBinOp "^"
+        (.vBytes (ByteArray.mk #[0x0f]))
+        (.vBytes (ByteArray.mk #[0xf0]))
+        none with
+     | .ok (.vBytes out) => out.toList == [0xff]
+     | _ => false) = true := by
+  native_decide
+
+theorem evalBinOp_AND_length_mismatch_errors :
+    (match evalBinOp "&"
+        (.vBytes (ByteArray.mk #[0x0f]))
+        (.vBytes (ByteArray.mk #[0xf0, 0x00]))
+        none with
+     | .error (.typeError _) => true
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_num2bin_sample :
+    (match callBuiltin? "num2bin" [.vBigint (-128), .vBigint 4] with
+     | .ok (some (.vBytes out)) => out.toList == [0x80, 0x00, 0x00, 0x80]
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_bin2num_sample :
+    (match callBuiltin? "bin2num" [.vBytes (ByteArray.mk #[0x80, 0x80])] with
+     | .ok (some (.vBigint n)) => n == -128
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_substr_sample :
+    (match callBuiltin? "substr"
+        [.vBytes (ByteArray.mk #[0x01, 0x02, 0x03, 0x04]), .vBigint 1, .vBigint 2] with
+     | .ok (some (.vBytes out)) => out.toList == [0x02, 0x03]
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_split_returns_suffix_sample :
+    (match callBuiltin? "split"
+        [.vBytes (ByteArray.mk #[0x01, 0x02, 0x03, 0x04]), .vBigint 2] with
+     | .ok (some (.vBytes out)) => out.toList == [0x03, 0x04]
+     | _ => false) = true := by
+  native_decide
 
 /-! ## Type-preservation companion (statement-only)
 

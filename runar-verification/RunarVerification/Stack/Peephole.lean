@@ -6862,24 +6862,35 @@ theorem applyCheckMultiSigVerifyFuse_match (rest : List StackOp) :
         (.opcode "OP_CHECKMULTISIG" :: .opcode "OP_VERIFY" :: rest)
     = .opcode "OP_CHECKMULTISIGVERIFY" :: applyCheckMultiSigVerifyFuse rest := rfl
 
-theorem runOpcode_CHECKMULTISIG_def (s : StackState) :
+theorem runOpcode_CHECKMULTISIG_bytes
+    (s : StackState) (b : ByteArray) (rest_top : List ANF.Eval.Value)
+    (hs : s.stack = .vBytes b :: rest_top ∨ s.stack = .vOpaque b :: rest_top) :
     runOpcode "OP_CHECKMULTISIG" s
-    = match s.pop? with
-      | none => .error (.unsupported "OP_CHECKMULTISIG: empty stack")
-      | some (v, s') =>
-          match asBytes? v with
-          | some b => .ok (s'.push (.vBool (checkMultiSigStub b)))
-          | none   => .error (.typeError "OP_CHECKMULTISIG expects bytes") := rfl
+    = .ok (({ s with stack := rest_top } : StackState).push
+        (.vBool (checkMultiSigStub b))) := by
+  unfold runOpcode runCheckMultiSig runCheckMultiSigFallback
+  unfold StackState.pop?
+  rcases hs with hB | hO
+  · rw [hB]
+    simp [asNonNegativeNat?, asInt?, asBytes?]
+  · rw [hO]
+    simp [asNonNegativeNat?, asInt?, asBytes?]
 
-theorem runOpcode_CHECKMULTISIGVERIFY_def (s : StackState) :
+theorem runOpcode_CHECKMULTISIGVERIFY_bytes
+    (s : StackState) (b : ByteArray) (rest_top : List ANF.Eval.Value)
+    (hs : s.stack = .vBytes b :: rest_top ∨ s.stack = .vOpaque b :: rest_top) :
     runOpcode "OP_CHECKMULTISIGVERIFY" s
-    = match s.pop? with
-      | none => .error (.unsupported "OP_CHECKMULTISIGVERIFY: empty stack")
-      | some (v, s') =>
-          match asBytes? v with
-          | some b =>
-              if checkMultiSigStub b then .ok s' else .error .assertFailed
-          | none   => .error (.typeError "OP_CHECKMULTISIGVERIFY expects bytes") := rfl
+    = if checkMultiSigStub b then
+        .ok ({ s with stack := rest_top } : StackState)
+      else
+        .error .assertFailed := by
+  unfold runOpcode runCheckMultiSig runCheckMultiSigFallback
+  unfold StackState.pop?
+  rcases hs with hB | hO
+  · rw [hB]
+    simp [asNonNegativeNat?, asInt?, asBytes?]
+  · rw [hO]
+    simp [asNonNegativeNat?, asInt?, asBytes?]
 
 /-- Both .vBytes and .vOpaque single-byte top forms reduce uniformly. -/
 private theorem checkMultiSigVerifyFuse_extends_anyBytes
@@ -6893,10 +6904,7 @@ private theorem checkMultiSigVerifyFuse_extends_anyBytes
     rw [show runOpcode "OP_CHECKMULTISIG" s
           = .ok (({ s with stack := rest_top } : StackState).push
                   (.vBool (checkMultiSigStub b))) from by
-            rw [runOpcode_CHECKMULTISIG_def]
-            unfold StackState.pop?
-            rw [hB]
-            simp [asBytes?]]
+            exact runOpcode_CHECKMULTISIG_bytes s b rest_top (Or.inl hB)]
     show runOps (.opcode "OP_VERIFY" :: rest)
           ((({ s with stack := rest_top } : StackState).push
             (.vBool (checkMultiSigStub b)))) = _
@@ -6906,18 +6914,12 @@ private theorem checkMultiSigVerifyFuse_extends_anyBytes
           = (if checkMultiSigStub b then
               .ok ({ s with stack := rest_top } : StackState)
              else .error .assertFailed) from by
-            rw [runOpcode_CHECKMULTISIGVERIFY_def]
-            unfold StackState.pop?
-            rw [hB]
-            simp [asBytes?]]
+            exact runOpcode_CHECKMULTISIGVERIFY_bytes s b rest_top (Or.inl hB)]
   · rw [runOps_cons_opcode_eq, stepNonIf_opcode]
     rw [show runOpcode "OP_CHECKMULTISIG" s
           = .ok (({ s with stack := rest_top } : StackState).push
                   (.vBool (checkMultiSigStub b))) from by
-            rw [runOpcode_CHECKMULTISIG_def]
-            unfold StackState.pop?
-            rw [hO]
-            simp [asBytes?]]
+            exact runOpcode_CHECKMULTISIG_bytes s b rest_top (Or.inr hO)]
     show runOps (.opcode "OP_VERIFY" :: rest)
           ((({ s with stack := rest_top } : StackState).push
             (.vBool (checkMultiSigStub b)))) = _
@@ -6927,10 +6929,7 @@ private theorem checkMultiSigVerifyFuse_extends_anyBytes
           = (if checkMultiSigStub b then
               .ok ({ s with stack := rest_top } : StackState)
              else .error .assertFailed) from by
-            rw [runOpcode_CHECKMULTISIGVERIFY_def]
-            unfold StackState.pop?
-            rw [hO]
-            simp [asBytes?]]
+            exact runOpcode_CHECKMULTISIGVERIFY_bytes s b rest_top (Or.inr hO)]
 
 /-- Reduce stepNonIf OP_CHECKMULTISIG on bytes-mixed top to a uniform shape. -/
 private theorem stepNonIf_OPCHECKMULTISIG_anyBytes
@@ -6939,11 +6938,8 @@ private theorem stepNonIf_OPCHECKMULTISIG_anyBytes
     stepNonIf (.opcode "OP_CHECKMULTISIG") s
     = .ok ((({ s with stack := rest_top } : StackState).push
               (.vBool (checkMultiSigStub b)))) := by
-  rw [stepNonIf_opcode, runOpcode_CHECKMULTISIG_def]
-  unfold StackState.pop?
-  rcases hs with hB | hO
-  · rw [hB]; simp [asBytes?]
-  · rw [hO]; simp [asBytes?]
+  rw [stepNonIf_opcode]
+  exact runOpcode_CHECKMULTISIG_bytes s b rest_top hs
 
 private theorem applyCheckMultiSigVerifyFuse_cons_no_match
     (op : StackOp) (rest : List StackOp)
@@ -6978,11 +6974,8 @@ theorem checkMultiSigVerifyFuse_pass_sound :
                   = (if checkMultiSigStub b then
                       .ok ({ s with stack := rest_top } : StackState)
                      else .error .assertFailed) := by
-      rw [stepNonIf_opcode, runOpcode_CHECKMULTISIGVERIFY_def]
-      unfold StackState.pop?
-      rcases hStack with hB | hO
-      · rw [hB]; simp [asBytes?]
-      · rw [hO]; simp [asBytes?]
+      rw [stepNonIf_opcode]
+      exact runOpcode_CHECKMULTISIGVERIFY_bytes s b rest_top hStack
     rw [hStepDef] at hStepCMV
     by_cases hSig : checkMultiSigStub b = true
     · rw [hSig] at hStepCMV
