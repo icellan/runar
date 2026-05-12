@@ -48,7 +48,8 @@ describe('wots-codegen module extraction (GAP-001)', () => {
     // Sanity: WOTS+ verification ends with the bool result on top after
     // dropping pubSeed (final ops in the new module: SWAP, drop).
     const last = ops[ops.length - 1];
-    expect(last.op).toBe('drop');
+    expect(last).toBeDefined();
+    expect(last!.op).toBe('drop');
   });
 
   it('compiling the WOTS+ example produces byte-identical hex to pre-extraction baseline', () => {

@@ -4,6 +4,7 @@
 
 export type { Signer } from './signer.js';
 export { LocalSigner } from './local.js';
+export { MockSigner } from './mock.js';
 export { ExternalSigner } from './external.js';
 export type { SignCallback } from './external.js';
 export { WalletSigner } from './wallet.js';

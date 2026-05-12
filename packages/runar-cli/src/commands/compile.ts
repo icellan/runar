@@ -11,6 +11,8 @@ interface CompileOptions {
   ir?: boolean;
   asm?: boolean;
   disableConstantFolding?: boolean;
+  fromIr?: string;
+  hex?: boolean;
 }
 
 interface CompilerDiagnosticLike {
@@ -57,7 +59,15 @@ export async function compileCommand(
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
   type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean }) => unknown;
+  type CompileFromANFFn = (
+    program: unknown,
+    options?: { disableConstantFolding?: boolean },
+  ) => { scriptHex: string; scriptAsm: string };
+  type LoadANFFn = (json: string) => unknown;
+
   let compile: CompileFn | null = null;
+  let compileFromANF: CompileFromANFFn | null = null;
+  let loadANFFromJSON: LoadANFFn | null = null;
   try {
     // In monorepo/dev mode, prefer the source entry so conformance and CLI
     // runs always reflect the latest compiler implementation.
@@ -66,6 +76,12 @@ export async function compileCommand(
       const compiler = (await import(pathToFileURL(sourceEntry).href)) as Record<string, unknown>;
       if (typeof compiler.compile === 'function') {
         compile = compiler.compile as CompileFn;
+      }
+      if (typeof compiler.compileFromANF === 'function') {
+        compileFromANF = compiler.compileFromANF as CompileFromANFFn;
+      }
+      if (typeof compiler.loadANFFromJSON === 'function') {
+        loadANFFromJSON = compiler.loadANFFromJSON as LoadANFFn;
       }
     }
 
@@ -76,9 +92,80 @@ export async function compileCommand(
       if (typeof compiler.compile === 'function') {
         compile = compiler.compile as CompileFn;
       }
+      if (!compileFromANF && typeof compiler.compileFromANF === 'function') {
+        compileFromANF = compiler.compileFromANF as CompileFromANFFn;
+      }
+      if (!loadANFFromJSON && typeof compiler.loadANFFromJSON === 'function') {
+        loadANFFromJSON = compiler.loadANFFromJSON as LoadANFFn;
+      }
     }
   } catch {
     // Compiler not available — will fall back to error message below
+  }
+
+  // --from-ir mode: compile a single ANF IR JSON file straight to a
+  // locking script. Skips parse/validate/typecheck/anf-lower entirely.
+  if (options.fromIr) {
+    if (!compileFromANF || !loadANFFromJSON) {
+      console.error(
+        '  Error: runar-compiler does not expose compileFromANF / loadANFFromJSON. Ensure the package is built.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    const irPath = path.resolve(process.cwd(), options.fromIr);
+    let irJson: string;
+    try {
+      irJson = fs.readFileSync(irPath, 'utf-8');
+    } catch (err) {
+      console.error(`  Error reading IR file: ${(err as Error).message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    let program: unknown;
+    try {
+      program = loadANFFromJSON(irJson);
+    } catch (err) {
+      console.error(`  IR parse error: ${(err as Error).message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    let result: { scriptHex: string; scriptAsm: string };
+    try {
+      result = compileFromANF(program, { disableConstantFolding: options.disableConstantFolding });
+    } catch (err) {
+      console.error(`  Compilation error: ${(err as Error).message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (options.hex) {
+      // Print only the hex on stdout; no other chatter so the output
+      // can be piped into a hex-comparison harness.
+      process.stdout.write(result.scriptHex + '\n');
+      return;
+    }
+
+    const baseName = path.basename(irPath, path.extname(irPath));
+    const minimalArtifact = {
+      contractName: (program as { contractName?: string }).contractName ?? baseName,
+      script: result.scriptHex,
+      asm: result.scriptAsm,
+    };
+    const artifactPath = path.join(outputDir, `${baseName}.json`);
+    fs.writeFileSync(artifactPath, JSON.stringify(minimalArtifact, null, 2) + '\n');
+    console.log(`Compiling from IR: ${irPath}`);
+    console.log(`  Artifact written: ${artifactPath}`);
+    if (options.asm) {
+      console.log('');
+      console.log(`  ASM (${baseName}):`);
+      console.log(`  ${result.scriptAsm}`);
+      console.log('');
+    }
+    return;
   }
 
   let successCount = 0;

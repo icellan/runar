@@ -28,11 +28,13 @@ program
 program
   .command('compile')
   .description('Compile Rúnar contracts')
-  .argument('<files...>', 'contract files to compile')
+  .argument('[files...]', 'contract files to compile (omit when --from-ir is used)')
   .option('-o, --output <dir>', 'output directory', './artifacts')
   .option('--ir', 'include IR in artifact')
   .option('--asm', 'print ASM to stdout')
   .option('--disable-constant-folding', 'disable ANF constant folding pass')
+  .option('--from-ir <path>', 'compile from an ANF IR JSON file (skips parse/validate/typecheck/anf-lower)')
+  .option('--hex', 'with --from-ir, print only the script hex to stdout (no artifact JSON)')
   .action(compileCommand);
 
 program

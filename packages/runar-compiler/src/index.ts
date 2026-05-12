@@ -362,6 +362,166 @@ export function compile(source: string, options?: CompileOptions): CompileResult
 }
 
 // ---------------------------------------------------------------------------
+// compileFromANF — IR-input compilation (mirrors Go/Rust/Python `--ir`)
+// ---------------------------------------------------------------------------
+
+export interface CompileFromANFOptions {
+  /** Bake property values into the locking script (replaces placeholders). */
+  constructorArgs?: Record<string, bigint | boolean | string>;
+  /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
+  disableConstantFolding?: boolean;
+}
+
+export interface CompileFromANFResult {
+  /** Hex-encoded Bitcoin Script. */
+  scriptHex: string;
+  /** Human-readable ASM representation. */
+  scriptAsm: string;
+  /** The (possibly post-fold, post-EC-optimize) ANF program. */
+  anf: ANFProgram;
+  /** Per-method OP_CODESEPARATOR byte offsets. */
+  codeSeparatorIndices?: number[];
+  /** Constructor parameter placeholder byte offsets. */
+  constructorSlots?: { paramIndex: number; byteOffset: number }[];
+}
+
+/**
+ * Compile a parsed/loaded ANF IR program directly to a Bitcoin Script.
+ *
+ * Skips passes 1–4 (parse/validate/typecheck/anf-lower) and runs only:
+ *   constant-fold (optional) → EC optimize → stack-lower → peephole → emit
+ *
+ * Mirrors Go's `CompileFromIR`, Rust's `compile_from_ir`, Python's
+ * `compile_from_ir_bytes`, and the corresponding entry points on the Zig,
+ * Ruby, and Java tiers. Returns the locking-script hex and ASM only —
+ * since an IR program does not carry a `ContractNode`, the full ABI /
+ * state-fields artifact cannot be reconstructed at this layer; callers
+ * that need the full artifact should compile from source.
+ */
+export function compileFromANF(
+  program: ANFProgram,
+  options?: CompileFromANFOptions,
+): CompileFromANFResult {
+  const opts = options ?? {};
+
+  let anf: ANFProgram = program;
+
+  // Bake constructor args into ANF properties so stack lowering emits real
+  // values instead of OP_0 placeholders.
+  if (opts.constructorArgs) {
+    for (const prop of anf.properties) {
+      if (prop.name in opts.constructorArgs) {
+        prop.initialValue = opts.constructorArgs[prop.name];
+      }
+    }
+  }
+
+  if (!opts.disableConstantFolding) {
+    anf = foldConstants(anf);
+  }
+
+  const optimizedAnf = optimizeEC(anf);
+
+  const stackProgram = lowerToStack(optimizedAnf);
+  for (const method of stackProgram.methods) {
+    method.ops = optimizeStackIR(method.ops);
+  }
+
+  const emitResult = emit(stackProgram);
+  return {
+    scriptHex: emitResult.scriptHex,
+    scriptAsm: emitResult.scriptAsm,
+    anf: optimizedAnf,
+    codeSeparatorIndices: emitResult.codeSeparatorIndices,
+    constructorSlots: emitResult.constructorSlots,
+  };
+}
+
+/**
+ * Parse an ANF IR JSON string into an `ANFProgram`.
+ *
+ * The TS compiler emits `bigint` values as JSON strings of the form
+ * `"42n"`. The Go / Rust / Python emitters use plain numbers for safe
+ * integer values and decimal strings for big numbers. This loader accepts
+ * both shapes so a TS `--from-ir` invocation can consume IR produced by
+ * any peer compiler.
+ *
+ * Throws on malformed JSON. Does NOT perform deep schema validation —
+ * downstream stack-lowering will reject malformed IR with an explicit error.
+ */
+export function loadANFFromJSON(json: string): ANFProgram {
+  const parsed = JSON.parse(json, (_key, value) => {
+    if (typeof value === 'string' && /^-?\d+n$/.test(value)) {
+      return BigInt(value.slice(0, -1));
+    }
+    return value;
+  }) as unknown;
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('loadANFFromJSON: top-level value is not an object');
+  }
+  const program = parsed as Partial<ANFProgram>;
+  if (typeof program.contractName !== 'string') {
+    throw new Error('loadANFFromJSON: missing string field "contractName"');
+  }
+  if (!Array.isArray(program.properties)) {
+    throw new Error('loadANFFromJSON: missing array field "properties"');
+  }
+  if (!Array.isArray(program.methods)) {
+    throw new Error('loadANFFromJSON: missing array field "methods"');
+  }
+  return program as ANFProgram;
+}
+
+// ---------------------------------------------------------------------------
+// compileCheck — frontend-only validation wrapper
+// ---------------------------------------------------------------------------
+
+export interface CompileCheckOptions {
+  /** Source file name for error messages and parser dispatch. Defaults to "contract.runar.ts". */
+  fileName?: string;
+}
+
+/**
+ * Run the Rúnar frontend (parse → validate → typecheck → expandFixedArrays
+ * → typecheck) on a source string and throw on any error-severity diagnostic.
+ *
+ * Returns void on success. Throws an Error whose message lists every
+ * frontend diagnostic when validation fails. Mirrors the named API exposed
+ * by the Go (`CompileCheck`), Rust (`compile_check`), Python
+ * (`compile_check`), Zig, Ruby, and Java tiers, so contract-level tests in
+ * TypeScript can write `compileCheck(src, 'X.runar.ts')` instead of having
+ * to thread through the full `compile()` result.
+ */
+export function compileCheck(source: string, fileName?: string, options?: CompileCheckOptions): void {
+  const effectiveFileName = options?.fileName ?? fileName ?? 'contract.runar.ts';
+  const result = compile(source, {
+    fileName: effectiveFileName,
+    typecheckOnly: true,
+  });
+
+  if (!result.success) {
+    const errorDiagnostics = result.diagnostics.filter(d => d.severity === 'error');
+    const messages = errorDiagnostics.length > 0
+      ? errorDiagnostics.map(d => d.message ?? 'unknown error').join('; ')
+      : 'unknown compileCheck failure';
+    throw new Error(`compileCheck failed for ${effectiveFileName}: ${messages}`);
+  }
+
+  // Run pass 3b (expand fixed arrays) explicitly so callers get the same
+  // failure surface as the full compile pipeline (pass 3b runs after the
+  // typecheck-only short-circuit above).
+  if (!result.contract) {
+    throw new Error(`compileCheck failed for ${effectiveFileName}: no contract produced`);
+  }
+  const expand = expandFixedArrays(result.contract);
+  const expandErrors = expand.errors.filter(d => d.severity === 'error');
+  if (expandErrors.length > 0) {
+    const messages = expandErrors.map(d => d.message ?? 'unknown error').join('; ');
+    throw new Error(`compileCheck failed for ${effectiveFileName}: ${messages}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

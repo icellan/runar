@@ -19,7 +19,7 @@ export { WhatsOnChainProvider, MockProvider, RPCProvider, WalletProvider, Gorill
 export type { Provider, RPCProviderOptions, WalletProviderOptions, InscriptionInfo, InscriptionDetail } from './providers/index.js';
 
 // Signers
-export { LocalSigner, ExternalSigner, WalletSigner } from './signers/index.js';
+export { LocalSigner, MockSigner, ExternalSigner, WalletSigner } from './signers/index.js';
 export type { Signer, SignCallback, WalletSignerOptions } from './signers/index.js';
 
 // Contract

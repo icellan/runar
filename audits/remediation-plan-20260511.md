@@ -58,7 +58,7 @@ Grouped by language to minimize file overlap with majors. Order column is contig
 | GAP-013 | B8 `--parse-only` test | Go | `compilers/go/main_test.go` (or extend) | minor | 13 | pending |
 | GAP-014 | B8 `--parse-only` test | Rust | `compilers/rust/tests/cli_tests.rs` (new) | minor | 14 | refuted 2026-05-12 — Rust impl at main.rs:74 (handles --parse-only); test at conformance runner level still missing but Rust impl is verified and exercised via parser-only matrix |
 | GAP-015 | B8 `--parse-only` test | Zig | `compilers/zig/src/main.zig` inline test | minor | 15 | pending |
-| GAP-016 | B9 / F-2 (BUG-002) | TS | `packages/runar-cli` + `packages/runar-compiler/src/index.ts` `--ir` mode | minor | 16 | pending |
+| GAP-016 | B9 / F-2 (BUG-002) | TS | `packages/runar-cli` + `packages/runar-compiler/src/index.ts` `--ir` mode | minor | 16 | resolved 2026-05-12 |
 | GAP-017 | B10 expand fixed arrays test | Rust | `compilers/rust/tests/compiler_tests.rs` extension | minor | 17 | refuted 2026-05-12 — 9+ inline `#[test]` at `compilers/rust/src/frontend/expand_fixed_arrays.rs:1346+` |
 | GAP-018 | B10 expand fixed arrays test | Zig | inline test in `compilers/zig/src/passes/expand_fixed_arrays.zig` | minor | 18 | refuted 2026-05-12 — 4 inline tests at expand_fixed_arrays.zig:1038+ |
 | GAP-019 | C3 `addOutput` test | Python | `compilers/python/tests/test_addoutput.py` (new) | minor | 19 | pending |
@@ -89,8 +89,8 @@ Grouped by language to minimize file overlap with majors. Order column is contig
 | GAP-044 | G4 GorillaPoolProvider test | Zig | `packages/runar-zig/src/sdk_gorillapool.zig` inline test | minor | 44 | refuted 2026-05-12 — 4 inline tests at sdk_gorillapool.zig:454+ (init / testnet URL / buildTxPath / mock-broadcast) |
 | GAP-045 | G5 RPC provider impl | Zig | `packages/runar-zig/src/sdk_rpc_provider.zig` (new) | minor | 45 | refuted 2026-05-12 — `packages/runar-zig/src/sdk_rpc_provider.zig` exists |
 | GAP-046 | G5 RPC provider test | Python | `packages/runar-py/tests/test_rpc_provider.py` (new) | minor | 46 | refuted 2026-05-12 — `packages/runar-py/tests/test_sdk_rpc_provider.py` exists |
-| GAP-047 | G7 TS MockSigner class / F-4 (BUG-004) | TS | `packages/runar-sdk/src/signers/mock.ts` (new) + index export | minor | 47 | pending |
-| GAP-048 | G7 MockSigner real test | TS | `packages/runar-sdk/src/__tests__/mock-signer.spec.ts` (new) — depends on GAP-047 | minor | 48 | pending |
+| GAP-047 | G7 TS MockSigner class / F-4 (BUG-004) | TS | `packages/runar-sdk/src/signers/mock.ts` (new) + index export | minor | 47 | resolved 2026-05-12 |
+| GAP-048 | G7 MockSigner real test | TS | `packages/runar-sdk/src/__tests__/mock-signer.spec.ts` (new) — depends on GAP-047 | minor | 48 | resolved 2026-05-12 |
 | GAP-049 | G8 ExternalSigner impl finish | Zig | `packages/runar-zig/src/sdk_signer.zig` (extend) | minor | 49 | refuted 2026-05-12 — `ExternalSigner` already implemented at sdk_signer.zig:196-227 (callback-based signer with full Signer interface) |
 | GAP-050 | G8 ExternalSigner test | Python | `packages/runar-py/tests/test_external_signer.py` (new) | minor | 50 | refuted 2026-05-12 — `TestExternalSigner` class at `packages/runar-py/tests/test_signer.py:82+` |
 | GAP-051 | G13 1sat inscription test | Zig | inline test in `packages/runar-zig/src/sdk_ordinals.zig` | minor | 51 | refuted 2026-05-12 — 10+ inline tests at sdk_ordinals.zig:494+ (build / parse / round-trip / find for text + medium + large data + empty) |
@@ -99,7 +99,7 @@ Grouped by language to minimize file overlap with majors. Order column is contig
 | GAP-054 | G14 BRC-100 test | Python | `packages/runar-py/tests/test_brc100_wallet.py` (new) | minor | 54 | refuted 2026-05-12 — `packages/runar-py/tests/test_wallet.py` + `test_wallet_client_integration.py` exist |
 | GAP-055 | G14 BRC-100 test | Zig | `packages/runar-zig/src/sdk_wallet.zig` inline test | minor | 55 | refuted 2026-05-12 — 7+ inline tests at sdk_wallet.zig:552+ (MockWalletClient pubkey/sig/createAction/listOutputs + WalletProvider + WalletSigner) |
 | GAP-056 | H1/H2 Zig runtime tests | Zig | tests for new `sdk_anf_interpreter.zig` (folded into GAP-010) | minor | — | folded |
-| GAP-057 | H3 TS `compileCheck` wrapper / S-1 (BUG-006) | TS | `packages/runar-compiler/src/index.ts` thin wrapper | minor | 56 | pending |
+| GAP-057 | H3 TS `compileCheck` wrapper / S-1 (BUG-006) | TS | `packages/runar-compiler/src/index.ts` thin wrapper | minor | 56 | resolved 2026-05-12 |
 
 ### Section 6 cross-references
 
