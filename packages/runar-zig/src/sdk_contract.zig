@@ -333,6 +333,7 @@ pub const RunarContract = struct {
 
         for (args, 0..) |arg, i| {
             const param_type = user_params[i].type_name;
+            const param_name = user_params[i].name;
             if (std.mem.eql(u8, param_type, "Sig") and arg == .int and arg.int == 0) {
                 // Placeholder sig: 72 zero bytes
                 try sig_indices.append(self.allocator, i);
@@ -343,12 +344,16 @@ pub const RunarContract = struct {
                 resolved_args[i] = .{ .bytes = pk };
             } else if ((std.mem.eql(u8, param_type, "ByteString") or
                 std.mem.eql(u8, param_type, "Ripemd160")) and
-                arg == .int and arg.int == 0)
+                arg == .int and arg.int == 0 and
+                std.mem.eql(u8, param_name, "allPrevouts"))
             {
                 // Auto-resolve `allPrevouts`: placeholder of 36*(1+n_extra+1)
                 // zero bytes — sized for the primary contract input + every
                 // additional contract input + one P2PKH funding input. The
                 // real bytes are spliced in after tx convergence below.
+                // Gated on the well-known param name `allPrevouts`; otherwise
+                // the user's `.int = 0` for a ByteString param is a legitimate
+                // empty-bytestring value (encodes as OP_0).
                 try prevouts_indices.append(self.allocator, i);
                 const placeholder_inputs: usize = 1 + n_extra_contract_inputs + 1;
                 const placeholder_hex_len: usize = 36 * 2 * placeholder_inputs;
@@ -625,9 +630,11 @@ pub const RunarContract = struct {
         }
         const extra_resolved_args: [][]types.StateValue = extra_resolved_args_list.items;
 
-        // Convert data outputs (interpreter DataOutputEntry -> ContractOutput
-        // with hex-encoded scripts) for the tx builder. The scripts must be
-        // hex-encoded because CallBuildOptions.contract_outputs uses hex too.
+        // Convert data outputs (interpreter DataOutputEntry -> ContractOutput)
+        // for the tx builder. CallBuildOptions.data_outputs scripts are hex
+        // strings; the ANF interpreter already stores `script` as a hex string
+        // (matching the TS reference, see conformance/anf-interpreter/expected/
+        // add-data-output-publish.json), so we just dupe it.
         // Explicit options.data_outputs wins over the ANF-resolved set.
         var data_outputs_hex: std.ArrayListUnmanaged(types.ContractOutput) = .empty;
         defer {
@@ -644,9 +651,8 @@ pub const RunarContract = struct {
                 }
             } else {
                 for (anf_data_outputs) |d| {
-                    const hex_buf = try self.allocator.alloc(u8, d.script.len * 2);
-                    _ = try bsvz.primitives.hex.encodeLower(d.script, hex_buf);
-                    try data_outputs_hex.append(self.allocator, .{ .script = hex_buf, .satoshis = d.satoshis });
+                    const dup_script = try self.allocator.dupe(u8, d.script);
+                    try data_outputs_hex.append(self.allocator, .{ .script = dup_script, .satoshis = d.satoshis });
                 }
             }
         }
@@ -2095,21 +2101,50 @@ pub const RunarContract = struct {
             ctor_anf_args[i] = stateValueToAnf(arg);
         }
 
+        // Snapshot the current self.state .bytes pointers — these are the
+        // "borrowed" slices that runMethod passed through into state_map
+        // entries (current_state passthrough). State_delta updates were
+        // duped into self.allocator and DO need freeing. We use this
+        // snapshot to distinguish the two in the cleanup pass below.
+        var borrowed_ptrs: std.ArrayListUnmanaged([*]const u8) = .empty;
+        defer borrowed_ptrs.deinit(self.allocator);
+        for (self.state) |sv| {
+            if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
+        }
+
         // Compute new state AND data outputs.
         const result = anf_interp.computeNewStateAndDataOutputs(
             self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
         ) catch return empty;
         var state_map = result.state;
-        defer state_map.deinit();
+        defer {
+            var it = state_map.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* == .bytes) {
+                    const ptr = entry.value_ptr.*.bytes.ptr;
+                    var borrowed = false;
+                    for (borrowed_ptrs.items) |bp| {
+                        if (bp == ptr) {
+                            borrowed = true;
+                            break;
+                        }
+                    }
+                    if (!borrowed) self.allocator.free(entry.value_ptr.*.bytes);
+                }
+            }
+            state_map.deinit();
+        }
 
-        // Apply computed state back to self.state
+        // Apply computed state back to self.state. anfToStateValue dupes
+        // bytes into self.allocator before we free the old state value, so
+        // there's no use-after-free even when the new value is a passthrough
+        // pointer into the old self.state slot.
         for (self.artifact.state_fields, 0..) |field, i| {
             if (i < self.state.len) {
                 if (state_map.get(field.name)) |anf_val| {
-                    // Free old state value
+                    const new_val = anfToStateValue(self.allocator, anf_val) catch types.StateValue{ .int = 0 };
                     self.state[i].deinit(self.allocator);
-                    // Convert ANFValue back to StateValue
-                    self.state[i] = anfToStateValue(self.allocator, anf_val) catch .{ .int = 0 };
+                    self.state[i] = new_val;
                 }
             }
         }
@@ -2158,11 +2193,35 @@ pub const RunarContract = struct {
             ctor_anf_args[i] = stateValueToAnf(arg);
         }
 
+        // Snapshot the borrowed (passthrough) ptrs in self.state — see the
+        // matching pass in autoComputeState. This caller never mutates
+        // self.state, so the snapshot is identical to the current set.
+        var borrowed_ptrs: std.ArrayListUnmanaged([*]const u8) = .empty;
+        defer borrowed_ptrs.deinit(self.allocator);
+        for (self.state) |sv| {
+            if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
+        }
+
         const result = anf_interp.computeNewStateAndDataOutputs(
             self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
         ) catch return empty;
-        // Drop computed state; caller provides an explicit override.
         var state_map = result.state;
+        {
+            var it = state_map.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* == .bytes) {
+                    const ptr = entry.value_ptr.*.bytes.ptr;
+                    var borrowed = false;
+                    for (borrowed_ptrs.items) |bp| {
+                        if (bp == ptr) {
+                            borrowed = true;
+                            break;
+                        }
+                    }
+                    if (!borrowed) self.allocator.free(entry.value_ptr.*.bytes);
+                }
+            }
+        }
         state_map.deinit();
 
         return result.data_outputs;

@@ -863,11 +863,19 @@ fn emitANFValueJson(w: anytype, value: types.ANFValue) error{OutOfMemory}!void {
             }
             try w.writeByte('}');
         },
-        .add_raw_output => {
-            try w.writeAll("{\"kind\":\"add_raw_output\"}");
+        .add_raw_output => |aro| {
+            try w.writeAll("{\"kind\":\"add_raw_output\",\"satoshis\":");
+            try writeJsonString(w, aro.satoshis);
+            try w.writeAll(",\"scriptBytes\":");
+            try writeJsonString(w, aro.script_bytes);
+            try w.writeByte('}');
         },
-        .add_data_output => {
-            try w.writeAll("{\"kind\":\"add_data_output\"}");
+        .add_data_output => |ado| {
+            try w.writeAll("{\"kind\":\"add_data_output\",\"satoshis\":");
+            try writeJsonString(w, ado.satoshis);
+            try w.writeAll(",\"scriptBytes\":");
+            try writeJsonString(w, ado.script_bytes);
+            try w.writeByte('}');
         },
         .get_state_script => {
             try w.writeAll("{\"kind\":\"get_state_script\"}");
