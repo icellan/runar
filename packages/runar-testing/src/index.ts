@@ -111,10 +111,18 @@ export {
 export type { SLHParams, SLHKeyPair } from './crypto/slh-dsa.js';
 
 // Analyzer
-export { analyzeScript, parseScript, getStackEffect, analyzeStackLinear } from './analyzer/index.js';
+export {
+  analyzeScript,
+  parseScript,
+  getStackEffect,
+  analyzeStackLinear,
+  collapseRawScriptSpans,
+  isRawSpan,
+  RAW_SPAN_OPCODE,
+} from './analyzer/index.js';
 export type {
-  AnalysisResult, AnalysisFinding, AnalysisSummary,
-  ExecutionPath, FindingSeverity, FindingCode,
+  AnalysisResult, AnalysisFinding, AnalysisSummary, AnalyzeOptions,
+  ExecutionPath, FindingSeverity, FindingCode, RawScriptSpan,
 } from './analyzer/index.js';
 export type { ParsedOpcode } from './analyzer/index.js';
 

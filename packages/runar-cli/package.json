@@ -27,6 +27,7 @@
   "dependencies": {
     "commander": "^12.1.0",
     "runar-compiler": "workspace:*",
+    "runar-decompiler": "workspace:*",
     "runar-sdk": "workspace:*",
     "runar-testing": "workspace:*"
   },

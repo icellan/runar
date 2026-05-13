@@ -172,6 +172,27 @@ export interface ArrayLiteral {
   elements: string[];    // references to temp names
 }
 
+/**
+ * RawScript — an opaque opcode-byte span with declared stack arity.
+ *
+ * Bytes are emitted verbatim during stack lowering and Bitcoin Script emit;
+ * no re-encoding takes place. The compiler treats this node as a hard
+ * barrier: the EC algebraic optimizer, the peephole optimizer, and the
+ * static analyzer all leave it untouched, and dead-code elimination
+ * treats it as side-effecting.
+ *
+ * Used by the `asm({...})` surface syntax and by the decompiler when a
+ * span of bytes can't be lifted to higher-level Rúnar source. Keeping
+ * the IR byte-canonical (not mnemonic-based) makes cross-compiler
+ * conformance trivial.
+ */
+export interface RawScript {
+  kind: 'raw_script';
+  bytes: string;     // hex string of the verbatim opcode bytes
+  in_arity: number;  // stack elements consumed
+  out_arity: number; // stack elements produced
+}
+
 export type ANFValue =
   | LoadParam
   | LoadProp
@@ -190,4 +211,5 @@ export type ANFValue =
   | AddOutput
   | AddRawOutput
   | AddDataOutput
-  | ArrayLiteral;
+  | ArrayLiteral
+  | RawScript;

@@ -914,6 +914,22 @@ class TypeChecker {
 
     // Direct builtin call: assert(...), checkSig(...), sha256(...), etc.
     if (callee.kind === 'identifier') {
+      // `asm` is a compile-time intrinsic — the parser has already
+      // rewritten the `{ body, in_arity?, out_arity? }` object-literal
+      // argument into three positional args (body, in_arity, out_arity).
+      // Statement form returns void. The expression form
+      // `asm<T>({...})` carries the captured return type on
+      // `expr.asmReturnType` and produces a value of that type.
+      if (callee.name === 'asm') {
+        for (const arg of args) {
+          this.inferExprType(arg, env);
+        }
+        if (expr.asmReturnType) {
+          return expr.asmReturnType;
+        }
+        return VOID;
+      }
+
       const sig = BUILTIN_FUNCTIONS.get(callee.name);
       if (sig) {
         return this.checkCallArgs(callee.name, sig, args, env);

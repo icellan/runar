@@ -1,0 +1,333 @@
+{
+  "generatedAt": "2026-05-13T01:30:34.025Z",
+  "summary": {
+    "byte-match": 63,
+    "byte-diff": 0,
+    "compile-error": 0,
+    "parse-error": 0,
+    "skipped": 0
+  },
+  "pathBreakdown": {
+    "template": 58,
+    "assert-recognizer": 1,
+    "symexec": 0,
+    "raw_script": 4
+  },
+  "rows": [
+    {
+      "id": "add-data-output/DataOutputTest",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "add-raw-output/RawOutputTest",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "arithmetic/Arithmetic",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "auction/Auction",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "babybear-ext4/BabyBearExt4Demo",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "babybear/BabyBearDemo",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "bitwise-ops/BitwiseOps",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "blake3/Blake3Test",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "boolean-logic/BooleanLogic",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "bounded-loop/BoundedLoop",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "bsv20-token/BSV20Token",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "bsv21-token/BSV21Token",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "conditional-data-output/ConditionalDataOutput",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "convergence-proof/ConvergenceProof",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "covenant-vault/CovenantVault",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "cross-covenant/CrossCovenantRef",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "ec-demo/ECDemo",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "ec-primitives/ECPrimitives",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "ec-unit/ECUnit",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "escrow/Escrow",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "fixed-array-nested/Grid2x2.v2",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "function-patterns/FunctionPatterns",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "go-dsl-bytestring-literal/GoDslBytestringLiteral",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "if-else/IfElse",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "if-without-else-multi-temp/StackTrackerReproV10min",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "if-without-else/IfWithoutElse",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "math-demo/MathDemo",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "merkle-proof/MerkleProofDemo",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "message-board/MessageBoard",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "multi-method/MultiMethod",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "multisig-2of3/MultiSig2of3",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "oracle-price/OraclePriceFeed",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "ordinal-nft/OrdinalNFT",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p256-primitives/P256Primitives",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p256-wallet/P256Wallet",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p2blake3pkh/P2Blake3PKH",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p2pkh/P2PKH",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p384-primitives/P384Primitives",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p384-wallet/P384Wallet",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "post-quantum-wallet/PostQuantumWallet",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "private-helper-outputs/PrivateHelperOutputs",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "property-initializers/BoundedCounter",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "property-initializers/PropertyInitializers",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "schnorr-zkp/SchnorrZKP",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "sha256-compress/Sha256CompressTest",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "sha256-finalize/Sha256FinalizeTest",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "shift-ops/ShiftOps",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "sphincs-wallet/SPHINCSWallet",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "state-covenant/StateCovenant",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "state-ripemd160/HashRegistry",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "stateful-counter/Counter",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "stateful/Stateful",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "tic-tac-toe/TicTacToe",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "tic-tac-toe/TicTacToe.v2",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "token-ft/FungibleTokenExample",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "token-nft/NFTExample",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "fixture/counter",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "fixture/inscribed",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "fixture/p2pkh",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "fixture/simple",
+      "outcome": "byte-match",
+      "recoveryPath": "assert-recognizer"
+    },
+    {
+      "id": "fixture/stateful-escrow",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    }
+  ]
+}

@@ -12,6 +12,7 @@ import { verifyCommand } from './commands/verify.js';
 import { codegenCommand } from './commands/codegen.js';
 import { debugCommand } from './commands/debug.js';
 import { analyzeCommand } from './commands/analyze.js';
+import { decompileCommand } from './commands/decompile.js';
 
 program
   .name('runar')
@@ -86,5 +87,14 @@ program
   .option('--verbose', 'include detailed path analysis')
   .option('--severity <level>', 'minimum severity to report (error, warning, info)', 'info')
   .action(analyzeCommand);
+
+program
+  .command('decompile')
+  .description('Recover Rúnar TypeScript source from a Bitcoin Script byte stream')
+  .argument('<input>', 'hex script, .hex file, artifact JSON, or "-" for stdin')
+  .option('-o, --out-file <path>', 'write recovered source to file (default: stdout)')
+  .option('-q, --quiet', 'suppress the round-trip status message on stderr')
+  .option('--raw', 'force the raw_script path: skip templates, wrap the entire input in an asm({...}) call. Honest output for arbitrary byte streams, byte-identical round-trip.')
+  .action(decompileCommand);
 
 program.parse();

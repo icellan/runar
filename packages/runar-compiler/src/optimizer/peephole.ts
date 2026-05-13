@@ -497,6 +497,16 @@ function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
   const windowSizes = [...rulesBySize.keys()].sort((a, b) => b - a); // largest first
 
   while (i < ops.length) {
+    // raw_bytes is an opaque opcode-byte span emitted by a raw_script ANF
+    // node. Peephole rules MUST NOT bridge across it — the byte-identity
+    // contract requires the span to round-trip verbatim, and downstream
+    // analyzer arity contracts depend on the span staying intact.
+    if (ops[i]!.op === 'raw_bytes') {
+      result.push(ops[i]!);
+      i++;
+      continue;
+    }
+
     // Altstack round-trip elimination is disabled for now.
     // The safety check (net stack effect = 0) is necessary but not sufficient:
     // removing DUP+TOALTSTACK shifts items on the main stack, which invalidates
@@ -511,6 +521,12 @@ function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
 
       const sizeRules = rulesBySize.get(size)!;
       const window = ops.slice(i, i + size);
+
+      // Defensive: even though the leading-op gate above prevents the
+      // window from starting on a raw_bytes, a window starting just
+      // before one could still try to match across it. Skip any window
+      // that contains a raw_bytes op anywhere inside.
+      if (window.some(w => w.op === 'raw_bytes')) continue;
 
       for (const rule of sizeRules) {
         const replacement = rule.match(window);

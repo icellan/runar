@@ -8,6 +8,22 @@
 
 import { Opcode, opcodeName } from '../vm/opcodes.js';
 import { hexToBytes } from '../vm/utils.js';
+import type { RawScriptSpan } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Synthetic raw-span sentinel
+// ---------------------------------------------------------------------------
+
+/**
+ * Sentinel `opcode` value used for the synthetic opcode that stands in for
+ * a `raw_script` byte range when `analyzeScript` is given the artifact's
+ * `rawScriptSpans`. The value is outside the legal byte range (0..255) so
+ * none of the existing `op.opcode === Opcode.OP_*` checks ever match it —
+ * the synthetic step is naturally inert for IF/ELSE structure, CHECKSIG
+ * hygiene, CODESEPARATOR concerns, and push-encoding analysis. Stack-effect
+ * tracking reads `rawSpanArity` instead.
+ */
+export const RAW_SPAN_OPCODE = -1;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,9 +32,12 @@ import { hexToBytes } from '../vm/utils.js';
 export interface ParsedOpcode {
   /** Byte offset of this opcode in the script. */
   offset: number;
-  /** Raw opcode byte value (0x00-0xff). */
+  /**
+   * Raw opcode byte value (0x00-0xff), or `RAW_SPAN_OPCODE` (-1) for the
+   * synthetic step that stands in for a `raw_script` byte range.
+   */
   opcode: number;
-  /** Human-readable name (e.g., 'OP_ADD', 'OP_DUP', 'PUSH_20'). */
+  /** Human-readable name (e.g., 'OP_ADD', 'OP_DUP', 'PUSH_20', 'RAW_SPAN'). */
   name: string;
   /** Push data bytes, if this is a push operation. */
   data?: Uint8Array;
@@ -35,6 +54,12 @@ export interface ParsedOpcode {
   pushEncoding?: 'direct' | 'pushdata1' | 'pushdata2' | 'pushdata4' | 'opN';
   /** For push-data: the actual data length (helps detect inefficient encoding). */
   dataLength?: number;
+  /**
+   * Stack effect of a synthetic raw-span step: `[pops, pushes]`. Present
+   * only on the synthetic opcode produced by `collapseRawScriptSpans`.
+   * Read by `getStackEffect` to keep depth tracking sound across the span.
+   */
+  rawSpanArity?: [pops: number, pushes: number];
 }
 
 // ---------------------------------------------------------------------------
@@ -256,4 +281,120 @@ export function isCheckSigOpcode(op: ParsedOpcode): boolean {
     op.opcode === Opcode.OP_CHECKMULTISIG ||
     op.opcode === Opcode.OP_CHECKMULTISIGVERIFY
   );
+}
+
+/**
+ * Check if a parsed opcode is the synthetic raw-span step.
+ */
+export function isRawSpan(op: ParsedOpcode): boolean {
+  return op.opcode === RAW_SPAN_OPCODE;
+}
+
+// ---------------------------------------------------------------------------
+// Raw-span collapsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Rewrite a parsed opcode stream so that each byte range listed in `spans`
+ * is replaced by a single synthetic `RAW_SPAN` opcode whose stack effect is
+ * `(-inArity, +outArity)`.
+ *
+ * The synthetic opcode uses `RAW_SPAN_OPCODE` (-1), which intentionally
+ * falls outside the legal byte range — every `op.opcode === Opcode.OP_*`
+ * check in the analyzer becomes false for it, so the contents of the
+ * span do not contribute to IF/ELSE structure detection, CODESEPARATOR
+ * findings, push-encoding warnings, or CHECKSIG hygiene. Stack-effect
+ * tracking reads `rawSpanArity` to keep depth analysis sound.
+ *
+ * Bytes inside a span are produced verbatim by the emit pass and are not
+ * guaranteed to form a well-formed opcode stream (e.g. the user's `asm({
+ * body })` may push arbitrary script bytes). The script parser will have
+ * produced "best-effort" entries for them — those entries are discarded
+ * by this function and replaced with the synthetic step.
+ *
+ * Spans are processed in offset order. Spans that overlap or escape the
+ * parsed opcode bounds are silently clipped — the analyzer is a static
+ * checker, not a validator, so we prefer "ignore weird inputs" over
+ * throwing.
+ */
+export function collapseRawScriptSpans(
+  opcodes: ParsedOpcode[],
+  spans: RawScriptSpan[],
+): ParsedOpcode[] {
+  if (spans.length === 0) return opcodes;
+
+  const sortedSpans = [...spans].sort((a, b) => a.offset - b.offset);
+  const out: ParsedOpcode[] = [];
+
+  let spanIdx = 0;
+  for (const op of opcodes) {
+    // Advance past spans we've already emitted (any span whose end is at or
+    // before this opcode's offset is fully behind us).
+    while (
+      spanIdx < sortedSpans.length &&
+      sortedSpans[spanIdx]!.offset + sortedSpans[spanIdx]!.length <= op.offset
+    ) {
+      spanIdx++;
+    }
+
+    if (spanIdx >= sortedSpans.length) {
+      out.push(op);
+      continue;
+    }
+
+    const span = sortedSpans[spanIdx]!;
+    const spanEnd = span.offset + span.length;
+
+    // Opcode entirely before the next span — keep it.
+    if (op.offset + op.size <= span.offset) {
+      out.push(op);
+      continue;
+    }
+
+    // Opcode entirely inside a span — drop it; the synthetic step covers it.
+    if (op.offset >= span.offset && op.offset + op.size <= spanEnd) {
+      // Emit the synthetic step exactly once per span, when we first cross
+      // its offset.
+      if (
+        out.length === 0 ||
+        out[out.length - 1]!.opcode !== RAW_SPAN_OPCODE ||
+        out[out.length - 1]!.offset !== span.offset
+      ) {
+        out.push({
+          offset: span.offset,
+          opcode: RAW_SPAN_OPCODE,
+          name: 'RAW_SPAN',
+          size: span.length,
+          rawSpanArity: [span.inArity, span.outArity],
+        });
+      }
+      continue;
+    }
+
+    // Partial overlap (opcode crosses a span boundary) — degenerate input.
+    // The parser produced an opcode that straddles the span edge, which
+    // means either the span is misaligned or the parser walked past the
+    // span. Drop the partial opcode; the synthetic step still represents
+    // the span's effect. If we haven't yet emitted the synthetic for this
+    // span, emit it now.
+    if (
+      out.length === 0 ||
+      out[out.length - 1]!.opcode !== RAW_SPAN_OPCODE ||
+      out[out.length - 1]!.offset !== span.offset
+    ) {
+      out.push({
+        offset: span.offset,
+        opcode: RAW_SPAN_OPCODE,
+        name: 'RAW_SPAN',
+        size: span.length,
+        rawSpanArity: [span.inArity, span.outArity],
+      });
+    }
+  }
+
+  // Any spans past the end of the parsed stream are silently dropped — they
+  // can't have contributed any opcodes to drop, and emitting the synthetic
+  // for an empty trailing span has no effect on the rest of the analysis.
+
+  return out;
 }

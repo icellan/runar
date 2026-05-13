@@ -87,6 +87,49 @@ export interface AnalysisSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Raw script spans
+// ---------------------------------------------------------------------------
+
+/**
+ * Byte range in the locking script produced by a `raw_script` ANF node
+ * (surfaced in source as `asm({ body, in_arity, out_arity })`).
+ *
+ * The analyzer treats these spans as opaque — it does not walk the opcodes
+ * inside, since `raw_bytes` is a peephole barrier and the contents may not
+ * form a well-formed opcode stream. The declared `inArity` / `outArity`
+ * carry the stack-effect contract so depth tracking remains sound across
+ * the span without inspecting it.
+ *
+ * Compilers emit these into the `rawScriptSpans` artifact field. Callers
+ * that load an artifact JSON should forward the field to
+ * `analyzeScript(hex, { rawScriptSpans })`.
+ */
+export interface RawScriptSpan {
+  /** Byte offset of the span start in the locking script. */
+  offset: number;
+  /** Total length of the span, in bytes. */
+  length: number;
+  /** Number of stack values consumed before the span executes. */
+  inArity: number;
+  /** Number of stack values left on the stack after the span executes. */
+  outArity: number;
+}
+
+/**
+ * Options for `analyzeScript`.
+ */
+export interface AnalyzeOptions {
+  /**
+   * Byte ranges produced by `raw_script` ANF nodes. When supplied, the
+   * analyzer collapses each span into a single opaque step whose stack
+   * effect is `(-inArity, +outArity)` and skips opcode-level concerns
+   * (CODESEPARATOR / INEFFICIENT_PUSH / CHECKSIG / IF-ELSE) for the
+   * contents of the span.
+   */
+  rawScriptSpans?: RawScriptSpan[];
+}
+
+// ---------------------------------------------------------------------------
 // Top-level result
 // ---------------------------------------------------------------------------
 

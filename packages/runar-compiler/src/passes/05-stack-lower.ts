@@ -59,6 +59,26 @@ import {
 
 const MAX_STACK_DEPTH = 800;
 
+/**
+ * Local hex-to-Uint8Array helper. Avoids a runar-testing dependency
+ * (runar-testing depends on runar-compiler, so the reverse direction
+ * would create a cycle).
+ */
+function decodeHexBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) {
+    throw new Error(`raw_script bytes must have even hex length, got ${hex.length}`);
+  }
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const b = parseInt(hex.substr(i * 2, 2), 16);
+    if (Number.isNaN(b)) {
+      throw new Error(`raw_script bytes contain non-hex character near offset ${i * 2}`);
+    }
+    out[i] = b;
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Builtin function → opcode mapping
 // ---------------------------------------------------------------------------
@@ -326,6 +346,10 @@ function collectRefs(value: ANFValue): string[] {
       break;
     case 'array_literal':
       refs.push(...value.elements);
+      break;
+    case 'raw_script':
+      // No operand refs — the raw byte span has no SSA inputs visible to
+      // the optimizer. Stack effect is declared via in_arity / out_arity.
       break;
   }
 
@@ -1018,7 +1042,42 @@ class LoweringContext {
       case 'array_literal':
         this.lowerArrayLiteral(name, value.elements, bindingIndex, lastUses);
         break;
+      case 'raw_script':
+        this.lowerRawScript(name, value.bytes, value.in_arity, value.out_arity);
+        break;
     }
+  }
+
+  /**
+   * Lower a raw_script ANF node to a single opaque raw_bytes StackOp.
+   *
+   * The bytes pass through verbatim — the emit pass writes them as-is,
+   * and the peephole optimizer must not bridge across them. Stack-tracker
+   * bookkeeping consumes `in_arity` items and pushes `out_arity` items
+   * named after the binding so downstream PICK/ROLL/DROP refer to the
+   * correct logical slot.
+   */
+  private lowerRawScript(
+    bindingName: string,
+    bytesHex: string,
+    inArity: number,
+    outArity: number,
+  ): void {
+    if (this.stackMap.depth < inArity) {
+      throw new Error(
+        `raw_script binding '${bindingName}' requires ${inArity} stack items but only ${this.stackMap.depth} are present`,
+      );
+    }
+    const bytes = decodeHexBytes(bytesHex);
+    this.emitOp({ op: 'raw_bytes', bytes, in_arity: inArity, out_arity: outArity });
+    for (let i = 0; i < inArity; i++) {
+      this.stackMap.pop();
+    }
+    for (let i = 0; i < outArity; i++) {
+      const slotName = outArity === 1 ? bindingName : `${bindingName}.${i}`;
+      this.stackMap.push(slotName);
+    }
+    this.trackDepth();
   }
 
   /** Whether `ref` is used after `currentIndex`. */

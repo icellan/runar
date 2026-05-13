@@ -80,6 +80,11 @@
       "items": { "type": "integer", "minimum": 0 },
       "description": "Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.)"
     },
+    "rawScriptSpans": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/RawScriptSpan" },
+      "description": "Byte ranges produced by raw_script ANF nodes (opaque to the static analyzer)"
+    },
     "buildTimestamp": {
       "type": "string",
       "description": "ISO-8601 date-time string",
@@ -219,6 +224,33 @@
           "type": "integer",
           "minimum": 0,
           "description": "The template-relative codeSeparatorIndex value this placeholder represents"
+        }
+      }
+    },
+    "RawScriptSpan": {
+      "type": "object",
+      "required": ["offset", "length", "inArity", "outArity"],
+      "additionalProperties": false,
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Byte offset of the span start in the locking script"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total length of the span in bytes"
+        },
+        "inArity": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of stack values consumed before the span executes"
+        },
+        "outArity": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of stack values left on the stack after the span executes"
         }
       }
     }

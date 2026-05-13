@@ -411,6 +411,11 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
 
     case 'array_literal':
       return value;
+
+    case 'raw_script':
+      // Opaque byte span — never folded. Bytes are byte-canonical and the
+      // EC / peephole optimizers treat it as a hard barrier.
+      return value;
   }
 }
 
@@ -544,6 +549,9 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
     case 'array_literal':
       for (const elem of value.elements) refs.add(elem);
       break;
+    case 'raw_script':
+      // Opaque: no SSA operand refs.
+      break;
   }
 }
 
@@ -558,6 +566,7 @@ function hasSideEffect(value: ANFValue): boolean {
     case 'add_data_output':
     case 'call':        // calls may have side effects (e.g. assert)
     case 'method_call': // method calls may have side effects
+    case 'raw_script':  // opaque byte span — DCE must never eliminate it
       return true;
     default:
       return false;

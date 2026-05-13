@@ -62,7 +62,7 @@ export type TypeNode = PrimitiveTypeNode | FixedArrayTypeNode | CustomTypeNode;
 export interface ContractNode {
   kind: 'contract';
   name: string;
-  parentClass: 'SmartContract' | 'StatefulSmartContract';
+  parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
   properties: PropertyNode[];
   constructor: MethodNode;
   methods: MethodNode[];
@@ -222,6 +222,18 @@ export interface CallExpr {
   callee: Expression;
   args: Expression[];
   sourceLocation?: SourceLocation;
+  /**
+   * Only set on the synthetic `call_expr` that the parser emits for the
+   * expression-form `asm<T>({...})` intrinsic. `T` must be one of the
+   * primitive value types (`bigint`, `boolean`, `ByteString`); other
+   * type arguments are rejected by the parser.
+   *
+   * When set, the typechecker treats the call as producing a value of
+   * this type instead of `void`, and the validator skips the
+   * "terminal-truthy asm" check for mid-method occurrences (since the
+   * value is consumed by a let-binding).
+   */
+  asmReturnType?: PrimitiveTypeName;
 }
 
 export interface MemberExpr {

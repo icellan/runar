@@ -5,7 +5,7 @@
  * signature hygiene checks, and opcode concern detection.
  */
 
-import { parseScript } from './script-parser.js';
+import { parseScript, collapseRawScriptSpans } from './script-parser.js';
 import { analyzeStackLinear, checkTerminalStack } from './stack-analyzer.js';
 import { analyzePaths } from './path-analyzer.js';
 import { analyzeSigHygiene } from './sig-analyzer.js';
@@ -14,11 +14,17 @@ import type {
   AnalysisFinding,
   AnalysisResult,
   AnalysisSummary,
+  AnalyzeOptions,
   FindingSeverity,
 } from './types.js';
 
 // Re-export types and utilities
-export { parseScript } from './script-parser.js';
+export {
+  parseScript,
+  collapseRawScriptSpans,
+  isRawSpan,
+  RAW_SPAN_OPCODE,
+} from './script-parser.js';
 export type { ParsedOpcode } from './script-parser.js';
 export { getStackEffect, analyzeStackLinear } from './stack-analyzer.js';
 export { analyzePaths } from './path-analyzer.js';
@@ -28,9 +34,11 @@ export type {
   AnalysisFinding,
   AnalysisResult,
   AnalysisSummary,
+  AnalyzeOptions,
   ExecutionPath,
   FindingSeverity,
   FindingCode,
+  RawScriptSpan,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -59,9 +67,17 @@ function sortFindings(findings: AnalysisFinding[]): AnalysisFinding[] {
  * Analyze a hex-encoded Bitcoin Script for potential issues.
  *
  * @param hexScript - The hex-encoded Bitcoin Script to analyze.
+ * @param options  - Optional `rawScriptSpans` from the artifact, surfaced by
+ *                   the compiler for `asm({...})` regions. When supplied, the
+ *                   analyzer skips opcode-level inspection inside each span
+ *                   and carries stack depth across them using the declared
+ *                   `inArity` / `outArity`.
  * @returns Analysis result with findings, execution paths, and summary.
  */
-export function analyzeScript(hexScript: string): AnalysisResult {
+export function analyzeScript(
+  hexScript: string,
+  options: AnalyzeOptions = {},
+): AnalysisResult {
   const normalizedHex = hexScript.replace(/\s/g, '').toLowerCase();
   const scriptSizeBytes = normalizedHex.length / 2;
   const allFindings: AnalysisFinding[] = [];
@@ -87,8 +103,11 @@ export function analyzeScript(hexScript: string): AnalysisResult {
     };
   }
 
-  // Step 1: Parse the script
-  const opcodes = parseScript(normalizedHex);
+  // Step 1: Parse the script and collapse raw_script spans into opaque steps.
+  let opcodes = parseScript(normalizedHex);
+  if (options.rawScriptSpans && options.rawScriptSpans.length > 0) {
+    opcodes = collapseRawScriptSpans(opcodes, options.rawScriptSpans);
+  }
 
   // Step 2: Path analysis (includes stack analysis per path and branch structure validation)
   const { paths, findings: pathFindings } = analyzePaths(opcodes);

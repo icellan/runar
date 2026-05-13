@@ -10,7 +10,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { extname } from 'node:path';
 import { analyzeScript } from 'runar-testing';
-import type { AnalysisResult, FindingSeverity } from 'runar-testing';
+import type { AnalysisResult, FindingSeverity, RawScriptSpan } from 'runar-testing';
 
 export interface AnalyzeOptions {
   json?: boolean;
@@ -18,13 +18,20 @@ export interface AnalyzeOptions {
   severity?: string;
 }
 
+interface ResolvedInput {
+  hex: string;
+  rawScriptSpans?: RawScriptSpan[];
+}
+
 /**
- * Resolve the input to a hex script string.
+ * Resolve the input to a hex script string. When the input is an artifact
+ * JSON, also surfaces the `rawScriptSpans` so the analyzer can skip opaque
+ * `asm({...})` regions.
  */
-function resolveInput(input: string): string {
+function resolveInput(input: string): ResolvedInput {
   // "-" reads hex from stdin
   if (input === '-') {
-    return readFileSync(0, 'utf-8').trim();
+    return { hex: readFileSync(0, 'utf-8').trim() };
   }
 
   // Check if input is a file path
@@ -38,15 +45,18 @@ function resolveInput(input: string): string {
       if (typeof artifact.script !== 'string') {
         throw new Error(`Artifact JSON at ${input} does not contain a "script" field`);
       }
-      return artifact.script;
+      const spans = Array.isArray(artifact.rawScriptSpans)
+        ? (artifact.rawScriptSpans as RawScriptSpan[])
+        : undefined;
+      return { hex: artifact.script, rawScriptSpans: spans };
     }
 
     // .hex file or any other file — read as raw hex
-    return readFileSync(input, 'utf-8').trim();
+    return { hex: readFileSync(input, 'utf-8').trim() };
   }
 
   // Assume it's a hex string
-  return input;
+  return { hex: input };
 }
 
 const SEVERITY_COLORS: Record<FindingSeverity, string> = {
@@ -127,8 +137,10 @@ export async function analyzeCommand(
   options: AnalyzeOptions,
 ): Promise<void> {
   try {
-    const hexScript = resolveInput(input);
-    const result = analyzeScript(hexScript);
+    const resolved = resolveInput(input);
+    const result = analyzeScript(resolved.hex, {
+      rawScriptSpans: resolved.rawScriptSpans,
+    });
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));

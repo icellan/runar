@@ -111,6 +111,20 @@ export interface CodeSepIndexSlot {
   codeSepIndex: number;
 }
 
+/**
+ * Byte range in the locking script produced by a `raw_script` ANF node
+ * (surfaced in source as `asm({ body, in_arity, out_arity })`). The static
+ * analyzer treats these spans as opaque; the declared `inArity` / `outArity`
+ * carry the stack-effect contract so depth tracking remains sound across
+ * the span without inspecting its contents.
+ */
+export interface RawScriptSpan {
+  offset: number;
+  length: number;
+  inArity: number;
+  outArity: number;
+}
+
 export interface RunarArtifact {
   /** Schema version, e.g. "runar-v0.1.0" */
   version: string;
@@ -158,6 +172,9 @@ export interface RunarArtifact {
   /** Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.). */
   codeSeparatorIndices?: number[];
 
+  /** Byte ranges produced by `raw_script` ANF nodes (opaque to the analyzer). */
+  rawScriptSpans?: RawScriptSpan[];
+
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
 }
@@ -183,6 +200,8 @@ export interface AssembleOptions {
   codeSeparatorIndex?: number;
   /** Per-method OP_CODESEPARATOR byte offsets. */
   codeSeparatorIndices?: number[];
+  /** Byte ranges produced by raw_script ANF nodes (from emitter). */
+  rawScriptSpans?: RawScriptSpan[];
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +675,10 @@ export function assembleArtifact(
   }
   if (options?.codeSeparatorIndices && options.codeSeparatorIndices.length > 0) {
     artifact.codeSeparatorIndices = options.codeSeparatorIndices;
+  }
+
+  if (options?.rawScriptSpans && options.rawScriptSpans.length > 0) {
+    artifact.rawScriptSpans = options.rawScriptSpans;
   }
 
   return artifact;

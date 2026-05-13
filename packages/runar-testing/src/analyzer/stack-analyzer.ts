@@ -106,9 +106,13 @@ const STACK_EFFECTS: Record<number, [pops: number, pushes: number]> = {
 
 /**
  * Get the stack effect of an opcode. Returns [pops, pushes].
- * Push opcodes always pop 0 and push 1.
+ * Push opcodes always pop 0 and push 1. Synthetic raw-span opcodes carry
+ * their declared `(inArity, outArity)` on `rawSpanArity`.
  */
 export function getStackEffect(op: ParsedOpcode): [pops: number, pushes: number] {
+  if (op.rawSpanArity) {
+    return op.rawSpanArity;
+  }
   if (isPushOpcode(op)) {
     return [0, 1];
   }

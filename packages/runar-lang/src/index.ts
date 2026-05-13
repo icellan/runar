@@ -404,3 +404,137 @@ export abstract class StatefulSmartContract extends SmartContract {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// UnsafeSmartContract base class
+// ---------------------------------------------------------------------------
+
+/**
+ * Escape-hatch base class for contracts that need to embed raw Bitcoin
+ * Script bytes via the {@link asm} primitive.
+ *
+ * Structurally identical to {@link SmartContract} — same constructor /
+ * super interface, same readonly property rules, no auto-injected
+ * preimage check. The only difference is that the compiler permits
+ * `asm({...})` calls inside its methods. Contracts that don't need
+ * `asm` should keep extending `SmartContract` (or
+ * {@link StatefulSmartContract}) so the language subset stays
+ * statically enforced.
+ *
+ * ```ts
+ * import { UnsafeSmartContract, asm } from 'runar-lang';
+ *
+ * class Anyone extends UnsafeSmartContract {
+ *   constructor() { super(); }
+ *
+ *   public unlock() {
+ *     // OP_1 — anyone-can-spend, written as raw script.
+ *     asm({ body: '51', in_arity: 0, out_arity: 1 });
+ *   }
+ * }
+ * ```
+ *
+ * Author guidance: `asm` skips the type checker for the bytes it emits
+ * and is opaque to the EC algebraic / peephole optimizers. Use it only
+ * for genuinely uncovered patterns; prefer regular Rúnar built-ins
+ * everywhere else.
+ */
+export abstract class UnsafeSmartContract {
+  /**
+   * Constructor arguments are the contract's compile-time parameters.
+   * They become embedded in the locking script.
+   *
+   * Subclasses MUST call `super(...)` forwarding all constructor args so
+   * the compiler can track them.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  constructor(..._args: unknown[]) {
+    // Intentionally empty — the compiler extracts constructor parameters
+    // from the TypeScript AST. No runtime bookkeeping is needed.
+  }
+
+  /**
+   * Generate the locking script for the current contract state.
+   *
+   * Mirrors {@link SmartContract.getStateScript}; exposed here so
+   * unsafe contracts can still build state-continuation outputs by
+   * hand when they wrap them in `asm`.
+   */
+  protected getStateScript(): ByteString {
+    throw new Error(
+      'UnsafeSmartContract.getStateScript() cannot be called at runtime — compile this contract.',
+    );
+  }
+
+  /**
+   * Build a standard P2PKH output script for the given address.
+   *
+   * Mirrors {@link SmartContract.buildP2PKH}.
+   */
+  protected buildP2PKH(_addr: Addr): ByteString {
+    throw new Error(
+      'UnsafeSmartContract.buildP2PKH() cannot be called at runtime — compile this contract.',
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// asm — opaque raw-script escape hatch (UnsafeSmartContract only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured argument for the {@link asm} compiler intrinsic.
+ *
+ * The compiler intercepts `asm({...})` calls at parse time and lowers
+ * them to a `raw_script` ANF node. The runtime stub below only exists
+ * so the TypeScript checker accepts the source — calling `asm` from
+ * regular JS / TS code throws.
+ */
+export interface AsmArgs {
+  /**
+   * Even-length hex string of the raw Bitcoin Script opcode bytes to
+   * embed verbatim. The compiler does not re-encode or validate the
+   * semantics of these bytes — it only checks that the string is
+   * valid hex with an even length.
+   */
+  body: string;
+
+  /**
+   * Number of stack items the embedded bytes consume on entry.
+   * Defaults to `0`.
+   */
+  in_arity?: number;
+
+  /**
+   * Number of stack items the embedded bytes leave on exit. Defaults
+   * to `1` so that the common "this is the terminal value of a public
+   * method" case works without ceremony.
+   */
+  out_arity?: number;
+}
+
+/**
+ * Embed a raw Bitcoin Script byte sequence in a contract method.
+ *
+ * Only callable from inside a contract that extends
+ * {@link UnsafeSmartContract}. The compiler enforces this — a
+ * `SmartContract` or `StatefulSmartContract` that calls `asm` will
+ * fail validation.
+ *
+ * v0 only supports the string-literal `body` form:
+ *
+ * ```ts
+ * asm({ body: '76a90088ac', in_arity: 1, out_arity: 0 });
+ * ```
+ *
+ * Phase 3 follow-ups (NOT shipped today):
+ *  - Array-form body: `asm({ body: [OP_DUP, push(...)] })`
+ *  - Typed expression form: `const x: bigint = asm<bigint>({...})`
+ *  - Multi-output asm with arity > 1 returning a tuple.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function asm(_args: AsmArgs): void {
+  throw new Error(
+    'asm() cannot be called at runtime — compile this contract with the Rúnar compiler.',
+  );
+}

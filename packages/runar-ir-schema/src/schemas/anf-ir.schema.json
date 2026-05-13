@@ -103,7 +103,8 @@
         { "$ref": "#/$defs/AddOutput" },
         { "$ref": "#/$defs/AddRawOutput" },
         { "$ref": "#/$defs/AddDataOutput" },
-        { "$ref": "#/$defs/ArrayLiteral" }
+        { "$ref": "#/$defs/ArrayLiteral" },
+        { "$ref": "#/$defs/RawScript" }
       ]
     },
     "LoadParam": {
@@ -326,6 +327,17 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         }
+      }
+    },
+    "RawScript": {
+      "type": "object",
+      "required": ["kind", "bytes", "in_arity", "out_arity"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "raw_script" },
+        "bytes": { "type": "string", "pattern": "^([0-9a-fA-F]{2})*$" },
+        "in_arity": { "type": "integer", "minimum": 0 },
+        "out_arity": { "type": "integer", "minimum": 0 }
       }
     }
   }

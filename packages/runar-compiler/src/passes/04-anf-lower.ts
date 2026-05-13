@@ -1069,6 +1069,17 @@ function lowerCallExpr(
     }
   }
 
+  // asm({ body, in_arity?, out_arity? }) — parser has already normalised
+  // the object-literal argument into three positional args
+  // (body: bytestring_literal, in_arity: bigint_literal, out_arity:
+  // bigint_literal). Lower directly to a raw_script ANF binding so the
+  // bytes pass through stack-lower / emit verbatim. Phase-3 follow-ups
+  // (array-body form, generic-expression form, multi-output) will reuse
+  // this same ANF node with different parser shapes.
+  if (callee.kind === 'identifier' && callee.name === 'asm') {
+    return lowerAsmCall(expr, ctx);
+  }
+
   // this.addOutput(satoshis, val1, val2, ...) -> special node
   if (callee.kind === 'property_access' && callee.property === 'addOutput') {
     const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
@@ -1275,6 +1286,40 @@ function flattenAddOutputArgs(args: Expression[]): Expression[] {
     return [args[0]!, ...args[1].elements];
   }
   return args;
+}
+
+/**
+ * Lower an asm({...}) call (already parser-normalised to three
+ * positional args (body, in_arity, out_arity)) into a single
+ * `raw_script` ANF binding. The hex body passes through unchanged
+ * — stack-lower decodes it and emits a `raw_bytes` StackOp, which the
+ * emit pass writes verbatim. The peephole optimizer treats it as a
+ * hard barrier, so adjacent bindings never fold across it.
+ *
+ * Diagnostics for malformed args (wrong arity, non-literal arities,
+ * odd-length / non-hex body) have already been pushed by 02-validate;
+ * here we defensively coerce missing values to safe defaults so a
+ * downstream pass error doesn't mask the earlier validator error.
+ */
+function lowerAsmCall(
+  expr: Extract<Expression, { kind: 'call_expr' }>,
+  ctx: LoweringContext,
+): string {
+  const [bodyArg, inArityArg, outArityArg] = expr.args;
+
+  const bytes =
+    bodyArg && bodyArg.kind === 'bytestring_literal' ? bodyArg.value : '';
+  const inArity =
+    inArityArg && inArityArg.kind === 'bigint_literal' ? Number(inArityArg.value) : 0;
+  const outArity =
+    outArityArg && outArityArg.kind === 'bigint_literal' ? Number(outArityArg.value) : 1;
+
+  return ctx.emit({
+    kind: 'raw_script',
+    bytes,
+    in_arity: inArity,
+    out_arity: outArity,
+  });
 }
 
 function lowerTernaryExpr(

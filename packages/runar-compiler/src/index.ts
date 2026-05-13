@@ -80,6 +80,25 @@ export interface CompileOptions {
   /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
   disableConstantFolding?: boolean;
 
+  /**
+   * If true, skip the always-on ANF EC algebraic optimizer.
+   *
+   * Intended for the decompiler's `--strict-roundtrip` mode and similar
+   * byte-identity probes — when comparing a candidate against bytes whose
+   * production didn't apply the EC optimizer (e.g. older Rúnar versions,
+   * hand-rolled scripts), enabling this keeps the re-emit byte-faithful.
+   * NOT a stable user-facing option; the default pipeline always optimizes.
+   */
+  disableEcOptimizer?: boolean;
+
+  /**
+   * If true, skip the Stack IR peephole optimizer.
+   *
+   * Same niche as `disableEcOptimizer` — turn off when round-tripping
+   * against bytes that were emitted without peephole rewriting.
+   */
+  disablePeephole?: boolean;
+
   /** Called between compilation passes with the current stage name and progress percentage (0-100). */
   onProgress?: (stage: string, percent: number) => void;
 }
@@ -303,9 +322,9 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     anf = foldConstants(anf);
   }
 
-  // Pass 4.5: ANF EC Optimizer (always-on)
+  // Pass 4.5: ANF EC Optimizer (always-on by default; opt-out for strict-roundtrip)
   onProgress?.('EC optimization', 50);
-  const optimizedAnf = optimizeEC(anf);
+  const optimizedAnf = opts.disableEcOptimizer ? anf : optimizeEC(anf);
 
   // Pass 5-6: Stack lower + Peephole optimize + Emit
   try {
@@ -315,9 +334,11 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     // Apply peephole optimization to each method's ops (runs on Stack IR,
     // after the ANF conformance boundary, so it doesn't affect cross-compiler
     // conformance).
-    onProgress?.('Peephole optimizing', 75);
-    for (const method of stackProgram.methods) {
-      method.ops = optimizeStackIR(method.ops);
+    if (!opts.disablePeephole) {
+      onProgress?.('Peephole optimizing', 75);
+      for (const method of stackProgram.methods) {
+        method.ops = optimizeStackIR(method.ops);
+      }
     }
 
     onProgress?.('Emitting script', 85);
@@ -334,6 +355,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
         codeSepIndexSlots: emitResult.codeSepIndexSlots,
         codeSeparatorIndex: emitResult.codeSeparatorIndex,
         codeSeparatorIndices: emitResult.codeSeparatorIndices,
+        rawScriptSpans: emitResult.rawScriptSpans,
         includeSourceMap: emitResult.sourceMap.length > 0,
         sourceMappings: emitResult.sourceMap,
       },
@@ -370,6 +392,10 @@ export interface CompileFromANFOptions {
   constructorArgs?: Record<string, bigint | boolean | string>;
   /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
   disableConstantFolding?: boolean;
+  /** If true, skip the EC algebraic optimizer. See CompileOptions for context. */
+  disableEcOptimizer?: boolean;
+  /** If true, skip the Stack IR peephole optimizer. See CompileOptions for context. */
+  disablePeephole?: boolean;
 }
 
 export interface CompileFromANFResult {
@@ -420,11 +446,13 @@ export function compileFromANF(
     anf = foldConstants(anf);
   }
 
-  const optimizedAnf = optimizeEC(anf);
+  const optimizedAnf = opts.disableEcOptimizer ? anf : optimizeEC(anf);
 
   const stackProgram = lowerToStack(optimizedAnf);
-  for (const method of stackProgram.methods) {
-    method.ops = optimizeStackIR(method.ops);
+  if (!opts.disablePeephole) {
+    for (const method of stackProgram.methods) {
+      method.ops = optimizeStackIR(method.ops);
+    }
   }
 
   const emitResult = emit(stackProgram);

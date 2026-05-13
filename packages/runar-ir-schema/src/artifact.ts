@@ -119,6 +119,31 @@ export interface CodeSepIndexSlot {
 }
 
 // ---------------------------------------------------------------------------
+// Raw script spans
+// ---------------------------------------------------------------------------
+
+/**
+ * Byte range in the locking script produced by a `raw_script` ANF node
+ * (surfaced in source as `asm({ body, in_arity, out_arity })`).
+ *
+ * The static analyzer treats these spans as opaque — it does not walk the
+ * opcodes inside, since `raw_bytes` is a peephole barrier and the contents
+ * may be arbitrary bytes that don't form a well-formed opcode stream. The
+ * declared `inArity` / `outArity` carry the stack-effect contract so depth
+ * tracking remains sound across the span.
+ */
+export interface RawScriptSpan {
+  /** Byte offset of the span start in the locking script. */
+  offset: number;
+  /** Total length of the span, in bytes. */
+  length: number;
+  /** Number of stack values consumed before the span executes. */
+  inArity: number;
+  /** Number of stack values left on the stack after the span executes. */
+  outArity: number;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level artifact
 // ---------------------------------------------------------------------------
 
@@ -168,6 +193,9 @@ export interface RunarArtifact {
 
   /** Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.). */
   codeSeparatorIndices?: number[];
+
+  /** Byte ranges produced by `raw_script` ANF nodes (opaque to the analyzer). */
+  rawScriptSpans?: RawScriptSpan[];
 
   /** ISO-8601 build timestamp */
   buildTimestamp: string;

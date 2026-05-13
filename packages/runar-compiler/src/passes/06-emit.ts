@@ -12,6 +12,13 @@ import type {
   StackOp,
 } from '../ir/index.js';
 import type { SourceMapping } from '../ir/index.js';
+import {
+  byteToHex,
+  bytesToHex,
+  encodeScriptNumber,
+  encodePushData,
+  encodePushBigIntHex,
+} from './push-encoding.js';
 
 // ---------------------------------------------------------------------------
 // Opcode table
@@ -152,6 +159,19 @@ export interface CodeSepIndexSlot {
   codeSepIndex: number;
 }
 
+/**
+ * Byte range produced by a `raw_script` ANF node. The bytes are emitted
+ * verbatim by `emitRawBytes`; the static analyzer reads these spans so it
+ * can skip the contents (which are opaque, peephole-barrier-protected,
+ * and not guaranteed to form a well-formed opcode stream).
+ */
+export interface RawScriptSpan {
+  offset: number;
+  length: number;
+  inArity: number;
+  outArity: number;
+}
+
 export interface EmitResult {
   /** Hex-encoded Bitcoin Script */
   scriptHex: string;
@@ -170,106 +190,21 @@ export interface EmitResult {
   /** Per-method OP_CODESEPARATOR byte offsets, in method emission order.
    *  Index 0 = first public method, index 1 = second, etc. */
   codeSeparatorIndices?: number[];
+  /** Byte ranges produced by raw_script ANF nodes (opaque to the analyzer). */
+  rawScriptSpans?: RawScriptSpan[];
 }
 
 // ---------------------------------------------------------------------------
-// Script number encoding
+// Push-value encoding (re-exported from push-encoding.ts via local wrapper)
 // ---------------------------------------------------------------------------
 
 /**
- * Encode a bigint as a Bitcoin Script number (little-endian, sign bit in MSB).
+ * Encode a push value (bigint, boolean, or Uint8Array) as Bitcoin Script
+ * bytes plus a human-readable ASM disassembly tag.
  *
- * Bitcoin Script numbers use a sign-magnitude representation:
- * - 0 is encoded as empty byte array
- * - Positive numbers: little-endian bytes, MSB's high bit clear
- * - Negative numbers: little-endian bytes, MSB's high bit set
- * - If the high bit of the most significant byte is already set,
- *   an extra 0x00 (positive) or 0x80 (negative) byte is appended.
- */
-function encodeScriptNumber(n: bigint): Uint8Array {
-  if (n === 0n) {
-    return new Uint8Array(0);
-  }
-
-  const negative = n < 0n;
-  let abs = negative ? -n : n;
-
-  const bytes: number[] = [];
-  while (abs > 0n) {
-    bytes.push(Number(abs & 0xffn));
-    abs >>= 8n;
-  }
-
-  // If the high bit of the last byte is set, we need an extra byte
-  // for the sign bit.
-  const lastByte = bytes[bytes.length - 1]!;
-  if (lastByte & 0x80) {
-    bytes.push(negative ? 0x80 : 0x00);
-  } else if (negative) {
-    bytes[bytes.length - 1] = lastByte | 0x80;
-  }
-
-  return new Uint8Array(bytes);
-}
-
-// ---------------------------------------------------------------------------
-// Push data encoding
-// ---------------------------------------------------------------------------
-
-/**
- * Encode a push-data operation as Bitcoin Script bytes.
- *
- * Rules:
- * - data.length 1-75: single byte length prefix + data
- * - data.length 76-255: OP_PUSHDATA1 (0x4c) + 1-byte length + data
- * - data.length 256-65535: OP_PUSHDATA2 (0x4d) + 2-byte LE length + data
- * - data.length > 65535: OP_PUSHDATA4 (0x4e) + 4-byte LE length + data
- */
-function encodePushData(data: Uint8Array): Uint8Array {
-  const len = data.length;
-
-  if (len === 0) {
-    // Push empty data = OP_0
-    return new Uint8Array([0x00]);
-  }
-
-  if (len >= 1 && len <= 75) {
-    const result = new Uint8Array(1 + len);
-    result[0] = len;
-    result.set(data, 1);
-    return result;
-  }
-
-  if (len >= 76 && len <= 255) {
-    const result = new Uint8Array(2 + len);
-    result[0] = 0x4c; // OP_PUSHDATA1
-    result[1] = len;
-    result.set(data, 2);
-    return result;
-  }
-
-  if (len >= 256 && len <= 65535) {
-    const result = new Uint8Array(3 + len);
-    result[0] = 0x4d; // OP_PUSHDATA2
-    result[1] = len & 0xff;
-    result[2] = (len >> 8) & 0xff;
-    result.set(data, 3);
-    return result;
-  }
-
-  // OP_PUSHDATA4
-  const result = new Uint8Array(5 + len);
-  result[0] = 0x4e;
-  result[1] = len & 0xff;
-  result[2] = (len >> 8) & 0xff;
-  result[3] = (len >> 16) & 0xff;
-  result[4] = (len >> 24) & 0xff;
-  result.set(data, 5);
-  return result;
-}
-
-/**
- * Encode a push value (bigint, boolean, or Uint8Array) as Bitcoin Script bytes.
+ * Uses the shared low-level encoders in `push-encoding.ts` so the array-
+ * form `asm({ body: [OP_DUP, push(...)] })` parser can produce byte-
+ * identical output to a hand-written hex string body.
  */
 function encodePushValue(value: Uint8Array | bigint | boolean): { hex: string; asm: string } {
   if (typeof value === 'boolean') {
@@ -301,44 +236,23 @@ function encodePushValue(value: Uint8Array | bigint | boolean): { hex: string; a
 
 /**
  * Encode a bigint push, using small integer opcodes where possible.
+ *
+ * Returns a `{ hex, asm }` tuple — the hex bytes come from the shared
+ * `encodePushBigIntHex` helper so the emit pass and the array-form
+ * parser both produce the same bytes for the same bigint.
  */
 function encodePushBigInt(n: bigint): { hex: string; asm: string } {
-  // OP_0 for zero
   if (n === 0n) {
     return { hex: '00', asm: 'OP_0' };
   }
-
-  // OP_1NEGATE for -1
   if (n === -1n) {
     return { hex: '4f', asm: 'OP_1NEGATE' };
   }
-
-  // OP_1 through OP_16 for 1-16
   if (n >= 1n && n <= 16n) {
-    const opcode = 0x50 + Number(n);
-    return { hex: byteToHex(opcode), asm: `OP_${n}` };
+    return { hex: encodePushBigIntHex(n), asm: `OP_${n}` };
   }
-
-  // General case: encode as Script number
   const numBytes = encodeScriptNumber(n);
-  const encoded = encodePushData(numBytes);
-  return { hex: bytesToHex(encoded), asm: `<${bytesToHex(numBytes)}>` };
-}
-
-// ---------------------------------------------------------------------------
-// Hex utilities
-// ---------------------------------------------------------------------------
-
-function byteToHex(b: number): string {
-  return b.toString(16).padStart(2, '0');
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = '';
-  for (const b of bytes) {
-    hex += byteToHex(b);
-  }
-  return hex;
+  return { hex: encodePushBigIntHex(n), asm: `<${bytesToHex(numBytes)}>` };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +271,8 @@ class EmitContext {
   codeSeparatorIndex?: number;
   /** Per-method OP_CODESEPARATOR byte offsets (in method emission order) */
   readonly codeSeparatorIndices: number[] = [];
+  /** Byte ranges produced by raw_bytes StackOps (asm({...}) calls). */
+  readonly rawScriptSpans: RawScriptSpan[] = [];
 
   appendHex(hex: string): void {
     this.hexParts.push(hex);
@@ -429,6 +345,36 @@ class EmitContext {
     this.appendAsm('OP_0');
     this.nextOpcodeIndex();
     this.codeSepIndexSlots.push({ byteOffset, codeSepIndex });
+  }
+
+  /**
+   * Write a verbatim byte span emitted by a raw_bytes StackOp.
+   *
+   * No re-encoding takes place — the bytes go out as supplied. ASM column
+   * shows `<raw N bytes>` so the human-readable disassembly is honest about
+   * the opacity. Source-map gets a single entry for the whole span.
+   *
+   * Records a `RawScriptSpan` capturing the span's offset, length, and the
+   * declared stack-effect arities so the static analyzer can treat the
+   * span as one opaque stack-effect step.
+   */
+  emitRawBytes(bytes: Uint8Array, inArity: number, outArity: number): void {
+    if (bytes.length === 0) return;
+    const offset = this.byteLength;
+    this.recordSourceMapping();
+    let hex = '';
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i]!.toString(16).padStart(2, '0');
+    }
+    this.appendHex(hex);
+    this.appendAsm(`<raw ${bytes.length} bytes>`);
+    this.nextOpcodeIndex();
+    this.rawScriptSpans.push({
+      offset,
+      length: bytes.length,
+      inArity,
+      outArity,
+    });
   }
 
   getHex(): string {
@@ -510,6 +456,15 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
       // arg substitution which can shift byte offsets in the script.
       ctx.emitCodeSepIndexPlaceholder();
       break;
+
+    case 'raw_bytes':
+      // Opaque opcode-byte span from a raw_script ANF node. Written verbatim,
+      // no re-encoding. The peephole optimizer treats this op as a hard
+      // barrier so its bytes never get rewritten. The in/out arity declared
+      // on the StackOp is recorded into the artifact's rawScriptSpans so the
+      // analyzer can carry stack-effect across the span without walking it.
+      ctx.emitRawBytes(op.bytes, op.in_arity, op.out_arity);
+      break;
   }
 
   // Clear after emitting so the location doesn't leak to the next op
@@ -589,6 +544,7 @@ export function emit(program: StackProgram): EmitResult {
     codeSepIndexSlots: ctx.codeSepIndexSlots,
     codeSeparatorIndex: ctx.codeSeparatorIndex,
     codeSeparatorIndices: ctx.codeSeparatorIndices.length > 0 ? ctx.codeSeparatorIndices : undefined,
+    rawScriptSpans: ctx.rawScriptSpans.length > 0 ? ctx.rawScriptSpans : undefined,
   };
 }
 
@@ -651,5 +607,6 @@ export function emitMethod(method: StackMethod): EmitResult {
     sourceMap: ctx.sourceMap,
     constructorSlots: ctx.constructorSlots,
     codeSepIndexSlots: ctx.codeSepIndexSlots,
+    rawScriptSpans: ctx.rawScriptSpans.length > 0 ? ctx.rawScriptSpans : undefined,
   };
 }

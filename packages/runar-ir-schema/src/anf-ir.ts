@@ -176,6 +176,20 @@ export interface ArrayLiteral {
   elements: string[];    // references to temp names
 }
 
+/**
+ * RawScript — an opaque opcode-byte span with declared stack arity.
+ *
+ * Mirrors the definition in `packages/runar-compiler/src/ir/anf-ir.ts`.
+ * The IR stores resolved bytes (not mnemonics) so cross-compiler
+ * conformance reduces to byte equality.
+ */
+export interface RawScript {
+  kind: 'raw_script';
+  bytes: string;     // hex string of the verbatim opcode bytes
+  in_arity: number;  // stack elements consumed
+  out_arity: number; // stack elements produced
+}
+
 export type ANFValue =
   | LoadParam
   | LoadProp
@@ -194,4 +208,5 @@ export type ANFValue =
   | AddOutput
   | AddRawOutput
   | AddDataOutput
-  | ArrayLiteral;
+  | ArrayLiteral
+  | RawScript;

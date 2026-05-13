@@ -770,6 +770,49 @@ jobs:
             printf 'Phase history: see `runar-verification/HANDOFF.md`\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  decompiler-roundtrip:
+    # v0 decompiler (Bitcoin Script → Rúnar TS source). Gates on coverage
+    # regression vs. packages/decompiler/coverage-baseline.json, never on
+    # absolute pass count — the symbolic-execution lifter is still a
+    # skeleton, so most contracts currently fall through to a /* RAW: ... */
+    # fallback. Pipeline must run end-to-end without crashing on every
+    # example + fixture, and the fingerprint DB must not silently drift.
+    name: Decompiler — round-trip + fingerprint regression
+    runs-on: ubuntu-latest
+    needs: [ts-compiler]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Decompiler typecheck
+        run: pnpm --filter runar-decompiler run typecheck
+      - name: Decompiler round-trip tests (Tier 1 + 2 + 3, regression gate)
+        run: pnpm --filter runar-decompiler run test
+      - name: Decompiler coverage matrix
+        run: pnpm --filter runar-decompiler run coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: decompiler-coverage-matrix
+          path: packages/decompiler/coverage.json
+      - name: Fingerprint DB drift check
+        # If a peephole rule or EC-optimizer rewrite changed the emitted
+        # template bytes, regenerated fingerprints.json will differ from the
+        # checked-in copy and this step fails. Fix by running
+        # `pnpm run decompiler:fingerprints:check` locally and committing.
+        run: pnpm run decompiler:fingerprints:check
+      - name: Templates manifest drift check
+        # If the corpus changed (new contract added, source edited, or
+        # compiler output shifted), the regenerated templates-data.json
+        # differs from the checked-in copy. Fix by running
+        # `pnpm run decompiler:templates:check` locally and committing.
+        run: pnpm run decompiler:templates:check
+
   sdk-conformance:
     name: SDK Output Conformance
     needs: [ts-compiler, go-sdk, rust-sdk, python-sdk, zig-sdk, ruby-sdk, java-sdk]
