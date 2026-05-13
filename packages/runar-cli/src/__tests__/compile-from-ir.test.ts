@@ -6,7 +6,14 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, afterEach } 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { pathToFileURL } from 'node:url';
+
+interface CompilerModule {
+  compile: (s: string, o?: { fileName?: string; disableConstantFolding?: boolean }) => {
+    success: boolean;
+    scriptHex?: string;
+    anf?: unknown;
+  };
+}
 
 const VALID_P2PKH = `
 import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
@@ -38,11 +45,9 @@ describe('compile --from-ir', () => {
   let compileCommand: typeof import('../commands/compile.js').compileCommand;
 
   beforeAll(async () => {
-    // Warm the dynamic-import path used by compile.ts.
-    const sourceEntry = path.resolve(process.cwd(), 'packages/runar-compiler/src/index.ts');
-    if (fs.existsSync(sourceEntry)) {
-      await import(pathToFileURL(sourceEntry).href);
-    }
+    // Warm the workspace import that compile.ts falls back to when running
+    // outside the monorepo source tree (e.g. from the CLI package dir).
+    await import('runar-compiler');
   }, 60_000);
 
   beforeEach(async () => {
@@ -58,14 +63,7 @@ describe('compile --from-ir', () => {
     // Step 1: compile from source to grab the canonical hex via the
     // exported compile() function (this is what the CLI's source mode
     // already does, modulo IR-snapshot inclusion).
-    const sourceEntry = path.resolve(process.cwd(), 'packages/runar-compiler/src/index.ts');
-    const compilerMod = (await import(pathToFileURL(sourceEntry).href)) as {
-      compile: (s: string, o?: { fileName?: string; disableConstantFolding?: boolean }) => {
-        success: boolean;
-        scriptHex?: string;
-        anf?: unknown;
-      };
-    };
+    const compilerMod = (await import('runar-compiler')) as unknown as CompilerModule;
     const sourceResult = compilerMod.compile(VALID_P2PKH, {
       fileName: 'P2PKH.runar.ts',
       disableConstantFolding: true,
@@ -109,14 +107,7 @@ describe('compile --from-ir', () => {
   }, 60_000);
 
   it('writes a minimal artifact JSON to the output dir when --hex is omitted', async () => {
-    const sourceEntry = path.resolve(process.cwd(), 'packages/runar-compiler/src/index.ts');
-    const compilerMod = (await import(pathToFileURL(sourceEntry).href)) as {
-      compile: (s: string, o?: { fileName?: string; disableConstantFolding?: boolean }) => {
-        success: boolean;
-        scriptHex?: string;
-        anf?: unknown;
-      };
-    };
+    const compilerMod = (await import('runar-compiler')) as unknown as CompilerModule;
     const sourceResult = compilerMod.compile(VALID_P2PKH, {
       fileName: 'P2PKH.runar.ts',
       disableConstantFolding: true,

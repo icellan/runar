@@ -1517,7 +1517,7 @@ fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) error{Out
         if (v == .bool) prop.readonly = v.bool;
     }
     if (obj.get("initialValue")) |v| {
-        prop.initial_value = parseJSONToANFValue(v);
+        prop.initial_value = try parseJSONToANFValue(allocator, v);
     }
     return prop;
 }
@@ -1597,7 +1597,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     }
     if (std.mem.eql(u8, kind, "load_const")) {
         const value_node = obj.get("value") orelse return .{ .load_const = .{} };
-        return .{ .load_const = .{ .value = parseJSONToANFValue(value_node) } };
+        return .{ .load_const = .{ .value = try parseJSONToANFValue(allocator, value_node) } };
     }
     if (std.mem.eql(u8, kind, "bin_op")) {
         return .{ .bin_op = .{
@@ -1740,7 +1740,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     return .{ .unknown = {} };
 }
 
-fn parseJSONToANFValue(val: std.json.Value) ANFValue {
+fn parseJSONToANFValue(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFValue {
     return switch (val) {
         .integer => |n| .{ .int = n },
         .bool => |b| .{ .boolean = b },
@@ -1755,7 +1755,9 @@ fn parseJSONToANFValue(val: std.json.Value) ANFValue {
             if (std.fmt.parseInt(i64, s, 10)) |n| {
                 break :blk .{ .int = n };
             } else |_| {}
-            break :blk .{ .bytes = s };
+            // Dupe the string — the source std.json.Parsed is deinit'd by the
+            // caller, so we can't hold a slice into its arena.
+            break :blk .{ .bytes = try allocator.dupe(u8, s) };
         },
         .float => |f| .{ .int = @intFromFloat(f) },
         else => .{ .none = {} },
