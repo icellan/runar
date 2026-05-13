@@ -21,7 +21,8 @@
  *      support to round-trip; introducing splitLeft/splitRight builtins
  *      that the compiler doesn't recognize would not round-trip either.
  *      Therefore OP_SPLIT stays on the raw_script fallback. The test below
- *      is a POSITIVE assertion of that fallback (not a TODO comment).
+ *      is a POSITIVE assertion of that fallback — it pins the
+ *      documented limitation, it is not a placeholder for unfinished work.
  *
  *   4. Surface-compiler-emitted OP_CHECKMULTISIG — the Rúnar compiler emits
  *      OP_CHECKMULTISIG via a sequence of OP_ROT/OP_ROLL that reorders
