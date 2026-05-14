@@ -5625,12 +5625,13 @@ each one's `_pass_sound` theorem under the established recipe.
 * `zeroNumEqual`  — `[push 0, OP_NUMEQUAL] → [OP_NOT]`    (bigint precond)
 
 The 3-op constant folds (`pushPushAdd`/`pushPushSub`/`pushPushMul`)
-follow this section. The previously-deferred Phase 3v rules
-(`checkMultiSigVerifyFuse` plus the 5 Roll/Pick rules) are landed in
-the **Phase 3z-B** section below `pushPushMul_pass_sound`, after the
-backing `Stack/Eval.lean` extensions (`OP_CHECKMULTISIG` /
-`OP_CHECKMULTISIGVERIFY` semantics + bytecode-style `applyRoll` /
-`applyPick`).
+follow this section. The previously-deferred `checkMultiSigVerifyFuse`
+rule is landed in the **Phase 3z-B** section below
+`pushPushMul_pass_sound`, after the backing `Stack/Eval.lean` extension
+(`OP_CHECKMULTISIG` / `OP_CHECKMULTISIGVERIFY` semantics). The 5
+roll/pick depth simplifications are single-op rewrites on the bundled
+`.roll d` / `.pick d` ops — see `rollPickRewriteOne` and the Phase 7.9.d
+section.
 -/
 
 /-! ### `oneSub_pass_sound` — Phase 3u
@@ -6827,15 +6828,13 @@ The previously-deferred 6 rules from Phase 3v (per HANDOFF.md §"Phase 3u
    `checkMultiSigStub : ByteArray → Bool` as a local adapter into the
    explicit auth backend.
 
-2-6. `zeroRoll0` / `oneRoll1` / `twoRoll2` / `zeroPick0` / `onePick1` —
-   Path A: `Stack/Eval.lean`'s `applyRoll` and `applyPick` were
-   refactored to bytecode-style semantics (pop the runtime depth from
-   the stack, then perform the structural roll/pick at parameter `d`).
-   Each rule then needs an extra "depth strict" hypothesis bounding
-   `s.stack.length`; we encode it inline as an additional `Prop`
-   argument rather than threading a recursive predicate (the rule's
-   match-case is the only firing position, so the inline form is
-   tight).
+2-6. roll/pick depth simplifications — the bundled `.roll d` / `.pick d`
+   ops fold directly to their byte-equivalent specialised opcodes
+   (`.roll 0 → []`, `.roll 1 → .swap`, `.roll 2 → .rot`,
+   `.pick 0 → .dup`, `.pick 1 → .over`) via `rollPickRewriteOne`. Under
+   the corrected no-pop `applyRoll`/`applyPick` evaluator semantics each
+   rewrite is exactly `runOps`-preserving given `s.stack.length ≥ d + 1`
+   at the firing position (`rollPickRewriteOne_runOps_eq`).
 
 The `checkMultiSigVerifyFuse` rule follows the standard `wellTypedRun`
 recipe (`.bytes` precondition on the multi-sig opcode entry).
@@ -7073,31 +7072,21 @@ theorem checkMultiSigVerifyFuse_pass_sound :
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
 
-/-! ### Roll/Pick combinator rules — Phase 3z-B (Path A)
+/-! ### Roll/Pick combinator rules
 
-Five 2-op rewrites that fuse a `[push d, .roll d]` or `[push d, .pick d]`
-pattern into a smaller op:
-
-* `zeroRoll0`  — `[push 0, .roll 0] → []`        (no-op)
-* `oneRoll1`   — `[push 1, .roll 1] → [.swap]`
-* `twoRoll2`   — `[push 2, .roll 2] → [.rot]`
-* `zeroPick0`  — `[push 0, .pick 0] → [.dup]`
-* `onePick1`   — `[push 1, .pick 1] → [.over]`
-
-These rules require `Stack/Eval.lean`'s `applyRoll`/`applyPick` to use
-**bytecode-style** semantics (pop the runtime depth from the stack
-before performing the structural roll/pick at parameter `d`); the
-refactor was landed in Phase 3z-B alongside these proofs.
-
-Each rule additionally requires a depth-strict precondition: at the
-match position, `s.stack` must have at least `d+1` elements (so
-`applyRoll`/`applyPick` succeeds after popping the runtime depth).
-We encode this per-rule via a recursive `_depthOk` predicate that
-checks the precondition at every potential firing position and
-threads through `stepNonIf` at non-firing positions.
+The Lean stack lowerer emits a *bare* bundled `.roll d` / `.pick d` op,
+never the TS-shaped `[push d, .roll d]` 2-op pair. The 5 roll/pick depth
+simplifications are therefore expressed as single-op rewrites in
+`rollPickRewriteOne` (further below), whose `runOps` soundness is
+`rollPickRewriteOne_runOps_eq`. The earlier `zeroRoll0` / `oneRoll1` /
+`twoRoll2` / `zeroPick0` / `onePick1` 2-op-pair rewrites — a workaround
+for the previous bytecode-style `applyRoll`/`applyPick` that popped a
+runtime depth literal — were removed when the evaluator was corrected to
+treat the bundled `.roll d` / `.pick d` ops as no-pop structural
+operations (see `Stack/Eval.lean`).
 -/
 
-/-! #### Reduction lemmas: `applyRoll`/`applyPick` after a `push d` -/
+/-! #### Definitional reduction lemmas for `.roll` / `.pick` -/
 
 /-- `stepNonIf .roll d s = applyRoll s d` (definitional). -/
 private theorem stepNonIf_roll_def (s : StackState) (d : Nat) :
@@ -7106,909 +7095,6 @@ private theorem stepNonIf_roll_def (s : StackState) (d : Nat) :
 /-- `stepNonIf .pick d s = applyPick s d` (definitional). -/
 private theorem stepNonIf_pick_def (s : StackState) (d : Nat) :
     stepNonIf (.pick d) s = applyPick s d := rfl
-
-/-- After `push (vBigint i)` (any int `i`), `applyRoll _ d` pops the freshly
-pushed value and reduces to a structural roll on the original stack at depth `d`. -/
-private theorem applyRoll_after_pushInt (s : StackState) (i : Int) (d : Nat) :
-    applyRoll (s.push (.vBigint i)) d
-    = if d ≥ s.stack.length then
-        .error (.unsupported s!"OP_ROLL: depth {d} ≥ stack size {s.stack.length}")
-      else
-        .ok ({ s with stack := s.stack[d]! :: s.stack.eraseIdx d } : StackState) := by
-  cases s with
-  | mk stack altstack outputs props preimage =>
-    simp [applyRoll, StackState.push, StackState.pop?]
-
-/-- After `push (vBigint i)` (any int `i`), `applyPick _ d` pops the freshly
-pushed value and reduces to a structural pick on the original stack at depth `d`. -/
-private theorem applyPick_after_pushInt (s : StackState) (i : Int) (d : Nat) :
-    applyPick (s.push (.vBigint i)) d
-    = if d ≥ s.stack.length then
-        .error (.unsupported s!"OP_PICK: depth {d} ≥ stack size {s.stack.length}")
-      else
-        .ok (s.push s.stack[d]!) := by
-  cases s with
-  | mk stack altstack outputs props preimage =>
-    simp [applyPick, StackState.push, StackState.pop?]
-
-/-! #### `zeroRoll0_pass_sound` — `[push 0, .roll 0] → []` -/
-
-def applyZeroRoll0 : List StackOp → List StackOp
-  | [] => []
-  | .push (.bigint 0) :: .roll 0 :: rest => applyZeroRoll0 rest
-  | op :: rest => op :: applyZeroRoll0 rest
-
-theorem applyZeroRoll0_empty : applyZeroRoll0 [] = [] := rfl
-
-theorem applyZeroRoll0_match (rest : List StackOp) :
-    applyZeroRoll0 (.push (.bigint 0) :: .roll 0 :: rest) = applyZeroRoll0 rest := rfl
-
-/-- Head-precondition: at this exact position, is the match firing, and if so,
-does the depth requirement hold? -/
-def zeroRoll0_headPre : StackOp → List StackOp → StackState → Prop
-  | .push (.bigint 0), .roll 0 :: _, s => s.stack.length ≥ 1
-  | _, _, _ => True
-
-/-- Recursive depth-strict predicate. -/
-def zeroRoll0_depthOk : List StackOp → StackState → Prop
-  | [], _ => True
-  | op :: rest, s =>
-      zeroRoll0_headPre op rest s ∧
-      (∀ s', stepNonIf op s = .ok s' → zeroRoll0_depthOk rest s')
-
-theorem zeroRoll0_depthOk_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
-    zeroRoll0_depthOk (op :: rest) s ↔
-      (zeroRoll0_headPre op rest s ∧
-        (∀ s', stepNonIf op s = .ok s' → zeroRoll0_depthOk rest s')) :=
-  Iff.rfl
-
-/-- The match-case extension: `[push 0, .roll 0]` evaluated on a state with
-non-empty stack returns the same as running `[]` (i.e. the state unchanged). -/
-theorem zeroRoll0_extends (s : StackState) (rest : List StackOp)
-    (hLen : s.stack.length ≥ 1) :
-    runOps (.push (.bigint 0) :: .roll 0 :: rest) s = runOps rest s := by
-  rw [runOps_cons_PUSHbigint, runOps_cons_roll_eq]
-  show (match stepNonIf (.roll 0) (s.push (.vBigint 0)) with
-        | .error e => .error e
-        | .ok s' => runOps rest s') = runOps rest s
-  have hStep : stepNonIf (.roll 0) (s.push (.vBigint 0)) = .ok s := by
-    show applyRoll (s.push (.vBigint 0)) 0 = .ok s
-    rw [applyRoll_after_pushInt s 0 0]
-    have hNotGe : ¬ (0 ≥ s.stack.length) := by omega
-    rw [if_neg hNotGe]
-    cases s with
-    | mk stack altstack outputs props preimage =>
-      cases stack with
-      | nil => simp at hLen
-      | cons head tail => simp
-  rw [hStep]
-
-private theorem applyZeroRoll0_cons_no_match
-    (op : StackOp) (rest : List StackOp)
-    (h : ∀ rt, op = .push (.bigint 0) → rest = .roll 0 :: rt → False) :
-    applyZeroRoll0 (op :: rest) = op :: applyZeroRoll0 rest :=
-  applyZeroRoll0.eq_3 op rest h
-
-theorem zeroRoll0_pass_sound :
-    ∀ (ops : List StackOp), noIfOp ops →
-      ∀ (s : StackState), wellTypedRun ops s →
-        zeroRoll0_depthOk ops s →
-        runOps (applyZeroRoll0 ops) s = runOps ops s := by
-  intro ops
-  induction ops using applyZeroRoll0.induct with
-  | case1 => intros _ _ _ _; rfl
-  | case2 rest' ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      change noIfOp (.push (.bigint 0) :: .roll 0 :: rest') at hNoIf
-      change noIfOp rest'
-      exact hNoIf
-    -- Extract from hDepth: head precondition (s.stack.length ≥ 1) and tail.
-    have ⟨hHeadPre, hDepthCont⟩ := zeroRoll0_depthOk_cons _ _ _ |>.mp hDepth
-    have hLen : s.stack.length ≥ 1 := hHeadPre
-    -- Establish wellTypedRun rest' s and depthOk rest' s.
-    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have hStepPush : stepNonIf (.push (.bigint 0)) s = .ok (s.push (.vBigint 0)) :=
-      stepNonIf_push_bigint s 0
-    have hWell1 : wellTypedRun (.roll 0 :: rest') (s.push (.vBigint 0)) :=
-      hCont1 _ hStepPush
-    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
-    have hStepRoll : stepNonIf (.roll 0) (s.push (.vBigint 0)) = .ok s := by
-      show applyRoll (s.push (.vBigint 0)) 0 = .ok s
-      rw [applyRoll_after_pushInt s 0 0]
-      have hNotGe : ¬ (0 ≥ s.stack.length) := by omega
-      rw [if_neg hNotGe]
-      cases s with
-      | mk stack altstack outputs props preimage =>
-        cases stack with
-        | nil => simp at hLen
-        | cons head tail => simp
-    have hWellRest : wellTypedRun rest' s := hCont2 _ hStepRoll
-    -- depthOk rest' s: from hDepthCont, with hStepPush.
-    have hDepthRest_intermediate : zeroRoll0_depthOk (.roll 0 :: rest') (s.push (.vBigint 0)) :=
-      hDepthCont _ hStepPush
-    have ⟨_, hDepthCont2⟩ := zeroRoll0_depthOk_cons _ _ _ |>.mp hDepthRest_intermediate
-    have hDepthRest : zeroRoll0_depthOk rest' s := hDepthCont2 _ hStepRoll
-    show runOps (applyZeroRoll0 rest') s
-         = runOps (.push (.bigint 0) :: .roll 0 :: rest') s
-    rw [zeroRoll0_extends s rest' hLen]
-    exact ih hRestNoIf s hWellRest hDepthRest
-  | case3 op rest' h_no_match ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      cases op with
-      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-      | _ => simpa [noIfOp] using hNoIf
-    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    -- depthOk_cons gives us the tail-propagating clause.
-    have ⟨_, hDepthCont⟩ := zeroRoll0_depthOk_cons _ _ _ |>.mp hDepth
-    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
-        runOps (applyZeroRoll0 rest') s' = runOps rest' s' := by
-      intro s' hStep
-      exact ih hRestNoIf s' (hCont s' hStep) (hDepthCont s' hStep)
-    match op with
-    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-    | .push v   =>
-        rw [applyZeroRoll0_cons_no_match (.push v) rest'
-              (fun rt hOp hRest => h_no_match rt hOp hRest)]
-        exact runOps_cons_push_cong_typed v _ _ s ihTyped
-    | .dup      =>
-        show runOps (.dup :: applyZeroRoll0 rest') s = runOps (.dup :: rest') s
-        exact runOps_cons_dup_cong_typed _ _ s ihTyped
-    | .swap     =>
-        show runOps (.swap :: applyZeroRoll0 rest') s = runOps (.swap :: rest') s
-        exact runOps_cons_swap_cong_typed _ _ s ihTyped
-    | .drop     =>
-        show runOps (.drop :: applyZeroRoll0 rest') s = runOps (.drop :: rest') s
-        exact runOps_cons_drop_cong_typed _ _ s ihTyped
-    | .nip      =>
-        show runOps (.nip :: applyZeroRoll0 rest') s = runOps (.nip :: rest') s
-        exact runOps_cons_nip_cong_typed _ _ s ihTyped
-    | .over     =>
-        show runOps (.over :: applyZeroRoll0 rest') s = runOps (.over :: rest') s
-        exact runOps_cons_over_cong_typed _ _ s ihTyped
-    | .rot      =>
-        show runOps (.rot :: applyZeroRoll0 rest') s = runOps (.rot :: rest') s
-        exact runOps_cons_rot_cong_typed _ _ s ihTyped
-    | .tuck     =>
-        show runOps (.tuck :: applyZeroRoll0 rest') s = runOps (.tuck :: rest') s
-        exact runOps_cons_tuck_cong_typed _ _ s ihTyped
-    | .roll d   =>
-        show runOps (.roll d :: applyZeroRoll0 rest') s = runOps (.roll d :: rest') s
-        exact runOps_cons_roll_cong_typed d _ _ s ihTyped
-    | .pick d   =>
-        show runOps (.pick d :: applyZeroRoll0 rest') s = runOps (.pick d :: rest') s
-        exact runOps_cons_pick_cong_typed d _ _ s ihTyped
-    | .pickStruct d =>
-        show runOps (.pickStruct d :: applyZeroRoll0 rest') s = runOps (.pickStruct d :: rest') s
-        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
-    | .opcode code =>
-        show runOps (.opcode code :: applyZeroRoll0 rest') s
-             = runOps (.opcode code :: rest') s
-        exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
-    | .placeholder i n =>
-        show runOps (.placeholder i n :: applyZeroRoll0 rest') s
-             = runOps (.placeholder i n :: rest') s
-        exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
-    | .pushCodesepIndex =>
-        show runOps (.pushCodesepIndex :: applyZeroRoll0 rest') s
-             = runOps (.pushCodesepIndex :: rest') s
-        exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
-
-/-! #### `oneRoll1_pass_sound` — `[push 1, .roll 1] → [.swap]` -/
-
-def applyOneRoll1 : List StackOp → List StackOp
-  | [] => []
-  | .push (.bigint 1) :: .roll 1 :: rest => .swap :: applyOneRoll1 rest
-  | op :: rest => op :: applyOneRoll1 rest
-
-theorem applyOneRoll1_empty : applyOneRoll1 [] = [] := rfl
-
-theorem applyOneRoll1_match (rest : List StackOp) :
-    applyOneRoll1 (.push (.bigint 1) :: .roll 1 :: rest)
-    = .swap :: applyOneRoll1 rest := rfl
-
-def oneRoll1_headPre : StackOp → List StackOp → StackState → Prop
-  | .push (.bigint 1), .roll 1 :: _, s => s.stack.length ≥ 2
-  | _, _, _ => True
-
-def oneRoll1_depthOk : List StackOp → StackState → Prop
-  | [], _ => True
-  | op :: rest, s =>
-      oneRoll1_headPre op rest s ∧
-      (∀ s', stepNonIf op s = .ok s' → oneRoll1_depthOk rest s')
-
-theorem oneRoll1_depthOk_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
-    oneRoll1_depthOk (op :: rest) s ↔
-      (oneRoll1_headPre op rest s ∧
-        (∀ s', stepNonIf op s = .ok s' → oneRoll1_depthOk rest s')) :=
-  Iff.rfl
-
-/-- Helper: After `push 1` then `.roll 1` on a state with stack length ≥ 2,
-we land on the swap-of-top-two state. -/
-private theorem stepRoll1_after_push1 (s : StackState) (hLen : s.stack.length ≥ 2) :
-    ∃ x y rest_tail, s.stack = x :: y :: rest_tail ∧
-      stepNonIf (.roll 1) (s.push (.vBigint 1))
-      = .ok ({ s with stack := y :: x :: rest_tail } : StackState) := by
-  cases s with
-  | mk stack altstack outputs props preimage =>
-    cases stack with
-    | nil => simp at hLen
-    | cons x tail =>
-      cases tail with
-      | nil => simp at hLen
-      | cons y rest_tail =>
-        refine ⟨x, y, rest_tail, rfl, ?_⟩
-        rw [stepNonIf_roll_def, applyRoll_after_pushInt _ 1 1]
-        have hNotGe : ¬ (1 ≥ ({stack := x :: y :: rest_tail, altstack := altstack,
-                                outputs := outputs, props := props,
-                                preimage := preimage} : StackState).stack.length) := by
-          show ¬ (1 ≥ (x :: y :: rest_tail).length)
-          simp
-        rw [if_neg hNotGe]
-        simp
-
-/-- Helper: `swap` on a state with stack `x :: y :: tail` swaps the top two. -/
-private theorem stepSwap_on_two (s : StackState) (x y : ANF.Eval.Value)
-    (rest_tail : List ANF.Eval.Value) (hs : s.stack = x :: y :: rest_tail) :
-    stepNonIf .swap s = .ok ({ s with stack := y :: x :: rest_tail } : StackState) := by
-  rw [stepNonIf_swap]
-  cases s with
-  | mk stack _ _ _ _ =>
-    simp only at hs
-    rw [hs]
-    rfl
-
-/-- The match-case extension: `[push 1, .roll 1]` evaluated on a state with
-stack length ≥ 2 returns the same as running `[.swap]`. -/
-theorem oneRoll1_extends (s : StackState) (rest : List StackOp)
-    (hLen : s.stack.length ≥ 2) :
-    runOps (.push (.bigint 1) :: .roll 1 :: rest) s = runOps (.swap :: rest) s := by
-  rw [runOps_cons_PUSHbigint, runOps_cons_roll_eq, runOps_cons_swap_eq]
-  obtain ⟨x, y, rest_tail, hStack, hRoll⟩ := stepRoll1_after_push1 s hLen
-  have hSwap := stepSwap_on_two s x y rest_tail hStack
-  rw [hRoll, hSwap]
-
-private theorem applyOneRoll1_cons_no_match
-    (op : StackOp) (rest : List StackOp)
-    (h : ∀ rt, op = .push (.bigint 1) → rest = .roll 1 :: rt → False) :
-    applyOneRoll1 (op :: rest) = op :: applyOneRoll1 rest :=
-  applyOneRoll1.eq_3 op rest h
-
-theorem oneRoll1_pass_sound :
-    ∀ (ops : List StackOp), noIfOp ops →
-      ∀ (s : StackState), wellTypedRun ops s →
-        oneRoll1_depthOk ops s →
-        runOps (applyOneRoll1 ops) s = runOps ops s := by
-  intro ops
-  induction ops using applyOneRoll1.induct with
-  | case1 => intros _ _ _ _; rfl
-  | case2 rest' ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      change noIfOp (.push (.bigint 1) :: .roll 1 :: rest') at hNoIf
-      change noIfOp rest'
-      exact hNoIf
-    have ⟨hHeadPre, hDepthCont⟩ := oneRoll1_depthOk_cons _ _ _ |>.mp hDepth
-    have hLen : s.stack.length ≥ 2 := hHeadPre
-    -- wellTypedRun chain to recover post-swap wellTypedRun rest'.
-    show runOps (.swap :: applyOneRoll1 rest') s
-         = runOps (.push (.bigint 1) :: .roll 1 :: rest') s
-    rw [oneRoll1_extends s rest' hLen]
-    apply runOps_cons_swap_cong_typed
-    intro s' hStepSwap
-    -- swap reduces uniformly; recover ihTyped from depthOk chain & wellTypedRun chain.
-    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have hStepPush : stepNonIf (.push (.bigint 1)) s = .ok (s.push (.vBigint 1)) :=
-      stepNonIf_push_bigint s 1
-    have hWell1 : wellTypedRun (.roll 1 :: rest') (s.push (.vBigint 1)) :=
-      hCont1 _ hStepPush
-    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
-    -- The post-LHS state s' equals the swap-of-top-two state, which is also
-    -- what stepNonIf (.roll 1) (s.push (.vBigint 1)) computes.
-    obtain ⟨x, y, rest_tail, hStack, hRoll⟩ := stepRoll1_after_push1 s hLen
-    have hSwapDef := stepSwap_on_two s x y rest_tail hStack
-    rw [hSwapDef] at hStepSwap
-    have hSEq : s' = ({ s with stack := y :: x :: rest_tail } : StackState) :=
-      ((Except.ok.injEq _ _).mp hStepSwap).symm
-    have hRollEq : stepNonIf (.roll 1) (s.push (.vBigint 1)) = .ok s' := by
-      rw [hSEq]; exact hRoll
-    have hWellRest : wellTypedRun rest' s' := hCont2 _ hRollEq
-    -- depthOk rest' s' similarly.
-    have hDepthIntermediate : oneRoll1_depthOk (.roll 1 :: rest') (s.push (.vBigint 1)) :=
-      hDepthCont _ hStepPush
-    have ⟨_, hDepthCont2⟩ := oneRoll1_depthOk_cons _ _ _ |>.mp hDepthIntermediate
-    have hDepthRest : oneRoll1_depthOk rest' s' := hDepthCont2 _ hRollEq
-    exact ih hRestNoIf s' hWellRest hDepthRest
-  | case3 op rest' h_no_match ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      cases op with
-      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-      | _ => simpa [noIfOp] using hNoIf
-    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have ⟨_, hDepthCont⟩ := oneRoll1_depthOk_cons _ _ _ |>.mp hDepth
-    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
-        runOps (applyOneRoll1 rest') s' = runOps rest' s' := by
-      intro s' hStep
-      exact ih hRestNoIf s' (hCont s' hStep) (hDepthCont s' hStep)
-    match op with
-    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-    | .push v   =>
-        rw [applyOneRoll1_cons_no_match (.push v) rest'
-              (fun rt hOp hRest => h_no_match rt hOp hRest)]
-        exact runOps_cons_push_cong_typed v _ _ s ihTyped
-    | .dup      =>
-        show runOps (.dup :: applyOneRoll1 rest') s = runOps (.dup :: rest') s
-        exact runOps_cons_dup_cong_typed _ _ s ihTyped
-    | .swap     =>
-        show runOps (.swap :: applyOneRoll1 rest') s = runOps (.swap :: rest') s
-        exact runOps_cons_swap_cong_typed _ _ s ihTyped
-    | .drop     =>
-        show runOps (.drop :: applyOneRoll1 rest') s = runOps (.drop :: rest') s
-        exact runOps_cons_drop_cong_typed _ _ s ihTyped
-    | .nip      =>
-        show runOps (.nip :: applyOneRoll1 rest') s = runOps (.nip :: rest') s
-        exact runOps_cons_nip_cong_typed _ _ s ihTyped
-    | .over     =>
-        show runOps (.over :: applyOneRoll1 rest') s = runOps (.over :: rest') s
-        exact runOps_cons_over_cong_typed _ _ s ihTyped
-    | .rot      =>
-        show runOps (.rot :: applyOneRoll1 rest') s = runOps (.rot :: rest') s
-        exact runOps_cons_rot_cong_typed _ _ s ihTyped
-    | .tuck     =>
-        show runOps (.tuck :: applyOneRoll1 rest') s = runOps (.tuck :: rest') s
-        exact runOps_cons_tuck_cong_typed _ _ s ihTyped
-    | .roll d   =>
-        show runOps (.roll d :: applyOneRoll1 rest') s = runOps (.roll d :: rest') s
-        exact runOps_cons_roll_cong_typed d _ _ s ihTyped
-    | .pick d   =>
-        show runOps (.pick d :: applyOneRoll1 rest') s = runOps (.pick d :: rest') s
-        exact runOps_cons_pick_cong_typed d _ _ s ihTyped
-    | .pickStruct d =>
-        show runOps (.pickStruct d :: applyOneRoll1 rest') s = runOps (.pickStruct d :: rest') s
-        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
-    | .opcode code =>
-        show runOps (.opcode code :: applyOneRoll1 rest') s
-             = runOps (.opcode code :: rest') s
-        exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
-    | .placeholder i n =>
-        show runOps (.placeholder i n :: applyOneRoll1 rest') s
-             = runOps (.placeholder i n :: rest') s
-        exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
-    | .pushCodesepIndex =>
-        show runOps (.pushCodesepIndex :: applyOneRoll1 rest') s
-             = runOps (.pushCodesepIndex :: rest') s
-        exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
-
-/-! #### `twoRoll2_pass_sound` — `[push 2, .roll 2] → [.rot]` -/
-
-def applyTwoRoll2 : List StackOp → List StackOp
-  | [] => []
-  | .push (.bigint 2) :: .roll 2 :: rest => .rot :: applyTwoRoll2 rest
-  | op :: rest => op :: applyTwoRoll2 rest
-
-theorem applyTwoRoll2_empty : applyTwoRoll2 [] = [] := rfl
-
-theorem applyTwoRoll2_match (rest : List StackOp) :
-    applyTwoRoll2 (.push (.bigint 2) :: .roll 2 :: rest)
-    = .rot :: applyTwoRoll2 rest := rfl
-
-def twoRoll2_headPre : StackOp → List StackOp → StackState → Prop
-  | .push (.bigint 2), .roll 2 :: _, s => s.stack.length ≥ 3
-  | _, _, _ => True
-
-def twoRoll2_depthOk : List StackOp → StackState → Prop
-  | [], _ => True
-  | op :: rest, s =>
-      twoRoll2_headPre op rest s ∧
-      (∀ s', stepNonIf op s = .ok s' → twoRoll2_depthOk rest s')
-
-theorem twoRoll2_depthOk_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
-    twoRoll2_depthOk (op :: rest) s ↔
-      (twoRoll2_headPre op rest s ∧
-        (∀ s', stepNonIf op s = .ok s' → twoRoll2_depthOk rest s')) :=
-  Iff.rfl
-
-private theorem stepRoll2_after_push2 (s : StackState) (hLen : s.stack.length ≥ 3) :
-    ∃ x y z rest_tail, s.stack = x :: y :: z :: rest_tail ∧
-      stepNonIf (.roll 2) (s.push (.vBigint 2))
-      = .ok ({ s with stack := z :: x :: y :: rest_tail } : StackState) := by
-  cases s with
-  | mk stack altstack outputs props preimage =>
-    cases stack with
-    | nil => simp at hLen
-    | cons x t1 =>
-      cases t1 with
-      | nil => simp at hLen
-      | cons y t2 =>
-        cases t2 with
-        | nil => simp at hLen
-        | cons z rest_tail =>
-          refine ⟨x, y, z, rest_tail, rfl, ?_⟩
-          rw [stepNonIf_roll_def, applyRoll_after_pushInt _ 2 2]
-          have hNotGe : ¬ (2 ≥ ({stack := x :: y :: z :: rest_tail, altstack := altstack,
-                                  outputs := outputs, props := props,
-                                  preimage := preimage} : StackState).stack.length) := by
-            show ¬ (2 ≥ (x :: y :: z :: rest_tail).length)
-            simp
-          rw [if_neg hNotGe]
-          simp
-
-private theorem stepRot_on_three (s : StackState) (x y z : ANF.Eval.Value)
-    (rest_tail : List ANF.Eval.Value) (hs : s.stack = x :: y :: z :: rest_tail) :
-    stepNonIf .rot s = .ok ({ s with stack := z :: x :: y :: rest_tail } : StackState) := by
-  show applyRot s = _
-  unfold applyRot
-  cases s with
-  | mk stack _ _ _ _ =>
-    simp only at hs
-    rw [hs]
-
-theorem twoRoll2_extends (s : StackState) (rest : List StackOp)
-    (hLen : s.stack.length ≥ 3) :
-    runOps (.push (.bigint 2) :: .roll 2 :: rest) s = runOps (.rot :: rest) s := by
-  rw [runOps_cons_PUSHbigint, runOps_cons_roll_eq, runOps_cons_rot_eq]
-  obtain ⟨x, y, z, rest_tail, hStack, hRoll⟩ := stepRoll2_after_push2 s hLen
-  have hRot := stepRot_on_three s x y z rest_tail hStack
-  rw [hRoll, hRot]
-
-private theorem applyTwoRoll2_cons_no_match
-    (op : StackOp) (rest : List StackOp)
-    (h : ∀ rt, op = .push (.bigint 2) → rest = .roll 2 :: rt → False) :
-    applyTwoRoll2 (op :: rest) = op :: applyTwoRoll2 rest :=
-  applyTwoRoll2.eq_3 op rest h
-
-theorem twoRoll2_pass_sound :
-    ∀ (ops : List StackOp), noIfOp ops →
-      ∀ (s : StackState), wellTypedRun ops s →
-        twoRoll2_depthOk ops s →
-        runOps (applyTwoRoll2 ops) s = runOps ops s := by
-  intro ops
-  induction ops using applyTwoRoll2.induct with
-  | case1 => intros _ _ _ _; rfl
-  | case2 rest' ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      change noIfOp (.push (.bigint 2) :: .roll 2 :: rest') at hNoIf
-      change noIfOp rest'
-      exact hNoIf
-    have ⟨hHeadPre, hDepthCont⟩ := twoRoll2_depthOk_cons _ _ _ |>.mp hDepth
-    have hLen : s.stack.length ≥ 3 := hHeadPre
-    show runOps (.rot :: applyTwoRoll2 rest') s
-         = runOps (.push (.bigint 2) :: .roll 2 :: rest') s
-    rw [twoRoll2_extends s rest' hLen]
-    apply runOps_cons_rot_cong_typed
-    intro s' hStepRot
-    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have hStepPush : stepNonIf (.push (.bigint 2)) s = .ok (s.push (.vBigint 2)) :=
-      stepNonIf_push_bigint s 2
-    have hWell1 : wellTypedRun (.roll 2 :: rest') (s.push (.vBigint 2)) :=
-      hCont1 _ hStepPush
-    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
-    obtain ⟨x, y, z, rest_tail, hStack, hRoll⟩ := stepRoll2_after_push2 s hLen
-    have hRotDef := stepRot_on_three s x y z rest_tail hStack
-    rw [hRotDef] at hStepRot
-    have hSEq : s' = ({ s with stack := z :: x :: y :: rest_tail } : StackState) :=
-      ((Except.ok.injEq _ _).mp hStepRot).symm
-    have hRollEq : stepNonIf (.roll 2) (s.push (.vBigint 2)) = .ok s' := by
-      rw [hSEq]; exact hRoll
-    have hWellRest : wellTypedRun rest' s' := hCont2 _ hRollEq
-    have hDepthIntermediate : twoRoll2_depthOk (.roll 2 :: rest') (s.push (.vBigint 2)) :=
-      hDepthCont _ hStepPush
-    have ⟨_, hDepthCont2⟩ := twoRoll2_depthOk_cons _ _ _ |>.mp hDepthIntermediate
-    have hDepthRest : twoRoll2_depthOk rest' s' := hDepthCont2 _ hRollEq
-    exact ih hRestNoIf s' hWellRest hDepthRest
-  | case3 op rest' h_no_match ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      cases op with
-      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-      | _ => simpa [noIfOp] using hNoIf
-    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have ⟨_, hDepthCont⟩ := twoRoll2_depthOk_cons _ _ _ |>.mp hDepth
-    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
-        runOps (applyTwoRoll2 rest') s' = runOps rest' s' := by
-      intro s' hStep
-      exact ih hRestNoIf s' (hCont s' hStep) (hDepthCont s' hStep)
-    match op with
-    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-    | .push v   =>
-        rw [applyTwoRoll2_cons_no_match (.push v) rest'
-              (fun rt hOp hRest => h_no_match rt hOp hRest)]
-        exact runOps_cons_push_cong_typed v _ _ s ihTyped
-    | .dup      =>
-        show runOps (.dup :: applyTwoRoll2 rest') s = runOps (.dup :: rest') s
-        exact runOps_cons_dup_cong_typed _ _ s ihTyped
-    | .swap     =>
-        show runOps (.swap :: applyTwoRoll2 rest') s = runOps (.swap :: rest') s
-        exact runOps_cons_swap_cong_typed _ _ s ihTyped
-    | .drop     =>
-        show runOps (.drop :: applyTwoRoll2 rest') s = runOps (.drop :: rest') s
-        exact runOps_cons_drop_cong_typed _ _ s ihTyped
-    | .nip      =>
-        show runOps (.nip :: applyTwoRoll2 rest') s = runOps (.nip :: rest') s
-        exact runOps_cons_nip_cong_typed _ _ s ihTyped
-    | .over     =>
-        show runOps (.over :: applyTwoRoll2 rest') s = runOps (.over :: rest') s
-        exact runOps_cons_over_cong_typed _ _ s ihTyped
-    | .rot      =>
-        show runOps (.rot :: applyTwoRoll2 rest') s = runOps (.rot :: rest') s
-        exact runOps_cons_rot_cong_typed _ _ s ihTyped
-    | .tuck     =>
-        show runOps (.tuck :: applyTwoRoll2 rest') s = runOps (.tuck :: rest') s
-        exact runOps_cons_tuck_cong_typed _ _ s ihTyped
-    | .roll d   =>
-        show runOps (.roll d :: applyTwoRoll2 rest') s = runOps (.roll d :: rest') s
-        exact runOps_cons_roll_cong_typed d _ _ s ihTyped
-    | .pick d   =>
-        show runOps (.pick d :: applyTwoRoll2 rest') s = runOps (.pick d :: rest') s
-        exact runOps_cons_pick_cong_typed d _ _ s ihTyped
-    | .pickStruct d =>
-        show runOps (.pickStruct d :: applyTwoRoll2 rest') s = runOps (.pickStruct d :: rest') s
-        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
-    | .opcode code =>
-        show runOps (.opcode code :: applyTwoRoll2 rest') s
-             = runOps (.opcode code :: rest') s
-        exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
-    | .placeholder i n =>
-        show runOps (.placeholder i n :: applyTwoRoll2 rest') s
-             = runOps (.placeholder i n :: rest') s
-        exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
-    | .pushCodesepIndex =>
-        show runOps (.pushCodesepIndex :: applyTwoRoll2 rest') s
-             = runOps (.pushCodesepIndex :: rest') s
-        exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
-
-/-! #### `zeroPick0_pass_sound` — `[push 0, .pick 0] → [.dup]` -/
-
-def applyZeroPick0 : List StackOp → List StackOp
-  | [] => []
-  | .push (.bigint 0) :: .pick 0 :: rest => .dup :: applyZeroPick0 rest
-  | op :: rest => op :: applyZeroPick0 rest
-
-theorem applyZeroPick0_empty : applyZeroPick0 [] = [] := rfl
-
-theorem applyZeroPick0_match (rest : List StackOp) :
-    applyZeroPick0 (.push (.bigint 0) :: .pick 0 :: rest)
-    = .dup :: applyZeroPick0 rest := rfl
-
-def zeroPick0_headPre : StackOp → List StackOp → StackState → Prop
-  | .push (.bigint 0), .pick 0 :: _, s => s.stack.length ≥ 1
-  | _, _, _ => True
-
-def zeroPick0_depthOk : List StackOp → StackState → Prop
-  | [], _ => True
-  | op :: rest, s =>
-      zeroPick0_headPre op rest s ∧
-      (∀ s', stepNonIf op s = .ok s' → zeroPick0_depthOk rest s')
-
-theorem zeroPick0_depthOk_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
-    zeroPick0_depthOk (op :: rest) s ↔
-      (zeroPick0_headPre op rest s ∧
-        (∀ s', stepNonIf op s = .ok s' → zeroPick0_depthOk rest s')) :=
-  Iff.rfl
-
-private theorem stepPick0_after_push0 (s : StackState) (hLen : s.stack.length ≥ 1) :
-    ∃ x rest_tail, s.stack = x :: rest_tail ∧
-      stepNonIf (.pick 0) (s.push (.vBigint 0))
-      = .ok ({ s with stack := x :: x :: rest_tail } : StackState) := by
-  cases s with
-  | mk stack altstack outputs props preimage =>
-    cases stack with
-    | nil => simp at hLen
-    | cons x rest_tail =>
-      refine ⟨x, rest_tail, rfl, ?_⟩
-      rw [stepNonIf_pick_def, applyPick_after_pushInt _ 0 0]
-      have hNotGe : ¬ (0 ≥ ({stack := x :: rest_tail, altstack := altstack,
-                              outputs := outputs, props := props,
-                              preimage := preimage} : StackState).stack.length) := by
-        show ¬ (0 ≥ (x :: rest_tail).length)
-        simp
-      rw [if_neg hNotGe]
-      simp [StackState.push]
-
-private theorem stepDup_on_one (s : StackState) (x : ANF.Eval.Value)
-    (rest_tail : List ANF.Eval.Value) (hs : s.stack = x :: rest_tail) :
-    stepNonIf .dup s = .ok ({ s with stack := x :: x :: rest_tail } : StackState) := by
-  show applyDup s = _
-  unfold applyDup
-  cases s with
-  | mk stack _ _ _ _ =>
-    simp only at hs
-    rw [hs]
-    rfl
-
-theorem zeroPick0_extends (s : StackState) (rest : List StackOp)
-    (hLen : s.stack.length ≥ 1) :
-    runOps (.push (.bigint 0) :: .pick 0 :: rest) s = runOps (.dup :: rest) s := by
-  rw [runOps_cons_PUSHbigint, runOps_cons_pick_eq, runOps_cons_dup_eq]
-  obtain ⟨x, rest_tail, hStack, hPick⟩ := stepPick0_after_push0 s hLen
-  have hDup := stepDup_on_one s x rest_tail hStack
-  rw [hPick, hDup]
-
-private theorem applyZeroPick0_cons_no_match
-    (op : StackOp) (rest : List StackOp)
-    (h : ∀ rt, op = .push (.bigint 0) → rest = .pick 0 :: rt → False) :
-    applyZeroPick0 (op :: rest) = op :: applyZeroPick0 rest :=
-  applyZeroPick0.eq_3 op rest h
-
-theorem zeroPick0_pass_sound :
-    ∀ (ops : List StackOp), noIfOp ops →
-      ∀ (s : StackState), wellTypedRun ops s →
-        zeroPick0_depthOk ops s →
-        runOps (applyZeroPick0 ops) s = runOps ops s := by
-  intro ops
-  induction ops using applyZeroPick0.induct with
-  | case1 => intros _ _ _ _; rfl
-  | case2 rest' ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      change noIfOp (.push (.bigint 0) :: .pick 0 :: rest') at hNoIf
-      change noIfOp rest'
-      exact hNoIf
-    have ⟨hHeadPre, hDepthCont⟩ := zeroPick0_depthOk_cons _ _ _ |>.mp hDepth
-    have hLen : s.stack.length ≥ 1 := hHeadPre
-    show runOps (.dup :: applyZeroPick0 rest') s
-         = runOps (.push (.bigint 0) :: .pick 0 :: rest') s
-    rw [zeroPick0_extends s rest' hLen]
-    apply runOps_cons_dup_cong_typed
-    intro s' hStepDup
-    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have hStepPush : stepNonIf (.push (.bigint 0)) s = .ok (s.push (.vBigint 0)) :=
-      stepNonIf_push_bigint s 0
-    have hWell1 : wellTypedRun (.pick 0 :: rest') (s.push (.vBigint 0)) :=
-      hCont1 _ hStepPush
-    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
-    obtain ⟨x, rest_tail, hStack, hPick⟩ := stepPick0_after_push0 s hLen
-    have hDupDef := stepDup_on_one s x rest_tail hStack
-    rw [hDupDef] at hStepDup
-    have hSEq : s' = ({ s with stack := x :: x :: rest_tail } : StackState) :=
-      ((Except.ok.injEq _ _).mp hStepDup).symm
-    have hPickEq : stepNonIf (.pick 0) (s.push (.vBigint 0)) = .ok s' := by
-      rw [hSEq]; exact hPick
-    have hWellRest : wellTypedRun rest' s' := hCont2 _ hPickEq
-    have hDepthIntermediate : zeroPick0_depthOk (.pick 0 :: rest') (s.push (.vBigint 0)) :=
-      hDepthCont _ hStepPush
-    have ⟨_, hDepthCont2⟩ := zeroPick0_depthOk_cons _ _ _ |>.mp hDepthIntermediate
-    have hDepthRest : zeroPick0_depthOk rest' s' := hDepthCont2 _ hPickEq
-    exact ih hRestNoIf s' hWellRest hDepthRest
-  | case3 op rest' h_no_match ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      cases op with
-      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-      | _ => simpa [noIfOp] using hNoIf
-    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have ⟨_, hDepthCont⟩ := zeroPick0_depthOk_cons _ _ _ |>.mp hDepth
-    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
-        runOps (applyZeroPick0 rest') s' = runOps rest' s' := by
-      intro s' hStep
-      exact ih hRestNoIf s' (hCont s' hStep) (hDepthCont s' hStep)
-    match op with
-    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-    | .push v   =>
-        rw [applyZeroPick0_cons_no_match (.push v) rest'
-              (fun rt hOp hRest => h_no_match rt hOp hRest)]
-        exact runOps_cons_push_cong_typed v _ _ s ihTyped
-    | .dup      =>
-        show runOps (.dup :: applyZeroPick0 rest') s = runOps (.dup :: rest') s
-        exact runOps_cons_dup_cong_typed _ _ s ihTyped
-    | .swap     =>
-        show runOps (.swap :: applyZeroPick0 rest') s = runOps (.swap :: rest') s
-        exact runOps_cons_swap_cong_typed _ _ s ihTyped
-    | .drop     =>
-        show runOps (.drop :: applyZeroPick0 rest') s = runOps (.drop :: rest') s
-        exact runOps_cons_drop_cong_typed _ _ s ihTyped
-    | .nip      =>
-        show runOps (.nip :: applyZeroPick0 rest') s = runOps (.nip :: rest') s
-        exact runOps_cons_nip_cong_typed _ _ s ihTyped
-    | .over     =>
-        show runOps (.over :: applyZeroPick0 rest') s = runOps (.over :: rest') s
-        exact runOps_cons_over_cong_typed _ _ s ihTyped
-    | .rot      =>
-        show runOps (.rot :: applyZeroPick0 rest') s = runOps (.rot :: rest') s
-        exact runOps_cons_rot_cong_typed _ _ s ihTyped
-    | .tuck     =>
-        show runOps (.tuck :: applyZeroPick0 rest') s = runOps (.tuck :: rest') s
-        exact runOps_cons_tuck_cong_typed _ _ s ihTyped
-    | .roll d   =>
-        show runOps (.roll d :: applyZeroPick0 rest') s = runOps (.roll d :: rest') s
-        exact runOps_cons_roll_cong_typed d _ _ s ihTyped
-    | .pick d   =>
-        show runOps (.pick d :: applyZeroPick0 rest') s = runOps (.pick d :: rest') s
-        exact runOps_cons_pick_cong_typed d _ _ s ihTyped
-    | .pickStruct d =>
-        show runOps (.pickStruct d :: applyZeroPick0 rest') s = runOps (.pickStruct d :: rest') s
-        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
-    | .opcode code =>
-        show runOps (.opcode code :: applyZeroPick0 rest') s
-             = runOps (.opcode code :: rest') s
-        exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
-    | .placeholder i n =>
-        show runOps (.placeholder i n :: applyZeroPick0 rest') s
-             = runOps (.placeholder i n :: rest') s
-        exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
-    | .pushCodesepIndex =>
-        show runOps (.pushCodesepIndex :: applyZeroPick0 rest') s
-             = runOps (.pushCodesepIndex :: rest') s
-        exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
-
-/-! #### `onePick1_pass_sound` — `[push 1, .pick 1] → [.over]` -/
-
-def applyOnePick1 : List StackOp → List StackOp
-  | [] => []
-  | .push (.bigint 1) :: .pick 1 :: rest => .over :: applyOnePick1 rest
-  | op :: rest => op :: applyOnePick1 rest
-
-theorem applyOnePick1_empty : applyOnePick1 [] = [] := rfl
-
-theorem applyOnePick1_match (rest : List StackOp) :
-    applyOnePick1 (.push (.bigint 1) :: .pick 1 :: rest)
-    = .over :: applyOnePick1 rest := rfl
-
-def onePick1_headPre : StackOp → List StackOp → StackState → Prop
-  | .push (.bigint 1), .pick 1 :: _, s => s.stack.length ≥ 2
-  | _, _, _ => True
-
-def onePick1_depthOk : List StackOp → StackState → Prop
-  | [], _ => True
-  | op :: rest, s =>
-      onePick1_headPre op rest s ∧
-      (∀ s', stepNonIf op s = .ok s' → onePick1_depthOk rest s')
-
-theorem onePick1_depthOk_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
-    onePick1_depthOk (op :: rest) s ↔
-      (onePick1_headPre op rest s ∧
-        (∀ s', stepNonIf op s = .ok s' → onePick1_depthOk rest s')) :=
-  Iff.rfl
-
-private theorem stepPick1_after_push1 (s : StackState) (hLen : s.stack.length ≥ 2) :
-    ∃ x y rest_tail, s.stack = x :: y :: rest_tail ∧
-      stepNonIf (.pick 1) (s.push (.vBigint 1))
-      = .ok ({ s with stack := y :: x :: y :: rest_tail } : StackState) := by
-  cases s with
-  | mk stack altstack outputs props preimage =>
-    cases stack with
-    | nil => simp at hLen
-    | cons x t1 =>
-      cases t1 with
-      | nil => simp at hLen
-      | cons y rest_tail =>
-        refine ⟨x, y, rest_tail, rfl, ?_⟩
-        rw [stepNonIf_pick_def, applyPick_after_pushInt _ 1 1]
-        have hNotGe : ¬ (1 ≥ ({stack := x :: y :: rest_tail, altstack := altstack,
-                                outputs := outputs, props := props,
-                                preimage := preimage} : StackState).stack.length) := by
-          show ¬ (1 ≥ (x :: y :: rest_tail).length)
-          simp
-        rw [if_neg hNotGe]
-        simp [StackState.push]
-
-private theorem stepOver_on_two (s : StackState) (x y : ANF.Eval.Value)
-    (rest_tail : List ANF.Eval.Value) (hs : s.stack = x :: y :: rest_tail) :
-    stepNonIf .over s = .ok ({ s with stack := y :: x :: y :: rest_tail } : StackState) := by
-  show applyOver s = _
-  unfold applyOver
-  cases s with
-  | mk stack _ _ _ _ =>
-    simp only at hs
-    rw [hs]
-
-theorem onePick1_extends (s : StackState) (rest : List StackOp)
-    (hLen : s.stack.length ≥ 2) :
-    runOps (.push (.bigint 1) :: .pick 1 :: rest) s = runOps (.over :: rest) s := by
-  rw [runOps_cons_PUSHbigint, runOps_cons_pick_eq, runOps_cons_over_eq]
-  obtain ⟨x, y, rest_tail, hStack, hPick⟩ := stepPick1_after_push1 s hLen
-  have hOver := stepOver_on_two s x y rest_tail hStack
-  rw [hPick, hOver]
-
-private theorem applyOnePick1_cons_no_match
-    (op : StackOp) (rest : List StackOp)
-    (h : ∀ rt, op = .push (.bigint 1) → rest = .pick 1 :: rt → False) :
-    applyOnePick1 (op :: rest) = op :: applyOnePick1 rest :=
-  applyOnePick1.eq_3 op rest h
-
-theorem onePick1_pass_sound :
-    ∀ (ops : List StackOp), noIfOp ops →
-      ∀ (s : StackState), wellTypedRun ops s →
-        onePick1_depthOk ops s →
-        runOps (applyOnePick1 ops) s = runOps ops s := by
-  intro ops
-  induction ops using applyOnePick1.induct with
-  | case1 => intros _ _ _ _; rfl
-  | case2 rest' ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      change noIfOp (.push (.bigint 1) :: .pick 1 :: rest') at hNoIf
-      change noIfOp rest'
-      exact hNoIf
-    have ⟨hHeadPre, hDepthCont⟩ := onePick1_depthOk_cons _ _ _ |>.mp hDepth
-    have hLen : s.stack.length ≥ 2 := hHeadPre
-    show runOps (.over :: applyOnePick1 rest') s
-         = runOps (.push (.bigint 1) :: .pick 1 :: rest') s
-    rw [onePick1_extends s rest' hLen]
-    apply runOps_cons_over_cong_typed
-    intro s' hStepOver
-    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have hStepPush : stepNonIf (.push (.bigint 1)) s = .ok (s.push (.vBigint 1)) :=
-      stepNonIf_push_bigint s 1
-    have hWell1 : wellTypedRun (.pick 1 :: rest') (s.push (.vBigint 1)) :=
-      hCont1 _ hStepPush
-    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
-    obtain ⟨x, y, rest_tail, hStack, hPick⟩ := stepPick1_after_push1 s hLen
-    have hOverDef := stepOver_on_two s x y rest_tail hStack
-    rw [hOverDef] at hStepOver
-    have hSEq : s' = ({ s with stack := y :: x :: y :: rest_tail } : StackState) :=
-      ((Except.ok.injEq _ _).mp hStepOver).symm
-    have hPickEq : stepNonIf (.pick 1) (s.push (.vBigint 1)) = .ok s' := by
-      rw [hSEq]; exact hPick
-    have hWellRest : wellTypedRun rest' s' := hCont2 _ hPickEq
-    have hDepthIntermediate : onePick1_depthOk (.pick 1 :: rest') (s.push (.vBigint 1)) :=
-      hDepthCont _ hStepPush
-    have ⟨_, hDepthCont2⟩ := onePick1_depthOk_cons _ _ _ |>.mp hDepthIntermediate
-    have hDepthRest : onePick1_depthOk rest' s' := hDepthCont2 _ hPickEq
-    exact ih hRestNoIf s' hWellRest hDepthRest
-  | case3 op rest' h_no_match ih =>
-    intro hNoIf s hWT hDepth
-    have hRestNoIf : noIfOp rest' := by
-      cases op with
-      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-      | _ => simpa [noIfOp] using hNoIf
-    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
-    have ⟨_, hDepthCont⟩ := onePick1_depthOk_cons _ _ _ |>.mp hDepth
-    have ihTyped : ∀ s', stepNonIf op s = .ok s' →
-        runOps (applyOnePick1 rest') s' = runOps rest' s' := by
-      intro s' hStep
-      exact ih hRestNoIf s' (hCont s' hStep) (hDepthCont s' hStep)
-    match op with
-    | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
-    | .push v   =>
-        rw [applyOnePick1_cons_no_match (.push v) rest'
-              (fun rt hOp hRest => h_no_match rt hOp hRest)]
-        exact runOps_cons_push_cong_typed v _ _ s ihTyped
-    | .dup      =>
-        show runOps (.dup :: applyOnePick1 rest') s = runOps (.dup :: rest') s
-        exact runOps_cons_dup_cong_typed _ _ s ihTyped
-    | .swap     =>
-        show runOps (.swap :: applyOnePick1 rest') s = runOps (.swap :: rest') s
-        exact runOps_cons_swap_cong_typed _ _ s ihTyped
-    | .drop     =>
-        show runOps (.drop :: applyOnePick1 rest') s = runOps (.drop :: rest') s
-        exact runOps_cons_drop_cong_typed _ _ s ihTyped
-    | .nip      =>
-        show runOps (.nip :: applyOnePick1 rest') s = runOps (.nip :: rest') s
-        exact runOps_cons_nip_cong_typed _ _ s ihTyped
-    | .over     =>
-        show runOps (.over :: applyOnePick1 rest') s = runOps (.over :: rest') s
-        exact runOps_cons_over_cong_typed _ _ s ihTyped
-    | .rot      =>
-        show runOps (.rot :: applyOnePick1 rest') s = runOps (.rot :: rest') s
-        exact runOps_cons_rot_cong_typed _ _ s ihTyped
-    | .tuck     =>
-        show runOps (.tuck :: applyOnePick1 rest') s = runOps (.tuck :: rest') s
-        exact runOps_cons_tuck_cong_typed _ _ s ihTyped
-    | .roll d   =>
-        show runOps (.roll d :: applyOnePick1 rest') s = runOps (.roll d :: rest') s
-        exact runOps_cons_roll_cong_typed d _ _ s ihTyped
-    | .pick d   =>
-        show runOps (.pick d :: applyOnePick1 rest') s = runOps (.pick d :: rest') s
-        exact runOps_cons_pick_cong_typed d _ _ s ihTyped
-    | .pickStruct d =>
-        show runOps (.pickStruct d :: applyOnePick1 rest') s = runOps (.pickStruct d :: rest') s
-        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
-    | .opcode code =>
-        show runOps (.opcode code :: applyOnePick1 rest') s
-             = runOps (.opcode code :: rest') s
-        exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
-    | .placeholder i n =>
-        show runOps (.placeholder i n :: applyOnePick1 rest') s
-             = runOps (.placeholder i n :: rest') s
-        exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
-    | .pushCodesepIndex =>
-        show runOps (.pushCodesepIndex :: applyOnePick1 rest') s
-             = runOps (.pushCodesepIndex :: rest') s
-        exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
 
 /-! ### Phase 3t pragmatic fallback note
 
@@ -9018,60 +8104,6 @@ private def applyCheckMultiSigVerifyFuse.tr.go : List StackOp → List StackOp �
 
 attribute [implemented_by applyCheckMultiSigVerifyFuse.tr] applyCheckMultiSigVerifyFuse
 
-private def applyZeroRoll0.tr.go : List StackOp → List StackOp → List StackOp
-  | [], acc => acc.reverse
-  | .push (.bigint 0) :: .roll 0 :: rest, acc => applyZeroRoll0.tr.go rest acc
-  | op :: rest, acc => applyZeroRoll0.tr.go rest (op :: acc)
-
-@[inline] private def applyZeroRoll0.tr (ops : List StackOp) : List StackOp :=
-  applyZeroRoll0.tr.go ops []
-
-attribute [implemented_by applyZeroRoll0.tr] applyZeroRoll0
-
-private def applyOneRoll1.tr.go : List StackOp → List StackOp → List StackOp
-  | [], acc => acc.reverse
-  | .push (.bigint 1) :: .roll 1 :: rest, acc =>
-      applyOneRoll1.tr.go rest (.swap :: acc)
-  | op :: rest, acc => applyOneRoll1.tr.go rest (op :: acc)
-
-@[inline] private def applyOneRoll1.tr (ops : List StackOp) : List StackOp :=
-  applyOneRoll1.tr.go ops []
-
-attribute [implemented_by applyOneRoll1.tr] applyOneRoll1
-
-private def applyTwoRoll2.tr.go : List StackOp → List StackOp → List StackOp
-  | [], acc => acc.reverse
-  | .push (.bigint 2) :: .roll 2 :: rest, acc =>
-      applyTwoRoll2.tr.go rest (.rot :: acc)
-  | op :: rest, acc => applyTwoRoll2.tr.go rest (op :: acc)
-
-@[inline] private def applyTwoRoll2.tr (ops : List StackOp) : List StackOp :=
-  applyTwoRoll2.tr.go ops []
-
-attribute [implemented_by applyTwoRoll2.tr] applyTwoRoll2
-
-private def applyZeroPick0.tr.go : List StackOp → List StackOp → List StackOp
-  | [], acc => acc.reverse
-  | .push (.bigint 0) :: .pick 0 :: rest, acc =>
-      applyZeroPick0.tr.go rest (.dup :: acc)
-  | op :: rest, acc => applyZeroPick0.tr.go rest (op :: acc)
-
-@[inline] private def applyZeroPick0.tr (ops : List StackOp) : List StackOp :=
-  applyZeroPick0.tr.go ops []
-
-attribute [implemented_by applyZeroPick0.tr] applyZeroPick0
-
-private def applyOnePick1.tr.go : List StackOp → List StackOp → List StackOp
-  | [], acc => acc.reverse
-  | .push (.bigint 1) :: .pick 1 :: rest, acc =>
-      applyOnePick1.tr.go rest (.over :: acc)
-  | op :: rest, acc => applyOnePick1.tr.go rest (op :: acc)
-
-@[inline] private def applyOnePick1.tr (ops : List StackOp) : List StackOp :=
-  applyOnePick1.tr.go ops []
-
-attribute [implemented_by applyOnePick1.tr] applyOnePick1
-
 /-! ## End of tail-recursive runtime implementations. -/
 
 /-- All 19 proven peephole rules applied in TS-reference order.
@@ -9513,6 +8545,14 @@ theorem peepholePostFold_runOps_eq (ops : List StackOp) (s : StackState)
   rw [applyPushOneSub_runOps_eq _ hNoIfAdd s]
   rw [applyPushOneAdd_runOps_eq ops hNoIf s]
 
+theorem peepholePostFold_preserves_noIfOp
+    (ops : List StackOp) (hNoIf : noIfOp ops) :
+    noIfOp (peepholePostFold ops) := by
+  unfold peepholePostFold
+  rw [postFoldList_eq_of_noIfOp ops hNoIf]
+  exact applyPushOneSub_preserves_noIfOp _
+    (applyPushOneAdd_preserves_noIfOp ops hNoIf)
+
 /-! ## Phase 7.9.b — Chain-fold post-pass
 
 The 4-op `applyPushAddPushAdd` / `applyPushAddPushSub` rules added above
@@ -9600,23 +8640,15 @@ that the stack lowerer leaves behind:
 * `[push 0, OP_PICK]` → `[OP_DUP]`  (depth-0 pick == dup)
 * `[push 1, OP_PICK]` → `[OP_OVER]` (depth-1 pick == over)
 
-In the Lean port, `.roll d` and `.pick d` are SINGLE Stack-IR ops that
-bundle the depth-push into `Emit.emitStackOp` (see `Script/Emit.lean:176`:
-`.roll d → encodePushBigInt d ++ [0x7a]`). The TS reference, by contrast,
-emits two separate Stack-IR ops (`push d` then `OP_ROLL`) and the peephole
-pass folds the literal pair into a single opcode BEFORE the byte encoding.
+In the Lean port, `.roll d` and `.pick d` are SINGLE bundled Stack-IR ops
+that `Emit.emitStackOp` encodes as the byte pair `encodePushBigInt d ++
+[opcode]` (see `Script/Emit.lean`), and the no-pop evaluator
+(`Stack/Eval.lean`) treats them as the *combined* effect of that pair: a
+direct structural roll/pick at depth `d`. The Lean stack lowerer emits a
+bare `.roll d` / `.pick d`, so the fold operates directly on the bundled
+op via `rollPickRewriteOne`:
 
-Because the Lean IR is structurally different at this layer, the existing
-`applyZeroRoll0` / `applyOneRoll1` / `applyTwoRoll2` / `applyZeroPick0` /
-`applyOnePick1` definitions (which match the TS-shaped 2-op `.push (.bigint
-N) :: .rollOrPick N :: rest` pattern) cannot fire on Lean-emitted IR. We
-therefore introduce direct StackOp-level rewrites that fold the bundled
-`.roll 0/1/2` and `.pick 0/1` ops to their byte-equivalent specialised
-opcodes:
-
-* `.roll 0` → drop (the `.roll 0` op encodes to `00 7a` which the TS
-  reference, after folding, omits entirely — its `[push 0, OP_ROLL]` pair
-  becomes `[]`)
+* `.roll 0` → `[]`     (depth-0 roll on a non-empty stack is the identity)
 * `.roll 1` → `.swap`
 * `.roll 2` → `.rot`
 * `.pick 0` → `.dup`
@@ -9630,16 +8662,14 @@ SLH-DSA WOTS+ chain codegen (`Stack/SlhDsa.lean:686`,
 
 /-- Single-op StackOp-level rewrite for `.roll 0/1/2` / `.pick 0/1`.
 Mirrors the byte-equivalence:
-  emit (.roll 0) = `00 7a` ≡ `nothing` (the depth-push of OP_0 followed by
-                                        OP_ROLL is a no-op when the roll
-                                        consumes its own depth literal)
+  emit (.roll 0) = `00 7a` ≡ `nothing` (push-0 then OP_ROLL is the
+                                        identity on a non-empty stack)
   emit (.roll 1) = `51 7a` ≡ emit .swap = `7c`
   emit (.roll 2) = `52 7a` ≡ emit .rot  = `7b`
   emit (.pick 0) = `00 79` ≡ emit .dup  = `76`
   emit (.pick 1) = `51 79` ≡ emit .over = `78`
 
-Note: the `.roll 0` case folds to **nothing**, not to `.drop`. The TS
-reference's `[push 0, OP_ROLL] → []` rule is byte-shrinking. -/
+`runOps` soundness of each rewrite is `rollPickRewriteOne_runOps_eq`. -/
 private def rollPickRewriteOne : StackOp → List StackOp
   | .roll 0 => []
   | .roll 1 => [.swap]
@@ -9647,6 +8677,100 @@ private def rollPickRewriteOne : StackOp → List StackOp
   | .pick 0 => [.dup]
   | .pick 1 => [.over]
   | other   => [other]
+
+/-! Runtime soundness of the 5 single-op roll/pick rewrites.
+
+Under the corrected no-pop `.roll d` / `.pick d` evaluator semantics
+(`Stack/Eval.lean`), each bundled IR op rolls/picks at structural depth
+`d` directly. The 5 rewrites are therefore exactly `runOps`-preserving
+given enough stack depth at the firing position — proved by
+`rollPickRewriteOne_runOps_eq` below. The general fixpoint-pass
+soundness (`peepholeRollPickFold` over arbitrary lists, threading the
+depth precondition) lands in M3 alongside the first-pass per-rule
+soundness chain. -/
+
+/-- Each single-op roll/pick rewrite preserves `runOps` behaviour, given
+the byte-equivalent specialised opcode has enough operands at the firing
+position. The depth precondition `s.stack.length ≥ d + 1` is exactly
+what the bundled `.roll d` / `.pick d` op itself requires. -/
+private theorem rollPickRewriteOne_runOps_eq
+    (op : StackOp) (s : StackState) (rest : List StackOp)
+    (hLen : ∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) :
+    runOps (rollPickRewriteOne op ++ rest) s = runOps (op :: rest) s := by
+  cases op with
+  | roll d =>
+    match d, hLen with
+    | 0, hLen =>
+      have h1 : s.stack.length ≥ 1 := hLen 0 (Or.inl rfl)
+      rw [runOps_cons_roll_eq]
+      show runOps rest s
+        = (match stepNonIf (.roll 0) s with
+           | .error e => .error e | .ok s' => runOps rest s')
+      have hStep : stepNonIf (.roll 0) s = .ok s := by
+        show applyRoll s 0 = .ok s
+        cases s with
+        | mk stack altstack outputs props preimage =>
+          cases stack with
+          | nil => simp at h1
+          | cons a tl => simp [applyRoll]
+      rw [hStep]
+    | 1, hLen =>
+      have h2 : s.stack.length ≥ 2 := hLen 1 (Or.inl rfl)
+      show runOps (StackOp.swap :: rest) s = runOps (.roll 1 :: rest) s
+      rw [runOps_cons_swap_eq, runOps_cons_roll_eq]
+      have hEq : stepNonIf .swap s = stepNonIf (.roll 1) s := by
+        show applySwap s = applyRoll s 1
+        cases s with
+        | mk stack altstack outputs props preimage =>
+          match stack with
+          | [] => simp at h2
+          | [_] => simp at h2
+          | a :: b :: tl => simp [applySwap, applyRoll]
+      rw [hEq]
+    | 2, hLen =>
+      have h3 : s.stack.length ≥ 3 := hLen 2 (Or.inl rfl)
+      show runOps (StackOp.rot :: rest) s = runOps (.roll 2 :: rest) s
+      rw [runOps_cons_rot_eq, runOps_cons_roll_eq]
+      have hEq : stepNonIf .rot s = stepNonIf (.roll 2) s := by
+        show applyRot s = applyRoll s 2
+        cases s with
+        | mk stack altstack outputs props preimage =>
+          match stack with
+          | [] => simp at h3
+          | [_] => simp at h3
+          | [_, _] => simp at h3
+          | a :: b :: c :: tl => simp [applyRot, applyRoll]
+      rw [hEq]
+    | (d + 3), _ => rfl
+  | pick d =>
+    match d, hLen with
+    | 0, hLen =>
+      have h1 : s.stack.length ≥ 1 := hLen 0 (Or.inr rfl)
+      show runOps (StackOp.dup :: rest) s = runOps (.pick 0 :: rest) s
+      rw [runOps_cons_dup_eq, runOps_cons_pick_eq]
+      have hEq : stepNonIf .dup s = stepNonIf (.pick 0) s := by
+        show applyDup s = applyPick s 0
+        cases s with
+        | mk stack altstack outputs props preimage =>
+          cases stack with
+          | nil => simp at h1
+          | cons a tl => simp [applyDup, applyPick, StackState.push]
+      rw [hEq]
+    | 1, hLen =>
+      have h2 : s.stack.length ≥ 2 := hLen 1 (Or.inr rfl)
+      show runOps (StackOp.over :: rest) s = runOps (.pick 1 :: rest) s
+      rw [runOps_cons_over_eq, runOps_cons_pick_eq]
+      have hEq : stepNonIf .over s = stepNonIf (.pick 1) s := by
+        show applyOver s = applyPick s 1
+        cases s with
+        | mk stack altstack outputs props preimage =>
+          match stack with
+          | [] => simp at h2
+          | [_] => simp at h2
+          | a :: b :: tl => simp [applyOver, applyPick, StackState.push]
+      rw [hEq]
+    | (d + 2), _ => rfl
+  | _ => rfl
 
 /-- One pass of the 5 roll/pick rewrites over a flat op list.
 Walks left-to-right via structural recursion. Note: rewrites do not
@@ -9702,14 +8826,76 @@ which runs inside the TS optimizer's outer fixpoint loop. -/
 def peepholeRollPickFold (ops : List StackOp) : List StackOp :=
   rollPickFixpointFlat 64 (rollPickListTRgo ops [])
 
+/-- A singleton roll/pick op folds through `peepholeRollPickFold` to
+exactly `rollPickRewriteOne` applied to that op. -/
+private theorem peepholeRollPickFold_singleton_eq (op : StackOp) :
+    peepholeRollPickFold [op] = rollPickRewriteOne (rollPickOp op) := by
+  simp [peepholeRollPickFold, rollPickFixpointFlat, rollPickListTRgo,
+    applyRollPickFold]
+
+/-- Fired `.roll 0` fold: under no-pop `.roll` semantics, the bundled
+`.roll 0` op folds to `[]` with identical `runOps` behaviour. -/
+theorem peepholeRollPickFold_singleton_roll0_runOps_eq
+    (s : StackState) (rest : List StackOp) (hLen : s.stack.length ≥ 1) :
+    runOps (peepholeRollPickFold [.roll 0] ++ rest) s
+      = runOps (.roll 0 :: rest) s := by
+  rw [peepholeRollPickFold_singleton_eq]
+  exact rollPickRewriteOne_runOps_eq (.roll 0) s rest
+    (fun d hd => by rcases hd with h | h
+                    · injection h with h'; omega
+                    · exact absurd h (by simp))
+
+/-- Fired `.roll 1` fold: `.roll 1` folds to `[.swap]`. -/
+theorem peepholeRollPickFold_singleton_roll1_runOps_eq
+    (s : StackState) (rest : List StackOp) (hLen : s.stack.length ≥ 2) :
+    runOps (peepholeRollPickFold [.roll 1] ++ rest) s
+      = runOps (.roll 1 :: rest) s := by
+  rw [peepholeRollPickFold_singleton_eq]
+  exact rollPickRewriteOne_runOps_eq (.roll 1) s rest
+    (fun d hd => by rcases hd with h | h
+                    · injection h with h'; omega
+                    · exact absurd h (by simp))
+
+/-- Fired `.roll 2` fold: `.roll 2` folds to `[.rot]`. -/
+theorem peepholeRollPickFold_singleton_roll2_runOps_eq
+    (s : StackState) (rest : List StackOp) (hLen : s.stack.length ≥ 3) :
+    runOps (peepholeRollPickFold [.roll 2] ++ rest) s
+      = runOps (.roll 2 :: rest) s := by
+  rw [peepholeRollPickFold_singleton_eq]
+  exact rollPickRewriteOne_runOps_eq (.roll 2) s rest
+    (fun d hd => by rcases hd with h | h
+                    · injection h with h'; omega
+                    · exact absurd h (by simp))
+
+/-- Fired `.pick 0` fold: `.pick 0` folds to `[.dup]`. -/
+theorem peepholeRollPickFold_singleton_pick0_runOps_eq
+    (s : StackState) (rest : List StackOp) (hLen : s.stack.length ≥ 1) :
+    runOps (peepholeRollPickFold [.pick 0] ++ rest) s
+      = runOps (.pick 0 :: rest) s := by
+  rw [peepholeRollPickFold_singleton_eq]
+  exact rollPickRewriteOne_runOps_eq (.pick 0) s rest
+    (fun d hd => by rcases hd with h | h
+                    · exact absurd h (by simp)
+                    · injection h with h'; omega)
+
+/-- Fired `.pick 1` fold: `.pick 1` folds to `[.over]`. -/
+theorem peepholeRollPickFold_singleton_pick1_runOps_eq
+    (s : StackState) (rest : List StackOp) (hLen : s.stack.length ≥ 2) :
+    runOps (peepholeRollPickFold [.pick 1] ++ rest) s
+      = runOps (.pick 1 :: rest) s := by
+  rw [peepholeRollPickFold_singleton_eq]
+  exact rollPickRewriteOne_runOps_eq (.pick 1) s rest
+    (fun d hd => by rcases hd with h | h
+                    · exact absurd h (by simp)
+                    · injection h with h'; omega)
+
 /-! ### Phase 7.9.d bounded identity slice
 
-The direct single-op roll/pick rewrites above are byte-level cleanups for
-the producer shape. At the `runOps` layer, `.roll d` and `.pick d` still
-model bytecode-style operations that pop a runtime depth first, so the
-primitive operational equalities require stronger shape hypotheses. This
-bounded slice captures the safe identity case needed by callers whose
-post-chain output contains no foldable low-depth roll/pick op. -/
+This slice captures the case where `applyRollPickFold` has no flat
+rewrite to perform — the post-chain op list contains none of the five
+foldable low-depth roll/pick heads — so the pass is the identity. The
+general fired-rewrite soundness is `rollPickRewriteOne_runOps_eq` above;
+the full fixpoint-pass `runOps` soundness lands in M3. -/
 
 /-- True when a single op is not one of the five flat roll/pick fold heads. -/
 def rollPickFoldOpNoop : StackOp → Prop
@@ -9778,6 +8964,52 @@ private theorem applyRollPickFold_eq_self_of_flatNoop :
       unfold applyRollPickFold
       rw [hOp, ih hRest]
       simp
+
+theorem applyRollPickFold_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyRollPickFold ops) := by
+  intro ops
+  induction ops with
+  | nil =>
+      intro _
+      exact True.intro
+  | cons op rest ih =>
+      intro hNoIf
+      have hRest : noIfOp rest := by
+        cases op with
+        | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+        | _ => simpa [noIfOp] using hNoIf
+      unfold applyRollPickFold
+      cases op with
+      | push v => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | dup => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | swap => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | drop => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | nip => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | over => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | rot => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | tuck => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | roll d =>
+          cases d with
+          | zero => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+          | succ d1 =>
+              cases d1 with
+              | zero => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+              | succ d2 =>
+                  cases d2 with
+                  | zero => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+                  | succ _ => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | pick d =>
+          cases d with
+          | zero => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+          | succ d1 =>
+              cases d1 with
+              | zero => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+              | succ _ => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | pickStruct d => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | opcode code => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | placeholder i n => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | pushCodesepIndex => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
 private theorem rollPickOp_id_of_not_ifOp (op : StackOp)
     (h : ∀ thn els, op ≠ .ifOp thn els) :
@@ -9848,6 +9080,14 @@ theorem peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop
     (hNoop : rollPickFoldFlatNoop ops) :
     runOps (peepholeRollPickFold ops) s = runOps ops s := by
   rw [peepholeRollPickFold_eq_self_of_noIfOp_flatNoop ops hNoIf hNoop]
+
+theorem peepholeRollPickFold_preserves_noIfOp
+    (ops : List StackOp) (hNoIf : noIfOp ops) :
+    noIfOp (peepholeRollPickFold ops) := by
+  unfold peepholeRollPickFold
+  rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  unfold rollPickFixpointFlat
+  exact applyRollPickFold_preserves_noIfOp ops hNoIf
 
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
 
@@ -10194,6 +9434,27 @@ identity, useful for transferring soundness from
 `peepholePassAllFlat_sound` to `peepholePassAll`. -/
 private theorem peepholePassAll_eq_flat_preprocess (ops : List StackOp) :
     peepholePassAll ops = peepholePassAllFlat (preprocessIfOps ops) := rfl
+
+theorem preprocessIfOps_eq_self_of_noIfOp
+    (ops : List StackOp) (hNoIf : noIfOp ops) :
+    preprocessIfOps ops = ops := by
+  unfold preprocessIfOps
+  rw [preprocessOpListReversedAux_noIf ops [] hNoIf]
+  simp
+
+theorem peepholePassAll_eq_flat_of_noIfOp
+    (ops : List StackOp) (hNoIf : noIfOp ops) :
+    peepholePassAll ops = peepholePassAllFlat ops := by
+  rw [peepholePassAll_eq_flat_preprocess ops]
+  rw [preprocessIfOps_eq_self_of_noIfOp ops hNoIf]
+
+theorem peepholePassAll_runOps_eq_of_flat_sound
+    (ops : List StackOp) (s : StackState)
+    (hNoIf : noIfOp ops)
+    (hFlatSound : runOps (peepholePassAllFlat ops) s = runOps ops s) :
+    runOps (peepholePassAll ops) s = runOps ops s := by
+  rw [peepholePassAll_eq_flat_of_noIfOp ops hNoIf]
+  exact hFlatSound
 
 /-! ## Phase 4-C — `peepholePassAll_sound` for `noIfOp` programs.
 
@@ -11122,6 +10383,13 @@ private theorem chainFoldListTRgo_nil_acc_of_noIfOp
     chainFoldListTRgo ops [] = ops := by
   rw [chainFoldListTRgo_eq_of_noIfOp ops [] h]
   simp
+
+theorem peepholeChainFold_preserves_noIfOp
+    (ops : List StackOp) (hNoIf : noIfOp ops) :
+    noIfOp (peepholeChainFold ops) := by
+  unfold peepholeChainFold
+  rw [chainFoldListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  exact chainFoldFixpointFlat_preserves_noIfOp 64 ops hNoIf
 
 theorem peepholeChainFold_runOps_eq (ops : List StackOp) (s : StackState)
     (hNoIf : noIfOp ops) (hWT : wellTypedRun ops s) :

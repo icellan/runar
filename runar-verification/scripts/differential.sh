@@ -9,8 +9,15 @@
 # then diff the two reports. Fail on any mismatch.
 #
 # External reference selection:
-#   * auto selects python3 + python-bitcoinlib, the implemented adapter
-#     in this repository (see external-ref.py).
+#   * auto selects a configured BSV command adapter first, then
+#     python3 + python-bitcoinlib, the implemented adapter in this
+#     repository (see external-ref.py).
+#   * bsv-command runs RUNAR_BSV_REFERENCE_CMD, passing the external JSON
+#     output path as its only argument. Use a wrapper script when the
+#     reference VM needs additional flags.
+#   * bsv-json copies RUNAR_BSV_REFERENCE_JSON into the external report
+#     path. This is useful for scheduled jobs that generate the BSV report
+#     in a separate step.
 #   * svnode-cli and libbitcoin-explorer are reserved flag values for
 #     future adapters. Forcing either one fails in strict mode rather than
 #     silently replacing the implemented Python path.
@@ -21,7 +28,8 @@
 # environments without the reference VMs installed.
 #
 # Usage:
-#   differential.sh [--reference {svnode|libbitcoin|python|auto}] [--strict]
+#   differential.sh [--reference {bsv-command|bsv-json|svnode|libbitcoin|python|auto}]
+#                   [--strict]
 #                   [--report-dir PATH]
 #
 # Flags:
@@ -63,7 +71,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,30p' "$0"
+      sed -n '2,40p' "$0"
       exit 0
       ;;
     *)
@@ -158,6 +166,14 @@ choose_reference() {
     echo "$REFERENCE"
     return 0
   fi
+  if [ -n "${RUNAR_BSV_REFERENCE_CMD:-}" ]; then
+    echo "bsv-command"
+    return 0
+  fi
+  if [ -n "${RUNAR_BSV_REFERENCE_JSON:-}" ]; then
+    echo "bsv-json"
+    return 0
+  fi
   if command -v python3 >/dev/null 2>&1 \
       && python3 -c "import bitcoin.core.script" >/dev/null 2>&1; then
     echo "python"
@@ -171,6 +187,36 @@ CHOSEN="$(choose_reference)"
 echo "[differential] external reference: $CHOSEN"
 
 case "$CHOSEN" in
+  bsv-command)
+    if [ -z "${RUNAR_BSV_REFERENCE_CMD:-}" ]; then
+      echo "[differential] RUNAR_BSV_REFERENCE_CMD is not set" >&2
+      if [ "$STRICT" = "1" ]; then exit 1; fi
+      echo "[differential] OK: no configured BSV command reference — skipping"
+      exit 0
+    fi
+    if [ ! -x "$RUNAR_BSV_REFERENCE_CMD" ]; then
+      echo "[differential] RUNAR_BSV_REFERENCE_CMD is not executable: $RUNAR_BSV_REFERENCE_CMD" >&2
+      if [ "$STRICT" = "1" ]; then exit 1; fi
+      echo "[differential] OK: configured BSV command reference unavailable — skipping"
+      exit 0
+    fi
+    "$RUNAR_BSV_REFERENCE_CMD" "$EXT_REPORT"
+    ;;
+  bsv-json)
+    if [ -z "${RUNAR_BSV_REFERENCE_JSON:-}" ]; then
+      echo "[differential] RUNAR_BSV_REFERENCE_JSON is not set" >&2
+      if [ "$STRICT" = "1" ]; then exit 1; fi
+      echo "[differential] OK: no configured BSV JSON reference — skipping"
+      exit 0
+    fi
+    if [ ! -f "$RUNAR_BSV_REFERENCE_JSON" ]; then
+      echo "[differential] RUNAR_BSV_REFERENCE_JSON does not exist: $RUNAR_BSV_REFERENCE_JSON" >&2
+      if [ "$STRICT" = "1" ]; then exit 1; fi
+      echo "[differential] OK: configured BSV JSON reference unavailable — skipping"
+      exit 0
+    fi
+    cp "$RUNAR_BSV_REFERENCE_JSON" "$EXT_REPORT"
+    ;;
   svnode)
     echo "[differential] svnode-cli reference adapter not implemented yet — skipping" >&2
     if [ "$STRICT" = "1" ]; then

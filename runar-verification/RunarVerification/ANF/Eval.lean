@@ -950,29 +950,5 @@ theorem evalValue_call_within_sample :
      | _ => false) = true := by
   native_decide
 
-/-! ## Type-preservation companion (statement-only)
-
-A statement-only sketch of the eventual soundness theorem, included so
-the verification lead has a concrete starting point for Phase 3.
-
-The full statement will eventually be:
-
-> If `Γ ⊢ v : τ` and `s` agrees with `Γ` (every typed name resolves to
-> a value of the corresponding type), and `evalValue s v = .ok (v', s')`,
-> then `v' : τ`.
-
-This requires (a) a `valueOfType : Value → ANFType → Prop` predicate,
-(b) an `agrees : State → TypeEnv → Prop` predicate, and (c) an
-inductive characterization of `evalValue`'s success cases — none of
-which we attempt here. The statement below is intentionally vacuous so
-that it compiles without `sorry`.
--/
-
-/-- A trivially-provable placeholder. Phase 3 strengthens this. -/
-theorem eval_step_typeable_placeholder
-    (Γ : Typed.TypeEnv) (v : ANFValue) (τ : ANFType)
-    (_h : Typed.HasType Γ v τ) :
-    True := trivial
-
 end Eval
 end RunarVerification.ANF

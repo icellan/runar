@@ -1704,6 +1704,69 @@ theorem parseOps_emit_singleton_push_bytes_17_terminal :
   simp [ByteArray.toList_eq_data_toList]
   rfl
 
+/-! ### Nonterminal push parser samples
+
+These concrete facts cover push-eager parsing when a push is followed by
+another recoverable op. The bool case documents the same byte collision
+as the terminal facts: `true` emits `OP_1`, so parsing recovers
+`.push (.bigint 1)`.
+-/
+
+theorem parseOps_emit_push_bigint_two_then_dup :
+    parseOps (emitOpsL [.push (.bigint 2), .dup])
+      = .ok [.push (.bigint 2), .dup] := rfl
+
+theorem parseOps_emit_push_bool_true_then_dup :
+    parseOps (emitOpsL [.push (.bool true), .dup])
+      = .ok [.push (.bigint 1), .dup] := rfl
+
+theorem parseOps_emit_push_bytes_17_then_dup :
+    parseOps (emitOpsL [.push (.bytes (ByteArray.mk #[0x17])), .dup])
+      = .ok [.push (.bytes (ByteArray.mk #[0x17])), .dup] := by
+  unfold emitOpsL emitStackOpL encodePushValL encodePushBytesL encodePushDataL
+  simp [ByteArray.toList_eq_data_toList]
+  rfl
+
+private theorem emitOps_toList_push_bigint_two_then_dup :
+    (Emit.emitOps [.push (.bigint 2), .dup]).toList
+      = emitOpsL [.push (.bigint 2), .dup] := by
+  simp [Emit.emitOps, Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBigInt,
+    emitOpsL, emitStackOpL, encodePushValL, encodePushBigIntL,
+    ByteArray.toList_append, ByteArray.toList_mk_singleton]
+
+private theorem emitOps_toList_push_bool_true_then_dup :
+    (Emit.emitOps [.push (.bool true), .dup]).toList
+      = emitOpsL [.push (.bool true), .dup] := by
+  simp [Emit.emitOps, Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBool,
+    emitOpsL, emitStackOpL, encodePushValL, encodePushBoolL,
+    ByteArray.toList_append, ByteArray.toList_mk_singleton]
+
+private theorem emitOps_toList_push_bytes_17_then_dup :
+    (Emit.emitOps [.push (.bytes (ByteArray.mk #[0x17])), .dup]).toList
+      = emitOpsL [.push (.bytes (ByteArray.mk #[0x17])), .dup] := by
+  native_decide
+
+theorem parseScript_emit_push_bigint_two_then_dup :
+    parseScript (Emit.emitOps [.push (.bigint 2), .dup])
+      = .ok [.push (.bigint 2), .dup] := by
+  unfold parseScript
+  rw [emitOps_toList_push_bigint_two_then_dup]
+  exact parseOps_emit_push_bigint_two_then_dup
+
+theorem parseScript_emit_push_bool_true_then_dup :
+    parseScript (Emit.emitOps [.push (.bool true), .dup])
+      = .ok [.push (.bigint 1), .dup] := by
+  unfold parseScript
+  rw [emitOps_toList_push_bool_true_then_dup]
+  exact parseOps_emit_push_bool_true_then_dup
+
+theorem parseScript_emit_push_bytes_17_then_dup :
+    parseScript (Emit.emitOps [.push (.bytes (ByteArray.mk #[0x17])), .dup])
+      = .ok [.push (.bytes (ByteArray.mk #[0x17])), .dup] := by
+  unfold parseScript
+  rw [emitOps_toList_push_bytes_17_then_dup]
+  exact parseOps_emit_push_bytes_17_then_dup
+
 /-! ## Tier 3.4 Path B — multi-method dispatch chain primitives
 
 The TS reference compiler emits an `OP_DUP <i> OP_NUMEQUAL OP_IF OP_DROP
@@ -2261,23 +2324,41 @@ theorem parseScript_emit_singleton_nested_ifOp_none_dup :
   rw [emitOps_toList_singleton_nested_ifOp_none_dup]
   exact parseOps_emit_singleton_nested_ifOp_none_dup
 
+theorem parseOps_emit_singleton_nested_ifOp_some_dup_drop_swap :
+    parseOps (emitOpsL [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])])
+      = .ok [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])] := rfl
+
+private theorem emitOps_toList_singleton_nested_ifOp_some_dup_drop_swap :
+    (Emit.emitOps [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])]).toList
+      = emitOpsL [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])] := by
+  simp [Emit.emitOps, Emit.emitStackOp, emitOpsL, emitStackOpL,
+    ByteArray.toList_append, ByteArray.toList_mk_singleton]
+
+theorem parseScript_emit_singleton_nested_ifOp_some_dup_drop_swap :
+    parseScript (Emit.emitOps [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])])
+      = .ok [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_nested_ifOp_some_dup_drop_swap]
+  exact parseOps_emit_singleton_nested_ifOp_some_dup_drop_swap
+
 /-! ### List-level structural IF integration
 
 `RunarEmittableWithIf` extends the flat `RunarEmittable` subset with
-single structural `.ifOp` values whose branch bodies are already in the
-flat subset. This deliberately avoids nested IFs for now, but it closes
-the list-level parser composition for mixed lists such as
-`[dup, ifOp [...], drop]`.
+structural `.ifOp` values whose branch bodies are recursively in the
+same subset. The empty-else shape remains excluded because
+`.ifOp thn (some [])` emits the same bytes as `.ifOp thn none`.
 -/
+
+mutual
 
 inductive RunarEmittableWithIf : StackOp → Prop where
   | flat (op : StackOp) (h : RunarEmittable op) :
       RunarEmittableWithIf op
-  | if_none (thn : List StackOp) (hThn : AreRunarEmittable thn) :
+  | if_none (thn : List StackOp) (hThn : AreRunarEmittableWithIf thn) :
       RunarEmittableWithIf (.ifOp thn none)
   | if_some_cons (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
-      (hThn : AreRunarEmittable thn)
-      (hEls : AreRunarEmittable (elsHead :: elsTail)) :
+      (hThn : AreRunarEmittableWithIf thn)
+      (hEls : AreRunarEmittableWithIf (elsHead :: elsTail)) :
       RunarEmittableWithIf (.ifOp thn (some (elsHead :: elsTail)))
 
 inductive AreRunarEmittableWithIf : List StackOp → Prop where
@@ -2285,6 +2366,8 @@ inductive AreRunarEmittableWithIf : List StackOp → Prop where
   | cons (op : StackOp) (rest : List StackOp)
       (hOp : RunarEmittableWithIf op) (hRest : AreRunarEmittableWithIf rest) :
       AreRunarEmittableWithIf (op :: rest)
+
+end
 
 theorem RunarEmittable.toWithIf (op : StackOp) (h : RunarEmittable op) :
     RunarEmittableWithIf op :=
@@ -2315,6 +2398,25 @@ private theorem emitStackOpL_length_pos_of_RunarEmittableWithIf
   rw [hHead]
   simp
 
+private theorem head_of_emitStackOpL_not_else_or_endif_with_if
+    (op : StackOp) (hOp : RunarEmittableWithIf op) :
+    ∀ b tail, emitStackOpL op = b :: tail → b ≠ 0x67 ∧ b ≠ 0x68 := by
+  cases hOp with
+  | flat op h =>
+      exact head_of_emitStackOpL_not_else_or_endif op h
+  | if_none thn hThn =>
+      intro b tail h
+      injection h with hb _
+      subst hb
+      exact ⟨by decide, by decide⟩
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      intro b tail h
+      injection h with hb _
+      subst hb
+      exact ⟨by decide, by decide⟩
+
+mutual
+
 /-- A single op in the integrated predicate round-trips with any fuel at least
 as large as its emitted byte length. -/
 private theorem parseStackOpFuel_emit_round_trip_with_if
@@ -2336,57 +2438,60 @@ private theorem parseStackOpFuel_emit_round_trip_with_if
         omega
       obtain ⟨fuel', hFuelEq⟩ : ∃ k, fuel = k + 2 := ⟨fuel - 2, by omega⟩
       subst fuel
-      have hFuelThn : thn.length ≤ fuel' := by
-        have hBytes := emitOpsL_length_ge_ops_length thn hThn
+      have hFuelThn : (emitOpsL thn).length ≤ fuel' := by
         have hLen : (emitOpsL thn).length + 2 ≤ fuel' + 2 := by
           simpa [emitStackOpL, List.length_append] using hFuel
         omega
-      exact parseStackOpFuel_ifOp_none fuel' thn hThn hFuelThn rest
+      rw [show emitStackOpL (.ifOp thn none) ++ rest
+            = 0x63 :: (emitOpsL thn ++ (0x68 :: rest)) by
+          simp [emitStackOpL, List.append_assoc]]
+      simp [parseStackOpFuel]
+      rw [parseOpsFuel_emit_round_trip_with_if_stop thn hThn fuel'
+            hFuelThn 0x68 (by right; rfl) rest]
+      rw [parsePushVal?_OP_IF]
+      rfl
   | if_some_cons thn elsHead elsTail hThn hEls =>
       have hFuel2 : 2 ≤ fuel := by
-        have hLen :
-            (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 3
-              ≤ fuel := by
-          have hLen0 := hFuel
-          simp [emitStackOpL, List.length_append] at hLen0
-          omega
+        have hLen0 := hFuel
+        simp [emitStackOpL, List.length_append] at hLen0
         omega
       obtain ⟨fuel', hFuelEq⟩ : ∃ k, fuel = k + 2 := ⟨fuel - 2, by omega⟩
       subst fuel
-      have hFuelThn : thn.length ≤ fuel' := by
-        have hBytes := emitOpsL_length_ge_ops_length thn hThn
-        have hLen :
-            (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 3
-              ≤ fuel' + 2 := by
-          have hLen0 := hFuel
-          simp [emitStackOpL, List.length_append] at hLen0
-          omega
+      have hFuelThn : (emitOpsL thn).length ≤ fuel' := by
+        have hLen0 := hFuel
+        simp [emitStackOpL, List.length_append] at hLen0
         omega
-      have hFuelEls : (elsHead :: elsTail).length ≤ fuel' := by
-        have hBytes := emitOpsL_length_ge_ops_length (elsHead :: elsTail) hEls
-        have hLen :
-            (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 3
-              ≤ fuel' + 2 := by
-          have hLen0 := hFuel
-          simp [emitStackOpL, List.length_append] at hLen0
-          omega
+      have hFuelEls : (emitOpsL (elsHead :: elsTail)).length ≤ fuel' := by
+        have hLen0 := hFuel
+        simp [emitStackOpL, List.length_append] at hLen0
         omega
-      exact parseStackOpFuel_ifOp_some_cons fuel' thn elsHead elsTail
-        hThn hEls hFuelThn hFuelEls rest
+      rw [show emitStackOpL (.ifOp thn (some (elsHead :: elsTail))) ++ rest
+            = 0x63 :: (emitOpsL thn ++
+                (0x67 :: (emitOpsL (elsHead :: elsTail) ++ (0x68 :: rest)))) by
+          simp [emitStackOpL, List.append_assoc]]
+      simp [parseStackOpFuel]
+      rw [parseOpsFuel_emit_round_trip_with_if_stop thn hThn fuel'
+            hFuelThn 0x67 (by left; rfl)
+            (emitOpsL (elsHead :: elsTail) ++ (0x68 :: rest))]
+      rw [parsePushVal?_OP_IF]
+      simp
+      rw [parseOpsFuel_emit_round_trip_with_if_stop
+            (elsHead :: elsTail) hEls fuel' hFuelEls 0x68 (by right; rfl) rest]
+      rfl
 
 /-- Top-level fuel round-trip for lists that mix flat emitted ops with
-single-level structural IF ops. The fuel is measured in emitted bytes, not
+recursive structural IF ops. The fuel is measured in emitted bytes, not
 source op count, because IF body parsing consumes nested fuel. -/
 theorem parseOpsFuel_emit_round_trip_with_if :
     ∀ (ops : List StackOp), AreRunarEmittableWithIf ops →
       ∀ (fuel : Nat), (emitOpsL ops).length ≤ fuel →
         parseOpsFuel (fuel + 1) (emitOpsL ops) false = .ok (ops, []) := by
   intro ops hOps
-  induction hOps with
+  cases hOps with
   | nil =>
       intro fuel hFuel
       rfl
-  | cons op rest hOp hRest ih =>
+  | cons op rest hOp hRest =>
       intro fuel hFuel
       have hHeadLen := emitStackOpL_length_pos_of_RunarEmittableWithIf op hOp
       have hFuelPos : 1 ≤ fuel := by
@@ -2420,7 +2525,60 @@ theorem parseOpsFuel_emit_round_trip_with_if :
         have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel' + 1 := by
           simpa [emitOpsL, List.length_append] using hFuel
         omega
-      rw [ih fuel' hRestFuel]
+      rw [parseOpsFuel_emit_round_trip_with_if rest hRest fuel' hRestFuel]
+
+private theorem parseOpsFuel_emit_round_trip_with_if_stop :
+    ∀ (ops : List StackOp), AreRunarEmittableWithIf ops →
+      ∀ (fuel : Nat), (emitOpsL ops).length ≤ fuel →
+        ∀ (s : UInt8), s = 0x67 ∨ s = 0x68 → ∀ (rest : List UInt8),
+          parseOpsFuel (fuel + 1) (emitOpsL ops ++ (s :: rest)) true
+            = .ok (ops, s :: rest) := by
+  intro ops hOps
+  cases hOps with
+  | nil =>
+      intro fuel hFuel s hStop rest
+      rcases hStop with h | h <;> subst h <;> rfl
+  | cons op rest' hOp hRest =>
+      intro fuel hFuel s hStop rest
+      have hHeadLen := emitStackOpL_length_pos_of_RunarEmittableWithIf op hOp
+      have hFuelPos : 1 ≤ fuel := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest').length ≤ fuel := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      obtain ⟨b, opTail, hOpHead⟩ :=
+        emitStackOpL_cons_of_RunarEmittableWithIf op hOp
+      have hAllBytes :
+          emitOpsL (op :: rest') ++ (s :: rest)
+          = b :: (opTail ++ emitOpsL rest' ++ (s :: rest)) := by
+        show emitStackOpL op ++ emitOpsL rest' ++ (s :: rest) = _
+        rw [hOpHead]
+        simp [List.cons_append, List.append_assoc]
+      rw [hAllBytes]
+      have hBnotStop : b ≠ 0x67 ∧ b ≠ 0x68 :=
+        head_of_emitStackOpL_not_else_or_endif_with_if op hOp b opTail hOpHead
+      rw [parseOpsFuel_cons_unfold_stop (fuel' + 1) b
+            (opTail ++ emitOpsL rest' ++ (s :: rest)) hBnotStop]
+      have hHeadBack :
+          b :: (opTail ++ emitOpsL rest' ++ (s :: rest))
+          = emitStackOpL op ++ (emitOpsL rest' ++ (s :: rest)) := by
+        rw [hOpHead]
+        simp [List.cons_append, List.append_assoc]
+      rw [hHeadBack]
+      have hOpFuel : (emitStackOpL op).length ≤ fuel' + 1 := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest').length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [parseStackOpFuel_emit_round_trip_with_if op hOp (fuel' + 1) hOpFuel
+            (emitOpsL rest' ++ (s :: rest))]
+      dsimp only
+      have hRestFuel : (emitOpsL rest').length ≤ fuel' := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest').length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [parseOpsFuel_emit_round_trip_with_if_stop rest' hRest fuel' hRestFuel s hStop rest]
+
+end
 
 /-- Top-level list parser round-trip for the integrated structural IF subset. -/
 theorem parseOps_emit_round_trip_with_if
@@ -2428,6 +2586,8 @@ theorem parseOps_emit_round_trip_with_if
     parseOps (emitOpsL ops) = .ok ops := by
   unfold parseOps
   rw [parseOpsFuel_emit_round_trip_with_if ops hOps (emitOpsL ops).length (Nat.le_refl _)]
+
+mutual
 
 private theorem emitStackOp_toList_of_RunarEmittableWithIf
     (op : StackOp) (hOp : RunarEmittableWithIf op) :
@@ -2437,26 +2597,29 @@ private theorem emitStackOp_toList_of_RunarEmittableWithIf
   | if_none thn hThn =>
       simp [Emit.emitStackOp, emitStackOpL, ByteArray.toList_append,
         ByteArray.toList_mk_singleton,
-        emitOps_toList_of_AreRunarEmittable thn hThn]
+        emitOps_toList_of_AreRunarEmittableWithIf thn hThn]
   | if_some_cons thn elsHead elsTail hThn hEls =>
       simp [Emit.emitStackOp, emitStackOpL, ByteArray.toList_append,
         ByteArray.toList_mk_singleton,
-        emitOps_toList_of_AreRunarEmittable thn hThn,
-        emitOps_toList_of_AreRunarEmittable (elsHead :: elsTail) hEls]
+        emitOps_toList_of_AreRunarEmittableWithIf thn hThn,
+        emitOps_toList_of_AreRunarEmittableWithIf (elsHead :: elsTail) hEls]
 
 /-- ByteArray/list bridge for the integrated structural IF subset. -/
 theorem emitOps_toList_of_AreRunarEmittableWithIf
     (ops : List StackOp) (hOps : AreRunarEmittableWithIf ops) :
     (Emit.emitOps ops).toList = emitOpsL ops := by
-  induction hOps with
+  cases hOps with
   | nil =>
       unfold Emit.emitOps emitOpsL
       exact ByteArray.toList_empty
-  | cons op rest hOp hRest ih =>
+  | cons op rest hOp hRest =>
       change (Emit.emitStackOp op ++ Emit.emitOps rest).toList
         = emitStackOpL op ++ emitOpsL rest
       rw [ByteArray.toList_append,
-        emitStackOp_toList_of_RunarEmittableWithIf op hOp, ih]
+        emitStackOp_toList_of_RunarEmittableWithIf op hOp,
+        emitOps_toList_of_AreRunarEmittableWithIf rest hRest]
+
+end
 
 /-- ByteArray parser round-trip for the integrated structural IF subset. -/
 theorem parseScript_emit_round_trip_with_if
@@ -2465,6 +2628,657 @@ theorem parseScript_emit_round_trip_with_if
   unfold parseScript
   rw [emitOps_toList_of_AreRunarEmittableWithIf ops hOps]
   exact parseOps_emit_round_trip_with_if ops hOps
+
+/-! ### Normalized push integration
+
+Pushes cannot be admitted into an exact inverse predicate without extra
+information: `OP_0`, `OP_1NEGATE`, and `OP_1..OP_16` intentionally
+normalise bools, small byte payloads, and small ints to
+`.push (.bigint ...)`, and a push immediately followed by `OP_PICK` or
+`OP_ROLL` is structurally reconstructed as `.pick` / `.roll`.
+
+The conservative predicate below therefore proves the useful statement:
+for op lists whose pushes have a supplied normalised parse proof, and
+whose push tails do not start with `OP_PICK` / `OP_ROLL`, parsing emitted
+bytes returns `normalizeOps ops`.
+-/
+
+def byteArrayOfList (bs : List UInt8) : ByteArray :=
+  ByteArray.mk bs.toArray
+
+def normalizePushVal : PushVal → PushVal
+  | .bigint i =>
+      if i = -1 ∨ (0 ≤ i ∧ i ≤ 16) then
+        .bigint i
+      else
+        .bytes (byteArrayOfList (encodeScriptNumberL i))
+  | .bool b =>
+      .bigint (if b then 1 else 0)
+  | .bytes bs =>
+      match bs.toList with
+      | [] => .bigint 0
+      | [b] =>
+          if 1 ≤ b.toNat ∧ b.toNat ≤ 16 then
+            .bigint (Int.ofNat b.toNat)
+          else if b = 0x81 then
+            .bigint (-1)
+          else
+            .bytes bs
+      | _ :: _ :: _ => .bytes bs
+
+mutual
+
+def normalizeStackOp : StackOp → StackOp
+  | .push v => .push (normalizePushVal v)
+  | .ifOp thn none => .ifOp (normalizeOps thn) none
+  | .ifOp thn (some []) => .ifOp (normalizeOps thn) none
+  | .ifOp thn (some els) => .ifOp (normalizeOps thn) (some (normalizeOps els))
+  | op => op
+
+def normalizeOps : List StackOp → List StackOp
+  | [] => []
+  | op :: rest => normalizeStackOp op :: normalizeOps rest
+
+end
+
+def isPushStackOp : StackOp → Bool
+  | .push _ => true
+  | _ => false
+
+structure NormalizedPushEmittable (v : PushVal) : Prop where
+  emitted_cons : ∃ b tail, emitStackOpL (.push v) = b :: tail
+  head_not_stop :
+    ∀ b tail, emitStackOpL (.push v) = b :: tail → b ≠ 0x67 ∧ b ≠ 0x68
+  emit_toList : (Emit.emitStackOp (.push v)).toList = emitStackOpL (.push v)
+  parse_normalized :
+    ∀ (fuel : Nat) (rest : List UInt8), restNotPickOrRoll rest →
+      parseStackOpFuel (fuel + 1) (emitStackOpL (.push v) ++ rest)
+        = .ok (.push (normalizePushVal v), rest)
+
+private theorem normalizedPush_bool_false : NormalizedPushEmittable (.bool false) where
+  emitted_cons := ⟨0x00, [], rfl⟩
+  head_not_stop := by
+    intro b tail h
+    injection h with hb _
+    subst hb
+    exact ⟨by decide, by decide⟩
+  emit_toList := by
+    simp [Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBool,
+      emitStackOpL, encodePushValL, encodePushBoolL, ByteArray.toList_mk_singleton]
+  parse_normalized := by
+    intro fuel rest hRest
+    cases rest with
+    | nil => rfl
+    | cons b bs =>
+        unfold restNotPickOrRoll at hRest
+        unfold emitStackOpL encodePushValL encodePushBoolL normalizePushVal
+        unfold parseStackOpFuel parsePushVal?
+        simp [hRest.1, hRest.2]
+
+private theorem normalizedPush_bool_true : NormalizedPushEmittable (.bool true) where
+  emitted_cons := ⟨0x51, [], rfl⟩
+  head_not_stop := by
+    intro b tail h
+    injection h with hb _
+    subst hb
+    exact ⟨by decide, by decide⟩
+  emit_toList := by
+    simp [Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBool,
+      emitStackOpL, encodePushValL, encodePushBoolL, ByteArray.toList_mk_singleton]
+  parse_normalized := by
+    intro fuel rest hRest
+    cases rest with
+    | nil => rfl
+    | cons b bs =>
+        unfold restNotPickOrRoll at hRest
+        unfold emitStackOpL encodePushValL encodePushBoolL normalizePushVal
+        unfold parseStackOpFuel parsePushVal?
+        simp [hRest.1, hRest.2]
+
+theorem normalizedPush_bool (b : Bool) : NormalizedPushEmittable (.bool b) := by
+  cases b
+  · exact normalizedPush_bool_false
+  · exact normalizedPush_bool_true
+
+theorem normalizedPush_bytes_empty :
+    NormalizedPushEmittable (.bytes (ByteArray.mk #[])) where
+  emitted_cons := by
+    unfold emitStackOpL encodePushValL encodePushBytesL
+    simp [ByteArray.toList_eq_data_toList]
+  head_not_stop := by
+    intro b tail h
+    unfold emitStackOpL encodePushValL encodePushBytesL at h
+    simp [ByteArray.toList_eq_data_toList] at h
+    rcases h with ⟨hb, _⟩
+    subst b
+    exact ⟨by decide, by decide⟩
+  emit_toList := by
+    native_decide
+  parse_normalized := by
+    intro fuel rest hRest
+    cases rest with
+    | nil =>
+        unfold emitStackOpL encodePushValL encodePushBytesL normalizePushVal
+        unfold parseStackOpFuel parsePushVal?
+        simp [ByteArray.toList_eq_data_toList]
+    | cons b bs =>
+        unfold restNotPickOrRoll at hRest
+        unfold emitStackOpL encodePushValL encodePushBytesL normalizePushVal
+        unfold parseStackOpFuel parsePushVal?
+        simp [ByteArray.toList_eq_data_toList, hRest.1, hRest.2]
+
+private theorem normalizePushVal_bigint_small_eq
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    normalizePushVal (.bigint i) = .bigint i := by
+  simp [normalizePushVal, h]
+
+private theorem parseStackOpFuel_push_bigint_small_normalized
+    (fuel : Nat) (rest : List UInt8) (i : Int)
+    (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) (hRest : restNotPickOrRoll rest) :
+    parseStackOpFuel (fuel + 1) (emitStackOpL (.push (.bigint i)) ++ rest)
+      = .ok (.push (.bigint i), rest) := by
+  have hCases :
+      i = -1 ∨ i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨
+        i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+        i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 := by
+    omega
+  rcases hCases with
+    hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI |
+    hI | hI | hI | hI <;> subst i <;> cases rest with
+    | nil => rfl
+    | cons b bs =>
+        unfold restNotPickOrRoll at hRest
+        unfold emitStackOpL encodePushValL encodePushBigIntL
+        unfold parseStackOpFuel parsePushVal?
+        simp [hRest.1, hRest.2]
+
+private theorem emitStackOpL_push_bigint_small_cons
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    ∃ b tail, emitStackOpL (.push (.bigint i)) = b :: tail := by
+  have hCases :
+      i = -1 ∨ i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨
+        i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+        i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 := by
+    omega
+  rcases hCases with
+    hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI |
+    hI | hI | hI | hI <;> subst i
+  · exact ⟨0x4f, [], rfl⟩
+  · exact ⟨0x00, [], rfl⟩
+  · exact ⟨0x51, [], rfl⟩
+  · exact ⟨0x52, [], rfl⟩
+  · exact ⟨0x53, [], rfl⟩
+  · exact ⟨0x54, [], rfl⟩
+  · exact ⟨0x55, [], rfl⟩
+  · exact ⟨0x56, [], rfl⟩
+  · exact ⟨0x57, [], rfl⟩
+  · exact ⟨0x58, [], rfl⟩
+  · exact ⟨0x59, [], rfl⟩
+  · exact ⟨0x5a, [], rfl⟩
+  · exact ⟨0x5b, [], rfl⟩
+  · exact ⟨0x5c, [], rfl⟩
+  · exact ⟨0x5d, [], rfl⟩
+  · exact ⟨0x5e, [], rfl⟩
+  · exact ⟨0x5f, [], rfl⟩
+  · exact ⟨0x60, [], rfl⟩
+
+private theorem head_not_stop_push_bigint_small
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    ∀ b tail, emitStackOpL (.push (.bigint i)) = b :: tail → b ≠ 0x67 ∧ b ≠ 0x68 := by
+  have hCases :
+      i = -1 ∨ i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨
+        i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+        i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 := by
+    omega
+  rcases hCases with
+    hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI |
+    hI | hI | hI | hI <;> subst i
+  all_goals
+    intro b' tail' hHead
+    injection hHead with hb _
+    subst hb
+    exact ⟨by decide, by decide⟩
+
+private theorem emitStackOp_toList_push_bigint_small
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    (Emit.emitStackOp (.push (.bigint i))).toList = emitStackOpL (.push (.bigint i)) := by
+  have hCases :
+      i = -1 ∨ i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨
+        i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+        i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 := by
+    omega
+  rcases hCases with
+    hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI | hI |
+    hI | hI | hI | hI <;> subst i <;>
+    simp [Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBigInt,
+      emitStackOpL, encodePushValL, encodePushBigIntL, ByteArray.toList_mk_singleton]
+
+theorem normalizedPush_bigint_small
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    NormalizedPushEmittable (.bigint i) where
+  emitted_cons := emitStackOpL_push_bigint_small_cons i h
+  head_not_stop := head_not_stop_push_bigint_small i h
+  emit_toList := emitStackOp_toList_push_bigint_small i h
+  parse_normalized := by
+    intro fuel rest hRest
+    rw [normalizePushVal_bigint_small_eq i h]
+    exact parseStackOpFuel_push_bigint_small_normalized fuel rest i h hRest
+
+private theorem encodeScriptNumberL_17 : encodeScriptNumberL 17 = [0x11] := by
+  native_decide
+
+private theorem normalizePushVal_bigint_17_eq :
+    normalizePushVal (.bigint 17) = .bytes (byteArrayOfList [0x11]) := by
+  simp [normalizePushVal, encodeScriptNumberL_17]
+
+private theorem emitStackOpL_push_bigint_17_eq :
+    emitStackOpL (.push (.bigint 17)) = 0x01 :: [0x11] := by
+  native_decide
+
+theorem normalizedPush_bigint_17 : NormalizedPushEmittable (.bigint 17) where
+  emitted_cons := ⟨0x01, [0x11], emitStackOpL_push_bigint_17_eq⟩
+  head_not_stop := by
+    intro b tail h
+    rw [emitStackOpL_push_bigint_17_eq] at h
+    injection h with hb _
+    subst hb
+    exact ⟨by decide, by decide⟩
+  emit_toList := by
+    native_decide
+  parse_normalized := by
+    intro fuel rest hRest
+    cases rest with
+    | nil =>
+        rw [emitStackOpL_push_bigint_17_eq, normalizePushVal_bigint_17_eq]
+        unfold parseStackOpFuel parsePushVal? takeBytes decodeLiteralPush
+        simp [Bind.bind, Except.bind, takeBytes, byteArrayOfList]
+    | cons b bs =>
+        change b ≠ 0x7a ∧ b ≠ 0x79 at hRest
+        rw [emitStackOpL_push_bigint_17_eq, normalizePushVal_bigint_17_eq]
+        unfold parseStackOpFuel parsePushVal? takeBytes decodeLiteralPush
+        simp [Bind.bind, Except.bind, takeBytes, byteArrayOfList, hRest.1, hRest.2]
+
+private theorem encodeScriptNumberL_128 : encodeScriptNumberL 128 = [0x80, 0x00] := by
+  native_decide
+
+private theorem normalizePushVal_bigint_128_eq :
+    normalizePushVal (.bigint 128) = .bytes (byteArrayOfList [0x80, 0x00]) := by
+  simp [normalizePushVal, encodeScriptNumberL_128]
+
+private theorem emitStackOpL_push_bigint_128_eq :
+    emitStackOpL (.push (.bigint 128)) = 0x02 :: [0x80, 0x00] := by
+  native_decide
+
+theorem normalizedPush_bigint_128 : NormalizedPushEmittable (.bigint 128) where
+  emitted_cons := ⟨0x02, [0x80, 0x00], emitStackOpL_push_bigint_128_eq⟩
+  head_not_stop := by
+    intro b tail h
+    rw [emitStackOpL_push_bigint_128_eq] at h
+    injection h with hb _
+    subst hb
+    exact ⟨by decide, by decide⟩
+  emit_toList := by
+    native_decide
+  parse_normalized := by
+    intro fuel rest hRest
+    cases rest with
+    | nil =>
+        rw [emitStackOpL_push_bigint_128_eq, normalizePushVal_bigint_128_eq]
+        unfold parseStackOpFuel parsePushVal? takeBytes decodeLiteralPush
+        simp [Bind.bind, Except.bind, takeBytes, byteArrayOfList]
+    | cons b bs =>
+        change b ≠ 0x7a ∧ b ≠ 0x79 at hRest
+        rw [emitStackOpL_push_bigint_128_eq, normalizePushVal_bigint_128_eq]
+        unfold parseStackOpFuel parsePushVal? takeBytes decodeLiteralPush
+        simp [Bind.bind, Except.bind, takeBytes, byteArrayOfList, hRest.1, hRest.2]
+
+private theorem normalizePushVal_bytes_aa_bb_eq :
+    normalizePushVal (.bytes (ByteArray.mk #[0xaa, 0xbb]))
+      = .bytes (ByteArray.mk #[0xaa, 0xbb]) := by
+  unfold normalizePushVal
+  simp [ByteArray.toList_eq_data_toList]
+
+private theorem emitStackOpL_push_bytes_aa_bb_eq :
+    emitStackOpL (.push (.bytes (ByteArray.mk #[0xaa, 0xbb])))
+      = 0x02 :: [0xaa, 0xbb] := by
+  native_decide
+
+theorem normalizedPush_bytes_aa_bb :
+    NormalizedPushEmittable (.bytes (ByteArray.mk #[0xaa, 0xbb])) where
+  emitted_cons := ⟨0x02, [0xaa, 0xbb], emitStackOpL_push_bytes_aa_bb_eq⟩
+  head_not_stop := by
+    intro b tail h
+    rw [emitStackOpL_push_bytes_aa_bb_eq] at h
+    injection h with hb _
+    subst hb
+    exact ⟨by decide, by decide⟩
+  emit_toList := by
+    native_decide
+  parse_normalized := by
+    intro fuel rest hRest
+    cases rest with
+    | nil =>
+        rw [emitStackOpL_push_bytes_aa_bb_eq, normalizePushVal_bytes_aa_bb_eq]
+        unfold parseStackOpFuel parsePushVal? takeBytes decodeLiteralPush
+        simp [Bind.bind, Except.bind, takeBytes]
+    | cons b bs =>
+        change b ≠ 0x7a ∧ b ≠ 0x79 at hRest
+        rw [emitStackOpL_push_bytes_aa_bb_eq, normalizePushVal_bytes_aa_bb_eq]
+        unfold parseStackOpFuel parsePushVal? takeBytes decodeLiteralPush
+        simp [Bind.bind, Except.bind, takeBytes, hRest.1, hRest.2]
+
+mutual
+
+inductive RunarEmittableNormalized : StackOp → Prop where
+  | flat (op : StackOp) (h : RunarEmittable op) :
+      RunarEmittableNormalized op
+  | push (v : PushVal) (h : NormalizedPushEmittable v) :
+      RunarEmittableNormalized (.push v)
+  | if_none (thn : List StackOp) (hThn : AreRunarEmittableNormalized thn) :
+      RunarEmittableNormalized (.ifOp thn none)
+  | if_some_cons (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+      (hThn : AreRunarEmittableNormalized thn)
+      (hEls : AreRunarEmittableNormalized (elsHead :: elsTail)) :
+      RunarEmittableNormalized (.ifOp thn (some (elsHead :: elsTail)))
+
+inductive AreRunarEmittableNormalized : List StackOp → Prop where
+  | nil : AreRunarEmittableNormalized []
+  | cons (op : StackOp) (rest : List StackOp)
+      (hOp : RunarEmittableNormalized op)
+      (hRest : AreRunarEmittableNormalized rest)
+      (hTail : isPushStackOp op = true → restNotPickOrRoll (emitOpsL rest)) :
+      AreRunarEmittableNormalized (op :: rest)
+
+end
+
+theorem RunarEmittable.toNormalized (op : StackOp) (h : RunarEmittable op) :
+    RunarEmittableNormalized op :=
+  .flat op h
+
+theorem AreRunarEmittable.toNormalized :
+    ∀ (ops : List StackOp), AreRunarEmittable ops → AreRunarEmittableNormalized ops
+  | [], .nil => .nil
+  | op :: rest, .cons _ _ hOp hRest =>
+      .cons op rest (.flat op hOp) (AreRunarEmittable.toNormalized rest hRest)
+        (by intro hPush; cases hOp <;> simp [isPushStackOp] at hPush)
+
+private theorem restNotPickOrRoll_append_stop
+    (xs : List UInt8) (hxs : restNotPickOrRoll xs)
+    (s : UInt8) (hStop : s = 0x67 ∨ s = 0x68) (tail : List UInt8) :
+    restNotPickOrRoll (xs ++ (s :: tail)) := by
+  cases xs with
+  | nil =>
+      rcases hStop with h | h <;> subst h <;> exact ⟨by decide, by decide⟩
+  | cons b bs =>
+      exact hxs
+
+private theorem emitStackOpL_cons_of_RunarEmittableNormalized
+    (op : StackOp) (hOp : RunarEmittableNormalized op) :
+    ∃ b tail, emitStackOpL op = b :: tail := by
+  cases hOp with
+  | flat op h => exact emitStackOpL_cons_of_RunarEmittable op h
+  | push v h => exact h.emitted_cons
+  | if_none thn hThn =>
+      exact ⟨0x63, emitOpsL thn ++ [0x68], by simp [emitStackOpL]⟩
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      exact ⟨0x63,
+        emitOpsL thn ++ (0x67 :: (emitOpsL (elsHead :: elsTail) ++ [0x68])),
+        by simp [emitStackOpL]⟩
+
+private theorem emitStackOpL_length_pos_of_RunarEmittableNormalized
+    (op : StackOp) (hOp : RunarEmittableNormalized op) :
+    1 ≤ (emitStackOpL op).length := by
+  obtain ⟨b, tail, hHead⟩ := emitStackOpL_cons_of_RunarEmittableNormalized op hOp
+  rw [hHead]
+  simp
+
+private theorem head_of_emitStackOpL_not_else_or_endif_normalized
+    (op : StackOp) (hOp : RunarEmittableNormalized op) :
+    ∀ b tail, emitStackOpL op = b :: tail → b ≠ 0x67 ∧ b ≠ 0x68 := by
+  cases hOp with
+  | flat op h => exact head_of_emitStackOpL_not_else_or_endif op h
+  | push v h => exact h.head_not_stop
+  | if_none thn hThn =>
+      intro b tail h
+      injection h with hb _
+      subst hb
+      exact ⟨by decide, by decide⟩
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      intro b tail h
+      injection h with hb _
+      subst hb
+      exact ⟨by decide, by decide⟩
+
+private theorem normalizeStackOp_eq_self_of_RunarEmittable
+    (op : StackOp) (hOp : RunarEmittable op) :
+    normalizeStackOp op = op := by
+  cases hOp <;> rfl
+
+mutual
+
+private theorem parseStackOpFuel_emit_round_trip_normalized
+    (op : StackOp) (hOp : RunarEmittableNormalized op)
+    (fuel : Nat) (hFuel : (emitStackOpL op).length ≤ fuel)
+    (rest : List UInt8)
+    (hTail : isPushStackOp op = true → restNotPickOrRoll rest) :
+    parseStackOpFuel fuel (emitStackOpL op ++ rest)
+      = .ok (normalizeStackOp op, rest) := by
+  cases hOp with
+  | flat op h =>
+      have hFuelPos : 1 ≤ fuel := by
+        have hLen := emitStackOpL_length_pos_of_RunarEmittableNormalized op (.flat op h)
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      rw [normalizeStackOp_eq_self_of_RunarEmittable op h]
+      exact parseStackOp_emit_round_trip fuel' op rest h
+  | push v h =>
+      have hFuelPos : 1 ≤ fuel := by
+        have hLen := emitStackOpL_length_pos_of_RunarEmittableNormalized (.push v) (.push v h)
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      exact h.parse_normalized fuel' rest (hTail rfl)
+  | if_none thn hThn =>
+      have hFuel2 : 2 ≤ fuel := by
+        have hLen : (emitOpsL thn).length + 2 ≤ fuel := by
+          simpa [emitStackOpL, List.length_append] using hFuel
+        omega
+      obtain ⟨fuel', hFuelEq⟩ : ∃ k, fuel = k + 2 := ⟨fuel - 2, by omega⟩
+      subst fuel
+      have hFuelThn : (emitOpsL thn).length ≤ fuel' := by
+        have hLen : (emitOpsL thn).length + 2 ≤ fuel' + 2 := by
+          simpa [emitStackOpL, List.length_append] using hFuel
+        omega
+      rw [show emitStackOpL (.ifOp thn none) ++ rest
+            = 0x63 :: (emitOpsL thn ++ (0x68 :: rest)) by
+          simp [emitStackOpL, List.append_assoc]]
+      simp [parseStackOpFuel]
+      rw [parseOpsFuel_emit_round_trip_normalized_stop thn hThn fuel'
+            hFuelThn 0x68 (by right; rfl) rest]
+      rw [parsePushVal?_OP_IF]
+      rfl
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      have hFuel2 : 2 ≤ fuel := by
+        have hLen0 := hFuel
+        simp [emitStackOpL, List.length_append] at hLen0
+        omega
+      obtain ⟨fuel', hFuelEq⟩ : ∃ k, fuel = k + 2 := ⟨fuel - 2, by omega⟩
+      subst fuel
+      have hFuelThn : (emitOpsL thn).length ≤ fuel' := by
+        have hLen0 := hFuel
+        simp [emitStackOpL, List.length_append] at hLen0
+        omega
+      have hFuelEls : (emitOpsL (elsHead :: elsTail)).length ≤ fuel' := by
+        have hLen0 := hFuel
+        simp [emitStackOpL, List.length_append] at hLen0
+        omega
+      rw [show emitStackOpL (.ifOp thn (some (elsHead :: elsTail))) ++ rest
+            = 0x63 :: (emitOpsL thn ++
+                (0x67 :: (emitOpsL (elsHead :: elsTail) ++ (0x68 :: rest)))) by
+          simp [emitStackOpL, List.append_assoc]]
+      simp [parseStackOpFuel]
+      rw [parseOpsFuel_emit_round_trip_normalized_stop thn hThn fuel'
+            hFuelThn 0x67 (by left; rfl)
+            (emitOpsL (elsHead :: elsTail) ++ (0x68 :: rest))]
+      rw [parsePushVal?_OP_IF]
+      simp
+      rw [parseOpsFuel_emit_round_trip_normalized_stop
+            (elsHead :: elsTail) hEls fuel' hFuelEls 0x68 (by right; rfl) rest]
+      rfl
+
+theorem parseOpsFuel_emit_round_trip_normalized :
+    ∀ (ops : List StackOp), AreRunarEmittableNormalized ops →
+      ∀ (fuel : Nat), (emitOpsL ops).length ≤ fuel →
+        parseOpsFuel (fuel + 1) (emitOpsL ops) false
+          = .ok (normalizeOps ops, []) := by
+  intro ops hOps
+  cases hOps with
+  | nil =>
+      intro fuel hFuel
+      rfl
+  | cons op rest hOp hRest hTail =>
+      intro fuel hFuel
+      have hHeadLen := emitStackOpL_length_pos_of_RunarEmittableNormalized op hOp
+      have hFuelPos : 1 ≤ fuel := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      obtain ⟨b, opTail, hOpHead⟩ :=
+        emitStackOpL_cons_of_RunarEmittableNormalized op hOp
+      have hAllBytes : emitOpsL (op :: rest)
+          = b :: (opTail ++ emitOpsL rest) := by
+        show emitStackOpL op ++ emitOpsL rest = _
+        rw [hOpHead]
+        rfl
+      rw [hAllBytes]
+      rw [parseOpsFuel_cons_unfold (fuel' + 1) b (opTail ++ emitOpsL rest)]
+      have hHeadBack : b :: (opTail ++ emitOpsL rest)
+          = emitStackOpL op ++ emitOpsL rest := by
+        rw [hOpHead]
+        rfl
+      rw [hHeadBack]
+      have hOpFuel : (emitStackOpL op).length ≤ fuel' + 1 := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [parseStackOpFuel_emit_round_trip_normalized op hOp (fuel' + 1) hOpFuel
+            (emitOpsL rest) hTail]
+      dsimp only
+      have hRestFuel : (emitOpsL rest).length ≤ fuel' := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [parseOpsFuel_emit_round_trip_normalized rest hRest fuel' hRestFuel]
+      rfl
+
+private theorem parseOpsFuel_emit_round_trip_normalized_stop :
+    ∀ (ops : List StackOp), AreRunarEmittableNormalized ops →
+      ∀ (fuel : Nat), (emitOpsL ops).length ≤ fuel →
+        ∀ (s : UInt8), s = 0x67 ∨ s = 0x68 → ∀ (rest : List UInt8),
+          parseOpsFuel (fuel + 1) (emitOpsL ops ++ (s :: rest)) true
+            = .ok (normalizeOps ops, s :: rest) := by
+  intro ops hOps
+  cases hOps with
+  | nil =>
+      intro fuel hFuel s hStop rest
+      rcases hStop with h | h <;> subst h <;> rfl
+  | cons op rest' hOp hRest hTail =>
+      intro fuel hFuel s hStop rest
+      have hHeadLen := emitStackOpL_length_pos_of_RunarEmittableNormalized op hOp
+      have hFuelPos : 1 ≤ fuel := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest').length ≤ fuel := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      obtain ⟨b, opTail, hOpHead⟩ :=
+        emitStackOpL_cons_of_RunarEmittableNormalized op hOp
+      have hAllBytes :
+          emitOpsL (op :: rest') ++ (s :: rest)
+          = b :: (opTail ++ emitOpsL rest' ++ (s :: rest)) := by
+        show emitStackOpL op ++ emitOpsL rest' ++ (s :: rest) = _
+        rw [hOpHead]
+        simp [List.cons_append, List.append_assoc]
+      rw [hAllBytes]
+      have hBnotStop : b ≠ 0x67 ∧ b ≠ 0x68 :=
+        head_of_emitStackOpL_not_else_or_endif_normalized op hOp b opTail hOpHead
+      rw [parseOpsFuel_cons_unfold_stop (fuel' + 1) b
+            (opTail ++ emitOpsL rest' ++ (s :: rest)) hBnotStop]
+      have hHeadBack :
+          b :: (opTail ++ emitOpsL rest' ++ (s :: rest))
+          = emitStackOpL op ++ (emitOpsL rest' ++ (s :: rest)) := by
+        rw [hOpHead]
+        simp [List.cons_append, List.append_assoc]
+      rw [hHeadBack]
+      have hOpFuel : (emitStackOpL op).length ≤ fuel' + 1 := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest').length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      have hPushTail :
+          isPushStackOp op = true →
+            restNotPickOrRoll (emitOpsL rest' ++ (s :: rest)) := by
+        intro hPush
+        exact restNotPickOrRoll_append_stop (emitOpsL rest')
+          (hTail hPush) s hStop rest
+      rw [parseStackOpFuel_emit_round_trip_normalized op hOp (fuel' + 1) hOpFuel
+            (emitOpsL rest' ++ (s :: rest)) hPushTail]
+      dsimp only
+      have hRestFuel : (emitOpsL rest').length ≤ fuel' := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest').length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [parseOpsFuel_emit_round_trip_normalized_stop rest' hRest fuel'
+            hRestFuel s hStop rest]
+      rfl
+
+end
+
+theorem parseOps_emit_round_trip_normalized
+    (ops : List StackOp) (hOps : AreRunarEmittableNormalized ops) :
+    parseOps (emitOpsL ops) = .ok (normalizeOps ops) := by
+  unfold parseOps
+  rw [parseOpsFuel_emit_round_trip_normalized
+    ops hOps (emitOpsL ops).length (Nat.le_refl _)]
+
+mutual
+
+private theorem emitStackOp_toList_of_RunarEmittableNormalized
+    (op : StackOp) (hOp : RunarEmittableNormalized op) :
+    (Emit.emitStackOp op).toList = emitStackOpL op := by
+  cases hOp with
+  | flat op h => exact emitStackOp_toList_of_RunarEmittable op h
+  | push v h => exact h.emit_toList
+  | if_none thn hThn =>
+      simp [Emit.emitStackOp, emitStackOpL, ByteArray.toList_append,
+        ByteArray.toList_mk_singleton,
+        emitOps_toList_of_AreRunarEmittableNormalized thn hThn]
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      simp [Emit.emitStackOp, emitStackOpL, ByteArray.toList_append,
+        ByteArray.toList_mk_singleton,
+        emitOps_toList_of_AreRunarEmittableNormalized thn hThn,
+        emitOps_toList_of_AreRunarEmittableNormalized (elsHead :: elsTail) hEls]
+
+theorem emitOps_toList_of_AreRunarEmittableNormalized
+    (ops : List StackOp) (hOps : AreRunarEmittableNormalized ops) :
+    (Emit.emitOps ops).toList = emitOpsL ops := by
+  cases hOps with
+  | nil =>
+      unfold Emit.emitOps emitOpsL
+      exact ByteArray.toList_empty
+  | cons op rest hOp hRest hTail =>
+      change (Emit.emitStackOp op ++ Emit.emitOps rest).toList
+        = emitStackOpL op ++ emitOpsL rest
+      rw [ByteArray.toList_append,
+        emitStackOp_toList_of_RunarEmittableNormalized op hOp,
+        emitOps_toList_of_AreRunarEmittableNormalized rest hRest]
+
+end
+
+theorem parseScript_emit_round_trip_normalized
+    (ops : List StackOp) (hOps : AreRunarEmittableNormalized ops) :
+    parseScript (Emit.emitOps ops) = .ok (normalizeOps ops) := by
+  unfold parseScript
+  rw [emitOps_toList_of_AreRunarEmittableNormalized ops hOps]
+  exact parseOps_emit_round_trip_normalized ops hOps
 
 /-! ### 2-method dispatch chain bytes
 

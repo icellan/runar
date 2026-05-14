@@ -208,6 +208,14 @@ theorem lower_call_num2bin (sm : StackMap) (bn : String) (n size : String) :
   congr 1
   rw [lowerArgs_pair_fst]
 
+theorem lower_call_split (sm : StackMap) (bn : String) (data index : String) :
+    lowerValue sm bn (.call "split" [data, index]) =
+      (loadRef sm data ++ loadRef (sm.push data) index ++ [.opcode "OP_SPLIT"], sm.push bn) := by
+  unfold lowerValue
+  simp only [builtinOpcode, List.map_cons, List.map_nil]
+  congr 1
+  rw [lowerArgs_pair_fst]
+
 theorem lower_call_bin2num (sm : StackMap) (bn : String) (x : String) :
     lowerValue sm bn (.call "bin2num" [x]) =
       (loadRef sm x ++ [.opcode "OP_BIN2NUM"], sm.push bn) := by
@@ -814,6 +822,9 @@ theorem runOpcode_NOT_def (s : StackState) :
 theorem runOpcode_NIP_def (s : StackState) :
     runOpcode "OP_NIP" s = applyNip s := rfl
 
+theorem runOpcode_DROP_def (s : StackState) :
+    runOpcode "OP_DROP" s = applyDrop s := rfl
+
 theorem runOpcode_VERIFY_def (s : StackState) :
     runOpcode "OP_VERIFY" s
     = (match s.pop? with
@@ -1160,6 +1171,14 @@ theorem runOpcode_NIP_deep
   unfold applyNip
   rw [hStk]
 
+theorem runOpcode_DROP_top
+    (s : StackState) (top : Value) (rest : List Value)
+    (hStk : s.stack = top :: rest) :
+    runOpcode "OP_DROP" s = .ok { s with stack := rest } := by
+  rw [runOpcode_DROP_def]
+  unfold applyDrop
+  rw [hStk]
+
 /-! #### Bytes ops -/
 
 theorem runOpcode_CAT_bytesBytes
@@ -1343,6 +1362,20 @@ theorem run_OP_CAT_bytesBytes
   show runOps (.opcode "OP_CAT" :: []) s = _
   unfold runOps
   rw [stepNonIf_opcode, runOpcode_CAT_bytesBytes s a b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_SPLIT]` on a bytes/index stack. Top is the suffix, with
+the prefix retained below it, matching Bitcoin Script `OP_SPLIT`. -/
+theorem run_OP_SPLIT_bytesNat
+    (s : StackState) (bs : ByteArray) (idx : Nat) (rest : List Value)
+    (hStk : s.stack = .vBigint (idx : Int) :: .vBytes bs :: rest)
+    (hLe : idx ≤ bs.size) :
+    runOps [.opcode "OP_SPLIT"] s
+    = .ok (({ s with stack := rest }.push (.vBytes (bs.extract 0 idx))).push
+        (.vBytes (bs.extract idx bs.size))) := by
+  show runOps (.opcode "OP_SPLIT" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_SPLIT_bytesNat s bs idx rest hStk hLe]
   simp [run_empty]
 
 /-- `runOps [OP_VERIFY]` on a `vBool true` top: reaches the popped state. -/

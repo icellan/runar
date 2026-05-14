@@ -140,40 +140,34 @@ def applyTuck (s : StackState) : EvalResult StackState :=
   | a :: b :: rest => .ok { s with stack := a :: b :: a :: rest }
   | _              => .error (.unsupported "OP_TUCK: <2 elements")
 
-/-- `roll d`: bytecode-style `OP_ROLL`. Pops one value off the top of the stack
-(the runtime depth, supplied by stack-lower as a `[push d]` immediately preceding
-this op), then rolls the element at structural depth `d` to the top. The popped
-runtime depth is *not* re-checked against the IR-level parameter `d`: stack-lower
-is the trusted producer that guarantees the two agree. `roll 0` is therefore a
-no-op once the runtime depth has been popped.
+/-- `roll d`: rolls the element at structural depth `d` to the top of the stack.
 
-This matches `06-emit.ts` (which lowers `.roll d` to a single `OP_PICK`/`OP_ROLL`
-opcode), so the bytecode-level pattern `[push d, OP_ROLL]` aligns with the IR
-pattern `[push d, .roll d]`. -/
+This is the *bundled* Stack-IR op exactly as produced by `Stack.Lower` — a bare
+`.roll d` with no preceding depth push. `Script/Emit.lean` encodes it as the byte
+pair `[push d, OP_ROLL]`, so the IR op models the *combined* effect of that pair:
+`runOps [.roll d] s` equals running the parsed bytecode `[push d, OP_ROLL]` on
+`s` (the named `OP_ROLL` opcode below pops that pushed depth first). Keeping the
+IR op no-pop is what makes the producer (`Lower`), the evaluator (`runOps`), and
+the emit/parse round-trip agree. `roll 0` is the identity. -/
 def applyRoll (s : StackState) (d : Nat) : EvalResult StackState :=
-  match s.pop? with
-  | none => .error (.unsupported "OP_ROLL: empty stack")
-  | some (_, s') =>
-      if d ≥ s'.stack.length then
-        .error (.unsupported s!"OP_ROLL: depth {d} ≥ stack size {s'.stack.length}")
-      else
-        let v := s'.stack[d]!
-        let rest := s'.stack.eraseIdx d
-        .ok { s' with stack := v :: rest }
+  if d ≥ s.stack.length then
+    .error (.unsupported s!"OP_ROLL: depth {d} ≥ stack size {s.stack.length}")
+  else
+    let v := s.stack[d]!
+    let rest := s.stack.eraseIdx d
+    .ok { s with stack := v :: rest }
 
-/-- `pick d`: bytecode-style `OP_PICK`. Pops one value off the top of the stack
-(the runtime depth, supplied by stack-lower as a `[push d]` immediately preceding
-this op), then copies the element at structural depth `d` to the top. The popped
-runtime depth is *not* re-checked against `d` for the same reason as `applyRoll`.
-`pick 0` (after the pop) copies the new top to the top — i.e. `dup`. -/
+/-- `pick d`: copies the element at structural depth `d` to the top of the stack.
+
+Like `applyRoll`, this is the bundled Stack-IR op (a bare `.pick d`) that
+`Script/Emit.lean` encodes as the byte pair `[push d, OP_PICK]`; the IR op models
+the combined effect of that pair. It is definitionally identical to
+`applyPickStruct`. `pick 0` duplicates the top of stack. -/
 def applyPick (s : StackState) (d : Nat) : EvalResult StackState :=
-  match s.pop? with
-  | none => .error (.unsupported "OP_PICK: empty stack")
-  | some (_, s') =>
-      if d ≥ s'.stack.length then
-        .error (.unsupported s!"OP_PICK: depth {d} ≥ stack size {s'.stack.length}")
-      else
-        .ok (s'.push s'.stack[d]!)
+  if d ≥ s.stack.length then
+    .error (.unsupported s!"OP_PICK: depth {d} ≥ stack size {s.stack.length}")
+  else
+    .ok (s.push s.stack[d]!)
 
 /-- `pickStruct d`: structural pick (no-pop). Copies the element at
 structural depth `d` to the top without popping a runtime depth first.
@@ -376,18 +370,22 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
   | "OP_ROT"     => applyRot s
   | "OP_TUCK"    => applyTuck s
   | "OP_ROLL" =>
-      match s.stack with
-      | [] => .error (.unsupported "OP_ROLL: empty stack")
-      | v :: _ =>
+      -- Parsed-bytecode path: the depth is a runtime stack value. Pop it, then
+      -- apply the bundled `roll` op (which is itself no-pop) to the remainder.
+      match s.pop? with
+      | none => .error (.unsupported "OP_ROLL: empty stack")
+      | some (v, s') =>
           match asNonNegativeNat? v with
-          | some d => applyRoll s d
+          | some d => applyRoll s' d
           | none => .error (.typeError "OP_ROLL expects non-negative depth")
   | "OP_PICK" =>
-      match s.stack with
-      | [] => .error (.unsupported "OP_PICK: empty stack")
-      | v :: _ =>
+      -- Parsed-bytecode path: pop the runtime depth, then apply the bundled
+      -- `pick` op (no-pop) to the remainder.
+      match s.pop? with
+      | none => .error (.unsupported "OP_PICK: empty stack")
+      | some (v, s') =>
           match asNonNegativeNat? v with
-          | some d => applyPick s d
+          | some d => applyPick s' d
           | none => .error (.typeError "OP_PICK expects non-negative depth")
   | "OP_2DUP" =>
       match applyOver s with

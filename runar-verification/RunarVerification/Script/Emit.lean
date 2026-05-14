@@ -506,6 +506,28 @@ private def PatchState.finish (st : PatchState) : EmitResult :=
 
 mutual
 
+/--
+True when an op tree contains no byte positions whose deployed bytes
+can differ from the legacy emitter: constructor placeholders,
+`pushCodesepIndex`, or `OP_CODESEPARATOR`.
+-/
+def stackOpHasNoPatchSites : StackOp → Bool
+  | .placeholder _ _ => false
+  | .pushCodesepIndex => false
+  | .opcode "OP_CODESEPARATOR" => false
+  | .ifOp thn none => opsHaveNoPatchSites thn
+  | .ifOp thn (some els) =>
+      opsHaveNoPatchSites thn && opsHaveNoPatchSites els
+  | _ => true
+
+def opsHaveNoPatchSites : List StackOp → Bool
+  | [] => true
+  | op :: rest => stackOpHasNoPatchSites op && opsHaveNoPatchSites rest
+
+end
+
+mutual
+
 private def emitStackOpPatchedChecked : StackOp → PatchState →
     Except CodeSepPatchError PatchState
   | .placeholder paramIndex paramName, st =>
@@ -613,6 +635,202 @@ def emitWithCodeSepPatches (p : StackProgram) :
   | ms => do
       let stChain ← emitDispatchChainPatched 0 ms {}
       .ok (emitEndifsPatched (ms.length - 1) stChain).finish
+
+namespace PatchProof
+
+private def noPatchState (bytes : ByteArray) : PatchState :=
+  { bytes := bytes,
+    constructorSlotsRev := [],
+    codeSepIndexSlotsRev := [],
+    possibleCodeSeparatorOffsets := [0] }
+
+private theorem loop_eq_append_extract
+    (bs acc : ByteArray) (i j : Nat) (hij : j + i = bs.size) :
+    ByteArray.foldlM.loop (m := Id)
+        (fun a b => pure (a.push b)) bs bs.size (Nat.le_refl _) i j acc
+      = acc ++ bs.extract j bs.size := by
+  induction i generalizing j acc with
+  | zero =>
+    have hj_eq : j = bs.size := by omega
+    unfold ByteArray.foldlM.loop
+    by_cases hjlt : j < bs.size
+    · omega
+    · simp only [hjlt, ↓reduceDIte]
+      have hempty : bs.extract j bs.size = ByteArray.empty := by
+        apply ByteArray.ext
+        simp [hj_eq]
+      rw [hempty]
+      show acc = acc ++ ByteArray.empty
+      rw [ByteArray.append_empty]
+  | succ i ih =>
+    have hjlt : j < bs.size := by omega
+    unfold ByteArray.foldlM.loop
+    simp only [hjlt, ↓reduceDIte]
+    show (Id.run do
+      let b ← (pure (acc.push bs[j]) : Id ByteArray)
+      ByteArray.foldlM.loop (m := Id)
+        (fun a b' => pure (a.push b')) bs bs.size (Nat.le_refl _) i (j+1) b
+      ) = acc ++ bs.extract j bs.size
+    simp only [Id.run, pure_bind]
+    rw [ih (acc.push bs[j]) (j+1) (by omega)]
+    have hsplit :
+        bs.extract j bs.size
+          = bs.extract j (j+1) ++ bs.extract (j+1) bs.size :=
+      ByteArray.extract_eq_extract_append_extract (j+1)
+        (Nat.le_succ j) (by omega)
+    rw [hsplit, ← ByteArray.append_assoc,
+        ByteArray.extract_add_one (by omega),
+        ByteArray.append_toByteArray_singleton]
+    rfl
+
+theorem foldl_push_eq_append (acc bs : ByteArray) :
+    bs.foldl (init := acc) (fun a b => a.push b) = acc ++ bs := by
+  show (Id.run <| ByteArray.foldlM (m := Id)
+        (fun a b => pure (a.push b)) acc bs 0 bs.size) = acc ++ bs
+  unfold ByteArray.foldlM
+  simp only [Nat.le_refl, ↓reduceDIte, Id.run]
+  have h := loop_eq_append_extract bs acc bs.size 0 (by omega)
+  show ByteArray.foldlM.loop (m := Id)
+        (fun a b => pure (a.push b)) bs bs.size (Nat.le_refl _) (bs.size - 0) 0 acc
+      = acc ++ bs
+  rw [Nat.sub_zero, h]
+  rw [ByteArray.extract_zero_size]
+
+theorem appendBA_eq_append (acc bs : ByteArray) :
+    appendBA acc bs = acc ++ bs := by
+  unfold appendBA
+  exact foldl_push_eq_append acc bs
+
+def flatStackOpHasNoPatchSites : StackOp → Bool
+  | .placeholder _ _ => false
+  | .pushCodesepIndex => false
+  | .opcode _ => false
+  | .ifOp _ _ => false
+  | _ => true
+
+def flatOpsHaveNoPatchSites : List StackOp → Bool
+  | [] => true
+  | op :: rest => flatStackOpHasNoPatchSites op && flatOpsHaveNoPatchSites rest
+
+private theorem emitStackOpPatchedChecked_flat_no_patch_sites_eq_emitStackOp
+    (op : StackOp) (acc : ByteArray)
+    (hNoPatch : flatStackOpHasNoPatchSites op = true) :
+    emitStackOpPatchedChecked op (noPatchState acc)
+      = .ok (noPatchState (acc ++ emitStackOp op)) := by
+  cases op with
+  | push v =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | dup =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | swap =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | roll d =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | pick d =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | pickStruct d =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | drop =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | nip =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | over =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | rot =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | tuck =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
+  | opcode name =>
+      simp [flatStackOpHasNoPatchSites] at hNoPatch
+  | ifOp thn els =>
+      simp [flatStackOpHasNoPatchSites] at hNoPatch
+  | placeholder i n =>
+      simp [flatStackOpHasNoPatchSites] at hNoPatch
+  | pushCodesepIndex =>
+      simp [flatStackOpHasNoPatchSites] at hNoPatch
+
+private theorem emitOpsPatchedAuxChecked_flat_no_patch_sites_eq_emitOps :
+    ∀ (ops : List StackOp) (acc : ByteArray),
+      flatOpsHaveNoPatchSites ops = true →
+      emitOpsPatchedAuxChecked ops (noPatchState acc)
+        = .ok (noPatchState (acc ++ emitOps ops))
+  | [], acc, _ => by
+      simp [emitOpsPatchedAuxChecked, emitOps, noPatchState]
+  | op :: rest, acc, hNoPatch => by
+      have hOp : flatStackOpHasNoPatchSites op = true := by
+        cases h : flatStackOpHasNoPatchSites op <;>
+          simp [flatOpsHaveNoPatchSites, h] at hNoPatch ⊢
+      have hRest : flatOpsHaveNoPatchSites rest = true := by
+        cases h : flatOpsHaveNoPatchSites rest <;>
+          simp [flatOpsHaveNoPatchSites, h] at hNoPatch ⊢
+      unfold emitOpsPatchedAuxChecked
+      rw [emitStackOpPatchedChecked_flat_no_patch_sites_eq_emitStackOp
+        op acc hOp]
+      change
+        emitOpsPatchedAuxChecked rest (noPatchState (acc ++ emitStackOp op))
+          = Except.ok (noPatchState (acc ++ emitOps (op :: rest)))
+      rw [emitOpsPatchedAuxChecked_flat_no_patch_sites_eq_emitOps
+        rest (acc ++ emitStackOp op) hRest]
+      simp [emitOps, noPatchState, ByteArray.append_assoc]
+
+theorem emitOpsWithCodeSepPatches_flat_no_patch_sites_bytes_eq_emitOps
+    (ops : List StackOp) (r : EmitResult)
+    (hNoPatch : flatOpsHaveNoPatchSites ops = true)
+    (hPatch : emitOpsWithCodeSepPatches ops = .ok r) :
+    r.bytes = emitOps ops := by
+  unfold emitOpsWithCodeSepPatches at hPatch
+  change
+    (do
+      let st ← emitOpsPatchedAuxChecked ops (noPatchState ByteArray.empty)
+      Except.ok st.finish) = Except.ok r at hPatch
+  rw [emitOpsPatchedAuxChecked_flat_no_patch_sites_eq_emitOps ops ByteArray.empty
+    hNoPatch] at hPatch
+  simp [noPatchState, PatchState.finish] at hPatch
+  cases hPatch
+  rfl
+
+theorem emitWithCodeSepPatches_single_public_flat_no_patch_sites_bytes_eq_emit
+    (p : StackProgram) (m : StackMethod) (r : EmitResult)
+    (hPublic : publicMethodsOf p = [m])
+    (hNoPatch : flatOpsHaveNoPatchSites m.ops = true)
+    (hPatch : emitWithCodeSepPatches p = .ok r) :
+    r.bytes = emit p := by
+  unfold emitWithCodeSepPatches at hPatch
+  rw [hPublic] at hPatch
+  simp at hPatch
+  unfold emit
+  rw [hPublic]
+  simp only
+  exact emitOpsWithCodeSepPatches_flat_no_patch_sites_bytes_eq_emitOps
+    m.ops r hNoPatch hPatch
+
+end PatchProof
+
+theorem emitWithCodeSepPatches_single_public_empty_ops_bytes_eq_emitFast
+    (p : StackProgram) (m : StackMethod) (r : EmitResult)
+    (hPublic : publicMethodsOf p = [m])
+    (hOps : m.ops = [])
+    (hPatch : emitWithCodeSepPatches p = .ok r) :
+    r.bytes = emitFast p := by
+  unfold emitWithCodeSepPatches at hPatch
+  rw [hPublic] at hPatch
+  simp at hPatch
+  rw [hOps] at hPatch
+  cases hPatch
+  unfold emitFast
+  rw [hPublic]
+  simp [hOps, emitOpsFast, emitOpsFastAux, PatchState.finish]
 
 theorem emitOpsWithCodeSepPatches_sample :
     (match emitOpsWithCodeSepPatches

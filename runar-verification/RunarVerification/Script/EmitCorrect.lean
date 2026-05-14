@@ -413,6 +413,32 @@ theorem parseScript_emitOpsFast_runOps_eq_with_if (ops : List StackOp)
       = RunarVerification.Stack.Eval.runOps ops s := by
   rw [parseScript_emitOpsFast_round_trip_with_if ops hOps]
 
+/-! ### Normalized push parser bridge -/
+
+theorem parseScript_emitOpsFast_round_trip_normalized (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittableNormalized ops) :
+    Parse.parseScript (emitOpsFast ops) = .ok (Parse.normalizeOps ops) := by
+  rw [← emitOps_eq_emitOpsFast ops]
+  exact Parse.parseScript_emit_round_trip_normalized ops hOps
+
+theorem parseScript_emitOps_runOps_eq_normalized (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittableNormalized ops)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOps ops) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps (Parse.normalizeOps ops) s)
+      = RunarVerification.Stack.Eval.runOps (Parse.normalizeOps ops) s := by
+  rw [Parse.parseScript_emit_round_trip_normalized ops hOps]
+
+theorem parseScript_emitOpsFast_runOps_eq_normalized (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittableNormalized ops)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOpsFast ops) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps (Parse.normalizeOps ops) s)
+      = RunarVerification.Stack.Eval.runOps (Parse.normalizeOps ops) s := by
+  rw [parseScript_emitOpsFast_round_trip_normalized ops hOps]
+
 /-! ### Terminal singleton push collisions
 
 Boolean pushes are byte-identical to the small script-number pushes
@@ -432,6 +458,24 @@ theorem parseScript_emitOpsFast_singleton_push_bool_true_terminal :
       = .ok [.push (.bigint 1)] := by
   rw [← emitOps_eq_emitOpsFast [.push (.bool true)]]
   exact Parse.parseScript_emit_singleton_push_bool_true_terminal
+
+theorem parseScript_emitOpsFast_push_bigint_two_then_dup :
+    Parse.parseScript (emitOpsFast [.push (.bigint 2), .dup])
+      = .ok [.push (.bigint 2), .dup] := by
+  rw [← emitOps_eq_emitOpsFast [.push (.bigint 2), .dup]]
+  exact Parse.parseScript_emit_push_bigint_two_then_dup
+
+theorem parseScript_emitOpsFast_push_bool_true_then_dup :
+    Parse.parseScript (emitOpsFast [.push (.bool true), .dup])
+      = .ok [.push (.bigint 1), .dup] := by
+  rw [← emitOps_eq_emitOpsFast [.push (.bool true), .dup]]
+  exact Parse.parseScript_emit_push_bool_true_then_dup
+
+theorem parseScript_emitOpsFast_push_bytes_17_then_dup :
+    Parse.parseScript (emitOpsFast [.push (.bytes (ByteArray.mk #[0x17])), .dup])
+      = .ok [.push (.bytes (ByteArray.mk #[0x17])), .dup] := by
+  rw [← emitOps_eq_emitOpsFast [.push (.bytes (ByteArray.mk #[0x17])), .dup]]
+  exact Parse.parseScript_emit_push_bytes_17_then_dup
 
 /-- Parser round-trip for fast-emitted singleton `ifOp` without an else branch.
 This extends the parser bridge beyond the flat `RunarEmittable` predicate while
@@ -460,6 +504,14 @@ theorem parseScript_emitOpsFast_singleton_nested_ifOp_none_dup_round_trip :
       = .ok [.ifOp [.ifOp [.dup] none] none] := by
   rw [← emitOps_eq_emitOpsFast [.ifOp [.ifOp [.dup] none] none]]
   exact Parse.parseScript_emit_singleton_nested_ifOp_none_dup
+
+/-- Fast-emitter parser smoke case for a nested IF with non-empty inner and
+outer else branches. -/
+theorem parseScript_emitOpsFast_singleton_nested_ifOp_some_dup_drop_swap_round_trip :
+    Parse.parseScript (emitOpsFast [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])])
+      = .ok [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])] := by
+  rw [← emitOps_eq_emitOpsFast [.ifOp [.ifOp [.dup] (some [.drop])] (some [.swap])]]
+  exact Parse.parseScript_emit_singleton_nested_ifOp_some_dup_drop_swap
 
 /-- Running parsed structurally emitted singleton `ifOp` bytes matches running
 the original singleton `ifOp`, for no-else branches whose body is in the

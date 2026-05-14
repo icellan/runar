@@ -9,6 +9,7 @@ import RunarVerification.Stack.Eval
 import RunarVerification.Stack.Lower
 import RunarVerification.Stack.Sim
 import RunarVerification.Stack.Agrees
+import RunarVerification.Stack.OutputTrace
 import RunarVerification.Stack.Peephole
 import RunarVerification.Stack.TxContext
 import RunarVerification.Stack.NumEncoding

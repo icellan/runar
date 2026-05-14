@@ -85,6 +85,16 @@ assumptions with fail-fast codegen, not hidden `opaque := ...` bodies.
   the low-depth fold heads, and
   `Pipeline.peephole_post_chain_roll_runOps_eq_of_rollPick_noop` uses
   that theorem to discharge the final fold equality for that subset.
+  `Stack.Peephole.peepholePassAll_runOps_eq_of_flat_sound` and
+  `Pipeline.peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop`
+  bridge no-IF `peepholePassAll` callers through a flat first-pass proof.
+  `Stack.Peephole.peepholePostFold_preserves_noIfOp`,
+  `Stack.Peephole.peepholeChainFold_preserves_noIfOp`, and
+  `Stack.Peephole.peepholeRollPickFold_preserves_noIfOp` show the later
+  peephole phases preserve the no-IF invariant. The fired low-depth
+  roll/pick rewrites have local runtime-equality slices for their
+  TS-shaped depth-push sources, plus a concrete counterexample showing
+  why bare `.roll 1` is not runtime-equal under bytecode-style `ROLL`.
 * `Pipeline.compileSafe` rejects sentinel `OP_RUNAR_*` opcodes and
   unknown emitter opcodes before byte emission.
 * `Stack.Eval` uses concrete Script-number and bytewise semantics for
@@ -120,27 +130,62 @@ assumptions with fail-fast codegen, not hidden `opaque := ...` bodies.
   consume-mode witnesses for depth-0 through depth-2 `loadParam` and
   depth-0 through depth-2 copied `loadConst .refAlias`, plus Stage C
   operational witnesses for the common integer/arithmetic/comparison/
-  logical/shift binOps, bytewise INVERT at unary depths 0/1/>=2, byte
+  logical/shift binOps at depth pairs `(1,0)`, `(0,1)`, `(>=2,0)`, and
+  `(0,>=2)`. It also has bytewise INVERT at unary depths 0/1/>=2, byte
   equality/inequality, and bytewise AND/OR/XOR success paths at binary
-  depth pair `(1,0)`, plus bounded builtin-call witnesses for
-  `toByteString` byte inputs, `abs`, `len`, `bin2num`, `cat`,
-  `num2bin`, `min`, `max`, and `within`.
+  depth pairs `(1,0)`, `(0,1)`, `(>=2,0)`, and `(0,>=2)`,
+  plus bounded builtin-call witnesses for `toByteString` byte inputs,
+  `abs`, `len`, and `bin2num` at depths 0/1/>=2, `cat`, `num2bin`, and
+  `min`/`max` at depth pairs `(1,0)`, `(0,1)`, `(>=2,0)`, and
+  `(0,>=2)`, and `within` at depth tuple `(2,1,0)`. `split(data, index)`
+  has exact lowered VM stack-shape theorems at depth pairs `(1,0)`,
+  `(0,1)`, `(>=2,0)`, and `(0,>=2)` and retained-prefix agreement bridges; this
+  remains proof infrastructure separate from `simpleStepRel` because
+  `OP_SPLIT` leaves an unnamed prefix below the named suffix.
+  Stage D post-processing preservation covers cleanup tails made only of
+  `OP_NIP`, `OP_DROP`, and `OP_VERIFY`. The output-construction families
+  have explicit conditional preservation wrappers, and `Stack.OutputTrace`
+  supplies the event/trace bridge for output appends while preserving
+  agreement, including wrapper-shape bridges for lowered `addOutput`,
+  `addRawOutput`, and `addDataOutput`, plus named-trace composition for
+  multiple output events. The remaining output obligation is deriving
+  those events from actual lowered verification code.
+  Deeper consume-mode reference loads now have the current lowerer-shape
+  theorem and a depth >= 3 witness when callers supply the required
+  bytecode-style depth push before `ROLL`, either in the producer shape
+  or as the initial stack prefix for the current bare `[.roll d]` shape;
+  the unresolved piece is the producer/evaluator shape mismatch for the
+  current emitted sequence.
 * `Script.Parse`, `Script.EmitCorrect`, and `Pipeline` connect
   emit/parse round-trip facts to `Stack.Eval.runOps` for the current
-  `RunarEmittable` subset, plus `RunarEmittableWithIf` lists that mix
-  flat emitted ops with single-level structural IF frames whose branch
-  bodies are already `AreRunarEmittable`. `Pipeline` connects both
-  predicates to single-public-method `compileSafe` results. General
-  pushes remain outside the main predicate; standalone theorems cover
-  terminal singleton pushes for the small-int fast path covering -1 and
-  0 through 16, explicit terminal bool collisions, bounded terminal
-  byte-push samples, and one concrete nested no-else IF parser smoke
-  case.
+  `RunarEmittable` subset, recursive `RunarEmittableWithIf` lists, and
+  a normalized push predicate that parses emitted bytes to
+  `normalizeOps`. `Pipeline` connects those predicates to
+  single-public-method `compileSafe` results. Exact push inversion is
+  intentionally not claimed: Script encodings normalize bools, small
+  byte payloads, and small ints, and pushes immediately before
+  `OP_PICK`/`OP_ROLL` are reconstructed structurally. The small-int
+  normalized push family for `-1` and `0..16` is proved, along with a
+  concrete non-small `17` and `128` pushdata cases, the empty-byte
+  payload case, and a concrete multi-byte `aa bb` payload.
 * `tests/PipelineGolden.lean` now guards the full 49-fixture bucket
   inventory, default/full/regen fixture modes, stale stored constants,
   and sharded full-mode crypto pending checks. `scripts/differential.sh`
   and `scripts/full-verification.sh` refuse report/artifact paths inside
-  tracked fixture/test trees.
+  tracked fixture/test trees. `scripts/differential.sh` can consume a BSV
+  reference through `RUNAR_BSV_REFERENCE_CMD` or a prebuilt
+  `RUNAR_BSV_REFERENCE_JSON`.
+* `Pipeline.compileSafeWithCodeSepPatches_single_public_observational_correct`
+  threads the slot-aware emitted bytes into the single-public-method
+  observational statement under the remaining patched-byte soundness
+  hypothesis. The restricted
+  `Pipeline.compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes`
+  discharges that hypothesis when patched bytes equal `emitFast` bytes
+  and the existing `AreRunarEmittableWithIf` parser path applies.
+  `Pipeline.emitWithCodeSepPatches_single_public_empty_ops_bytes_eq_emitFast`
+  proves a concrete no-patch-site equality for the empty-ops
+  single-public case, and the flat no-patch-site subset now proves
+  slot-aware bytes equal legacy emit bytes for single-public methods.
 
 ## Not Yet Proven
 
@@ -153,20 +198,26 @@ These are active proof obligations, not historical notes:
   relation.
 * Full lowering simulation from all supported ANF constructors and
   consume-depth combinations to Stack VM execution. Remaining work
-  includes broader binary depth pairs, output-construction call families,
-  method post-processing, deeper consume-mode reference loads, and the
-  stronger producer-shape semantics needed because `.roll d` is
-  bytecode-style in `Stack.Eval`.
-* Exact first-pass and roll/pick-fold peephole obligations outside the
-  current no-op subset for the full `Pipeline.peepholeProgram` chain.
-* Emit/parse/runOps round-trip beyond the current `RunarEmittableWithIf`
-  subset, including the general nested IF predicate and nonterminal or
-  general push cases still outside `Parse.lean`'s main predicate.
-* Threading the slot-aware emit result through the final deployed-byte
-  theorem using the checked branch-sensitive code-separator patching
-  relation.
+  includes deriving output events for output-construction call families,
+  builtin-call depth tuples beyond the landed unary/binary edge cases,
+  method post-processing, and the stronger producer-shape semantics
+  needed because `.roll d` is bytecode-style in `Stack.Eval`.
+* Flat first-pass peephole rule preconditions and roll/pick-fold
+  obligations outside the current no-op subset for the full
+  `Pipeline.peepholeProgram` chain.
+* Broader emit/parse/runOps coverage beyond the current recursive
+  `RunarEmittableWithIf` and normalized-push predicates, especially
+  additional concrete `NormalizedPushEmittable` proof families and
+  push-before-`OP_PICK`/`OP_ROLL` cases if callers need them.
+* Discharging the patched-byte soundness hypothesis in the slot-aware
+  deployed-byte theorem beyond the landed `emitFast`-byte-equality and
+  flat no-patch-site subsets using the checked branch-sensitive
+  code-separator patching relation.
 * Live or stored-Lean-constant verification for the 15 crypto-heavy
-  fixtures currently outside the default byte-exact count.
+  fixtures currently outside the default byte-exact count. Regen mode
+  now emits per-fixture hex files and a generated Lean match-table
+  snippet, but the constants themselves are intentionally unpopulated
+  until a full regen run supplies Lean-produced hex.
 
 ## Policy
 
