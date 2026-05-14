@@ -41,10 +41,8 @@ pub struct P2Blake3PKH {
     pub pub_key_hash: ByteString,
 }
 
-#[runar::methods(P2Blake3PKH)]
 impl P2Blake3PKH {
     /// Unlock verifies the pub_key hashes to the committed BLAKE3 hash, then checks the signature.
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         // Step 1: Verify pub_key matches the committed BLAKE3 hash
         assert!(blake3_hash(pub_key) == self.pub_key_hash);

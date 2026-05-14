@@ -26,11 +26,9 @@ pub struct StateCovenant {
     pub verifying_key_hash: ByteString,
 }
 
-#[runar::methods(StateCovenant)]
 impl StateCovenant {
     /// Advance the covenant state. Verifies proof data and updates state root
     /// and block number.
-    #[public]
     pub fn advance_state(
         &mut self,
         new_state_root: ByteString,

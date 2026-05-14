@@ -24,11 +24,9 @@ pub struct BSV21Token {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(BSV21Token)]
 impl BSV21Token {
     /// Unlock by proving ownership of the private key corresponding to
     /// `pub_key_hash`.
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));

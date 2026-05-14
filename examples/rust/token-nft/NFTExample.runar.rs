@@ -33,7 +33,6 @@ pub struct SimpleNFT {
     pub metadata: ByteString,
 }
 
-#[runar::methods(SimpleNFT)]
 impl SimpleNFT {
     /// Transfer ownership of the NFT to a new owner.
     ///
@@ -45,7 +44,6 @@ impl SimpleNFT {
     /// - `sig` - Current owner's signature (authorization)
     /// - `new_owner` - New owner's public key
     /// - `output_satoshis` - Satoshis to fund the continuation UTXO
-    #[public]
     pub fn transfer(&mut self, sig: &Sig, new_owner: PubKey, output_satoshis: Bigint) {
         assert!(check_sig(sig, &self.owner));
         assert!(output_satoshis >= 1);
@@ -60,7 +58,6 @@ impl SimpleNFT {
     ///
     /// # Parameters
     /// - `sig` - Current owner's signature (authorization)
-    #[public]
     pub fn burn(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.owner));
         // No add_output = token destroyed

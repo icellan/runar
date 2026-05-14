@@ -8,5 +8,4 @@
 fn compile_fail_cases() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/contract_on_enum.rs");
-    t.compile_fail("tests/compile_fail/methods_bad_arg.rs");
 }

@@ -3,13 +3,13 @@
 //
 // Rúnar contracts support three categories of callable code:
 //
-//   1. Public methods      — annotated with #[public]. These are the
+//   1. Public methods      — declared with `pub fn`. These are the
 //                            spending entry points that appear in the
 //                            compiled Bitcoin Script.
 //
-//   2. Private methods     — methods without #[public]. These can access
-//                            contract state via &self / &mut self and are
-//                            inlined by the compiler at call sites.
+//   2. Private methods     — declared with bare `fn` (no `pub`). These can
+//                            access contract state via &self / &mut self and
+//                            are inlined by the compiler at call sites.
 //                            Private methods may return a value.
 //
 //   3. Built-in functions  — functions from runar::prelude (e.g. check_sig,
@@ -28,18 +28,16 @@ pub struct FunctionPatterns {
     pub balance: Bigint, // stateful: current balance
 }
 
-#[runar::methods(FunctionPatterns)]
 impl FunctionPatterns {
     // -------------------------------------------------------------------
     // 1. Public methods — spending entry points
     // -------------------------------------------------------------------
-    // #[public] methods become separate OP_IF branches in the compiled
+    // `pub fn` methods become separate OP_IF branches in the compiled
     // locking script.
     //
     // Public methods take &mut self and must not return a value.
 
     /// Deposit adds funds. Calls a private method and a built-in.
-    #[public]
     pub fn deposit(&mut self, sig: &Sig, amount: Bigint) {
         // Private method: shared signature check
         self.require_owner(sig);
@@ -53,7 +51,6 @@ impl FunctionPatterns {
 
     /// Withdraw removes funds after applying a fee.
     /// Demonstrates a private method that returns a value.
-    #[public]
     pub fn withdraw(&mut self, sig: &Sig, amount: Bigint, fee_bps: Bigint) {
         self.require_owner(sig);
         assert!(amount > 0);
@@ -68,7 +65,6 @@ impl FunctionPatterns {
 
     /// Scale multiplies the balance by a rational number.
     /// Demonstrates a private method wrapping a built-in.
-    #[public]
     pub fn scale(&mut self, sig: &Sig, numerator: Bigint, denominator: Bigint) {
         self.require_owner(sig);
         self.balance = self.scale_value(self.balance, numerator, denominator);
@@ -76,7 +72,6 @@ impl FunctionPatterns {
 
     /// Normalize clamps the balance to a range and rounds down.
     /// Demonstrates composing multiple private helper methods.
-    #[public]
     pub fn normalize(&mut self, sig: &Sig, lo: Bigint, hi: Bigint, step: Bigint) {
         self.require_owner(sig);
         let clamped = self.clamp_value(self.balance, lo, hi);
@@ -86,8 +81,8 @@ impl FunctionPatterns {
     // -------------------------------------------------------------------
     // 2. Private methods — inlined helpers
     // -------------------------------------------------------------------
-    // Methods without #[public] are private. They can read/write contract
-    // state via &self / &mut self and may return a value.
+    // Methods declared with bare `fn` (no `pub`) are private. They can
+    // read/write contract state via &self / &mut self and may return a value.
 
     /// Verify the caller is the contract owner.
     fn require_owner(&self, sig: &Sig) {

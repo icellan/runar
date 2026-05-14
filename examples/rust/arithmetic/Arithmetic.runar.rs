@@ -6,10 +6,8 @@ struct Arithmetic {
     target: Int,
 }
 
-#[runar::methods(Arithmetic)]
 impl Arithmetic {
-    #[public]
-    fn verify(&self, a: Int, b: Int) {
+    pub fn verify(&self, a: Int, b: Int) {
         let sum = a + b;
         let diff = a - b;
         let prod = a * b;

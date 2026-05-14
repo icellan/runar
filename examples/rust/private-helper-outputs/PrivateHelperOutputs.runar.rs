@@ -66,7 +66,6 @@ pub struct PrivateHelperOutputs {
     pub counter: Bigint,
 }
 
-#[runar::methods(PrivateHelperOutputs)]
 impl PrivateHelperOutputs {
     /// Pure state mutation, exposed through a private helper. The
     /// public caller's continuation hash must commit to the new
@@ -90,21 +89,18 @@ impl PrivateHelperOutputs {
     }
 
     /// Public spending entry: state mutation via private helper.
-    #[public]
     pub fn commit(&mut self) {
         self.bump();
         assert!(true);
     }
 
     /// Public spending entry: data output via private helper.
-    #[public]
     pub fn log(&mut self, payload: ByteString) {
         self.record(payload);
         assert!(true);
     }
 
     /// Public spending entry: state output via private helper.
-    #[public]
     pub fn partition(&mut self, amount: Bigint, leftover: Bigint) {
         self.fork_output(amount, leftover);
         assert!(true);

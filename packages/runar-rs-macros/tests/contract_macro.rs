@@ -1,10 +1,11 @@
 //! Integration tests for the Rúnar proc-macro crate.
 //!
-//! Verifies that `#[contract]` / `#[methods]` / `#[public]` behave as
-//! documented — specifically, that `#[contract]` strips `#[readonly]`
-//! field annotations so the struct compiles under rustc.
+//! Verifies that `#[contract]` behaves as documented — specifically, that it
+//! strips `#[readonly]` field annotations so the struct compiles under rustc.
+//! Methods live in a plain `impl` block with no attribute; `pub fn` marks a
+//! public spending entry point.
 
-use runar_lang_macros::{contract, methods, public};
+use runar_lang_macros::contract;
 
 #[contract]
 pub struct StripsReadonly {
@@ -13,14 +14,11 @@ pub struct StripsReadonly {
     pub b: Vec<u8>,
 }
 
-#[methods(StripsReadonly)]
 impl StripsReadonly {
-    #[public]
     pub fn plain(&self) -> i64 {
         self.a
     }
 
-    #[public]
     pub fn with_args(&self, x: i64) -> i64 {
         self.a + x
     }
@@ -34,7 +32,7 @@ fn strips_readonly_and_preserves_fields() {
 }
 
 #[test]
-fn methods_attribute_preserves_impl() {
+fn plain_impl_methods_work() {
     let c = StripsReadonly { a: 11, b: vec![] };
     assert_eq!(c.plain(), 11);
     assert_eq!(c.with_args(4), 15);

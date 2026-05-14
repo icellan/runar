@@ -7,10 +7,8 @@ pub struct ShiftOps {
     pub a: Bigint,
 }
 
-#[runar::methods(ShiftOps)]
 impl ShiftOps {
     /// Apply left shift and right shift, then sanity-check the results.
-    #[public]
     pub fn test_shift(&self) {
         let left = self.a << 3;
         let right = self.a >> 2;

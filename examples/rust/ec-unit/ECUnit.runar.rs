@@ -7,11 +7,9 @@ pub struct ECUnit {
     pub pub_key: ByteString,
 }
 
-#[runar::methods(ECUnit)]
 impl ECUnit {
     /// Exercise ecMulGen, ecOnCurve, ecNegate, ecMul, ecAdd, ecPointX,
     /// ecPointY, ecMakePoint, and ecEncodeCompressed.
-    #[public]
     pub fn test_ops(&self) {
         let g = ec_mul_gen(1);
         assert!(ec_on_curve(g));

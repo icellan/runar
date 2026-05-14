@@ -1,9 +1,14 @@
 //! Proc-macro crate for Rúnar smart contract attributes.
 //!
-//! - `#[runar::contract]` — strips `#[readonly]` field annotations (since Rust
-//!   doesn't allow attribute macros on fields) and passes the struct through.
-//! - `#[runar::methods(Name)]` — identity macro for impl blocks.
-//! - `#[public]` — identity macro marking a spending entry point.
+//! - `#[runar::contract]` / `#[runar::stateful_contract]` — strips `#[readonly]`
+//!   field annotations (since Rust doesn't allow attribute macros on fields) and
+//!   passes the struct through.
+//!
+//! Methods live in a plain `impl ContractName { ... }` block — no attribute is
+//! required. `pub fn` marks a public spending entry point; bare `fn` is a
+//! private helper. The former `#[runar::methods]` and `#[public]` attributes
+//! have been removed; the Rúnar `.runar.rs` parsers reject them with a
+//! migration diagnostic.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -38,45 +43,6 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn stateful_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     contract(TokenStream::new(), item)
-}
-
-/// Marks an impl block as containing Rúnar contract methods.
-///
-/// Accepts a single identifier argument: `#[methods(StructName)]`.
-#[proc_macro_attribute]
-pub fn methods(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Validate the attribute argument shape: expect an `Ident` (the struct name)
-    // or empty. Reject malformed argument forms (e.g. literals, punctuation)
-    // with a diagnostic so downstream errors are less confusing.
-    if !attr.is_empty() {
-        let attr2: proc_macro2::TokenStream = attr.into();
-        if syn::parse2::<syn::Ident>(attr2).is_err() {
-            let err = syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "#[methods(...)] expects a single identifier naming the contract struct",
-            );
-            return err.into_compile_error().into();
-        }
-    }
-
-    // Validate that it wraps an impl block.
-    let parsed = parse_macro_input!(item as Item);
-    match parsed {
-        Item::Impl(_) => quote! { #parsed }.into(),
-        other => {
-            let err = syn::Error::new_spanned(
-                &other,
-                "#[methods] can only be applied to an impl block",
-            );
-            err.into_compile_error().into()
-        }
-    }
-}
-
-/// Marks a method as a public spending entry point.
-#[proc_macro_attribute]
-pub fn public(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
 }
 
 /// Remove `#[readonly]` attributes from each field in the given `Fields`.

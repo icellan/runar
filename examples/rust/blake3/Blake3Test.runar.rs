@@ -65,7 +65,6 @@ pub struct Blake3Test {
     pub expected: ByteString,
 }
 
-#[runar::methods(Blake3Test)]
 impl Blake3Test {
     /// Verify a BLAKE3 compression function invocation.
     ///
@@ -82,7 +81,6 @@ impl Blake3Test {
     /// Use this method when you need full control over the chaining value,
     /// for example when verifying intermediate nodes in a BLAKE3 Merkle tree
     /// or when implementing multi-block BLAKE3 hashing with custom chaining.
-    #[public]
     pub fn verify_compress(&self, chaining_value: &ByteString, block: &ByteString) {
         let result = blake3_compress(chaining_value, block);
         assert!(result == self.expected);
@@ -103,7 +101,6 @@ impl Blake3Test {
     /// of the actual message length. For interoperability with off-chain
     /// BLAKE3 libraries, use `blake3_compress` directly with the correct
     /// blockLen encoding.
-    #[public]
     pub fn verify_hash(&self, message: &ByteString) {
         let result = blake3_hash(message);
         assert!(result == self.expected);

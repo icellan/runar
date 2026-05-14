@@ -31,17 +31,14 @@ pub struct MessageBoard {
     pub owner: PubKey,
 }
 
-#[runar::methods(MessageBoard)]
 impl MessageBoard {
     /// Post a new message, replacing the current one. Anyone can call.
-    #[public]
     pub fn post(&mut self, new_message: ByteString) {
         self.message = new_message;
     }
 
     /// Burn the contract -- terminal spend with no continuation output.
     /// Only the owner can burn the contract (requires a valid signature).
-    #[public]
     pub fn burn(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.owner));
     }

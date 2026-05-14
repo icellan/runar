@@ -24,7 +24,6 @@ pub struct TicTacToe {
     pub tx_preimage: SigHashPreimage,
 }
 
-#[runar::methods(TicTacToe)]
 impl TicTacToe {
     pub fn init(&mut self) {
         self.p2pkh_prefix = "1976a914";
@@ -37,7 +36,6 @@ impl TicTacToe {
 
     /// Player O joins the game.
     /// State-mutating: produces continuation UTXO with doubled bet.
-    #[public]
     pub fn join(&mut self, opponent_pk: PubKey, sig: &Sig) {
         assert!(self.status == 0);
         assert!(check_sig(sig, &opponent_pk));
@@ -49,7 +47,6 @@ impl TicTacToe {
     /// Make a non-terminal move. Updates board and flips turn.
     /// State-mutating: produces continuation UTXO.
     /// Caller provides their pubkey; contract verifies it matches the expected turn.
-    #[public]
     pub fn move_piece(&mut self, position: Bigint, player: PubKey, sig: &Sig) {
         assert!(self.status == 1);
         assert!(check_sig(sig, &player));
@@ -65,7 +62,6 @@ impl TicTacToe {
     /// Make a winning move. Non-mutating terminal method.
     /// Enforces winner-gets-all payout via extract_output_hash.
     /// Supports optional change output for fee funding.
-    #[public]
     pub fn move_and_win(&mut self, position: Bigint, player: PubKey, sig: &Sig, change_pkh: ByteString, change_amount: Bigint) {
         assert!(self.status == 1);
         assert!(check_sig(sig, &player));
@@ -86,7 +82,6 @@ impl TicTacToe {
     /// Make a move that fills the board (tie). Non-mutating terminal method.
     /// Enforces equal split payout via extract_output_hash.
     /// Supports optional change output for fee funding.
-    #[public]
     pub fn move_and_tie(&mut self, position: Bigint, player: PubKey, sig: &Sig, change_pkh: ByteString, change_amount: Bigint) {
         assert!(self.status == 1);
         assert!(check_sig(sig, &player));
@@ -108,7 +103,6 @@ impl TicTacToe {
     /// Player X cancels before anyone joins. Non-mutating terminal method.
     /// Refunds the full bet to player X.
     /// Supports optional change output for fee funding.
-    #[public]
     pub fn cancel_before_join(&mut self, sig: &Sig, change_pkh: ByteString, change_amount: Bigint) {
         assert!(self.status == 0);
         assert!(check_sig(sig, &self.player_x));
@@ -124,7 +118,6 @@ impl TicTacToe {
     /// Both players agree to cancel. Non-mutating terminal method.
     /// Enforces equal refund via extract_output_hash.
     /// Supports optional change output for fee funding.
-    #[public]
     pub fn cancel(&mut self, sig_x: &Sig, sig_o: &Sig, change_pkh: ByteString, change_amount: Bigint) {
         let out1 = cat(&cat(&num2bin(&self.bet_amount, 8), &self.p2pkh_prefix), &cat(&hash160(&self.player_x), &self.p2pkh_suffix));
         let out2 = cat(&cat(&num2bin(&self.bet_amount, 8), &self.p2pkh_prefix), &cat(&hash160(&self.player_o), &self.p2pkh_suffix));

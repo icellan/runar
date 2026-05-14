@@ -63,9 +63,7 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
@@ -508,7 +506,7 @@ packages/
   runar-go/            # Go package: types, mock crypto, real hashes, CompileCheck(), deployment SDK
   runar-rb/            # Ruby gem: types, DSL, mock crypto, real hashes, EC operations, deployment SDK
   runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
-  runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
+  runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[runar::stateful_contract])
   runar-py/            # Python package: types, mock crypto, real hashes, deployment SDK
   runar-zig/           # Zig package: native testing/runtime helpers and compile checks
 compilers/

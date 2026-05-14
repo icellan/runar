@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Rust DSL (`.runar.rs`) is now idiomatic Rust.** All seven compilers parse a plain `impl ContractName { ... }` block — no `#[runar::methods(...)]` attribute is required — and use `pub fn` / `fn` for public-vs-private method visibility. Previously only the TypeScript reference parser accepted bare `impl` blocks; the Go, Rust, Python, Zig, Ruby, and Java parsers required the `#[runar::methods]` gate, a latent frontend-parity divergence now closed. The full 57-file `.runar.rs` corpus, the `runar init` Rust scaffold, and the fuzzer's Rust renderer were migrated to the new style.
+
+### Removed
+
+- **BREAKING (Rust DSL):** the `#[runar::methods(ContractName)]` and `#[public]` attribute macros have been removed from `runar-lang-macros` (and dropped from the `runar-lang` prelude re-export). No parser accepts them any longer — `#[runar::methods]` and `#[public]` now produce a migration parse error. Migrate `.runar.rs` files by deleting those attributes: write a bare `impl` block and mark spending entry points with `pub fn`. Struct-level `#[runar::contract]` / `#[runar::stateful_contract]` (which strip `#[readonly]` so the struct compiles under `rustc`) are unchanged. `runar-lang-macros`, `runar-lang`, and `runar-compiler-rust` bump to **0.6.0**.
+
 ### Performance
 
 - **Conformance runner now parallel.** `conformance/runner/runner.ts` rewritten to spawn compiler subprocesses concurrently with bounded concurrency (default `cpus/4`, capped at 8; override with `RUNAR_CONFORMANCE_CONCURRENCY`). `pnpm run conformance:multi` now finishes in under five minutes on a typical dev box, down from 30+ minutes serial.

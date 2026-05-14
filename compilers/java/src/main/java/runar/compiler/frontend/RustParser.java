@@ -52,8 +52,8 @@ import runar.compiler.ir.ast.Visibility;
  * <ul>
  *   <li>{@code #[runar::contract]} or {@code #[runar::stateful_contract]} on a struct</li>
  *   <li>{@code #[readonly]} on struct fields</li>
- *   <li>{@code #[public]} on impl methods</li>
- *   <li>{@code #[runar::methods(Name)]} on impl block</li>
+ *   <li>plain {@code impl Name { ... }} block (no attribute required)</li>
+ *   <li>{@code pub fn} = public spending entry point, {@code fn} = private helper</li>
  *   <li>Rust types lowered to Rúnar primitives ({@code i64}/{@code u64}/{@code i128} →
  *       {@code bigint}, {@code bool} → {@code boolean}, {@code FixedArray<T, N>}, etc.)</li>
  *   <li>{@code assert!(expr)} / {@code assert_eq!(a, b)} macros</li>
@@ -755,29 +755,15 @@ public final class RustParser {
 
                     s.expect(TOK_RBRACE);
                 } else if (attr.startsWith("runar::methods")) {
-                    if (s.check(TOK_IMPL)) s.advance();
-                    if (s.peek().kind == TOK_IDENT) s.advance();
-                    s.expect(TOK_LBRACE);
-
-                    while (!s.check(TOK_RBRACE) && !s.check(TOK_EOF)) {
-                        Visibility visibility = Visibility.PRIVATE;
-                        if (s.check(TOK_HASH_BRACKET)) {
-                            String methodAttr = parseAttribute(s);
-                            if (methodAttr.equals("public")) {
-                                visibility = Visibility.PUBLIC;
-                            }
-                        }
-                        if (s.check(TOK_PUB)) {
-                            s.advance();
-                            visibility = Visibility.PUBLIC;
-                        }
-                        methods.add(parseFunction(s, visibility));
-                    }
-
-                    s.expect(TOK_RBRACE);
+                    // #[runar::methods] is no longer supported — bare `impl`
+                    // blocks are discovered directly. Emit a migration
+                    // diagnostic; the `impl` branch below still parses the block.
+                    s.addError("#[runar::methods] is no longer supported — write a bare 'impl ContractName { ... }' block instead");
                 } else {
                     // Unknown attribute — discard
                 }
+            } else if (s.check(TOK_IMPL)) {
+                methods.addAll(parseImplBlock(s));
             } else {
                 s.advance();
             }
@@ -873,6 +859,45 @@ public final class RustParser {
         return new ContractNode(
             contractName, parentClass, properties, constructor, methods, s.filename
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Impl block parsing
+    // -----------------------------------------------------------------
+
+    /**
+     * Parses a bare {@code impl ContractName { ... }} block and returns its
+     * methods. The type name is consumed and discarded (unrelated {@code impl}
+     * blocks merge the same way they did under the old {@code #[runar::methods]}
+     * gate). {@code pub fn} marks a public spending entry point; bare
+     * {@code fn} is a private helper.
+     */
+    private static List<MethodNode> parseImplBlock(State s) {
+        List<MethodNode> methods = new ArrayList<>();
+        s.expect(TOK_IMPL);
+        // Skip the type name.
+        if (s.peek().kind == TOK_IDENT) s.advance();
+        s.expect(TOK_LBRACE);
+
+        while (!s.check(TOK_RBRACE) && !s.check(TOK_EOF)) {
+            // #[public] is no longer supported — `pub fn` marks public methods.
+            while (s.check(TOK_HASH_BRACKET)) {
+                String methodAttr = parseAttribute(s);
+                if (methodAttr.equals("public")) {
+                    s.addError("#[public] is no longer supported — use 'pub fn' for public methods");
+                }
+            }
+
+            Visibility visibility = Visibility.PRIVATE;
+            if (s.check(TOK_PUB)) {
+                s.advance();
+                visibility = Visibility.PUBLIC;
+            }
+            methods.add(parseFunction(s, visibility));
+        }
+
+        s.expect(TOK_RBRACE);
+        return methods;
     }
 
     // -----------------------------------------------------------------

@@ -7,8 +7,8 @@
  *
  * Rust contract syntax conventions:
  *   - `#[runar::contract]` attribute on struct
- *   - `#[runar::methods(Name)]` attribute on impl block
- *   - `#[public]` attribute on public methods
+ *   - plain `impl ContractName { ... }` block (no attribute required)
+ *   - `pub fn` = public spending entry point, `fn` = private helper
  *   - `#[readonly]` attribute on readonly fields
  *   - `&self` / `&mut self` method receivers (stripped)
  *   - `&Type` reference parameters (stripped)
@@ -33,6 +33,7 @@ import type {
 import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
+import { makeDiagnostic } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -362,12 +363,15 @@ class RustParser extends ParserCore<RustToken> {
           }
           continue;
         }
-        // Check for #[runar::methods(Name)] -> next should be impl
+        // #[runar::methods] is no longer supported — bare `impl` blocks are
+        // discovered directly. Emit a migration diagnostic; the `impl` branch
+        // below still parses the block so recovery is clean.
         if (attr.startsWith('runar::methods')) {
-          if (this.current().type === 'impl') {
-            const implMethods = this.parseImplBlock();
-            methods.push(...implMethods);
-          }
+          this.errors.push(makeDiagnostic(
+            "#[runar::methods] is no longer supported — write a bare 'impl ContractName { ... }' block instead",
+            'error',
+            this.loc(),
+          ));
           continue;
         }
         // Other top-level attributes — skip
@@ -622,19 +626,27 @@ class RustParser extends ParserCore<RustToken> {
 
     const methods: MethodNode[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
-      // Check for attributes (#[public])
-      let isPublic = false;
+      // #[public] is no longer supported — `pub fn` marks public methods.
+      // Emit a migration diagnostic for any leftover attribute, then recover.
       while (this.current().type === '#') {
         const attr = this.parseAttribute();
         if (attr === 'public') {
-          isPublic = true;
+          this.errors.push(makeDiagnostic(
+            "#[public] is no longer supported — use 'pub fn' for public methods",
+            'error',
+            this.loc(),
+          ));
         }
       }
 
       // Doc comments are already handled by the tokenizer (skipped)
 
-      // Skip optional `pub` keyword
-      if (this.current().type === 'pub') this.advance();
+      // `pub fn` marks a public spending entry point; bare `fn` is a private helper.
+      let isPublic = false;
+      if (this.current().type === 'pub') {
+        isPublic = true;
+        this.advance();
+      }
 
       if (this.current().type === 'fn') {
         const method = this.parseFnDecl(isPublic);

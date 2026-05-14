@@ -656,9 +656,7 @@ pub struct P2PKH {
   pub pub_key_hash: Ripemd160,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-  #[public]
   pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
     assert!(hash160(pub_key) == self.pub_key_hash);
     assert!(check_sig(sig, pub_key));
@@ -672,7 +670,8 @@ stripped, and \texttt{.clone()} calls are treated as no-ops (necessary for
 Rust's borrow checker but irrelevant to Bitcoin Script semantics).
 The \texttt{\#[readonly]} attribute on fields is stripped by the proc-macro
 (Rust does not allow \texttt{proc\_macro\_attribute} on struct fields
-natively), and \texttt{\#[public]} controls method visibility.
+natively). Methods live in a plain \texttt{impl} block, and \texttt{pub fn}
+versus \texttt{fn} controls method visibility.
 Range-based for loops (\texttt{for i in 0..n}) are translated to
 bounded C-style loops in the AST.
 

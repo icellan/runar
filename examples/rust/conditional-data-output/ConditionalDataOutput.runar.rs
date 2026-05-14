@@ -11,13 +11,11 @@ pub struct ConditionalDataOutput {
     pub amount: Bigint,
 }
 
-#[runar::methods(ConditionalDataOutput)]
 impl ConditionalDataOutput {
     /// The canonical bug: `add_data_output` is wrapped in a branch.
     /// The compiler must register the if's value as a DATA output ref
     /// (not a state output ref) so that the parent method's continuation
     /// hash keeps `compute_state_output`.
-    #[public]
     pub fn pay(&mut self, flag: bool, payload: ByteString) {
         self.amount = self.amount + 1;
         if flag {

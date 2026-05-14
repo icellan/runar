@@ -43,7 +43,6 @@ pub struct CovenantVault {
     pub min_amount: Bigint,
 }
 
-#[runar::methods(CovenantVault)]
 impl CovenantVault {
     /// Spend funds held by this covenant.
     ///
@@ -52,7 +51,6 @@ impl CovenantVault {
     ///
     /// - `sig`         -- ECDSA signature from the owner (~72 bytes DER).
     /// - `tx_preimage` -- Sighash preimage for `check_preimage` verification.
-    #[public]
     pub fn spend(&self, sig: &Sig, tx_preimage: &SigHashPreimage) {
         assert!(check_sig(sig, &self.owner));
         assert!(check_preimage(tx_preimage));

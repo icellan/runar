@@ -9,10 +9,8 @@ pub struct BitwiseOps {
     pub b: Bigint,
 }
 
-#[runar::methods(BitwiseOps)]
 impl BitwiseOps {
     /// Verify shift operators compile and run.
-    #[public]
     pub fn test_shift(&self) {
         let left = self.a << 2;
         let right = self.a >> 1;
@@ -22,7 +20,6 @@ impl BitwiseOps {
     }
 
     /// Verify bitwise operators compile and run.
-    #[public]
     pub fn test_bitwise(&self) {
         let and_result = self.a & self.b;
         let or_result = self.a | self.b;

@@ -21,10 +21,8 @@ pub struct CrossCovenantRef {
     pub source_script_hash: Sha256,
 }
 
-#[runar::methods(CrossCovenantRef)]
 impl CrossCovenantRef {
     /// Verify a referenced output and extract a 32-byte state root from it.
-    #[public]
     pub fn verify_and_extract(
         &self,
         referenced_output: ByteString,
@@ -43,7 +41,6 @@ impl CrossCovenantRef {
     }
 
     /// Verify a referenced output and extract a numeric value from it.
-    #[public]
     pub fn verify_and_extract_numeric(
         &self,
         referenced_output: ByteString,

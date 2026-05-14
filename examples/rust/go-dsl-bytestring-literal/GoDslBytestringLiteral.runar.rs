@@ -14,9 +14,7 @@ pub struct GoDslBytestringLiteral {
     pub expected: ByteString,
 }
 
-#[runar::methods(GoDslBytestringLiteral)]
 impl GoDslBytestringLiteral {
-    #[public]
     pub fn check(&self, a: Bigint, b: Bigint) {
         assert!(a + b == self.target);
         assert!(0x006a == self.expected);

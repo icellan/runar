@@ -121,8 +121,11 @@ describe('Multi-format renderers', () => {
       const source = renderRust(contract);
       expect(source).toContain('use runar::prelude::*');
       expect(source).toContain('#[runar::contract]');
-      expect(source).toContain('#[public]');
+      expect(source).toContain('impl ');
       expect(source).toContain('&self');
+      // Removed spellings must not be emitted.
+      expect(source).not.toContain('#[runar::methods]');
+      expect(source).not.toContain('#[public]');
     }
   });
 

@@ -10,9 +10,7 @@ use runar::prelude::*;
 #[runar::contract]
 pub struct StackTrackerReproV10min {}
 
-#[runar::methods(StackTrackerReproV10min)]
 impl StackTrackerReproV10min {
-    #[public]
     pub fn verify_mnee_tx_contains_both_outputs(
         &self,
         raw_tx: ByteString,
@@ -52,7 +50,6 @@ impl StackTrackerReproV10min {
         assert!(found_extra);
     }
 
-    #[public]
     pub fn other(&self, x: ByteString) {
         assert!(x == x);
     }

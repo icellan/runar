@@ -151,9 +151,7 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
@@ -178,9 +176,7 @@ pub struct Test {
     pub owner: PubKey,
 }
 
-#[runar::methods(Test)]
 impl Test {
-    #[public]
     pub fn do_it(&mut self, player: PubKey) {
         self.owner = player.clone();
     }
@@ -207,9 +203,7 @@ pub struct Test {
     pub owner: PubKey,
 }
 
-#[runar::methods(Test)]
 impl Test {
-    #[public]
     pub fn check(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.owner));
     }
@@ -233,14 +227,12 @@ pub struct Counter {
     pub active: bool,
 }
 
-#[runar::methods(Counter)]
 impl Counter {
     pub fn init(&mut self) {
         self.count = 0;
         self.active = true;
     }
 
-    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
@@ -276,9 +268,7 @@ pub struct Loop {
     pub expected: Bigint,
 }
 
-#[runar::methods(Loop)]
 impl Loop {
-    #[public]
     pub fn verify(&self, start: Bigint) {
         let mut sum: Bigint = 0;
         for i in 0..5 {
@@ -302,8 +292,7 @@ impl Loop {
 use runar::prelude::*;
 #[runar::contract]
 struct Test { #[readonly] x: Bigint, }
-#[runar::methods(Test)]
-impl Test { #[public] fn verify(&self) { assert!(self.x > 0); } }
+impl Test { pub fn verify(&self) { assert!(self.x > 0); } }
 `, 'Test.runar.rs');
     expect(stateless.contract!.parentClass).toBe('SmartContract');
 
@@ -312,8 +301,7 @@ impl Test { #[public] fn verify(&self) { assert!(self.x > 0); } }
 use runar::prelude::*;
 #[runar::contract]
 struct Test { x: Bigint, }
-#[runar::methods(Test)]
-impl Test { #[public] fn set(&mut self) { self.x = 1; } }
+impl Test { pub fn set(&mut self) { self.x = 1; } }
 `, 'Test.runar.rs');
     expect(stateful.contract!.parentClass).toBe('StatefulSmartContract');
   });
@@ -328,13 +316,11 @@ pub struct Test {
     pub x: Bigint,
 }
 
-#[runar::methods(Test)]
 impl Test {
     fn helper(&self, a: Bigint, b: Bigint) -> Bigint {
         a + b
     }
 
-    #[public]
     pub fn check(&self, v: Bigint) {
         assert!(self.helper(v, 1) > 0);
     }
@@ -359,9 +345,7 @@ pub struct Counter {
     pub tx_preimage: SigHashPreimage,
 }
 
-#[runar::methods(Counter)]
 impl Counter {
-    #[public]
     pub fn increment(&mut self) {
         self.count = self.count + 1;
     }
@@ -385,13 +369,11 @@ pub struct Calc {
     pub x: Bigint,
 }
 
-#[runar::methods(Calc)]
 impl Calc {
     fn double(&self, n: Bigint) -> Bigint {
         n + n
     }
 
-    #[public]
     pub fn check(&self, v: Bigint) {
         assert!(self.double(v) == self.x);
     }
@@ -405,5 +387,122 @@ impl Calc {
 
     const tcResult = typecheck(result.contract!);
     expect(tcResult.errors.filter(e => e.severity === 'error')).toEqual([]);
+  });
+
+  it('parses a bare impl block without #[runar::methods]', () => {
+    const source = `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Counter {
+    pub count: Bigint,
+}
+
+impl Counter {
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+
+    fn helper(&self) {
+        assert!(self.count > 0);
+    }
+}
+`;
+    const result = parseRustSource(source, 'Counter.runar.rs');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract!.methods.map(m => m.name)).toEqual(['increment', 'helper']);
+    expect(result.contract!.methods[0]!.visibility).toBe('public');
+    expect(result.contract!.methods[1]!.visibility).toBe('private');
+  });
+
+  it('merges multiple impl blocks in source order', () => {
+    const source = `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Multi {
+    #[readonly]
+    pub x: Bigint,
+}
+
+impl Multi {
+    pub fn first(&self) {
+        assert!(self.x > 0);
+    }
+}
+
+impl Multi {
+    pub fn second(&self) {
+        assert!(self.x < 100);
+    }
+}
+`;
+    const result = parseRustSource(source, 'Multi.runar.rs');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract!.methods.map(m => m.name)).toEqual(['first', 'second']);
+  });
+
+  it('parses an impl block declared before the struct', () => {
+    const source = `
+use runar::prelude::*;
+
+impl Early {
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+
+#[runar::contract]
+pub struct Early {
+    #[readonly]
+    pub x: Bigint,
+}
+`;
+    const result = parseRustSource(source, 'Early.runar.rs');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract!.name).toBe('Early');
+    expect(result.contract!.methods.map(m => m.name)).toEqual(['check']);
+  });
+
+  it('rejects the removed #[runar::methods] attribute', () => {
+    const source = `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Old {
+    #[readonly]
+    pub x: Bigint,
+}
+
+#[runar::methods(Old)]
+impl Old {
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+`;
+    const result = parseRustSource(source, 'Old.runar.rs');
+    expect(result.errors.some(e => e.message.includes('#[runar::methods]'))).toBe(true);
+  });
+
+  it('rejects the removed #[public] attribute', () => {
+    const source = `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Old {
+    #[readonly]
+    pub x: Bigint,
+}
+
+impl Old {
+    #[public]
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+`;
+    const result = parseRustSource(source, 'Old.runar.rs');
+    expect(result.errors.some(e => e.message.includes('#[public]'))).toBe(true);
   });
 });

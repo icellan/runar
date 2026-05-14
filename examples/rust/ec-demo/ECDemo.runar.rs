@@ -44,7 +44,6 @@ pub struct ECDemo {
     pub pt: Point,
 }
 
-#[runar::methods(ECDemo)]
 impl ECDemo {
     // -------------------------------------------------------------------
     // Coordinate extraction and construction
@@ -58,7 +57,6 @@ impl ECDemo {
     ///
     /// Use cases: comparing public key x-coordinates, Schnorr signature
     /// verification (which only uses the x-coordinate).
-    #[public]
     pub fn check_x(&self, expected_x: Bigint) {
         assert!(ec_point_x(&self.pt) == expected_x);
     }
@@ -70,7 +68,6 @@ impl ECDemo {
     /// unsigned y-coordinate) and converts to a script number.
     ///
     /// Use cases: full point comparison, parity checks for compressed encoding.
-    #[public]
     pub fn check_y(&self, expected_y: Bigint) {
         assert!(ec_point_y(&self.pt) == expected_y);
     }
@@ -83,7 +80,6 @@ impl ECDemo {
     ///
     /// Use cases: reconstructing points from stored coordinates, building
     /// points from external data.
-    #[public]
     pub fn check_make_point(&self, x: Bigint, y: Bigint, expected_x: Bigint, expected_y: Bigint) {
         let p = ec_make_point(x, y);
         assert!(ec_point_x(&p) == expected_x);
@@ -101,7 +97,6 @@ impl ECDemo {
     ///
     /// Use cases: validating untrusted points from transaction inputs before
     /// performing EC arithmetic (prevents invalid-curve attacks).
-    #[public]
     pub fn check_on_curve(&self) {
         assert!(ec_on_curve(&self.pt));
     }
@@ -123,7 +118,6 @@ impl ECDemo {
     ///
     /// Use cases: combining public keys (key aggregation), Schnorr multi-sig,
     /// Pedersen commitments (C = v*G + r*H).
-    #[public]
     pub fn check_add(&self, other: &Point, expected_x: Bigint, expected_y: Bigint) {
         let result = ec_add(&self.pt, other);
         assert!(ec_point_x(&result) == expected_x);
@@ -141,7 +135,6 @@ impl ECDemo {
     ///
     /// Use cases: public key derivation (P = k*G), Diffie-Hellman shared
     /// secrets, BIP-32 child key derivation.
-    #[public]
     pub fn check_mul(&self, scalar: Bigint, expected_x: Bigint, expected_y: Bigint) {
         let result = ec_mul(&self.pt, scalar);
         assert!(ec_point_x(&result) == expected_x);
@@ -157,7 +150,6 @@ impl ECDemo {
     /// Use cases: deriving a public key from a private key (the fundamental
     /// operation in elliptic curve cryptography), generating nonce points
     /// for Schnorr proofs (R = r*G).
-    #[public]
     pub fn check_mul_gen(&self, scalar: Bigint, expected_x: Bigint, expected_y: Bigint) {
         let result = ec_mul_gen(scalar);
         assert!(ec_point_x(&result) == expected_x);
@@ -175,7 +167,6 @@ impl ECDemo {
     ///
     /// Use cases: subtraction of points (A - B = A + (-B)), cancellation
     /// checks in zero-knowledge proofs.
-    #[public]
     pub fn check_negate(&self, expected_neg_y: Bigint) {
         let neg = ec_negate(&self.pt);
         assert!(ec_point_y(&neg) == expected_neg_y);
@@ -185,7 +176,6 @@ impl ECDemo {
     ///
     /// This demonstrates the involution property: -(-P) = P. Double negation
     /// is a no-op, which the compiler can optimize away at the ANF level.
-    #[public]
     pub fn check_negate_roundtrip(&self) {
         let neg1 = ec_negate(&self.pt);
         let neg2 = ec_negate(&neg1);
@@ -205,7 +195,6 @@ impl ECDemo {
     ///
     /// Use cases: reducing Schnorr response values mod n, ensuring private
     /// key scalars are in the valid range, hash-to-scalar conversion.
-    #[public]
     pub fn check_mod_reduce(&self, value: Bigint, modulus: Bigint, expected: Bigint) {
         assert!(ec_mod_reduce(value, modulus) == expected);
     }
@@ -223,7 +212,6 @@ impl ECDemo {
     /// Use cases: generating public key hashes for P2PKH addresses, comparing
     /// computed keys against stored key hashes, interoperating with standard
     /// Bitcoin tooling.
-    #[public]
     pub fn check_encode_compressed(&self, expected: ByteString) {
         let compressed = ec_encode_compressed(&self.pt);
         assert!(compressed == expected);
@@ -237,7 +225,6 @@ impl ECDemo {
     ///
     /// For any point P: 1 * P = P. This is a fundamental algebraic property
     /// and a useful sanity check that ec_mul handles the identity scalar.
-    #[public]
     pub fn check_mul_identity(&self) {
         let result = ec_mul(&self.pt, 1);
         assert!(ec_point_x(&result) == ec_point_x(&self.pt));
@@ -249,7 +236,6 @@ impl ECDemo {
     /// Closure property: if A and B are on the curve, then A + B is also on
     /// the curve. This is guaranteed by the group law but serves as a
     /// correctness check for the EC addition implementation.
-    #[public]
     pub fn check_add_on_curve(&self, other: &Point) {
         let result = ec_add(&self.pt, other);
         assert!(ec_on_curve(&result));
@@ -259,7 +245,6 @@ impl ECDemo {
     ///
     /// For any scalar k, k * G must be a valid curve point. This tests the
     /// ec_mul_gen implementation produces points satisfying the curve equation.
-    #[public]
     pub fn check_mul_gen_on_curve(&self, scalar: Bigint) {
         let result = ec_mul_gen(scalar);
         assert!(ec_on_curve(&result));

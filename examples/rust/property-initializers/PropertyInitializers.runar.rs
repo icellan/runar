@@ -9,22 +9,19 @@ struct PropertyInitializers {
     active: Bool,
 }
 
-#[runar::methods(PropertyInitializers)]
 impl PropertyInitializers {
     fn init(&mut self) {
         self.count = 0;
         self.active = true;
     }
 
-    #[public]
-    fn increment(&mut self, amount: Int) {
+    pub fn increment(&mut self, amount: Int) {
         assert!(self.active);
         self.count = self.count + amount;
         assert!(self.count <= self.max_count);
     }
 
-    #[public]
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.count = 0;
     }
 }
