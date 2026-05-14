@@ -589,7 +589,7 @@ jobs:
         # formats" (see spec/README.md and conformance/README.md).
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
-        run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
+        run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
       - name: Run multi-format source conformance (all 7 compilers, all 9 formats)
         # Adds the TypeScript compiler to the central conformance job (it was
         # previously absent) and exercises every compiler's frontend against
@@ -599,7 +599,7 @@ jobs:
         # expected-ir.json / expected-script.hex goldens.
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
-        run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+        run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
       - name: Run multi-format source conformance (fold ON, cross-tier parity only)
         # Companion run: every compiler executes with constant folding ENABLED
         # (its end-user default) and the runner enforces cross-tier hex + ANF
@@ -614,7 +614,7 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
           RUNAR_DISABLE_CONSTANT_FOLDING: '0'
-        run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+        run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
 
   conformance-anf-parity:
     # Cross-interpreter parity for the ANF lenient interpreter shipped by
