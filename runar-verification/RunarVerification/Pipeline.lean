@@ -8,6 +8,7 @@ import RunarVerification.Stack.Eval
 import RunarVerification.Script.Emit
 import RunarVerification.Script.EmitCorrect
 import RunarVerification.Script.Eval
+import RunarVerification.Script.Parse
 
 /-!
 # End-to-end compiler pipeline (Phase 3a)
@@ -233,6 +234,7 @@ namespace Soundness
 
 open RunarVerification.ANF.Eval (State EvalResult)
 open RunarVerification.Stack.Eval (StackState runOps runMethod)
+open RunarVerification.ANF.Eval (EvalError)
 
 /-- Two `EvalResult` values agree on the **success bit** — i.e. both
 succeeded, or both failed. This is the weakest-but-still-meaningful
@@ -294,33 +296,20 @@ concretely, prove the 10-case per-binding step, lift to the whole
 method by structural induction. Estimated multi-week work; explicitly
 out of scope for the single-session step that produced this comment.
 
-**Stage A scaffolding landed.** See `RunarVerification.Stack.Agrees`
-for:
+**Current lowering substrate.** See `RunarVerification.Stack.Agrees`
+for the simulation-predicate infrastructure (`agreesTagged`,
+`taggedStackAligned`, Stage B/C/D scaffolding), the proved
+`addBinding_preserves_lookup` lemma, copied reference-load coverage,
+NEGATE/NOT/assert coverage at depths 0/1/>=2, and ADD/SUB/MUL/
+NUMEQUAL coverage for binary depth pair `(1,0)`.
 
-* the `agrees : StackMap → State → StackState → Prop` predicate,
-* its `stackAligned` core invariant and destructors,
-* the `addBinding_preserves_lookup` lemma (no longer an axiom — it
-  was provable directly),
-* `stackAligned_addBinding_fresh` lifting that to alignment,
-* 4/10 Stage B per-constructor preservation lemmas
-  (`loadConst .int / .bool / .bytes / .thisRef`).
-
-The remaining 6 Stage B constructors (`loadConst .refAlias`,
-`loadParam`, `loadProp`, `unaryOp`, `binOp`, `assert`) are blocked
-behind two pre-existing model issues identified during Stage A:
-
-1. `loadParam` / `loadProp` / `loadConst .refAlias` require a
-   discriminated `stackAligned` (param-slot vs. prop-slot vs.
-   binding-slot) — `evalValue`'s `loadParam` case looks up only
-   `params`, but `lookupAnf` looks up bindings → params → props.
-2. `Stack.Eval.applyPick d` consumes a runtime depth from the
-   stack, but `Stack.Lower.loadRef` for depth ≥ 2 emits
-   `[.pick d]` with no preceding push. Either `applyPick` needs a
-   non-popping variant or `loadRef` needs to emit `[.push d, .pick d]`.
-
-See `Stack/Agrees.lean` for the simulation-predicate
-infrastructure (`agreesTagged`, `taggedStackAligned`, the Stage
-B/C/D scaffolding) that Phase 6 landed.
+The remaining lowering work is no longer the old "4/10 constructors"
+gap. It is the broader product space: additional binary opcodes and
+depth pairs, builtin-call families such as output construction, method
+post-processing, and consume-mode reference loads beyond the current
+depth-0 through depth-2 witnesses. Depth >= 3 consume remains tied to
+the bytecode-style `.roll d` model and needs stronger producer-shape
+hypotheses rather than structural equality with `lowerBindings`.
 
 **Phase 6 closure (2026-05-04).** The previous axiom was replaced by a
 skeleton theorem whose hypothesis is the per-method operational
@@ -441,49 +430,563 @@ theorem peephole_observational_correct_modulo_runMethod_eq
   exact successAgrees_refl _
 
 /--
-**Skeleton (emit + parse round-trip preserves success).** The bytes
-emitted by `Emit.emit` decode (via a not-yet-formalised `parseScript`
-on the BSV consensus side) into a Script whose `runScript` reduces
-back to `runOps` over the same op list, with no observable behavioural
-drift introduced by the byte-coding step.
+Composition lemma for the concrete tail of `peepholeProgram`.
 
-`Script.Eval.runScript` already implements a structural-reuse
-translation (`scriptElemToStackOp` forwards each script element to
-`Stack.Eval.runOps`), so once `parseScript : ByteArray → Script` is
-formalised the discharge reduces to:
+The first 19-rule pass and the final roll/pick fold still expose their
+own obligations, but the post-fold and chain-fold phases are discharged
+with the proved `Stack.Peephole` runOps equalities. This is the useful
+bridge from a caller's `peepholePassAll` proof to the exact op-list shape
+used by `Pipeline.peepholeProgram`.
+-/
+theorem peephole_post_chain_roll_runOps_eq
+    (ops passOps : List StackOp) (initialStack : StackState)
+    (hPassAllEq :
+      runOps passOps initialStack = runOps ops initialStack)
+    (hPassAllNoIf : Peephole.noIfOp passOps)
+    (hPostNoIf :
+      Peephole.noIfOp (Peephole.peepholePostFold passOps))
+    (hPostWT :
+      Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack)
+    (hRollPickEq :
+      runOps
+        (Peephole.peepholeRollPickFold
+          (Peephole.peepholeChainFold
+            (Peephole.peepholePostFold passOps)))
+        initialStack
+      =
+      runOps
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps))
+        initialStack) :
+    runOps
+      (Peephole.peepholeRollPickFold
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps)))
+      initialStack
+    = runOps ops initialStack := by
+  calc
+    runOps
+        (Peephole.peepholeRollPickFold
+          (Peephole.peepholeChainFold
+            (Peephole.peepholePostFold passOps)))
+        initialStack
+        = runOps
+            (Peephole.peepholeChainFold
+              (Peephole.peepholePostFold passOps))
+            initialStack := hRollPickEq
+    _ = runOps (Peephole.peepholePostFold passOps) initialStack :=
+          Peephole.peepholeChainFold_runOps_eq
+            (Peephole.peepholePostFold passOps) initialStack hPostNoIf hPostWT
+    _ = runOps passOps initialStack :=
+          Peephole.peepholePostFold_runOps_eq
+            passOps initialStack hPassAllNoIf
+    _ = runOps ops initialStack := hPassAllEq
 
-* `parseScript (Emit.emit p) = scriptOf p`, where `scriptOf` is the
-  obvious opcode-list-to-`ScriptElem`-list translation.
-* `runScript (scriptOf p) initialStack = runOps p.ops initialStack`
-  for every method's ops list (immediate from
-  `scriptElemToStackOp`'s definition).
+/--
+Variant of `peephole_post_chain_roll_runOps_eq` for the roll/pick no-op
+subset. The caller supplies the no-op-subset facts for the exact
+`peepholeChainFold (peepholePostFold passOps)` list, and the
+`Stack.Peephole` roll/pick theorem discharges the final fold equality.
+-/
+theorem peephole_post_chain_roll_runOps_eq_of_rollPick_noop
+    (ops passOps : List StackOp) (initialStack : StackState)
+    (hPassAllEq :
+      runOps passOps initialStack = runOps ops initialStack)
+    (hPassAllNoIf : Peephole.noIfOp passOps)
+    (hPostNoIf :
+      Peephole.noIfOp (Peephole.peepholePostFold passOps))
+    (hPostWT :
+      Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack)
+    (hChainNoIf :
+      Peephole.noIfOp
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps)))
+    (hChainRollPickNoop :
+      Peephole.rollPickFoldFlatNoop
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps))) :
+    runOps
+      (Peephole.peepholeRollPickFold
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps)))
+      initialStack
+    = runOps ops initialStack := by
+  have hRollPickEq :
+      runOps
+        (Peephole.peepholeRollPickFold
+          (Peephole.peepholeChainFold
+            (Peephole.peepholePostFold passOps)))
+        initialStack
+      =
+      runOps
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps))
+        initialStack :=
+    Peephole.peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop
+      (Peephole.peepholeChainFold
+        (Peephole.peepholePostFold passOps))
+      initialStack
+      hChainNoIf
+      hChainRollPickNoop
+  exact peephole_post_chain_roll_runOps_eq
+    ops passOps initialStack hPassAllEq hPassAllNoIf hPostNoIf hPostWT
+    hRollPickEq
 
-The `Script.EmitCorrect` byte-level identities are the load-bearing
-input to step 1; the `tests/PipelineGolden.lean` corpus serves as the
-running empirical check.
+/--
+Run the parser output from `Emit.emitOps`, converting parser failure
+into the same `EvalResult` error channel used by the Stack VM.
+-/
+def runParsedEmitOps (ops : List StackOp) (initialStack : StackState) :
+    EvalResult StackState :=
+  match Parse.parseScript (Emit.emitOps ops) with
+  | .ok parsedOps => runOps parsedOps initialStack
+  | .error e => .error (.unsupported s!"parse error: {repr e}")
 
-Until `parseScript` is formalised the conclusion is stated against
-`runMethod p m` on both sides, which is `successAgrees_refl`. This
-keeps the theorem citable today (no `axiom` declaration needed) while
-making the placeholder shape explicit: the right-hand side is the
-intended `runScript ∘ parseScript ∘ Emit.emitMethod ...` form, which
-will replace the trivial RHS once Phase 4-Z lands. The Phase 4-Z
-work is exactly the byte-level emit identities (`Script.EmitCorrect`)
-plus a `parseScript` decoder; until then, the empirical
-`tests/PipelineGolden.lean` corpus is the empirical regression check.
+def runParsedBytes (bytes : ByteArray) (initialStack : StackState) :
+    EvalResult StackState :=
+  match Parse.parseScript bytes with
+  | .ok parsedOps => runOps parsedOps initialStack
+  | .error e => .error (.unsupported s!"parse error: {repr e}")
 
-Phase 4-Z deliverable. -/
-theorem emit_round_trip_skeleton
-    (p : StackProgram) (m : String) (initialStack : StackState) :
+/--
+The formal parser/emit round trip is now connected directly to
+`Stack.Eval.runOps` for every op list in the `RunarEmittable` subset.
+This replaces the old reflexive emit skeleton for method bodies whose
+bytes are decoded by `Script.Parse.parseScript`.
+-/
+theorem emit_parse_runOps_eq
+    (ops : List StackOp) (initialStack : StackState)
+    (hOps : Parse.AreRunarEmittable ops) :
+    runParsedEmitOps ops initialStack = runOps ops initialStack := by
+  unfold runParsedEmitOps
+  rw [Parse.parseScript_emit_round_trip ops hOps]
+
+theorem emit_parse_observational_correct
+    (ops : List StackOp) (initialStack : StackState)
+    (hOps : Parse.AreRunarEmittable ops) :
     successAgrees
-      (runMethod p m initialStack)
-      -- Once `parseScript` lands this becomes:
-      -- `runScript (parseScript (Emit.emitMethod ...)) initialStack`
-      -- Stated here against `runMethod` directly so the theorem captures
-      -- the strongest reasonable property: emit + parse together act
-      -- as the identity on observable behaviour.
-      (runMethod p m initialStack) :=
-  successAgrees_refl _
+      (runOps ops initialStack)
+      (runParsedEmitOps ops initialStack) := by
+  rw [emit_parse_runOps_eq ops initialStack hOps]
+  exact successAgrees_refl _
+
+theorem emit_parse_runOps_eq_with_if
+    (ops : List StackOp) (initialStack : StackState)
+    (hOps : Parse.AreRunarEmittableWithIf ops) :
+    runParsedEmitOps ops initialStack = runOps ops initialStack := by
+  unfold runParsedEmitOps
+  rw [Parse.parseScript_emit_round_trip_with_if ops hOps]
+
+theorem emit_parse_observational_correct_with_if
+    (ops : List StackOp) (initialStack : StackState)
+    (hOps : Parse.AreRunarEmittableWithIf ops) :
+    successAgrees
+      (runOps ops initialStack)
+      (runParsedEmitOps ops initialStack) := by
+  rw [emit_parse_runOps_eq_with_if ops initialStack hOps]
+  exact successAgrees_refl _
+
+theorem emit_parse_singleton_ifOp_none_runOps_eq
+    (thn : List StackOp) (initialStack : StackState)
+    (hThn : Parse.AreRunarEmittable thn) :
+    runParsedEmitOps [.ifOp thn none] initialStack
+      = runOps [.ifOp thn none] initialStack := by
+  unfold runParsedEmitOps
+  rw [Parse.parseScript_emit_singleton_ifOp_none thn hThn]
+
+theorem emit_parse_singleton_ifOp_none_observational_correct
+    (thn : List StackOp) (initialStack : StackState)
+    (hThn : Parse.AreRunarEmittable thn) :
+    successAgrees
+      (runOps [.ifOp thn none] initialStack)
+      (runParsedEmitOps [.ifOp thn none] initialStack) := by
+  rw [emit_parse_singleton_ifOp_none_runOps_eq thn initialStack hThn]
+  exact successAgrees_refl _
+
+theorem emit_parse_singleton_ifOp_some_cons_runOps_eq
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (initialStack : StackState)
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail)) :
+    runParsedEmitOps [.ifOp thn (some (elsHead :: elsTail))] initialStack
+      = runOps [.ifOp thn (some (elsHead :: elsTail))] initialStack := by
+  unfold runParsedEmitOps
+  rw [Parse.parseScript_emit_singleton_ifOp_some_cons thn elsHead elsTail hThn hEls]
+
+theorem emit_parse_singleton_ifOp_some_cons_observational_correct
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (initialStack : StackState)
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail)) :
+    successAgrees
+      (runOps [.ifOp thn (some (elsHead :: elsTail))] initialStack)
+      (runParsedEmitOps [.ifOp thn (some (elsHead :: elsTail))] initialStack) := by
+  rw [emit_parse_singleton_ifOp_some_cons_runOps_eq thn elsHead elsTail initialStack hThn hEls]
+  exact successAgrees_refl _
+
+/--
+Single-public-method programs emitted through the production fast
+emitter parse back to the same method body when that body is in the
+formal `RunarEmittable` subset.
+-/
+theorem emitFast_single_public_parse_round_trip
+    (p : StackProgram) (m : StackMethod)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOps : Parse.AreRunarEmittable m.ops) :
+    Parse.parseScript (Emit.emitFast p) = .ok m.ops := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  exact Emit.parseScript_emitOpsFast_round_trip m.ops hOps
+
+theorem emitFast_single_public_runOps_eq
+    (p : StackProgram) (m : StackMethod) (initialStack : StackState)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOps : Parse.AreRunarEmittable m.ops) :
+    runParsedBytes (Emit.emitFast p) initialStack = runOps m.ops initialStack := by
+  unfold runParsedBytes
+  rw [emitFast_single_public_parse_round_trip p m hPublic hOps]
+
+theorem emitFast_single_public_parse_round_trip_with_if
+    (p : StackProgram) (m : StackMethod)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOps : Parse.AreRunarEmittableWithIf m.ops) :
+    Parse.parseScript (Emit.emitFast p) = .ok m.ops := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  exact Emit.parseScript_emitOpsFast_round_trip_with_if m.ops hOps
+
+theorem emitFast_single_public_runOps_eq_with_if
+    (p : StackProgram) (m : StackMethod) (initialStack : StackState)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOps : Parse.AreRunarEmittableWithIf m.ops) :
+    runParsedBytes (Emit.emitFast p) initialStack = runOps m.ops initialStack := by
+  unfold runParsedBytes
+  rw [emitFast_single_public_parse_round_trip_with_if p m hPublic hOps]
+
+theorem emitFast_single_public_singleton_push_bool_false_parse_terminal
+    (p : StackProgram) (m : StackMethod)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.push (.bool false)]) :
+    Parse.parseScript (Emit.emitFast p) = .ok [.push (.bigint 0)] := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  rw [hOpsEq]
+  exact Emit.parseScript_emitOpsFast_singleton_push_bool_false_terminal
+
+theorem emitFast_single_public_singleton_push_bool_true_parse_terminal
+    (p : StackProgram) (m : StackMethod)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.push (.bool true)]) :
+    Parse.parseScript (Emit.emitFast p) = .ok [.push (.bigint 1)] := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  rw [hOpsEq]
+  exact Emit.parseScript_emitOpsFast_singleton_push_bool_true_terminal
+
+theorem emitFast_single_public_singleton_ifOp_none_parse_round_trip
+    (p : StackProgram) (m : StackMethod) (thn : List StackOp)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.ifOp thn none])
+    (hThn : Parse.AreRunarEmittable thn) :
+    Parse.parseScript (Emit.emitFast p) = .ok [.ifOp thn none] := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  rw [hOpsEq]
+  exact Emit.parseScript_emitOpsFast_singleton_ifOp_none_round_trip thn hThn
+
+theorem emitFast_single_public_singleton_ifOp_none_runOps_eq
+    (p : StackProgram) (m : StackMethod) (thn : List StackOp)
+    (initialStack : StackState)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.ifOp thn none])
+    (hThn : Parse.AreRunarEmittable thn) :
+    runParsedBytes (Emit.emitFast p) initialStack = runOps m.ops initialStack := by
+  unfold runParsedBytes
+  rw [emitFast_single_public_singleton_ifOp_none_parse_round_trip
+        p m thn hPublic hOpsEq hThn]
+  rw [hOpsEq]
+
+theorem emitFast_single_public_singleton_ifOp_some_cons_parse_round_trip
+    (p : StackProgram) (m : StackMethod)
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.ifOp thn (some (elsHead :: elsTail))])
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail)) :
+    Parse.parseScript (Emit.emitFast p) = .ok [.ifOp thn (some (elsHead :: elsTail))] := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  rw [hOpsEq]
+  exact Emit.parseScript_emitOpsFast_singleton_ifOp_some_cons_round_trip
+    thn elsHead elsTail hThn hEls
+
+theorem emitFast_single_public_singleton_ifOp_some_cons_runOps_eq
+    (p : StackProgram) (m : StackMethod)
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (initialStack : StackState)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.ifOp thn (some (elsHead :: elsTail))])
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail)) :
+    runParsedBytes (Emit.emitFast p) initialStack = runOps m.ops initialStack := by
+  unfold runParsedBytes
+  rw [emitFast_single_public_singleton_ifOp_some_cons_parse_round_trip
+        p m thn elsHead elsTail hPublic hOpsEq hThn hEls]
+  rw [hOpsEq]
+
+theorem emitFast_single_public_singleton_nested_ifOp_none_dup_parse_round_trip
+    (p : StackProgram) (m : StackMethod)
+    (hPublic : Emit.publicMethodsOf p = [m])
+    (hOpsEq : m.ops = [.ifOp [.ifOp [.dup] none] none]) :
+    Parse.parseScript (Emit.emitFast p)
+      = .ok [.ifOp [.ifOp [.dup] none] none] := by
+  unfold Emit.emitFast
+  rw [hPublic]
+  simp only
+  rw [hOpsEq]
+  exact Emit.parseScript_emitOpsFast_singleton_nested_ifOp_none_dup_round_trip
+
+/-! ### Fail-closed compile path lemmas -/
+
+theorem compileSafe_ok_implies_validated
+    (p : ANFProgram) (bytes : ByteArray)
+    (hSafe : compileSafe p = .ok bytes) :
+    validateStackProgram (peepholeProgram (Lower.lower p)) = .ok () := by
+  unfold compileSafe at hSafe
+  change
+    (do
+      validateStackProgram (peepholeProgram (Lower.lower p))
+      Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p)))) = .ok bytes
+    at hSafe
+  cases hValidate : validateStackProgram (peepholeProgram (Lower.lower p)) with
+  | ok u =>
+      cases u
+      rfl
+  | error e =>
+      rw [hValidate] at hSafe
+      contradiction
+
+theorem compileSafe_ok_implies_emitFast
+    (p : ANFProgram) (bytes : ByteArray)
+    (hSafe : compileSafe p = .ok bytes) :
+    bytes = Emit.emitFast (peepholeProgram (Lower.lower p)) := by
+  unfold compileSafe at hSafe
+  change
+    (do
+      validateStackProgram (peepholeProgram (Lower.lower p))
+      Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p)))) = .ok bytes
+    at hSafe
+  cases hValidate : validateStackProgram (peepholeProgram (Lower.lower p)) with
+  | ok u =>
+      cases u
+      rw [hValidate] at hSafe
+      change Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p))) = .ok bytes at hSafe
+      injection hSafe with hEq
+      exact hEq.symm
+  | error e =>
+      rw [hValidate] at hSafe
+      contradiction
+
+theorem compileSafe_eq_compile_of_validate
+    (p : ANFProgram)
+    (hValidate :
+      validateStackProgram (peepholeProgram (Lower.lower p)) = .ok ()) :
+    compileSafe p = .ok (compile p) := by
+  unfold compileSafe compile
+  change
+    (do
+      validateStackProgram (peepholeProgram (Lower.lower p))
+      Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p))))
+      = Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p)))
+  rw [hValidate]
+  change Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p)))
+      = Except.ok (Emit.emitFast (peepholeProgram (Lower.lower p)))
+  rfl
+
+theorem compileSafeWithCodeSepPatches_ok_implies_validated
+    (p : ANFProgram) (r : Emit.EmitResult)
+    (hSafe : compileSafeWithCodeSepPatches p = .ok r) :
+    validateStackProgram (peepholeProgram (Lower.lower p)) = .ok () := by
+  unfold compileSafeWithCodeSepPatches at hSafe
+  change
+    (do
+      validateStackProgram (peepholeProgram (Lower.lower p))
+      match Emit.emitWithCodeSepPatches (peepholeProgram (Lower.lower p)) with
+      | .ok r => .ok r
+      | .error e => .error (.codeSepPatchError e)) = .ok r
+    at hSafe
+  cases hValidate : validateStackProgram (peepholeProgram (Lower.lower p)) with
+  | ok u =>
+      cases u
+      rfl
+  | error e =>
+      rw [hValidate] at hSafe
+      contradiction
+
+theorem compileSafeWithCodeSepPatches_ok_implies_emit
+    (p : ANFProgram) (r : Emit.EmitResult)
+    (hSafe : compileSafeWithCodeSepPatches p = .ok r) :
+    Emit.emitWithCodeSepPatches (peepholeProgram (Lower.lower p)) = .ok r := by
+  unfold compileSafeWithCodeSepPatches at hSafe
+  change
+    (do
+      validateStackProgram (peepholeProgram (Lower.lower p))
+      match Emit.emitWithCodeSepPatches (peepholeProgram (Lower.lower p)) with
+      | .ok r => .ok r
+      | .error e => .error (.codeSepPatchError e)) = .ok r
+    at hSafe
+  cases hValidate : validateStackProgram (peepholeProgram (Lower.lower p)) with
+  | error e =>
+      rw [hValidate] at hSafe
+      contradiction
+  | ok u =>
+      cases u
+      rw [hValidate] at hSafe
+      cases hEmit :
+          Emit.emitWithCodeSepPatches (peepholeProgram (Lower.lower p)) with
+      | ok r' =>
+          rw [hEmit] at hSafe
+          change Except.ok r' = Except.ok r at hSafe
+          injection hSafe with hEq
+          rw [hEq]
+      | error e =>
+          rw [hEmit] at hSafe
+          contradiction
+
+theorem compileSafe_single_public_runOps_eq
+    (p : ANFProgram) (bytes : ByteArray)
+    (m : StackMethod) (initialStack : StackState)
+    (hSafe : compileSafe p = .ok bytes)
+    (hPublic : Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [m])
+    (hOps : Parse.AreRunarEmittable m.ops) :
+    runParsedBytes bytes initialStack = runOps m.ops initialStack := by
+  have hBytes := compileSafe_ok_implies_emitFast p bytes hSafe
+  rw [hBytes]
+  exact emitFast_single_public_runOps_eq
+    (peepholeProgram (Lower.lower p)) m initialStack hPublic hOps
+
+theorem compileSafe_single_public_runOps_eq_with_if
+    (p : ANFProgram) (bytes : ByteArray)
+    (m : StackMethod) (initialStack : StackState)
+    (hSafe : compileSafe p = .ok bytes)
+    (hPublic : Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [m])
+    (hOps : Parse.AreRunarEmittableWithIf m.ops) :
+    runParsedBytes bytes initialStack = runOps m.ops initialStack := by
+  have hBytes := compileSafe_ok_implies_emitFast p bytes hSafe
+  rw [hBytes]
+  exact emitFast_single_public_runOps_eq_with_if
+    (peepholeProgram (Lower.lower p)) m initialStack hPublic hOps
+
+theorem compileSafe_single_public_singleton_push_bool_false_parse_terminal
+    (p : ANFProgram) (bytes : ByteArray) (m : StackMethod)
+    (hSafe : compileSafe p = .ok bytes)
+    (hPublic : Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [m])
+    (hOpsEq : m.ops = [.push (.bool false)]) :
+    Parse.parseScript bytes = .ok [.push (.bigint 0)] := by
+  have hBytes := compileSafe_ok_implies_emitFast p bytes hSafe
+  rw [hBytes]
+  exact emitFast_single_public_singleton_push_bool_false_parse_terminal
+    (peepholeProgram (Lower.lower p)) m hPublic hOpsEq
+
+theorem compileSafe_single_public_singleton_push_bool_true_parse_terminal
+    (p : ANFProgram) (bytes : ByteArray) (m : StackMethod)
+    (hSafe : compileSafe p = .ok bytes)
+    (hPublic : Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [m])
+    (hOpsEq : m.ops = [.push (.bool true)]) :
+    Parse.parseScript bytes = .ok [.push (.bigint 1)] := by
+  have hBytes := compileSafe_ok_implies_emitFast p bytes hSafe
+  rw [hBytes]
+  exact emitFast_single_public_singleton_push_bool_true_parse_terminal
+    (peepholeProgram (Lower.lower p)) m hPublic hOpsEq
+
+theorem compileSafe_single_public_singleton_nested_ifOp_none_dup_parse_round_trip
+    (p : ANFProgram) (bytes : ByteArray) (m : StackMethod)
+    (hSafe : compileSafe p = .ok bytes)
+    (hPublic : Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [m])
+    (hOpsEq : m.ops = [.ifOp [.ifOp [.dup] none] none]) :
+    Parse.parseScript bytes = .ok [.ifOp [.ifOp [.dup] none] none] := by
+  have hBytes := compileSafe_ok_implies_emitFast p bytes hSafe
+  rw [hBytes]
+  exact emitFast_single_public_singleton_nested_ifOp_none_dup_parse_round_trip
+    (peepholeProgram (Lower.lower p)) m hPublic hOpsEq
+
+theorem compileSafe_single_public_observational_correct
+    (p : ANFProgram) (h : WF.ANF p)
+    (anfM : ANFMethod) (stackM : StackMethod)
+    (bytes : ByteArray)
+    (initialAnf : State) (initialStack : StackState)
+    (hSafe : compileSafe p = .ok bytes)
+    (hLowSimulates :
+        (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body).toOption.isSome ↔
+        (runMethod (Lower.lower p) anfM.name initialStack).toOption.isSome)
+    (hPeepToEmittedOps :
+        runMethod (Lower.lower p) anfM.name initialStack
+          = runOps stackM.ops initialStack)
+    (hPublic :
+      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
+    (hOps : Parse.AreRunarEmittable stackM.ops) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack) := by
+  have hLow :=
+    lower_observational_correct_skeleton p h anfM initialAnf initialStack hLowSimulates
+  have hPeep : successAgrees
+      (runMethod (Lower.lower p) anfM.name initialStack)
+      (runOps stackM.ops initialStack) := by
+    rw [hPeepToEmittedOps]
+    exact successAgrees_refl _
+  have hEmitEq :=
+    compileSafe_single_public_runOps_eq p bytes stackM initialStack
+      hSafe hPublic hOps
+  have hEmit : successAgrees
+      (runOps stackM.ops initialStack)
+      (runParsedBytes bytes initialStack) := by
+    rw [hEmitEq]
+    exact successAgrees_refl _
+  exact successAgrees_trans _ _ _
+    (successAgrees_trans _ _ _ hLow hPeep) hEmit
+
+theorem compileSafe_single_public_observational_correct_with_if
+    (p : ANFProgram) (h : WF.ANF p)
+    (anfM : ANFMethod) (stackM : StackMethod)
+    (bytes : ByteArray)
+    (initialAnf : State) (initialStack : StackState)
+    (hSafe : compileSafe p = .ok bytes)
+    (hLowSimulates :
+        (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body).toOption.isSome ↔
+        (runMethod (Lower.lower p) anfM.name initialStack).toOption.isSome)
+    (hPeepToEmittedOps :
+        runMethod (Lower.lower p) anfM.name initialStack
+          = runOps stackM.ops initialStack)
+    (hPublic :
+      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
+    (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack) := by
+  have hLow :=
+    lower_observational_correct_skeleton p h anfM initialAnf initialStack hLowSimulates
+  have hPeep : successAgrees
+      (runMethod (Lower.lower p) anfM.name initialStack)
+      (runOps stackM.ops initialStack) := by
+    rw [hPeepToEmittedOps]
+    exact successAgrees_refl _
+  have hEmitEq :=
+    compileSafe_single_public_runOps_eq_with_if p bytes stackM initialStack
+      hSafe hPublic hOps
+  have hEmit : successAgrees
+      (runOps stackM.ops initialStack)
+      (runParsedBytes bytes initialStack) := by
+    rw [hEmitEq]
+    exact successAgrees_refl _
+  exact successAgrees_trans _ _ _
+    (successAgrees_trans _ _ _ hLow hPeep) hEmit
 
 /-! ### The top-level soundness theorem
 
@@ -533,16 +1036,14 @@ theorem compile_observational_correct_bytes_skeleton
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf m.body)
       (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
-  -- Three-stage chain: ANF → Stack (via lower) → Stack (via peephole) → bytes.
+  -- ANF → Stack (via lower) → Stack (via peephole). The emitted-body
+  -- parser bridge is `emit_parse_runOps_eq`; callers use it once they
+  -- have a concrete method body and `Parse.AreRunarEmittable` proof.
   have hLow :=
     lower_observational_correct_skeleton p h m initialAnf initialStack hLowSimulates
   have hPeepStep :=
     peephole_observational_correct_modulo_runMethod_eq (Lower.lower p) m.name initialStack hPeepEq
-  have hEmit :=
-    emit_round_trip_skeleton
-      (peepholeProgram (Lower.lower p)) m.name initialStack
-  exact successAgrees_trans _ _ _
-    (successAgrees_trans _ _ _ hLow hPeepStep) hEmit
+  exact successAgrees_trans _ _ _ hLow hPeepStep
 
 end Soundness
 

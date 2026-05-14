@@ -375,6 +375,20 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
   | "OP_OVER"    => applyOver s
   | "OP_ROT"     => applyRot s
   | "OP_TUCK"    => applyTuck s
+  | "OP_ROLL" =>
+      match s.stack with
+      | [] => .error (.unsupported "OP_ROLL: empty stack")
+      | v :: _ =>
+          match asNonNegativeNat? v with
+          | some d => applyRoll s d
+          | none => .error (.typeError "OP_ROLL expects non-negative depth")
+  | "OP_PICK" =>
+      match s.stack with
+      | [] => .error (.unsupported "OP_PICK: empty stack")
+      | v :: _ =>
+          match asNonNegativeNat? v with
+          | some d => applyPick s d
+          | none => .error (.typeError "OP_PICK expects non-negative depth")
   | "OP_2DUP" =>
       match applyOver s with
       | .error e => .error e
@@ -507,6 +521,21 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
           | _ => .error (.unsupported "OP_EQUAL popN bug")
   -- ---------------------------------------------------------------- bytes
   | "OP_CAT" => liftBytesBin s (fun a b => .vBytes (a ++ b))
+  | "OP_SPLIT" =>
+      match popN s 2 with
+      | .error e => .error e
+      | .ok (vs, s') =>
+          match vs with
+          | [idx, v] =>
+              match asBytes? v, asNonNegativeNat? idx with
+              | some bs, some i =>
+                  if i > bs.size then
+                    .error (.unsupported "OP_SPLIT: index past end")
+                  else
+                    .ok ((s'.push (.vBytes (bs.extract 0 i))).push
+                      (.vBytes (bs.extract i bs.size)))
+              | _, _ => .error (.typeError "OP_SPLIT expects bytes and non-negative index")
+          | _ => .error (.unsupported "OP_SPLIT popN bug")
   | "OP_SIZE" =>
       match s.stack with
       | [] => .error (.unsupported "OP_SIZE: empty stack")
@@ -648,6 +677,43 @@ theorem runOpcode_XOR_sample :
      | .ok s =>
          match s.stack with
          | [.vBytes out] => out.toList == [0xff]
+         | _ => false
+     | .error _ => false) = true := by
+  native_decide
+
+theorem runOpcode_SPLIT_sample :
+    (match runOpcode "OP_SPLIT"
+        { stack := [.vBigint 2,
+                    .vBytes (ByteArray.mk #[0xaa, 0xbb, 0xcc])] } with
+     | .ok s =>
+         match s.stack with
+         | [.vBytes suffix, .vBytes pref] =>
+             suffix.toList == [0xcc] && pref.toList == [0xaa, 0xbb]
+         | _ => false
+     | .error _ => false) = true := by
+  native_decide
+
+theorem runOpcode_ROLL_sample :
+    (match runOpcode "OP_ROLL"
+        { stack := [.vBigint 1,
+                    .vBytes (ByteArray.mk #[0xaa]),
+                    .vBytes (ByteArray.mk #[0xbb])] } with
+     | .ok s =>
+         match s.stack with
+         | [.vBytes a, .vBytes b] => a.toList == [0xbb] && b.toList == [0xaa]
+         | _ => false
+     | .error _ => false) = true := by
+  native_decide
+
+theorem runOpcode_PICK_sample :
+    (match runOpcode "OP_PICK"
+        { stack := [.vBigint 1,
+                    .vBytes (ByteArray.mk #[0xaa]),
+                    .vBytes (ByteArray.mk #[0xbb])] } with
+     | .ok s =>
+         match s.stack with
+         | [.vBytes a, .vBytes b, .vBytes c] =>
+             a.toList == [0xbb] && b.toList == [0xaa] && c.toList == [0xbb]
          | _ => false
      | .error _ => false) = true := by
   native_decide

@@ -17,40 +17,59 @@ pipeline. The package is useful in two roles:
 | ANF JSON round-trip | 49/49 |
 | Default byte-exact gate | 34/49 live fixtures |
 | Crypto-heavy fixtures | 15/49 explicit pending-assumption bucket |
+| Full/sharded byte-exact target | `cryptoAxiomPending` bucket |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
 | Project axioms | 71 |
 | Opaque executable defaults | 0 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
 
-Default `pipelineGolden` no longer counts a crypto-heavy fixture by
-comparing `expected-script.hex` to itself. A crypto-heavy fixture counts
-in default mode only after `tests/PipelineGolden.lean` contains a stored
-Lean-produced constant for that fixture. Until then, the 15 fixtures are
-visible as unpopulated pending-assumption fixtures.
+Default `pipelineGolden` is the fast gate and currently checks 34/49
+fixtures byte-exact. It no longer counts a crypto-heavy fixture by
+comparing `expected-script.hex` to itself. The remaining 15 fixtures stay
+visible as the `cryptoAxiomPending` bucket until they have stored
+Lean-produced constants or are run through full/sharded verification.
 
 ## Commands
 
 ```bash
 cd runar-verification
-lake build
+./scripts/lean-verify.sh
 lake env ./.lake/build/bin/goldenLoad
 lake env ./.lake/build/bin/roundtrip
 lake env ./.lake/build/bin/pipelineGolden
 ./scripts/check-tcb-drift.sh
 ```
 
-Long-running checks:
+`scripts/lean-verify.sh` builds every tracked Lean module, including
+standalone test modules that are outside the default root import closure.
+`pipelineGolden` is the default 34/49 fast byte-exact gate.
+
+Full and scheduled checks:
 
 ```bash
+./scripts/full-verification.sh
+./scripts/full-verification.sh --shard 1 --of 3
 RUNAR_VERIFICATION_REGEN=1 lake env ./.lake/build/bin/pipelineGolden
 RUNAR_VERIFICATION_FULL=1 lake env ./.lake/build/bin/pipelineGolden
-bash scripts/differential.sh --reference python --strict
+./scripts/differential.sh --reference python --strict
 ```
 
-The differential wrapper raises the process stack limit before parsing
-large scripts. The Lean-side report writes to `RUNAR_DIFFERENTIAL_OUT`
-when set, otherwise under `/tmp/runar-verification-differential/`.
+`scripts/full-verification.sh` builds the fixture executables, runs
+`goldenLoad` and `roundtrip`, then runs either full `pipelineGolden` or
+one shard of the `cryptoAxiomPending` bucket. It writes logs, summaries,
+and differential reports under `RUNAR_VERIFICATION_ARTIFACT_DIR` or a
+timestamped temp artifact directory, and refuses artifact paths inside
+tracked fixture/test trees.
+
+`scripts/differential.sh` compares the Lean Stack VM report with an
+external Bitcoin Script reference when one is available. It writes
+Lean/external JSON reports under `--report-dir`,
+`RUNAR_DIFFERENTIAL_DIR`, or `/tmp/runar-verification-differential/`, and
+honors `RUNAR_DIFFERENTIAL_LEAN_OUT` /
+`RUNAR_DIFFERENTIAL_EXT_OUT` for explicit report paths. Without
+`--strict`, missing external references are reported as an intentional
+skip.
 
 ## Proof Status
 
@@ -63,7 +82,17 @@ bytes. The current proof surface is deliberately split:
   composition points whose hypotheses still carry the load-bearing
   obligations;
 * concrete Stack VM and ANF evaluator semantics for Script-number
-  conversions and bytewise/slicing operations used by Rúnar lowering;
+  conversions, bytewise operations, `OP_SPLIT`, and named `OP_PICK` /
+  `OP_ROLL` dispatch used by Rúnar lowering, plus ANF evaluator support
+  for byte-slicing builtins and the concrete numeric builtins `abs`,
+  `min`, `max`, and `within`;
+* bounded Stage C lowering witnesses for builtin calls: `toByteString`
+  for byte inputs at depths 0/1/>=2, `abs`, `len`, and `bin2num` at
+  depth 0, `cat`, `num2bin`, and `min`/`max` at depth pair `(1,0)`, and
+  `within` at depth tuple `(2,1,0)`, plus the common integer binOp family
+  at depth pair `(1,0)`, bytewise INVERT at unary depths 0/1/>=2, and
+  byte equality/inequality plus bytewise AND/OR/XOR success paths at the
+  same depth pair;
 * concrete BIP-143 transaction-context preimage construction, including
   `OP_CODESEPARATOR` script-suffix coverage at the context layer;
 * a PC-aware Stack VM runner for `OP_CODESEPARATOR` index tracking and
@@ -72,6 +101,11 @@ bytes. The current proof surface is deliberately split:
 * slot-aware emit via `Pipeline.compileSafeWithCodeSepPatches`, which
   records constructor slots, emits `pushCodesepIndex` from final script
   byte offsets, and rejects branch-ambiguous code-separator joins;
+* parser-backed emit/runOps composition for flat `RunarEmittable` method
+  bodies and for `RunarEmittableWithIf` bodies with single-level
+  structural IF frames over already-emittable branches, plus concrete
+  terminal push collision/sample facts and one nested no-else IF parser
+  smoke case through `compileSafe`;
 * backend-parametric SHA-256 / RIPEMD-160, preimage validation, and
   authentication semantics, with fail-fast Lean codegen and Runar
   runtime hash implementations checked against external vectors; and

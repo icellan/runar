@@ -8,11 +8,12 @@
 #   2. an EXTERNAL Bitcoin Script reference implementation,
 # then diff the two reports. Fail on any mismatch.
 #
-# External reference selection (in priority order):
-#   1. svnode-cli            — sv-node's standalone CLI (preferred)
-#   2. libbitcoin-explorer   — fallback if svnode-cli unavailable
-#   3. python3 + python-bitcoinlib — pure-Python fallback for CI
-#                                    without C deps (see external-ref.py)
+# External reference selection:
+#   * auto selects python3 + python-bitcoinlib, the implemented adapter
+#     in this repository (see external-ref.py).
+#   * svnode-cli and libbitcoin-explorer are reserved flag values for
+#     future adapters. Forcing either one fails in strict mode rather than
+#     silently replacing the implemented Python path.
 #
 # If no external reference is available, the script EXITS 0 with a clear
 # "no external reference available — skipping differential" message. CI
@@ -21,20 +22,24 @@
 #
 # Usage:
 #   differential.sh [--reference {svnode|libbitcoin|python|auto}] [--strict]
+#                   [--report-dir PATH]
 #
 # Flags:
-#   --reference  Force a specific external reference; defaults to `auto`
-#                (highest-priority available).
+#   --reference  Force a specific external reference; defaults to `auto`.
 #   --strict     Fail if the chosen reference is not installed (instead
 #                of taking the skip path). Useful in CI to catch missing
 #                deps.
+#   --report-dir Write Lean/external JSON reports under PATH. Defaults to
+#                ${RUNAR_DIFFERENTIAL_DIR:-$TMPDIR/runar-verification-differential}.
 
 set -euo pipefail
 
+CALLER_DIR="$(pwd)"
 cd "$(dirname "$0")/.."
 
 REFERENCE="auto"
 STRICT="0"
+REPORT_DIR_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reference)
@@ -49,6 +54,14 @@ while [ $# -gt 0 ]; do
       STRICT="1"
       shift
       ;;
+    --report-dir)
+      REPORT_DIR_ARG="$2"
+      shift 2
+      ;;
+    --report-dir=*)
+      REPORT_DIR_ARG="${1#--report-dir=}"
+      shift
+      ;;
     -h|--help)
       sed -n '2,30p' "$0"
       exit 0
@@ -60,10 +73,59 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-REPORT_DIR="${RUNAR_DIFFERENTIAL_DIR:-${TMPDIR:-/tmp}/runar-verification-differential}"
+abs_path() {
+  local path="$1"
+  local dir base parent leaf
+  case "$path" in
+    /*) ;;
+    *) path="$CALLER_DIR/$path" ;;
+  esac
+  dir="$(dirname "$path")"
+  base="$(basename "$path")"
+  if [ -d "$dir" ]; then
+    ( cd "$dir" && printf '%s/%s\n' "$(pwd -P)" "$base" )
+  else
+    parent="$(dirname "$dir")"
+    leaf="$(basename "$dir")"
+    if [ -d "$parent" ]; then
+      ( cd "$parent" && printf '%s/%s/%s\n' "$(pwd -P)" "$leaf" "$base" )
+    else
+      printf '%s/%s\n' "$dir" "$base"
+    fi
+  fi
+}
+
+REPORT_DIR="${REPORT_DIR_ARG:-${RUNAR_DIFFERENTIAL_DIR:-${TMPDIR:-/tmp}/runar-verification-differential}}"
+REPORT_DIR="$(abs_path "$REPORT_DIR")"
+LEAN_REPORT="$(abs_path "${RUNAR_DIFFERENTIAL_LEAN_OUT:-$REPORT_DIR/differential-results.json}")"
+EXT_REPORT="$(abs_path "${RUNAR_DIFFERENTIAL_EXT_OUT:-$REPORT_DIR/differential-external.json}")"
+
+ensure_report_destination() {
+  local path="$1"
+  local abs repo_root rel
+  abs="$(abs_path "$path")"
+  if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    case "$abs" in
+      "$repo_root/conformance/tests/"*|"$repo_root/runar-verification/tests/"*)
+        echo "[differential] FAIL: refusing to write differential report into tracked fixture/test tree: $path" >&2
+        exit 1
+        ;;
+    esac
+    case "$abs" in
+      "$repo_root"/*)
+        rel="${abs#"$repo_root"/}"
+        if git -C "$repo_root" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
+          echo "[differential] FAIL: refusing to overwrite tracked report path: $rel" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  fi
+}
+
+ensure_report_destination "$LEAN_REPORT"
+ensure_report_destination "$EXT_REPORT"
 mkdir -p "$REPORT_DIR"
-LEAN_REPORT="${RUNAR_DIFFERENTIAL_LEAN_OUT:-$REPORT_DIR/differential-results.json}"
-EXT_REPORT="${RUNAR_DIFFERENTIAL_EXT_OUT:-$REPORT_DIR/differential-external.json}"
 
 # ----------------------------------------------------------------------
 # 1. Build the Lean executable and produce the Lean-side report.
@@ -94,14 +156,6 @@ echo "[differential] Lean report: $LEAN_REPORT"
 choose_reference() {
   if [ "$REFERENCE" != "auto" ]; then
     echo "$REFERENCE"
-    return 0
-  fi
-  if command -v svnode-cli >/dev/null 2>&1; then
-    echo "svnode"
-    return 0
-  fi
-  if command -v bx >/dev/null 2>&1; then
-    echo "libbitcoin"
     return 0
   fi
   if command -v python3 >/dev/null 2>&1 \
@@ -152,7 +206,7 @@ case "$CHOSEN" in
     ;;
   none)
     echo "[differential] no external Bitcoin Script reference available" >&2
-    echo "[differential]   tried: svnode-cli, bx, python3+python-bitcoinlib" >&2
+    echo "[differential]   tried: python3+python-bitcoinlib" >&2
     if [ "$STRICT" = "1" ]; then
       echo "[differential] FAIL: --strict requires an external reference" >&2
       exit 1

@@ -25,13 +25,63 @@ remaining active proof obligations live in `Pipeline.lean`,
   constants before they can count in default CI.
 * `Pipeline.compileSafe` is the proof-facing compiler entrypoint and
   rejects sentinel or unknown opcodes before byte emission.
+* `Stack.Eval.runOpcode` now executes named `OP_PICK` and `OP_ROLL`
+  through the same bytecode-style depth-pop helpers used by structured
+  `.pick` / `.roll`, so raw opcode lowering paths no longer fall through
+  to `unsupported`. It also has concrete Script-number and bytewise
+  semantics for `OP_BIN2NUM`, `OP_NUM2BIN`, `OP_SPLIT`, `OP_INVERT`,
+  `OP_AND`, `OP_OR`, and `OP_XOR`, with executable sample coverage for
+  representative success/error paths.
 * `Stack.Agrees` now has method-level bridge lemmas from binding-list
-  execution witnesses to public-head `Lower.lower` results for the
+  execution witnesses to any unique public method selected by public
+  method name, not only the public head method, for the
   no-implicit/no-postprocessing fragments proved so far.
 * `lowerBindingsP = lowerBindings` is proved for the const-only
   fragment and for copied reference loads (`loadParam`, stack-backed
   `loadProp`, and copied `loadConst .refAlias`) under explicit copy-mode
   hypotheses.
+* `Stack.Agrees` has operational consume-mode witnesses for depth-0
+  through depth-2 `loadParam` and depth-0 through depth-2 copied
+  `loadConst .refAlias`; deeper consume cases remain open.
+* `Stack.Peephole` proves `peepholePostFold_runOps_eq` and
+  `peepholeChainFold_runOps_eq`, and `Pipeline` composes those with a
+  caller-supplied pass proof plus an explicit roll/pick-fold equality.
+  It also proves the roll/pick fold is identity, and therefore
+  runOps-preserving, for no-IF lists that contain none of the
+  low-depth fold heads; `Pipeline` has a companion composition theorem
+  that uses this no-op subset proof directly.
+* `Script.Parse` / `Script.EmitCorrect` provide parser-backed
+  emit/runOps lemmas for the current `RunarEmittable` subset and for
+  the integrated `RunarEmittableWithIf` subset: flat emitted ops mixed
+  with single-level structural IF frames whose branch bodies are already
+  `AreRunarEmittable`. `Pipeline` connects both predicates to
+  single-public-method `compileSafe` results. `Script.Parse` also has
+  terminal singleton push round-trip lemmas for the small-int fast path
+  covering -1 and 0 through 16, plus explicit terminal bool-push parser
+  facts documenting the unavoidable `false -> bigint 0` and
+  `true -> bigint 1` byte collisions through the fast emitter and
+  `compileSafe`; list-level terminal byte-push facts cover the empty,
+  `0x81`, and one non-small literal-byte cases. A concrete nested
+  no-else IF smoke case is also proved through `parseScript`,
+  `emitOpsFast`, and the single-public `compileSafe` parser bridge while
+  the general recursive IF predicate remains open.
+* `Stack.Agrees` now exposes Stage C `simpleStepRel` operational
+  witnesses for common integer `binOp`s in depth pair `(left depth 1,
+  right depth 0)`: ADD/SUB/MUL/DIV/MOD, comparisons, NUMEQUAL/
+  NUMNOTEQUAL, BOOLAND/BOOLOR, and LSHIFT/RSHIFT. DIV/MOD carry the
+  expected nonzero-divisor precondition. The same depth pair is also
+  covered for byte equality/inequality and bytewise AND/OR/XOR success
+  paths; bytewise INVERT is covered at unary depths 0/1/>=2. Bounded
+  builtin-call witnesses cover byte-valued `toByteString` at depths
+  0/1/>=2, `abs`, `len`, and `bin2num` at depth 0, `cat`, `num2bin`,
+  and `min`/`max` at depth pair `(1,0)`, and `within` at depth tuple
+  `(2,1,0)`. `Stack.Sim` also has byte-exact lowering identities for
+  those builtin calls and the common binOp opcode table.
+* Fixture gates now include a complete 49-fixture bucket inventory,
+  default/full/regen mode checks, stored-constant drift reporting,
+  sharded full-mode guards for the 15 crypto pending fixtures, and
+  differential report path guards that refuse tracked fixture/test
+  outputs.
 
 ## Finish Order
 
@@ -41,13 +91,15 @@ remaining active proof obligations live in `Pipeline.lean`,
      routed through an explicit fail-fast backend instead of an
      unconditional evaluator branch.
    * Stack VM Script-number and bytewise semantics are concrete for
-     `OP_BIN2NUM`, `OP_NUM2BIN`, `OP_INVERT`, `OP_AND`, `OP_OR`, and
-     `OP_XOR`.
+     `OP_BIN2NUM`, `OP_NUM2BIN`, `OP_SPLIT`, `OP_INVERT`, `OP_AND`,
+     `OP_OR`, and `OP_XOR`, and named `OP_PICK` / `OP_ROLL` dispatch is
+     wired to the bytecode-style stack helpers.
    * ANF evaluation now reuses the same Script-number conversion helper
      for `bin2num`, `num2bin`, `int2str`, `pack`, and `unpack`, and has
      concrete bytewise/slicing semantics for `&`, `|`, `^`, `~`,
-     `substr`, `left`, `right`, `split`, `reverseBytes`, and
-     `toByteString`.
+     `substr`, `left`, `right`, `split`, `reverseBytes`,
+     `toByteString`, and concrete numeric helper semantics for `abs`,
+     `min`, `max`, and `within`.
    * Tx context and BIP-143 preimage construction are concrete; the old
      11 TxContext companion axioms have been removed, and
      `afterCodeSeparator` models the script suffix covered after
@@ -68,18 +120,30 @@ remaining active proof obligations live in `Pipeline.lean`,
      peephole abstractions.
 
 2. **Lowering simulation**
-   * Extend the current public-head method bridge beyond the proved
-     const-only and copied-reference fragments.
-   * Handle consume-mode liveness directly. Structural equality with
-     `lowerBindings` is false by design once `ROLL`, `SWAP`, or `ROT`
-     consumes tracked slots, so the next proofs should produce execution
-     witnesses for those cases instead of trying to reuse copy-mode
+   * Discharge `lower_observational_correct_skeleton` without a
+     hypothesis that restates the ANF/Stack success relation.
+   * Extend consume-mode liveness beyond the current depth-0 through
+     depth-2 `loadParam` and depth-0 through depth-2 copied `refAlias`
+     witnesses. Depths 3 and above need stronger producer-shape
+     semantics because `.roll d` is bytecode-style in `Stack.Eval`,
+     not a direct arbitrary-depth stack extraction primitive.
+     Structural equality with `lowerBindings` is false by design once
+     `ROLL`, `SWAP`, or `ROT` consumes tracked slots, so the remaining
+     proofs should keep using execution witnesses instead of copy-mode
      equality lemmas.
-   * Generalize the method bridge from public-head lookup to any public
-     method selected by name, with the needed uniqueness condition.
    * Prove lowering simulation for the remaining supported ANF
-     constructors, especially unary, binary, assert, and consuming
-     reference-load cases.
+     constructors and depth combinations. Landed coverage includes
+     literal loads, copied reference loads, NEGATE/NOT/assert at
+     depths 0/1/>=2, bytewise INVERT at depths 0/1/>=2, and the common
+     integer/arithmetic/comparison/logical/shift binOps plus byte
+     equality/inequality and bytewise AND/OR/XOR success paths for depth
+     pair `(1,0)`;
+     landed builtin-call coverage includes `toByteString` for byte inputs
+     at depths 0/1/>=2, `abs`, `len`, and `bin2num` at depth 0, `cat`,
+     `num2bin`, and `min`/`max` at depth pair `(1,0)`, and `within` at
+     depth tuple `(2,1,0)`. Remaining work is broader binary depth pairs,
+     output-construction call families such as `addOutput`, method
+     post-processing, and consuming reference-load cases.
    * Thread the slot-aware emit result through the final deployed-byte
      theorem, using the checked branch-sensitive code-separator patching
      relation.
@@ -87,22 +151,31 @@ remaining active proof obligations live in `Pipeline.lean`,
      never through emitted sentinel bytes.
 
 3. **Peephole and emit composition**
-   * Prove soundness for exactly the pass chain used by
-     `Pipeline.peepholeProgram`.
-   * Prove emit/parse round-trip for the emitted subset.
-   * Connect parsed bytes to `Stack.Eval.runOps`.
+   * Finish soundness for exactly the pass chain used by
+     `Pipeline.peepholeProgram`: first-pass obligations, the exact
+     roll/pick-fold equality outside the no-op subset, and the currently
+     external preconditions for the rules that need stronger
+     post-rewrite facts.
+   * Extend the parser-backed emit/runOps theorem beyond the current
+     `RunarEmittableWithIf` subset. List-level single-level IF
+     integration is landed. Terminal bigint pushes, terminal bool
+     collision facts, bounded terminal byte-push samples, and one
+     concrete nested no-else IF smoke case are explicit, but the general
+     nested IF predicate and nonterminal or general push cases remain
+     active parser work.
 
 4. **Fixture gates**
    * Populate `cryptoAxiomPendingExpected` only with Lean-produced hex
      from regen/full mode.
    * Keep default CI at 34/49 until those constants exist or full mode is
      fast enough to gate.
-   * Add scheduled/manual full verification for all 49 fixtures.
+   * Wire the existing `scripts/full-verification.sh` hook into
+     scheduled/manual CI when the project is ready to spend the runtime.
 
 5. **Differential assurance**
    * Run the Lean parser/VM against an external BSV reference.
-   * Store differential reports as artifacts or temp files, not tracked
-     test fixtures.
+   * Keep differential reports as artifacts or temp files; the current
+     scripts already guard against tracked fixture/test report paths.
    * Treat differential agreement as assurance alongside formal proofs,
      not as a substitute for theorem obligations.
 

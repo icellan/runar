@@ -83,6 +83,70 @@ theorem lower_binOp_mul (sm : StackMap) (bn : String) (l r : String) :
     lowerValue sm bn (.binOp "*" l r none) =
       (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_MUL"], sm.push bn) := rfl
 
+theorem lower_binOp_div (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "/" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_DIV"], sm.push bn) := rfl
+
+theorem lower_binOp_mod (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "%" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_MOD"], sm.push bn) := rfl
+
+theorem lower_binOp_lt (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "<" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_LESSTHAN"], sm.push bn) := rfl
+
+theorem lower_binOp_lte (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "<=" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_LESSTHANOREQUAL"], sm.push bn) := rfl
+
+theorem lower_binOp_gt (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp ">" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_GREATERTHAN"], sm.push bn) := rfl
+
+theorem lower_binOp_gte (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp ">=" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_GREATERTHANOREQUAL"], sm.push bn) := rfl
+
+theorem lower_binOp_boolAnd (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "&&" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_BOOLAND"], sm.push bn) := rfl
+
+theorem lower_binOp_boolOr (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "||" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_BOOLOR"], sm.push bn) := rfl
+
+theorem lower_binOp_numEq (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "===" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_NUMEQUAL"], sm.push bn) := rfl
+
+theorem lower_binOp_numNeq (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "!==" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_NUMNOTEQUAL"], sm.push bn) := rfl
+
+theorem lower_binOp_bytesEq (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "===" l r (some "bytes")) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_EQUAL"], sm.push bn) := rfl
+
+theorem lower_binOp_andBytes (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "&" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_AND"], sm.push bn) := rfl
+
+theorem lower_binOp_orBytes (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "|" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_OR"], sm.push bn) := rfl
+
+theorem lower_binOp_xorBytes (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "^" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_XOR"], sm.push bn) := rfl
+
+theorem lower_binOp_lshift (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp "<<" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_LSHIFT"], sm.push bn) := rfl
+
+theorem lower_binOp_rshift (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.binOp ">>" l r none) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_RSHIFT"], sm.push bn) := rfl
+
 /-! ## `lowerArgs` reduction lemmas (used by `call` lowering identities) -/
 
 theorem lowerArgs_nil (sm : StackMap) :
@@ -109,6 +173,20 @@ theorem lowerArgs_pair_fst (sm : StackMap) (l r : String) :
     (lowerArgs sm [l, r]).fst = loadRef sm l ++ loadRef (sm.push l) r := by
   rw [lowerArgs_pair]
 
+theorem lowerArgs_triple (sm : StackMap) (x y z : String) :
+    lowerArgs sm [x, y, z] =
+      (loadRef sm x ++ loadRef (sm.push x) y ++ loadRef ((sm.push x).push y) z,
+       ((sm.push x).push y).push z) := by
+  show (loadRef sm x ++ (lowerArgs (sm.push x) [y, z]).fst,
+        (lowerArgs (sm.push x) [y, z]).snd) = _
+  rw [lowerArgs_pair]
+  simp [List.append_assoc]
+
+theorem lowerArgs_triple_fst (sm : StackMap) (x y z : String) :
+    (lowerArgs sm [x, y, z]).fst =
+      loadRef sm x ++ loadRef (sm.push x) y ++ loadRef ((sm.push x).push y) z := by
+  rw [lowerArgs_triple]
+
 theorem lower_call_cat (sm : StackMap) (bn : String) (l r : String) :
     lowerValue sm bn (.call "cat" [l, r]) =
       (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_CAT"], sm.push bn) := by
@@ -117,10 +195,63 @@ theorem lower_call_cat (sm : StackMap) (bn : String) (l r : String) :
   congr 1
   rw [lowerArgs_pair_fst]
 
+theorem lower_call_len (sm : StackMap) (bn : String) (x : String) :
+    lowerValue sm bn (.call "len" [x]) =
+      (loadRef sm x ++ [.opcode "OP_SIZE", .opcode "OP_NIP"], sm.push bn) := by
+  simp [lowerValue, lowerArgs_singleton_fst, builtinOpcode]
+
+theorem lower_call_num2bin (sm : StackMap) (bn : String) (n size : String) :
+    lowerValue sm bn (.call "num2bin" [n, size]) =
+      (loadRef sm n ++ loadRef (sm.push n) size ++ [.opcode "OP_NUM2BIN"], sm.push bn) := by
+  unfold lowerValue
+  simp only [builtinOpcode, List.map_cons, List.map_nil]
+  congr 1
+  rw [lowerArgs_pair_fst]
+
+theorem lower_call_bin2num (sm : StackMap) (bn : String) (x : String) :
+    lowerValue sm bn (.call "bin2num" [x]) =
+      (loadRef sm x ++ [.opcode "OP_BIN2NUM"], sm.push bn) := by
+  simp [lowerValue, lowerArgs_singleton_fst, builtinOpcode]
+
+theorem lower_call_toByteString (sm : StackMap) (bn : String) (x : String) :
+    lowerValue sm bn (.call "toByteString" [x]) =
+      (loadRef sm x, sm.push bn) := by
+  simp [lowerValue, lowerArgs_singleton_fst, builtinOpcode]
+
 theorem lower_call_sha256 (sm : StackMap) (bn : String) (x : String) :
     lowerValue sm bn (.call "sha256" [x]) =
       (loadRef sm x ++ [.opcode "OP_SHA256"], sm.push bn) := by
   simp [lowerValue, lowerArgs_singleton_fst, builtinOpcode]
+
+theorem lower_call_abs (sm : StackMap) (bn : String) (x : String) :
+    lowerValue sm bn (.call "abs" [x]) =
+      (loadRef sm x ++ [.opcode "OP_ABS"], sm.push bn) := by
+  simp [lowerValue, lowerArgs_singleton_fst, builtinOpcode]
+
+theorem lower_call_min (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.call "min" [l, r]) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_MIN"], sm.push bn) := by
+  unfold lowerValue
+  simp only [builtinOpcode, List.map_cons, List.map_nil]
+  congr 1
+  rw [lowerArgs_pair_fst]
+
+theorem lower_call_max (sm : StackMap) (bn : String) (l r : String) :
+    lowerValue sm bn (.call "max" [l, r]) =
+      (loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode "OP_MAX"], sm.push bn) := by
+  unfold lowerValue
+  simp only [builtinOpcode, List.map_cons, List.map_nil]
+  congr 1
+  rw [lowerArgs_pair_fst]
+
+theorem lower_call_within (sm : StackMap) (bn : String) (x lo hi : String) :
+    lowerValue sm bn (.call "within" [x, lo, hi]) =
+      (loadRef sm x ++ loadRef (sm.push x) lo ++ loadRef ((sm.push x).push lo) hi ++
+        [.opcode "OP_WITHIN"], sm.push bn) := by
+  unfold lowerValue
+  simp only [builtinOpcode, List.map_cons, List.map_nil]
+  congr 1
+  rw [lowerArgs_triple_fst]
 
 /-! ## `loadRef` decision-table identities
 
@@ -558,6 +689,32 @@ theorem runOpcode_SUB_def (s : StackState) :
 theorem runOpcode_MUL_def (s : StackState) :
     runOpcode "OP_MUL" s = liftIntBin s (fun a b => .vBigint (a * b)) := rfl
 
+theorem runOpcode_DIV_def (s : StackState) :
+    runOpcode "OP_DIV" s =
+      (match popN s 2 with
+       | .error e => .error e
+       | .ok (vs, s') =>
+           match vs with
+           | [b, a] =>
+               match asInt? a, asInt? b with
+               | some ai, some bi =>
+                   if bi == 0 then .error .divByZero else .ok (s'.push (.vBigint (ai / bi)))
+               | _, _ => .error (.typeError "OP_DIV expects ints")
+           | _ => .error (.unsupported "OP_DIV popN bug")) := rfl
+
+theorem runOpcode_MOD_def (s : StackState) :
+    runOpcode "OP_MOD" s =
+      (match popN s 2 with
+       | .error e => .error e
+       | .ok (vs, s') =>
+           match vs with
+           | [b, a] =>
+               match asInt? a, asInt? b with
+               | some ai, some bi =>
+                   if bi == 0 then .error .divByZero else .ok (s'.push (.vBigint (ai % bi)))
+               | _, _ => .error (.typeError "OP_MOD expects ints")
+           | _ => .error (.unsupported "OP_MOD popN bug")) := rfl
+
 theorem runOpcode_LSHIFT_def (s : StackState) :
     runOpcode "OP_LSHIFT" s
     = liftIntBin s (fun a b => .vBigint (a * (2 ^ b.toNat))) := rfl
@@ -571,6 +728,19 @@ theorem runOpcode_MIN_def (s : StackState) :
 
 theorem runOpcode_MAX_def (s : StackState) :
     runOpcode "OP_MAX" s = liftIntBin s (fun a b => .vBigint (max a b)) := rfl
+
+theorem runOpcode_WITHIN_def (s : StackState) :
+    runOpcode "OP_WITHIN" s =
+      (match popN s 3 with
+       | .error e => .error e
+       | .ok (vs, s') =>
+           match vs with
+           | [hi, lo, x] =>
+               match asInt? x, asInt? lo, asInt? hi with
+               | some xi, some li, some hii =>
+                   .ok (s'.push (.vBool (decide (li ≤ xi ∧ xi < hii))))
+               | _, _, _ => .error (.typeError "OP_WITHIN expects ints")
+           | _ => .error (.unsupported "OP_WITHIN popN bug")) := rfl
 
 theorem runOpcode_LESSTHAN_def (s : StackState) :
     runOpcode "OP_LESSTHAN" s
@@ -604,6 +774,22 @@ theorem runOpcode_BOOLOR_def (s : StackState) :
     runOpcode "OP_BOOLOR" s
     = liftIntBin s (fun a b => .vBool (decide (a ≠ 0 ∨ b ≠ 0))) := rfl
 
+theorem runOpcode_EQUAL_def (s : StackState) :
+    runOpcode "OP_EQUAL" s =
+      (match popN s 2 with
+       | .error e => .error e
+       | .ok (vs, s') =>
+           match vs with
+           | [b, a] =>
+               let eq := match asBytes? a, asBytes? b with
+                 | some ab, some bb => decide (ab.toList = bb.toList)
+                 | _, _ =>
+                     match asInt? a, asInt? b with
+                     | some ai, some bi => decide (ai = bi)
+                     | _, _ => false
+               .ok (s'.push (.vBool eq))
+           | _ => .error (.unsupported "OP_EQUAL popN bug")) := rfl
+
 theorem runOpcode_NEGATE_def (s : StackState) :
     runOpcode "OP_NEGATE" s = liftIntUnary s (fun i => .vBigint (-i)) := rfl
 
@@ -625,6 +811,9 @@ theorem runOpcode_NOT_def (s : StackState) :
            | some b => .ok (s'.push (.vBool (!b)))
            | none   => .error (.typeError "OP_NOT non-bool")) := rfl
 
+theorem runOpcode_NIP_def (s : StackState) :
+    runOpcode "OP_NIP" s = applyNip s := rfl
+
 theorem runOpcode_VERIFY_def (s : StackState) :
     runOpcode "OP_VERIFY" s
     = (match s.pop? with
@@ -638,6 +827,71 @@ theorem runOpcode_VERIFY_def (s : StackState) :
 theorem runOpcode_CAT_def (s : StackState) :
     runOpcode "OP_CAT" s = liftBytesBin s (fun a b => .vBytes (a ++ b)) := rfl
 
+theorem runOpcode_SPLIT_def (s : StackState) :
+    runOpcode "OP_SPLIT" s =
+      (match popN s 2 with
+       | .error e => .error e
+       | .ok (vs, s') =>
+           match vs with
+           | [idx, v] =>
+               match asBytes? v, asNonNegativeNat? idx with
+               | some bs, some i =>
+                   if i > bs.size then
+                     .error (.unsupported "OP_SPLIT: index past end")
+                   else
+                     .ok ((s'.push (.vBytes (bs.extract 0 i))).push
+                       (.vBytes (bs.extract i bs.size)))
+               | _, _ => .error (.typeError "OP_SPLIT expects bytes and non-negative index")
+           | _ => .error (.unsupported "OP_SPLIT popN bug")) := rfl
+
+theorem runOpcode_SIZE_def (s : StackState) :
+    runOpcode "OP_SIZE" s =
+      (match s.stack with
+       | [] => .error (.unsupported "OP_SIZE: empty stack")
+       | v :: _ =>
+           match asBytes? v with
+           | some b => .ok (s.push (.vBigint b.size))
+           | none => .error (.typeError "OP_SIZE: not bytes")) := rfl
+
+theorem runOpcode_INVERT_def (s : StackState) :
+    runOpcode "OP_INVERT" s = liftBytesUnary s (fun b => .vBytes (invertBytes b)) := rfl
+
+theorem runOpcode_BIN2NUM_def (s : StackState) :
+    runOpcode "OP_BIN2NUM" s =
+      (match s.pop? with
+       | none => .error (.unsupported "OP_BIN2NUM: empty stack")
+       | some (v, s') =>
+           match asBytes? v with
+           | some b => .ok (s'.push (.vBigint (decodeMinimalLE b)))
+           | none => .error (.typeError "OP_BIN2NUM: not bytes")) := rfl
+
+theorem runOpcode_NUM2BIN_def (s : StackState) :
+    runOpcode "OP_NUM2BIN" s =
+      (match popN s 2 with
+       | .error e => .error e
+       | .ok (vs, s') =>
+           match vs with
+           | [size, val] =>
+               match asInt? val, asInt? size with
+               | some n, some target =>
+                   if target < 0 then
+                     .error (.typeError "OP_NUM2BIN expects non-negative size")
+                   else
+                     match num2binEncode? n target.toNat with
+                     | some encoded => .ok (s'.push (.vBytes encoded))
+                     | none => .error (.unsupported "OP_NUM2BIN: value does not fit target size")
+               | _, _ => .error (.typeError "OP_NUM2BIN expects int value and size")
+           | _ => .error (.unsupported "OP_NUM2BIN popN bug")) := rfl
+
+theorem runOpcode_AND_def (s : StackState) :
+    runOpcode "OP_AND" s = liftBytesBinChecked s (bitwiseBytes "OP_AND" (· &&& ·)) := rfl
+
+theorem runOpcode_OR_def (s : StackState) :
+    runOpcode "OP_OR" s = liftBytesBinChecked s (bitwiseBytes "OP_OR" (· ||| ·)) := rfl
+
+theorem runOpcode_XOR_def (s : StackState) :
+    runOpcode "OP_XOR" s = liftBytesBinChecked s (bitwiseBytes "OP_XOR" (· ^^^ ·)) := rfl
+
 /-! #### Helper: `popN s 2` on a 2+ stack -/
 
 /-- `popN s 2` when stack starts with two elements `b :: a :: rest`
@@ -647,6 +901,16 @@ private theorem popN_two_local
     (s : StackState) (b a : Value) (rest : List Value)
     (hStk : s.stack = b :: a :: rest) :
     popN s 2 = .ok ([b, a], { s with stack := rest }) := by
+  unfold popN StackState.pop?
+  rw [hStk]
+  simp only [popN, StackState.pop?]
+
+/-- `popN s 3` when stack starts with three elements
+`c :: b :: a :: rest` returns `[c, b, a]` and the residual state. -/
+private theorem popN_three_local
+    (s : StackState) (c b a : Value) (rest : List Value)
+    (hStk : s.stack = c :: b :: a :: rest) :
+    popN s 3 = .ok ([c, b, a], { s with stack := rest }) := by
   unfold popN StackState.pop?
   rw [hStk]
   simp only [popN, StackState.pop?]
@@ -702,6 +966,24 @@ theorem runOpcode_MUL_intInt
   rw [popN_two_local s _ _ rest hStk]
   simp [asInt?]
 
+theorem runOpcode_DIV_intInt_nonzero
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest)
+    (hNonzero : b ≠ 0) :
+    runOpcode "OP_DIV" s = .ok ({ s with stack := rest }.push (.vBigint (a / b))) := by
+  rw [runOpcode_DIV_def]
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?, hNonzero]
+
+theorem runOpcode_MOD_intInt_nonzero
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest)
+    (hNonzero : b ≠ 0) :
+    runOpcode "OP_MOD" s = .ok ({ s with stack := rest }.push (.vBigint (a % b))) := by
+  rw [runOpcode_MOD_def]
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?, hNonzero]
+
 theorem runOpcode_LSHIFT_intInt
     (s : StackState) (a b : Int) (rest : List Value)
     (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
@@ -736,6 +1018,15 @@ theorem runOpcode_MAX_intInt
   rw [runOpcode_MAX_def]
   unfold liftIntBin
   rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_WITHIN_intIntInt
+    (s : StackState) (x lo hi : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint hi :: .vBigint lo :: .vBigint x :: rest) :
+    runOpcode "OP_WITHIN" s =
+      .ok ({ s with stack := rest }.push (.vBool (decide (lo ≤ x ∧ x < hi)))) := by
+  rw [runOpcode_WITHIN_def]
+  rw [popN_three_local s _ _ _ rest hStk]
   simp [asInt?]
 
 /-! #### Comparison ops (`liftIntBin`-shaped, return `vBool`) -/
@@ -861,6 +1152,14 @@ theorem runOpcode_NOT_bool
   rw [hStk]
   simp [asBool?]
 
+theorem runOpcode_NIP_deep
+    (s : StackState) (top second : Value) (rest : List Value)
+    (hStk : s.stack = top :: second :: rest) :
+    runOpcode "OP_NIP" s = .ok { s with stack := top :: rest } := by
+  rw [runOpcode_NIP_def]
+  unfold applyNip
+  rw [hStk]
+
 /-! #### Bytes ops -/
 
 theorem runOpcode_CAT_bytesBytes
@@ -871,6 +1170,97 @@ theorem runOpcode_CAT_bytesBytes
   unfold liftBytesBin
   rw [popN_two_local s _ _ rest hStk]
   simp [asBytes?]
+
+theorem runOpcode_SPLIT_bytesNat
+    (s : StackState) (bs : ByteArray) (idx : Nat) (rest : List Value)
+    (hStk : s.stack = .vBigint (idx : Int) :: .vBytes bs :: rest)
+    (hLe : idx ≤ bs.size) :
+    runOpcode "OP_SPLIT" s =
+      .ok (({ s with stack := rest }.push (.vBytes (bs.extract 0 idx))).push
+        (.vBytes (bs.extract idx bs.size))) := by
+  rw [runOpcode_SPLIT_def]
+  rw [popN_two_local s _ _ rest hStk]
+  have hNonneg : ¬ ((idx : Int) < 0) :=
+    Int.not_lt.2 (Int.natCast_nonneg idx)
+  have hNotPast : ¬ bs.size < idx := Nat.not_lt_of_ge hLe
+  simp [asBytes?, asNonNegativeNat?, asInt?, hNonneg, hNotPast]
+
+theorem runOpcode_SIZE_bytes
+    (s : StackState) (b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: rest) :
+    runOpcode "OP_SIZE" s = .ok (s.push (.vBigint b.size)) := by
+  rw [runOpcode_SIZE_def]
+  rw [hStk]
+  simp [asBytes?]
+
+theorem runOpcode_INVERT_bytes
+    (s : StackState) (b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: rest) :
+    runOpcode "OP_INVERT" s =
+      .ok ({ s with stack := rest }.push (.vBytes (invertBytes b))) := by
+  rw [runOpcode_INVERT_def]
+  unfold liftBytesUnary StackState.pop?
+  rw [hStk]
+  simp [asBytes?]
+
+theorem runOpcode_BIN2NUM_bytes
+    (s : StackState) (b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: rest) :
+    runOpcode "OP_BIN2NUM" s =
+      .ok ({ s with stack := rest }.push (.vBigint (decodeMinimalLE b))) := by
+  rw [runOpcode_BIN2NUM_def]
+  unfold StackState.pop?
+  rw [hStk]
+  simp [asBytes?]
+
+theorem runOpcode_NUM2BIN_intNat
+    (s : StackState) (n : Int) (size : Nat) (encoded : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBigint (Int.ofNat size) :: .vBigint n :: rest)
+    (hEnc : num2binEncode? n size = some encoded) :
+    runOpcode "OP_NUM2BIN" s =
+      .ok ({ s with stack := rest }.push (.vBytes encoded)) := by
+  rw [runOpcode_NUM2BIN_def]
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?, hEnc]
+
+theorem runOpcode_EQUAL_bytesBytes
+    (s : StackState) (a b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest) :
+    runOpcode "OP_EQUAL" s =
+      .ok ({ s with stack := rest }.push (.vBool (decide (a.toList = b.toList)))) := by
+  rw [runOpcode_EQUAL_def]
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asBytes?]
+
+theorem runOpcode_AND_bytesBytes
+    (s : StackState) (a b out : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest)
+    (hZip : zipBytesWith? (fun x y => x &&& y) a b = some out) :
+    runOpcode "OP_AND" s = .ok ({ s with stack := rest }.push (.vBytes out)) := by
+  rw [runOpcode_AND_def]
+  unfold liftBytesBinChecked bitwiseBytes
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asBytes?, hZip]
+
+theorem runOpcode_OR_bytesBytes
+    (s : StackState) (a b out : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest)
+    (hZip : zipBytesWith? (fun x y => x ||| y) a b = some out) :
+    runOpcode "OP_OR" s = .ok ({ s with stack := rest }.push (.vBytes out)) := by
+  rw [runOpcode_OR_def]
+  unfold liftBytesBinChecked bitwiseBytes
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asBytes?, hZip]
+
+theorem runOpcode_XOR_bytesBytes
+    (s : StackState) (a b out : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest)
+    (hZip : zipBytesWith? (fun x y => x ^^^ y) a b = some out) :
+    runOpcode "OP_XOR" s = .ok ({ s with stack := rest }.push (.vBytes out)) := by
+  rw [runOpcode_XOR_def]
+  unfold liftBytesBinChecked bitwiseBytes
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asBytes?, hZip]
 
 /-! ### Phase 6 Step 4 tail — End-to-end runOps for unary/binary opcodes
 

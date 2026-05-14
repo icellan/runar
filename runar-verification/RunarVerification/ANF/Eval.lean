@@ -28,6 +28,7 @@ where it sits in the larger Phase 3 plan.
 * `update_prop` (writes the property slot)
 * the four control-flow / framework intrinsics: `super` (no-op in eval),
   `cat` (byte concatenation), `len`, `bool` (coercion), `assert`.
+* numeric helper intrinsics: `abs`, `min`, `max`, and `within`.
 * byte-string conversion/slicing intrinsics: `bin2num`, `num2bin`,
   `int2str`, `substr`, `left`, `right`, `reverseBytes`,
   `toByteString`, `pack`, `unpack`.
@@ -598,6 +599,23 @@ def callBuiltin? (func : String) (args : List Value) : EvalResult (Option Value)
   | "left" => evalLeft? args
   | "right" => evalRight? args
   | "toByteString" => evalToByteString? args
+  | "abs" =>
+      match args with
+      | [.vBigint i] => return some (.vBigint i.natAbs)
+      | _ => return none
+  | "min" =>
+      match args with
+      | [.vBigint a, .vBigint b] => return some (.vBigint (min a b))
+      | _ => return none
+  | "max" =>
+      match args with
+      | [.vBigint a, .vBigint b] => return some (.vBigint (max a b))
+      | _ => return none
+  | "within" =>
+      match args with
+      | [.vBigint x, .vBigint lo, .vBigint hi] =>
+          return some (.vBool (decide (lo ≤ x ∧ x < hi)))
+      | _ => return none
   | "super" =>
       -- super(...) is a constructor-delegation marker with no
       -- runtime effect in eval; we return the @this marker.
@@ -659,7 +677,8 @@ Concrete cases handled (all non-cryptographic constructors):
 * `assert` — fails with `.assertFailed` if the operand is `false`.
 * `update_prop` — writes the property slot; returns the assigned value.
 * `call` — dispatches the cheap built-ins (`cat`, `len`, `super`,
-  `bool`), byte-string slicing, and script-number conversions;
+  `bool`), byte-string slicing, script-number conversions, and numeric
+  helpers (`abs`, `min`, `max`, `within`);
   everything else returns `.error .unsupported` for the Phase 3 lead
   to wire to `Crypto`.
 * `getStateScript`, `deserializeState` — opaque framework intrinsics
@@ -874,6 +893,60 @@ theorem callBuiltin_split_returns_suffix_sample :
     (match callBuiltin? "split"
         [.vBytes (ByteArray.mk #[0x01, 0x02, 0x03, 0x04]), .vBigint 2] with
      | .ok (some (.vBytes out)) => out.toList == [0x03, 0x04]
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_abs_sample :
+    (match callBuiltin? "abs" [.vBigint (-9)] with
+     | .ok (some (.vBigint n)) => n == 9
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_min_sample :
+    (match callBuiltin? "min" [.vBigint 7, .vBigint (-3)] with
+     | .ok (some (.vBigint n)) => n == -3
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_max_sample :
+    (match callBuiltin? "max" [.vBigint 7, .vBigint (-3)] with
+     | .ok (some (.vBigint n)) => n == 7
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_within_true_sample :
+    (match callBuiltin? "within" [.vBigint 7, .vBigint 3, .vBigint 9] with
+     | .ok (some (.vBool b)) => b == true
+     | _ => false) = true := by
+  native_decide
+
+theorem callBuiltin_within_false_at_hi_sample :
+    (match callBuiltin? "within" [.vBigint 9, .vBigint 3, .vBigint 9] with
+     | .ok (some (.vBool b)) => b == false
+     | _ => false) = true := by
+  native_decide
+
+theorem evalValue_call_abs_sample :
+    (match evalValue { (default : State) with bindings := [("x", .vBigint (-9))] }
+        (.call "abs" ["x"]) with
+     | .ok (.vBigint n, _) => n == 9
+     | _ => false) = true := by
+  native_decide
+
+theorem evalValue_call_min_sample :
+    (match evalValue
+        { (default : State) with bindings := [("r", .vBigint (-3)), ("l", .vBigint 7)] }
+        (.call "min" ["l", "r"]) with
+     | .ok (.vBigint n, _) => n == -3
+     | _ => false) = true := by
+  native_decide
+
+theorem evalValue_call_within_sample :
+    (match evalValue
+        { (default : State) with
+          bindings := [("hi", .vBigint 9), ("lo", .vBigint 3), ("x", .vBigint 7)] }
+        (.call "within" ["x", "lo", "hi"]) with
+     | .ok (.vBool b, _) => b == true
      | _ => false) = true := by
   native_decide
 

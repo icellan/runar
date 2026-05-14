@@ -1,4 +1,6 @@
 import RunarVerification.Script.Emit
+import RunarVerification.Script.Parse
+import RunarVerification.Stack.Eval
 
 /-!
 # Bitcoin Script — Emit correctness (Phase 3a)
@@ -348,6 +350,168 @@ theorem emit_eq_emitFast (p : RunarVerification.Stack.StackProgram) :
       simp only
       rw [emitDispatchChainFast_eq_append, ByteArray.empty_append,
           emitEndifsFastAux_eq_append]
+
+/-! ## Emit/parse/runOps composition for the proof-facing emitted subset -/
+
+/-- Parser round-trip for the fast op-list emitter. `emitFast` is the
+pipeline path; this connects it back to the parser theorem proved for
+the structural emitter. -/
+theorem parseScript_emitOpsFast_round_trip (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittable ops) :
+    Parse.parseScript (emitOpsFast ops) = .ok ops := by
+  rw [← emitOps_eq_emitOpsFast ops]
+  exact Parse.parseScript_emit_round_trip ops hOps
+
+/-- Parsing structurally emitted bytes and immediately running the parsed
+ops is the same as running the original Stack IR ops. -/
+theorem parseScript_emitOps_runOps_eq (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittable ops)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOps ops) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps ops s)
+      = RunarVerification.Stack.Eval.runOps ops s := by
+  rw [Parse.parseScript_emit_round_trip ops hOps]
+
+/-- Fast-emitter version of `parseScript_emitOps_runOps_eq`, matching the
+compiler's byte-emission path. -/
+theorem parseScript_emitOpsFast_runOps_eq (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittable ops)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOpsFast ops) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps ops s)
+      = RunarVerification.Stack.Eval.runOps ops s := by
+  rw [parseScript_emitOpsFast_round_trip ops hOps]
+
+/-- Parser round-trip for fast-emitted op lists in the integrated IF subset. -/
+theorem parseScript_emitOpsFast_round_trip_with_if (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittableWithIf ops) :
+    Parse.parseScript (emitOpsFast ops) = .ok ops := by
+  rw [← emitOps_eq_emitOpsFast ops]
+  exact Parse.parseScript_emit_round_trip_with_if ops hOps
+
+/-- Structurally emitted bytes parse and run like the original op list for the
+integrated IF subset. -/
+theorem parseScript_emitOps_runOps_eq_with_if (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittableWithIf ops)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOps ops) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps ops s)
+      = RunarVerification.Stack.Eval.runOps ops s := by
+  rw [Parse.parseScript_emit_round_trip_with_if ops hOps]
+
+/-- Fast-emitted bytes parse and run like the original op list for the
+integrated IF subset. -/
+theorem parseScript_emitOpsFast_runOps_eq_with_if (ops : List StackOp)
+    (hOps : Parse.AreRunarEmittableWithIf ops)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOpsFast ops) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps ops s)
+      = RunarVerification.Stack.Eval.runOps ops s := by
+  rw [parseScript_emitOpsFast_round_trip_with_if ops hOps]
+
+/-! ### Terminal singleton push collisions
+
+Boolean pushes are byte-identical to the small script-number pushes
+`0` and `1`, so the parser cannot recover the original typed
+`.bool` constructor. These fast-emitter lemmas make the production
+parse result explicit instead of pretending exact recovery is possible.
+-/
+
+theorem parseScript_emitOpsFast_singleton_push_bool_false_terminal :
+    Parse.parseScript (emitOpsFast [.push (.bool false)])
+      = .ok [.push (.bigint 0)] := by
+  rw [← emitOps_eq_emitOpsFast [.push (.bool false)]]
+  exact Parse.parseScript_emit_singleton_push_bool_false_terminal
+
+theorem parseScript_emitOpsFast_singleton_push_bool_true_terminal :
+    Parse.parseScript (emitOpsFast [.push (.bool true)])
+      = .ok [.push (.bigint 1)] := by
+  rw [← emitOps_eq_emitOpsFast [.push (.bool true)]]
+  exact Parse.parseScript_emit_singleton_push_bool_true_terminal
+
+/-- Parser round-trip for fast-emitted singleton `ifOp` without an else branch.
+This extends the parser bridge beyond the flat `RunarEmittable` predicate while
+keeping the branch bodies inside that already-proved subset. -/
+theorem parseScript_emitOpsFast_singleton_ifOp_none_round_trip
+    (thn : List StackOp) (hThn : Parse.AreRunarEmittable thn) :
+    Parse.parseScript (emitOpsFast [.ifOp thn none]) = .ok [.ifOp thn none] := by
+  rw [← emitOps_eq_emitOpsFast [.ifOp thn none]]
+  exact Parse.parseScript_emit_singleton_ifOp_none thn hThn
+
+/-- Parser round-trip for fast-emitted singleton `ifOp` with a non-empty else
+branch. The non-empty else shape avoids the byte ambiguity between `some []`
+and `none`. -/
+theorem parseScript_emitOpsFast_singleton_ifOp_some_cons_round_trip
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail)) :
+    Parse.parseScript (emitOpsFast [.ifOp thn (some (elsHead :: elsTail))])
+      = .ok [.ifOp thn (some (elsHead :: elsTail))] := by
+  rw [← emitOps_eq_emitOpsFast [.ifOp thn (some (elsHead :: elsTail))]]
+  exact Parse.parseScript_emit_singleton_ifOp_some_cons thn elsHead elsTail hThn hEls
+
+/-- Fast-emitter parser smoke case for one concrete nested IF shape. -/
+theorem parseScript_emitOpsFast_singleton_nested_ifOp_none_dup_round_trip :
+    Parse.parseScript (emitOpsFast [.ifOp [.ifOp [.dup] none] none])
+      = .ok [.ifOp [.ifOp [.dup] none] none] := by
+  rw [← emitOps_eq_emitOpsFast [.ifOp [.ifOp [.dup] none] none]]
+  exact Parse.parseScript_emit_singleton_nested_ifOp_none_dup
+
+/-- Running parsed structurally emitted singleton `ifOp` bytes matches running
+the original singleton `ifOp`, for no-else branches whose body is in the
+proved emitted subset. -/
+theorem parseScript_emitOps_singleton_ifOp_none_runOps_eq
+    (thn : List StackOp) (hThn : Parse.AreRunarEmittable thn)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOps [.ifOp thn none]) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps [.ifOp thn none] s)
+      = RunarVerification.Stack.Eval.runOps [.ifOp thn none] s := by
+  rw [Parse.parseScript_emit_singleton_ifOp_none thn hThn]
+
+/-- Fast-emitter version of
+`parseScript_emitOps_singleton_ifOp_none_runOps_eq`. -/
+theorem parseScript_emitOpsFast_singleton_ifOp_none_runOps_eq
+    (thn : List StackOp) (hThn : Parse.AreRunarEmittable thn)
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOpsFast [.ifOp thn none]) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ => RunarVerification.Stack.Eval.runOps [.ifOp thn none] s)
+      = RunarVerification.Stack.Eval.runOps [.ifOp thn none] s := by
+  rw [parseScript_emitOpsFast_singleton_ifOp_none_round_trip thn hThn]
+
+/-- Running parsed structurally emitted singleton `ifOp` bytes matches running
+the original singleton `ifOp`, for non-empty else branches whose bodies are in
+the proved emitted subset. -/
+theorem parseScript_emitOps_singleton_ifOp_some_cons_runOps_eq
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail))
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOps [.ifOp thn (some (elsHead :: elsTail))]) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ =>
+        RunarVerification.Stack.Eval.runOps [.ifOp thn (some (elsHead :: elsTail))] s)
+      = RunarVerification.Stack.Eval.runOps [.ifOp thn (some (elsHead :: elsTail))] s := by
+  rw [Parse.parseScript_emit_singleton_ifOp_some_cons thn elsHead elsTail hThn hEls]
+
+/-- Fast-emitter version of
+`parseScript_emitOps_singleton_ifOp_some_cons_runOps_eq`. -/
+theorem parseScript_emitOpsFast_singleton_ifOp_some_cons_runOps_eq
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : Parse.AreRunarEmittable thn)
+    (hEls : Parse.AreRunarEmittable (elsHead :: elsTail))
+    (s : RunarVerification.Stack.Eval.StackState) :
+    (match Parse.parseScript (emitOpsFast [.ifOp thn (some (elsHead :: elsTail))]) with
+     | .ok parsed => RunarVerification.Stack.Eval.runOps parsed s
+     | .error _ =>
+        RunarVerification.Stack.Eval.runOps [.ifOp thn (some (elsHead :: elsTail))] s)
+      = RunarVerification.Stack.Eval.runOps [.ifOp thn (some (elsHead :: elsTail))] s := by
+  rw [parseScript_emitOpsFast_singleton_ifOp_some_cons_round_trip thn elsHead elsTail hThn hEls]
 
 end Emit
 end RunarVerification.Script

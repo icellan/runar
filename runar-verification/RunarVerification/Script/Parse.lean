@@ -554,7 +554,8 @@ theorem parseStackOp1?_not_round_trip :
 
 /-! ## RunarEmittable predicate
 
-The set of StackOps the parser is required to recover. Excludes:
+The main list-level set of StackOps the parser is required to recover.
+Excludes:
 
 * `.placeholder` / `.pushCodesepIndex` — both emit `OP_0`, which
   parses as `.push (.bigint 0)`. Inverse is ambiguous.
@@ -564,8 +565,11 @@ The set of StackOps the parser is required to recover. Excludes:
   `"OP_ROLL"` — these bytes are reserved for the structural decoders
   (ifOp / pick / roll). Direct named usage clashes with reconstruction.
 
-Plus an inductive constraint on the body of `.ifOp`: every nested op
-must itself be `RunarEmittable`.
+Standalone structural IF round-trip theorems below cover `.ifOp thn none`
+and `.ifOp thn (some nonemptyElse)` when the branch bodies are already
+`AreRunarEmittable`. IF remains outside this main predicate until the
+list-level round-trip proof is refactored around a mutual op/list
+predicate and a byte-length fuel invariant.
 -/
 
 /-- An opcode-string is "free" — i.e. parses back as `.opcode name`
@@ -615,11 +619,16 @@ Exclusions:
   list-level "next byte ≠ 0x79/0x7a" hypothesis.
 * `.pickStruct d` — emits the same bytes as `.pick d`, and the parser
   always reconstructs as `.pick`. Excluded; users should write `.pick d`.
-* `.ifOp` — recursive case deferred until Phase 7.C lands the IF-frame
-  fuel induction (the ELSE-branch parser needs a separate well-founded
-  measure that is not yet in place).
+* `.ifOp` — covered by standalone per-op theorems
+  `parseStackOpFuel_ifOp_none` and `parseStackOpFuel_ifOp_some_cons`
+  below for branch bodies that are already `AreRunarEmittable`.
+  It remains outside the main list predicate because lifting it into
+  `RunarEmittable` requires a mutual op/list predicate and replacing
+  the current top-level-op-count fuel invariant with a byte-length
+  invariant. The ambiguous `.ifOp thn (some [])` shape stays excluded
+  because it emits the same bytes as `.ifOp thn none`.
 
-The current `RunarEmittable` therefore covers:
+The main `RunarEmittable` predicate therefore covers:
 * the 7 short-form stack ops (dup/swap/nip/over/rot/tuck/drop),
 * `.roll d` and `.pick d` for `d ∈ [0..16]` (single-byte small-int
   push prefix; `roll`/`pick` reconstruction is unambiguous because no
@@ -697,8 +706,9 @@ Each lemma proves `parseStackOpFuel (emitStackOpL op ++ rest)` returns
 `(op, rest)` for one specific `op` shape. These compose into the
 master `parseOps_emit_round_trip`.
 
-We use `unfold` + `rfl` for the simple short-form opcodes; the push,
-roll, and ifOp cases need a structural argument.
+We use `unfold` + `rfl` for the simple short-form opcodes; roll and
+pick need structural arguments. Structural IF is handled later by
+standalone per-op theorems rather than by the main predicate.
 -/
 
 theorem parseStackOpFuel_dup (fuel : Nat) (rest : List UInt8) :
@@ -1602,6 +1612,98 @@ theorem parseScript_emit_round_trip (ops : List StackOp)
   rw [emitOps_toList_of_AreRunarEmittable ops hOps]
   exact parseOps_emit_round_trip ops hOps
 
+/-! ### Terminal singleton push round-trip
+
+This is an intentionally separate, bounded expansion beyond
+`RunarEmittable`: a terminal singleton `.push (.bigint i)` round-trips
+for the unambiguous small-int fast-path values below. It does not say
+anything about `.placeholder` / `.pushCodesepIndex`, nor about a push
+followed by `OP_PICK` / `OP_ROLL`.
+-/
+
+/-- ByteArray/list bridge for the terminal singleton bigint-push subset. -/
+private theorem emitOps_toList_singleton_push_bigint_terminal
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    (Emit.emitOps [.push (.bigint i)]).toList = emitOpsL [.push (.bigint i)] := by
+  have hCases :
+      i = -1 ∨ i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨
+        i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+        i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 := by
+    omega
+  rcases hCases with
+    h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h <;>
+    subst i <;>
+    simp [Emit.emitOps, Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBigInt,
+      emitOpsL, emitStackOpL, encodePushValL, encodePushBigIntL,
+      ByteArray.toList_mk_singleton]
+
+/-- List parser round-trip for a terminal singleton bigint-push subset. -/
+theorem parseOps_emit_singleton_push_bigint_terminal
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    parseOps (emitOpsL [.push (.bigint i)]) = .ok [.push (.bigint i)] := by
+  have hCases :
+      i = -1 ∨ i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 ∨ i = 4 ∨ i = 5 ∨
+        i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+        i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 := by
+    omega
+  rcases hCases with
+    h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h | h <;>
+    subst i <;> rfl
+
+/-- ByteArray parser round-trip for a terminal singleton bigint-push subset. -/
+theorem parseScript_emit_singleton_push_bigint_terminal
+    (i : Int) (h : i = -1 ∨ (0 ≤ i ∧ i ≤ 16)) :
+    parseScript (Emit.emitOps [.push (.bigint i)]) = .ok [.push (.bigint i)] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_push_bigint_terminal i h]
+  exact parseOps_emit_singleton_push_bigint_terminal i h
+
+theorem parseOps_emit_singleton_push_bool_false_terminal :
+    parseOps (emitOpsL [.push (.bool false)]) = .ok [.push (.bigint 0)] := rfl
+
+theorem parseOps_emit_singleton_push_bool_true_terminal :
+    parseOps (emitOpsL [.push (.bool true)]) = .ok [.push (.bigint 1)] := rfl
+
+private theorem emitOps_toList_singleton_push_bool_terminal (b : Bool) :
+    (Emit.emitOps [.push (.bool b)]).toList = emitOpsL [.push (.bool b)] := by
+  cases b <;>
+    simp [Emit.emitOps, Emit.emitStackOp, Emit.encodePushVal, Emit.encodePushBool,
+      emitOpsL, emitStackOpL, encodePushValL, encodePushBoolL,
+      ByteArray.toList_mk_singleton]
+
+theorem parseScript_emit_singleton_push_bool_false_terminal :
+    parseScript (Emit.emitOps [.push (.bool false)]) = .ok [.push (.bigint 0)] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_push_bool_terminal false]
+  exact parseOps_emit_singleton_push_bool_false_terminal
+
+theorem parseScript_emit_singleton_push_bool_true_terminal :
+    parseScript (Emit.emitOps [.push (.bool true)]) = .ok [.push (.bigint 1)] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_push_bool_terminal true]
+  exact parseOps_emit_singleton_push_bool_true_terminal
+
+theorem parseOps_emit_singleton_push_bytes_empty_terminal :
+    parseOps (emitOpsL [.push (.bytes (ByteArray.mk #[]))])
+      = .ok [.push (.bigint 0)] := by
+  unfold emitOpsL emitStackOpL encodePushValL encodePushBytesL
+  simp [ByteArray.toList_eq_data_toList]
+  rfl
+
+theorem parseOps_emit_singleton_push_bytes_81_terminal :
+    parseOps (emitOpsL [.push (.bytes (ByteArray.mk #[0x81]))])
+      = .ok [.push (.bigint (-1))] := by
+  unfold emitOpsL emitStackOpL encodePushValL encodePushBytesL
+  simp [ByteArray.toList_eq_data_toList]
+  rfl
+
+theorem parseOps_emit_singleton_push_bytes_17_terminal :
+    parseOps (emitOpsL [.push (.bytes (ByteArray.mk #[0x17]))])
+      = .ok [.push (.bytes (ByteArray.mk #[0x17]))] := by
+  unfold emitOpsL emitStackOpL encodePushValL encodePushBytesL encodePushDataL
+  simp [ByteArray.toList_eq_data_toList]
+  rfl
+
 /-! ## Tier 3.4 Path B — multi-method dispatch chain primitives
 
 The TS reference compiler emits an `OP_DUP <i> OP_NUMEQUAL OP_IF OP_DROP
@@ -1642,9 +1744,9 @@ This block delivers:
   that runs the matching method based on the index pushed onto the
   stack — not currently in `Stack.Eval`.
 
-The deferred items are documented inline; this block closes the
-byte-level recogniser story for the 2-method case and provides the
-primitive head parsers required by any N-method extension.
+The remaining pipeline-level items are documented inline; this block
+closes the byte-level recogniser story for the 2-method case and
+provides the primitive head parsers required by any N-method extension.
 -/
 
 /-! ### List-level dispatch chain emit (mirrors `Emit.emitDispatch*`)
@@ -1942,6 +2044,427 @@ private theorem parseOpsFuel_emit_round_trip_true_nil
           have hRestLen : rest.length ≤ fuel' := by
             simp [List.length] at hFuel; omega
           rw [ih hRest fuel' hRestLen]
+
+private theorem parsePushVal?_OP_IF (rest : List UInt8) :
+    parsePushVal? (0x63 :: rest) = none := rfl
+
+/-! ### Structural `ifOp` body round-trip
+
+These theorems expand the proven emitted subset at the per-op level:
+an `ifOp` whose branch bodies are already `AreRunarEmittable` parses
+back to the same structural `ifOp`. The exact `some []` shape is still
+intentionally excluded because `Emit.emitStackOp` emits no `OP_ELSE`
+for an empty else branch, making `.ifOp thn (some [])` byte-identical
+to `.ifOp thn none`.
+-/
+
+/-- An emitted `ifOp` with no else branch round-trips when the then-body
+is in the existing emitted subset and the fuel covers that body. -/
+theorem parseStackOpFuel_ifOp_none
+    (fuel : Nat) (thn : List StackOp)
+    (hThn : AreRunarEmittable thn) (hFuelThn : thn.length ≤ fuel)
+    (rest : List UInt8) :
+    parseStackOpFuel (fuel + 2) (emitStackOpL (.ifOp thn none) ++ rest)
+      = .ok (.ifOp thn none, rest) := by
+  rw [show emitStackOpL (.ifOp thn none) ++ rest
+        = 0x63 :: (emitOpsL thn ++ (0x68 :: rest)) by
+      simp [emitStackOpL, List.append_assoc]]
+  simp [parseStackOpFuel]
+  rw [parseOpsFuel_emit_round_trip_with_stop_byte thn hThn fuel hFuelThn
+        0x68 (by right; rfl) rest]
+  rw [parsePushVal?_OP_IF]
+  rfl
+
+/-- An emitted `ifOp` with a non-empty else branch round-trips when both
+branch bodies are in the existing emitted subset and the fuel covers both
+bodies. The else branch is stated as `elsHead :: elsTail` to rule out the
+`some []`/`none` byte ambiguity. -/
+theorem parseStackOpFuel_ifOp_some_cons
+    (fuel : Nat) (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : AreRunarEmittable thn)
+    (hEls : AreRunarEmittable (elsHead :: elsTail))
+    (hFuelThn : thn.length ≤ fuel)
+    (hFuelEls : (elsHead :: elsTail).length ≤ fuel)
+    (rest : List UInt8) :
+    parseStackOpFuel (fuel + 2)
+        (emitStackOpL (.ifOp thn (some (elsHead :: elsTail))) ++ rest)
+      = .ok (.ifOp thn (some (elsHead :: elsTail)), rest) := by
+  rw [show emitStackOpL (.ifOp thn (some (elsHead :: elsTail))) ++ rest
+        = 0x63 :: (emitOpsL thn ++
+            (0x67 :: (emitOpsL (elsHead :: elsTail) ++ (0x68 :: rest)))) by
+      simp [emitStackOpL, List.append_assoc]]
+  simp [parseStackOpFuel]
+  rw [parseOpsFuel_emit_round_trip_with_stop_byte thn hThn fuel hFuelThn
+        0x67 (by left; rfl) (emitOpsL (elsHead :: elsTail) ++ (0x68 :: rest))]
+  rw [parsePushVal?_OP_IF]
+  simp
+  rw [parseOpsFuel_emit_round_trip_with_stop_byte (elsHead :: elsTail) hEls fuel
+        hFuelEls 0x68 (by right; rfl) rest]
+  rfl
+
+/-- Top-level fuel round-trip for a singleton `ifOp` with no else branch. -/
+theorem parseOpsFuel_emit_singleton_ifOp_none
+    (fuel : Nat) (thn : List StackOp)
+    (hThn : AreRunarEmittable thn) (hFuelThn : thn.length ≤ fuel) :
+    parseOpsFuel (fuel + 3) (emitOpsL [.ifOp thn none]) false
+      = .ok ([.ifOp thn none], []) := by
+  rw [show emitOpsL [.ifOp thn none]
+        = 0x63 :: (emitOpsL thn ++ [0x68]) by
+      simp [emitOpsL, emitStackOpL]]
+  rw [parseOpsFuel_cons_unfold (fuel + 2) 0x63
+        (emitOpsL thn ++ [0x68])]
+  rw [show 0x63 :: (emitOpsL thn ++ [0x68])
+        = emitStackOpL (.ifOp thn none) ++ [] by
+      simp [emitStackOpL]]
+  rw [parseStackOpFuel_ifOp_none fuel thn hThn hFuelThn []]
+  rfl
+
+/-- Top-level list parser round-trip for a singleton `ifOp` with no else branch. -/
+theorem parseOps_emit_singleton_ifOp_none
+    (thn : List StackOp) (hThn : AreRunarEmittable thn) :
+    parseOps (emitOpsL [.ifOp thn none]) = .ok [.ifOp thn none] := by
+  unfold parseOps
+  have hFuelThn : thn.length ≤ (emitOpsL thn).length :=
+    emitOpsL_length_ge_ops_length thn hThn
+  rw [show (emitOpsL [.ifOp thn none]).length + 1
+        = (emitOpsL thn).length + 3 by
+      simp [emitOpsL, emitStackOpL, List.length_append]]
+  rw [parseOpsFuel_emit_singleton_ifOp_none (emitOpsL thn).length thn
+        hThn hFuelThn]
+
+/-- ByteArray/list bridge for a singleton `ifOp` with no else branch. -/
+private theorem emitOps_toList_singleton_ifOp_none
+    (thn : List StackOp) (hThn : AreRunarEmittable thn) :
+    (Emit.emitOps [.ifOp thn none]).toList = emitOpsL [.ifOp thn none] := by
+  change (Emit.emitStackOp (.ifOp thn none) ++ Emit.emitOps []).toList
+      = emitStackOpL (.ifOp thn none) ++ emitOpsL []
+  rw [ByteArray.toList_append]
+  have hEmpty : (Emit.emitOps []).toList = [] := by
+    unfold Emit.emitOps
+    exact ByteArray.toList_empty
+  rw [hEmpty]
+  simp [Emit.emitStackOp, emitOpsL, emitStackOpL,
+    ByteArray.toList_append, ByteArray.toList_mk_singleton,
+    emitOps_toList_of_AreRunarEmittable thn hThn]
+
+/-- ByteArray parser round-trip for a singleton `ifOp` with no else branch. -/
+theorem parseScript_emit_singleton_ifOp_none
+    (thn : List StackOp) (hThn : AreRunarEmittable thn) :
+    parseScript (Emit.emitOps [.ifOp thn none]) = .ok [.ifOp thn none] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_ifOp_none thn hThn]
+  exact parseOps_emit_singleton_ifOp_none thn hThn
+
+/-- Top-level fuel round-trip for a singleton `ifOp` with a non-empty else branch. -/
+theorem parseOpsFuel_emit_singleton_ifOp_some_cons
+    (fuel : Nat) (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : AreRunarEmittable thn)
+    (hEls : AreRunarEmittable (elsHead :: elsTail))
+    (hFuelThn : thn.length ≤ fuel)
+    (hFuelEls : (elsHead :: elsTail).length ≤ fuel) :
+    parseOpsFuel (fuel + 3)
+        (emitOpsL [.ifOp thn (some (elsHead :: elsTail))]) false
+      = .ok ([.ifOp thn (some (elsHead :: elsTail))], []) := by
+  rw [show emitOpsL [.ifOp thn (some (elsHead :: elsTail))]
+        = 0x63 ::
+            (emitOpsL thn ++ (0x67 :: (emitOpsL (elsHead :: elsTail) ++ [0x68]))) by
+      simp [emitOpsL, emitStackOpL, List.append_assoc]]
+  rw [parseOpsFuel_cons_unfold (fuel + 2) 0x63
+        (emitOpsL thn ++ (0x67 :: (emitOpsL (elsHead :: elsTail) ++ [0x68])))]
+  rw [show 0x63 ::
+          (emitOpsL thn ++ (0x67 :: (emitOpsL (elsHead :: elsTail) ++ [0x68])))
+        = emitStackOpL (.ifOp thn (some (elsHead :: elsTail))) ++ [] by
+      simp [emitStackOpL, List.append_assoc]]
+  rw [parseStackOpFuel_ifOp_some_cons fuel thn elsHead elsTail
+        hThn hEls hFuelThn hFuelEls []]
+  rfl
+
+/-- Top-level list parser round-trip for a singleton `ifOp` with a non-empty else branch. -/
+theorem parseOps_emit_singleton_ifOp_some_cons
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : AreRunarEmittable thn)
+    (hEls : AreRunarEmittable (elsHead :: elsTail)) :
+    parseOps (emitOpsL [.ifOp thn (some (elsHead :: elsTail))])
+      = .ok [.ifOp thn (some (elsHead :: elsTail))] := by
+  unfold parseOps
+  have hFuelThn0 : thn.length ≤ (emitOpsL thn).length :=
+    emitOpsL_length_ge_ops_length thn hThn
+  have hFuelEls0 :
+      (elsHead :: elsTail).length ≤ (emitOpsL (elsHead :: elsTail)).length :=
+    emitOpsL_length_ge_ops_length (elsHead :: elsTail) hEls
+  let fuel := (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 1
+  have hFuelThn : thn.length ≤ fuel := by
+    dsimp [fuel]
+    exact Nat.le_trans hFuelThn0 (by omega)
+  have hFuelEls : (elsHead :: elsTail).length ≤ fuel := by
+    dsimp [fuel]
+    exact Nat.le_trans hFuelEls0 (by omega)
+  rw [show (emitOpsL [.ifOp thn (some (elsHead :: elsTail))]).length + 1
+        = fuel + 3 by
+      dsimp [fuel]
+      simp [emitOpsL, emitStackOpL, List.length_append]
+      omega]
+  rw [parseOpsFuel_emit_singleton_ifOp_some_cons fuel thn elsHead elsTail
+        hThn hEls hFuelThn hFuelEls]
+
+/-- ByteArray/list bridge for a singleton `ifOp` with a non-empty else branch. -/
+private theorem emitOps_toList_singleton_ifOp_some_cons
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : AreRunarEmittable thn)
+    (hEls : AreRunarEmittable (elsHead :: elsTail)) :
+    (Emit.emitOps [.ifOp thn (some (elsHead :: elsTail))]).toList
+      = emitOpsL [.ifOp thn (some (elsHead :: elsTail))] := by
+  change (Emit.emitStackOp (.ifOp thn (some (elsHead :: elsTail))) ++ Emit.emitOps []).toList
+      = emitStackOpL (.ifOp thn (some (elsHead :: elsTail))) ++ emitOpsL []
+  rw [ByteArray.toList_append]
+  have hEmpty : (Emit.emitOps []).toList = [] := by
+    unfold Emit.emitOps
+    exact ByteArray.toList_empty
+  rw [hEmpty]
+  simp [Emit.emitStackOp, emitOpsL, emitStackOpL,
+    ByteArray.toList_append, ByteArray.toList_mk_singleton,
+    emitOps_toList_of_AreRunarEmittable thn hThn,
+    emitOps_toList_of_AreRunarEmittable (elsHead :: elsTail) hEls]
+
+/-- ByteArray parser round-trip for a singleton `ifOp` with a non-empty else branch. -/
+theorem parseScript_emit_singleton_ifOp_some_cons
+    (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+    (hThn : AreRunarEmittable thn)
+    (hEls : AreRunarEmittable (elsHead :: elsTail)) :
+    parseScript (Emit.emitOps [.ifOp thn (some (elsHead :: elsTail))])
+      = .ok [.ifOp thn (some (elsHead :: elsTail))] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_ifOp_some_cons thn elsHead elsTail hThn hEls]
+  exact parseOps_emit_singleton_ifOp_some_cons thn elsHead elsTail hThn hEls
+
+/-! ### Concrete nested IF smoke case
+
+The generic parser predicate below deliberately stops at one structural
+IF layer. This concrete theorem keeps one nested parser path covered
+while the recursive predicate design remains open.
+-/
+
+theorem parseOps_emit_singleton_nested_ifOp_none_dup :
+    parseOps (emitOpsL [.ifOp [.ifOp [.dup] none] none])
+      = .ok [.ifOp [.ifOp [.dup] none] none] := rfl
+
+private theorem emitOps_toList_singleton_nested_ifOp_none_dup :
+    (Emit.emitOps [.ifOp [.ifOp [.dup] none] none]).toList
+      = emitOpsL [.ifOp [.ifOp [.dup] none] none] := by
+  simp [Emit.emitOps, Emit.emitStackOp, emitOpsL, emitStackOpL,
+    ByteArray.toList_append, ByteArray.toList_mk_singleton]
+
+theorem parseScript_emit_singleton_nested_ifOp_none_dup :
+    parseScript (Emit.emitOps [.ifOp [.ifOp [.dup] none] none])
+      = .ok [.ifOp [.ifOp [.dup] none] none] := by
+  unfold parseScript
+  rw [emitOps_toList_singleton_nested_ifOp_none_dup]
+  exact parseOps_emit_singleton_nested_ifOp_none_dup
+
+/-! ### List-level structural IF integration
+
+`RunarEmittableWithIf` extends the flat `RunarEmittable` subset with
+single structural `.ifOp` values whose branch bodies are already in the
+flat subset. This deliberately avoids nested IFs for now, but it closes
+the list-level parser composition for mixed lists such as
+`[dup, ifOp [...], drop]`.
+-/
+
+inductive RunarEmittableWithIf : StackOp → Prop where
+  | flat (op : StackOp) (h : RunarEmittable op) :
+      RunarEmittableWithIf op
+  | if_none (thn : List StackOp) (hThn : AreRunarEmittable thn) :
+      RunarEmittableWithIf (.ifOp thn none)
+  | if_some_cons (thn : List StackOp) (elsHead : StackOp) (elsTail : List StackOp)
+      (hThn : AreRunarEmittable thn)
+      (hEls : AreRunarEmittable (elsHead :: elsTail)) :
+      RunarEmittableWithIf (.ifOp thn (some (elsHead :: elsTail)))
+
+inductive AreRunarEmittableWithIf : List StackOp → Prop where
+  | nil : AreRunarEmittableWithIf []
+  | cons (op : StackOp) (rest : List StackOp)
+      (hOp : RunarEmittableWithIf op) (hRest : AreRunarEmittableWithIf rest) :
+      AreRunarEmittableWithIf (op :: rest)
+
+theorem RunarEmittable.toWithIf (op : StackOp) (h : RunarEmittable op) :
+    RunarEmittableWithIf op :=
+  .flat op h
+
+theorem AreRunarEmittable.toWithIf :
+    ∀ (ops : List StackOp), AreRunarEmittable ops → AreRunarEmittableWithIf ops
+  | [], .nil => .nil
+  | op :: rest, .cons _ _ hOp hRest =>
+      .cons op rest (.flat op hOp) (AreRunarEmittable.toWithIf rest hRest)
+
+private theorem emitStackOpL_cons_of_RunarEmittableWithIf
+    (op : StackOp) (hOp : RunarEmittableWithIf op) :
+    ∃ b tail, emitStackOpL op = b :: tail := by
+  cases hOp with
+  | flat op h => exact emitStackOpL_cons_of_RunarEmittable op h
+  | if_none thn hThn =>
+      exact ⟨0x63, emitOpsL thn ++ [0x68], by simp [emitStackOpL]⟩
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      exact ⟨0x63,
+        emitOpsL thn ++ (0x67 :: (emitOpsL (elsHead :: elsTail) ++ [0x68])),
+        by simp [emitStackOpL]⟩
+
+private theorem emitStackOpL_length_pos_of_RunarEmittableWithIf
+    (op : StackOp) (hOp : RunarEmittableWithIf op) :
+    1 ≤ (emitStackOpL op).length := by
+  obtain ⟨b, tail, hHead⟩ := emitStackOpL_cons_of_RunarEmittableWithIf op hOp
+  rw [hHead]
+  simp
+
+/-- A single op in the integrated predicate round-trips with any fuel at least
+as large as its emitted byte length. -/
+private theorem parseStackOpFuel_emit_round_trip_with_if
+    (op : StackOp) (hOp : RunarEmittableWithIf op)
+    (fuel : Nat) (hFuel : (emitStackOpL op).length ≤ fuel)
+    (rest : List UInt8) :
+    parseStackOpFuel fuel (emitStackOpL op ++ rest) = .ok (op, rest) := by
+  cases hOp with
+  | flat op h =>
+      have hFuelPos : 1 ≤ fuel := by
+        have hLen := emitStackOpL_length_pos_of_RunarEmittableWithIf op (.flat op h)
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      exact parseStackOp_emit_round_trip fuel' op rest h
+  | if_none thn hThn =>
+      have hFuel2 : 2 ≤ fuel := by
+        have hLen : (emitOpsL thn).length + 2 ≤ fuel := by
+          simpa [emitStackOpL, List.length_append] using hFuel
+        omega
+      obtain ⟨fuel', hFuelEq⟩ : ∃ k, fuel = k + 2 := ⟨fuel - 2, by omega⟩
+      subst fuel
+      have hFuelThn : thn.length ≤ fuel' := by
+        have hBytes := emitOpsL_length_ge_ops_length thn hThn
+        have hLen : (emitOpsL thn).length + 2 ≤ fuel' + 2 := by
+          simpa [emitStackOpL, List.length_append] using hFuel
+        omega
+      exact parseStackOpFuel_ifOp_none fuel' thn hThn hFuelThn rest
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      have hFuel2 : 2 ≤ fuel := by
+        have hLen :
+            (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 3
+              ≤ fuel := by
+          have hLen0 := hFuel
+          simp [emitStackOpL, List.length_append] at hLen0
+          omega
+        omega
+      obtain ⟨fuel', hFuelEq⟩ : ∃ k, fuel = k + 2 := ⟨fuel - 2, by omega⟩
+      subst fuel
+      have hFuelThn : thn.length ≤ fuel' := by
+        have hBytes := emitOpsL_length_ge_ops_length thn hThn
+        have hLen :
+            (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 3
+              ≤ fuel' + 2 := by
+          have hLen0 := hFuel
+          simp [emitStackOpL, List.length_append] at hLen0
+          omega
+        omega
+      have hFuelEls : (elsHead :: elsTail).length ≤ fuel' := by
+        have hBytes := emitOpsL_length_ge_ops_length (elsHead :: elsTail) hEls
+        have hLen :
+            (emitOpsL thn).length + (emitOpsL (elsHead :: elsTail)).length + 3
+              ≤ fuel' + 2 := by
+          have hLen0 := hFuel
+          simp [emitStackOpL, List.length_append] at hLen0
+          omega
+        omega
+      exact parseStackOpFuel_ifOp_some_cons fuel' thn elsHead elsTail
+        hThn hEls hFuelThn hFuelEls rest
+
+/-- Top-level fuel round-trip for lists that mix flat emitted ops with
+single-level structural IF ops. The fuel is measured in emitted bytes, not
+source op count, because IF body parsing consumes nested fuel. -/
+theorem parseOpsFuel_emit_round_trip_with_if :
+    ∀ (ops : List StackOp), AreRunarEmittableWithIf ops →
+      ∀ (fuel : Nat), (emitOpsL ops).length ≤ fuel →
+        parseOpsFuel (fuel + 1) (emitOpsL ops) false = .ok (ops, []) := by
+  intro ops hOps
+  induction hOps with
+  | nil =>
+      intro fuel hFuel
+      rfl
+  | cons op rest hOp hRest ih =>
+      intro fuel hFuel
+      have hHeadLen := emitStackOpL_length_pos_of_RunarEmittableWithIf op hOp
+      have hFuelPos : 1 ≤ fuel := by
+        show 1 ≤ fuel
+        have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      obtain ⟨fuel', rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+      obtain ⟨b, opTail, hOpHead⟩ :=
+        emitStackOpL_cons_of_RunarEmittableWithIf op hOp
+      have hAllBytes : emitOpsL (op :: rest)
+          = b :: (opTail ++ emitOpsL rest) := by
+        show emitStackOpL op ++ emitOpsL rest = _
+        rw [hOpHead]
+        rfl
+      rw [hAllBytes]
+      rw [parseOpsFuel_cons_unfold (fuel' + 1) b (opTail ++ emitOpsL rest)]
+      have hHeadBack : b :: (opTail ++ emitOpsL rest)
+          = emitStackOpL op ++ emitOpsL rest := by
+        rw [hOpHead]
+        rfl
+      rw [hHeadBack]
+      have hOpFuel : (emitStackOpL op).length ≤ fuel' + 1 := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [parseStackOpFuel_emit_round_trip_with_if op hOp (fuel' + 1) hOpFuel
+            (emitOpsL rest)]
+      dsimp only
+      have hRestFuel : (emitOpsL rest).length ≤ fuel' := by
+        have hLen : (emitStackOpL op).length + (emitOpsL rest).length ≤ fuel' + 1 := by
+          simpa [emitOpsL, List.length_append] using hFuel
+        omega
+      rw [ih fuel' hRestFuel]
+
+/-- Top-level list parser round-trip for the integrated structural IF subset. -/
+theorem parseOps_emit_round_trip_with_if
+    (ops : List StackOp) (hOps : AreRunarEmittableWithIf ops) :
+    parseOps (emitOpsL ops) = .ok ops := by
+  unfold parseOps
+  rw [parseOpsFuel_emit_round_trip_with_if ops hOps (emitOpsL ops).length (Nat.le_refl _)]
+
+private theorem emitStackOp_toList_of_RunarEmittableWithIf
+    (op : StackOp) (hOp : RunarEmittableWithIf op) :
+    (Emit.emitStackOp op).toList = emitStackOpL op := by
+  cases hOp with
+  | flat op h => exact emitStackOp_toList_of_RunarEmittable op h
+  | if_none thn hThn =>
+      simp [Emit.emitStackOp, emitStackOpL, ByteArray.toList_append,
+        ByteArray.toList_mk_singleton,
+        emitOps_toList_of_AreRunarEmittable thn hThn]
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      simp [Emit.emitStackOp, emitStackOpL, ByteArray.toList_append,
+        ByteArray.toList_mk_singleton,
+        emitOps_toList_of_AreRunarEmittable thn hThn,
+        emitOps_toList_of_AreRunarEmittable (elsHead :: elsTail) hEls]
+
+/-- ByteArray/list bridge for the integrated structural IF subset. -/
+theorem emitOps_toList_of_AreRunarEmittableWithIf
+    (ops : List StackOp) (hOps : AreRunarEmittableWithIf ops) :
+    (Emit.emitOps ops).toList = emitOpsL ops := by
+  induction hOps with
+  | nil =>
+      unfold Emit.emitOps emitOpsL
+      exact ByteArray.toList_empty
+  | cons op rest hOp hRest ih =>
+      change (Emit.emitStackOp op ++ Emit.emitOps rest).toList
+        = emitStackOpL op ++ emitOpsL rest
+      rw [ByteArray.toList_append,
+        emitStackOp_toList_of_RunarEmittableWithIf op hOp, ih]
+
+/-- ByteArray parser round-trip for the integrated structural IF subset. -/
+theorem parseScript_emit_round_trip_with_if
+    (ops : List StackOp) (hOps : AreRunarEmittableWithIf ops) :
+    parseScript (Emit.emitOps ops) = .ok ops := by
+  unfold parseScript
+  rw [emitOps_toList_of_AreRunarEmittableWithIf ops hOps]
+  exact parseOps_emit_round_trip_with_if ops hOps
 
 /-! ### 2-method dispatch chain bytes
 

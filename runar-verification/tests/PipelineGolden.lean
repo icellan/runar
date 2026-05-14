@@ -117,6 +117,8 @@ mode.
 -/
 def expectedByteExact : Nat := 34
 
+def expectedFixtureTotal : Nat := 49
+
 def baselineMatches : List String := [
   "add-raw-output",
   "auction",
@@ -310,6 +312,67 @@ StackOps already encode the depth push internally — see
 -/
 def lowerDivergencePending : List String := []
 
+def fixtureBuckets : List (String × List String) := [
+  ("baselineMatches", baselineMatches),
+  ("goOnlyFixtures", goOnlyFixtures),
+  ("cryptoAxiomPending", cryptoAxiomPending),
+  ("mathBuiltinsPending", mathBuiltinsPending),
+  ("lowerDivergencePending", lowerDivergencePending)
+]
+
+def trackedFixtures : List String :=
+  baselineMatches ++ goOnlyFixtures ++ cryptoAxiomPending
+    ++ mathBuiltinsPending ++ lowerDivergencePending
+
+def findDuplicates (xs : List String) : List String :=
+  let rec loop (rest seen dups : List String) : List String :=
+    match rest with
+    | [] => dups.reverse
+    | x :: tail =>
+        if seen.contains x then
+          if dups.contains x then loop tail seen dups
+          else loop tail seen (x :: dups)
+        else
+          loop tail (x :: seen) dups
+  loop xs [] []
+
+def missingFrom (expected actual : List String) : List String :=
+  expected.filter (fun x => !(actual.contains x))
+
+def indexOf? (needle : String) (xs : List String) : Option Nat :=
+  let rec loop (rest : List String) (idx : Nat) : Option Nat :=
+    match rest with
+    | [] => none
+    | x :: tail => if x == needle then some idx else loop tail (idx + 1)
+  loop xs 0
+
+def assignedToShard (name : String) (shard shards : Nat) : Bool :=
+  match indexOf? name cryptoAxiomPending with
+  | none => false
+  | some idx => (idx % shards) + 1 == shard
+
+def parsePositiveEnv (name : String) : IO (Option Nat) := do
+  match (← IO.getEnv name) with
+  | none => pure none
+  | some raw =>
+      match raw.toNat? with
+      | some n =>
+          if n > 0 then pure (some n)
+          else throw (IO.userError s!"{name} must be a positive integer, got {raw}")
+      | none =>
+          throw (IO.userError s!"{name} must be a positive integer, got {raw}")
+
+def readShardSpec : IO (Option (Nat × Nat)) := do
+  let shard ← parsePositiveEnv "RUNAR_VERIFICATION_SHARD"
+  let shards ← parsePositiveEnv "RUNAR_VERIFICATION_SHARDS"
+  match shard, shards with
+  | none, none => pure none
+  | some s, some n =>
+      if s <= n then pure (some (s, n))
+      else throw (IO.userError s!"RUNAR_VERIFICATION_SHARD ({s}) must be <= RUNAR_VERIFICATION_SHARDS ({n})")
+  | _, _ =>
+      throw (IO.userError "RUNAR_VERIFICATION_SHARD and RUNAR_VERIFICATION_SHARDS must be set together")
+
 /--
 Sanity check: 34 baseline + 0 Go-only + 15 crypto-pending + 0 math-pending
 + 0 lower-divergence = 49, matching `conformance/tests/`.
@@ -342,9 +405,18 @@ def main : IO Unit := do
   let regen ← match (← IO.getEnv "RUNAR_VERIFICATION_REGEN") with
     | some _ => pure true
     | none   => pure false
+  let shardSpec ← readShardSpec
+  if shardSpec.isSome && !(full || regen) then
+    throw (IO.userError "RUNAR_VERIFICATION_SHARD requires RUNAR_VERIFICATION_FULL=1 or RUNAR_VERIFICATION_REGEN=1")
+  match shardSpec with
+  | some (s, n) =>
+      IO.println s!"PIPELINE GOLDEN: live cryptoAxiomPending shard {s}/{n}"
+  | none => pure ()
   let mut total := 0
   let mut matched := 0
   let mut matchedNames : List String := []
+  let mut fixtureNames : List String := []
+  let mut fullShardSkipped : List String := []
   -- 3c: Per-fixture timing telemetry for the cryptoAxiomPending bucket.
   -- Each entry: (fixture name, milliseconds elapsed, byteExact?).
   let mut fullTimings : List (String × Nat × Bool) := []
@@ -369,7 +441,14 @@ def main : IO Unit := do
         match ANFProgram.fromString irJson with
         | .ok p =>
             total := total + 1
+            fixtureNames := e.fileName :: fixtureNames
             let isCryptoPending := cryptoAxiomPending.contains e.fileName
+            let inShard :=
+              match shardSpec with
+              | none => true
+              | some (s, n) =>
+                  if isCryptoPending then assignedToShard e.fileName s n
+                  else true
             -- Phase 5: the EC / P-256 / P-384 / SLH-DSA fixtures in
             -- `cryptoAxiomPending` are skipped by default in live-compile
             -- mode (`compileHex` >25 min/fixture). Three gating modes:
@@ -394,6 +473,8 @@ def main : IO Unit := do
                   -- else: stored constant disagrees with expected — surfaces below
               | none =>
                   constUnpopulated := e.fileName :: constUnpopulated
+            else if isCryptoPending && !inShard then
+              fullShardSkipped := e.fileName :: fullShardSkipped
             else
               -- 3c: Time each fixture's compile. In full mode, log
               -- per-fixture progress so users see what's happening
@@ -433,6 +514,39 @@ def main : IO Unit := do
         | _ => pure ()
       catch _ => pure ()
   IO.println s!"PIPELINE GOLDEN: {matched}/{total} byte-exact"
+
+  if total != expectedFixtureTotal then
+    IO.eprintln s!"FAIL: discovered {total} fixtures, expected {expectedFixtureTotal}"
+    IO.Process.exit 1
+
+  let duplicateTracked := findDuplicates trackedFixtures
+  if !duplicateTracked.isEmpty then
+    IO.eprintln "FAIL: fixture appears in more than one gate bucket:"
+    for n in duplicateTracked do
+      IO.eprintln s!"  - {n}"
+    IO.Process.exit 1
+
+  let missingTracked := missingFrom fixtureNames trackedFixtures
+  let unknownTracked := missingFrom trackedFixtures fixtureNames
+  if !missingTracked.isEmpty || !unknownTracked.isEmpty then
+    if !missingTracked.isEmpty then
+      IO.eprintln "FAIL: fixtures missing from PipelineGolden bucket inventory:"
+      for n in missingTracked do
+        IO.eprintln s!"  - {n}"
+    if !unknownTracked.isEmpty then
+      IO.eprintln "FAIL: bucket inventory names not present in conformance/tests:"
+      for n in unknownTracked do
+        IO.eprintln s!"  - {n}"
+    IO.Process.exit 1
+
+  for (bucket, names) in fixtureBuckets do
+    if names.length > 0 then
+      IO.println s!"  bucket {bucket}: {names.length}"
+
+  if (full || regen) && !fullShardSkipped.isEmpty then
+    IO.println "  live cryptoAxiomPending fixtures skipped by shard:"
+    for n in fullShardSkipped.reverse do
+      IO.println s!"    - {n}"
   -- 3c: Surface per-fixture timing for the cryptoAxiomPending bucket
   -- when full or regen mode ran.
   if (full || regen) && !fullTimings.isEmpty then
@@ -497,6 +611,27 @@ def main : IO Unit := do
     for n in regressions.reverse do
       IO.eprintln s!"  - {n}"
     IO.Process.exit 1
+
+  -- Gate 2b: unsharded full mode is the scheduled/manual "all fixtures"
+  -- byte-exact gate. Sharded full mode gates exactly the assigned
+  -- cryptoAxiomPending slice while still running the baseline regression
+  -- gate above.
+  if full then
+    match shardSpec with
+    | none =>
+        if matched != expectedFixtureTotal then
+          IO.eprintln s!"FAIL: full mode requires all {expectedFixtureTotal} fixtures byte-exact, got {matched}"
+          IO.Process.exit 1
+    | some (s, n) =>
+        let mut shardMisses : List String := []
+        for name in cryptoAxiomPending do
+          if assignedToShard name s n && !(matchedNames.contains name) then
+            shardMisses := name :: shardMisses
+        if !shardMisses.isEmpty then
+          IO.eprintln s!"FAIL: full shard {s}/{n} cryptoAxiomPending fixture(s) were not byte-exact:"
+          for name in shardMisses.reverse do
+            IO.eprintln s!"  - {name}"
+          IO.Process.exit 1
 
   -- Gate 3: any fixture in the pending-triage buckets that has *flipped* to
   -- byte-exact should be promoted into `baselineMatches` (and the count

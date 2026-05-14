@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+EXPECTED_FIXTURE_TOTAL = 49
+
 try:
     from bitcoin.core import CTransaction, CTxIn, CTxOut, COutPoint
     from bitcoin.core.script import CScript
@@ -158,6 +160,13 @@ def main(argv: list[str]) -> int:
         with open(hex_path, "r") as fh:
             hex_text = fh.read()
         results.append(run_fixture(entry.name, hex_text))
+
+    if len(results) != EXPECTED_FIXTURE_TOTAL:
+        print(
+            f"ERROR: discovered {len(results)} fixtures, expected {EXPECTED_FIXTURE_TOTAL}",
+            file=sys.stderr,
+        )
+        return 1
 
     payload = {
         "fixtures": [

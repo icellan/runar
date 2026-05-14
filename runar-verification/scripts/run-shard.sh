@@ -85,6 +85,7 @@ echo "==> run-shard.sh: building pipelineGolden exe"
 lake build pipelineGolden
 
 echo "==> run-shard.sh: running shard $shard of $of"
+RUNAR_VERIFICATION_FULL=1 \
 RUNAR_VERIFICATION_SHARD="$shard" \
 RUNAR_VERIFICATION_SHARDS="$of" \
   lake env ./.lake/build/bin/pipelineGolden

@@ -9242,6 +9242,277 @@ to `ops`, including recursive descent into `.ifOp` branches. -/
 def peepholePostFold (ops : List StackOp) : List StackOp :=
   applyPushOneSub (applyPushOneAdd (postFoldList ops))
 
+/-! ### Phase 7.1 post-fold operational soundness
+
+The post-fold pass is part of the production peephole chain. On `noIfOp`
+inputs, `postFoldList` is the identity, so the pass reduces to the two
+flat consolidation rules `applyPushOneAdd` and `applyPushOneSub`. -/
+
+private theorem pushOneAdd_extends (s : StackState) (a : Int)
+    (rest : List StackOp) :
+    runOps (.push (.bigint a) :: .opcode "OP_1ADD" :: rest) s
+    = runOps (.push (.bigint (a + 1)) :: rest) s := by
+  rw [runOps_cons_PUSHbigint]
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode, runOpcode_1ADD_def]
+  unfold liftIntUnary StackState.pop?
+  simp [asInt?]
+  rw [runOps_cons_PUSHbigint]
+  cases s
+  simp [StackState.push]
+
+private theorem pushOneSub_extends (s : StackState) (a : Int)
+    (rest : List StackOp) :
+    runOps (.push (.bigint a) :: .opcode "OP_1SUB" :: rest) s
+    = runOps (.push (.bigint (a - 1)) :: rest) s := by
+  rw [runOps_cons_PUSHbigint]
+  rw [runOps_cons_opcode_eq, stepNonIf_opcode, runOpcode_1SUB_def]
+  unfold liftIntUnary StackState.pop?
+  simp [asInt?]
+  rw [runOps_cons_PUSHbigint]
+  cases s
+  simp [StackState.push]
+
+private theorem applyPushOneAdd_cons_no_match
+    (op : StackOp) (rest : List StackOp)
+    (h : ∀ a rt, op = .push (.bigint a) →
+         rest = .opcode "OP_1ADD" :: rt → False) :
+    applyPushOneAdd (op :: rest) = op :: applyPushOneAdd rest :=
+  applyPushOneAdd.eq_3 op rest h
+
+private theorem applyPushOneSub_cons_no_match
+    (op : StackOp) (rest : List StackOp)
+    (h : ∀ a rt, op = .push (.bigint a) →
+         rest = .opcode "OP_1SUB" :: rt → False) :
+    applyPushOneSub (op :: rest) = op :: applyPushOneSub rest :=
+  applyPushOneSub.eq_3 op rest h
+
+theorem applyPushOneAdd_runOps_eq :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState),
+        runOps (applyPushOneAdd ops) s = runOps ops s := by
+  intro ops
+  induction ops using applyPushOneAdd.induct with
+  | case1 => intros _ _; rfl
+  | case2 a rest' ih =>
+    intro hNoIf s
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_1ADD" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    rw [show applyPushOneAdd
+              (.push (.bigint a) :: .opcode "OP_1ADD" :: rest')
+            = .push (.bigint (a + 1)) :: applyPushOneAdd rest' from rfl]
+    rw [pushOneAdd_extends s a rest']
+    apply runOps_cons_push_cong_typed
+    intro s' hStep
+    have hStepDef :
+        stepNonIf (.push (.bigint (a + 1))) s
+          = .ok (s.push (.vBigint (a + 1))) :=
+      stepNonIf_push_bigint s (a + 1)
+    have hs' : s' = s.push (.vBigint (a + 1)) := by
+      rw [hStepDef] at hStep
+      exact ((Except.ok.injEq _ _).mp hStep).symm
+    rw [hs']
+    exact ih hRestNoIf _
+  | case3 op rest' hNoMatch ih =>
+    intro hNoIf s
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    rw [applyPushOneAdd_cons_no_match op rest' hNoMatch]
+    cases op with
+    | push v => exact runOps_cons_push_cong v _ _ s (fun s' => ih hRestNoIf s')
+    | dup => exact runOps_cons_dup_cong _ _ s (fun s' => ih hRestNoIf s')
+    | swap => exact runOps_cons_swap_cong _ _ s (fun s' => ih hRestNoIf s')
+    | drop => exact runOps_cons_drop_cong _ _ s (fun s' => ih hRestNoIf s')
+    | nip => exact runOps_cons_nip_cong _ _ s (fun s' => ih hRestNoIf s')
+    | over => exact runOps_cons_over_cong _ _ s (fun s' => ih hRestNoIf s')
+    | rot => exact runOps_cons_rot_cong _ _ s (fun s' => ih hRestNoIf s')
+    | tuck => exact runOps_cons_tuck_cong _ _ s (fun s' => ih hRestNoIf s')
+    | roll d => exact runOps_cons_roll_cong d _ _ s (fun s' => ih hRestNoIf s')
+    | pick d => exact runOps_cons_pick_cong d _ _ s (fun s' => ih hRestNoIf s')
+    | pickStruct d => exact runOps_cons_pickStruct_cong d _ _ s (fun s' => ih hRestNoIf s')
+    | opcode code => exact runOps_cons_opcode_cong code _ _ s (fun s' => ih hRestNoIf s')
+    | placeholder i n => exact runOps_cons_placeholder_cong i n _ _ s (fun s' => ih hRestNoIf s')
+    | pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong _ _ s (fun s' => ih hRestNoIf s')
+    | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
+
+theorem applyPushOneSub_runOps_eq :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState),
+        runOps (applyPushOneSub ops) s = runOps ops s := by
+  intro ops
+  induction ops using applyPushOneSub.induct with
+  | case1 => intros _ _; rfl
+  | case2 a rest' ih =>
+    intro hNoIf s
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_1SUB" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    rw [show applyPushOneSub
+              (.push (.bigint a) :: .opcode "OP_1SUB" :: rest')
+            = .push (.bigint (a - 1)) :: applyPushOneSub rest' from rfl]
+    rw [pushOneSub_extends s a rest']
+    apply runOps_cons_push_cong_typed
+    intro s' hStep
+    have hStepDef :
+        stepNonIf (.push (.bigint (a - 1))) s
+          = .ok (s.push (.vBigint (a - 1))) :=
+      stepNonIf_push_bigint s (a - 1)
+    have hs' : s' = s.push (.vBigint (a - 1)) := by
+      rw [hStepDef] at hStep
+      exact ((Except.ok.injEq _ _).mp hStep).symm
+    rw [hs']
+    exact ih hRestNoIf _
+  | case3 op rest' hNoMatch ih =>
+    intro hNoIf s
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    rw [applyPushOneSub_cons_no_match op rest' hNoMatch]
+    cases op with
+    | push v => exact runOps_cons_push_cong v _ _ s (fun s' => ih hRestNoIf s')
+    | dup => exact runOps_cons_dup_cong _ _ s (fun s' => ih hRestNoIf s')
+    | swap => exact runOps_cons_swap_cong _ _ s (fun s' => ih hRestNoIf s')
+    | drop => exact runOps_cons_drop_cong _ _ s (fun s' => ih hRestNoIf s')
+    | nip => exact runOps_cons_nip_cong _ _ s (fun s' => ih hRestNoIf s')
+    | over => exact runOps_cons_over_cong _ _ s (fun s' => ih hRestNoIf s')
+    | rot => exact runOps_cons_rot_cong _ _ s (fun s' => ih hRestNoIf s')
+    | tuck => exact runOps_cons_tuck_cong _ _ s (fun s' => ih hRestNoIf s')
+    | roll d => exact runOps_cons_roll_cong d _ _ s (fun s' => ih hRestNoIf s')
+    | pick d => exact runOps_cons_pick_cong d _ _ s (fun s' => ih hRestNoIf s')
+    | pickStruct d => exact runOps_cons_pickStruct_cong d _ _ s (fun s' => ih hRestNoIf s')
+    | opcode code => exact runOps_cons_opcode_cong code _ _ s (fun s' => ih hRestNoIf s')
+    | placeholder i n => exact runOps_cons_placeholder_cong i n _ _ s (fun s' => ih hRestNoIf s')
+    | pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong _ _ s (fun s' => ih hRestNoIf s')
+    | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
+
+theorem applyPushOneAdd_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushOneAdd ops) := by
+  intro ops
+  induction ops using applyPushOneAdd.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a rest' ih =>
+    intro hNoIf
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_1ADD" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    show noIfOp (.push (.bigint (a + 1)) :: applyPushOneAdd rest')
+    exact ih hRestNoIf
+  | case3 op rest' hNoMatch ih =>
+    intro hNoIf
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    rw [applyPushOneAdd_cons_no_match op rest' hNoMatch]
+    cases op with
+    | push v => simpa [noIfOp] using ih hRestNoIf
+    | dup => simpa [noIfOp] using ih hRestNoIf
+    | swap => simpa [noIfOp] using ih hRestNoIf
+    | drop => simpa [noIfOp] using ih hRestNoIf
+    | nip => simpa [noIfOp] using ih hRestNoIf
+    | over => simpa [noIfOp] using ih hRestNoIf
+    | rot => simpa [noIfOp] using ih hRestNoIf
+    | tuck => simpa [noIfOp] using ih hRestNoIf
+    | roll d => simpa [noIfOp] using ih hRestNoIf
+    | pick d => simpa [noIfOp] using ih hRestNoIf
+    | pickStruct d => simpa [noIfOp] using ih hRestNoIf
+    | opcode code => simpa [noIfOp] using ih hRestNoIf
+    | placeholder i n => simpa [noIfOp] using ih hRestNoIf
+    | pushCodesepIndex => simpa [noIfOp] using ih hRestNoIf
+    | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
+
+theorem applyPushOneSub_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushOneSub ops) := by
+  intro ops
+  induction ops using applyPushOneSub.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a rest' ih =>
+    intro hNoIf
+    have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .opcode "OP_1SUB" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    show noIfOp (.push (.bigint (a - 1)) :: applyPushOneSub rest')
+    exact ih hRestNoIf
+  | case3 op rest' hNoMatch ih =>
+    intro hNoIf
+    have hRestNoIf : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    rw [applyPushOneSub_cons_no_match op rest' hNoMatch]
+    cases op with
+    | push v => simpa [noIfOp] using ih hRestNoIf
+    | dup => simpa [noIfOp] using ih hRestNoIf
+    | swap => simpa [noIfOp] using ih hRestNoIf
+    | drop => simpa [noIfOp] using ih hRestNoIf
+    | nip => simpa [noIfOp] using ih hRestNoIf
+    | over => simpa [noIfOp] using ih hRestNoIf
+    | rot => simpa [noIfOp] using ih hRestNoIf
+    | tuck => simpa [noIfOp] using ih hRestNoIf
+    | roll d => simpa [noIfOp] using ih hRestNoIf
+    | pick d => simpa [noIfOp] using ih hRestNoIf
+    | pickStruct d => simpa [noIfOp] using ih hRestNoIf
+    | opcode code => simpa [noIfOp] using ih hRestNoIf
+    | placeholder i n => simpa [noIfOp] using ih hRestNoIf
+    | pushCodesepIndex => simpa [noIfOp] using ih hRestNoIf
+    | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
+
+private theorem postFoldOp_id_of_not_ifOp (op : StackOp)
+    (h : ∀ thn els, op ≠ .ifOp thn els) :
+    postFoldOp op = op := by
+  cases op with
+  | ifOp thn els => exact absurd rfl (h thn els)
+  | push v => rfl
+  | dup => rfl
+  | swap => rfl
+  | drop => rfl
+  | nip => rfl
+  | over => rfl
+  | rot => rfl
+  | tuck => rfl
+  | roll d => rfl
+  | pick d => rfl
+  | pickStruct d => rfl
+  | opcode code => rfl
+  | placeholder i n => rfl
+  | pushCodesepIndex => rfl
+
+private theorem postFoldList_eq_of_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → postFoldList ops = ops := by
+  intro ops
+  induction ops with
+  | nil => intro _; rfl
+  | cons op rest ih =>
+    intro hNoIf
+    have hRest : noIfOp rest := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hOp : postFoldOp op = op := by
+      apply postFoldOp_id_of_not_ifOp
+      intro thn els hEq
+      rw [hEq] at hNoIf
+      exact absurd hNoIf (by simp [noIfOp])
+    unfold postFoldList
+    rw [hOp, ih hRest]
+
+theorem peepholePostFold_runOps_eq (ops : List StackOp) (s : StackState)
+    (hNoIf : noIfOp ops) :
+    runOps (peepholePostFold ops) s = runOps ops s := by
+  unfold peepholePostFold
+  rw [postFoldList_eq_of_noIfOp ops hNoIf]
+  have hNoIfAdd : noIfOp (applyPushOneAdd ops) :=
+    applyPushOneAdd_preserves_noIfOp ops hNoIf
+  rw [applyPushOneSub_runOps_eq _ hNoIfAdd s]
+  rw [applyPushOneAdd_runOps_eq ops hNoIf s]
+
 /-! ## Phase 7.9.b — Chain-fold post-pass
 
 The 4-op `applyPushAddPushAdd` / `applyPushAddPushSub` rules added above
@@ -9430,6 +9701,153 @@ Mirrors TS `peephole.ts:268-317` (Roll/Pick depth simplification block)
 which runs inside the TS optimizer's outer fixpoint loop. -/
 def peepholeRollPickFold (ops : List StackOp) : List StackOp :=
   rollPickFixpointFlat 64 (rollPickListTRgo ops [])
+
+/-! ### Phase 7.9.d bounded identity slice
+
+The direct single-op roll/pick rewrites above are byte-level cleanups for
+the producer shape. At the `runOps` layer, `.roll d` and `.pick d` still
+model bytecode-style operations that pop a runtime depth first, so the
+primitive operational equalities require stronger shape hypotheses. This
+bounded slice captures the safe identity case needed by callers whose
+post-chain output contains no foldable low-depth roll/pick op. -/
+
+/-- True when a single op is not one of the five flat roll/pick fold heads. -/
+def rollPickFoldOpNoop : StackOp → Prop
+  | .roll 0 => False
+  | .roll 1 => False
+  | .roll 2 => False
+  | .pick 0 => False
+  | .pick 1 => False
+  | _       => True
+
+/-- True when `applyRollPickFold` has no flat rewrite to perform. -/
+def rollPickFoldFlatNoop (ops : List StackOp) : Prop :=
+  ∀ op, op ∈ ops → rollPickFoldOpNoop op
+
+private theorem rollPickRewriteOne_eq_singleton_of_opNoop
+    (op : StackOp) (h : rollPickFoldOpNoop op) :
+    rollPickRewriteOne op = [op] := by
+  cases op with
+  | push v => rfl
+  | dup => rfl
+  | swap => rfl
+  | drop => rfl
+  | nip => rfl
+  | over => rfl
+  | rot => rfl
+  | tuck => rfl
+  | roll d =>
+      cases d with
+      | zero => exact False.elim h
+      | succ d1 =>
+          cases d1 with
+          | zero => exact False.elim h
+          | succ d2 =>
+              cases d2 with
+              | zero => exact False.elim h
+              | succ _ => rfl
+  | pick d =>
+      cases d with
+      | zero => exact False.elim h
+      | succ d1 =>
+          cases d1 with
+          | zero => exact False.elim h
+          | succ _ => rfl
+  | pickStruct d => rfl
+  | opcode code => rfl
+  | placeholder i n => rfl
+  | pushCodesepIndex => rfl
+  | ifOp thn els => rfl
+
+private theorem applyRollPickFold_eq_self_of_flatNoop :
+    ∀ (ops : List StackOp), rollPickFoldFlatNoop ops →
+        applyRollPickFold ops = ops := by
+  intro ops
+  induction ops with
+  | nil =>
+      intro _
+      rfl
+  | cons op rest ih =>
+      intro hNoop
+      have hOp : rollPickRewriteOne op = [op] :=
+        rollPickRewriteOne_eq_singleton_of_opNoop op
+          (hNoop op (by simp))
+      have hRest : rollPickFoldFlatNoop rest := by
+        intro op' hMem
+        exact hNoop op' (by simp [hMem])
+      unfold applyRollPickFold
+      rw [hOp, ih hRest]
+      simp
+
+private theorem rollPickOp_id_of_not_ifOp (op : StackOp)
+    (h : ∀ thn els, op ≠ .ifOp thn els) :
+    rollPickOp op = op := by
+  cases op with
+  | ifOp thn els => exact absurd rfl (h thn els)
+  | push v => rfl
+  | dup => rfl
+  | swap => rfl
+  | drop => rfl
+  | nip => rfl
+  | over => rfl
+  | rot => rfl
+  | tuck => rfl
+  | roll d => rfl
+  | pick d => rfl
+  | pickStruct d => rfl
+  | opcode code => rfl
+  | placeholder i n => rfl
+  | pushCodesepIndex => rfl
+
+private theorem rollPickListTRgo_eq_of_noIfOp :
+    ∀ (ops : List StackOp) (acc : List StackOp), noIfOp ops →
+        rollPickListTRgo ops acc = acc.reverse ++ ops := by
+  intro ops
+  induction ops with
+  | nil =>
+      intro acc _
+      show rollPickListTRgo [] acc = acc.reverse ++ []
+      unfold rollPickListTRgo
+      simp
+  | cons op rest ih =>
+      intro acc hNoIf
+      have hRest : noIfOp rest := by
+        cases op with
+        | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+        | _ => simpa [noIfOp] using hNoIf
+      have hOpId : rollPickOp op = op := by
+        apply rollPickOp_id_of_not_ifOp
+        intro thn els hEq
+        rw [hEq] at hNoIf
+        exact absurd hNoIf (by simp [noIfOp])
+      show rollPickListTRgo (op :: rest) acc = acc.reverse ++ (op :: rest)
+      unfold rollPickListTRgo
+      rw [hOpId]
+      have ihAcc := ih (op :: acc) hRest
+      rw [ihAcc]
+      simp
+
+private theorem rollPickListTRgo_nil_acc_of_noIfOp
+    (ops : List StackOp) (h : noIfOp ops) :
+    rollPickListTRgo ops [] = ops := by
+  rw [rollPickListTRgo_eq_of_noIfOp ops [] h]
+  simp
+
+theorem peepholeRollPickFold_eq_self_of_noIfOp_flatNoop
+    (ops : List StackOp) (hNoIf : noIfOp ops)
+    (hNoop : rollPickFoldFlatNoop ops) :
+    peepholeRollPickFold ops = ops := by
+  unfold peepholeRollPickFold
+  rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  show rollPickFixpointFlat 64 ops = ops
+  unfold rollPickFixpointFlat
+  exact applyRollPickFold_eq_self_of_flatNoop ops hNoop
+
+theorem peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop
+    (ops : List StackOp) (s : StackState) (hNoIf : noIfOp ops)
+    (hNoop : rollPickFoldFlatNoop ops) :
+    runOps (peepholeRollPickFold ops) s = runOps ops s := by
+  rw [peepholeRollPickFold_eq_self_of_noIfOp_flatNoop ops hNoIf hNoop]
 
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
 
