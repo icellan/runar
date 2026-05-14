@@ -304,6 +304,42 @@ test "addDataOutput produces add_data_output ANF node" {
     try std.testing.expect(result.script_hex.len > 0);
 }
 
+test "addDataOutput emits the raw-output wire-shape opcodes in compiled hex" {
+    // GAP-m3: a dedicated codegen op-shape pin for the addDataOutput
+    // intrinsic. The conformance suite gates cross-tier byte parity, but
+    // this test catches a wrong-opcode regression in the Zig stack lowerer
+    // locally. add_data_output lowers to the same wire shape as
+    // add_raw_output: OP_SIZE + varint + OP_CAT + 8-byte LE amount via
+    // OP_NUM2BIN + OP_CAT (mirrors Go's TestStack_AddDataOutput_WireShape).
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const DataLogger = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\
+        \\    count: i64 = 0,
+        \\
+        \\    pub fn init(count: i64) DataLogger {
+        \\        return .{ .count = count };
+        \\    }
+        \\
+        \\    pub fn log(self: *DataLogger, note: runar.ByteString) void {
+        \\        self.count = self.count + 1;
+        \\        self.addDataOutput(0, note);
+        \\    }
+        \\};
+    ;
+
+    const hex = try compileSourceToHex(std.testing.allocator, source, "DataLogger.runar.zig");
+    defer std.testing.allocator.free(hex);
+
+    // The data-output serialization building blocks must be present:
+    //   OP_SIZE (0x82), OP_CAT (0x7e), OP_NUM2BIN (0x80).
+    try std.testing.expect(hexContainsOpcode(hex, "82")); // OP_SIZE — script-len prefix
+    try std.testing.expect(hexContainsOpcode(hex, "7e")); // OP_CAT — output assembly
+    try std.testing.expect(hexContainsOpcode(hex, "80")); // OP_NUM2BIN — 8-byte LE satoshis
+}
+
 test "addDataOutput without state mutation still emits continuation hash" {
     // A stateful method that does NOT mutate state but declares a data
     // output must still trigger the continuation-hash machinery

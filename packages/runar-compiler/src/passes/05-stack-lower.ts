@@ -21,6 +21,7 @@ import type {
 } from '../ir/index.js';
 import { emitVerifySLHDSA } from './slh-dsa-codegen.js';
 import { emitVerifyWOTS } from './wots-codegen.js';
+import { emitVerifyRabinSig } from './rabin-codegen.js';
 import {
   emitEcAdd, emitEcMul, emitEcMulGen, emitEcNegate,
   emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
@@ -3983,18 +3984,10 @@ class LoweringContext {
    * Lower verifyRabinSig(msg, sig, padding, pubKey) to Script.
    *
    * Rabin signature verification checks: (sig^2 + padding) mod pubKey == SHA256(msg)
+   * The 10-opcode emission delegates to rabin-codegen.ts.
    *
-   * Stack before: <msg(3)> <sig(2)> <padding(1)> <pubKey(0)>
-   * Script:
-   *   OP_SWAP                     -- msg sig pubKey padding
-   *   OP_ROT                      -- msg pubKey padding sig  (sig on top for squaring)
-   *   OP_DUP OP_MUL               -- msg pubKey padding sig^2
-   *   OP_ADD                      -- msg pubKey (sig^2+padding)
-   *   OP_SWAP                     -- msg (sig^2+padding) pubKey
-   *   OP_MOD                      -- msg ((sig^2+padding) mod pubKey)
-   *   OP_SWAP                     -- ((sig^2+padding) mod pubKey) msg
-   *   OP_SHA256                   -- ((sig^2+padding) mod pubKey) SHA256(msg)
-   *   OP_EQUAL                    -- result
+   * Stack before (bottom→top): msg sig padding pubKey
+   * Stack after: <boolean>
    */
   private lowerVerifyRabinSig(
     bindingName: string,
@@ -4008,39 +4001,14 @@ class LoweringContext {
 
     // Bring all 4 args to the top: msg, sig, padding, pubKey
     for (const arg of args) {
-      const isLast = this.isLastUse(arg, bindingIndex, lastUses);
-      this.bringToTop(arg, isLast);
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
     }
 
     // Pop all 4 args from stack map
-    for (let i = 0; i < 4; i++) {
-      this.stackMap.pop();
-    }
+    for (let i = 0; i < 4; i++) this.stackMap.pop();
 
-    // Stack bottom->top: msg(3) sig(2) padding(1) pubKey(0)
-    // Compute: (sig^2 + padding) mod pubKey == SHA256(msg)
+    emitVerifyRabinSig((op) => this.emitOp(op));
 
-    // Rearrange so sig is on top for squaring
-    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });  // msg sig pubKey padding
-    this.emitOp({ op: 'opcode', code: 'OP_ROT' });   // msg pubKey padding sig
-
-    // sig^2
-    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-    this.emitOp({ op: 'opcode', code: 'OP_MUL' });   // msg pubKey padding sig^2
-
-    // sig^2 + padding
-    this.emitOp({ op: 'opcode', code: 'OP_ADD' });   // msg pubKey (sig^2+padding)
-
-    // (sig^2 + padding) mod pubKey
-    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });  // msg (sig^2+padding) pubKey
-    this.emitOp({ op: 'opcode', code: 'OP_MOD' });   // msg ((sig^2+padding) mod pubKey)
-
-    // SHA256(msg) and compare
-    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });  // ((sig^2+padding) mod pubKey) msg
-    this.emitOp({ op: 'opcode', code: 'OP_SHA256' });
-    this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
-
-    // Result is on top
     this.stackMap.push(bindingName);
     this.trackDepth();
   }

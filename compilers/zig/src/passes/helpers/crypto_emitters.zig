@@ -1,5 +1,6 @@
 const std = @import("std");
 const registry = @import("crypto_builtins.zig");
+const rabin_emitter = @import("rabin_emitter.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -64,17 +65,11 @@ pub fn appendBuiltinInstructions(
     try list.appendSlice(allocator, builder.instructions.items);
 }
 
+/// Rabin signature verification — delegates to the standalone
+/// `rabin_emitter.zig` module so the 10-opcode sequence is owned in one place
+/// (mirrors the standalone Rabin modules in the other compiler tiers).
 pub fn appendVerifyRabinSig(builder: *Builder) !void {
-    try builder.emitOp("OP_SWAP");
-    try builder.emitOp("OP_ROT");
-    try builder.emitOp("OP_DUP");
-    try builder.emitOp("OP_MUL");
-    try builder.emitOp("OP_ADD");
-    try builder.emitOp("OP_SWAP");
-    try builder.emitOp("OP_MOD");
-    try builder.emitOp("OP_SWAP");
-    try builder.emitOp("OP_SHA256");
-    try builder.emitOp("OP_EQUAL");
+    try rabin_emitter.append(&builder.instructions, builder.allocator);
 }
 
 pub fn appendEcModReduce(builder: *Builder) !void {

@@ -3373,29 +3373,23 @@ module RunarCompiler::Codegen
       _track_depth
     end
 
+    # Lower verifyRabinSig(msg, sig, padding, pubKey).
+    # The 10-opcode emission delegates to the standalone Rabin module.
+    #
+    # Stack input (bottom->top): msg sig padding pubKey -> Stack output: bool
     def _lower_verify_rabin_sig(binding_name, args, binding_index, last_uses)
       raise "verifyRabinSig requires 4 arguments" if args.length < 4
 
-      msg, sig, padding, pub_key = args[0], args[1], args[2], args[3]
+      require_relative "rabin"
 
-      bring_to_top(msg, _is_last_use(msg, binding_index, last_uses))
-      bring_to_top(sig, _is_last_use(sig, binding_index, last_uses))
-      bring_to_top(padding, _is_last_use(padding, binding_index, last_uses))
-      bring_to_top(pub_key, _is_last_use(pub_key, binding_index, last_uses))
+      args.each do |arg|
+        bring_to_top(arg, _is_last_use(arg, binding_index, last_uses))
+      end
 
       4.times { @sm.pop }
 
-      # Rabin sig verification opcode sequence
-      emit_opcode("OP_SWAP")
-      emit_opcode("OP_ROT")
-      emit_opcode("OP_DUP")
-      emit_opcode("OP_MUL")
-      emit_opcode("OP_ADD")
-      emit_opcode("OP_SWAP")
-      emit_opcode("OP_MOD")
-      emit_opcode("OP_SWAP")
-      emit_opcode("OP_SHA256")
-      emit_opcode("OP_EQUAL")
+      emit_fn = ->(op) { emit_op(op) }
+      RunarCompiler::Codegen::Rabin.emit_verify_rabin_sig(emit_fn)
 
       @sm.push(binding_name)
       _track_depth

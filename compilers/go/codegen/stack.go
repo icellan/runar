@@ -3349,27 +3349,20 @@ func (ctx *loweringContext) lowerSubstr(bindingName string, args []string, bindi
 	ctx.trackDepth()
 }
 
+// lowerVerifyRabinSig lowers verifyRabinSig(msg, sig, padding, pubKey).
+// The 10-opcode emission delegates to rabin.go.
+//
+// Stack input (bottom→top): msg sig padding pubKey
+// Stack output:             bool
 func (ctx *loweringContext) lowerVerifyRabinSig(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	if len(args) < 4 {
 		panic("verifyRabinSig requires 4 arguments")
 	}
 
-	// Stack input: <msg> <sig> <padding> <pubKey>
-	// Computation: (sig^2 + padding) mod pubKey == SHA256(msg)
-	// Opcode sequence: OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
-	msg, sig, padding, pubKey := args[0], args[1], args[2], args[3]
-
-	msgIsLast := ctx.isLastUse(msg, bindingIndex, lastUses)
-	ctx.bringToTop(msg, msgIsLast)
-
-	sigIsLast := ctx.isLastUse(sig, bindingIndex, lastUses)
-	ctx.bringToTop(sig, sigIsLast)
-
-	paddingIsLast := ctx.isLastUse(padding, bindingIndex, lastUses)
-	ctx.bringToTop(padding, paddingIsLast)
-
-	pubKeyIsLast := ctx.isLastUse(pubKey, bindingIndex, lastUses)
-	ctx.bringToTop(pubKey, pubKeyIsLast)
+	// Bring all 4 args to the top in argument order: msg sig padding pubKey
+	for _, arg := range args {
+		ctx.bringToTop(arg, ctx.isLastUse(arg, bindingIndex, lastUses))
+	}
 
 	// Pop all 4 args from stack map
 	ctx.sm.pop()
@@ -3377,18 +3370,7 @@ func (ctx *loweringContext) lowerVerifyRabinSig(bindingName string, args []strin
 	ctx.sm.pop()
 	ctx.sm.pop()
 
-	// Emit the Rabin signature verification opcode sequence
-	// Stack: msg(3) sig(2) padding(1) pubKey(0)
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})  // msg sig pubKey padding
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROT"})   // msg pubKey padding sig
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MUL"})   // msg pubKey padding sig^2
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ADD"})   // msg pubKey (sig^2+padding)
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})  // msg (sig^2+padding) pubKey
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})   // msg ((sig^2+padding) mod pubKey)
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})  // ((sig^2+padding) mod pubKey) msg
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SHA256"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	EmitVerifyRabinSig(func(op StackOp) { ctx.emitOp(op) })
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()

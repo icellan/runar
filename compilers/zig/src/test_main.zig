@@ -21,6 +21,9 @@ test {
     _ = @import("passes/constant_fold.zig");
     _ = @import("passes/ec_optimizer.zig");
     _ = @import("tests/e2e.zig");
+    _ = @import("tests/math_builtins.zig");
+    _ = @import("tests/hash_builtins.zig");
+    _ = @import("tests/language_constructs.zig");
     _ = @import("compiler_api.zig");
     _ = @import("passes/helpers/koalabear_emitters.zig");
     _ = @import("passes/helpers/poseidon2_koalabear.zig");
@@ -33,6 +36,7 @@ test {
     _ = @import("passes/helpers/ec_emitters.zig");
     _ = @import("passes/helpers/pq_emitters.zig");
     _ = @import("passes/helpers/crypto_emitters.zig");
+    _ = @import("passes/helpers/rabin_emitter.zig");
     _ = @import("passes/helpers/crypto_builtins.zig");
     _ = @import("passes/helpers/merkle_emitters.zig");
     _ = @import("passes/helpers/babybear_emitters.zig");

@@ -2921,38 +2921,24 @@ class _LoweringContext:
 
     def _lower_verify_rabin_sig(self, binding_name: str, args: list[str],
                                 binding_index: int, last_uses: dict[str, int]) -> None:
+        """Lower verifyRabinSig(msg, sig, padding, pubKey).
+
+        The 10-opcode emission delegates to ``codegen.rabin``.
+        Stack input (bottom->top): msg sig padding pubKey -> Stack output: bool
+        """
         if len(args) < 4:
             raise RuntimeError("verifyRabinSig requires 4 arguments")
 
-        msg, sig, padding, pub_key = args[0], args[1], args[2], args[3]
-
-        msg_is_last = self._is_last_use(msg, binding_index, last_uses)
-        self.bring_to_top(msg, msg_is_last)
-
-        sig_is_last = self._is_last_use(sig, binding_index, last_uses)
-        self.bring_to_top(sig, sig_is_last)
-
-        padding_is_last = self._is_last_use(padding, binding_index, last_uses)
-        self.bring_to_top(padding, padding_is_last)
-
-        pub_key_is_last = self._is_last_use(pub_key, binding_index, last_uses)
-        self.bring_to_top(pub_key, pub_key_is_last)
+        # Bring all 4 args to the top in argument order: msg sig padding pubKey
+        for arg in args:
+            self.bring_to_top(arg, self._is_last_use(arg, binding_index, last_uses))
 
         # Pop all 4 args
         for _ in range(4):
             self.sm.pop()
 
-        # Rabin sig verification opcode sequence
-        self.emit_op(StackOp(op="opcode", code="OP_SWAP"))
-        self.emit_op(StackOp(op="opcode", code="OP_ROT"))
-        self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-        self.emit_op(StackOp(op="opcode", code="OP_MUL"))
-        self.emit_op(StackOp(op="opcode", code="OP_ADD"))
-        self.emit_op(StackOp(op="opcode", code="OP_SWAP"))
-        self.emit_op(StackOp(op="opcode", code="OP_MOD"))
-        self.emit_op(StackOp(op="opcode", code="OP_SWAP"))
-        self.emit_op(StackOp(op="opcode", code="OP_SHA256"))
-        self.emit_op(StackOp(op="opcode", code="OP_EQUAL"))
+        from runar_compiler.codegen.rabin import emit_verify_rabin_sig
+        emit_verify_rabin_sig(lambda op: self.emit_op(op))
 
         self.sm.push(binding_name)
         self._track_depth()

@@ -1,15 +1,34 @@
 # frozen_string_literal: true
 
 require_relative 'codegen_helper'
+require 'runar_compiler/codegen/rabin'
 
-# Unit-vector test for Rabin signature verification codegen — the
-# `verifyRabinSig` builtin is consumed by the Ruby stack-lower module
-# (no dedicated rabin.rb codegen file exists; it lowers via the generic
-# bigint stack ops + an inline modular-arithmetic sequence). These
-# assertions lock down the emitted-script shape.
+# Unit-vector test for Rabin signature verification codegen. The
+# `verifyRabinSig` builtin lowers via the standalone
+# `RunarCompiler::Codegen::Rabin` module (extracted from stack.rb under
+# GAP-M1). These assertions lock down both the extracted module's
+# byte-frozen opcode sequence and the emitted-script shape.
 
 class TestRabinCodegen < Minitest::Test
   include CodegenTestHelpers
+
+  # Byte-frozen golden: the fixed 10-opcode Rabin verification sequence
+  # (sig^2 + padding) mod pubKey == SHA256(msg). Mirrored across all 7 tiers.
+  RABIN_GOLDEN = %w[
+    OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD
+    OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+  ].freeze
+
+  def test_rabin_module_emits_byte_frozen_golden
+    ops = []
+    RunarCompiler::Codegen::Rabin.emit_verify_rabin_sig(->(op) { ops << op })
+
+    assert_equal RABIN_GOLDEN.length, ops.length
+    ops.each_with_index do |op, i|
+      assert_equal 'opcode', op[:op], "op #{i}: expected opcode"
+      assert_equal RABIN_GOLDEN[i], op[:code], "op #{i}"
+    end
+  end
 
   def test_verify_rabin_sig_emits_modular_check
     source = <<~TS

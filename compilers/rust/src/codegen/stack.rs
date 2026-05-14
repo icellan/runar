@@ -3417,6 +3417,11 @@ impl LoweringContext {
         self.sm.push(binding_name);
         self.track_depth();
     }
+    /// Lower verifyRabinSig(msg, sig, padding, pubKey).
+    /// The 10-opcode emission delegates to `super::rabin`.
+    ///
+    /// Stack input (bottom->top): msg sig padding pubKey
+    /// Stack output:              bool
     fn lower_verify_rabin_sig(
         &mut self,
         binding_name: &str,
@@ -3426,25 +3431,11 @@ impl LoweringContext {
     ) {
         assert!(args.len() >= 4, "verifyRabinSig requires 4 arguments");
 
-        // Stack input: <msg> <sig> <padding> <pubKey>
-        // Computation: (sig^2 + padding) mod pubKey == SHA256(msg)
-        // Opcode sequence: OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
-        let msg = &args[0];
-        let sig = &args[1];
-        let padding = &args[2];
-        let pub_key = &args[3];
-
-        let msg_is_last = self.is_last_use(msg, binding_index, last_uses);
-        self.bring_to_top(msg, msg_is_last);
-
-        let sig_is_last = self.is_last_use(sig, binding_index, last_uses);
-        self.bring_to_top(sig, sig_is_last);
-
-        let padding_is_last = self.is_last_use(padding, binding_index, last_uses);
-        self.bring_to_top(padding, padding_is_last);
-
-        let pub_key_is_last = self.is_last_use(pub_key, binding_index, last_uses);
-        self.bring_to_top(pub_key, pub_key_is_last);
+        // Bring all 4 args to the top in argument order: msg sig padding pubKey
+        for arg in args {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
 
         // Pop all 4 args from stack map
         self.sm.pop();
@@ -3452,18 +3443,7 @@ impl LoweringContext {
         self.sm.pop();
         self.sm.pop();
 
-        // Emit the Rabin signature verification opcode sequence
-        // Stack: msg(3) sig(2) padding(1) pubKey(0)
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));  // msg sig pubKey padding
-        self.emit_op(StackOp::Opcode("OP_ROT".to_string()));   // msg pubKey padding sig
-        self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_MUL".to_string()));   // msg pubKey padding sig^2
-        self.emit_op(StackOp::Opcode("OP_ADD".to_string()));   // msg pubKey (sig^2+padding)
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));  // msg (sig^2+padding) pubKey
-        self.emit_op(StackOp::Opcode("OP_MOD".to_string()));   // msg ((sig^2+padding) mod pubKey)
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));  // ((sig^2+padding) mod pubKey) msg
-        self.emit_op(StackOp::Opcode("OP_SHA256".to_string()));
-        self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
+        super::rabin::emit_verify_rabin_sig(&mut |op| self.ops.push(op));
 
         self.sm.push(binding_name);
         self.track_depth();

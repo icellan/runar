@@ -18,6 +18,7 @@ pub mod opcodes;
 pub mod optimizer;
 pub mod poseidon2_koalabear;
 pub mod poseidon2_merkle;
+pub mod rabin;
 pub mod sha256;
 pub mod slh_dsa;
 pub mod stack;

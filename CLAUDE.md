@@ -242,6 +242,16 @@ void testCompile() throws Exception {
 
 The `CompileCheck` / `compile_check` functions run the contract through the Rúnar frontend (parse → validate → typecheck) to verify it's valid Rúnar that will compile to Bitcoin Script.
 
+### Off-chain Script VM (`ScriptVM`)
+
+`ScriptVM` executes raw Bitcoin Script bytes off-chain (one-shot `execute` / `executeHex` plus a step-mode debugger API). It is **not a custom VM** in any tier — each tier wraps an upstream BSV SDK's script interpreter:
+
+- **TypeScript** — `packages/runar-testing/src/vm/script-vm.ts`. Full execute + step API. Used by `runar-cli debug`.
+- **Go** — `packages/runar-go/script_vm.go`. Wraps `github.com/bsv-blockchain/go-sdk/script/interpreter` via its `Debugger` hook. Full execute + step API.
+- **Rust** — `packages/runar-rs/src/sdk/script_vm.rs`. Wraps `bsv-sdk`'s `Spend`. **Execute-only**: the upstream `Spend` keeps its stack / program-counter `pub(crate)`, so per-opcode stepping is not observable from a downstream crate. Documented divergence.
+- **Python** — `packages/runar-py/runar/sdk/script_vm.py`. Wraps the bsv-blockchain `bsv-sdk` (`bsv.script.spend.Spend`). Full execute + step API. Requires the optional `bsv-sdk` dependency — install with `pip install runar[script-vm]`; the module imports lazily and ScriptVM tests `importorskip` it.
+- **Zig, Ruby, Java** — **no ScriptVM.** No canonical upstream BSV SDK script interpreter is usable: there is no `bsv-blockchain` Ruby or Java SDK, and the Zig `bsvz` library's `script/engine.zig` does not compile under the repo's Zig 0.16 toolchain (`unreachable else prong` at `engine.zig:1172`) — and `packages/runar-zig/zig-pkg/` is a gitignored fetch cache, not patchable in-repo. Per project policy these tiers do **not** ship a hand-written Script VM; off-chain contract verification is covered instead by the ANF interpreter + (Java) `ContractSimulator`, with cross-tier byte-level correctness gated by the conformance suite.
+
 ### Deployment SDK (7 languages)
 
 All seven languages have equivalent deployment SDKs for interacting with compiled contracts on-chain:

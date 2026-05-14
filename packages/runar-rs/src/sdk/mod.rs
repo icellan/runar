@@ -12,6 +12,7 @@ pub mod oppushtx;
 pub mod anf_interpreter;
 pub mod codegen;
 pub mod script_utils;
+pub mod script_vm;
 pub mod token_wallet;
 pub mod wallet;
 pub mod woc_provider;
@@ -30,6 +31,7 @@ pub use types::PreparedCall;
 pub use oppushtx::compute_op_push_tx;
 pub use codegen::generate_rust;
 pub use script_utils::{extract_constructor_args, matches_artifact};
+pub use script_vm::{ScriptVm, VmOptions, VmResult};
 pub use woc_provider::WhatsOnChainProvider;
 pub use token_wallet::TokenWallet;
 pub use wallet::{

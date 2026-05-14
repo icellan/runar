@@ -2563,6 +2563,100 @@ test "P2PKH contract full lowering" {
     }
 }
 
+test "stateful contract injects checkPreimage at public method entry" {
+    // GAP-m6: a public method of a StatefulSmartContract must have the
+    // compiler auto-inject `checkPreimage(txPreimage)` as the first three
+    // bindings: load_param("txPreimage") -> check_preimage -> assert.
+    const allocator = std.testing.allocator;
+
+    // contract Counter extends StatefulSmartContract {
+    //   count: bigint;                       // mutable state
+    //   constructor(count: bigint) { super(count); }
+    //   public touch() { assert(1); }
+    // }
+    const props = try allocator.alloc(PropertyNode, 1);
+    defer allocator.free(props);
+    props[0] = .{ .name = "count", .type_info = .bigint, .readonly = false };
+
+    const ctor_params = try allocator.alloc(ParamNode, 1);
+    defer allocator.free(ctor_params);
+    ctor_params[0] = .{ .name = "count", .type_info = .bigint, .type_name = "bigint" };
+
+    const ctor_assignments = try allocator.alloc(types.AssignmentNode, 1);
+    defer allocator.free(ctor_assignments);
+    ctor_assignments[0] = .{ .target = "count", .value = .{ .identifier = "count" } };
+
+    // Method body: assert(1) — a trivial public spend path. The body content
+    // is irrelevant; what matters is that checkPreimage is injected ahead of it.
+    const assert_args = try allocator.alloc(Expression, 1);
+    defer allocator.free(assert_args);
+    assert_args[0] = .{ .literal_int = 1 };
+    const assert_call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(assert_call);
+    assert_call.* = .{ .callee = "assert", .args = assert_args };
+
+    const body = try allocator.alloc(Statement, 1);
+    defer allocator.free(body);
+    body[0] = .{ .expr_stmt = .{ .call = assert_call } };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "touch", .is_public = true, .params = &.{}, .body = body };
+
+    const contract = ContractNode{
+        .name = "Counter",
+        .parent_class = .stateful_smart_contract,
+        .properties = props,
+        .constructor = .{ .params = ctor_params, .super_args = &.{}, .assignments = ctor_assignments },
+        .methods = methods,
+    };
+
+    const program = try lowerToANF(allocator, contract);
+    defer {
+        for (program.methods) |m| {
+            for (m.bindings) |b| {
+                if (b.name.len >= 2 and b.name[0] == 't') allocator.free(b.name);
+                switch (b.value) {
+                    .call => |c| if (c.args.len > 0) allocator.free(c.args),
+                    else => {},
+                }
+            }
+            if (m.bindings.len > 0) allocator.free(m.bindings);
+        }
+        // The public stateful method (`touch`, index 1) has an augmented
+        // params slice freshly allocated by lowerMethods (original params +
+        // implicit txPreimage / change-output params). The constructor's
+        // params alias `contract.constructor.params` and must not be freed here.
+        allocator.free(program.methods[1].params);
+        allocator.free(program.methods);
+        allocator.free(program.properties);
+    }
+
+    // methods = [constructor, touch]
+    try std.testing.expectEqual(@as(usize, 2), program.methods.len);
+    try std.testing.expectEqualStrings("touch", program.methods[1].name);
+    try std.testing.expect(program.methods[1].is_public);
+
+    const touch_bindings = program.methods[1].bindings;
+    try std.testing.expect(touch_bindings.len >= 3);
+
+    // Binding 0: load_param("txPreimage")
+    switch (touch_bindings[0].value) {
+        .load_param => |lp| try std.testing.expectEqualStrings("txPreimage", lp.name),
+        else => return error.TestExpectedEqual,
+    }
+    // Binding 1: check_preimage over that param
+    switch (touch_bindings[1].value) {
+        .check_preimage => |cp| try std.testing.expectEqualStrings(touch_bindings[0].name, cp.preimage),
+        else => return error.TestExpectedEqual,
+    }
+    // Binding 2: assert over the check_preimage result
+    switch (touch_bindings[2].value) {
+        .assert => |a| try std.testing.expectEqualStrings(touch_bindings[1].name, a.value),
+        else => return error.TestExpectedEqual,
+    }
+}
+
 test "sub_context shares counter" {
     const allocator = std.testing.allocator;
     var ctx = LowerCtx.init(allocator, .{
