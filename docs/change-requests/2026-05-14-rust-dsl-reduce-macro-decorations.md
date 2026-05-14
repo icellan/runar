@@ -14,9 +14,16 @@
 ### Tracking issue
 
 - Open a single **GitHub issue** titled along the lines of: *Rust DSL: remove redundant `#[methods]` / `#[public]` decorations*.
-- Paste or link **this document** (`docs/change-requests/2026-05-14-rust-dsl-reduce-macro-decorations.md`) in the issue description as the authoritative proposal.
-- The **PR that adds this document** should reference that issue (`Fixes #…` / `Refs #…` per repo convention).
-- **All subsequent implementation PRs** should reference the **same issue** so design, approval, and delivery stay traceable.
+  - **This initiative is tracked at [issue #37](https://github.com/icellan/runar/issues/37).**
+
+### Two-phase pull requests on the **same issue**
+
+| Phase | Typical PR | Contents |
+|-------|-----------|----------|
+| **A — Documentation** | e.g. [PR #38](https://github.com/icellan/runar/pull/38) | Adds **`docs/change-requests/*.md`** only. **Refs** the issue (#37); merge + owner approval **authorizes** phase B |
+| **B — Implementation** | (future) | Parser, corpus, macros, handbook updates. **Refs** issue #37; closes issue when behaviour is landed (or splits follow-ups) |
+
+Do **not** close the tracking issue until phase B completes (unless owners agree otherwise).
 
 ### Hard blocker
 

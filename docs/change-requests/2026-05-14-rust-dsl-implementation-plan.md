@@ -3,6 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Parent change request** | [`2026-05-14-rust-dsl-reduce-macro-decorations.md`](./2026-05-14-rust-dsl-reduce-macro-decorations.md) |
+| **Tracking issue** | [icellan/runar#37](https://github.com/icellan/runar/issues/37) |
 | **Status** | Ready to execute after **repository owner approval** on the tracking issue |
 | **Role** | Product architecture — phased delivery plan for engineering |
 
