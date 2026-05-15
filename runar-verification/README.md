@@ -12,10 +12,10 @@ pipeline. The package is useful in two roles:
 
 | Area | Status |
 |---|---:|
-| Conformance fixtures discovered | 49/49 |
-| ANF parse + well-formedness | 49/49 |
-| ANF JSON round-trip | 49/49 |
-| Default byte-exact gate | 49/49 fixtures |
+| Conformance fixtures discovered (Lean-recognised) | 49/50 |
+| ANF parse + well-formedness | 49/50 |
+| ANF JSON round-trip | 49/50 |
+| Default byte-exact gate (`pipelineGolden`) | 49/49 byte-exact |
 | Crypto-heavy fixtures | 15/49 stored Lean-produced constants; explicit pending-assumption bucket |
 | Full/sharded byte-exact target | live `cryptoAxiomPending` bucket regeneration |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
@@ -23,13 +23,26 @@ pipeline. The package is useful in two roles:
 | Opaque executable defaults | 0 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
+| End-to-end capstone (structural-const fragment) | `Pipeline.compileSafe_single_public_observational_correct_unconditional` |
 
-Default `pipelineGolden` is the fast gate and currently checks 49/49
-fixtures byte-exact. The 15 crypto-heavy fixtures are counted only
-through stored Lean-produced constants, not by comparing
-`expected-script.hex` to itself. They remain visible as the
-`cryptoAxiomPending` bucket because their semantic proof obligations
-still depend on the crypto assumptions listed in `TRUST_MANIFEST.md`.
+Default `pipelineGolden` is the fast gate and currently reports 49/49
+fixtures byte-exact (34 baseline + 15 stored crypto-pending constants).
+The 15 crypto-heavy fixtures are counted only through stored
+Lean-produced constants, not by comparing `expected-script.hex` to
+itself. They remain visible as the `cryptoAxiomPending` bucket because
+their semantic proof obligations still depend on the crypto assumptions
+listed in `TRUST_MANIFEST.md`.
+
+`conformance/tests/` currently contains 50 fixtures rather than 49
+because of an unrelated concurrent fixture
+(`conformance/tests/asm-raw-script/`) added outside this verification
+directory; it uses a new `raw_script` ANF kind that the Lean ANF loader
+does not yet recognise. `goldenLoad` and `roundtrip` therefore report
+49/50 today (1 parse failure on `asm-raw-script`). `pipelineGolden`
+silently drops the unparseable fixture from its discovery loop and
+still reports 49/49 byte-exact for the 49 fixtures the Lean loader does
+recognise. The Lean proof gate (`scripts/lean-verify.sh` +
+`scripts/check-tcb-drift.sh`) is unaffected by this concurrent change.
 
 ## Commands
 
@@ -81,14 +94,50 @@ into place.
 
 ## Proof Status
 
-The citable end-to-end theorem is not yet complete for deployed Script
-bytes. The current proof surface is deliberately split:
+The citable end-to-end theorem
+`Pipeline.compileSafe_single_public_observational_correct_unconditional`
+is complete for the **structural-const fragment** of
+single-public-method programs. It composes:
+
+* **M2** (`Pipeline.lower_observational_correct`) — `successAgrees`
+  between the ANF evaluator and `runMethod (Lower.lower p)` for bodies
+  where every binding is a literal load
+  (`Agrees.structuralConstBody m.body`), under genuine domain
+  predicates only.
+* **M3** (`Pipeline.peephole_observational_correct_modulo_runMethod_eq`)
+  — the full `peepholeProgram` pipeline is `runMethod`-preserving from
+  `Peephole.noIfOp` / `peepholePassAllFlat_preconditions` /
+  `wellTypedRun` / `rollPickDepthOK`; the caller no longer supplies any
+  "fold preserves runOps" hypothesis.
+* **M4** (`Pipeline.compileSafe_single_public_runOps_eq` and the
+  patched-emit round-trip
+  `Pipeline.patched_bytes_sound_with_if`) — the slot-aware deployed
+  bytes round-trip through `Parse.parseScript` to `runOps stackM.ops`
+  from `Parse.AreRunarEmittableWithIf stackM.ops` alone.
+
+The capstone's hypotheses are all genuine domain or structural
+predicates — `WF.ANF`, the single-public-method shape, fragment
+membership (`structuralConstBody`), the M3 structural preconditions,
+and `Parse.AreRunarEmittable stackM.ops`. None restate the conclusion.
+The fragment boundary is the literal-load substrate: `binOp`,
+`unaryOp`, `assert`, reference loads, `methodCall`, crypto, `ifVal`,
+`loop`, and output-construction bodies lie outside it. Widening the
+fragment to `structuralCopyBody` (copied-reference loads) is the next
+step and currently requires lifting the Stage C `agreesTagged` /
+`ChainRel` witnesses to unconditional `successAgrees`.
+
+The deprecated skeletons `compile_observational_correct_skeleton` and
+`compile_observational_correct_bytes_skeleton` remain as
+`@[deprecated]` aliases re-exporting the capstone for backwards
+compatibility.
+
+The current proof surface is deliberately split:
 
 * real proved infrastructure for parsing, well-formedness, many
   peephole rules, and the `SimpleANF` proof substrate;
-* skeleton theorem names in `Pipeline.lean` for lower/peephole/emit
-  composition points whose hypotheses still carry the load-bearing
-  obligations;
+* `lower_observational_correct_skeleton` is retained for bodies
+  outside the discharged fragment and still carries a caller-supplied
+  `hSimulates` hypothesis for those cases;
 * concrete Stack VM and ANF evaluator semantics for Script-number
   conversions, bytewise operations, `OP_SPLIT`, and named `OP_PICK` /
   `OP_ROLL` dispatch used by Rúnar lowering, plus ANF evaluator support
@@ -127,12 +176,14 @@ bytes. The current proof surface is deliberately split:
   records constructor slots, emits `pushCodesepIndex` from final script
   byte offsets, and rejects branch-ambiguous code-separator joins.
   `Pipeline.compileSafeWithCodeSepPatches_single_public_observational_correct`
-  threads those emitted bytes through the single-public-method theorem
-  under the remaining patched-byte soundness hypothesis; a restricted
-  companion discharges that hypothesis when patched bytes equal
-  `emitFast` bytes and the existing `AreRunarEmittableWithIf` parser path
-  applies; the empty-ops and flat no-patch-site single-public subsets
-  prove concrete byte-equality routes into that theorem;
+  now (M4) takes `Parse.AreRunarEmittableWithIf stackM.ops` directly as
+  a structural precondition — the patched-byte soundness hypothesis is
+  gone. The patched-emit round-trip is proved internally by
+  `Pipeline.patched_bytes_sound_with_if`, which composes the no-patch-site
+  byte-equality lemmas in `Script.Emit` /  `Script.EmitCorrect` with the
+  `AreRunarEmittableWithIf → opsHaveNoPatchSites` bridge. The legacy
+  `_of_emitFast_bytes` companion remains as a backwards-compatible
+  re-export with a now-redundant `hBytes` hypothesis;
 * parser-backed emit/runOps composition for flat `RunarEmittable` method
   bodies, recursive `RunarEmittableWithIf` bodies with nested structural
   IF frames, and a normalized push predicate whose theorem parses emitted
@@ -150,7 +201,9 @@ bytes. The current proof surface is deliberately split:
 The proof-facing compiler entrypoint is `Pipeline.compileSafe`, which
 rejects `OP_RUNAR_*` sentinel opcodes and opcodes unknown to the emitter
 before producing bytes. Legacy `compile` remains total for older golden
-and proof scaffolding code.
+and proof scaffolding code. The end-to-end capstone
+`Pipeline.compileSafe_single_public_observational_correct_unconditional`
+is stated over `compileSafe` bytes for the structural-const fragment.
 
 ## Active References
 

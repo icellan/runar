@@ -565,5 +565,100 @@ theorem parseScript_emitOpsFast_singleton_ifOp_some_cons_runOps_eq
       = RunarVerification.Stack.Eval.runOps [.ifOp thn (some (elsHead :: elsTail))] s := by
   rw [parseScript_emitOpsFast_singleton_ifOp_some_cons_round_trip thn elsHead elsTail hThn hEls]
 
+/-! ## Bridge: `RunarEmittableWithIf` ops have no patch sites
+
+The `Parse.RunarEmittableWithIf` predicate (mutual with
+`Parse.AreRunarEmittableWithIf`) carves out the op subset whose bytes
+the parser recovers exactly. Every op shape in that predicate is also a
+non-patch-site shape — `RunarEmittable` admits only the short-form
+stack ops, `roll d` / `pick d` for `d ∈ [1..16]`, and `.opcode name`
+restricted to `isAllowedOpcodeName`, none of which include
+`.placeholder`, `.pushCodesepIndex`, or `.opcode "OP_CODESEPARATOR"`.
+
+This bridge lemma lets the M4 patched-emit byte equality discharge
+its `opsHaveNoPatchSites` precondition directly from
+`AreRunarEmittableWithIf`. -/
+
+private theorem stackOpHasNoPatchSites_of_RunarEmittable
+    (op : StackOp) (h : Parse.RunarEmittable op) :
+    stackOpHasNoPatchSites op = true := by
+  cases h with
+  | dup => rfl
+  | swap => rfl
+  | nip => rfl
+  | over => rfl
+  | rot => rfl
+  | tuck => rfl
+  | drop => rfl
+  | roll d _ => rfl
+  | pick d _ => rfl
+  | opcode name hAllow =>
+      -- `isAllowedOpcodeName name = true` is a 14-way Bool disjunction;
+      -- none of those literals is "OP_CODESEPARATOR", so
+      -- `stackOpHasNoPatchSites (.opcode name) = true`.
+      by_cases hCs : name = "OP_CODESEPARATOR"
+      · subst hCs
+        simp [Parse.isAllowedOpcodeName] at hAllow
+      · unfold stackOpHasNoPatchSites
+        split <;> first
+          | rfl
+          | (rename_i hEq; injection hEq with hEq'; exact absurd hEq' hCs)
+          | (rename_i hEq; cases hEq)
+
+mutual
+
+theorem stackOpHasNoPatchSites_of_RunarEmittableWithIf
+    (op : StackOp) (h : Parse.RunarEmittableWithIf op) :
+    stackOpHasNoPatchSites op = true := by
+  cases h with
+  | flat op hFlat => exact stackOpHasNoPatchSites_of_RunarEmittable op hFlat
+  | if_none thn hThn =>
+      show (opsHaveNoPatchSites thn) = true
+      exact opsHaveNoPatchSites_of_AreRunarEmittableWithIf thn hThn
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      show (opsHaveNoPatchSites thn && opsHaveNoPatchSites (elsHead :: elsTail)) = true
+      rw [opsHaveNoPatchSites_of_AreRunarEmittableWithIf thn hThn,
+          opsHaveNoPatchSites_of_AreRunarEmittableWithIf (elsHead :: elsTail) hEls]
+      rfl
+
+theorem opsHaveNoPatchSites_of_AreRunarEmittableWithIf
+    (ops : List StackOp) (h : Parse.AreRunarEmittableWithIf ops) :
+    opsHaveNoPatchSites ops = true := by
+  cases h with
+  | nil => rfl
+  | cons op rest hOp hRest =>
+      show (stackOpHasNoPatchSites op && opsHaveNoPatchSites rest) = true
+      rw [stackOpHasNoPatchSites_of_RunarEmittableWithIf op hOp,
+          opsHaveNoPatchSites_of_AreRunarEmittableWithIf rest hRest]
+      rfl
+
+end
+
+/-! ## Patched-emit byte equality under `AreRunarEmittableWithIf`
+
+Composing the no-patch-sites byte bridge from `Emit.lean` with the
+`AreRunarEmittableWithIf → opsHaveNoPatchSites` lemma above. -/
+
+theorem emitWithCodeSepPatches_single_public_bytes_eq_emit_with_if
+    (p : RunarVerification.Stack.StackProgram)
+    (m : RunarVerification.Stack.StackMethod) (r : EmitResult)
+    (hPublic : publicMethodsOf p = [m])
+    (hOps : Parse.AreRunarEmittableWithIf m.ops)
+    (hPatch : emitWithCodeSepPatches p = .ok r) :
+    r.bytes = emit p :=
+  PatchProof.emitWithCodeSepPatches_single_public_no_patch_sites_bytes_eq_emit
+    p m r hPublic (opsHaveNoPatchSites_of_AreRunarEmittableWithIf m.ops hOps) hPatch
+
+theorem emitWithCodeSepPatches_single_public_bytes_eq_emitFast_with_if
+    (p : RunarVerification.Stack.StackProgram)
+    (m : RunarVerification.Stack.StackMethod) (r : EmitResult)
+    (hPublic : publicMethodsOf p = [m])
+    (hOps : Parse.AreRunarEmittableWithIf m.ops)
+    (hPatch : emitWithCodeSepPatches p = .ok r) :
+    r.bytes = emitFast p := by
+  rw [emitWithCodeSepPatches_single_public_bytes_eq_emit_with_if
+    p m r hPublic hOps hPatch]
+  exact emit_eq_emitFast p
+
 end Emit
 end RunarVerification.Script

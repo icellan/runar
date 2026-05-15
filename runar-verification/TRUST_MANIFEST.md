@@ -68,9 +68,19 @@ assumptions with fail-fast codegen, not hidden `opaque := ...` bodies.
 
 ## Proven Or Empirical Anchors
 
-* `goldenLoad`: all 49 conformance ANF files parse and satisfy `WF.ANF`.
-* `roundtrip`: all 49 ANF files round-trip through the Lean JSON model.
-* `pipelineGolden`: default gate checks 34 live byte-exact fixtures.
+* `goldenLoad`: parses every conformance ANF file and checks `WF.ANF`.
+  Currently 49/50 — the 50th, `conformance/tests/asm-raw-script`, is an
+  unrelated concurrent fixture added outside `runar-verification/` that
+  uses a `raw_script` ANF kind the Lean loader does not yet recognize.
+  The Lean proof gate (`scripts/lean-verify.sh` +
+  `scripts/check-tcb-drift.sh`) is unaffected.
+* `roundtrip`: round-trips every ANF file through the Lean JSON model.
+  Same 49/50 caveat as `goldenLoad` for the same reason.
+* `pipelineGolden`: default gate currently reports 49/49 byte-exact
+  (34 baseline + 15 stored crypto-pending constants); the
+  `asm-raw-script` JSON-parse failure means that fixture is silently
+  dropped from the discovery loop, so the gate's pass count is honest
+  for the 49 fixtures the Lean ANF loader does recognise.
 * Peephole proofs cover the proved rewrite substrate; remaining
   composition obligations must match the exact passes used by
   `Pipeline.peepholeProgram`.
@@ -177,25 +187,102 @@ assumptions with fail-fast codegen, not hidden `opaque := ...` bodies.
   `RUNAR_BSV_REFERENCE_JSON`.
 * `Pipeline.compileSafeWithCodeSepPatches_single_public_observational_correct`
   threads the slot-aware emitted bytes into the single-public-method
-  observational statement under the remaining patched-byte soundness
-  hypothesis. The restricted
-  `Pipeline.compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes`
-  discharges that hypothesis when patched bytes equal `emitFast` bytes
-  and the existing `AreRunarEmittableWithIf` parser path applies.
-  `Pipeline.emitWithCodeSepPatches_single_public_empty_ops_bytes_eq_emitFast`
-  proves a concrete no-patch-site equality for the empty-ops
-  single-public case, and the flat no-patch-site subset now proves
-  slot-aware bytes equal legacy emit bytes for single-public methods.
+  observational statement. **M4:** the patched-byte soundness hypothesis
+  is gone — the theorem now takes `Parse.AreRunarEmittableWithIf
+  stackM.ops` directly as a structural precondition and proves the
+  patched-emit round-trip internally via `patched_bytes_sound_with_if`,
+  which composes
+  `Script.Emit.emitOpsWithCodeSepPatches_no_patch_sites_bytes_eq_emitOps`,
+  `Script.Emit.emitWithCodeSepPatches_single_public_bytes_eq_emit_with_if`,
+  and `Script.EmitCorrect.opsHaveNoPatchSites_of_AreRunarEmittableWithIf`.
+  The legacy companion
+  `compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes`
+  remains as a backwards-compatible re-export with a now-redundant
+  `hBytes` hypothesis.
+* **M2 (lowering, structural-const fragment).**
+  `Pipeline.lower_observational_correct` discharges `successAgrees`
+  unconditionally between the ANF evaluator and `runMethod (Lower.lower
+  p)` for the structural-const fragment. Both `.isSome` directions are
+  proved outright:
+  `Agrees.evalBindings_structuralConstBody_isSome` on the ANF side and
+  `Agrees.runMethod_lower_public_unique_no_post_structuralConst_isSome`
+  on the Stack-VM side, with supporting lemmas
+  `Agrees.evalValue_structuralConstValue_ok`,
+  `Agrees.runOps_lowerValue_structuralConstValue_ok`, and
+  `Agrees.runOps_lowerBindings_structuralConstBody_isSome`. The old
+  `lower_observational_correct_skeleton` is kept only for bodies outside
+  the discharged fragment.
+* **M3 (peephole composition).**
+  `Pipeline.peephole_observational_correct_modulo_runMethod_eq` proves
+  the live `peepholeProgram` pipeline (`peepholeRollPickFold ∘
+  peepholeChainFold ∘ peepholePostFold ∘ peepholePassAll`) is
+  `runMethod`-preserving from genuine structural preconditions
+  (`Peephole.noIfOp`, `Peephole.peepholePassAllFlat_preconditions`,
+  `Peephole.wellTypedRun`, `Peephole.rollPickDepthOK`); the caller no
+  longer supplies "this fold preserves runOps" hypotheses. Supporting
+  composition: `Pipeline.peephole_post_chain_runOps_eq`,
+  `Pipeline.peephole_post_chain_roll_runOps_eq` and `_of_rollPick_noop`
+  variant, `Pipeline.peepholeMethodOps_runOps_eq` and
+  `_of_rollPick_noop` variant,
+  `Pipeline.peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop`,
+  and `Stack.Peephole.peepholePassAllFlat_runOps_eq` /
+  `Stack.Peephole.peepholePassAllFlat_preconditions`.
+* **M5 (capstone).**
+  `Pipeline.compileSafe_single_public_observational_correct_unconditional`
+  composes M2 + M3 + M4 into the citable end-to-end theorem for
+  single-public-method `compileSafe` on the structural-const fragment.
+  All hypotheses are genuine domain or structural predicates; none
+  restate the conclusion. Fragment and hypothesis details are in the
+  "End-to-End Capstone (M5)" section below.
+
+## End-to-End Capstone (M5)
+
+`Pipeline.compileSafe_single_public_observational_correct_unconditional`
+composes M2 + M3 + M4 into the citable end-to-end theorem for
+single-public-method `compileSafe` over the **structural-const
+fragment**. Its hypotheses are all genuine domain or structural
+predicates — none restate the conclusion:
+
+* `WF.ANF p` and `compileSafe p = .ok bytes` (handle into the deployed
+  bytes).
+* Single-public-method shape: `Emit.publicMethodsOf (peepholeProgram
+  (Lower.lower p)) = [stackM]` and `(peepholeProgram (Lower.lower
+  p)).bodyOf anfM.name = stackM.ops`, with `anfM ∈ p.methods`,
+  `anfM.isPublic = true`, and public-name uniqueness.
+* M2 fragment predicates: no `checkPreimage`, no `codePart`, no terminal
+  `OP_VERIFY`, no `deserializeState`, and
+  `Agrees.structuralConstBody anfM.body` — every binding is a literal
+  load (`.loadConst (.int _)` / `.loadConst (.bool _)` / `.loadConst
+  (.bytes _)`).
+* M3 structural preconditions on the lowered body: `Peephole.noIfOp`,
+  `Peephole.peepholePassAllFlat_preconditions`,
+  `Peephole.wellTypedRun` on the post-fold list, and
+  `Peephole.rollPickDepthOK` on the chain-fold list.
+* M4 round-trip precondition: `Parse.AreRunarEmittable stackM.ops`.
+
+The fragment boundary is the literal-load substrate. Bodies that use
+`binOp`, `unaryOp`, `assert`, reference loads (`loadParam` / `loadProp`
+/ `refAlias`), `methodCall`, crypto intrinsics, `ifVal`, `loop`, or
+output construction are **outside** the discharged fragment. The
+deprecated skeleton aliases `compile_observational_correct_skeleton` and
+`compile_observational_correct_bytes_skeleton` remain as
+`@[deprecated compileSafe_single_public_observational_correct_unconditional]`
+re-exports for backwards compatibility.
 
 ## Not Yet Proven
 
 These are active proof obligations, not historical notes:
 
-* End-to-end `compileSafe` soundness from ANF evaluation to parsed Script
-  execution for deployed bytes.
-* Full discharge of `lower_observational_correct_skeleton`; the current
-  theorem still requires the caller to supply the ANF/Stack success
-  relation.
+* Widening `lower_observational_correct` past the structural-const
+  fragment. The copied-reference fragment (`Agrees.structuralCopyBody`)
+  is supported by Stage C `agreesTagged` / `ChainRel` witnesses and
+  `stageD_public_unique_no_post_structuralCopy_bridge`, but those have
+  not yet been lifted into an unconditional `successAgrees` form on the
+  ANF evaluator's failure paths the way M2 does for literal loads.
+  Bodies using `binOp`, `unaryOp`, `assert`, `methodCall`, crypto,
+  `ifVal`, `loop`, or output construction remain outside the discharged
+  fragment; the `_skeleton` form is retained for those as a documented
+  hypothesis.
 * Full lowering simulation from all supported ANF constructors and
   consume-depth combinations to Stack VM execution. Remaining work
   includes deriving output events for output-construction call families,
@@ -209,10 +296,6 @@ These are active proof obligations, not historical notes:
   `RunarEmittableWithIf` and normalized-push predicates, especially
   additional concrete `NormalizedPushEmittable` proof families and
   push-before-`OP_PICK`/`OP_ROLL` cases if callers need them.
-* Discharging the patched-byte soundness hypothesis in the slot-aware
-  deployed-byte theorem beyond the landed `emitFast`-byte-equality and
-  flat no-patch-site subsets using the checked branch-sensitive
-  code-separator patching relation.
 * Live or stored-Lean-constant verification for the 15 crypto-heavy
   fixtures currently outside the default byte-exact count. Regen mode
   now emits per-fixture hex files and a generated Lean match-table

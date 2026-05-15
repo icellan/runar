@@ -3,6 +3,7 @@ import RunarVerification.ANF.WF
 import RunarVerification.ANF.Eval
 import RunarVerification.Stack.Lower
 import RunarVerification.Stack.Sim
+import RunarVerification.Stack.Agrees
 import RunarVerification.Stack.Peephole
 import RunarVerification.Stack.Eval
 import RunarVerification.Script.Emit
@@ -203,6 +204,58 @@ theorem peepholeProgram_preserves_method_count (p : StackProgram) :
   unfold peepholeProgram
   simp
 
+/-- The per-method op-list rewrite that `peepholeProgram` applies.
+
+A `def` (not `abbrev`) so that elaboration does not aggressively unfold
+the 4-pass composition during defeq checks; callers use the explicit
+`peepholeMethodOps_eq` unfold lemma instead. -/
+def peepholeMethodOps (ops : List StackOp) : List StackOp :=
+  Peephole.peepholeRollPickFold
+    (Peephole.peepholeChainFold
+      (Peephole.peepholePostFold
+        (Peephole.peepholePassAll ops)))
+
+/-- Definitional unfold of `peepholeMethodOps`. -/
+theorem peepholeMethodOps_eq (ops : List StackOp) :
+    peepholeMethodOps ops
+      = Peephole.peepholeRollPickFold
+          (Peephole.peepholeChainFold
+            (Peephole.peepholePostFold
+              (Peephole.peepholePassAll ops))) := rfl
+
+/-- `peepholeProgram` rewrites each method body with `peepholeMethodOps`,
+and since the rewrite preserves method names, `bodyOf` after the program
+transform is `peepholeMethodOps` applied to the original body. The
+absent-method case is uniform: `peepholeMethodOps [] = []`. -/
+theorem peepholeProgram_bodyOf (p : StackProgram) (m : String) :
+    (peepholeProgram p).bodyOf m
+      = peepholeMethodOps (p.bodyOf m) := by
+  -- The per-method rewrite function used by `peepholeProgram`.
+  let f : Stack.StackMethod → Stack.StackMethod := fun mm =>
+    { mm with ops := peepholeMethodOps mm.ops }
+  have hMethods : (peepholeProgram p).methods = p.methods.map f := rfl
+  unfold StackProgram.bodyOf StackProgram.findMethod
+  rw [hMethods, List.find?_map]
+  -- The predicate `(·.name == m)` factors through `f` (which preserves
+  -- `.name`), so `find?` after the map is `find?` before, then `f`.
+  have hPred : (fun mm => mm.name == m) ∘ f = (fun mm => mm.name == m) := rfl
+  rw [hPred]
+  cases hFind : p.methods.find? (fun mm => mm.name == m) with
+  | none =>
+      -- `Option.map f none = none`, then both sides are `[]`
+      -- (`peepholeMethodOps []` reduces to `[]` — each pass maps the
+      -- empty op list to itself, established via the `_nil` lemmas).
+      simp only [Option.map_none]
+      show ([] : List StackOp) = peepholeMethodOps []
+      unfold peepholeMethodOps
+      have hNoIfNil : Peephole.noIfOp ([] : List StackOp) := by
+        simp [Peephole.noIfOp]
+      have h1 : Peephole.peepholePassAll [] = ([] : List StackOp) := by
+        rw [Peephole.peepholePassAll_eq_flat_of_noIfOp [] hNoIfNil]; rfl
+      rw [h1, Peephole.peepholePostFold_nil, Peephole.peepholeChainFold_nil,
+        Peephole.peepholeRollPickFold_nil]
+  | some m0 => rfl
+
 theorem compile_empty_program (cn : String) :
     compile { contractName := cn, properties := [], methods := [] } = ByteArray.empty := by
   unfold compile peepholeProgram Lower.lower
@@ -382,61 +435,138 @@ theorem lower_observational_correct_conditional
   lower_observational_correct_skeleton p h m initialAnf initialStack hSimulates
 
 /--
-**Theorem (peephole preserves success).** Applying the full 19-rule
-`peepholePassAll` to every method's ops (i.e. `peepholeProgram`)
-preserves observational equivalence with the un-optimised lowered
-program, **conditional on the per-method `runOps` equality**.
+**Theorem (lowering preserves success — structural-const fragment).**
 
-Phase 4-C delivered partial discharge work for this bridge by:
+This is the *unconditional* M2 deliverable: it discharges
+`successAgrees` for the widest tractable ANF fragment **without** any
+hypothesis that restates the conclusion. The fragment is gated by a
+genuine structural domain predicate `structuralConstBody m.body`
+together with the standard "no implicit params / no post-processing"
+side conditions and public-name uniqueness — none of which mention
+`evalBindings` / `runMethod` success bits.
 
-1. Adding `wellTypedRun`-preservation lemmas for the 6 Phase-3u rules
-   (`oneSub`, `doubleOver`, `doubleDrop`, `pushPushAdd`, `pushPushSub`,
-   `pushPushMul`). The seventh rule `zeroNumEqual` is genuinely
-   non-WT-preserving — its post-rewrite output requires
-   `precondMet .bool`, strictly stronger than the input — so its
-   preservation lemma is intentionally omitted (see
-   `Stack.Peephole.passAllInner15`'s docstring).
+**Fragment boundary.** `structuralConstBody m.body` (defined in
+`Stack.Agrees`) holds exactly when every binding in the method body is
+a literal load — `.loadConst (.int _)`, `.loadConst (.bool _)`, or
+`.loadConst (.bytes _)`. For such bodies:
 
-2. Composing 17 of 19 rules into `peepholePassAllFlat_sound`, with
-   `applyZeroNumEqual` and `applyEqualVerifyFuse` requiring
-   externally-supplied WT/eitherStrict preconditions (the same
-   pragmatic fallback as Phase 3t for `equalVerifyFuse`).
+* the ANF evaluator never fails (literal loads are total —
+  `evalBindings_structuralConstBody_isSome`); and
+* the Stack VM never fails: the unparameterized `lowerValue` emits a
+  single `.push` op per binding, and `runMethod (Lower.lower p)`
+  reduces — via `runMethod_lower_public_unique_no_post_eq_userRaw`
+  composed with `lowerMethodUserRawOps_eq_lowerBindings_structuralConst`
+  — to `runOps` of that all-`.push` op list, which `runOps` can never
+  fail on (`runMethod_lower_public_unique_no_post_structuralConst_isSome`).
 
-3. Equating the tail-recursive `peepholePassAll` to its structural
-   right-fold under `noIfOp`, via `peepholePassAll_eq_struct`.
+So both sides are `.isSome` and `successAgrees` collapses to
+`True ↔ True`.
 
-This theorem captures the observational-equivalence guarantee
-**conditional on** the caller having established per-method
-`runOps`-equality via `peepholePassAllFlat_sound` (or any equivalent
-fact). The old unconditional claim is represented as a
-proof-with-hypothesis; the hypothesis is exactly the obligation that
-remains after the WT-preservation chain runs out at `applyZeroNumEqual`.
-
-The hypothesis `hRunMethodEq` is the per-method `runOps`-equality
-between the original and peephole-optimised programs, lifted to
-`runMethod`. Callers discharge it with `peepholePassAllFlat_sound`
-(plus the `peepholePassAll_eq_struct` bridge from tail-recursive to
-flat form) when their input satisfies `noIfOp`/`wellTypedRun` plus
-the two external preconditions for `applyZeroNumEqual` and
-`applyEqualVerifyFuse`. -/
-theorem peephole_observational_correct_modulo_runMethod_eq
-    (p : StackProgram) (m : String) (initialStack : StackState)
-    (hRunMethodEq : runMethod p m initialStack
-                  = runMethod (peepholeProgram p) m initialStack) :
+**What this does NOT cover.** Bodies that use `binOp`, `unaryOp`,
+`assert`, `methodCall`, crypto intrinsics, `ifVal`, `loop`, output
+construction, or reference loads (`loadParam` / `loadProp` /
+`.refAlias`) fall outside `structuralConstBody`. Reference-load bodies
+in *copy mode* are handled by the `structuralCopyBody`-gated Stage C/D
+bridges in `Stack.Agrees` but require a `ChainRel` witness rather than
+the unconditional argument used here; lifting those to an equally
+unconditional `successAgrees` form is the next fragment-widening step.
+Full discharge for all ANF programs is equivalent to full compiler
+correctness and is intentionally out of scope. -/
+theorem lower_observational_correct
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Lower.bindingsUseDeserializeState m.body = false)
+    (hConst : Agrees.structuralConstBody m.body) :
     successAgrees
-      (runMethod p m initialStack)
-      (runMethod (peepholeProgram p) m initialStack) := by
-  rw [hRunMethodEq]
-  exact successAgrees_refl _
+      (RunarVerification.ANF.Eval.evalBindings initialAnf m.body)
+      (runMethod
+        (Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack) := by
+  -- `successAgrees` unfolds to `a.isSome ↔ b.isSome`; both sides are
+  -- `.isSome` for the const fragment, so the iff is `True ↔ True`.
+  have hAnf :
+      (RunarVerification.ANF.Eval.evalBindings initialAnf m.body).toOption.isSome :=
+    Agrees.evalBindings_structuralConstBody_isSome m.body initialAnf hConst
+  have hRun :
+      (runMethod
+        (Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome :=
+    Agrees.runMethod_lower_public_unique_no_post_structuralConst_isSome
+      contractName props methods m initialStack hMem hPublic hUnique
+      hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize hConst
+  exact Iff.intro (fun _ => hRun) (fun _ => hAnf)
+
+/-! ## M3 — Peephole composition discharge
+
+The theorems below close the M3 obligation: the live peephole pipeline
+`peepholeProgram = peepholeRollPickFold ∘ peepholeChainFold ∘
+peepholePostFold ∘ peepholePassAll` is `runMethod`-preserving, and the
+former caller-supplied "this fold preserves runOps" hypotheses
+(`hRunMethodEq`, `hRollPickEq`, `hFlatFirstPass`) are now PROVED facts.
+
+What remains as hypotheses are genuine domain/structural preconditions:
+* `noIfOp ops` — the input method body contains no `.ifOp` (the entire
+  peephole proof surface is scoped to `noIfOp` programs; the recursive
+  `.ifOp`-descent layer of each pass is the identity on such inputs).
+* `wellTypedRun · ·` — the standard stack-typing invariant.
+* `equalVerifyFuse_eitherStrict · ·` — the `eitherStrict` precondition
+  for the `equalVerifyFuse` rule's firing positions.
+* `rollPickDepthOK · ·` — the stack-depth invariant for the roll/pick
+  fold's firing positions (`opPrecondition` maps `.roll d` / `.pick d`
+  to `.none`, so this cannot be folded into `wellTypedRun`).
+
+None of these restate "a fold preserves runOps". -/
+
+/-- Shared post-fold + chain-fold composition: discharges the
+`peepholePostFold` and `peepholeChainFold` phases against the proved
+`Stack.Peephole` runOps equalities. -/
+theorem peephole_post_chain_runOps_eq
+    (ops passOps : List StackOp) (initialStack : StackState)
+    (hPassAllEq :
+      runOps passOps initialStack = runOps ops initialStack)
+    (hPassAllNoIf : Peephole.noIfOp passOps)
+    (hPostNoIf :
+      Peephole.noIfOp (Peephole.peepholePostFold passOps))
+    (hPostWT :
+      Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack) :
+    runOps
+      (Peephole.peepholeChainFold
+        (Peephole.peepholePostFold passOps))
+      initialStack
+    = runOps ops initialStack := by
+  calc
+    runOps
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps))
+        initialStack
+        = runOps (Peephole.peepholePostFold passOps) initialStack :=
+          Peephole.peepholeChainFold_runOps_eq
+            (Peephole.peepholePostFold passOps) initialStack hPostNoIf hPostWT
+    _ = runOps passOps initialStack :=
+          Peephole.peepholePostFold_runOps_eq
+            passOps initialStack hPassAllNoIf
+    _ = runOps ops initialStack := hPassAllEq
 
 /--
 Composition lemma for the concrete tail of `peepholeProgram`.
 
-The first 19-rule pass and the final roll/pick fold still expose their
-own obligations, but the post-fold and chain-fold phases are discharged
-with the proved `Stack.Peephole` runOps equalities. This is the useful
-bridge from a caller's `peepholePassAll` proof to the exact op-list shape
-used by `Pipeline.peepholeProgram`.
+The post-fold and chain-fold phases are discharged with the proved
+`Stack.Peephole` runOps equalities; the final roll/pick fold is
+discharged with the GENERAL `peepholeRollPickFold_runOps_eq` (M3) under
+its genuine `rollPickDepthOK` depth invariant. The former
+`hRollPickEq` hypothesis (which restated the roll/pick fold's
+runOps-preservation) is gone.
 -/
 theorem peephole_post_chain_roll_runOps_eq
     (ops passOps : List StackOp) (initialStack : StackState)
@@ -447,14 +577,12 @@ theorem peephole_post_chain_roll_runOps_eq
       Peephole.noIfOp (Peephole.peepholePostFold passOps))
     (hPostWT :
       Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack)
-    (hRollPickEq :
-      runOps
-        (Peephole.peepholeRollPickFold
-          (Peephole.peepholeChainFold
-            (Peephole.peepholePostFold passOps)))
-        initialStack
-      =
-      runOps
+    (hChainNoIf :
+      Peephole.noIfOp
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold passOps)))
+    (hChainDepth :
+      Peephole.rollPickDepthOK
         (Peephole.peepholeChainFold
           (Peephole.peepholePostFold passOps))
         initialStack) :
@@ -464,29 +592,19 @@ theorem peephole_post_chain_roll_runOps_eq
           (Peephole.peepholePostFold passOps)))
       initialStack
     = runOps ops initialStack := by
-  calc
-    runOps
-        (Peephole.peepholeRollPickFold
-          (Peephole.peepholeChainFold
-            (Peephole.peepholePostFold passOps)))
-        initialStack
-        = runOps
-            (Peephole.peepholeChainFold
-              (Peephole.peepholePostFold passOps))
-            initialStack := hRollPickEq
-    _ = runOps (Peephole.peepholePostFold passOps) initialStack :=
-          Peephole.peepholeChainFold_runOps_eq
-            (Peephole.peepholePostFold passOps) initialStack hPostNoIf hPostWT
-    _ = runOps passOps initialStack :=
-          Peephole.peepholePostFold_runOps_eq
-            passOps initialStack hPassAllNoIf
-    _ = runOps ops initialStack := hPassAllEq
+  rw [Peephole.peepholeRollPickFold_runOps_eq
+        (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps))
+        initialStack hChainNoIf hChainDepth]
+  exact peephole_post_chain_runOps_eq
+    ops passOps initialStack hPassAllEq hPassAllNoIf hPostNoIf hPostWT
 
 /--
 Variant of `peephole_post_chain_roll_runOps_eq` for the roll/pick no-op
-subset. The caller supplies the no-op-subset facts for the exact
-`peepholeChainFold (peepholePostFold passOps)` list, and the
-`Stack.Peephole` roll/pick theorem discharges the final fold equality.
+subset. The caller supplies the no-op-subset fact (`rollPickFoldFlatNoop`
+— a genuine structural predicate) for the exact `peepholeChainFold
+(peepholePostFold passOps)` list, and the `Stack.Peephole` roll/pick
+theorem discharges the final fold equality with no depth precondition
+(on the no-op subset the fold is literally the identity).
 -/
 theorem peephole_post_chain_roll_runOps_eq_of_rollPick_noop
     (ops passOps : List StackOp) (initialStack : StackState)
@@ -511,42 +629,208 @@ theorem peephole_post_chain_roll_runOps_eq_of_rollPick_noop
           (Peephole.peepholePostFold passOps)))
       initialStack
     = runOps ops initialStack := by
-  have hRollPickEq :
-      runOps
+  rw [Peephole.peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop
+        (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps))
+        initialStack hChainNoIf hChainRollPickNoop]
+  exact peephole_post_chain_runOps_eq
+    ops passOps initialStack hPassAllEq hPassAllNoIf hPostNoIf hPostWT
+
+section
+attribute [local irreducible] Peephole.peepholePassAll Peephole.peepholePostFold
+  Peephole.peepholeChainFold Peephole.peepholeRollPickFold
+  Peephole.peepholePassAllFlat Peephole.passAllInner15
+
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+Full per-method peephole-chain soundness. Given the genuine
+preconditions, every phase of `peepholeProgram`'s per-method rewrite is
+`runOps`-preserving — INCLUDING the first 19-rule pass, whose
+`hFlatFirstPass` obligation is now discharged via
+`Peephole.peepholePassAllFlat_sound`. The `passAllInner15`-shaped
+`wellTypedRun` / `eitherStrict` preconditions are exactly the genuine
+domain facts that the two non-WT-preserving rules (`applyZeroNumEqual`,
+`applyEqualVerifyFuse`) require — they are NOT runOps-preservation
+restatements.
+-/
+theorem peepholeMethodOps_runOps_eq
+    (ops : List StackOp) (initialStack : StackState)
+    (hNoIf : Peephole.noIfOp ops)
+    (hPre : Peephole.peepholePassAllFlat_preconditions ops initialStack)
+    (hPostWT :
+      Peephole.wellTypedRun
+        (Peephole.peepholePostFold (Peephole.peepholePassAll ops))
+        initialStack)
+    (hChainDepth :
+      Peephole.rollPickDepthOK
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold (Peephole.peepholePassAll ops)))
+        initialStack) :
+    runOps
+      (Peephole.peepholeRollPickFold
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold (Peephole.peepholePassAll ops))))
+      initialStack
+    = runOps ops initialStack := by
+  obtain ⟨hWT, hWT16, hWT18, hStrict18⟩ := hPre
+  have hFlatFirstPass :=
+    Peephole.peepholePassAllFlat_sound ops hNoIf initialStack
+      hWT hWT16 hWT18 hStrict18
+  have hPassAllEq :=
+    Peephole.peepholePassAll_runOps_eq_of_flat_sound
+      ops initialStack hNoIf hFlatFirstPass
+  have hPassAllNoIf := Peephole.peepholePassAll_preserves_noIfOp ops hNoIf
+  have hPostNoIf := Peephole.peepholePostFold_preserves_noIfOp _ hPassAllNoIf
+  have hChainNoIf := Peephole.peepholeChainFold_preserves_noIfOp _ hPostNoIf
+  calc
+    runOps
         (Peephole.peepholeRollPickFold
           (Peephole.peepholeChainFold
-            (Peephole.peepholePostFold passOps)))
+            (Peephole.peepholePostFold (Peephole.peepholePassAll ops))))
         initialStack
-      =
-      runOps
-        (Peephole.peepholeChainFold
-          (Peephole.peepholePostFold passOps))
-        initialStack :=
-    Peephole.peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop
-      (Peephole.peepholeChainFold
-        (Peephole.peepholePostFold passOps))
-      initialStack
-      hChainNoIf
-      hChainRollPickNoop
-  exact peephole_post_chain_roll_runOps_eq
-    ops passOps initialStack hPassAllEq hPassAllNoIf hPostNoIf hPostWT
-    hRollPickEq
+        = runOps
+            (Peephole.peepholeChainFold
+              (Peephole.peepholePostFold (Peephole.peepholePassAll ops)))
+            initialStack :=
+          Peephole.peepholeRollPickFold_runOps_eq _ initialStack
+            hChainNoIf hChainDepth
+    _ = runOps (Peephole.peepholePostFold (Peephole.peepholePassAll ops))
+          initialStack :=
+          Peephole.peepholeChainFold_runOps_eq _ initialStack hPostNoIf hPostWT
+    _ = runOps (Peephole.peepholePassAll ops) initialStack :=
+          Peephole.peepholePostFold_runOps_eq _ initialStack hPassAllNoIf
+    _ = runOps ops initialStack := hPassAllEq
 
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+Variant of `peepholeMethodOps_runOps_eq` for the roll/pick no-op subset.
+The final fold's `rollPickFoldFlatNoop` structural predicate replaces
+the `rollPickDepthOK` depth invariant — useful for method bodies whose
+post-chain op list contains no foldable low-depth roll/pick head at all.
+-/
+theorem peepholeMethodOps_runOps_eq_of_rollPick_noop
+    (ops : List StackOp) (initialStack : StackState)
+    (hNoIf : Peephole.noIfOp ops)
+    (hPre : Peephole.peepholePassAllFlat_preconditions ops initialStack)
+    (hPostWT :
+      Peephole.wellTypedRun
+        (Peephole.peepholePostFold (Peephole.peepholePassAll ops))
+        initialStack)
+    (hChainRollPickNoop :
+      Peephole.rollPickFoldFlatNoop
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold (Peephole.peepholePassAll ops)))) :
+    runOps
+      (Peephole.peepholeRollPickFold
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold (Peephole.peepholePassAll ops))))
+      initialStack
+    = runOps ops initialStack := by
+  obtain ⟨hWT, hWT16, hWT18, hStrict18⟩ := hPre
+  have hFlatFirstPass :=
+    Peephole.peepholePassAllFlat_sound ops hNoIf initialStack
+      hWT hWT16 hWT18 hStrict18
+  have hPassAllEq :=
+    Peephole.peepholePassAll_runOps_eq_of_flat_sound
+      ops initialStack hNoIf hFlatFirstPass
+  have hPassAllNoIf := Peephole.peepholePassAll_preserves_noIfOp ops hNoIf
+  have hPostNoIf := Peephole.peepholePostFold_preserves_noIfOp _ hPassAllNoIf
+  have hChainNoIf := Peephole.peepholeChainFold_preserves_noIfOp _ hPostNoIf
+  calc
+    runOps
+        (Peephole.peepholeRollPickFold
+          (Peephole.peepholeChainFold
+            (Peephole.peepholePostFold (Peephole.peepholePassAll ops))))
+        initialStack
+        = runOps
+            (Peephole.peepholeChainFold
+              (Peephole.peepholePostFold (Peephole.peepholePassAll ops)))
+            initialStack :=
+          Peephole.peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop _ initialStack
+            hChainNoIf hChainRollPickNoop
+    _ = runOps (Peephole.peepholePostFold (Peephole.peepholePassAll ops))
+          initialStack :=
+          Peephole.peepholeChainFold_runOps_eq _ initialStack hPostNoIf hPostWT
+    _ = runOps (Peephole.peepholePassAll ops) initialStack :=
+          Peephole.peepholePostFold_runOps_eq _ initialStack hPassAllNoIf
+    _ = runOps ops initialStack := hPassAllEq
+
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+**Theorem (peephole preserves success).** Applying `peepholeProgram` to a
+stack program preserves observational equivalence with the un-optimised
+program, on `noIfOp` method bodies, under the genuine `wellTypedRun` /
+`eitherStrict` / `rollPickDepthOK` preconditions.
+
+The former `hRunMethodEq` hypothesis — which restated this theorem's own
+conclusion as a `runMethod` equality — is now a PROVED fact: it is
+obtained by `peepholeProgram_bodyOf` (the per-method rewrite is exactly
+`peepholeMethodOps` applied to the body) composed with the full per-method
+chain soundness `peepholeMethodOps_runOps_eq`.
+-/
+theorem peephole_observational_correct_modulo_runMethod_eq
+    (p : StackProgram) (m : String) (initialStack : StackState)
+    (hNoIf : Peephole.noIfOp (p.bodyOf m))
+    (hPre :
+      Peephole.peepholePassAllFlat_preconditions (p.bodyOf m) initialStack)
+    (hPostWT :
+      Peephole.wellTypedRun
+        (Peephole.peepholePostFold (Peephole.peepholePassAll (p.bodyOf m)))
+        initialStack)
+    (hChainDepth :
+      Peephole.rollPickDepthOK
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold
+            (Peephole.peepholePassAll (p.bodyOf m))))
+        initialStack) :
+    successAgrees
+      (runMethod p m initialStack)
+      (runMethod (peepholeProgram p) m initialStack) := by
+  -- The per-method `runMethod` equality is a PROVED fact (no longer a
+  -- caller-supplied hypothesis).
+  have hRunMethodEq :
+      runMethod p m initialStack
+        = runMethod (peepholeProgram p) m initialStack := by
+    unfold runMethod
+    rw [peepholeProgram_bodyOf p m, peepholeMethodOps_eq]
+    symm
+    apply peepholeMethodOps_runOps_eq (p.bodyOf m) initialStack
+      hNoIf hPre hPostWT hChainDepth
+  rw [hRunMethodEq]
+  exact successAgrees_refl _
+
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+Variant of `peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop`
+restated against the genuine `peepholePassAllFlat_sound` preconditions
+(the former `hFlatFirstPass` hypothesis — which restated the first
+pass's runOps-preservation — is discharged inside
+`peepholeMethodOps_runOps_eq_of_rollPick_noop`).
+-/
 theorem peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop
     (ops passOps : List StackOp) (initialStack : StackState)
     (hPassOps : passOps = Peephole.peepholePassAll ops)
     (hNoIf : Peephole.noIfOp ops)
-    (hFlatFirstPass :
-      runOps (Peephole.peepholePassAllFlat ops) initialStack =
-        runOps ops initialStack)
-    (hPassAllNoIf : Peephole.noIfOp passOps)
-    (hPostNoIf :
-      Peephole.noIfOp (Peephole.peepholePostFold passOps))
+    (hWT : Peephole.wellTypedRun ops initialStack)
+    (hWT16 :
+      Peephole.wellTypedRun
+        (Peephole.applyZeroNumEqual (Peephole.passAllInner15 ops))
+        initialStack)
+    (hWT18 :
+      Peephole.wellTypedRun
+        (Peephole.applyCheckSigVerifyFuse (Peephole.applyNumEqualVerifyFuse
+          (Peephole.applyZeroNumEqual (Peephole.passAllInner15 ops))))
+        initialStack)
+    (hStrict18 :
+      Peephole.equalVerifyFuse_eitherStrict
+        (Peephole.applyCheckSigVerifyFuse (Peephole.applyNumEqualVerifyFuse
+          (Peephole.applyZeroNumEqual (Peephole.passAllInner15 ops))))
+        initialStack)
     (hPostWT :
       Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack)
-    (hChainNoIf :
-      Peephole.noIfOp
-        (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
     (hChainRollPickNoop :
       Peephole.rollPickFoldFlatNoop
         (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps))) :
@@ -555,15 +839,14 @@ theorem peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop
         (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
       initialStack =
     runOps ops initialStack := by
-  have hPassAllEq :
-      runOps passOps initialStack = runOps ops initialStack := by
-    rw [hPassOps]
-    exact Peephole.peepholePassAll_runOps_eq_of_flat_sound
-      ops initialStack hNoIf hFlatFirstPass
-  exact peephole_post_chain_roll_runOps_eq_of_rollPick_noop
-    ops passOps initialStack
-    hPassAllEq hPassAllNoIf hPostNoIf hPostWT hChainNoIf
+  subst hPassOps
+  have hPre : Peephole.peepholePassAllFlat_preconditions ops initialStack :=
+    ⟨hWT, hWT16, hWT18, hStrict18⟩
+  exact peepholeMethodOps_runOps_eq_of_rollPick_noop
+    ops initialStack hNoIf hPre hPostWT
     hChainRollPickNoop
+
+end
 
 /--
 Run the parser output from `Emit.emitOps`, converting parser failure
@@ -1193,6 +1476,8 @@ theorem compileSafe_single_public_observational_correct_with_if
   exact successAgrees_trans _ _ _
     (successAgrees_trans _ _ _ hLow hPeep) hEmit
 
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
 /--
 Single-public-method `compileSafe` soundness for the largest currently
 proved peephole subset.
@@ -1223,17 +1508,23 @@ theorem compileSafe_single_public_observational_correct_with_if_of_flat_first_pa
           (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
     (hPassOps : passOps = Peephole.peepholePassAll loweredOps)
     (hNoIf : Peephole.noIfOp loweredOps)
-    (hFlatFirstPass :
-      runOps (Peephole.peepholePassAllFlat loweredOps) initialStack =
-        runOps loweredOps initialStack)
-    (hPassAllNoIf : Peephole.noIfOp passOps)
-    (hPostNoIf :
-      Peephole.noIfOp (Peephole.peepholePostFold passOps))
+    (hWT : Peephole.wellTypedRun loweredOps initialStack)
+    (hWT16 :
+      Peephole.wellTypedRun
+        (Peephole.applyZeroNumEqual (Peephole.passAllInner15 loweredOps))
+        initialStack)
+    (hWT18 :
+      Peephole.wellTypedRun
+        (Peephole.applyCheckSigVerifyFuse (Peephole.applyNumEqualVerifyFuse
+          (Peephole.applyZeroNumEqual (Peephole.passAllInner15 loweredOps))))
+        initialStack)
+    (hStrict18 :
+      Peephole.equalVerifyFuse_eitherStrict
+        (Peephole.applyCheckSigVerifyFuse (Peephole.applyNumEqualVerifyFuse
+          (Peephole.applyZeroNumEqual (Peephole.passAllInner15 loweredOps))))
+        initialStack)
     (hPostWT :
       Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack)
-    (hChainNoIf :
-      Peephole.noIfOp
-        (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
     (hChainRollPickNoop :
       Peephole.rollPickFoldFlatNoop
         (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
@@ -1245,8 +1536,8 @@ theorem compileSafe_single_public_observational_correct_with_if_of_flat_first_pa
       (runParsedBytes bytes initialStack) := by
   have hPeepOps :=
     peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop
-      loweredOps passOps initialStack hPassOps hNoIf hFlatFirstPass
-      hPassAllNoIf hPostNoIf hPostWT hChainNoIf hChainRollPickNoop
+      loweredOps passOps initialStack hPassOps hNoIf hWT hWT16 hWT18 hStrict18
+      hPostWT hChainRollPickNoop
   have hPeepToEmittedOps :
       runMethod (Lower.lower p) anfM.name initialStack
         = runOps stackM.ops initialStack := by
@@ -1282,6 +1573,49 @@ theorem patched_bytes_sound_of_emitFast_bytes_with_if
   rw [hRun]
   exact successAgrees_refl _
 
+/--
+**M4** discharge: the patched-emit round-trip holds unconditionally for
+the `AreRunarEmittableWithIf` op subset.
+
+This subsumes `patched_bytes_sound_of_emitFast_bytes_with_if` — the
+caller no longer needs to supply a separate `r.bytes = emitFast p`
+hypothesis. The byte equality is derived inside the proof from
+`AreRunarEmittableWithIf m.ops`, which implies `opsHaveNoPatchSites
+m.ops = true` via `opsHaveNoPatchSites_of_AreRunarEmittableWithIf`
+(see `Script/EmitCorrect.lean`); under that no-patch-sites
+precondition, `emitWithCodeSepPatches` emits the same bytes as the
+legacy `emit` / `emitFast` paths.
+-/
+theorem patched_bytes_sound_with_if
+    (p : StackProgram) (m : StackMethod) (r : Emit.EmitResult)
+    (initialStack : StackState)
+    (hOps : Parse.AreRunarEmittableWithIf m.ops) :
+    Emit.publicMethodsOf p = [m] →
+    Emit.emitWithCodeSepPatches p = .ok r →
+    successAgrees
+      (runOps m.ops initialStack)
+      (runParsedBytes r.bytes initialStack) := by
+  intro hPublic hPatch
+  have hBytes : r.bytes = Emit.emitFast p :=
+    Emit.emitWithCodeSepPatches_single_public_bytes_eq_emitFast_with_if
+      p m r hPublic hOps hPatch
+  rw [hBytes]
+  have hRun :=
+    emitFast_single_public_runOps_eq_with_if p m initialStack hPublic hOps
+  rw [hRun]
+  exact successAgrees_refl _
+
+/--
+**M4** capstone: single-public-method `compileSafeWithCodeSepPatches`
+soundness no longer takes the `hPatchedBytesSound` hypothesis as an
+input. The patched-emit byte equality is proved internally from
+`Parse.AreRunarEmittableWithIf stackM.ops` (a genuine structural
+precondition on the public-method body, not a restatement of the
+conclusion). Under that precondition,
+`emitWithCodeSepPatches`'s output bytes equal the legacy `emit` /
+`emitFast` bytes, and the existing `emitFast_single_public_runOps_eq_with_if`
+lemma closes the round-trip.
+-/
 theorem compileSafeWithCodeSepPatches_single_public_observational_correct
     (p : ANFProgram) (h : WF.ANF p)
     (anfM : ANFMethod) (stackM : StackMethod)
@@ -1296,12 +1630,7 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct
           = runOps stackM.ops initialStack)
     (hPublic :
       Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
-    (hPatchedBytesSound :
-      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM] →
-      Emit.emitWithCodeSepPatches (peepholeProgram (Lower.lower p)) = .ok r →
-      successAgrees
-        (runOps stackM.ops initialStack)
-        (runParsedBytes r.bytes initialStack)) :
+    (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
       (runParsedBytes r.bytes initialStack) := by
@@ -1315,10 +1644,20 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct
       (runOps stackM.ops initialStack) := by
     rw [hPeepToEmittedOps]
     exact successAgrees_refl _
-  have hEmit := hPatchedBytesSound hPublic hPatch
+  have hEmit :=
+    patched_bytes_sound_with_if (peepholeProgram (Lower.lower p)) stackM r
+      initialStack hOps hPublic hPatch
   exact successAgrees_trans _ _ _
     (successAgrees_trans _ _ _ hLow hPeep) hEmit
 
+/--
+Legacy companion: same conclusion as
+`compileSafeWithCodeSepPatches_single_public_observational_correct` but
+with an extra `r.bytes = emitFast ...` hypothesis. After M4 this is
+strictly weaker — the byte equality is now proved internally, so the
+`hBytes` hypothesis is redundant. Kept for backwards compatibility
+with existing callers; new code should use the base theorem directly.
+-/
 theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes
     (p : ANFProgram) (h : WF.ANF p)
     (anfM : ANFMethod) (stackM : StackMethod)
@@ -1333,18 +1672,18 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
           = runOps stackM.ops initialStack)
     (hPublic :
       Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
-    (hBytes :
+    (_hBytes :
       r.bytes = Emit.emitFast (peepholeProgram (Lower.lower p)))
     (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
-      (runParsedBytes r.bytes initialStack) := by
-  exact compileSafeWithCodeSepPatches_single_public_observational_correct
+      (runParsedBytes r.bytes initialStack) :=
+  compileSafeWithCodeSepPatches_single_public_observational_correct
     p h anfM stackM r initialAnf initialStack
-    hSafe hLowSimulates hPeepToEmittedOps hPublic
-    (patched_bytes_sound_of_emitFast_bytes_with_if
-      (peepholeProgram (Lower.lower p)) stackM r initialStack hBytes hOps)
+    hSafe hLowSimulates hPeepToEmittedOps hPublic hOps
 
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
 /--
 Slot-aware companion to
 `compileSafe_single_public_observational_correct_with_if_of_flat_first_pass_rollPick_noop`.
@@ -1370,17 +1709,23 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
           (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
     (hPassOps : passOps = Peephole.peepholePassAll loweredOps)
     (hNoIf : Peephole.noIfOp loweredOps)
-    (hFlatFirstPass :
-      runOps (Peephole.peepholePassAllFlat loweredOps) initialStack =
-        runOps loweredOps initialStack)
-    (hPassAllNoIf : Peephole.noIfOp passOps)
-    (hPostNoIf :
-      Peephole.noIfOp (Peephole.peepholePostFold passOps))
+    (hWT : Peephole.wellTypedRun loweredOps initialStack)
+    (hWT16 :
+      Peephole.wellTypedRun
+        (Peephole.applyZeroNumEqual (Peephole.passAllInner15 loweredOps))
+        initialStack)
+    (hWT18 :
+      Peephole.wellTypedRun
+        (Peephole.applyCheckSigVerifyFuse (Peephole.applyNumEqualVerifyFuse
+          (Peephole.applyZeroNumEqual (Peephole.passAllInner15 loweredOps))))
+        initialStack)
+    (hStrict18 :
+      Peephole.equalVerifyFuse_eitherStrict
+        (Peephole.applyCheckSigVerifyFuse (Peephole.applyNumEqualVerifyFuse
+          (Peephole.applyZeroNumEqual (Peephole.passAllInner15 loweredOps))))
+        initialStack)
     (hPostWT :
       Peephole.wellTypedRun (Peephole.peepholePostFold passOps) initialStack)
-    (hChainNoIf :
-      Peephole.noIfOp
-        (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
     (hChainRollPickNoop :
       Peephole.rollPickFoldFlatNoop
         (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
@@ -1394,8 +1739,8 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
       (runParsedBytes r.bytes initialStack) := by
   have hPeepOps :=
     peephole_program_ops_runOps_eq_of_flat_first_pass_rollPick_noop
-      loweredOps passOps initialStack hPassOps hNoIf hFlatFirstPass
-      hPassAllNoIf hPostNoIf hPostWT hChainNoIf hChainRollPickNoop
+      loweredOps passOps initialStack hPassOps hNoIf hWT hWT16 hWT18 hStrict18
+      hPostWT hChainRollPickNoop
   have hPeepToEmittedOps :
       runMethod (Lower.lower p) anfM.name initialStack
         = runOps stackM.ops initialStack := by
@@ -1414,10 +1759,195 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
     p h anfM stackM r initialAnf initialStack
     hSafe hLowSimulates hPeepToEmittedOps hPublic hBytes hOps
 
-/-! ### The top-level soundness theorem
+/-! ### The top-level soundness theorem (M5 capstone)
 
-Composes the three sub-soundness facts above via `Eq.trans` /
-`Iff.trans` on the `successAgrees` relation. -/
+Composes M2 (`lower_observational_correct` — structural-const fragment),
+M3 (`peephole_observational_correct_modulo_runMethod_eq` — discharged
+from genuine `noIfOp` / `wellTypedRun` / `equalVerifyFuse_eitherStrict` /
+`rollPickDepthOK` preconditions), and M4
+(`compileSafe_single_public_runOps_eq` — discharged from
+`Parse.AreRunarEmittable`) into a single citable theorem that takes
+ONLY genuine domain predicates — not `successAgrees`-shaped or
+`runMethod = runOps`-shaped hypotheses that restate the conclusion.
+
+**Fragment.** The capstone is stated over the **structural-const**
+fragment: every ANF binding's value is a literal load
+(`.loadConst (.int _)` / `.loadConst (.bool _)` / `.loadConst (.bytes _)`).
+For this fragment the lowered method body is exactly a flat
+`[.push, .push, …]` op list — which trivially satisfies M3's
+`noIfOp` / `wellTypedRun` / `peepholePassAllFlat_preconditions` /
+`rollPickDepthOK` invariants and M4's `Parse.AreRunarEmittable`
+emit/parse round-trip.
+
+For programs whose public method body lies outside this fragment, the
+M2 lowering discharge is the limiting factor — fragment widening past
+literal loads needs `agreesTagged`/`ChainRel` infrastructure that is
+in scope for `Stack.Agrees` but has not yet been hoisted into an
+unconditional `successAgrees` form for non-trivial bindings (see
+`Stack.Agrees`'s "What's still required" header).
+-/
+
+section
+attribute [local irreducible] Peephole.peepholePassAll Peephole.peepholePostFold
+  Peephole.peepholeChainFold Peephole.peepholeRollPickFold
+  Peephole.peepholePassAllFlat Peephole.passAllInner15
+
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+**M5 capstone — `compileSafe` end-to-end observational correctness on
+the structural-const fragment.**
+
+Hypothesis audit (every premise is a genuine domain predicate; none
+restate the conclusion):
+
+* `h : WF.ANF p` — the standard ANF well-formedness predicate.
+* `hSafe : compileSafe p = .ok bytes` — the deployed-byte handle.
+* `hMem`, `hPublic`, `hUnique`, `hNoPreimage`, `hNoCode`,
+  `hNoTerminalAssert`, `hNoDeserialize`, `hConst` — M2's genuine
+  domain predicates: the selected method is a public, name-unique
+  member of `p.methods`, its body has no preimage / codepart /
+  deserialize-state intrinsics, no terminal `OP_VERIFY` post-op, and
+  every binding is a literal load.
+* `hPublicSingleton : Emit.publicMethodsOf (peepholeProgram
+  (Lower.lower p)) = [stackM]` — structural shape: `peepholeProgram
+  (Lower.lower p)` has exactly one public method, namely `stackM`.
+* `hStackBody : (peepholeProgram (Lower.lower p)).bodyOf anfM.name =
+  stackM.ops` — structural shape: `stackM`'s op list is the
+  peephole-rewritten lowered body of the selected ANF method.
+* `hNoIf : Peephole.noIfOp ((Lower.lower p).bodyOf anfM.name)` — M3's
+  genuine structural precondition (no `.ifOp` in the lowered body).
+* `hPre`, `hPostWT`, `hChainDepth` — M3's `wellTypedRun` /
+  `equalVerifyFuse_eitherStrict` / `rollPickDepthOK` invariants on
+  the lowered body and the intermediate phases.
+* `hOps : Parse.AreRunarEmittable stackM.ops` — M4's emit/parse
+  round-trip precondition on the public method's final op list.
+
+Conclusion: `successAgrees` between the ANF body's evaluation and the
+result of running the deployed bytes through `Parse.parseScript +
+Stack.Eval.runOps`. -/
+theorem compileSafe_single_public_observational_correct_unconditional
+    (p : ANFProgram) (_h : WF.ANF p)
+    (anfM : ANFMethod) (stackM : StackMethod)
+    (bytes : ByteArray)
+    (initialAnf : State) (initialStack : StackState)
+    -- Compile succeeded.
+    (hSafe : compileSafe p = .ok bytes)
+    -- M2 domain predicates (structural-const fragment, standard
+    -- public-method shape, no implicit-parameter / post-processing).
+    (hMem : anfM ∈ p.methods)
+    (hPublic : anfM.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ p.methods → m'.isPublic = true →
+        (m'.name == anfM.name) = true → m' = anfM)
+    (hNoPreimage : Lower.bindingsUseCheckPreimage anfM.body = false)
+    (hNoCode : Lower.bindingsUseCodePart anfM.body = false)
+    (hNoTerminalAssert : Lower.bodyEndsInAssert anfM.body = false)
+    (hNoDeserialize : Lower.bindingsUseDeserializeState anfM.body = false)
+    (hConst : Agrees.structuralConstBody anfM.body)
+    -- M3 domain predicates on the LOWERED body. These are structural
+    -- facts about the syntactic shape of `(Lower.lower p).bodyOf
+    -- anfM.name`, not restatements of `runMethod`/`runOps` success.
+    (hNoIf : Peephole.noIfOp ((Lower.lower p).bodyOf anfM.name))
+    (hPre :
+      Peephole.peepholePassAllFlat_preconditions
+        ((Lower.lower p).bodyOf anfM.name) initialStack)
+    (hPostWT :
+      Peephole.wellTypedRun
+        (Peephole.peepholePostFold
+          (Peephole.peepholePassAll
+            ((Lower.lower p).bodyOf anfM.name)))
+        initialStack)
+    (hChainDepth :
+      Peephole.rollPickDepthOK
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold
+            (Peephole.peepholePassAll
+              ((Lower.lower p).bodyOf anfM.name))))
+        initialStack)
+    -- Structural shape: `stackM` is the single public method of the
+    -- post-peephole program, and its ops are exactly the rewritten
+    -- lowered body of `anfM.name`.
+    (hPublicSingleton :
+      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
+    (hStackBody :
+      (peepholeProgram (Lower.lower p)).bodyOf anfM.name = stackM.ops)
+    -- M4 domain predicate (parser/emit round trip).
+    (hOps : Parse.AreRunarEmittable stackM.ops) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack) := by
+  -- Step 1 (M2): lowering preserves success on the structural-const
+  -- fragment. The structural assumptions are exactly M2's domain
+  -- predicates; the conclusion is `successAgrees evalBindings runMethod`.
+  -- `p` is definitionally equal to `{p.contractName, p.properties,
+  -- p.methods}`, so `lower_observational_correct` applies directly.
+  have hLow :
+      successAgrees
+        (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+        (runMethod (Lower.lower p) anfM.name initialStack) := by
+    -- Rewrite `p` to its constructor form so the M2 statement matches.
+    have hP : p =
+        { contractName := p.contractName,
+          properties := p.properties,
+          methods := p.methods } := rfl
+    rw [hP]
+    exact lower_observational_correct
+      p.contractName p.properties p.methods anfM initialAnf initialStack
+      hMem hPublic hUnique hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize hConst
+  -- Step 2 (M3): the live `peepholeProgram` pipeline is
+  -- `runMethod`-preserving from the lowered program to the
+  -- post-peephole program, under genuine structural preconditions.
+  have hPeep :
+      successAgrees
+        (runMethod (Lower.lower p) anfM.name initialStack)
+        (runMethod (peepholeProgram (Lower.lower p)) anfM.name initialStack) :=
+    peephole_observational_correct_modulo_runMethod_eq
+      (Lower.lower p) anfM.name initialStack hNoIf hPre hPostWT hChainDepth
+  -- Step 3: bridge `runMethod (peepholeProgram (Lower.lower p))
+  -- anfM.name initialStack` to `runOps stackM.ops initialStack`.
+  -- `runMethod q n s = runOps (q.bodyOf n) s` by definition, so this
+  -- collapses to `hStackBody` under `rfl`-rewrites.
+  have hRunMethodToOps :
+      runMethod (peepholeProgram (Lower.lower p)) anfM.name initialStack
+        = runOps stackM.ops initialStack := by
+    unfold runMethod
+    rw [hStackBody]
+  -- Step 4 (M4): `compileSafe` bytes round-trip through `parseScript`
+  -- back to `runOps stackM.ops` on the `AreRunarEmittable` subset.
+  have hEmitEq :
+      runParsedBytes bytes initialStack = runOps stackM.ops initialStack :=
+    compileSafe_single_public_runOps_eq p bytes stackM initialStack
+      hSafe hPublicSingleton hOps
+  -- Compose. We have:
+  --   evalBindings  ≃ runMethod (lower)    [hLow]
+  --   runMethod(lower) ≃ runMethod(peephole) [hPeep]
+  --   runMethod(peephole) = runOps stackM.ops [hRunMethodToOps]
+  --   runParsedBytes = runOps stackM.ops [hEmitEq]
+  -- The last two equalities give runMethod(peephole) ≃ runParsedBytes
+  -- via reflexivity of `successAgrees`.
+  have hPeepToParsed :
+      successAgrees
+        (runMethod (peepholeProgram (Lower.lower p)) anfM.name initialStack)
+        (runParsedBytes bytes initialStack) := by
+    rw [hRunMethodToOps, ← hEmitEq]
+    exact successAgrees_refl _
+  exact successAgrees_trans _ _ _
+    (successAgrees_trans _ _ _ hLow hPeep) hPeepToParsed
+
+end
+
+/-! ### Deprecated skeletons
+
+The original `compile_observational_correct_skeleton` and
+`compile_observational_correct_bytes_skeleton` are kept as
+`@[deprecated]` aliases pointing to the new capstone above. They are
+strictly weaker — they took a caller-supplied
+`hLowSimulates`/`hPeepEq` bridge that, post-M2/M3, is discharged
+internally. Migrate callers to
+`compileSafe_single_public_observational_correct_unconditional` (or one
+of the M2/M3 unconditional sub-theorems) and remove these aliases
+once the migration is complete. -/
 
 /--
 **Composition skeleton.** For every well-formed ANF program `p` and
@@ -1428,6 +1958,8 @@ This is intentionally not the final deployed-byte theorem: the
 statement still does not mention `compileSafe` bytes or parsed Script
 execution.
 -/
+@[deprecated compileSafe_single_public_observational_correct_unconditional
+  (since := "M5 capstone")]
 theorem compile_observational_correct_skeleton
     (p : ANFProgram) (h : WF.ANF p) (m : ANFMethod)
     (initialAnf : State) (initialStack : StackState)
@@ -1441,8 +1973,16 @@ theorem compile_observational_correct_skeleton
       (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
   have h1 :=
     lower_observational_correct_skeleton p h m initialAnf initialStack hLowSimulates
-  have h2 :=
-    peephole_observational_correct_modulo_runMethod_eq (Lower.lower p) m.name initialStack hPeepEq
+  -- The peephole step: this skeleton receives the per-method `runMethod`
+  -- equality `hPeepEq` directly as a hypothesis, so the peephole leg of
+  -- the composition is a rewrite. Callers that want `hPeepEq` itself
+  -- discharged use `peephole_observational_correct_modulo_runMethod_eq`,
+  -- which proves it from the genuine domain preconditions.
+  have h2 :
+      successAgrees
+        (runMethod (Lower.lower p) m.name initialStack)
+        (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
+    rw [hPeepEq]; exact successAgrees_refl _
   exact successAgrees_trans _ _ _ h1 h2
 
 /--
@@ -1451,6 +1991,8 @@ theorem compile_observational_correct_skeleton
 included as a reflexive final step. The statement still targets
 `runMethod`, not parsed emitted bytes.
 -/
+@[deprecated compileSafe_single_public_observational_correct_unconditional
+  (since := "M5 capstone")]
 theorem compile_observational_correct_bytes_skeleton
     (p : ANFProgram) (h : WF.ANF p) (m : ANFMethod)
     (initialAnf : State) (initialStack : StackState)
@@ -1467,8 +2009,13 @@ theorem compile_observational_correct_bytes_skeleton
   -- have a concrete method body and `Parse.AreRunarEmittable` proof.
   have hLow :=
     lower_observational_correct_skeleton p h m initialAnf initialStack hLowSimulates
-  have hPeepStep :=
-    peephole_observational_correct_modulo_runMethod_eq (Lower.lower p) m.name initialStack hPeepEq
+  -- The peephole step: this skeleton receives `hPeepEq` directly, so the
+  -- peephole leg is a rewrite (see `compile_observational_correct_skeleton`).
+  have hPeepStep :
+      successAgrees
+        (runMethod (Lower.lower p) m.name initialStack)
+        (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
+    rw [hPeepEq]; exact successAgrees_refl _
   exact successAgrees_trans _ _ _ hLow hPeepStep
 
 end Soundness

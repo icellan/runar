@@ -11918,6 +11918,129 @@ theorem stageC_lowerBindingsP_structuralConst_witness
         body sm currentIndex hConst]
   exact hRunStructural
 
+/-! ### ANF-side success for the structural-const fragment
+
+The operational bridges above cover the runtime (Stack VM) side. The
+matching ANF-evaluator fact is that a structural-const body never fails
+to evaluate: literal loads are total. Together these are the two halves
+of `successAgrees` for the const fragment. -/
+
+/-- `evalValue` never fails on a structural-const value, and leaves the
+ANF state unchanged. -/
+theorem evalValue_structuralConstValue_ok
+    (s : State) (v : ANFValue) (h : structuralConstValue v) :
+    ∃ val, RunarVerification.ANF.Eval.evalValue s v = .ok (val, s) := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int i => exact ⟨.vBigint i, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | bool b => exact ⟨.vBool b, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | bytes b => exact ⟨.vBytes b, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | refAlias _ => simp [structuralConstValue] at h
+      | thisRef => simp [structuralConstValue] at h
+  | loadParam _ => simp [structuralConstValue] at h
+  | loadProp _ => simp [structuralConstValue] at h
+  | binOp _ _ _ _ => simp [structuralConstValue] at h
+  | unaryOp _ _ _ => simp [structuralConstValue] at h
+  | call _ _ => simp [structuralConstValue] at h
+  | methodCall _ _ _ => simp [structuralConstValue] at h
+  | ifVal _ _ _ => simp [structuralConstValue] at h
+  | loop _ _ _ => simp [structuralConstValue] at h
+  | assert _ => simp [structuralConstValue] at h
+  | updateProp _ _ => simp [structuralConstValue] at h
+  | getStateScript => simp [structuralConstValue] at h
+  | checkPreimage _ => simp [structuralConstValue] at h
+  | deserializeState _ => simp [structuralConstValue] at h
+  | addOutput _ _ _ => simp [structuralConstValue] at h
+  | addRawOutput _ _ => simp [structuralConstValue] at h
+  | addDataOutput _ _ => simp [structuralConstValue] at h
+  | arrayLiteral _ => simp [structuralConstValue] at h
+
+/-- `evalBindings` always succeeds on a structural-const body. -/
+theorem evalBindings_structuralConstBody_isSome
+    (body : List ANFBinding) (s : State) (h : structuralConstBody body) :
+    (RunarVerification.ANF.Eval.evalBindings s body).toOption.isSome := by
+  induction body generalizing s with
+  | nil => simp [RunarVerification.ANF.Eval.evalBindings, Except.toOption]
+  | cons hd rest ih =>
+      obtain ⟨name, v, src⟩ := hd
+      simp only [structuralConstBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      obtain ⟨val, hVal⟩ := evalValue_structuralConstValue_ok s v hHead
+      simp only [RunarVerification.ANF.Eval.evalBindings, hVal]
+      exact ih (s.addBinding name val) hRest
+
+/-! ### Runtime-side success for the structural-const fragment
+
+The matching Stack-VM fact: a structural-const value lowers (via the
+unparameterized `lowerValue`) to a single `.push` op, which `runOps`
+can never fail on. By list induction, a const-only body's lowered op
+list runs to `.ok` from *any* starting stack — there is no stack-map
+invariant to maintain because literal pushes inspect nothing. -/
+
+/-- `lowerValue` on a structural-const value emits exactly one `.push`
+op, and `runOps` of it succeeds from any stack. -/
+theorem runOps_lowerValue_structuralConstValue_ok
+    (sm : StackMap) (name : String) (v : ANFValue)
+    (h : structuralConstValue v) (stk : StackState) :
+    ∃ stk', runOps (Stack.Lower.lowerValue sm name v).1 stk = .ok stk' := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int i =>
+          refine ⟨stk.push (.vBigint i), ?_⟩
+          simp [Stack.Lower.lowerValue, Stack.Lower.emitConst, runOps, stepNonIf]
+      | bool b =>
+          refine ⟨stk.push (.vBool b), ?_⟩
+          simp [Stack.Lower.lowerValue, Stack.Lower.emitConst, runOps, stepNonIf]
+      | bytes b =>
+          refine ⟨stk.push (.vBytes b), ?_⟩
+          simp [Stack.Lower.lowerValue, Stack.Lower.emitConst, runOps, stepNonIf]
+      | refAlias _ => simp [structuralConstValue] at h
+      | thisRef => simp [structuralConstValue] at h
+  | loadParam _ => simp [structuralConstValue] at h
+  | loadProp _ => simp [structuralConstValue] at h
+  | binOp _ _ _ _ => simp [structuralConstValue] at h
+  | unaryOp _ _ _ => simp [structuralConstValue] at h
+  | call _ _ => simp [structuralConstValue] at h
+  | methodCall _ _ _ => simp [structuralConstValue] at h
+  | ifVal _ _ _ => simp [structuralConstValue] at h
+  | loop _ _ _ => simp [structuralConstValue] at h
+  | assert _ => simp [structuralConstValue] at h
+  | updateProp _ _ => simp [structuralConstValue] at h
+  | getStateScript => simp [structuralConstValue] at h
+  | checkPreimage _ => simp [structuralConstValue] at h
+  | deserializeState _ => simp [structuralConstValue] at h
+  | addOutput _ _ _ => simp [structuralConstValue] at h
+  | addRawOutput _ _ => simp [structuralConstValue] at h
+  | addDataOutput _ _ => simp [structuralConstValue] at h
+  | arrayLiteral _ => simp [structuralConstValue] at h
+
+/-- `runOps` of a structural-const body's lowered op list succeeds from
+any starting stack. This is the Stack-VM half of `successAgrees` for
+the const fragment — paired with `evalBindings_structuralConstBody_isSome`
+on the ANF side. -/
+theorem runOps_lowerBindings_structuralConstBody_isSome :
+    ∀ (body : List ANFBinding) (sm : StackMap) (stk : StackState),
+      structuralConstBody body →
+      (runOps (Stack.Lower.lowerBindings sm body).1 stk).toOption.isSome
+  | [], sm, stk, _h => by
+      simp [Stack.Lower.lowerBindings, runOps, Except.toOption]
+  | (.mk name v src) :: rest, sm, stk, h => by
+      simp only [structuralConstBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      obtain ⟨stk', hHeadRun⟩ :=
+        runOps_lowerValue_structuralConstValue_ok sm name v hHead stk
+      -- `lowerBindings` on a cons unfolds to `ops ++ restOps`.
+      have hUnfold :
+          (Stack.Lower.lowerBindings sm ((ANFBinding.mk name v src) :: rest)).1
+            = (Stack.Lower.lowerValue sm name v).1
+              ++ (Stack.Lower.lowerBindings (Stack.Lower.lowerValue sm name v).2 rest).1 := by
+        simp [Stack.Lower.lowerBindings]
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+      exact runOps_lowerBindings_structuralConstBody_isSome
+        rest (Stack.Lower.lowerValue sm name v).2 stk' hRest
+
 /-! ### Option 1 extension — copied reference loads
 
 The next equality fragment covers literal loads plus reference loads that
@@ -13445,6 +13568,37 @@ theorem stageD_public_unique_no_post_structuralCopy_bridge
     exact hRunStructural
   · exact hChain
   · exact hAgrees
+
+/-- Named-method runtime-success theorem for the structural-const
+fragment. Unlike `stageD_public_unique_no_post_structuralConst_bridge`,
+this needs no `ChainRel` / `agreesTagged` witness and no externally
+supplied `stkFinal`: for a const-only body the lowered op list is a
+sequence of `.push` ops that `runOps` can never fail on. This is the
+Stack-VM `.isSome` half of `successAgrees` for the const fragment. -/
+theorem runMethod_lower_public_unique_no_post_structuralConst_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hConst : structuralConstBody m.body) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [lowerMethodUserRawOps_eq_lowerBindings_structuralConst
+        methods props m hConst]
+  exact runOps_lowerBindings_structuralConstBody_isSome
+    m.body (m.params.map (fun p => p.name) |>.reverse) initialStack hConst
 
 /-- Terminal-assert elision activates iff the method is public,
 the body's last binding is `.assert _`, AND the lowered body's

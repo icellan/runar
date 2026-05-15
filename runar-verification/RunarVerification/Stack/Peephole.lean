@@ -8553,6 +8553,13 @@ theorem peepholePostFold_preserves_noIfOp
   exact applyPushOneSub_preserves_noIfOp _
     (applyPushOneAdd_preserves_noIfOp ops hNoIf)
 
+/-- `peepholePostFold` is the identity on the empty op list. Used by the
+absent-method case of `Pipeline.peepholeProgram_bodyOf`. -/
+theorem peepholePostFold_nil : peepholePostFold ([] : List StackOp) = [] := by
+  unfold peepholePostFold
+  rw [postFoldList_eq_of_noIfOp [] (by simp [noIfOp])]
+  rfl
+
 /-! ## Phase 7.9.b — Chain-fold post-pass
 
 The 4-op `applyPushAddPushAdd` / `applyPushAddPushSub` rules added above
@@ -9089,6 +9096,149 @@ theorem peepholeRollPickFold_preserves_noIfOp
   unfold rollPickFixpointFlat
   exact applyRollPickFold_preserves_noIfOp ops hNoIf
 
+/-! ### Phase 7.9.d — GENERAL roll/pick fold operational soundness (M3)
+
+The `_of_noIfOp_flatNoop` theorem above only covers inputs that have NO
+foldable roll/pick head — i.e. the pass is the identity. M3 discharges
+the fired-rewrite case generally.
+
+The single-op rewrite soundness (`rollPickRewriteOne_runOps_eq`) needs a
+genuine **depth precondition** at the firing position: a `.roll d` /
+`.pick d` op only behaves like its specialised opcode when the stack is
+at least `d + 1` deep — otherwise the bundled op errors while the
+rewrite does not. `opPrecondition` maps both `.roll d` and `.pick d` to
+`.none`, so `wellTypedRun` does NOT carry this fact; we thread it
+through a dedicated `rollPickDepthOK` predicate, structurally analogous
+to `wellTypedRun` but recording exactly the per-position depth bound.
+
+This is a genuine structural precondition — it does NOT restate "the
+fold preserves runOps"; it records the stack-depth invariant that the
+roll/pick lowerer already establishes for every `.roll d` / `.pick d` it
+emits (each is preceded in the lowering by enough material to populate
+its `d + 1` operands). -/
+
+/-- Per-position depth invariant for the roll/pick fold: at every
+`.roll d` / `.pick d` op in the list, the stack at that op's execution
+position is at least `d + 1` deep. Threaded through `stepNonIf` exactly
+like `wellTypedRun`. Non-roll/pick ops impose no depth requirement (the
+left conjunct is vacuous). `.ifOp` is not exercised by the roll/pick
+fold's flat layer (`applyRollPickFold` operates on `noIfOp` lists), so
+its second conjunct is vacuously `True` via `stepNonIf`'s `.ifOp` error
+branch. -/
+def rollPickDepthOK : List StackOp → StackState → Prop
+  | [], _ => True
+  | op :: rest, s =>
+      (∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) ∧
+      (∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s')
+
+theorem rollPickDepthOK_nil (s : StackState) : rollPickDepthOK [] s := True.intro
+
+theorem rollPickDepthOK_cons (op : StackOp) (rest : List StackOp) (s : StackState) :
+    rollPickDepthOK (op :: rest) s ↔
+      (∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) ∧
+      (∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s') :=
+  Iff.rfl
+
+/-- General `runOps` soundness of `applyRollPickFold` for `noIfOp`
+inputs, under the `rollPickDepthOK` depth invariant. Both fired and
+non-fired rewrites are covered: `rollPickRewriteOne_runOps_eq` discharges
+the head op, and the per-constructor `runOps_cons_*_cong_typed` lemmas
+thread the inductive hypothesis through the tail (the depth invariant on
+the tail is exactly `rollPickDepthOK`'s second conjunct). -/
+theorem applyRollPickFold_runOps_eq :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), rollPickDepthOK ops s →
+        runOps (applyRollPickFold ops) s = runOps ops s := by
+  intro ops
+  induction ops with
+  | nil => intro _ s _; rfl
+  | cons op rest ih =>
+    intro hNoIf s hDepth
+    have hRestNoIf : noIfOp rest := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hHeadDepth :
+        ∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1 :=
+      (rollPickDepthOK_cons op rest s |>.mp hDepth).1
+    have hTailDepth :
+        ∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s' :=
+      (rollPickDepthOK_cons op rest s |>.mp hDepth).2
+    -- Step 1: `applyRollPickFold (op :: rest) = rollPickRewriteOne op ++ applyRollPickFold rest`.
+    show runOps (rollPickRewriteOne op ++ applyRollPickFold rest) s
+       = runOps (op :: rest) s
+    -- Step 2: the head rewrite preserves `runOps` (given the depth bound).
+    rw [rollPickRewriteOne_runOps_eq op s (applyRollPickFold rest) hHeadDepth]
+    -- Step 3: thread the IH through the tail with a per-constructor cong.
+    -- The IH applies on the post-step state via `hTailDepth`.
+    cases op with
+    | push v =>
+        exact runOps_cons_push_cong_typed v _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | dup =>
+        exact runOps_cons_dup_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | swap =>
+        exact runOps_cons_swap_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | drop =>
+        exact runOps_cons_drop_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | nip =>
+        exact runOps_cons_nip_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | over =>
+        exact runOps_cons_over_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | rot =>
+        exact runOps_cons_rot_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | tuck =>
+        exact runOps_cons_tuck_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | roll d =>
+        exact runOps_cons_roll_cong_typed d _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | pick d =>
+        exact runOps_cons_pick_cong_typed d _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | pickStruct d =>
+        exact runOps_cons_pickStruct_cong_typed d _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | opcode code =>
+        exact runOps_cons_opcode_cong_typed code _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | placeholder i n =>
+        exact runOps_cons_placeholder_cong_typed i n _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | pushCodesepIndex =>
+        exact runOps_cons_pushCodesepIndex_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
+
+/-- General `runOps` soundness of `peepholeRollPickFold` for `noIfOp`
+inputs, under the `rollPickDepthOK` depth invariant. On `noIfOp` lists
+`rollPickListTRgo` is the identity and `rollPickFixpointFlat` is
+`applyRollPickFold`, so this reduces directly to
+`applyRollPickFold_runOps_eq`.
+
+This is strictly more general than
+`peepholeRollPickFold_runOps_eq_of_noIfOp_flatNoop` for inputs that
+DO contain foldable roll/pick heads — that theorem only covers the
+identity case where no head fires. The two are kept side-by-side: the
+`flatNoop` variant needs no depth precondition (the pass is literally
+the identity), while this one carries the genuine `rollPickDepthOK`
+structural invariant required when a head actually folds. -/
+theorem peepholeRollPickFold_runOps_eq
+    (ops : List StackOp) (s : StackState) (hNoIf : noIfOp ops)
+    (hDepth : rollPickDepthOK ops s) :
+    runOps (peepholeRollPickFold ops) s = runOps ops s := by
+  unfold peepholeRollPickFold
+  rw [rollPickListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  show runOps (rollPickFixpointFlat 64 ops) s = runOps ops s
+  unfold rollPickFixpointFlat
+  exact applyRollPickFold_runOps_eq ops hNoIf s hDepth
+
 /-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
 
 Composes the 19 individual `_pass_sound` results for `peepholePassAllFlat`.
@@ -9116,8 +9266,13 @@ The 17-rule WT-preserving chain (from innermost to outermost in
 
 /-- Abbreviation for the post-15-rule chain (everything strictly inner
 than `applyZeroNumEqual` in `peepholePassAllFlat`). All 15 rules are
-WT-preserving so this carries WT under standard preconditions. -/
-private def passAllInner15 (ops : List StackOp) : List StackOp :=
+WT-preserving so this carries WT under standard preconditions.
+
+Exposed (non-`private`) so that `Pipeline`-level callers can state the
+genuine `wellTypedRun` / `eitherStrict` preconditions that
+`peepholePassAllFlat_sound` requires for the two non-WT-preserving outer
+rules. -/
+def passAllInner15 (ops : List StackOp) : List StackOp :=
   applyDoubleSha256 <|
    applyDoubleDrop <|
     applyDoubleOver <|
@@ -9320,6 +9475,51 @@ theorem peepholePassAllFlat_sound :
        = runOps ops s
   exact hSound19.trans (hSound18.trans (hSound17.trans (hSound16.trans hSound15)))
 
+/-- Bundled precondition for `peepholePassAllFlat_sound`: the four
+`wellTypedRun` / `eitherStrict` facts that the two non-WT-preserving
+outer rules (`applyZeroNumEqual`, `applyEqualVerifyFuse`) genuinely need.
+
+Bundling these into a single predicate keeps Pipeline-level call sites
+small — without it, each caller's type signature would mention
+`passAllInner15 ops` four times, and even the type-elaboration cost of
+those mentions exceeds Lean's default whnf heartbeat budget on the
+deep-call composition we use in M3. -/
+def peepholePassAllFlat_preconditions
+    (ops : List StackOp) (s : StackState) : Prop :=
+  wellTypedRun ops s ∧
+  wellTypedRun (applyZeroNumEqual (passAllInner15 ops)) s ∧
+  wellTypedRun
+    (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
+      (applyZeroNumEqual (passAllInner15 ops)))) s ∧
+  equalVerifyFuse_eitherStrict
+    (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
+      (applyZeroNumEqual (passAllInner15 ops)))) s
+
+set_option maxHeartbeats 1600000 in
+/-- Discharge `peepholePassAllFlat_sound` from a bundled precondition. -/
+theorem peepholePassAllFlat_runOps_eq
+    (ops : List StackOp) (s : StackState) (hNoIf : noIfOp ops)
+    (hPre : peepholePassAllFlat_preconditions ops s) :
+    runOps (peepholePassAllFlat ops) s = runOps ops s :=
+  peepholePassAllFlat_sound ops hNoIf s hPre.1 hPre.2.1 hPre.2.2.1 hPre.2.2.2
+
+set_option maxHeartbeats 1600000 in
+/-- `noIfOp` preservation through the full 19-rule flat chain. Composes
+the inner-15 preservation with the four outer rules. -/
+theorem peepholePassAllFlat_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (peepholePassAllFlat ops) := by
+  intro ops hNoIf
+  -- `passAllInner15` is exactly the inner-15-rule prefix of
+  -- `peepholePassAllFlat`; the four outer rules wrap it.
+  have hInner : noIfOp (passAllInner15 ops) :=
+    passAllInner15_preserves_noIfOp ops hNoIf
+  show noIfOp (applyEqualVerifyFuse (applyCheckSigVerifyFuse
+        (applyNumEqualVerifyFuse (applyZeroNumEqual (passAllInner15 ops)))))
+  exact applyEqualVerifyFuse_preserves_noIfOp _
+    (applyCheckSigVerifyFuse_preserves_noIfOp _
+      (applyNumEqualVerifyFuse_preserves_noIfOp _
+        (applyZeroNumEqual_preserves_noIfOp _ hInner)))
+
 /-! ## Phase 4-C — equivalence of `peepholePassAll` with structural fold.
 
 For `noIfOp` inputs, the tail-recursive `peepholePassAll` reduces to a
@@ -9455,6 +9655,16 @@ theorem peepholePassAll_runOps_eq_of_flat_sound
     runOps (peepholePassAll ops) s = runOps ops s := by
   rw [peepholePassAll_eq_flat_of_noIfOp ops hNoIf]
   exact hFlatSound
+
+set_option maxHeartbeats 800000 in
+/-- `noIfOp` preservation through `peepholePassAll`. For `noIfOp` inputs
+the `.ifOp`-descent preprocessor is the identity, so this reduces to
+`peepholePassAllFlat_preserves_noIfOp`. -/
+theorem peepholePassAll_preserves_noIfOp
+    (ops : List StackOp) (hNoIf : noIfOp ops) :
+    noIfOp (peepholePassAll ops) := by
+  rw [peepholePassAll_eq_flat_of_noIfOp ops hNoIf]
+  exact peepholePassAllFlat_preserves_noIfOp ops hNoIf
 
 /-! ## Phase 4-C — `peepholePassAll_sound` for `noIfOp` programs.
 
@@ -10397,6 +10607,32 @@ theorem peepholeChainFold_runOps_eq (ops : List StackOp) (s : StackState)
   unfold peepholeChainFold
   rw [chainFoldListTRgo_nil_acc_of_noIfOp ops hNoIf]
   exact chainFoldFixpointFlat_runOps_eq 64 ops hNoIf s hWT
+
+/-- `chainFoldFixpointFlat` is the identity on the empty op list at any
+fuel: each iteration's length check immediately stabilises. -/
+private theorem chainFoldFixpointFlat_nil :
+    ∀ (fuel : Nat), chainFoldFixpointFlat fuel ([] : List StackOp) = [] := by
+  intro fuel
+  cases fuel with
+  | zero => unfold chainFoldFixpointFlat; rfl
+  | succ k =>
+    unfold chainFoldFixpointFlat
+    have hNext : applyPushAddPushSub (applyPushAddPushAdd ([] : List StackOp)) = [] := rfl
+    simp [hNext]
+
+/-- `peepholeChainFold` is the identity on the empty op list. Used by the
+absent-method case of `Pipeline.peepholeProgram_bodyOf`. -/
+theorem peepholeChainFold_nil : peepholeChainFold ([] : List StackOp) = [] := by
+  unfold peepholeChainFold
+  rw [chainFoldListTRgo_nil_acc_of_noIfOp [] (by simp [noIfOp])]
+  exact chainFoldFixpointFlat_nil 64
+
+/-- `peepholeRollPickFold` is the identity on the empty op list. Used by
+the absent-method case of `Pipeline.peepholeProgram_bodyOf`. -/
+theorem peepholeRollPickFold_nil :
+    peepholeRollPickFold ([] : List StackOp) = [] :=
+  peepholeRollPickFold_eq_self_of_noIfOp_flatNoop [] (by simp [noIfOp])
+    (by intro op hOp; exact absurd hOp (by simp))
 
 end Peephole
 end RunarVerification.Stack

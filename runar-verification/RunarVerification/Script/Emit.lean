@@ -815,6 +815,220 @@ theorem emitWithCodeSepPatches_single_public_flat_no_patch_sites_bytes_eq_emit
   exact emitOpsWithCodeSepPatches_flat_no_patch_sites_bytes_eq_emitOps
     m.ops r hNoPatch hPatch
 
+/-! ### Generalised: nested IFs
+
+The flat predicate `flatOpsHaveNoPatchSites` rejects `.ifOp` outright,
+which is too restrictive for the public-method bodies emitted by the
+production compiler (the peephole pipeline routinely produces nested
+IFs even when no code-separator / placeholder sites exist).
+
+The mutual predicate `opsHaveNoPatchSites` (defined in `Emit`) allows
+`.ifOp` provided every branch is itself patch-site-free. The lemmas
+below extend the no-patch-sites byte-equality bridge to that wider
+subset by mutual recursion on `stackOpHasNoPatchSites` /
+`opsHaveNoPatchSites`.
+
+The state-preservation invariant we ride on is that whenever
+`opsHaveNoPatchSites ops = true`, processing `ops` through the patched
+emitter does not modify `possibleCodeSeparatorOffsets`. Because the
+top-level entry begins with `possibleCodeSeparatorOffsets := [0]`
+(`noPatchState ByteArray.empty`), every recursive call stays at
+`[0]` and `natListUnion [0] [0] = [0]` discharges the IF-join
+bookkeeping. -/
+
+private theorem natListUnion_singleton_zero_self :
+    natListUnion [0] [0] = [0] := by
+  decide
+
+private theorem noPatchState_appendByte (acc : ByteArray) (b : UInt8) :
+    (noPatchState acc).appendByte b
+      = noPatchState (acc ++ ByteArray.mk #[b]) := by
+  have hpush : ∀ (a : ByteArray) (x : UInt8),
+      a.push x = a ++ ByteArray.mk #[x] := by
+    intro a x; apply ByteArray.ext; simp
+  simp [noPatchState, PatchState.appendByte, hpush]
+
+private theorem noPatchState_append_bytes (acc bs : ByteArray) :
+    (noPatchState acc).append bs = noPatchState (acc ++ bs) := by
+  simp [noPatchState, PatchState.append, appendBA_eq_append]
+
+mutual
+
+private theorem emitStackOpPatchedChecked_no_patch_sites_eq_emitStackOp
+    (op : StackOp) (acc : ByteArray)
+    (hNoPatch : stackOpHasNoPatchSites op = true) :
+    emitStackOpPatchedChecked op (noPatchState acc)
+      = .ok (noPatchState (acc ++ emitStackOp op)) := by
+  cases op with
+  | push v =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | dup =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | swap =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | roll d =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | pick d =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | pickStruct d =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | drop =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | nip =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | over =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | rot =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | tuck =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
+  | opcode name =>
+      by_cases hCs : name = "OP_CODESEPARATOR"
+      · subst hCs
+        simp [stackOpHasNoPatchSites] at hNoPatch
+      · -- The `.opcode name` case for non-`OP_CODESEPARATOR` reduces to
+        -- the catch-all `op, st => .ok (st.append (emitStackOp op))` branch.
+        have hUnfold :
+            emitStackOpPatchedChecked (.opcode name) (noPatchState acc)
+              = .ok ((noPatchState acc).append (emitStackOp (.opcode name))) := by
+          unfold emitStackOpPatchedChecked
+          split <;> first
+            | rfl
+            | (rename_i hname; injection hname with hname'; exact absurd hname' hCs)
+            | (rename_i hname; cases hname)
+        rw [hUnfold, noPatchState_append_bytes]
+  | placeholder i n =>
+      simp [stackOpHasNoPatchSites] at hNoPatch
+  | pushCodesepIndex =>
+      simp [stackOpHasNoPatchSites] at hNoPatch
+  | ifOp thn els =>
+      -- Common preparation for every IF case: extract `thn` no-patch-sites
+      -- and run the inductive step on `thn`.
+      have hThn : opsHaveNoPatchSites thn = true := by
+        cases els with
+        | none =>
+            simp [stackOpHasNoPatchSites] at hNoPatch; exact hNoPatch
+        | some elsB =>
+            cases elsB with
+            | nil =>
+                simp [stackOpHasNoPatchSites, opsHaveNoPatchSites] at hNoPatch
+                exact hNoPatch
+            | cons elsHead elsTail =>
+                have h := hNoPatch
+                simp [stackOpHasNoPatchSites] at h
+                exact h.1
+      have hIH1 := emitOpsPatchedAuxChecked_no_patch_sites_eq_emitOps thn
+        (acc ++ ByteArray.mk #[0x63]) hThn
+      -- Unfold the .ifOp branch of emitStackOpPatchedChecked.
+      unfold emitStackOpPatchedChecked
+      -- Use `simp only` to rewrite the inner bind chain via hIH1.
+      rw [noPatchState_appendByte]
+      -- Reduce: `emitOpsPatchedAuxChecked thn (noPatchState (acc ++ #[0x63])) = .ok ...`
+      simp only [hIH1, Bind.bind, Except.bind]
+      -- Goal now has substituted `stThen := noPatchState (acc ++ #[0x63] ++ emitOps thn)`.
+      -- Split into the three sub-cases of `els`.
+      cases els with
+      | none =>
+          -- Reduces to a single `.ok (... appendByte 0x68)`.
+          show Except.ok _ = _
+          simp [noPatchState, natListUnion_singleton_zero_self,
+            PatchState.appendByte, emitStackOp]
+          apply ByteArray.ext
+          simp
+      | some elsB =>
+          cases elsB with
+          | nil =>
+              show Except.ok _ = _
+              simp [noPatchState, natListUnion_singleton_zero_self,
+                PatchState.appendByte, emitStackOp]
+              apply ByteArray.ext
+              simp
+          | cons elsHead elsTail =>
+              have hEls : opsHaveNoPatchSites (elsHead :: elsTail) = true := by
+                have h := hNoPatch
+                simp [stackOpHasNoPatchSites] at h
+                exact h.2
+              -- After the outer bind has substituted `stThen := noPatchState ...`,
+              -- the residual state-record on which `elsB` runs equals
+              -- `noPatchState (acc ++ #[0x63] ++ emitOps thn ++ #[0x67])`.
+              have hStart :
+                  ({ (noPatchState
+                        (acc ++ ByteArray.mk #[0x63] ++ emitOps thn)).appendByte 0x67 with
+                      possibleCodeSeparatorOffsets :=
+                        (noPatchState (acc ++ ByteArray.mk #[0x63])).possibleCodeSeparatorOffsets }
+                    : PatchState)
+                    = noPatchState
+                        (acc ++ ByteArray.mk #[0x63] ++ emitOps thn
+                          ++ ByteArray.mk #[0x67]) := by
+                rw [noPatchState_appendByte]
+                simp [noPatchState]
+              simp only [hStart]
+              have hIH2 := emitOpsPatchedAuxChecked_no_patch_sites_eq_emitOps
+                (elsHead :: elsTail)
+                (acc ++ ByteArray.mk #[0x63] ++ emitOps thn ++ ByteArray.mk #[0x67]) hEls
+              rw [hIH2]
+              show Except.ok _ = _
+              simp [noPatchState, natListUnion_singleton_zero_self,
+                PatchState.appendByte, emitStackOp]
+              apply ByteArray.ext
+              simp [ByteArray.append_assoc]
+
+private theorem emitOpsPatchedAuxChecked_no_patch_sites_eq_emitOps
+    (ops : List StackOp) (acc : ByteArray)
+    (hNoPatch : opsHaveNoPatchSites ops = true) :
+    emitOpsPatchedAuxChecked ops (noPatchState acc)
+      = .ok (noPatchState (acc ++ emitOps ops)) := by
+  cases ops with
+  | nil =>
+      simp [emitOpsPatchedAuxChecked, emitOps, noPatchState]
+  | cons op rest =>
+      have hOp : stackOpHasNoPatchSites op = true := by
+        cases h : stackOpHasNoPatchSites op <;>
+          simp [opsHaveNoPatchSites, h] at hNoPatch ⊢
+      have hRest : opsHaveNoPatchSites rest = true := by
+        cases h : opsHaveNoPatchSites rest <;>
+          simp [opsHaveNoPatchSites, h] at hNoPatch ⊢
+      unfold emitOpsPatchedAuxChecked
+      rw [emitStackOpPatchedChecked_no_patch_sites_eq_emitStackOp op acc hOp]
+      change
+        emitOpsPatchedAuxChecked rest (noPatchState (acc ++ emitStackOp op))
+          = Except.ok (noPatchState (acc ++ emitOps (op :: rest)))
+      rw [emitOpsPatchedAuxChecked_no_patch_sites_eq_emitOps rest (acc ++ emitStackOp op) hRest]
+      simp [emitOps, noPatchState, ByteArray.append_assoc]
+
+end
+
+theorem emitOpsWithCodeSepPatches_no_patch_sites_bytes_eq_emitOps
+    (ops : List StackOp) (r : EmitResult)
+    (hNoPatch : opsHaveNoPatchSites ops = true)
+    (hPatch : emitOpsWithCodeSepPatches ops = .ok r) :
+    r.bytes = emitOps ops := by
+  unfold emitOpsWithCodeSepPatches at hPatch
+  change
+    (do
+      let st ← emitOpsPatchedAuxChecked ops (noPatchState ByteArray.empty)
+      Except.ok st.finish) = Except.ok r at hPatch
+  rw [emitOpsPatchedAuxChecked_no_patch_sites_eq_emitOps ops ByteArray.empty
+    hNoPatch] at hPatch
+  simp [noPatchState, PatchState.finish] at hPatch
+  cases hPatch
+  rfl
+
+theorem emitWithCodeSepPatches_single_public_no_patch_sites_bytes_eq_emit
+    (p : StackProgram) (m : StackMethod) (r : EmitResult)
+    (hPublic : publicMethodsOf p = [m])
+    (hNoPatch : opsHaveNoPatchSites m.ops = true)
+    (hPatch : emitWithCodeSepPatches p = .ok r) :
+    r.bytes = emit p := by
+  unfold emitWithCodeSepPatches at hPatch
+  rw [hPublic] at hPatch
+  simp at hPatch
+  unfold emit
+  rw [hPublic]
+  simp only
+  exact emitOpsWithCodeSepPatches_no_patch_sites_bytes_eq_emitOps
+    m.ops r hNoPatch hPatch
+
 end PatchProof
 
 theorem emitWithCodeSepPatches_single_public_empty_ops_bytes_eq_emitFast
