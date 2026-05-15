@@ -23,7 +23,7 @@ packages/
   runar-cli/           # CLI tool
   runar-go/            # Go package: types, mock crypto, real hashes, CompileCheck(), deployment SDK
   runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
-  runar-rs-macros/     # Rust proc-macro crate: #[runar::contract], #[public], #[readonly]
+  runar-rs-macros/     # Rust proc-macro crate: #[runar::contract], #[runar::stateful_contract] (strip #[readonly])
   runar-py/            # Python package: types, mock crypto, real hashes, EC operations, deployment SDK
   runar-zig/           # Zig package: types, mock crypto, real hashes, deployment SDK
   runar-rb/            # Ruby gem: types, mock crypto, real hashes, deployment SDK

@@ -17,9 +17,7 @@ pub struct Sha256FinalizeTest {
     pub expected: ByteString,
 }
 
-#[runar::methods(Sha256FinalizeTest)]
 impl Sha256FinalizeTest {
-    #[public]
     pub fn verify(&self, state: &ByteString, remaining: &ByteString, msg_bit_len: Bigint) {
         let result = sha256_finalize(state, remaining, msg_bit_len);
         assert!(result == self.expected);

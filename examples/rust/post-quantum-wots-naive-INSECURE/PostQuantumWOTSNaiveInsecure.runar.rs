@@ -41,10 +41,8 @@ struct PostQuantumWOTSNaiveInsecure {
     pubkey: ByteString,
 }
 
-#[runar::methods(PostQuantumWOTSNaiveInsecure)]
 impl PostQuantumWOTSNaiveInsecure {
-    #[public]
-    fn spend(&self, msg: &ByteString, sig: &ByteString) {
+    pub fn spend(&self, msg: &ByteString, sig: &ByteString) {
         assert!(verify_wots(msg, sig, &self.pubkey));
     }
 }

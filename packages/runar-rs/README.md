@@ -93,14 +93,11 @@ pub struct Counter {
     pub count: Bigint,
 }
 
-#[runar::methods(Counter)]
 impl Counter {
-    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
 
-    #[public]
     pub fn decrement(&mut self) {
         assert!(self.count > 0);
         self.count -= 1;
@@ -224,16 +221,20 @@ panic if the variant doesn't match (this matches the cross-SDK behaviour for
 ## 4. Writing a Contract
 
 Rúnar Rust contracts live in `*.runar.rs` files. They use plain Rust syntax
-plus four proc-macro attributes from `runar-lang-macros` (re-exported under
-`runar::` and inside `runar::prelude::*`):
+plus two proc-macro attributes from `runar-lang-macros` (re-exported under
+`runar::` and inside `runar::prelude::*`). Methods live in a plain
+`impl ContractName` block — no attribute on the impl — and `pub fn` marks a
+spending entry point while a bare `fn` is a private helper:
 
 | Attribute | Where it goes | What it does |
 |-----------|---------------|--------------|
 | `#[runar::contract]` | the contract `struct` | Strips `#[readonly]` field annotations so `rustc` accepts the struct, then passes the struct through unchanged. Used for both stateless and stateful contracts. |
 | `#[runar::stateful_contract]` | the contract `struct` | Alias for `#[runar::contract]` — kept for parity with other SDKs. |
-| `#[runar::methods(ContractName)]` | the `impl` block | Identity macro that validates it wraps an `impl` block. Required so the parser knows where the method body lives. |
-| `#[public]` | each public spending entry point | Identity macro that marks a method as a callable spending path in the compiled artifact. |
 | `#[readonly]` | a struct field | (No-op at the Rust level — the proc-macro strips it.) The Rúnar parser uses it to mark stateless / immutable properties. |
+
+> **Migration note:** the former `#[runar::methods(ContractName)]` and
+> `#[public]` attributes have been removed. Write a plain `impl` block and use
+> `pub fn` / `fn` for visibility.
 
 Minimal stateless P2PKH:
 
@@ -246,9 +247,7 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: Sig, pub_key: PubKey) {
         assert!(hash160(&pub_key) == self.pub_key_hash);
         assert!(check_sig(&sig, &pub_key));
@@ -690,7 +689,7 @@ itself via `OP_CODESEPARATOR` + `checkPreimage`.
 
 ### State chaining and OP_PUSH_TX
 
-For every `#[public]` method on a stateful contract, the compiler injects:
+For every public (`pub fn`) method on a stateful contract, the compiler injects:
 
 1. An implicit `SigHashPreimage` parameter (the BIP-143 preimage of the
    spending transaction).
@@ -1977,7 +1976,7 @@ a 64-char hex private key or a WIF-encoded key (starting with `5`, `K`, or
 **Compile errors about missing `runar::contract` macro** — You wrote
 `use runar::*;` instead of `use runar::prelude::*;` (the former does not
 re-export the proc-macros). Either fix the import or use the fully-qualified
-form `#[runar::contract]` and `#[runar::methods(Foo)]`.
+form `#[runar::contract]` / `#[runar::stateful_contract]`.
 
 **Wallet provider: `"public key not cached"`** — `WalletProvider::get_utxos`
 needs a cached pubkey to derive the funding script. Call

@@ -20,7 +20,7 @@ pub mod test_keys;
 pub mod wots;
 
 // Re-export proc-macro attributes so `#[runar::contract]` works.
-pub use runar_lang_macros::{contract, methods, public, stateful_contract};
+pub use runar_lang_macros::{contract, stateful_contract};
 
 /// Runs the Rúnar frontend (parse → validate → typecheck) on a `.runar.rs`
 /// source string. Returns `Ok(())` if the contract is valid Rúnar, or an

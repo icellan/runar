@@ -7,16 +7,13 @@ struct Stateful {
     max_count: Int,
 }
 
-#[runar::methods(Stateful)]
 impl Stateful {
-    #[public]
-    fn increment(&mut self, amount: Int) {
+    pub fn increment(&mut self, amount: Int) {
         self.count = self.count + amount;
         assert!(self.count <= self.max_count);
     }
 
-    #[public]
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.count = 0;
     }
 }

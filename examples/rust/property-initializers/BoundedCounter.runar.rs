@@ -14,21 +14,18 @@ pub struct BoundedCounter {
     pub active: bool,
 }
 
-#[runar::methods(BoundedCounter)]
 impl BoundedCounter {
     pub fn init(&mut self) {
         self.count = 0;
         self.active = true;
     }
 
-    #[public]
     pub fn increment(&mut self, amount: Bigint) {
         assert!(self.active);
         self.count = self.count + amount;
         assert!(self.count <= self.max_count);
     }
 
-    #[public]
     pub fn reset(&mut self) {
         self.count = 0;
     }

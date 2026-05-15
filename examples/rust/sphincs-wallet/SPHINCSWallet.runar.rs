@@ -53,10 +53,8 @@ pub struct SPHINCSWallet {
     pub slhdsa_pub_key_hash: ByteString,
 }
 
-#[runar::methods(SPHINCSWallet)]
 impl SPHINCSWallet {
     /// Verify both ECDSA and SLH-DSA-SHA2-128s signatures to allow spending.
-    #[public]
     pub fn spend(&self, slhdsa_sig: &ByteString, slhdsa_pub_key: &ByteString, sig: &Sig, pub_key: &PubKey) {
         // Step 1: Verify ECDSA — proves sig commits to this transaction
         assert!(hash160(pub_key) == self.ecdsa_pub_key_hash);

@@ -21,13 +21,11 @@ pub struct SchnorrZKP {
     pub pub_key: Point,
 }
 
-#[runar::methods(SchnorrZKP)]
 impl SchnorrZKP {
     /// Verify a Schnorr ZKP proof.
     ///
     /// - `r_point` - The commitment R = r*G (prover's nonce point)
     /// - `s` - The response s = r + e*k (mod n)
-    #[public]
     pub fn verify(&self, r_point: &Point, s: Bigint) {
         // Verify R is on the curve
         assert!(ec_on_curve(r_point));

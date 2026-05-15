@@ -49,7 +49,6 @@ pub struct FungibleToken {
     pub tx_preimage: SigHashPreimage,
 }
 
-#[runar::methods(FungibleToken)]
 impl FungibleToken {
     /// Transfer tokens to a recipient. If the full balance is sent, produces 1 output;
     /// otherwise produces 2 outputs (recipient + change back to sender).
@@ -63,7 +62,6 @@ impl FungibleToken {
     /// - `to` - Recipient's public key
     /// - `amount` - Number of tokens to send (must be > 0 and <= total available balance)
     /// - `output_satoshis` - Satoshis to fund each output UTXO
-    #[public]
     pub fn transfer(&mut self, sig: &Sig, to: PubKey, amount: Bigint, output_satoshis: Bigint) {
         assert!(check_sig(sig, &self.owner));
         assert!(output_satoshis >= 1);
@@ -87,7 +85,6 @@ impl FungibleToken {
     /// - `sig` - Current owner's signature (authorization)
     /// - `to` - New owner's public key
     /// - `output_satoshis` - Satoshis to fund the output UTXO
-    #[public]
     pub fn send(&mut self, sig: &Sig, to: PubKey, output_satoshis: Bigint) {
         assert!(check_sig(sig, &self.owner));
         assert!(output_satoshis >= 1);
@@ -127,7 +124,6 @@ impl FungibleToken {
     /// - `other_balance` - Claimed balance of the other merging input
     /// - `all_prevouts` - Concatenated outpoints of all tx inputs (verified via hash_prevouts)
     /// - `output_satoshis` - Satoshis to fund the merged output UTXO
-    #[public]
     pub fn merge(&mut self, sig: &Sig, other_balance: Bigint, all_prevouts: ByteString, output_satoshis: Bigint) {
         assert!(check_sig(sig, &self.owner));
         assert!(output_satoshis >= 1);

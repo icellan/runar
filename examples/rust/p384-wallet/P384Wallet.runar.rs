@@ -51,10 +51,8 @@ pub struct P384Wallet {
     pub p384_pub_key_hash: ByteString,
 }
 
-#[runar::methods(P384Wallet)]
 impl P384Wallet {
     /// Verify both secp256k1 and P-384 signatures to allow spending.
-    #[public]
     pub fn spend(&self, p384_sig: &ByteString, p384_pub_key: &ByteString, sig: &Sig, pub_key: &PubKey) {
         // Step 1: Verify secp256k1 — proves sig commits to this transaction
         assert!(hash160(pub_key) == self.ecdsa_pub_key_hash);

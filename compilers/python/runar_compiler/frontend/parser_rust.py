@@ -618,30 +618,19 @@ class _RustParser:
                     self.expect(TOK_RBRACE)
 
                 elif attr.startswith("runar::methods"):
-                    # Parse impl block
-                    if self.check(TOK_IMPL):
-                        self.advance()
-                    # Skip type name
-                    if self.peek().kind == TOK_IDENT:
-                        self.advance()
-                    self.expect(TOK_LBRACE)
-
-                    while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-                        # Check for #[public] attribute
-                        visibility = "private"
-                        if self.check(TOK_HASH_BRACKET):
-                            method_attr = self.parse_attribute()
-                            if method_attr == "public":
-                                visibility = "public"
-                        if self.check(TOK_PUB):
-                            self.advance()
-                            visibility = "public"
-                        methods.append(self.parse_function(visibility))
-
-                    self.expect(TOK_RBRACE)
+                    # #[runar::methods] is no longer supported — bare `impl`
+                    # blocks are discovered directly. Emit a migration
+                    # diagnostic; the `impl` branch below still parses the block.
+                    self.add_error(
+                        "#[runar::methods] is no longer supported — write a bare "
+                        "'impl ContractName { ... }' block instead"
+                    )
+                    continue
                 else:
                     # Unknown attribute, skip
                     continue
+            elif self.check(TOK_IMPL):
+                methods.extend(self.parse_impl_block())
             else:
                 self.advance()
 
@@ -720,6 +709,42 @@ class _RustParser:
             methods=methods,
             source_file=self.file_name,
         )
+
+    # -- Impl block parsing --------------------------------------------------
+
+    def parse_impl_block(self) -> list[MethodNode]:
+        """Parse a bare ``impl ContractName { ... }`` block, returning its methods.
+
+        The type name is consumed and discarded (unrelated ``impl`` blocks merge
+        the same way they did under the old ``#[runar::methods]`` gate).
+        ``pub fn`` marks a public spending entry point; bare ``fn`` is a private
+        helper.
+        """
+        methods: list[MethodNode] = []
+        self.expect(TOK_IMPL)
+        # Skip the type name.
+        if self.peek().kind == TOK_IDENT:
+            self.advance()
+        self.expect(TOK_LBRACE)
+
+        while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            # #[public] is no longer supported — `pub fn` marks public methods.
+            while self.check(TOK_HASH_BRACKET):
+                method_attr = self.parse_attribute()
+                if method_attr == "public":
+                    self.add_error(
+                        "#[public] is no longer supported — use 'pub fn' "
+                        "for public methods"
+                    )
+
+            visibility = "private"
+            if self.check(TOK_PUB):
+                self.advance()
+                visibility = "public"
+            methods.append(self.parse_function(visibility))
+
+        self.expect(TOK_RBRACE)
+        return methods
 
     # -- Function parsing ----------------------------------------------------
 

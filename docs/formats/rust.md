@@ -2,17 +2,19 @@
 
 **Status:** Experimental
 **File extension:** `.runar.rs`
-**Supported compilers:** Rust only
+**Supported compilers:** all (TypeScript, Go, Rust, Python, Zig, Ruby, Java)
 
 ---
 
 ## Overview
 
-The Rust DSL format lets you write Rúnar contracts as idiomatic Rust code using attribute macros. Contracts are Rust structs annotated with `#[runar::contract]`, and methods are defined in `impl` blocks annotated with `#[runar::methods(ContractName)]`. The Rust compiler parses these directly into the Rúnar AST.
+The Rust DSL format lets you write Rúnar contracts as idiomatic Rust code. Contracts are Rust structs annotated with `#[runar::contract]`, and methods live in a plain `impl ContractName` block — no attribute is required on the impl. `pub fn` marks a spending entry point; a bare `fn` is a private helper. The compilers parse these directly into the Rúnar AST.
 
 Contracts are also valid Rust that can be compiled and tested natively with `cargo test`, using the `runar` mock crate which provides types and mock crypto functions.
 
-This format is **only supported by the Rust compiler** (`compilers/rust`). The TypeScript and Go compilers cannot parse `.runar.rs` files.
+All seven Rúnar compilers parse `.runar.rs` files (frontend parity).
+
+> **Migration note:** the former `#[runar::methods(ContractName)]` (on the impl block) and `#[public]` (on methods) attributes have been removed. Write a plain `impl` block and use `pub fn` / `fn` for visibility. The parsers now reject `#[runar::methods]` and `#[public]` with a migration diagnostic.
 
 ---
 
@@ -39,7 +41,7 @@ pub struct P2PKH {
 
 ### Property Initializers
 
-Properties can have default values using a private `init()` method in the `impl` block. The `init()` method must take only `&mut self`, have no `#[public]` attribute, and contain only `self.property = value` assignments with literal values:
+Properties can have default values using a private `init()` method in the `impl` block. The `init()` method must take only `&mut self`, must not be `pub`, and contain only `self.property = value` assignments with literal values:
 
 ```rust
 #[runar::contract]
@@ -51,14 +53,12 @@ pub struct GameBoard {
     pub owner: PubKey,
 }
 
-#[runar::methods(GameBoard)]
 impl GameBoard {
     fn init(&mut self) {
         self.count = 0;
         self.active = true;
     }
 
-    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
@@ -70,9 +70,7 @@ Properties assigned in `init()` are excluded from the auto-generated constructor
 ### Method Blocks
 
 ```rust
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
@@ -80,8 +78,8 @@ impl P2PKH {
 }
 ```
 
-- `#[runar::methods(ContractName)]` links the impl block to the contract struct.
-- `#[public]` marks spending entry points. Methods without `#[public]` are private helpers.
+- A plain `impl ContractName` block holds the contract's methods — no attribute is required, and multiple `impl` blocks for the same contract are merged in source order.
+- `pub fn` marks a spending entry point; a bare `fn` (no `pub`) is a private helper.
 - The first parameter is `&self` (stateless) or `&mut self` (stateful).
 - Byte-type parameters use references (`&Sig`, `&PubKey`) to avoid ownership issues.
 
@@ -378,9 +376,7 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
@@ -398,14 +394,11 @@ pub struct Counter {
     pub count: Bigint,
 }
 
-#[runar::methods(Counter)]
 impl Counter {
-    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
 
-    #[public]
     pub fn decrement(&mut self) {
         assert!(self.count > 0);
         self.count -= 1;
@@ -425,14 +418,11 @@ pub struct StatefulCounter {
     pub count: Bigint,
 }
 
-#[runar::methods(StatefulCounter)]
 impl StatefulCounter {
-    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
 
-    #[public]
     pub fn reset(&mut self) {
         self.count = 0;
     }
@@ -456,24 +446,19 @@ pub struct Escrow {
     pub arbiter: PubKey,
 }
 
-#[runar::methods(Escrow)]
 impl Escrow {
-    #[public]
     pub fn release_by_seller(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.seller));
     }
 
-    #[public]
     pub fn release_by_arbiter(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.arbiter));
     }
 
-    #[public]
     pub fn refund_to_buyer(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.buyer));
     }
 
-    #[public]
     pub fn refund_by_arbiter(&self, sig: &Sig) {
         assert!(check_sig(sig, &self.arbiter));
     }

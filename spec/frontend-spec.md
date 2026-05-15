@@ -119,7 +119,7 @@ MethodNode = {
 | Solidity | `function name(...) public` | `function name(...) private` |
 | Move | `public fun name(...)` | `fun name(...)` |
 | Go | `func (c *T) Name(...)` (exported) | `func (c *T) name(...)` (unexported) |
-| Rust | `#[public] fn name(...)` | `fn name(...)` |
+| Rust | `pub fn name(...)` | `fn name(...)` |
 
 ### ParamNode
 

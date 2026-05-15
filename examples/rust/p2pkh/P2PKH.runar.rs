@@ -33,10 +33,8 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
     /// Unlock verifies the pub_key hashes to the committed hash, then checks the signature.
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         // Step 1: Verify pub_key matches the committed hash
         assert!(hash160(pub_key) == self.pub_key_hash);

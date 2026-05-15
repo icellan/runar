@@ -319,16 +319,15 @@ export function renderRust(contract: GeneratedContract): string {
   lines.push('}');
   lines.push('');
 
-  // Methods
-  lines.push(`#[runar::methods(${contract.name})]`);
+  // Methods — bare `impl` block; `pub fn` marks public spending entry points.
   lines.push(`impl ${contract.name} {`);
   for (const method of contract.methods) {
     const selfParam = method.mutatesState ? '&mut self' : '&self';
     const params = method.params.map((p) => `${toSnakeCase(p.name)}: ${rsType(p.type)}`).join(', ');
     const allParams = params ? `${selfParam}, ${params}` : selfParam;
 
-    if (method.visibility === 'public') lines.push('    #[public]');
-    lines.push(`    fn ${toSnakeCase(method.name)}(${allParams}) {`);
+    const fnKeyword = method.visibility === 'public' ? 'pub fn' : 'fn';
+    lines.push(`    ${fnKeyword} ${toSnakeCase(method.name)}(${allParams}) {`);
     for (const stmt of method.body) {
       lines.push(rsStmt(stmt, '        '));
     }

@@ -45,7 +45,6 @@ pub struct Auction {
     pub tx_preimage: SigHashPreimage,
 }
 
-#[runar::methods(Auction)]
 impl Auction {
     /// Submit a new bid that outbids the current highest.
     ///
@@ -58,7 +57,6 @@ impl Auction {
     /// * `sig`        - Bidder's signature proving they authorized this bid.
     /// * `bidder`     - Public key of the new bidder.
     /// * `bid_amount` - Bid in satoshis; must exceed the current highest bid.
-    #[public]
     pub fn bid(&mut self, sig: &Sig, bidder: PubKey, bid_amount: Bigint) {
         // Verify the bidder authorized this bid (prevents griefing)
         assert!(check_sig(sig, &bidder));
@@ -81,7 +79,6 @@ impl Auction {
     /// # Arguments
     ///
     /// * `sig` - Signature from the auctioneer proving ownership.
-    #[public]
     pub fn close(&self, sig: &Sig) {
         // Verify the caller is the auctioneer
         assert!(check_sig(sig, &self.auctioneer));

@@ -19,9 +19,7 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
@@ -86,14 +84,11 @@ pub struct Counter {
     pub count: Bigint,
 }
 
-#[runar::methods(Counter)]
 impl Counter {
-    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
 
-    #[public]
     pub fn decrement(&mut self) {
         assert!(self.count > 0);
         self.count -= 1;
@@ -150,9 +145,7 @@ pub struct MyContract {
     pub my_balance: Bigint,
 }
 
-#[runar::methods(MyContract)]
 impl MyContract {
-    #[public]
     pub fn verify_and_pay(&mut self, sig: &Sig, pub_key: &PubKey, fee_amount: Bigint) {
         assert!(check_sig(sig, pub_key));
         self.my_balance -= fee_amount;
@@ -258,14 +251,12 @@ pub struct BoundedCounter {
     pub active: bool,
 }
 
-#[runar::methods(BoundedCounter)]
 impl BoundedCounter {
     pub fn init(&mut self) {
         self.count = 0;
         self.active = true;
     }
 
-    #[public]
     pub fn increment(&mut self, amount: Bigint) {
         assert!(self.active);
         self.count = self.count + amount;
@@ -368,9 +359,7 @@ pub struct P2PKH {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(P2PKH)]
 impl P2PKH {
-    #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
@@ -390,5 +379,151 @@ impl P2PKH {
 	}
 	if c.SourceFile != "P2PKH.runar.rs" {
 		t.Errorf("sourceFile: got %q, want P2PKH.runar.rs", c.SourceFile)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bare `impl` parsing (no #[runar::methods]) + removed-spelling rejection
+// ---------------------------------------------------------------------------
+
+func TestParseRustMacro_BareImplWithoutMethodsAttribute(t *testing.T) {
+	source := `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Counter {
+    pub count: Bigint,
+}
+
+impl Counter {
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+
+    fn helper(&self) {
+        assert!(self.count > 0);
+    }
+}
+`
+	result := ParseSource([]byte(source), "Counter.runar.rs")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if c == nil {
+		t.Fatal("expected non-nil contract")
+	}
+	if len(c.Methods) != 2 {
+		t.Fatalf("expected 2 methods, got %d", len(c.Methods))
+	}
+	if c.Methods[0].Name != "increment" || c.Methods[0].Visibility != "public" {
+		t.Errorf("method 0: got %s/%s, want increment/public", c.Methods[0].Name, c.Methods[0].Visibility)
+	}
+	if c.Methods[1].Name != "helper" || c.Methods[1].Visibility != "private" {
+		t.Errorf("method 1: got %s/%s, want helper/private", c.Methods[1].Name, c.Methods[1].Visibility)
+	}
+}
+
+func TestParseRustMacro_MultipleImplBlocks(t *testing.T) {
+	source := `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Multi {
+    #[readonly]
+    pub x: Bigint,
+}
+
+impl Multi {
+    pub fn first(&self) {
+        assert!(self.x > 0);
+    }
+}
+
+impl Multi {
+    pub fn second(&self) {
+        assert!(self.x < 100);
+    }
+}
+`
+	result := ParseSource([]byte(source), "Multi.runar.rs")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if len(c.Methods) != 2 || c.Methods[0].Name != "first" || c.Methods[1].Name != "second" {
+		t.Fatalf("expected [first, second], got %+v", c.Methods)
+	}
+}
+
+func TestParseRustMacro_ImplBeforeStruct(t *testing.T) {
+	source := `
+use runar::prelude::*;
+
+impl Early {
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+
+#[runar::contract]
+pub struct Early {
+    #[readonly]
+    pub x: Bigint,
+}
+`
+	result := ParseSource([]byte(source), "Early.runar.rs")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if c == nil || c.Name != "Early" || len(c.Methods) != 1 || c.Methods[0].Name != "check" {
+		t.Fatalf("expected Early with method check, got %+v", c)
+	}
+}
+
+func TestParseRustMacro_RejectsRunarMethodsAttribute(t *testing.T) {
+	source := `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Old {
+    #[readonly]
+    pub x: Bigint,
+}
+
+#[runar::methods(Old)]
+impl Old {
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+`
+	result := ParseSource([]byte(source), "Old.runar.rs")
+	if !strings.Contains(strings.Join(result.ErrorStrings(), "; "), "#[runar::methods]") {
+		t.Fatalf("expected migration diagnostic for #[runar::methods], got: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+}
+
+func TestParseRustMacro_RejectsPublicAttribute(t *testing.T) {
+	source := `
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Old {
+    #[readonly]
+    pub x: Bigint,
+}
+
+impl Old {
+    #[public]
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+`
+	result := ParseSource([]byte(source), "Old.runar.rs")
+	if !strings.Contains(strings.Join(result.ErrorStrings(), "; "), "#[public]") {
+		t.Fatalf("expected migration diagnostic for #[public], got: %s", strings.Join(result.ErrorStrings(), "; "))
 	}
 }

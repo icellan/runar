@@ -59,10 +59,8 @@ pub struct PostQuantumWallet {
     pub wots_pub_key_hash: ByteString,
 }
 
-#[runar::methods(PostQuantumWallet)]
 impl PostQuantumWallet {
     /// Verify both ECDSA and WOTS+ signatures to allow spending.
-    #[public]
     pub fn spend(&self, wots_sig: &ByteString, wots_pub_key: &ByteString, sig: &Sig, pub_key: &PubKey) {
         // Step 1: Verify ECDSA — proves sig commits to this transaction
         assert!(hash160(pub_key) == self.ecdsa_pub_key_hash);

@@ -9,8 +9,8 @@
 # Rust syntax conventions used in Runar contracts:
 #   - `#[runar::contract]` or `#[runar::stateful_contract]` attribute
 #   - `struct Name { field: Type, ... }` for properties
-#   - `#[runar::methods(Name)]` + `impl Name { ... }` for methods
-#   - `#[public]` attribute before `fn` for public methods
+#   - plain `impl Name { ... }` block for methods (no attribute required)
+#   - `pub fn` = public spending entry point, `fn` = private helper
 #   - `#[readonly]` attribute for readonly struct fields
 #   - `fn method_name(&self, param: Type) -> ReturnType { ... }`
 #   - `fn init(...) -> Self { Self { field: value } }` for property initializers
@@ -569,10 +569,7 @@ module RunarCompiler
               next
             end
             if attr.start_with?("runar::methods")
-              if check(TOK_IMPL)
-                impl_methods = parse_impl_block
-                methods.concat(impl_methods)
-              end
+              add_error("#[runar::methods] is no longer supported -- write a bare 'impl ContractName { ... }' block instead")
               next
             end
             # Other attributes -- skip
@@ -806,14 +803,17 @@ module RunarCompiler
 
         methods = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
-          is_public = false
           while check(TOK_HASH)
             attr = parse_attribute
-            is_public = true if attr == "public"
+            add_error("#[public] is no longer supported -- use 'pub fn' for public methods") if attr == "public"
           end
 
-          # Skip optional pub
-          advance if check(TOK_PUB)
+          # `pub fn` = public spending entry point, `fn` = private helper
+          is_public = false
+          if check(TOK_PUB)
+            is_public = true
+            advance
+          end
 
           if check(TOK_FN)
             method = parse_fn_decl(is_public)

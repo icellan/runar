@@ -34,11 +34,9 @@ pub struct Escrow {
     pub arbiter: PubKey,
 }
 
-#[runar::methods(Escrow)]
 impl Escrow {
     /// Release escrowed funds to the seller.
     /// Requires both the seller's and arbiter's signatures.
-    #[public]
     pub fn release(&self, seller_sig: &Sig, arbiter_sig: &Sig) {
         assert!(check_sig(seller_sig, &self.seller));
         assert!(check_sig(arbiter_sig, &self.arbiter));
@@ -46,7 +44,6 @@ impl Escrow {
 
     /// Refund escrowed funds to the buyer.
     /// Requires both the buyer's and arbiter's signatures.
-    #[public]
     pub fn refund(&self, buyer_sig: &Sig, arbiter_sig: &Sig) {
         assert!(check_sig(buyer_sig, &self.buyer));
         assert!(check_sig(arbiter_sig, &self.arbiter));

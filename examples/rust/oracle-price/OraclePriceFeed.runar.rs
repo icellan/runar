@@ -28,7 +28,6 @@ pub struct OraclePriceFeed {
     pub receiver: PubKey,
 }
 
-#[runar::methods(OraclePriceFeed)]
 impl OraclePriceFeed {
     /// Settle the contract by proving a price was signed by the oracle and exceeds
     /// the threshold. The receiver must also sign to authorize the payout.
@@ -38,7 +37,6 @@ impl OraclePriceFeed {
     /// * `rabin_sig` - Rabin signature produced by the oracle over the price (variable length).
     /// * `padding` - Rabin signature padding bytes required for verification (variable length).
     /// * `sig` - ECDSA signature (~72 bytes) from the receiver authorizing the spend.
-    #[public]
     pub fn settle(&self, price: Bigint, rabin_sig: &RabinSig, padding: &ByteString, sig: &Sig) {
         // Layer 1: Oracle verification — convert the price to its 8-byte little-endian
         // canonical form (the format the oracle signs), then verify the Rabin signature

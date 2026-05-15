@@ -524,35 +524,19 @@ func (p *rustMacroParser) parse() *ContractNode {
 				p.expect(rustTokRBrace)
 
 			case strings.HasPrefix(attr, "runar::methods"):
-				// Parse: impl Name { ... }
-				p.match(rustTokImpl)
-				// Skip type name
-				if p.current().kind == rustTokIdent {
-					p.advance()
-				}
-				p.expect(rustTokLBrace)
-
-				for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
-					visibility := "private"
-					if p.current().kind == rustTokHashBracket {
-						methodAttr := p.parseAttribute()
-						if methodAttr == "public" {
-							visibility = "public"
-						}
-					}
-					// `pub fn` also makes it public
-					if p.current().kind == rustTokPub {
-						p.advance()
-						visibility = "public"
-					}
-					m := p.parseFunction(visibility)
-					methods = append(methods, m)
-				}
-				p.expect(rustTokRBrace)
+				// #[runar::methods] is no longer supported — bare `impl` blocks
+				// are discovered directly. Emit a migration diagnostic; the
+				// `impl` branch below still parses the block.
+				p.errors = append(p.errors, Diagnostic{
+					Message:  "#[runar::methods] is no longer supported — write a bare 'impl ContractName { ... }' block instead",
+					Severity: SeverityError,
+				})
 
 			default:
 				// Unknown attribute — skip
 			}
+		} else if p.current().kind == rustTokImpl {
+			methods = append(methods, p.parseImplBlock()...)
 		} else {
 			p.advance()
 		}
@@ -726,6 +710,46 @@ func rustMapType(name string) string {
 	}
 	// Pass through Rúnar primitives: PubKey, Sig, Addr, Sha256, Ripemd160, etc.
 	return name
+}
+
+// ---------------------------------------------------------------------------
+// Impl block parsing
+// ---------------------------------------------------------------------------
+
+// parseImplBlock parses a bare `impl ContractName { ... }` block and returns its
+// methods. The type name is consumed and discarded (unrelated `impl` blocks
+// merge the same way they did under the old `#[runar::methods]` gate). `pub fn`
+// marks a public spending entry point; bare `fn` is a private helper.
+func (p *rustMacroParser) parseImplBlock() []MethodNode {
+	var methods []MethodNode
+	p.expect(rustTokImpl)
+	// Skip the type name.
+	if p.current().kind == rustTokIdent {
+		p.advance()
+	}
+	p.expect(rustTokLBrace)
+
+	for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
+		// #[public] is no longer supported — `pub fn` marks public methods.
+		for p.current().kind == rustTokHashBracket {
+			methodAttr := p.parseAttribute()
+			if methodAttr == "public" {
+				p.errors = append(p.errors, Diagnostic{
+					Message:  "#[public] is no longer supported — use 'pub fn' for public methods",
+					Severity: SeverityError,
+				})
+			}
+		}
+
+		visibility := "private"
+		if p.current().kind == rustTokPub {
+			p.advance()
+			visibility = "public"
+		}
+		methods = append(methods, p.parseFunction(visibility))
+	}
+	p.expect(rustTokRBrace)
+	return methods
 }
 
 // ---------------------------------------------------------------------------

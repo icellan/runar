@@ -6,10 +6,8 @@ use runar::prelude::*;
 #[runar::contract]
 pub struct BabyBearExt4Demo {}
 
-#[runar::methods(BabyBearExt4Demo)]
 impl BabyBearExt4Demo {
     /// Ext4 multiplication: verify all 4 components.
-    #[public]
     pub fn check_mul(
         &self,
         a0: Bigint, a1: Bigint, a2: Bigint, a3: Bigint,
@@ -23,7 +21,6 @@ impl BabyBearExt4Demo {
     }
 
     /// Ext4 inverse: verify all 4 components.
-    #[public]
     pub fn check_inv(
         &self,
         a0: Bigint, a1: Bigint, a2: Bigint, a3: Bigint,
@@ -36,7 +33,6 @@ impl BabyBearExt4Demo {
     }
 
     /// FRI colinearity check: the core FRI folding relation.
-    #[public]
     pub fn check_fri_fold(
         &self,
         x: Bigint,

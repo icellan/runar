@@ -28,9 +28,7 @@ class TestParserRs < Minitest::Test
           pub pub_key_hash: Addr,
       }
 
-      #[runar::methods(P2PKH)]
       impl P2PKH {
-          #[public]
           pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
               assert!(hash160(pub_key) == self.pub_key_hash);
               assert!(check_sig(sig, pub_key));
@@ -75,14 +73,11 @@ class TestParserRs < Minitest::Test
           pub count: Bigint,
       }
 
-      #[runar::methods(Counter)]
       impl Counter {
-          #[public]
           pub fn increment(&mut self) {
               self.count += 1;
           }
 
-          #[public]
           pub fn decrement(&mut self) {
               assert!(self.count > 0);
               self.count -= 1;
@@ -122,9 +117,7 @@ class TestParserRs < Minitest::Test
           pub my_balance: Bigint,
       }
 
-      #[runar::methods(MyContract)]
       impl MyContract {
-          #[public]
           pub fn verify_and_pay(&mut self, sig: &Sig, pub_key: &PubKey, fee_amount: Bigint) {
               assert!(check_sig(sig, pub_key));
               self.my_balance -= fee_amount;
@@ -187,5 +180,137 @@ class TestParserRs < Minitest::Test
       assert_empty non_ctor_methods,
                    'non-contract source should not produce real methods'
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Bare `impl` parsing (no #[runar::methods]) + removed-spelling rejection
+  # ---------------------------------------------------------------------------
+
+  def test_bare_impl_without_methods_attribute
+    source = <<~RS
+      use runar::prelude::*;
+
+      #[runar::contract]
+      pub struct Counter {
+          pub count: Bigint,
+      }
+
+      impl Counter {
+          pub fn increment(&mut self) {
+              self.count += 1;
+          }
+
+          fn helper(&self) {
+              assert!(self.count > 0);
+          }
+      }
+    RS
+
+    result = parse(source, 'Counter.runar.rs')
+    assert_empty result.errors.map(&:format_message)
+    c = result.contract
+    refute_nil c
+    assert_equal %w[increment helper], c.methods.map(&:name)
+    assert_equal 'public',  c.methods[0].visibility
+    assert_equal 'private', c.methods[1].visibility
+  end
+
+  def test_multiple_impl_blocks_merge_in_order
+    source = <<~RS
+      use runar::prelude::*;
+
+      #[runar::contract]
+      pub struct Multi {
+          #[readonly]
+          pub x: Bigint,
+      }
+
+      impl Multi {
+          pub fn first(&self) {
+              assert!(self.x > 0);
+          }
+      }
+
+      impl Multi {
+          pub fn second(&self) {
+              assert!(self.x < 100);
+          }
+      }
+    RS
+
+    result = parse(source, 'Multi.runar.rs')
+    assert_empty result.errors.map(&:format_message)
+    assert_equal %w[first second], result.contract.methods.map(&:name)
+  end
+
+  def test_impl_before_struct
+    source = <<~RS
+      use runar::prelude::*;
+
+      impl Early {
+          pub fn check(&self) {
+              assert!(self.x > 0);
+          }
+      }
+
+      #[runar::contract]
+      pub struct Early {
+          #[readonly]
+          pub x: Bigint,
+      }
+    RS
+
+    result = parse(source, 'Early.runar.rs')
+    assert_empty result.errors.map(&:format_message)
+    c = result.contract
+    refute_nil c
+    assert_equal 'Early', c.name
+    assert_equal %w[check], c.methods.map(&:name)
+  end
+
+  def test_runar_methods_attribute_rejected
+    source = <<~RS
+      use runar::prelude::*;
+
+      #[runar::contract]
+      pub struct Old {
+          #[readonly]
+          pub x: Bigint,
+      }
+
+      #[runar::methods(Old)]
+      impl Old {
+          pub fn check(&self) {
+              assert!(self.x > 0);
+          }
+      }
+    RS
+
+    result = parse(source, 'Old.runar.rs')
+    assert result.errors.map(&:format_message).any? { |m| m.include?('#[runar::methods]') },
+           "expected a migration diagnostic, got: #{result.errors.map(&:format_message)}"
+  end
+
+  def test_public_attribute_rejected
+    source = <<~RS
+      use runar::prelude::*;
+
+      #[runar::contract]
+      pub struct Old {
+          #[readonly]
+          pub x: Bigint,
+      }
+
+      impl Old {
+          #[public]
+          pub fn check(&self) {
+              assert!(self.x > 0);
+          }
+      }
+    RS
+
+    result = parse(source, 'Old.runar.rs')
+    assert result.errors.map(&:format_message).any? { |m| m.include?('#[public]') },
+           "expected a migration diagnostic, got: #{result.errors.map(&:format_message)}"
   end
 end

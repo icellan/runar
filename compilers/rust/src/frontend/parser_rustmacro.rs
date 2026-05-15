@@ -346,30 +346,21 @@ impl RustDslParser {
                     }
                     self.expect(&TokenType::RBrace);
                 } else if attr.starts_with("runar::methods") {
-                    // Parse impl block
-                    if matches!(self.current().typ, TokenType::Impl) { self.advance_clone(); }
-                    // Skip type name
-                    if let TokenType::Ident(_) = self.current().typ { self.advance_clone(); }
-                    self.expect(&TokenType::LBrace);
-
-                    while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
-                        // Check for #[public] attribute
-                        let mut visibility = Visibility::Private;
-                        if matches!(self.current().typ, TokenType::HashBracket) {
-                            let method_attr = self.parse_attribute();
-                            if method_attr == "public" { visibility = Visibility::Public; }
-                        }
-                        if matches!(self.current().typ, TokenType::Pub) {
-                            self.advance_clone();
-                            visibility = Visibility::Public;
-                        }
-                        methods.push(self.parse_function(visibility));
-                    }
-                    self.expect(&TokenType::RBrace);
+                    // #[runar::methods] is no longer supported — bare `impl` blocks
+                    // are discovered directly. Emit a migration diagnostic; the
+                    // `impl` branch below still parses the block on the next pass.
+                    self.errors.push(Diagnostic::error(
+                        "#[runar::methods] is no longer supported — write a bare 'impl ContractName { ... }' block instead",
+                        None,
+                    ));
+                    continue;
                 } else {
                     // Unknown attribute, skip
                     continue;
                 }
+            } else if matches!(self.current().typ, TokenType::Impl) {
+                let impl_methods = self.parse_impl_block();
+                methods.extend(impl_methods);
             } else {
                 self.advance_clone();
             }
@@ -458,6 +449,40 @@ impl RustDslParser {
         };
 
         ParseResult { contract: Some(contract), errors: self.errors }
+    }
+
+    /// Parse a bare `impl ContractName { ... }` block and return its methods.
+    /// The type name is consumed and discarded (unrelated `impl` blocks merge
+    /// the same way they did under the old `#[runar::methods]` gate). `pub fn`
+    /// marks a public spending entry point; bare `fn` is a private helper.
+    fn parse_impl_block(&mut self) -> Vec<MethodNode> {
+        let mut methods: Vec<MethodNode> = Vec::new();
+        self.expect(&TokenType::Impl);
+        // Skip the type name.
+        if let TokenType::Ident(_) = self.current().typ { self.advance_clone(); }
+        self.expect(&TokenType::LBrace);
+
+        while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
+            // #[public] is no longer supported — `pub fn` marks public methods.
+            while matches!(self.current().typ, TokenType::HashBracket) {
+                let method_attr = self.parse_attribute();
+                if method_attr == "public" {
+                    self.errors.push(Diagnostic::error(
+                        "#[public] is no longer supported — use 'pub fn' for public methods",
+                        None,
+                    ));
+                }
+            }
+
+            let mut visibility = Visibility::Private;
+            if matches!(self.current().typ, TokenType::Pub) {
+                self.advance_clone();
+                visibility = Visibility::Public;
+            }
+            methods.push(self.parse_function(visibility));
+        }
+        self.expect(&TokenType::RBrace);
+        methods
     }
 
     fn parse_attribute(&mut self) -> String {
@@ -1191,10 +1216,8 @@ pub struct P2PKH {
     pub_key_hash: Addr,
 }
 
-#[runar::methods]
 impl P2PKH {
-    #[public]
-    fn unlock(&self, sig: Sig, pub_key: PubKey) {
+    pub fn unlock(&self, sig: Sig, pub_key: PubKey) {
         assert!(hash160(pub_key) == self.pub_key_hash);
         assert!(check_sig(sig, pub_key));
     }
@@ -1240,7 +1263,7 @@ impl P2PKH {
     }
 
     #[test]
-    fn test_public_attribute_makes_method_public() {
+    fn test_pub_fn_makes_method_public() {
         let source = r#"
 use runar::prelude::*;
 
@@ -1250,10 +1273,8 @@ pub struct Test {
     x: bigint,
 }
 
-#[runar::methods]
 impl Test {
-    #[public]
-    fn public_method(&self, v: i64) {
+    pub fn public_method(&self, v: i64) {
         assert!(v == self.x);
     }
 
@@ -1268,11 +1289,11 @@ impl Test {
         let contract = result.contract.unwrap();
         assert_eq!(contract.methods.len(), 2);
 
-        // First method should be public (has #[public])
+        // First method should be public (`pub fn`)
         assert_eq!(contract.methods[0].name, "publicMethod");
         assert_eq!(contract.methods[0].visibility, Visibility::Public);
 
-        // Second method should be private (no #[public])
+        // Second method should be private (bare `fn`)
         assert_eq!(contract.methods[1].name, "privateMethod");
         assert_eq!(contract.methods[1].visibility, Visibility::Private);
     }
@@ -1287,10 +1308,8 @@ pub struct MyFancyContract {
     value: bigint,
 }
 
-#[runar::methods]
 impl MyFancyContract {
-    #[public]
-    fn check(&self, v: i64) {
+    pub fn check(&self, v: i64) {
         assert!(v == self.value);
     }
 }
@@ -1313,10 +1332,8 @@ pub struct Test {
     my_value: bigint,
 }
 
-#[runar::methods]
 impl Test {
-    #[public]
-    fn check(&self, v: i64) {
+    pub fn check(&self, v: i64) {
         assert!(v == self.my_value);
     }
 }
@@ -1339,10 +1356,8 @@ pub struct Counter {
     count: bigint,
 }
 
-#[runar::methods]
 impl Counter {
-    #[public]
-    fn increment(&mut self) {
+    pub fn increment(&mut self) {
         self.count = self.count + 1;
     }
 }
@@ -1366,10 +1381,8 @@ pub struct Test {
     b: PubKey,
 }
 
-#[runar::methods]
 impl Test {
-    #[public]
-    fn check(&self) {
+    pub fn check(&self) {
         assert!(self.a > 0);
     }
 }
@@ -1395,10 +1408,8 @@ pub struct Test {
     x: bigint,
 }
 
-#[runar::methods]
 impl Test {
-    #[public]
-    fn check(&self, v: i64) {
+    pub fn check(&self, v: i64) {
         assert_eq!(self.x, v);
     }
 }
@@ -1483,13 +1494,11 @@ impl Test {
 use runar::prelude::*;
 #[runar::contract]
 pub struct Foo { #[readonly] pub x: Bigint }
-#[runar::methods(Foo)]
 impl Foo {
     fn compute(&self, a: Bigint, b: Bigint) -> Bigint {
         let sum = a + b;
         sum
     }
-    #[public]
     pub fn check(&self) {
         assert!(self.x > 0);
     }
@@ -1505,5 +1514,142 @@ impl Foo {
             Statement::ReturnStatement { value: Some(_), .. } => {}
             other => panic!("expected ReturnStatement, got {:?}", other),
         }
+    }
+
+    // -- New-style bare `impl` parsing -------------------------------------
+
+    #[test]
+    fn test_bare_impl_without_methods_attribute() {
+        // `impl ContractName` with no `#[runar::methods]` attribute is parsed.
+        let source = r#"
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Counter {
+    count: Bigint,
+}
+
+impl Counter {
+    pub fn increment(&mut self) {
+        self.count = self.count + 1;
+    }
+}
+"#;
+        let result = parse_rust_dsl(source, Some("Counter.runar.rs"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.methods.len(), 1);
+        assert_eq!(contract.methods[0].name, "increment");
+        assert_eq!(contract.methods[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn test_multiple_impl_blocks_merge_in_order() {
+        let source = r#"
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Multi {
+    #[readonly]
+    x: Bigint,
+}
+
+impl Multi {
+    pub fn first(&self) {
+        assert!(self.x > 0);
+    }
+}
+
+impl Multi {
+    pub fn second(&self) {
+        assert!(self.x < 100);
+    }
+}
+"#;
+        let result = parse_rust_dsl(source, Some("Multi.runar.rs"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.methods.len(), 2);
+        assert_eq!(contract.methods[0].name, "first");
+        assert_eq!(contract.methods[1].name, "second");
+    }
+
+    #[test]
+    fn test_impl_before_struct() {
+        // Single-pass parsing tolerates the `impl` block appearing before the
+        // contract struct.
+        let source = r#"
+use runar::prelude::*;
+
+impl Early {
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+
+#[runar::contract]
+pub struct Early {
+    #[readonly]
+    x: Bigint,
+}
+"#;
+        let result = parse_rust_dsl(source, Some("Early.runar.rs"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(contract.name, "Early");
+        assert_eq!(contract.methods.len(), 1);
+        assert_eq!(contract.methods[0].name, "check");
+    }
+
+    #[test]
+    fn test_runar_methods_attribute_rejected() {
+        let source = r#"
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Old {
+    #[readonly]
+    x: Bigint,
+}
+
+#[runar::methods(Old)]
+impl Old {
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+"#;
+        let result = parse_rust_dsl(source, Some("Old.runar.rs"));
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("#[runar::methods]")),
+            "expected a migration diagnostic, got: {:?}",
+            result.errors,
+        );
+    }
+
+    #[test]
+    fn test_public_attribute_rejected() {
+        let source = r#"
+use runar::prelude::*;
+
+#[runar::contract]
+pub struct Old {
+    #[readonly]
+    x: Bigint,
+}
+
+impl Old {
+    #[public]
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+"#;
+        let result = parse_rust_dsl(source, Some("Old.runar.rs"));
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("#[public]")),
+            "expected a migration diagnostic, got: {:?}",
+            result.errors,
+        );
     }
 }

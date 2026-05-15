@@ -20,9 +20,7 @@ pub struct Sha256CompressTest {
     pub expected: ByteString,
 }
 
-#[runar::methods(Sha256CompressTest)]
 impl Sha256CompressTest {
-    #[public]
     pub fn verify(&self, state: &ByteString, block: &ByteString) {
         let result = sha256_compress(state, block);
         assert!(result == self.expected);

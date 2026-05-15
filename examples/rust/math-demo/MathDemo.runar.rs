@@ -19,13 +19,11 @@ pub struct MathDemo {
     pub value: Bigint,
 }
 
-#[runar::methods(MathDemo)]
 impl MathDemo {
     /// Safe division — divides the stored value by `divisor`, asserting that
     /// `divisor` is non-zero. The transaction fails if divisor is 0.
     ///
     /// Use cases: splitting payments, computing averages.
-    #[public]
     pub fn divide_by(&mut self, divisor: Bigint) {
         self.value = safediv(self.value, divisor);
     }
@@ -35,7 +33,6 @@ impl MathDemo {
     /// Asserts that the total (amount + fee) does not exceed the stored value.
     ///
     /// Use cases: fee calculation, royalties, commission deductions.
-    #[public]
     pub fn withdraw_with_fee(&mut self, amount: Bigint, fee_bps: Bigint) {
         let fee = percent_of(amount, fee_bps);
         let total = amount + fee;
@@ -47,7 +44,6 @@ impl MathDemo {
     /// If value < lo, it becomes lo. If value > hi, it becomes hi.
     ///
     /// Use cases: enforcing min/max limits on bids, prices, or balances.
-    #[public]
     pub fn clamp_value(&mut self, lo: Bigint, hi: Bigint) {
         self.value = clamp(self.value, lo, hi);
     }
@@ -55,7 +51,6 @@ impl MathDemo {
     /// Replaces the stored value with its sign: -1, 0, or 1.
     ///
     /// Use cases: direction detection, comparison results, branch selection.
-    #[public]
     pub fn normalize(&mut self) {
         self.value = sign(self.value);
     }
@@ -63,7 +58,6 @@ impl MathDemo {
     /// Raises the stored value to the power `exp` (integer exponentiation).
     ///
     /// Use cases: compound interest, polynomial evaluation.
-    #[public]
     pub fn exponentiate(&mut self, exp: Bigint) {
         self.value = pow(self.value, exp);
     }
@@ -71,7 +65,6 @@ impl MathDemo {
     /// Replaces the stored value with its integer square root (floor).
     ///
     /// Use cases: geometric mean, distance calculations.
-    #[public]
     pub fn square_root(&mut self) {
         self.value = sqrt(self.value);
     }
@@ -80,7 +73,6 @@ impl MathDemo {
     /// common divisor.
     ///
     /// Use cases: fraction simplification, coprimality checks.
-    #[public]
     pub fn reduce_gcd(&mut self, other: Bigint) {
         self.value = gcd(self.value, other);
     }
@@ -89,7 +81,6 @@ impl MathDemo {
     /// to avoid overflow. Replaces the stored value with the result.
     ///
     /// Use cases: currency conversion, proportional allocation, token swaps.
-    #[public]
     pub fn scale_by_ratio(&mut self, numerator: Bigint, denominator: Bigint) {
         self.value = mul_div(self.value, numerator, denominator);
     }
@@ -98,7 +89,6 @@ impl MathDemo {
     /// base-2 logarithm.
     ///
     /// Use cases: bit-length calculation, binary search depth.
-    #[public]
     pub fn compute_log2(&mut self) {
         self.value = log2(self.value);
     }

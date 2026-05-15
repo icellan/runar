@@ -22,12 +22,10 @@ pub struct ConvergenceProof {
     pub r_b: Point,
 }
 
-#[runar::methods(ConvergenceProof)]
 impl ConvergenceProof {
     /// Prove convergence via offset difference.
     ///
     /// `delta_o` is the offset difference o_A - o_B (mod n), provided by the authority.
-    #[public]
     pub fn prove_convergence(&self, delta_o: Bigint) {
         // Verify both committed points are on the curve
         assert!(ec_on_curve(&self.r_a));

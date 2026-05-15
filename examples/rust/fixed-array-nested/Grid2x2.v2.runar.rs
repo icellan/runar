@@ -19,37 +19,31 @@ pub struct Grid2x2 {
     pub tx_preimage: SigHashPreimage,
 }
 
-#[runar::methods(Grid2x2)]
 impl Grid2x2 {
     pub fn init(&mut self) {
         self.grid = [[0, 0], [0, 0]];
     }
 
-    #[public]
     pub fn set00(&mut self, v: Bigint) {
         self.grid[0][0] = v;
         assert!(true);
     }
 
-    #[public]
     pub fn set01(&mut self, v: Bigint) {
         self.grid[0][1] = v;
         assert!(true);
     }
 
-    #[public]
     pub fn set10(&mut self, v: Bigint) {
         self.grid[1][0] = v;
         assert!(true);
     }
 
-    #[public]
     pub fn set11(&mut self, v: Bigint) {
         self.grid[1][1] = v;
         assert!(true);
     }
 
-    #[public]
     pub fn read00(&self) {
         assert!(self.grid[0][0] == self.grid[0][0]);
     }

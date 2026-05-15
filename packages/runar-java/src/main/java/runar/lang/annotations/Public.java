@@ -8,9 +8,9 @@ import java.lang.annotation.Target;
 /**
  * Marks a contract method as a public spending entry point.
  *
- * <p>Analog of Python's {@code @public} decorator and Rust's
- * {@code #[public]} attribute. Methods without {@code @Public} are
- * treated as private helpers (inlined by the compiler).
+ * <p>Analog of Python's {@code @public} decorator and Rust's {@code pub fn}
+ * visibility. Methods without {@code @Public} are treated as private helpers
+ * (inlined by the compiler).
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.METHOD)

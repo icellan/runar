@@ -96,9 +96,7 @@ pub struct OrdinalNFT {
     pub pub_key_hash: Addr,
 }
 
-#[runar::methods(OrdinalNFT)]
 impl OrdinalNFT {
-    #[public]
     pub fn unlock(&self, sig: &Sig,
         pub_key: &PubKey) {
         assert!(hash160(pub_key)

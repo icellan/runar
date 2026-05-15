@@ -31,9 +31,7 @@ class RustParserTest {
             pub pub_key_hash: Addr,
         }
 
-        #[runar::methods(P2PKH)]
         impl P2PKH {
-            #[public]
             pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
                 assert!(hash160(pub_key) == self.pub_key_hash);
                 assert!(check_sig(sig, pub_key));
@@ -49,14 +47,11 @@ class RustParserTest {
             pub count: Bigint,
         }
 
-        #[runar::methods(Counter)]
         impl Counter {
-            #[public]
             pub fn increment(&mut self) {
                 self.count += 1;
             }
 
-            #[public]
             pub fn decrement(&mut self) {
                 assert!(self.count > 0);
                 self.count -= 1;
@@ -196,7 +191,6 @@ class RustParserTest {
                 pub d: bool,
             }
 
-            #[runar::methods(C)]
             impl C {}
             """;
         ContractNode c = RustParser.parse(src, "C.runar.rs");
@@ -217,7 +211,6 @@ class RustParserTest {
                 pub seq: i64,
             }
 
-            #[runar::methods(S)]
             impl S {}
             """;
         ContractNode c = RustParser.parse(src, "S.runar.rs");
@@ -235,7 +228,6 @@ class RustParserTest {
                 pub count: i64,
             }
 
-            #[runar::methods(C)]
             impl C {
                 fn init() {
                     self.count = 7;
@@ -262,9 +254,7 @@ class RustParserTest {
                 pub n: i64,
             }
 
-            #[runar::methods(C)]
             impl C {
-                #[public]
                 pub fn run(&self) {
                     for i in 0..10 {
                         assert!(i < 10);
@@ -292,9 +282,7 @@ class RustParserTest {
                 pub data: ByteString,
             }
 
-            #[runar::methods(C)]
             impl C {
-                #[public]
                 pub fn check(&self) {
                     let x = self.data.clone();
                     assert!(x == self.data);
@@ -318,9 +306,7 @@ class RustParserTest {
                 pub a: i64,
             }
 
-            #[runar::methods(C)]
             impl C {
-                #[public]
                 pub fn check(&self, b: i64) {
                     assert_eq!(self.a, b);
                 }
@@ -344,9 +330,7 @@ class RustParserTest {
                 pub a: i64,
             }
 
-            #[runar::methods(C)]
             impl C {
-                #[public]
                 pub fn pick(&self, b: i64) {
                     if self.a > b {
                         assert!(true);
@@ -380,12 +364,132 @@ class RustParserTest {
         String src = """
             #[runar::contract]
             pub struct C { #[readonly] pub a: i64, }
-            #[runar::methods(C)]
             impl C {
-                #[public]
                 pub fn run(&self) { assert!(true);
             """;
         assertThrows(RustParser.ParseException.class,
             () -> RustParser.parse(src, "C.runar.rs"));
+    }
+
+    @Test
+    void parsesBareImplWithoutMethodsAttribute() throws Exception {
+        String src = """
+            #[runar::contract]
+            pub struct Counter {
+                pub count: Bigint,
+            }
+
+            impl Counter {
+                pub fn increment(&mut self) {
+                    self.count += 1;
+                }
+
+                fn helper(&self) {
+                    assert!(self.count > 0);
+                }
+            }
+            """;
+        ContractNode c = RustParser.parse(src, "Counter.runar.rs");
+        assertEquals(2, c.methods().size());
+        assertEquals("increment", c.methods().get(0).name());
+        assertEquals(Visibility.PUBLIC, c.methods().get(0).visibility());
+        assertEquals("helper", c.methods().get(1).name());
+        assertEquals(Visibility.PRIVATE, c.methods().get(1).visibility());
+    }
+
+    @Test
+    void mergesMultipleImplBlocksInOrder() throws Exception {
+        String src = """
+            #[runar::contract]
+            pub struct Multi {
+                #[readonly]
+                pub x: Bigint,
+            }
+
+            impl Multi {
+                pub fn first(&self) {
+                    assert!(self.x > 0);
+                }
+            }
+
+            impl Multi {
+                pub fn second(&self) {
+                    assert!(self.x < 100);
+                }
+            }
+            """;
+        ContractNode c = RustParser.parse(src, "Multi.runar.rs");
+        assertEquals(2, c.methods().size());
+        assertEquals("first", c.methods().get(0).name());
+        assertEquals("second", c.methods().get(1).name());
+    }
+
+    @Test
+    void parsesImplBeforeStruct() throws Exception {
+        String src = """
+            impl Early {
+                pub fn check(&self) {
+                    assert!(self.x > 0);
+                }
+            }
+
+            #[runar::contract]
+            pub struct Early {
+                #[readonly]
+                pub x: Bigint,
+            }
+            """;
+        ContractNode c = RustParser.parse(src, "Early.runar.rs");
+        assertEquals("Early", c.name());
+        assertEquals(1, c.methods().size());
+        assertEquals("check", c.methods().get(0).name());
+    }
+
+    @Test
+    void rejectsRunarMethodsAttribute() {
+        String src = """
+            #[runar::contract]
+            pub struct Old {
+                #[readonly]
+                pub x: Bigint,
+            }
+
+            #[runar::methods(Old)]
+            impl Old {
+                pub fn check(&self) {
+                    assert!(self.x > 0);
+                }
+            }
+            """;
+        RustParser.ParseException e = assertThrows(
+            RustParser.ParseException.class,
+            () -> RustParser.parse(src, "Old.runar.rs")
+        );
+        assertTrue(e.getMessage().contains("#[runar::methods]"),
+            "expected a migration diagnostic, got: " + e.getMessage());
+    }
+
+    @Test
+    void rejectsPublicAttribute() {
+        String src = """
+            #[runar::contract]
+            pub struct Old {
+                #[readonly]
+                pub x: Bigint,
+            }
+
+            impl Old {
+                #[public]
+                pub fn check(&self) {
+                    assert!(self.x > 0);
+                }
+            }
+            """;
+        RustParser.ParseException e = assertThrows(
+            RustParser.ParseException.class,
+            () -> RustParser.parse(src, "Old.runar.rs")
+        );
+        assertTrue(e.getMessage().contains("#[public]"),
+            "expected a migration diagnostic, got: " + e.getMessage());
     }
 }

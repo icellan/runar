@@ -6,10 +6,8 @@ struct BoundedLoop {
     expected_sum: Int,
 }
 
-#[runar::methods(BoundedLoop)]
 impl BoundedLoop {
-    #[public]
-    fn verify(&self, start: Int) {
+    pub fn verify(&self, start: Int) {
         let mut sum: Int = 0;
         for i in 0..5 {
             sum = sum + start + i;
