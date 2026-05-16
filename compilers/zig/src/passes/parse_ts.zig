@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const types = @import("../ir/types.zig");
+const opcodes = @import("../codegen/opcodes.zig");
 
 const Allocator = std.mem.Allocator;
 const Expression = types.Expression;
@@ -530,7 +531,7 @@ const Parser = struct {
             if (ParentClass.fromTsString(parent_tok.text)) |pc| {
                 parent_class = pc;
             } else {
-                self.addErrorFmt("unknown parent class: '{s}', expected SmartContract or StatefulSmartContract", .{parent_tok.text});
+                self.addErrorFmt("unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", .{parent_tok.text});
                 return null;
             }
         }
@@ -1531,6 +1532,29 @@ const Parser = struct {
                 if (std.mem.eql(u8, name, "this")) break :blk Expression{ .identifier = "this" };
                 if (std.mem.eql(u8, name, "super")) break :blk Expression{ .identifier = "super" };
 
+                // asm<T>({...}) — TS expression-form generic type argument.
+                // The captured T flags the expression form and is stashed
+                // on CallExpr.asm_return_type. T must be one of bigint,
+                // boolean, or ByteString.
+                var asm_return_type: []const u8 = "";
+                if (std.mem.eql(u8, name, "asm") and self.current.kind == .lt) {
+                    asm_return_type = self.parseAsmGenericTypeArg();
+                }
+
+                // asm({...}) — special-case so the parser doesn't have to
+                // grow general object-literal support. The object literal is
+                // decoded inline into three positional args
+                // (body, in_arity, out_arity) so downstream passes treat
+                // asm() like any other normalised CallExpr.
+                if (std.mem.eql(u8, name, "asm") and self.current.kind == .lparen) {
+                    _ = self.bump(); // consume '('
+                    const args = self.parseAsmArgs();
+                    _ = self.expect(.rparen);
+                    const call = self.allocator.create(CallExpr) catch break :blk null;
+                    call.* = .{ .callee = "asm", .args = args, .asm_return_type = asm_return_type };
+                    break :blk Expression{ .call = call };
+                }
+
                 // Function call: name(...)
                 if (self.current.kind == .lparen) {
                     _ = self.bump();
@@ -1574,6 +1598,261 @@ const Parser = struct {
         }
         _ = self.expect(.rbracket);
         return .{ .array_literal = elements.items };
+    }
+
+    // ---- asm({...}) parsing ------------------------------------------------
+
+    /// Parse the optional asm<T>(...) generic type argument. The parser
+    /// reaches this function only when `current.kind == .lt`, immediately
+    /// after the `asm` identifier. Returns the captured primitive type name
+    /// when present and valid ("bigint", "boolean", or "ByteString"); empty
+    /// string when missing. Pushes a diagnostic for any other type.
+    fn parseAsmGenericTypeArg(self: *Parser) []const u8 {
+        if (self.current.kind != .lt) return "";
+        _ = self.bump(); // '<'
+        var captured: []const u8 = "";
+        if (self.current.kind == .ident) {
+            const tok = self.bump();
+            if (std.mem.eql(u8, tok.text, "bigint") or
+                std.mem.eql(u8, tok.text, "boolean") or
+                std.mem.eql(u8, tok.text, "ByteString"))
+            {
+                captured = tok.text;
+            } else {
+                self.addErrorFmt("asm<T>() return type must be 'bigint', 'boolean', or 'ByteString'; got '{s}'", .{tok.text});
+            }
+        }
+        // Consume the rest of the type argument list permissively until '>'.
+        var depth: u32 = 1;
+        while (depth > 0 and self.current.kind != .eof) {
+            switch (self.current.kind) {
+                .lt => depth += 1,
+                .gt => {
+                    depth -= 1;
+                    _ = self.bump();
+                    if (depth == 0) break;
+                    continue;
+                },
+                else => {},
+            }
+            _ = self.bump();
+        }
+        return captured;
+    }
+
+    /// Decode an asm({ body, in_arity?, out_arity? }) argument into the
+    /// three positional CallExpr args [ByteString(body), bigint(in_arity),
+    /// bigint(out_arity)]. The body can be a hex string literal or an array
+    /// of opcode-name / push() elements (encoded to hex at parse time).
+    /// Defaults are in_arity = 0, out_arity = 1 — the latter reflects the
+    /// public-method-must-leave-truthy invariant.
+    fn parseAsmArgs(self: *Parser) []Expression {
+        var args: std.ArrayListUnmanaged(Expression) = .empty;
+
+        if (self.current.kind != .lbrace) {
+            self.addError("asm() argument must be an object literal { body: '<hex>', in_arity?: <int>, out_arity?: <int> }");
+            return args.items;
+        }
+        _ = self.bump(); // '{'
+
+        var body_expr: ?Expression = null;
+        var in_arity_expr: ?Expression = null;
+        var out_arity_expr: ?Expression = null;
+
+        while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            if (self.current.kind != .ident) {
+                _ = self.bump();
+                continue;
+            }
+            const key_tok = self.bump();
+            if (self.expect(.colon) == null) break;
+            const key = key_tok.text;
+
+            if (std.mem.eql(u8, key, "body")) {
+                if (self.current.kind == .string_literal) {
+                    const tok = self.bump();
+                    body_expr = Expression{ .literal_bytes = tok.text };
+                } else if (self.current.kind == .lbracket) {
+                    const encoded = self.encodeAsmArrayBody();
+                    body_expr = Expression{ .literal_bytes = encoded };
+                } else {
+                    self.addError("asm() body must be a hex string literal or an array of opcode names / push() calls");
+                    // Best-effort skip past the value
+                    _ = self.parseExpression();
+                }
+            } else if (std.mem.eql(u8, key, "in_arity")) {
+                in_arity_expr = self.parseAsmArityLiteral("in_arity");
+            } else if (std.mem.eql(u8, key, "out_arity")) {
+                out_arity_expr = self.parseAsmArityLiteral("out_arity");
+            } else {
+                self.addErrorFmt("asm() does not accept the '{s}' field; valid fields are 'body', 'in_arity', 'out_arity'", .{key});
+                _ = self.parseExpression();
+            }
+
+            if (self.current.kind == .comma) _ = self.bump();
+        }
+        _ = self.expect(.rbrace);
+
+        if (body_expr == null) {
+            self.addError("asm() requires a 'body' field with a hex string literal value");
+            body_expr = Expression{ .literal_bytes = "" };
+        }
+        // Defaults: in_arity = 0, out_arity = 1.
+        const in_a = in_arity_expr orelse Expression{ .literal_int = 0 };
+        const out_a = out_arity_expr orelse Expression{ .literal_int = 1 };
+
+        args.append(self.allocator, body_expr.?) catch {};
+        args.append(self.allocator, in_a) catch {};
+        args.append(self.allocator, out_a) catch {};
+        return args.items;
+    }
+
+    /// Parse a non-negative integer literal for an asm() arity field. Allows
+    /// either a bare number or a unary `-` followed by a number (which is
+    /// flagged as a diagnostic — arity must be non-negative).
+    fn parseAsmArityLiteral(self: *Parser, field_name: []const u8) Expression {
+        if (self.current.kind == .number) {
+            const tok = self.bump();
+            // Strip underscores from number text
+            var stripped_buf: [64]u8 = undefined;
+            var stripped_len: usize = 0;
+            for (tok.text) |ch| {
+                if (ch != '_' and stripped_len < stripped_buf.len) {
+                    stripped_buf[stripped_len] = ch;
+                    stripped_len += 1;
+                }
+            }
+            const stripped = stripped_buf[0..stripped_len];
+            const val = std.fmt.parseInt(i64, stripped, 0) catch {
+                self.addErrorFmt("asm() {s} must be a non-negative integer literal, got '{s}'", .{ field_name, tok.text });
+                return Expression{ .literal_int = 0 };
+            };
+            return Expression{ .literal_int = val };
+        }
+        self.addErrorFmt("asm() {s} must be a non-negative integer literal", .{field_name});
+        // Best-effort skip past the value
+        _ = self.parseExpression();
+        return Expression{ .literal_int = 0 };
+    }
+
+    /// Encode an asm({ body: [OP_DUP, push(0x42), ...] }) array literal to
+    /// its hex byte representation, byte-identical to the equivalent hex
+    /// body. Pushed at parse-time so every downstream pass sees the same
+    /// normalised raw_script binding regardless of which body shape the
+    /// developer used.
+    fn encodeAsmArrayBody(self: *Parser) []const u8 {
+        _ = self.expect(.lbracket);
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        const w = opcodes.ArrayListWriter{ .list = &buf, .allocator = self.allocator };
+
+        while (self.current.kind != .rbracket and self.current.kind != .eof) {
+            if (self.current.kind == .ident) {
+                const tok = self.bump();
+                // push(<literal>) is a function call — handled below if `(` follows.
+                if (std.mem.eql(u8, tok.text, "push") and self.current.kind == .lparen) {
+                    _ = self.bump(); // '('
+                    self.encodeAsmPushLiteral(w) catch {};
+                    _ = self.expect(.rparen);
+                } else if (opcodes.byName(tok.text)) |op| {
+                    buf.append(self.allocator, op.toByte()) catch {};
+                } else {
+                    self.addErrorFmt("Unknown opcode '{s}' in asm() body array. Expected an OP_* identifier or a push(...) call.", .{tok.text});
+                }
+            } else {
+                // Skip unexpected tokens until comma or `]`.
+                _ = self.bump();
+            }
+
+            if (self.current.kind == .comma) {
+                _ = self.bump();
+            } else if (self.current.kind != .rbracket) {
+                // Allow newlines/separators inside the array — keep scanning.
+            }
+        }
+        _ = self.expect(.rbracket);
+
+        // Convert raw bytes to hex string; arena-style ownership via allocator.
+        const hex = opcodes.bytesToHex(self.allocator, buf.items) catch return "";
+        buf.deinit(self.allocator);
+        return hex;
+    }
+
+    /// Encode a single literal argument of push(...) inside an asm() body
+    /// array. Writes the encoded bytes to `writer`. Returns false (with a
+    /// diagnostic pushed) if the literal is unrecognised.
+    fn encodeAsmPushLiteral(self: *Parser, writer: anytype) !void {
+        if (self.current.kind == .number) {
+            const tok = self.bump();
+            var stripped_buf: [64]u8 = undefined;
+            var stripped_len: usize = 0;
+            for (tok.text) |ch| {
+                if (ch != '_' and stripped_len < stripped_buf.len) {
+                    stripped_buf[stripped_len] = ch;
+                    stripped_len += 1;
+                }
+            }
+            const stripped = stripped_buf[0..stripped_len];
+            const val = std.fmt.parseInt(i64, stripped, 0) catch {
+                self.addErrorFmt("push() argument is not a valid integer literal: '{s}'", .{tok.text});
+                return;
+            };
+            try opcodes.encodeScriptNumber(writer, val);
+            return;
+        }
+        if (self.current.kind == .minus) {
+            _ = self.bump();
+            if (self.current.kind != .number) {
+                self.addError("push() argument must be a literal value (bigint, number, boolean, or hex string)");
+                return;
+            }
+            const tok = self.bump();
+            var stripped_buf: [64]u8 = undefined;
+            var stripped_len: usize = 0;
+            for (tok.text) |ch| {
+                if (ch != '_' and stripped_len < stripped_buf.len) {
+                    stripped_buf[stripped_len] = ch;
+                    stripped_len += 1;
+                }
+            }
+            const stripped = stripped_buf[0..stripped_len];
+            const val_abs = std.fmt.parseInt(i64, stripped, 0) catch {
+                self.addErrorFmt("push() argument is not a valid integer literal: '{s}'", .{tok.text});
+                return;
+            };
+            try opcodes.encodeScriptNumber(writer, -val_abs);
+            return;
+        }
+        if (self.current.kind == .ident) {
+            const tok = self.bump();
+            if (std.mem.eql(u8, tok.text, "true")) {
+                try writer.writeByte(0x51); // OP_TRUE
+                return;
+            }
+            if (std.mem.eql(u8, tok.text, "false")) {
+                try writer.writeByte(0x00); // OP_FALSE (alias of OP_0)
+                return;
+            }
+            self.addErrorFmt("push() argument must be a literal value (bigint, number, boolean, or hex string), got identifier '{s}'", .{tok.text});
+            return;
+        }
+        if (self.current.kind == .string_literal) {
+            const tok = self.bump();
+            // Decode the hex string to bytes
+            if (tok.text.len % 2 != 0) {
+                self.addError("push() ByteString argument must be even-length hex");
+                return;
+            }
+            const decoded = self.allocator.alloc(u8, tok.text.len / 2) catch return;
+            _ = std.fmt.hexToBytes(decoded, tok.text) catch {
+                self.allocator.free(decoded);
+                self.addError("push() ByteString argument is not valid hex");
+                return;
+            };
+            try opcodes.encodePushData(writer, decoded);
+            self.allocator.free(decoded);
+            return;
+        }
+        self.addError("push() argument must be a literal value (bigint, number, boolean, or hex string)");
     }
 
     // ---- Helpers ----

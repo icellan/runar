@@ -288,6 +288,9 @@ module RunarCompiler::Codegen
       refs << value.script_bytes
     when "array_literal"
       refs.concat(value.elements) if value.elements
+    when "raw_script"
+      # Opaque byte span -- no SSA operand refs. Stack effect is declared
+      # via in_arity / out_arity.
     end
 
     refs
@@ -1088,6 +1091,8 @@ module RunarCompiler::Codegen
         _lower_get_state_script(name)
       when "array_literal"
         _lower_array_literal(name, value.elements || [], binding_index, last_uses)
+      when "raw_script"
+        _lower_raw_script(name, value.bytes || "", value.in_arity || 0, value.out_arity || 1)
       end
     end
 
@@ -3220,6 +3225,35 @@ module RunarCompiler::Codegen
       @sm.push(binding_name)
       # Record the array length for checkMultiSig
       @array_lengths[binding_name] = elements.length
+      _track_depth
+    end
+
+    # -----------------------------------------------------------------
+    # raw_script
+    # -----------------------------------------------------------------
+
+    # Lower a raw_script ANF node to a single opaque raw_bytes StackOp.
+    #
+    # The bytes pass through verbatim -- the emit pass writes them as-is, and
+    # the peephole optimizer must not bridge across them. Stack-tracker
+    # bookkeeping consumes in_arity items and pushes out_arity items named
+    # after the binding so downstream PICK/ROLL/DROP refer to the correct
+    # logical slot.
+    def _lower_raw_script(binding_name, bytes_hex, in_arity, out_arity)
+      if @sm.depth < in_arity
+        raise "raw_script binding '#{binding_name}' requires #{in_arity} " \
+              "stack items but only #{@sm.depth} are present"
+      end
+      unless bytes_hex.match?(/\A[0-9a-fA-F]*\z/) && bytes_hex.length.even?
+        raise "raw_script binding '#{binding_name}' has invalid hex bytes: #{bytes_hex.inspect}"
+      end
+      bytes = [bytes_hex].pack("H*")
+      emit_op({ op: "raw_bytes", raw_bytes: bytes, in_arity: in_arity, out_arity: out_arity })
+      in_arity.times { @sm.pop }
+      out_arity.times do |i|
+        slot_name = out_arity == 1 ? binding_name : "#{binding_name}.#{i}"
+        @sm.push(slot_name)
+      end
       _track_depth
     end
 

@@ -766,7 +766,7 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		parentClass = classPart.value
 	}
 
-	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" {
+	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
 		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
 	}
 
@@ -988,8 +988,9 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 		}
 	}
 
-	// In stateless contracts, all properties are readonly
-	if parentClass == "SmartContract" {
+	// In stateless contracts (SmartContract and UnsafeSmartContract), all
+	// properties are readonly.
+	if parentClass == "SmartContract" || parentClass == "UnsafeSmartContract" {
 		isReadonly = true
 	}
 

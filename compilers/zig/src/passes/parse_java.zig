@@ -465,9 +465,11 @@ const Parser = struct {
                     parent_class = .smart_contract;
                 } else if (std.mem.eql(u8, parent_name, "StatefulSmartContract")) {
                     parent_class = .stateful_smart_contract;
+                } else if (std.mem.eql(u8, parent_name, "UnsafeSmartContract")) {
+                    parent_class = .unsafe_smart_contract;
                 } else {
                     self.addErrorFmt(
-                        "contract class '{s}' must extend SmartContract or StatefulSmartContract, got '{s}'",
+                        "contract class '{s}' must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got '{s}'",
                         .{ contract_name, parent_name },
                     );
                     return .{ .contract = null, .errors = self.errors.items };
@@ -1775,19 +1777,35 @@ const Parser = struct {
     /// Parse `new T[]{a, b, c}` — the only `new` form in the Runar subset.
     /// Returns an `array_literal` expression.
     fn parseNewExpr(self: *Parser) ?Expression {
-        // We've already consumed `new`.
-        // Skip type tokens up to `[]` then `{`.
+        // We've already consumed `new`. Parse `Type[] { e1, e2, ... }` —
+        // the only `new` form in the Rúnar subset. Consume the element
+        // type ident-by-ident (and any optional generic args) by hand
+        // rather than via parseType(), because parseType() greedily
+        // consumes a trailing `[]` and would leave us facing `{` here.
         if (self.current.kind != .ident) {
             self.addError("expected type after 'new'");
             return null;
         }
-        _ = self.parseType(); // discard the element type (already encoded in the property type)
+        _ = self.bump(); // element type ident
+        // Qualified type segments: `pkg.Name`
+        while (self.current.kind == .dot) {
+            _ = self.bump();
+            if (self.current.kind == .ident) _ = self.bump() else break;
+        }
+        // Optional generic args on the element type: `Foo<...>`
+        if (self.current.kind == .lt) self.skipTypeArgs();
+
         if (self.current.kind != .lbracket) {
             self.addError("expected '[' after 'new Type'");
             return null;
         }
         _ = self.bump();
         _ = self.expect(.rbracket);
+        // Multi-dim arrays — consume any additional empty `[]` pairs.
+        while (self.current.kind == .lbracket) {
+            _ = self.bump();
+            _ = self.expect(.rbracket);
+        }
         if (self.expect(.lbrace) == null) return null;
 
         var elements: std.ArrayListUnmanaged(Expression) = .empty;

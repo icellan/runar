@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
 import runar.compiler.ir.ast.BinaryExpr;
@@ -822,6 +823,8 @@ public final class GoParser {
                         parentClass = "SmartContract";
                     } else if ("StatefulSmartContract".equals(embedName)) {
                         parentClass = "StatefulSmartContract";
+                    } else if ("UnsafeSmartContract".equals(embedName)) {
+                        parentClass = "UnsafeSmartContract";
                     }
                     skipSemicolons();
                     continue;
@@ -1596,9 +1599,86 @@ public final class GoParser {
                 return e;
             }
 
+            if (tok.kind == Tok.LBRACKET) {
+                return parseArrayOrCompositeLiteral();
+            }
+
+            if (tok.kind == Tok.LBRACE) {
+                // Nested composite-literal body for multi-dim arrays.
+                return parseBraceLiteral();
+            }
+
             addError("line " + tok.line + ": unexpected token " + tok.value);
             advance();
             return new BigIntLiteral(BigInteger.ZERO);
+        }
+
+        // Parse either a bare `[a, b, …]` array literal or a Go composite
+        // literal `[N]T{a, b, …}` (also `[]T{...}` and multi-dim variants).
+        // Both surfaces emit an ArrayLiteralExpr so all 7 tiers lower to
+        // the same `array_literal` ANF node.
+        Expression parseArrayOrCompositeLiteral() {
+            int saved = pos;
+            expect(Tok.LBRACKET);
+            boolean composite = false;
+            if (check(Tok.NUMBER) || check(Tok.RBRACKET)) {
+                if (check(Tok.NUMBER)) advance();
+                if (check(Tok.RBRACKET)) {
+                    advance(); // consume ']'
+                    // Multi-dim arrays: consume additional `[N]` dims.
+                    while (check(Tok.LBRACKET)) {
+                        int dimSaved = pos;
+                        advance();
+                        if (check(Tok.NUMBER)) advance();
+                        if (!check(Tok.RBRACKET)) { pos = dimSaved; break; }
+                        advance();
+                    }
+                    // Consume element type: `*T`, `T`, or `runar.T`.
+                    if (check(Tok.STAR)) advance();
+                    if (check(Tok.IDENT)) {
+                        advance();
+                        while (check(Tok.DOT)) {
+                            advance();
+                            if (check(Tok.IDENT)) advance();
+                            else break;
+                        }
+                    }
+                    if (check(Tok.LBRACE)) {
+                        composite = true;
+                        return parseBraceLiteral();
+                    }
+                }
+            }
+            if (!composite) {
+                pos = saved;
+                expect(Tok.LBRACKET);
+            }
+            List<Expression> elements = new ArrayList<>();
+            while (!check(Tok.RBRACKET) && !check(Tok.EOF)) {
+                elements.add(parseExpression());
+                if (!match(Tok.COMMA)) {
+                    break;
+                }
+            }
+            expect(Tok.RBRACKET);
+            return new ArrayLiteralExpr(elements);
+        }
+
+        // Parse `{e, e, …}` — the body of a Go composite literal. Nested
+        // braces recurse for multi-dim arrays.
+        Expression parseBraceLiteral() {
+            expect(Tok.LBRACE);
+            List<Expression> elements = new ArrayList<>();
+            while (!check(Tok.RBRACE) && !check(Tok.EOF)) {
+                if (check(Tok.LBRACE)) {
+                    elements.add(parseBraceLiteral());
+                } else {
+                    elements.add(parseExpression());
+                }
+                if (!match(Tok.COMMA)) break;
+            }
+            expect(Tok.RBRACE);
+            return new ArrayLiteralExpr(elements);
         }
 
         List<Expression> parseCallArgs() {

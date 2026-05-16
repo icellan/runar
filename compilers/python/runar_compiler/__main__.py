@@ -26,6 +26,16 @@ from runar_compiler.compiler import (
 
 
 def main() -> None:
+    # Subcommand dispatch: a non-flag first arg is treated as a subcommand,
+    # matching the Go and Rust compilers. Keeps the legacy flag surface
+    # untouched while letting us add modes like `debug` (G-6) cleanly.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        if sys.argv[1] == "debug":
+            _run_debug_subcommand(sys.argv[2:])
+            return
+        # Unknown positional: fall through to argparse, which will emit a
+        # standard usage error.
+
     parser = argparse.ArgumentParser(
         prog="runar-compiler-python",
         description="Runar smart contract compiler (Python implementation).",
@@ -244,6 +254,110 @@ def _anf_to_camel_dict(obj: object) -> object:
     if isinstance(obj, list):
         return [_anf_to_camel_dict(item) for item in obj]
     return obj
+
+
+def _run_debug_subcommand(argv: list[str]) -> None:
+    """`debug` subcommand: step-trace a Bitcoin Script via the runar-py
+    ScriptVM (which wraps the bsv-sdk Spend interpreter).
+
+    Wraps ``runar.sdk.script_vm.ScriptVM`` from the ``packages/runar-py``
+    package — runar-py must be importable (typically: ``pip install runar``
+    in the same env, or set ``PYTHONPATH=packages/runar-py``). The ScriptVM
+    itself needs the optional ``bsv-sdk`` dependency
+    (``pip install runar[script-vm]``).
+
+    G-6 (audits/cross-language-completeness-20260514.md §5.1).
+    """
+    parser = argparse.ArgumentParser(
+        prog="runar-compiler-python debug",
+        description=(
+            "Step-trace a Bitcoin Script via the bsv-sdk Spend interpreter, "
+            "printing the main stack after each opcode."
+        ),
+    )
+    parser.add_argument("--script", metavar="HEX",
+                        help="locking-script hex (required unless --artifact is used)")
+    parser.add_argument("--unlock", metavar="HEX", default="",
+                        help="unlocking-script hex (default: empty)")
+    parser.add_argument("--artifact", metavar="PATH",
+                        help="compiled artifact JSON path (uses its 'script' field)")
+    parser.add_argument("--max-stack-bytes", type=int, default=32,
+                        help="max bytes of each stack element to print (0 = full)")
+    args = parser.parse_args(argv)
+
+    locking_hex = args.script
+    if not locking_hex and args.artifact:
+        try:
+            with open(args.artifact, "r", encoding="utf-8") as f:
+                art = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"read artifact: {e}", file=sys.stderr)
+            sys.exit(1)
+        locking_hex = art.get("script")
+        if not isinstance(locking_hex, str):
+            print("artifact has no 'script' field", file=sys.stderr)
+            sys.exit(1)
+    if not locking_hex:
+        parser.print_usage(sys.stderr)
+        print("debug: --script or --artifact is required", file=sys.stderr)
+        sys.exit(1)
+
+    # Lazy import so the rest of the CLI keeps working without bsv-sdk /
+    # runar-py installed. The runar-py ScriptVM does its own bsv-sdk
+    # detection and raises ImportError on first use with a helpful hint.
+    try:
+        from runar.sdk.script_vm import ScriptVM  # type: ignore
+    except ImportError as e:
+        print(
+            "debug: cannot import runar.sdk.script_vm — install runar-py "
+            "(e.g. `pip install runar[script-vm]`) or set PYTHONPATH to "
+            "packages/runar-py.",
+            file=sys.stderr,
+        )
+        print(f"  detail: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    vm = ScriptVM()
+    try:
+        vm.load_hex(args.unlock, locking_hex)
+    except ImportError as e:
+        # Raised lazily by runar.sdk.script_vm when bsv-sdk is missing.
+        print(f"debug: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001 — surface upstream errors verbatim
+        print(f"debug: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    step_n = 0
+    while (step := vm.step()) is not None:
+        step_n += 1
+        stack_repr = _format_stack(step.main_stack, args.max_stack_bytes)
+        print(
+            f"step={step_n}  ctx={step.context}  offset={step.offset}  "
+            f"op={step.opcode}  stack={stack_repr}"
+        )
+        if step.error:
+            print(f"  error: {step.error}")
+    if step_n == 0:
+        print("(no opcodes executed)")
+
+    status = "pass" if vm.is_success else "fail"
+    final_stack = _format_stack(vm.current_stack, args.max_stack_bytes)
+    print(f"final: {status}  ops={step_n}  stack={final_stack}")
+
+
+def _format_stack(stack: list, max_bytes: int) -> str:
+    """Render a stack as ``[hex1, hex2, ...]``. Top of stack is last."""
+    if not stack:
+        return "[]"
+    parts = []
+    for e in stack:
+        b = bytes(e)
+        if max_bytes > 0 and len(b) > max_bytes:
+            parts.append(b[:max_bytes].hex() + f"…(+{len(b) - max_bytes})")
+        else:
+            parts.append(b.hex() if b else "<empty>")
+    return "[" + ", ".join(parts) + "]"
 
 
 if __name__ == "__main__":

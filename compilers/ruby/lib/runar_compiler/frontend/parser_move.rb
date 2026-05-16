@@ -437,6 +437,12 @@ module RunarCompiler
       # -- Top-level parsing -----------------------------------------------
 
       def parse_contract
+        # `unsafe module Name { ... }` marks an UnsafeSmartContract -- the
+        # asm-escape-hatch base class. Plain `module Name { ... }` infers
+        # SmartContract / StatefulSmartContract structurally as before.
+        is_unsafe = check_ident("unsafe")
+        advance if is_unsafe
+
         # module ContractName { ... }
         expect_ident("module")
         name_tok = expect(TOK_IDENT)
@@ -452,7 +458,7 @@ module RunarCompiler
           match_tok(TOK_SEMICOLON)
         end
 
-        parent_class = "SmartContract"
+        parent_class = is_unsafe ? "UnsafeSmartContract" : "SmartContract"
         properties = []
         methods = []
 
@@ -519,10 +525,10 @@ module RunarCompiler
             end
             expect(TOK_RBRACE)
 
-            parent_class = "StatefulSmartContract" if is_resource || has_mutable
+            parent_class = "StatefulSmartContract" if (is_resource || has_mutable) && !is_unsafe
           elsif check_ident("public") || check_ident("fun")
             method, has_mut_recv = parse_function_with_mut
-            parent_class = "StatefulSmartContract" if has_mut_recv
+            parent_class = "StatefulSmartContract" if has_mut_recv && !is_unsafe
             methods << method
           else
             advance # skip unknown
@@ -530,9 +536,10 @@ module RunarCompiler
         end
         expect(TOK_RBRACE)
 
-        # Determine parent class from property mutability
+        # Determine parent class from property mutability (skipped for the
+        # explicit `unsafe module` spelling, which is authoritative).
         has_mutable = properties.any? { |p| !p.readonly }
-        parent_class = "StatefulSmartContract" if has_mutable
+        parent_class = "StatefulSmartContract" if has_mutable && !is_unsafe
 
         # Build constructor -- only non-initialized properties become params
         default_loc = SourceLocation.new(file: @file_name, line: 1, column: 0)

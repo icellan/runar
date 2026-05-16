@@ -280,7 +280,8 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 // hasSideEffect returns true if the binding has side effects and should not be eliminated.
 func hasSideEffect(v *ir.ANFValue) bool {
 	switch v.Kind {
-	case "assert", "update_prop", "check_preimage", "add_output", "deserialize_state":
+	case "assert", "update_prop", "check_preimage", "add_output", "deserialize_state",
+		"raw_script": // opaque byte span — DCE must never eliminate it
 		return true
 	case "if":
 		// If any branch has side effects, keep it

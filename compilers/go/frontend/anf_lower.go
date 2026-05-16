@@ -117,6 +117,10 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 
 	case CallExpr:
 		if id, ok := e.Callee.(Identifier); ok {
+			// Expression-form asm<ByteString>({...}) yields a byte value.
+			if id.Name == "asm" {
+				return e.AsmReturnType == "ByteString"
+			}
 			if byteReturningFunctions[id.Name] {
 				return true
 			}
@@ -1248,6 +1252,39 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			thisRef := ctx.emit(makeLoadConstString("@this"))
 			return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: me.Property, Args: argRefs})
 		}
+	}
+
+	// asm({...}) compiler intrinsic — the parser has already normalised the
+	// object-literal argument into three positional args
+	// (body, in_arity, out_arity). Lower it to a single opaque raw_script
+	// ANF binding; the hex body passes through unchanged. Diagnostics for
+	// malformed args were already pushed by the validator — here we
+	// defensively coerce missing values to safe defaults.
+	if id, ok := callee.(Identifier); ok && id.Name == "asm" {
+		bytes := ""
+		inArity := 0
+		outArity := 1
+		if len(e.Args) >= 1 {
+			if bs, ok := e.Args[0].(ByteStringLiteral); ok {
+				bytes = bs.Value
+			}
+		}
+		if len(e.Args) >= 2 {
+			if bi, ok := e.Args[1].(BigIntLiteral); ok && bi.Value != nil {
+				inArity = int(bi.Value.Int64())
+			}
+		}
+		if len(e.Args) >= 3 {
+			if bi, ok := e.Args[2].(BigIntLiteral); ok && bi.Value != nil {
+				outArity = int(bi.Value.Int64())
+			}
+		}
+		return ctx.emit(ir.ANFValue{
+			Kind:     "raw_script",
+			Bytes:    bytes,
+			InArity:  inArity,
+			OutArity: outArity,
+		})
 	}
 
 	// Direct function call: sha256(x), checkSig(sig, pk), etc.

@@ -55,4 +55,39 @@ class MathDemo < Runar::StatefulSmartContract
   def compute_log2
     @value = log2(@value)
   end
+
+  runar_public
+  def make_abs
+    @value = abs(@value)
+  end
+
+  runar_public other: Bigint
+  def take_min(other)
+    @value = min(@value, other)
+  end
+
+  runar_public other: Bigint
+  def take_max(other)
+    @value = max(@value, other)
+  end
+
+  runar_public lo: Bigint, hi: Bigint
+  def assert_within(lo, hi)
+    assert within(@value, lo, hi)
+  end
+
+  runar_public divisor: Bigint
+  def modulo_by(divisor)
+    @value = safemod(@value, divisor)
+  end
+
+  runar_public divisor: Bigint
+  def divmod_by(divisor)
+    @value = divmod(@value, divisor)
+  end
+
+  runar_public
+  def assert_non_zero
+    assert bool(@value)
+  end
 end

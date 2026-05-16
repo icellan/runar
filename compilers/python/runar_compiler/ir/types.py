@@ -157,6 +157,11 @@ class ANFValue:
     # -- array_literal -----------------------------------------------------
     elements: list[str] | None = None
 
+    # -- raw_script: opaque opcode-byte span with declared stack arity -----
+    bytes: str | None = None
+    in_arity: int | None = None
+    out_arity: int | None = None
+
 
 # ---------------------------------------------------------------------------
 # Constant decoding
@@ -268,6 +273,9 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
     v.state_values = d.get("stateValues")
     v.script_bytes = d.get("scriptBytes")
     v.elements = d.get("elements")
+    v.bytes = d.get("bytes")
+    v.in_arity = d.get("in_arity")
+    v.out_arity = d.get("out_arity")
 
     # Nested bindings
     if "then" in d and d["then"] is not None:

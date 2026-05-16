@@ -566,9 +566,15 @@ class _RustParser:
             if self.check(TOK_HASH_BRACKET):
                 attr = self.parse_attribute()
 
-                if attr in ("runar::contract", "runar::stateful_contract"):
+                if attr in (
+                    "runar::contract",
+                    "runar::stateful_contract",
+                    "runar::unsafe_contract",
+                ):
                     if attr == "runar::stateful_contract":
                         parent_class = "StatefulSmartContract"
+                    elif attr == "runar::unsafe_contract":
+                        parent_class = "UnsafeSmartContract"
 
                     # Parse struct
                     if self.check(TOK_PUB):

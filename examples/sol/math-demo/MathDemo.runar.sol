@@ -93,4 +93,51 @@ contract MathDemo is StatefulSmartContract {
     function computeLog2() public {
         this.value = log2(this.value);
     }
+
+    /// @notice Replaces the stored value with its absolute value.
+    /// @dev Use cases: magnitude comparison, distance calculation.
+    function makeAbs() public {
+        this.value = abs(this.value);
+    }
+
+    /// @notice Replaces the stored value with min(value, other).
+    /// @dev Use cases: capping bids, picking the smaller of two amounts.
+    function takeMin(bigint other) public {
+        this.value = min(this.value, other);
+    }
+
+    /// @notice Replaces the stored value with max(value, other).
+    /// @dev Use cases: enforcing reserve floors, picking the larger amount.
+    function takeMax(bigint other) public {
+        this.value = max(this.value, other);
+    }
+
+    /// @notice Asserts that the stored value lies in the half-open range
+    /// [lo, hi) — the semantics of Bitcoin Script's OP_WITHIN.
+    /// @dev Use cases: bounds-checked unlock parameters.
+    function assertWithin(bigint lo, bigint hi) public {
+        require(within(this.value, lo, hi));
+    }
+
+    /// @notice Safe modulo — replaces the stored value with `value mod divisor`,
+    /// asserting that `divisor` is non-zero.
+    /// @dev Use cases: round-robin scheduling, modular index calculation.
+    function moduloBy(bigint divisor) public {
+        this.value = safemod(this.value, divisor);
+    }
+
+    /// @notice Replaces the stored value with the quotient of `value / divisor`
+    /// via Rúnar's `divmod` builtin (canonical OP_2DUP OP_DIV OP_ROT OP_ROT
+    /// OP_MOD OP_DROP sequence).
+    /// @dev Use cases: integer division with a side-effect on the modulo result.
+    function divmodBy(bigint divisor) public {
+        this.value = divmod(this.value, divisor);
+    }
+
+    /// @notice Asserts that the stored value is "truthy" (non-zero) using
+    /// the dedicated `bool` builtin which compiles to OP_0NOTEQUAL.
+    /// @dev Use cases: terminal liveness check for non-zero state.
+    function assertNonZero() public {
+        require(bool(this.value));
+    }
 }

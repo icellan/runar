@@ -8,6 +8,8 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process;
 
+mod debug_subcommand;
+
 /// Rúnar Compiler (Rust implementation)
 #[derive(Parser, Debug)]
 #[command(name = "runar-compiler-rust")]
@@ -49,6 +51,23 @@ struct Args {
 }
 
 fn main() {
+    // Subcommand dispatch: if the first positional looks like a subcommand
+    // (not a flag), route it to its handler. Mirrors the Go compiler's
+    // approach so adding modes like `debug` does not require restructuring
+    // the legacy flag-based source/IR entry points.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.len() > 1 && !raw_args[1].starts_with('-') {
+        if raw_args[1] == "debug" {
+            if let Err(e) = debug_subcommand::run(&raw_args[2..]) {
+                eprintln!("debug: {}", e);
+                process::exit(1);
+            }
+            return;
+        }
+        // Unknown positional: fall through to clap, which will emit a
+        // standard usage error.
+    }
+
     let args = Args::parse();
 
     let opts = runar_compiler_rust::CompileOptions {

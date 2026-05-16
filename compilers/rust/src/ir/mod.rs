@@ -204,6 +204,20 @@ pub enum ANFValue {
     ArrayLiteral {
         elements: Vec<String>,
     },
+
+    /// RawScript — an opaque opcode-byte span emitted verbatim by the `asm`
+    /// compiler intrinsic. `bytes` is an even-length hex string of raw Bitcoin
+    /// Script opcode bytes; `in_arity` / `out_arity` declare the span's stack
+    /// effect. The bytes are never inspected — the peephole optimizer treats
+    /// the span as a hard barrier and constant folding never crosses it.
+    #[serde(rename = "raw_script")]
+    RawScript {
+        bytes: String,
+        #[serde(rename = "in_arity")]
+        in_arity: usize,
+        #[serde(rename = "out_arity")]
+        out_arity: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -146,6 +146,10 @@ fn isByteTypedExpr(expr: Expression, ctx: *const LowerCtx) bool {
             return false;
         },
         .call => |c| {
+            // Expression-form asm<ByteString>({...}) yields a byte value.
+            if (std.mem.eql(u8, c.callee, "asm")) {
+                return std.mem.eql(u8, c.asm_return_type, "ByteString");
+            }
             if (isByteReturningFunction(c.callee)) return true;
             if (c.callee.len >= 7 and std.mem.startsWith(u8, c.callee, "extract")) return true;
             return false;
@@ -1042,6 +1046,41 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         return try ctx.emit(.{ .call = .{
             .func = "super",
             .args = arg_refs,
+        } });
+    }
+
+    // asm({...}) compiler intrinsic — the parser has already normalised the
+    // object-literal argument into three positional args
+    // (body, in_arity, out_arity). Lower to a single opaque raw_script ANF
+    // binding; the hex body passes through unchanged. Diagnostics for
+    // malformed args were already pushed by the validator — here we
+    // defensively coerce missing values to safe defaults.
+    if (std.mem.eql(u8, c.callee, "asm")) {
+        var body_hex: []const u8 = "";
+        var in_arity: i32 = 0;
+        var out_arity: i32 = 1;
+        if (c.args.len >= 1) {
+            switch (c.args[0]) {
+                .literal_bytes => |bs| body_hex = bs,
+                else => {},
+            }
+        }
+        if (c.args.len >= 2) {
+            switch (c.args[1]) {
+                .literal_int => |i| in_arity = @intCast(i),
+                else => {},
+            }
+        }
+        if (c.args.len >= 3) {
+            switch (c.args[2]) {
+                .literal_int => |i| out_arity = @intCast(i),
+                else => {},
+            }
+        }
+        return try ctx.emit(.{ .raw_script = .{
+            .bytes = body_hex,
+            .in_arity = in_arity,
+            .out_arity = out_arity,
         } });
     }
 

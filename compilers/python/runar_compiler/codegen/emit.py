@@ -145,6 +145,21 @@ class SourceMapping:
     column: int = 0
 
 
+@dataclass
+class RawScriptSpan:
+    """Records a byte range produced by a raw_script ANF node.
+
+    The bytes are emitted verbatim by ``emit_raw_bytes``; the static analyzer
+    reads these spans so it can skip the contents (which are opaque,
+    peephole-barrier-protected, and not guaranteed to form a well-formed
+    opcode stream).
+    """
+    offset: int = 0
+    length: int = 0
+    in_arity: int = 0
+    out_arity: int = 0
+
+
 # ---------------------------------------------------------------------------
 # EmitResult
 # ---------------------------------------------------------------------------
@@ -159,6 +174,8 @@ class EmitResult:
     code_sep_index_slots: list[dict] = field(default_factory=list)
     code_separator_index: int = -1
     code_separator_indices: list[int] = field(default_factory=list)
+    # Byte ranges produced by raw_bytes StackOps (asm({...}) calls).
+    raw_script_spans: list[RawScriptSpan] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +194,7 @@ class _EmitContext:
         self.code_sep_index_slots: list[dict] = []
         self.code_separator_index: int = -1
         self.code_separator_indices: list[int] = []
+        self.raw_script_spans: list[RawScriptSpan] = []
 
     def set_source_loc(self, loc: Optional[SourceLocation]) -> None:
         self.pending_source_loc = loc
@@ -230,6 +248,29 @@ class _EmitContext:
         self.constructor_slots.append(ConstructorSlot(
             param_index=param_index,
             byte_offset=byte_offset,
+        ))
+
+    def emit_raw_bytes(self, raw: bytes, in_arity: int, out_arity: int) -> None:
+        """Write a verbatim byte span emitted by a raw_bytes StackOp.
+
+        No re-encoding takes place -- the bytes go out as supplied. The ASM
+        column shows ``<raw N bytes>`` so the human-readable disassembly is
+        honest about the opacity. A RawScriptSpan capturing the span's
+        offset, length, and declared stack-effect arities is recorded so the
+        static analyzer can treat the span as one opaque stack-effect step.
+        """
+        if len(raw) == 0:
+            return
+        offset = self.byte_length
+        self._record_source_mapping()
+        self.append_hex(raw.hex())
+        self.append_asm(f"<raw {len(raw)} bytes>")
+        self._advance_opcode_index()
+        self.raw_script_spans.append(RawScriptSpan(
+            offset=offset,
+            length=len(raw),
+            in_arity=in_arity,
+            out_arity=out_arity,
         ))
 
     def get_hex(self) -> str:
@@ -388,6 +429,12 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         _emit_if(op.then, op.else_ops, ctx)
     elif op.op == "placeholder":
         ctx.emit_placeholder(op.param_index)
+    elif op.op == "raw_bytes":
+        # Opaque opcode-byte span from a raw_script ANF node. Written
+        # verbatim with no re-encoding; the declared arities are recorded
+        # into the artifact's rawScriptSpans so the analyzer can treat the
+        # span as one opaque stack-effect step.
+        ctx.emit_raw_bytes(op.raw_bytes or b"", op.in_arity, op.out_arity)
     elif op.op == "push_codesep_index":
         # Emit an OP_0 placeholder that the SDK will replace with the
         # adjusted codeSeparatorIndex at runtime.
@@ -493,6 +540,7 @@ def emit(methods: list[StackMethod]) -> EmitResult:
         code_sep_index_slots=ctx.code_sep_index_slots,
         code_separator_index=ctx.code_separator_index,
         code_separator_indices=ctx.code_separator_indices,
+        raw_script_spans=ctx.raw_script_spans,
     )
 
 
@@ -509,4 +557,5 @@ def emit_method(method: StackMethod) -> EmitResult:
         code_sep_index_slots=ctx.code_sep_index_slots,
         code_separator_index=ctx.code_separator_index,
         code_separator_indices=ctx.code_separator_indices,
+        raw_script_spans=ctx.raw_script_spans,
     )

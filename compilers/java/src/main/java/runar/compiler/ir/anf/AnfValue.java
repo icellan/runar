@@ -9,6 +9,6 @@ public sealed interface AnfValue
     permits LoadParam, LoadProp, LoadConst, BinOp, UnaryOp, Call, MethodCall,
             If, Loop, Assert, UpdateProp, GetStateScript, CheckPreimage,
             DeserializeState, AddOutput, AddRawOutput, AddDataOutput,
-            ArrayLiteral {
+            ArrayLiteral, RawScript {
     String kind();
 }

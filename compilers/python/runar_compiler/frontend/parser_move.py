@@ -10,6 +10,7 @@ from __future__ import annotations
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
+    ArrayLiteralExpr,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
     PropertyAccessExpr, MemberExpr, BinaryExpr, UnaryExpr, CallExpr,
     TernaryExpr, IndexAccessExpr, IncrementExpr, DecrementExpr,
@@ -478,6 +479,11 @@ class _MoveParser:
         while self.check_ident("use"):
             self._skip_use_decl()
 
+        # `unsafe module Name { ... }` marks an UnsafeSmartContract -- the
+        # asm-escape-hatch base class. Plain `module Name { ... }` infers
+        # SmartContract / StatefulSmartContract structurally as before.
+        is_unsafe = self.match_ident("unsafe")
+
         # module Name { ... }
         if not self.match_ident("module"):
             raise ValueError("expected 'module' keyword")
@@ -490,6 +496,8 @@ class _MoveParser:
         properties: list[PropertyNode] = []
         methods: list[MethodNode] = []
         parent_class = "SmartContract"  # default
+        if is_unsafe:
+            parent_class = "UnsafeSmartContract"
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             # Skip use declarations inside the module
@@ -503,7 +511,9 @@ class _MoveParser:
                 if is_resource:
                     self.advance()  # skip "resource"
                 props = self._parse_move_struct()
-                if is_resource or any(not p.readonly for p in props):
+                if not is_unsafe and (
+                    is_resource or any(not p.readonly for p in props)
+                ):
                     parent_class = "StatefulSmartContract"
                 properties.extend(props)
                 continue
@@ -511,7 +521,7 @@ class _MoveParser:
             # public fun or fun
             if self.check_ident("public") or self.check_ident("fun"):
                 method, has_mut = self._parse_move_function()
-                if has_mut:
+                if has_mut and not is_unsafe:
                     parent_class = "StatefulSmartContract"
                 methods.append(method)
                 continue
@@ -1186,9 +1196,23 @@ class _MoveParser:
             self.expect(TOK_RPAREN)
             return expr
 
+        if tok.kind == TOK_LBRACKET:
+            return self._parse_move_array_literal()
+
         self.add_error(f"line {tok.line}: unexpected token {tok.value!r}")
         self.advance()
         return BigIntLiteral(value=0)
+
+    def _parse_move_array_literal(self) -> Expression:
+        """Parse a bare array literal `[a, b, c]` and emit an ArrayLiteralExpr."""
+        self.expect(TOK_LBRACKET)
+        elements: list[Expression] = []
+        while not self.check(TOK_RBRACKET) and not self.check(TOK_EOF):
+            elements.append(self._parse_move_expression())
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RBRACKET)
+        return ArrayLiteralExpr(elements=elements)
 
     def _parse_move_call_args(self) -> list[Expression]:
         self.expect(TOK_LPAREN)

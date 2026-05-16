@@ -47,7 +47,19 @@ KNOWN_KINDS: frozenset[str] = frozenset({
     "add_raw_output",
     "add_data_output",
     "array_literal",
+    "raw_script",
 })
+
+
+def _is_hex_string(s: str) -> bool:
+    """Return True if *s* contains only hex digits (0-9, a-f, A-F).
+
+    An empty string is considered valid hex.
+    """
+    for c in s:
+        if not (("0" <= c <= "9") or ("a" <= c <= "f") or ("A" <= c <= "F")):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +194,31 @@ def _validate_bindings(
             if binding.value.body:
                 errors.extend(
                     _validate_bindings(binding.value.body, method_name)
+                )
+
+        if kind == "raw_script":
+            body = binding.value.bytes or ""
+            if len(body) % 2 != 0:
+                errors.append(
+                    f"method {method_name} binding {binding.name} "
+                    f"raw_script bytes have odd hex length {len(body)}"
+                )
+            if not _is_hex_string(body):
+                errors.append(
+                    f"method {method_name} binding {binding.name} "
+                    f"raw_script bytes contain non-hex characters"
+                )
+            in_arity = binding.value.in_arity or 0
+            if in_arity < 0:
+                errors.append(
+                    f"method {method_name} binding {binding.name} "
+                    f"raw_script has negative in_arity {in_arity}"
+                )
+            out_arity = binding.value.out_arity or 0
+            if out_arity < 0:
+                errors.append(
+                    f"method {method_name} binding {binding.name} "
+                    f"raw_script has negative out_arity {out_arity}"
                 )
 
     return errors

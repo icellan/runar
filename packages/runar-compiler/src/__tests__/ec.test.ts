@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';
+import {
+  emitEcAdd,
+  emitEcMul,
+  emitEcMulGen,
+  emitEcNegate,
+  emitEcOnCurve,
+  emitEcModReduce,
+  emitEcEncodeCompressed,
+  emitEcMakePoint,
+  emitEcPointX,
+  emitEcPointY,
+} from '../passes/ec-codegen.js';
+import type { StackOp } from '../ir/index.js';
 
 // ---------------------------------------------------------------------------
 // Test sources
@@ -177,5 +190,54 @@ class Bad extends SmartContract {
     const result = compile(src);
     const errors = result.diagnostics.filter(d => d.severity === 'error');
     expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-11: Op-count goldens for every EC emitter.
+//
+// The "compilation" tests above only check that EC builtins compile without
+// errors; they don't pin codegen output. These goldens — copied from the
+// Python peer (compilers/python/tests/codegen/test_ec.py) which in turn
+// matches the Java reference EcTest — lock the exact op count for each
+// emitter so codegen drift surfaces here as a localized regression rather
+// than only as a cross-tier hex mismatch in the conformance harness.
+//
+// To update goldens after an intentional codegen change, run the Java peer
+// EcTest, copy the new numbers, and update Python + this file together.
+// ---------------------------------------------------------------------------
+
+describe('EC builtins — op-count goldens (T-11)', () => {
+  const goldens: Array<[name: string, fn: (emit: (op: StackOp) => void) => void, expected: number]> = [
+    ['ecAdd',              emitEcAdd,                8078],
+    ['ecMul',              emitEcMul,               63828],
+    ['ecMulGen',           emitEcMulGen,            63830],
+    ['ecNegate',           emitEcNegate,              945],
+    ['ecOnCurve',          emitEcOnCurve,             520],
+    ['ecModReduce',        emitEcModReduce,             8],
+    ['ecEncodeCompressed', emitEcEncodeCompressed,     14],
+    ['ecMakePoint',        emitEcMakePoint,           467],
+    ['ecPointX',           emitEcPointX,              233],
+    ['ecPointY',           emitEcPointY,              234],
+  ];
+
+  for (const [name, fn, expected] of goldens) {
+    it(`${name} op count is ${expected}`, () => {
+      const ops: StackOp[] = [];
+      fn((op: StackOp) => ops.push(op));
+      expect(ops.length).toBe(expected);
+    });
+  }
+
+  it('ecModReduce emits the exact 8-op shape (OP_2DUP, OP_MOD, rot, drop, over, OP_ADD, swap, OP_MOD)', () => {
+    const ops: StackOp[] = [];
+    emitEcModReduce((op: StackOp) => ops.push(op));
+    expect(ops).toHaveLength(8);
+    // Representative byte assertion: the first emitted op must be OP_2DUP.
+    // Loose-typed because StackOp variants differ across opcode/stack ops.
+    const first: any = ops[0];
+    expect(first.op === 'opcode' && first.code === 'OP_2DUP').toBe(true);
+    const last: any = ops[7];
+    expect(last.op === 'opcode' && last.code === 'OP_MOD').toBe(true);
   });
 });

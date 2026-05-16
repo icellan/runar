@@ -635,7 +635,11 @@ class PyParser {
     this.expect('INDENT');
     this.skipNewlines();
 
-    if (parentClass !== 'SmartContract' && parentClass !== 'StatefulSmartContract') {
+    if (
+      parentClass !== 'SmartContract' &&
+      parentClass !== 'StatefulSmartContract' &&
+      parentClass !== 'UnsafeSmartContract'
+    ) {
       this.errors.push(makeDiagnostic(
         `Unknown parent class: ${parentClass}`,
         'error',
@@ -698,7 +702,7 @@ class PyParser {
     return {
       kind: 'contract',
       name: contractName,
-      parentClass: parentClass as 'SmartContract' | 'StatefulSmartContract',
+      parentClass: parentClass as 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract',
       properties,
       constructor,
       methods,
@@ -732,8 +736,9 @@ class PyParser {
       typeNode = this.parseType();
     }
 
-    // In stateless contracts, all properties are readonly
-    if (parentClass === 'SmartContract') {
+    // In stateless contracts (SmartContract and UnsafeSmartContract),
+    // all properties are automatically readonly.
+    if (parentClass === 'SmartContract' || parentClass === 'UnsafeSmartContract') {
       isReadonly = true;
     }
 

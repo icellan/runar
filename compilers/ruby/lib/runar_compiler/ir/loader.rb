@@ -37,7 +37,14 @@ module RunarCompiler
       add_raw_output
       add_data_output
       array_literal
+      raw_script
     ]).freeze
+
+    # Return true if +s+ contains only hex digits (0-9, a-f, A-F).
+    # An empty string is considered valid hex.
+    def self._hex_string?(s)
+      s.match?(/\A[0-9a-fA-F]*\z/)
+    end
 
     # -------------------------------------------------------------------
     # Public API
@@ -169,6 +176,27 @@ module RunarCompiler
           end
           if binding.value.body
             errors.concat(_validate_bindings(binding.value.body, method_name))
+          end
+        end
+
+        if kind == "raw_script"
+          body = binding.value.bytes || ""
+          if body.length.odd?
+            errors << "method #{method_name} binding #{binding.name} " \
+                      "raw_script bytes have odd hex length #{body.length}"
+          elsif !_hex_string?(body)
+            errors << "method #{method_name} binding #{binding.name} " \
+                      "raw_script bytes contain non-hex characters"
+          end
+          in_arity = binding.value.in_arity || 0
+          if in_arity < 0
+            errors << "method #{method_name} binding #{binding.name} " \
+                      "raw_script has negative in_arity #{in_arity}"
+          end
+          out_arity = binding.value.out_arity || 0
+          if out_arity < 0
+            errors << "method #{method_name} binding #{binding.name} " \
+                      "raw_script has negative out_arity #{out_arity}"
           end
         end
       end

@@ -1,6 +1,9 @@
 package frontend
 
-import "fmt"
+import (
+	"fmt"
+	"math/big"
+)
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -129,11 +132,12 @@ func (ctx *validationContext) validateProperties() {
 		}
 	}
 
-	// SmartContract requires all properties to be readonly
-	if ctx.contract.ParentClass == "SmartContract" {
+	// SmartContract (and the asm-escape-hatch UnsafeSmartContract) require
+	// all properties to be readonly.
+	if ctx.contract.ParentClass == "SmartContract" || ctx.contract.ParentClass == "UnsafeSmartContract" {
 		for _, prop := range ctx.contract.Properties {
 			if !prop.Readonly {
-				ctx.addErrorWithLoc(fmt.Sprintf("property '%s' in SmartContract must be readonly. Use StatefulSmartContract for mutable state.", prop.Name), &prop.SourceLocation)
+				ctx.addErrorWithLoc(fmt.Sprintf("property '%s' in %s must be readonly. Use StatefulSmartContract for mutable state.", prop.Name, ctx.contract.ParentClass), &prop.SourceLocation)
 			}
 		}
 	}
@@ -306,11 +310,22 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 		}
 	}
 
-	// Public methods must end with assert() (unless StatefulSmartContract,
-	// where the compiler auto-injects the final assert)
-	if method.Visibility == "public" && ctx.contract.ParentClass != "StatefulSmartContract" {
+	// Public methods must end with an assert() call (unless
+	// StatefulSmartContract, where the compiler auto-injects the final
+	// assert; or UnsafeSmartContract, where a terminal asm({..., out_arity:
+	// 1}) provides the truthy stack value).
+	if method.Visibility == "public" && ctx.contract.ParentClass == "SmartContract" {
 		if !endsWithAssert(method.Body) {
 			ctx.addErrorWithLoc(fmt.Sprintf("public method '%s' must end with an assert() call", method.Name), &method.SourceLocation)
+		}
+	}
+
+	// UnsafeSmartContract public methods must end with either an assert()
+	// call or a terminal asm({..., out_arity: 1}) — either way the script
+	// has to leave a truthy value on the stack.
+	if method.Visibility == "public" && ctx.contract.ParentClass == "UnsafeSmartContract" {
+		if !endsWithAssert(method.Body) && !endsWithTerminalAsm(method.Body) {
+			ctx.addErrorWithLoc(fmt.Sprintf("public method '%s' must end with an assert() call or a terminal asm({...}) with out_arity 1", method.Name), &method.SourceLocation)
 		}
 	}
 
@@ -319,10 +334,122 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 		ctx.warnManualPreimageUsage(method)
 	}
 
+	// Gate asm({...}) calls on UnsafeSmartContract and check the structural args.
+	ctx.validateAsmUsage(method)
+
 	// Validate statements
 	for _, stmt := range method.Body {
 		ctx.validateStatement(stmt)
 	}
+}
+
+// isAsmCall reports whether expr is a call to the asm compiler intrinsic.
+func isAsmCall(expr Expression) bool {
+	call, ok := expr.(CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(Identifier)
+	return ok && id.Name == "asm"
+}
+
+// endsWithTerminalAsm reports whether the last statement of body is an
+// asm({...}) call with the parser-normalised positional args
+// (body, in_arity, out_arity) and an out_arity literal equal to 1.
+//
+// If/else branches that both terminate in a terminal asm (or assert) also
+// count, mirroring the asserts-on-both-branches rule.
+func endsWithTerminalAsm(body []Statement) bool {
+	if len(body) == 0 {
+		return false
+	}
+	last := body[len(body)-1]
+
+	if es, ok := last.(ExpressionStmt); ok {
+		if !isAsmCall(es.Expr) {
+			return false
+		}
+		call := es.Expr.(CallExpr)
+		// The parser always rewrites asm({...}) into positional
+		// (body, in_arity, out_arity).
+		if len(call.Args) == 3 {
+			if outArity, ok := call.Args[2].(BigIntLiteral); ok &&
+				outArity.Value != nil && outArity.Value.Cmp(big.NewInt(1)) == 0 {
+				return true
+			}
+		}
+		return false
+	}
+
+	if ifStmt, ok := last.(IfStmt); ok {
+		thenEnds := endsWithTerminalAsm(ifStmt.Then) || endsWithAssert(ifStmt.Then)
+		elseEnds := len(ifStmt.Else) > 0 &&
+			(endsWithTerminalAsm(ifStmt.Else) || endsWithAssert(ifStmt.Else))
+		return thenEnds && elseEnds
+	}
+
+	return false
+}
+
+// validateAsmUsage walks a method body and validates every asm({...}) call:
+//
+//   - Reject any asm() outside an UnsafeSmartContract.
+//   - Confirm the parser-normalised arg shape: (body, in_arity, out_arity)
+//     where body is a ByteString literal with even-length hex and the
+//     arities are non-negative bigint literals.
+//   - Expression-form asm<T>({...}) must have out_arity 1.
+//
+// The parser already pushes most hex diagnostics; this pass is the back-stop
+// that runs even when the parser shape is well-formed and is the only layer
+// that knows about the contract's parentClass.
+func (ctx *validationContext) validateAsmUsage(method MethodNode) {
+	walkExpressionsInBody(method.Body, func(expr Expression) {
+		if !isAsmCall(expr) {
+			return
+		}
+		call := expr.(CallExpr)
+
+		if ctx.contract.ParentClass != "UnsafeSmartContract" {
+			ctx.addError(fmt.Sprintf("'asm' is only available in contracts extending UnsafeSmartContract; got %s. Move the call into a class that extends UnsafeSmartContract (and import { UnsafeSmartContract } from 'runar-lang').", ctx.contract.ParentClass))
+			return
+		}
+
+		if len(call.Args) != 3 {
+			ctx.addError("asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }")
+			return
+		}
+
+		bodyArg, bodyOk := call.Args[0].(ByteStringLiteral)
+		if !bodyOk {
+			ctx.addError("asm() body must be a hex string literal")
+			return
+		}
+		body := bodyArg.Value
+		if len(body) == 0 {
+			ctx.addError("asm() body must be a non-empty hex string literal")
+		} else if len(body)%2 != 0 {
+			ctx.addError(fmt.Sprintf("asm() body has odd hex length (%d); each opcode byte requires two hex characters", len(body)))
+		} else if !isHexString(body) {
+			ctx.addError("asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed")
+		}
+
+		inArity, inOk := call.Args[1].(BigIntLiteral)
+		if !inOk || inArity.Value == nil || inArity.Value.Sign() < 0 {
+			ctx.addError("asm() in_arity must be a non-negative integer literal")
+		}
+
+		outArity, outOk := call.Args[2].(BigIntLiteral)
+		if !outOk || outArity.Value == nil || outArity.Value.Sign() < 0 {
+			ctx.addError("asm() out_arity must be a non-negative integer literal")
+		}
+
+		// Expression-form asm<T>({...}) returns a value that flows into a
+		// let-binding — exactly ONE stack value, so out_arity must be 1.
+		if call.AsmReturnType != "" && outOk && outArity.Value != nil &&
+			outArity.Value.Cmp(big.NewInt(1)) != 0 {
+			ctx.addError(fmt.Sprintf("Expression-form asm<%s>() must have out_arity 1 (got %s); only a single stack value can be bound to the result variable.", call.AsmReturnType, outArity.Value.String()))
+		}
+	})
 }
 
 func endsWithAssert(body []Statement) bool {

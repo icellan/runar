@@ -541,7 +541,8 @@ class _JavaParser:
 
         if not self.check(TOK_EXTENDS):
             raise _JavaParseError(
-                f"contract class in {self.file_name} must extend SmartContract or StatefulSmartContract"
+                f"contract class in {self.file_name} must extend SmartContract, "
+                f"StatefulSmartContract, or UnsafeSmartContract"
             )
         self.advance()  # consume extends
 
@@ -552,10 +553,12 @@ class _JavaParser:
             parent_class = "SmartContract"
         elif parent_name == "StatefulSmartContract":
             parent_class = "StatefulSmartContract"
+        elif parent_name == "UnsafeSmartContract":
+            parent_class = "UnsafeSmartContract"
         else:
             raise _JavaParseError(
-                f"contract class in {self.file_name} must extend SmartContract or "
-                f"StatefulSmartContract, got {parent_name}"
+                f"contract class in {self.file_name} must extend SmartContract, "
+                f"StatefulSmartContract, or UnsafeSmartContract, got {parent_name}"
             )
 
         # Ignore implements clause entirely.
@@ -1290,10 +1293,22 @@ class _JavaParser:
             self.advance()  # )
             return ByteStringLiteral(value=hex_tok.value)
 
+        # Special-case `asm("<hex>", in_arity, out_arity)` — the asm() intrinsic
+        # body is the only call position where a bare String literal is legal.
+        # Lower the first string-literal arg into a ByteStringLiteral so the
+        # bare-String rejection in _parse_primary never fires for it.
+        is_asm_call = isinstance(callee, Identifier) and callee.name == "asm"
+
         self.expect(TOK_LPAREN, "'('")
         args: list[Expression] = []
+        first_arg = True
         while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
-            args.append(self._parse_expression())
+            if is_asm_call and first_arg and self.peek().kind == TOK_STRING:
+                str_tok = self.advance()
+                args.append(ByteStringLiteral(value=str_tok.value))
+            else:
+                args.append(self._parse_expression())
+            first_arg = False
             if not self.match_tok(TOK_COMMA):
                 break
         self.expect(TOK_RPAREN, "')'")

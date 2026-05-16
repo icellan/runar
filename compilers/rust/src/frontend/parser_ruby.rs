@@ -845,7 +845,10 @@ impl<'a> RbParser<'a> {
 
         self.skip_newlines();
 
-        if parent_class != "SmartContract" && parent_class != "StatefulSmartContract" {
+        if parent_class != "SmartContract"
+            && parent_class != "StatefulSmartContract"
+            && parent_class != "UnsafeSmartContract"
+        {
             self.errors.push(format!(
                 "Unknown parent class: {}",
                 parent_class
@@ -1087,8 +1090,9 @@ impl<'a> RbParser<'a> {
             }
         }
 
-        // In stateless contracts, all properties are readonly
-        if parent_class == "SmartContract" {
+        // In stateless contracts (SmartContract and UnsafeSmartContract), all
+        // properties are readonly.
+        if parent_class == "SmartContract" || parent_class == "UnsafeSmartContract" {
             is_readonly = true;
         }
 
@@ -1317,6 +1321,7 @@ impl<'a> RbParser<'a> {
                     name: "assert".to_string(),
                 }),
                 args: vec![expr],
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1530,6 +1535,7 @@ impl<'a> RbParser<'a> {
                     name: "super".to_string(),
                 }),
                 args,
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -2005,6 +2011,7 @@ impl<'a> RbParser<'a> {
                     name: "pow".to_string(),
                 }),
                 args: vec![base, exp],
+                asm_return_type: None,
             }
         } else {
             base
@@ -2038,6 +2045,7 @@ impl<'a> RbParser<'a> {
                                     property: prop,
                                 }),
                                 args,
+                                asm_return_type: None,
                             };
                         } else {
                             expr = Expression::CallExpr {
@@ -2046,6 +2054,7 @@ impl<'a> RbParser<'a> {
                                     property: prop,
                                 }),
                                 args,
+                                asm_return_type: None,
                             };
                         }
                     } else {
@@ -2065,6 +2074,7 @@ impl<'a> RbParser<'a> {
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
+                        asm_return_type: None,
                     };
                 }
                 Token::LBracket => {
@@ -2184,6 +2194,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
                 name: "super".to_string(),
             }),
             args: super_args,
+            asm_return_type: None,
         },
         source_location: SourceLocation {
             file: file.to_string(),
@@ -2236,7 +2247,7 @@ fn rewrite_bare_method_calls(stmts: &mut [Statement], method_names: &std::collec
 
 fn rewrite_expr(expr: &mut Expression, method_names: &std::collections::HashSet<String>) {
     match expr {
-        Expression::CallExpr { callee, args } => {
+        Expression::CallExpr { callee, args, .. } => {
             for arg in args.iter_mut() {
                 rewrite_expr(arg, method_names);
             }

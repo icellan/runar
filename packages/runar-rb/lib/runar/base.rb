@@ -20,6 +20,51 @@ module Runar
     end
   end
 
+  # Base class for stateless Runar contracts that need the raw-script escape
+  # hatch (asm). Like SmartContract, all properties must be readonly —
+  # UnsafeSmartContract trades the type-checked subset only for the bytes
+  # inside asm() calls, not for mutable state. Use StatefulSmartContract for
+  # mutable state.
+  class UnsafeSmartContract < SmartContract
+    # Returns a mock state script (empty bytes in test mode). Mirrors
+    # StatefulSmartContract#get_state_script; exposed here so unsafe contracts
+    # can still build state-continuation outputs by hand when they wrap them
+    # in asm().
+    def get_state_script
+      ''
+    end
+  end
+
+  # Structured argument for the asm compiler intrinsic. The Runar frontend
+  # intercepts asm(...) calls at parse time and lowers them to a raw_script
+  # ANF node; this struct only exists so native Ruby execution of contract
+  # source has a stable shape to reference.
+  #
+  #   body      — even-length hex string of the raw Bitcoin Script opcode
+  #               bytes to embed verbatim. The compiler does not re-encode or
+  #               validate the semantics of these bytes, only that the string
+  #               is valid hex with an even length.
+  #   in_arity  — number of stack items the embedded bytes consume on entry.
+  #               Defaults to 0.
+  #   out_arity — number of stack items the embedded bytes leave on exit.
+  #               Defaults to 1 so the common "terminal value of a public
+  #               method" case works without ceremony.
+  AsmArgs = Struct.new(:body, :in_arity, :out_arity, keyword_init: true) do
+    def initialize(body: '', in_arity: 0, out_arity: 1)
+      super
+    end
+  end
+
+  # asm embeds a raw Bitcoin Script byte sequence in a contract method. Only
+  # callable from inside a contract that extends UnsafeSmartContract — the
+  # compiler enforces this.
+  #
+  # This runtime stub raises: asm is a compile-time intrinsic and cannot be
+  # executed off-chain.
+  def self.asm(*)
+    raise 'asm() cannot be called at runtime — compile this contract with the Runar compiler'
+  end
+
   # Base class for stateful Runar smart contracts.
   #
   # Mutable properties are carried in the UTXO state. The compiler

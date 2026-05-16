@@ -92,4 +92,58 @@ impl MathDemo {
     pub fn compute_log2(&mut self) {
         self.value = log2(self.value);
     }
+
+    /// Replaces the stored value with its absolute value.
+    ///
+    /// Use cases: magnitude comparison, distance calculation.
+    pub fn make_abs(&mut self) {
+        self.value = abs(self.value);
+    }
+
+    /// Replaces the stored value with min(value, other).
+    ///
+    /// Use cases: capping bids, picking the smaller of two amounts.
+    pub fn take_min(&mut self, other: Bigint) {
+        self.value = min(self.value, other);
+    }
+
+    /// Replaces the stored value with max(value, other).
+    ///
+    /// Use cases: enforcing reserve floors, picking the larger amount.
+    pub fn take_max(&mut self, other: Bigint) {
+        self.value = max(self.value, other);
+    }
+
+    /// Asserts that the stored value lies in the half-open range [lo, hi),
+    /// mirroring the semantics of Bitcoin Script's OP_WITHIN.
+    ///
+    /// Use cases: bounds-checked unlock parameters.
+    pub fn assert_within(&mut self, lo: Bigint, hi: Bigint) {
+        assert!(within(self.value, lo, hi));
+    }
+
+    /// Safe modulo — replaces the stored value with `value mod divisor`,
+    /// asserting that `divisor` is non-zero.
+    ///
+    /// Use cases: round-robin scheduling, modular index calculation.
+    pub fn modulo_by(&mut self, divisor: Bigint) {
+        self.value = safemod(self.value, divisor);
+    }
+
+    /// Replaces the stored value with the quotient of `value / divisor`
+    /// via Rúnar's `divmod` builtin (canonical OP_2DUP OP_DIV OP_ROT OP_ROT
+    /// OP_MOD OP_DROP sequence).
+    ///
+    /// Use cases: integer division with a side-effect on the modulo result.
+    pub fn divmod_by(&mut self, divisor: Bigint) {
+        self.value = divmod(self.value, divisor);
+    }
+
+    /// Asserts that the stored value is "truthy" (non-zero) using the
+    /// dedicated `bool` builtin which compiles to OP_0NOTEQUAL.
+    ///
+    /// Use cases: terminal liveness check for non-zero state.
+    pub fn assert_non_zero(&mut self) {
+        assert!(bool(self.value));
+    }
 }

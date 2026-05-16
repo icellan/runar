@@ -110,6 +110,7 @@ var knownKinds = map[string]bool{
 	"add_raw_output":    true,
 	"add_data_output":   true,
 	"array_literal":     true,
+	"raw_script":        true,
 }
 
 func validateBindings(bindings []ANFBinding, methodName string) error {
@@ -145,6 +146,36 @@ func validateBindings(bindings []ANFBinding, methodName string) error {
 				return err
 			}
 		}
+		if kind == "raw_script" {
+			body := binding.Value.Bytes
+			if len(body)%2 != 0 {
+				return fmt.Errorf("IR validation: method %s binding %s raw_script bytes have odd hex length %d", methodName, binding.Name, len(body))
+			}
+			if !isHexString(body) {
+				return fmt.Errorf("IR validation: method %s binding %s raw_script bytes contain non-hex characters", methodName, binding.Name)
+			}
+			if binding.Value.InArity < 0 {
+				return fmt.Errorf("IR validation: method %s binding %s raw_script has negative in_arity %d", methodName, binding.Name, binding.Value.InArity)
+			}
+			if binding.Value.OutArity < 0 {
+				return fmt.Errorf("IR validation: method %s binding %s raw_script has negative out_arity %d", methodName, binding.Name, binding.Value.OutArity)
+			}
+		}
 	}
 	return nil
+}
+
+// isHexString reports whether s contains only hex digits (0-9, a-f, A-F).
+// An empty string is considered valid hex.
+func isHexString(s string) bool {
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }

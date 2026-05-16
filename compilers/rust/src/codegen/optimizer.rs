@@ -88,7 +88,19 @@ fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
     (result, changed)
 }
 
+/// Reports whether an op is an opaque `raw_bytes` span emitted by a
+/// `raw_script` ANF node. `raw_bytes` is a hard peephole barrier — no
+/// optimization window may span or rewrite across it, because the bytes are
+/// opaque and not guaranteed to form a well-formed opcode stream.
+fn is_raw_bytes(op: &StackOp) -> bool {
+    matches!(op, StackOp::RawBytes { .. })
+}
+
 fn match_window_3(a: &StackOp, b: &StackOp, c: &StackOp) -> Option<Vec<StackOp>> {
+    if is_raw_bytes(a) || is_raw_bytes(b) || is_raw_bytes(c) {
+        return None;
+    }
+
     // Constant folding: PUSH(a) PUSH(b) ADD → PUSH(a+b)
     if let (StackOp::Push(PushValue::Int(va)), StackOp::Push(PushValue::Int(vb))) = (a, b) {
         if is_opcode(c, "OP_ADD") {
@@ -110,6 +122,10 @@ fn match_window_4(
     c: &StackOp,
     d: &StackOp,
 ) -> Option<Vec<StackOp>> {
+    if is_raw_bytes(a) || is_raw_bytes(b) || is_raw_bytes(c) || is_raw_bytes(d) {
+        return None;
+    }
+
     // Chain folding: PUSH(a) ADD PUSH(b) ADD → PUSH(a+b) ADD
     if let StackOp::Push(PushValue::Int(va)) = a {
         if is_opcode(b, "OP_ADD") {
@@ -137,6 +153,10 @@ fn match_window_4(
 }
 
 fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
+    if is_raw_bytes(a) || is_raw_bytes(b) {
+        return None;
+    }
+
     // PUSH x, DROP -> remove both
     if matches!(a, StackOp::Push(_)) && matches!(b, StackOp::Drop) {
         return Some(vec![]);

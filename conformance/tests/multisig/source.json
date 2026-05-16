@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/multisig-2of3/MultiSig2of3.runar.ts",
+    ".runar.sol": "../../../examples/sol/multisig-2of3/MultiSig2of3.runar.sol",
+    ".runar.move": "../../../examples/move/multisig-2of3/MultiSig2of3.runar.move",
+    ".runar.go": "../../../examples/go/multisig-2of3/MultiSig2of3.runar.go",
+    ".runar.rs": "../../../examples/rust/multisig-2of3/MultiSig2of3.runar.rs",
+    ".runar.py": "../../../examples/python/multisig-2of3/MultiSig2of3.runar.py",
+    ".runar.zig": "../../../examples/zig/multisig-2of3/MultiSig2of3.runar.zig",
+    ".runar.rb": "../../../examples/ruby/multisig-2of3/MultiSig2of3.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/multisig-2of3/MultiSig2of3.runar.java"
+  }
+}

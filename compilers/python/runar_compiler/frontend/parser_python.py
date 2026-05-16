@@ -672,7 +672,11 @@ class _PyParser:
             parent_class = parent_tok.value
             self.expect(TOK_RPAREN)
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in (
+            "SmartContract",
+            "StatefulSmartContract",
+            "UnsafeSmartContract",
+        ):
             raise ValueError(f"unknown parent class: {parent_class}")
 
         self.expect(TOK_COLON)
@@ -761,7 +765,9 @@ class _PyParser:
         is_readonly = False
         if self.check_ident("Readonly"):
             is_readonly = True
-        if parent_class == "SmartContract":
+        # In SmartContract (and UnsafeSmartContract), all properties are
+        # automatically readonly.
+        if parent_class in ("SmartContract", "UnsafeSmartContract"):
             is_readonly = True
 
         typ_node = self.parse_type_annotation()

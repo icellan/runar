@@ -620,7 +620,7 @@ impl<'a> ZigParser<'a> {
             if ctor_param_names.contains(&prop.name) {
                 prop.initializer = None;
             }
-            if parent_class == "SmartContract" {
+            if parent_class == "SmartContract" || parent_class == "UnsafeSmartContract" {
                 prop.readonly = true;
             } else if !prop.readonly && !had_initializer && !mutated.contains(&prop.name) {
                 prop.readonly = true;
@@ -664,6 +664,8 @@ impl<'a> ZigParser<'a> {
             let name = self.expect_ident();
             if name == "StatefulSmartContract" {
                 parent = "StatefulSmartContract".to_string();
+            } else if name == "UnsafeSmartContract" {
+                parent = "UnsafeSmartContract".to_string();
             }
         }
 
@@ -984,6 +986,7 @@ impl<'a> ZigParser<'a> {
                     name: "super".to_string(),
                 }),
                 args: super_args,
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1803,6 +1806,7 @@ impl<'a> ZigParser<'a> {
                             name: name.to_string(),
                         }),
                         args,
+                        asm_return_type: None,
                     }
                 } else {
                     self.errors
@@ -1830,6 +1834,7 @@ impl<'a> ZigParser<'a> {
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
+                        asm_return_type: None,
                     };
                 }
                 Token::Dot => {
@@ -1911,6 +1916,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
                 name: "super".to_string(),
             }),
             args: super_args,
+            asm_return_type: None,
         },
         source_location: SourceLocation {
             file: file.to_string(),
@@ -1986,7 +1992,7 @@ fn rewrite_bare_method_calls(stmts: &mut [Statement], method_names: &HashSet<Str
 
 fn rewrite_expr(expr: &mut Expression, method_names: &HashSet<String>) {
     match expr {
-        Expression::CallExpr { callee, args } => {
+        Expression::CallExpr { callee, args, .. } => {
             for arg in args.iter_mut() {
                 rewrite_expr(arg, method_names);
             }
@@ -2142,7 +2148,7 @@ fn collect_mutated_in_expr(expr: &Expression, out: &mut HashSet<String>) {
         Expression::UnaryExpr { operand, .. } => {
             collect_mutated_in_expr(operand, out);
         }
-        Expression::CallExpr { callee, args } => {
+        Expression::CallExpr { callee, args, .. } => {
             collect_mutated_in_expr(callee, out);
             for a in args {
                 collect_mutated_in_expr(a, out);

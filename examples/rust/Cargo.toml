@@ -138,6 +138,10 @@ name = "bsv21_token"
 path = "bsv21-token/BSV21Token_test.rs"
 
 [[test]]
+name = "ordinal_nft"
+path = "ordinal-nft/OrdinalNFT_test.rs"
+
+[[test]]
 name = "babybear_ext4"
 path = "babybear-ext4/BabyBearExt4Demo_test.rs"
 

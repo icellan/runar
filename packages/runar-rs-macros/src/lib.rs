@@ -45,6 +45,17 @@ pub fn stateful_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     contract(TokenStream::new(), item)
 }
 
+/// Marks a struct as an `UnsafeSmartContract` — the asm-escape-hatch base
+/// class. Like `#[runar::contract]`, all fields must be readonly; the unsafe
+/// designation only relaxes the type-checked subset for the bytes inside
+/// `asm(...)` calls, not for mutable state. The Rúnar Rust-DSL frontend keys
+/// off the `#[runar::unsafe_contract]` attribute to set `parentClass`.
+#[proc_macro_attribute]
+pub fn unsafe_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    contract(TokenStream::new(), item)
+}
+
+
 /// Remove `#[readonly]` attributes from each field in the given `Fields`.
 /// Works for named, unnamed, and unit structs.
 fn strip_readonly_from_fields(fields: &mut Fields) {

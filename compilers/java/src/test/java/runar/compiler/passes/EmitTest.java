@@ -216,4 +216,82 @@ class EmitTest {
     private static StackProgram singleMethod(List<StackOp> ops) {
         return new StackProgram("T", List.of(new StackMethod("unlock", ops, 0L)));
     }
+
+    // -----------------------------------------------------------------
+    // raw_script ANF JSON round-trip — load, lower, emit; the emitted
+    // hex must contain the input bytes verbatim, and a RawScriptSpan
+    // must be recorded.
+    // -----------------------------------------------------------------
+
+    @Test
+    void rawScriptRoundTripPreservesBytesAndRecordsSpan() {
+        // A minimal UnsafeSmartContract `unlock` method whose body is a
+        // single raw_script binding (the ANF shape produced by
+        // `asm({...})`). Bytes "5152935987" = OP_1 OP_2 OP_ADD OP_3
+        // OP_EQUAL — an arbitrary opaque span the emitter must write
+        // verbatim.
+        String rawHex = "5152935987";
+        String irJson = "{"
+            + "\"contractName\": \"Anyone\","
+            + "\"properties\": [],"
+            + "\"methods\": ["
+            + "  { \"name\": \"unlock\", \"params\": [], \"isPublic\": true,"
+            + "    \"body\": ["
+            + "      { \"name\": \"t0\","
+            + "        \"value\": { \"kind\": \"raw_script\","
+            + "                     \"bytes\": \"" + rawHex + "\","
+            + "                     \"in_arity\": 0, \"out_arity\": 1 } }"
+            + "    ] }"
+            + "]}";
+
+        AnfProgram program = AnfLoader.parse(irJson);
+
+        // Round-trip the loader: in_arity 0 must survive.
+        runar.compiler.ir.anf.AnfValue v = program.methods().get(0).body().get(0).value();
+        assertTrue(v instanceof runar.compiler.ir.anf.RawScript,
+            "loaded ANF value should be RawScript, got " + v.getClass().getSimpleName());
+        runar.compiler.ir.anf.RawScript rs = (runar.compiler.ir.anf.RawScript) v;
+        assertEquals(rawHex, rs.bytes(), "loaded raw_script bytes must match input");
+        assertEquals(0, rs.inArity(), "loaded raw_script in_arity must be 0");
+        assertEquals(1, rs.outArity(), "loaded raw_script out_arity must be 1");
+
+        StackProgram stack = StackLower.run(program);
+
+        // The lowered method must contain exactly one RawBytesOp.
+        int rawOps = 0;
+        for (StackMethod m : stack.methods()) {
+            for (StackOp op : m.ops()) {
+                if (op instanceof runar.compiler.ir.stack.RawBytesOp rb) {
+                    rawOps++;
+                    assertEquals(rawHex, bytesToHex(rb.bytes()),
+                        "RawBytesOp bytes must match input");
+                    assertEquals(0, rb.inArity(), "RawBytesOp in_arity must be 0");
+                    assertEquals(1, rb.outArity(), "RawBytesOp out_arity must be 1");
+                }
+            }
+        }
+        assertEquals(1, rawOps, "expected exactly 1 RawBytesOp");
+
+        Emit.EmitResult result = Emit.runResult(stack);
+
+        // The emitted hex must equal the input bytes verbatim
+        // (single-method contract, no dispatch preamble).
+        assertEquals(rawHex, result.scriptHex(), "emitted hex must equal input bytes");
+
+        // A RawScriptSpan covering the whole span must be recorded.
+        assertEquals(1, result.rawScriptSpans().size(),
+            "exactly 1 RawScriptSpan must be recorded");
+        Emit.RawScriptSpan span = result.rawScriptSpans().get(0);
+        assertEquals(0, span.offset(), "RawScriptSpan offset must be 0");
+        assertEquals(rawHex.length() / 2, span.length(),
+            "RawScriptSpan length must equal byte count");
+        assertEquals(0, span.inArity(), "RawScriptSpan in_arity must be 0");
+        assertEquals(1, span.outArity(), "RawScriptSpan out_arity must be 1");
+    }
+
+    private static String bytesToHex(byte[] bs) {
+        StringBuilder sb = new StringBuilder(bs.length * 2);
+        for (byte b : bs) sb.append(String.format("%02x", b & 0xff));
+        return sb.toString();
+    }
 }

@@ -201,6 +201,15 @@ class MoveParser {
   }
 
   parse(): ParseResult {
+    // `unsafe module Name { ... }` marks an UnsafeSmartContract — the
+    // asm-escape-hatch base class. Plain `module Name { ... }` infers
+    // SmartContract / StatefulSmartContract structurally as before.
+    let isUnsafe = false;
+    if (this.current().type === 'ident' && this.current().value === 'unsafe') {
+      this.advance();
+      isUnsafe = true;
+    }
+
     // module ContractName { ... }
     this.expect('module');
     const contractName = this.expect('ident').value;
@@ -212,7 +221,8 @@ class MoveParser {
       if (this.current().type === ';') this.advance();
     }
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' =
+      isUnsafe ? 'UnsafeSmartContract' : 'SmartContract';
     const properties: PropertyNode[] = [];
     const methods: MethodNode[] = [];
 
@@ -271,13 +281,15 @@ class MoveParser {
         }
         this.expect('}');
 
-        // If the struct is not marked resource, check for "stateful" marker
-        if (isResource || hasMutableField) {
+        // If the struct is not marked resource, check for "stateful" marker.
+        // `unsafe module` opts out of structural inference — the user has
+        // explicitly chosen UnsafeSmartContract.
+        if (!isUnsafe && (isResource || hasMutableField)) {
           parentClass = 'StatefulSmartContract';
         }
       } else if (this.current().type === 'public' || this.current().type === 'fun') {
         const { method, hasMutReceiver: hasMut } = this.parseFunction();
-        if (hasMut) parentClass = 'StatefulSmartContract';
+        if (hasMut && !isUnsafe) parentClass = 'StatefulSmartContract';
         methods.push(method);
       } else {
         this.advance(); // skip unknown
@@ -285,9 +297,10 @@ class MoveParser {
     }
     this.expect('}');
 
-    // Determine parent class from property mutability
+    // Determine parent class from property mutability. `unsafe module`
+    // opts out of structural inference.
     const hasMutable = properties.some(p => !p.readonly);
-    if (hasMutable) parentClass = 'StatefulSmartContract';
+    if (hasMutable && !isUnsafe) parentClass = 'StatefulSmartContract';
 
     // Build constructor — only non-initialized properties become params
     const loc = { file: this.file, line: 1, column: 1 };

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'codegen_helper'
+require 'runar_compiler/codegen/sha256'
 
 # Unit-vector tests for the Ruby SHA-256 codegen module
 # (compilers/ruby/lib/runar_compiler/codegen/sha256.rb).
@@ -93,5 +94,28 @@ class TestSha256Codegen < Minitest::Test
     asm = artifact.asm
     assert_includes asm, 'OP_ADD'
     assert_includes asm, 'OP_AND'
+  end
+
+  # ---------------------------------------------------------------------------
+  # T-11: Op-count goldens for the SHA-256 emitters.
+  #
+  # The ASM-substring tests above catch a gross regression but not byte-level
+  # codegen drift. Numbers mirror the Python peer
+  # (compilers/python/tests/codegen/test_sha256.py) and the Java reference
+  # at the same commit. Final hex is byte-identical across all 7 tiers
+  # (enforced by the conformance harness); these goldens are an in-process
+  # localized-regression gate.
+  # ---------------------------------------------------------------------------
+
+  def test_sha256_compress_op_count_golden
+    ops = []
+    RunarCompiler::Codegen::SHA256Codegen.emit_sha256_compress(->(op) { ops << op })
+    assert_equal 21292, ops.length, "sha256Compress op count drift"
+  end
+
+  def test_sha256_finalize_op_count_golden
+    ops = []
+    RunarCompiler::Codegen::SHA256Codegen.emit_sha256_finalize(->(op) { ops << op })
+    assert_equal 63941, ops.length, "sha256Finalize op count drift"
   end
 end

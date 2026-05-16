@@ -840,6 +840,43 @@ test "ec add helper emits affine split and compose flow" {
     try std.testing.expectEqualStrings("OP_CAT", bundle.ops[bundle.ops.len - 1].opcode);
 }
 
+// ---------------------------------------------------------------------------
+// T-11: Op-count goldens for the Zig EC helper bundles.
+//
+// The structural tests above check load-bearing opcodes (OP_SPLIT, OP_CAT,
+// 257 OP_IF branches in ec_mul, ...) but not the total op-count. These
+// goldens pin the Zig helper's pre-stack-lowering bundle size so a
+// regression in `buildBuiltinOps` surfaces here as a localized failure
+// rather than only as a cross-tier hex mismatch from the golden harness.
+//
+// The counts diverge from the Python/Java peers because the Zig tier
+// represents control flow at the helper level as a single `.@"if"` op
+// (containing nested `.then` / `.else` slices), whereas Python/Java
+// flatten if-bodies into separate ops. Final compiled hex is byte-
+// identical (enforced by the conformance harness).
+// ---------------------------------------------------------------------------
+
+test "ec helper op-count goldens" {
+    const cases = .{
+        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8068) },
+        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 59707) },
+        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 59709) },
+        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 945) },
+        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 518) },
+    };
+    inline for (cases) |c| {
+        var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);
+        defer bundle.deinit();
+        if (bundle.ops.len != c[2]) {
+            std.debug.print(
+                "{s}: op-count drift — got {d}, want {d}\n",
+                .{ c[1], bundle.ops.len, c[2] },
+            );
+        }
+        try std.testing.expectEqual(c[2], bundle.ops.len);
+    }
+}
+
 test "ec mul helper emits 257 conditional additions" {
     var bundle = try buildBuiltinOps(std.testing.allocator, .ec_mul);
     defer bundle.deinit();

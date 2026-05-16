@@ -133,9 +133,11 @@ describe('Example contracts: end-to-end compilation', () => {
           expect(/^[0-9a-f]+$/.test(artifact.script)).toBe(true);
         }
 
-        // ASM should contain recognizable opcodes
+        // ASM should contain recognizable opcodes — either an OP_* mnemonic
+        // or a `<raw N bytes>` token (the only legal asm rendering for an
+        // `asm(...)` raw-script body that decodes to no opcode mnemonics).
         if (artifact.asm.length > 0) {
-          expect(artifact.asm).toContain('OP_');
+          expect(artifact.asm).toMatch(/OP_|<raw \d+ bytes>/);
         }
 
         // ABI methods should have names

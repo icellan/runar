@@ -165,4 +165,45 @@ class TestAnfLower < Minitest::Test
     # Single-output path (no addOutput) ⇒ needs _newAmount for state continuation.
     assert_includes param_names, "_newAmount"
   end
+
+  # ---------------------------------------------------------------------------
+  # T-5: Ternary expression lowers to an `if` ANF binding.
+  #
+  # Mirrors the Java peer test
+  # (compilers/java/src/test/java/runar/compiler/passes/StackLowerTest.java
+  # ternaryLowersToIfOpStructural) and the Go/Rust/Python peers. Localized
+  # regression detection — otherwise covered only by the cross-tier golden
+  # harness.
+  # ---------------------------------------------------------------------------
+
+  TERNARY_DEMO = <<~TS
+    import { SmartContract, assert } from 'runar-lang';
+
+    class TernaryDemo extends SmartContract {
+      readonly limit: bigint;
+
+      constructor(limit: bigint) {
+        super(limit);
+        this.limit = limit;
+      }
+
+      public check(flag: boolean): void {
+        const result: bigint = flag ? this.limit + 1n : this.limit - 1n;
+        assert(result > 0n);
+      }
+    }
+  TS
+
+  def test_ternary_lowers_to_if_anf_binding
+    prog = anf_program_for(TERNARY_DEMO, "TernaryDemo.runar.ts")
+    check = prog.methods.find { |m| m.name == "check" }
+    refute_nil check
+
+    if_binding = check.body.find { |b| b.value.kind == "if" }
+    refute_nil if_binding,
+               "expected ternary to lower to `if` ANF node; got kinds: " \
+               "#{check.body.map { |b| b.value.kind }.inspect}"
+    refute_empty if_binding.value.then, "ternary `then` branch should not be empty"
+    refute_empty if_binding.value.else_, "ternary `else` branch should not be empty"
+  end
 end

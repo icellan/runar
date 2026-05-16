@@ -853,6 +853,9 @@ const Parser = struct {
                     } else if (std.mem.eql(u8, parent_name, "StatefulSmartContract")) {
                         parent_class = .stateful_smart_contract;
                         found_parent = true;
+                    } else if (std.mem.eql(u8, parent_name, "UnsafeSmartContract")) {
+                        parent_class = .unsafe_smart_contract;
+                        found_parent = true;
                     }
                 }
                 continue;
@@ -881,8 +884,8 @@ const Parser = struct {
                 }
             }
 
-            // For SmartContract, all properties are readonly
-            const readonly = if (parent_class == .smart_contract) true else is_readonly;
+            // For SmartContract (and UnsafeSmartContract), all properties are readonly
+            const readonly = if (parent_class == .smart_contract or parent_class == .unsafe_smart_contract) true else is_readonly;
 
             properties.append(self.allocator, .{
                 .name = field_name,

@@ -9,6 +9,7 @@ from __future__ import annotations
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
+    ArrayLiteralExpr,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
     PropertyAccessExpr, MemberExpr, BinaryExpr, UnaryExpr, CallExpr,
     TernaryExpr, IndexAccessExpr, IncrementExpr, DecrementExpr,
@@ -766,13 +767,16 @@ class _GoParser:
 
             field_loc = self.loc()
 
-            # Check for embedded type: runar.SmartContract or runar.StatefulSmartContract
+            # Check for embedded type: runar.SmartContract,
+            # runar.StatefulSmartContract, or runar.UnsafeSmartContract
             if self.check(TOK_IDENT) and self._is_embed_field():
                 embed_name = self._parse_embedded_type()
                 if embed_name == "SmartContract":
                     parent_class = "SmartContract"
                 elif embed_name == "StatefulSmartContract":
                     parent_class = "StatefulSmartContract"
+                elif embed_name == "UnsafeSmartContract":
+                    parent_class = "UnsafeSmartContract"
                 self.skip_semicolons()
                 continue
 
@@ -1645,9 +1649,86 @@ class _GoParser:
             self.expect(TOK_RPAREN)
             return expr
 
+        # Array literal: bare `[a, b, c]` OR Go composite literal
+        # `[N]T{a, b}` (also `[]T{a, b}` and multi-dim `[N][M]T{...}`).
+        if tok.kind == TOK_LBRACKET:
+            return self._parse_go_array_or_composite_literal()
+
+        # Nested composite-literal body for multi-dim arrays:
+        # `[2][2]Bigint{{1, 2}, {3, 4}}`.
+        if tok.kind == TOK_LBRACE:
+            return self._parse_go_brace_literal()
+
         self.add_error(f"line {tok.line}: unexpected token {tok.value!r}")
         self.advance()
         return BigIntLiteral(value=0)
+
+    def _parse_go_array_or_composite_literal(self) -> Expression:
+        """Parse either a bare `[a, b, …]` array literal or a Go composite
+        literal `[N]T{a, b, …}` (also `[]T{...}` and nested-dim variants).
+
+        Both surfaces emit an ArrayLiteralExpr so all 7 tiers lower to the
+        same `array_literal` ANF node.
+        """
+        saved_pos = self.pos
+        self.expect(TOK_LBRACKET)
+        # Try to recognise the composite-literal head: `[ <number>? ] <type>+ {`.
+        composite = False
+        if self.check(TOK_NUMBER) or self.check(TOK_RBRACKET):
+            if self.check(TOK_NUMBER):
+                self.advance()
+            if self.check(TOK_RBRACKET):
+                self.advance()  # consume ']'
+                # Consume any additional `[N]` dims for multi-dim arrays.
+                while self.check(TOK_LBRACKET):
+                    dim_saved = self.pos
+                    self.advance()
+                    if self.check(TOK_NUMBER):
+                        self.advance()
+                    if not self.check(TOK_RBRACKET):
+                        self.pos = dim_saved
+                        break
+                    self.advance()
+                # Consume the element type: `*T`, `T`, or `runar.T`.
+                if self.check(TOK_STAR):
+                    self.advance()
+                if self.check(TOK_IDENT):
+                    self.advance()
+                    while self.check(TOK_DOT):
+                        self.advance()
+                        if self.check(TOK_IDENT):
+                            self.advance()
+                        else:
+                            break
+                if self.check(TOK_LBRACE):
+                    composite = True
+                    return self._parse_go_brace_literal()
+        if not composite:
+            self.pos = saved_pos
+            self.expect(TOK_LBRACKET)
+        elements: list[Expression] = []
+        while not self.check(TOK_RBRACKET) and not self.check(TOK_EOF):
+            elements.append(self._parse_expression())
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RBRACKET)
+        return ArrayLiteralExpr(elements=elements)
+
+    def _parse_go_brace_literal(self) -> Expression:
+        """Parse `{e, e, …}` — the body of a Go composite literal. Nested
+        `{ … }` bodies are recursively parsed for multi-dim arrays.
+        """
+        self.expect(TOK_LBRACE)
+        elements: list[Expression] = []
+        while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            if self.check(TOK_LBRACE):
+                elements.append(self._parse_go_brace_literal())
+            else:
+                elements.append(self._parse_expression())
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RBRACE)
+        return ArrayLiteralExpr(elements=elements)
 
     def _parse_call_args(self) -> list[Expression]:
         """Parse a function call argument list: (expr, expr, ...)"""

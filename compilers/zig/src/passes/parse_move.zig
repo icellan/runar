@@ -625,6 +625,11 @@ const Parser = struct {
             self.skipUseDecl();
         }
 
+        // `unsafe module Name { ... }` marks an UnsafeSmartContract — the
+        // asm-escape-hatch base class. Plain `module Name { ... }` infers
+        // SmartContract / StatefulSmartContract structurally as before.
+        const is_unsafe = self.matchIdent("unsafe");
+
         // module Name { ... }
         if (!self.matchIdent("module")) {
             self.addError("expected 'module' keyword");
@@ -643,7 +648,7 @@ const Parser = struct {
 
         var properties: std.ArrayListUnmanaged(PropertyNode) = .empty;
         var methods: std.ArrayListUnmanaged(MethodNode) = .empty;
-        var parent_class: ParentClass = .smart_contract;
+        var parent_class: ParentClass = if (is_unsafe) .unsafe_smart_contract else .smart_contract;
         var has_init_fn = false;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
@@ -658,7 +663,9 @@ const Parser = struct {
                 const is_resource = self.checkIdent("resource");
                 if (is_resource) {
                     _ = self.bump(); // consume "resource"
-                    parent_class = .stateful_smart_contract;
+                    if (!is_unsafe) {
+                        parent_class = .stateful_smart_contract;
+                    }
                 }
                 const props = self.parseMoveStruct(parent_class);
                 for (props) |p| properties.append(self.allocator, p) catch {};
@@ -759,7 +766,7 @@ const Parser = struct {
             const type_info = self.parseMoveTypeName();
 
             // Determine readonly based on parent class and mutability markers
-            const readonly = if (parent_class == .smart_contract)
+            const readonly = if (parent_class == .smart_contract or parent_class == .unsafe_smart_contract)
                 true
             else if (is_mutable)
                 false

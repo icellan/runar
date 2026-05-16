@@ -675,6 +675,18 @@ class _TypeChecker:
         # Direct builtin call
         if isinstance(e.callee, Identifier):
             name = e.callee.name
+            # asm is a compile-time intrinsic -- the parser has already
+            # rewritten the { body, in_arity?, out_arity? } object-literal
+            # argument into three positional args (body, in_arity, out_arity).
+            # The statement form returns void; the expression form
+            # asm<T>({...}) carries the captured return type on
+            # asm_return_type and produces a value of that type.
+            if name == "asm":
+                for arg in e.args:
+                    self._infer_expr_type(arg, env)
+                if e.asm_return_type:
+                    return e.asm_return_type
+                return "void"
             if name in BUILTIN_FUNCTIONS:
                 return self._check_call_args(name, BUILTIN_FUNCTIONS[name], e.args, env)
             # Check if it's a known contract method
@@ -984,6 +996,9 @@ def _infer_expr_type_static(expr: Expression | None) -> str:
 
     if isinstance(expr, CallExpr):
         if isinstance(expr.callee, Identifier):
+            # Expression-form asm<T>({...}) statically yields type T.
+            if expr.callee.name == "asm" and expr.asm_return_type:
+                return expr.asm_return_type
             sig = BUILTIN_FUNCTIONS.get(expr.callee.name)
             if sig is not None:
                 return sig.return_type

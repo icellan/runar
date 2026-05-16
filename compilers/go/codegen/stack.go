@@ -25,7 +25,7 @@ const maxStackDepth = 800
 
 // StackOp represents a single stack-machine operation.
 type StackOp struct {
-	Op         string    // "push", "dup", "swap", "roll", "pick", "drop", "opcode", "if", "nip", "over", "rot", "tuck", "placeholder"
+	Op         string    // "push", "dup", "swap", "roll", "pick", "drop", "opcode", "if", "nip", "over", "rot", "tuck", "placeholder", "raw_bytes"
 	Value      PushValue // for push ops
 	Depth      int       // for roll/pick (informational)
 	Code       string    // for opcode ops (e.g. "OP_ADD")
@@ -34,6 +34,14 @@ type StackOp struct {
 	ParamIndex int       // for placeholder ops — index into constructor params
 	ParamName  string    // for placeholder ops — name of constructor param
 	SourceLoc  *ir.SourceLocation // Debug: source location from ANF binding
+
+	// raw_bytes — opaque opcode-byte span emitted verbatim by a raw_script
+	// ANF node. Stack effect is declared via InArity / OutArity; the bytes
+	// are never inspected and the peephole optimizer treats this op as a
+	// hard barrier.
+	RawBytes []byte
+	InArity  int
+	OutArity int
 }
 
 // PushValue holds the typed value for a push operation.
@@ -323,6 +331,9 @@ func collectRefs(value *ir.ANFValue) []string {
 		refs = append(refs, value.ScriptBytes)
 	case "array_literal":
 		refs = append(refs, value.Elements...)
+	case "raw_script":
+		// Opaque byte span — no SSA operand refs. Stack effect is
+		// declared via InArity / OutArity.
 	}
 
 	return refs
@@ -934,6 +945,8 @@ func (ctx *loweringContext) lowerBinding(binding *ir.ANFBinding, bindingIndex in
 		ctx.lowerAddRawOutput(name, value.Satoshis, value.ScriptBytes, bindingIndex, lastUses)
 	case "array_literal":
 		ctx.lowerArrayLiteral(name, value.Elements, bindingIndex, lastUses)
+	case "raw_script":
+		ctx.lowerRawScript(name, value.Bytes, value.InArity, value.OutArity)
 	}
 }
 
@@ -2753,6 +2766,38 @@ func (ctx *loweringContext) lowerArrayLiteral(bindingName string, elements []str
 	ctx.trackDepth()
 }
 
+// lowerRawScript lowers a raw_script ANF node to a single opaque raw_bytes
+// StackOp.
+//
+// The bytes pass through verbatim — the emit pass writes them as-is, and the
+// peephole optimizer must not bridge across them. Stack-tracker bookkeeping
+// consumes inArity items and pushes outArity items named after the binding so
+// downstream PICK/ROLL/DROP refer to the correct logical slot.
+func (ctx *loweringContext) lowerRawScript(bindingName, bytesHex string, inArity, outArity int) {
+	if ctx.sm.depth() < inArity {
+		panic(fmt.Sprintf(
+			"raw_script binding '%s' requires %d stack items but only %d are present",
+			bindingName, inArity, ctx.sm.depth(),
+		))
+	}
+	bytes, err := hex.DecodeString(bytesHex)
+	if err != nil {
+		panic(fmt.Sprintf("raw_script binding '%s' has invalid hex bytes: %v", bindingName, err))
+	}
+	ctx.emitOp(StackOp{Op: "raw_bytes", RawBytes: bytes, InArity: inArity, OutArity: outArity})
+	for i := 0; i < inArity; i++ {
+		ctx.sm.pop()
+	}
+	for i := 0; i < outArity; i++ {
+		slotName := bindingName
+		if outArity != 1 {
+			slotName = fmt.Sprintf("%s.%d", bindingName, i)
+		}
+		ctx.sm.push(slotName)
+	}
+	ctx.trackDepth()
+}
+
 func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	// checkMultiSig(sigs, pks) — emits the OP_CHECKMULTISIG sequence.
 	// Bitcoin Script stack layout:
@@ -4227,76 +4272,8 @@ func hexToBytes(h string) []byte {
 }
 
 // lowerVerifyWOTS emits the WOTS+ signature verification script.
-// Parameters: w=16, n=32 (SHA-256), len=67 chains.
-// emitWOTSOneChain emits one WOTS+ chain verification.
-// Input: sig(0) csum(1) endpt(2) digit(3) → sigRest(0) newCsum(1) newEndpt(2)
-func (ctx *loweringContext) emitWOTSOneChain(chainIndex int) {
-	// Entry stack: pubSeed(bottom) sig csum endpt digit(top)
-	// Save steps_copy = 15 - digit to alt (for checksum accumulation later)
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(15)})
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // push#1: steps_copy
-
-	// Save endpt, csum to alt. Leave pubSeed+sig+digit on main.
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // push#2: endpt
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // push#3: csum
-	// main: pubSeed sig digit
-
-	// Split 32B sig element
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(32)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // push#4: sigRest
-	ctx.emitOp(StackOp{Op: "swap"})
-	// main: pubSeed sigElem digit
-
-	// Hash loop: skip first `digit` iterations, then apply F for the rest.
-	// When digit > 0: decrement (skip). When digit == 0: hash at step j.
-	// Stack: pubSeed(depth2) sigElem(depth1) digit(depth0=top)
-	for j := 0; j < 15; j++ {
-		adrsBytes := []byte{byte(chainIndex), byte(j)}
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
-		ctx.emitOp(StackOp{Op: "if",
-			Then: []StackOp{
-				{Op: "opcode", Code: "OP_1SUB"}, // skip: digit--
-			},
-			Else: []StackOp{
-				{Op: "swap"},                                                             // pubSeed digit X
-				{Op: "push", Value: bigIntPush(2)},
-				{Op: "opcode", Code: "OP_PICK"},                                          // copy pubSeed
-				{Op: "push", Value: PushValue{Kind: "bytes", Bytes: adrsBytes}},           // ADRS [chainIndex, j]
-				{Op: "opcode", Code: "OP_CAT"},                                            // pubSeed || adrs
-				{Op: "swap"},                                                               // bring X to top
-				{Op: "opcode", Code: "OP_CAT"},                                            // pubSeed || adrs || X
-				{Op: "opcode", Code: "OP_SHA256"},                                         // F result
-				{Op: "swap"},                                                               // pubSeed new_X digit(=0)
-			},
-		})
-	}
-	ctx.emitOp(StackOp{Op: "drop"}) // drop digit (now 0)
-
-	// Restore: sigRest, csum, endpt_acc, steps_copy
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-
-	// csum += steps_copy
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROT"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ADD"})
-
-	// Concat endpoint to endpt_acc
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(3)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROLL"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
-}
-
+// Brings all 3 args to the top, pops them, delegates to EmitVerifyWOTS,
+// and pushes the boolean result.
 func (ctx *loweringContext) lowerVerifyWOTS(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	if len(args) < 3 {
 		panic("verifyWOTS requires 3 arguments: msg, sig, pubkey")
@@ -4309,115 +4286,8 @@ func (ctx *loweringContext) lowerVerifyWOTS(bindingName string, args []string, b
 	for i := 0; i < 3; i++ {
 		ctx.sm.pop()
 	}
-	// main: msg sig pubkey(64B: pubSeed||pkRoot)
 
-	// Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(32)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})          // msg sig pubSeed pkRoot
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})    // pkRoot → alt
-
-	// Rearrange: put pubSeed at bottom, hash msg
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROT"})            // sig pubSeed msg
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROT"})            // pubSeed msg sig
-	ctx.emitOp(StackOp{Op: "swap"})                                // pubSeed sig msg
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SHA256"})         // pubSeed sig msgHash
-
-	// Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(3)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROLL"})
-
-	// Process 32 bytes → 64 message chains
-	for byteIdx := 0; byteIdx < 32; byteIdx++ {
-		if byteIdx < 31 {
-			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-			ctx.emitOp(StackOp{Op: "swap"})
-		}
-		// Unsigned byte conversion
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
-		// Extract nibbles
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(16)})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DIV"})
-		ctx.emitOp(StackOp{Op: "swap"})
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(16)})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})
-
-		if byteIdx < 31 {
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-			ctx.emitOp(StackOp{Op: "swap"})
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-		} else {
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-		}
-
-		ctx.emitWOTSOneChain(byteIdx * 2) // high nibble chain
-
-		if byteIdx < 31 {
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-			ctx.emitOp(StackOp{Op: "swap"})
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-		} else {
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		}
-
-		ctx.emitWOTSOneChain(byteIdx*2 + 1) // low nibble chain
-
-		if byteIdx < 31 {
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		}
-	}
-
-	// Checksum digits
-	ctx.emitOp(StackOp{Op: "swap"})
-	// d66
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(16)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-	// d65
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(16)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DIV"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(16)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-	// d64
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(256)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DIV"})
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(16)})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-
-	// 3 checksum chains (indices 64, 65, 66)
-	for ci := 0; ci < 3; ci++ {
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		ctx.emitWOTSOneChain(64 + ci)
-		ctx.emitOp(StackOp{Op: "swap"})
-		ctx.emitOp(StackOp{Op: "drop"})
-	}
-
-	// Final comparison
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "drop"})
-	// main: pubSeed endptAcc
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SHA256"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"}) // pkRoot
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUAL"})
-	// Clean up pubSeed
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.emitOp(StackOp{Op: "drop"})
+	EmitVerifyWOTS(func(op StackOp) { ctx.emitOp(op) })
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()

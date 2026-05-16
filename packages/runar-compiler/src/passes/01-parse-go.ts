@@ -390,7 +390,7 @@ class GoParser extends ParserCore<GoToken> {
     // Skip `import runar "..."`
     this.skipImports();
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
     const properties: PropertyNode[] = [];
     const methods: MethodNode[] = [];
 
@@ -509,7 +509,7 @@ class GoParser extends ParserCore<GoToken> {
 
   private parseStructDecl(): {
     name: string;
-    parentClass: 'SmartContract' | 'StatefulSmartContract';
+    parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
     properties: PropertyNode[];
   } | null {
     this.expect('type');
@@ -518,13 +518,14 @@ class GoParser extends ParserCore<GoToken> {
     this.expect('struct');
     this.expect('{');
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
     const properties: PropertyNode[] = [];
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
       const propLoc = this.loc();
 
-      // Check for embedded type: runar.SmartContract / runar.StatefulSmartContract
+      // Check for embedded type: runar.SmartContract /
+      // runar.StatefulSmartContract / runar.UnsafeSmartContract
       if (this.current().type === 'ident' && this.current().value === 'runar' &&
           this.tokens[this.pos + 1]?.type === '.') {
         this.advance(); // skip 'runar'
@@ -532,6 +533,8 @@ class GoParser extends ParserCore<GoToken> {
         const embedName = this.expect('ident').value;
         if (embedName === 'StatefulSmartContract') {
           parentClass = 'StatefulSmartContract';
+        } else if (embedName === 'UnsafeSmartContract') {
+          parentClass = 'UnsafeSmartContract';
         }
         continue;
       }

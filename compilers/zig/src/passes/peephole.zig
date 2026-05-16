@@ -21,7 +21,18 @@ const max_iterations = 100;
 fn isPush(inst: Inst) bool {
     return switch (inst) {
         .push_int, .push_data, .push_bool, .push_codesep_index, .placeholder => true,
-        .op => false,
+        .op, .raw_bytes => false,
+    };
+}
+
+/// Returns true if the instruction is an opaque raw_bytes span emitted by a
+/// raw_script ANF node. raw_bytes is a hard peephole barrier — no rewrite
+/// window may span or cross it, because the bytes are opaque and not
+/// guaranteed to form a well-formed opcode stream.
+fn isRawBytes(inst: Inst) bool {
+    return switch (inst) {
+        .raw_bytes => true,
+        else => false,
     };
 }
 
@@ -62,6 +73,10 @@ fn instEql(a: Inst, b: Inst) bool {
         .push_data => |da| std.mem.eql(u8, da, b.push_data),
         .push_codesep_index => true,
         .placeholder => |pa| pa.param_index == b.placeholder.param_index,
+        // raw_bytes is opaque; we never compare or rewrite across it, so
+        // equality here is purely for completeness.
+        .raw_bytes => |ra| std.mem.eql(u8, ra.bytes, b.raw_bytes.bytes) and
+            ra.in_arity == b.raw_bytes.in_arity and ra.out_arity == b.raw_bytes.out_arity,
     };
 }
 
@@ -184,6 +199,9 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
     const a = w[0];
     const b = w[1];
 
+    // raw_bytes is a hard peephole barrier — never rewrite across it.
+    if (isRawBytes(a) or isRawBytes(b)) return null;
+
     // Rule 1: PUSH(x) + DROP -> (removed)
     if (isPush(a) and isOp(b, .op_drop)) return .{ null, null };
 
@@ -269,6 +287,8 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
 const Replacement3 = [3]?Inst;
 
 fn tryWindow3(w: *const [3]Inst) ?Replacement3 {
+    // raw_bytes is a hard peephole barrier — never rewrite across it.
+    if (isRawBytes(w[0]) or isRawBytes(w[1]) or isRawBytes(w[2])) return null;
     const va = getPushIntValue(w[0]) orelse return null;
     const vb = getPushIntValue(w[1]) orelse return null;
 
@@ -300,6 +320,8 @@ fn tryWindow3(w: *const [3]Inst) ?Replacement3 {
 const Replacement4 = [4]?Inst;
 
 fn tryWindow4(w: *const [4]Inst) ?Replacement4 {
+    // raw_bytes is a hard peephole barrier — never rewrite across it.
+    if (isRawBytes(w[0]) or isRawBytes(w[1]) or isRawBytes(w[2]) or isRawBytes(w[3])) return null;
     // Rule 27: PUSH(a) + OP_ADD + PUSH(b) + OP_ADD -> PUSH(a+b) + OP_ADD
     if (isOp(w[1], .op_add) and isOp(w[3], .op_add)) {
         const va = getPushIntValue(w[0]) orelse return null;

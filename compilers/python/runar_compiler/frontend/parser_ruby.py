@@ -751,7 +751,11 @@ class _RbParser:
 
         self._skip_newlines()
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in (
+            "SmartContract",
+            "StatefulSmartContract",
+            "UnsafeSmartContract",
+        ):
             self._errors.append(
                 f"{self._file}:{first_part.line}: unknown parent class: {parent_class}"
             )
@@ -925,8 +929,9 @@ class _RbParser:
                 self._expect(TOK_COLON, ":")
                 initializer = self._parse_primary()
 
-        # In stateless contracts, all properties are always readonly
-        if parent_class == "SmartContract":
+        # In stateless contracts (SmartContract and UnsafeSmartContract),
+        # all properties are always readonly.
+        if parent_class in ("SmartContract", "UnsafeSmartContract"):
             is_readonly = True
 
         # Skip rest of line

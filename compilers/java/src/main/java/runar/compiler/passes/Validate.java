@@ -174,11 +174,14 @@ public final class Validate {
                 }
             }
 
-            if (contract.parentClass() == ParentClass.SMART_CONTRACT) {
+            if (contract.parentClass() == ParentClass.SMART_CONTRACT
+                || contract.parentClass() == ParentClass.UNSAFE_SMART_CONTRACT) {
+                String label = contract.parentClass() == ParentClass.UNSAFE_SMART_CONTRACT
+                    ? "UnsafeSmartContract" : "SmartContract";
                 for (PropertyNode p : contract.properties()) {
                     if (!p.readonly()) {
                         error(
-                            "Property '" + p.name() + "' in SmartContract must be readonly. "
+                            "Property '" + p.name() + "' in " + label + " must be readonly. "
                                 + "Use StatefulSmartContract for mutable state.",
                             p.sourceLocation()
                         );
@@ -338,10 +341,12 @@ public final class Validate {
                 });
             }
 
-            // Public methods must end with an assert() call (unless stateful,
-            // in which case the compiler auto-injects the final assert).
+            // Public methods must end with an assert() call (unless
+            // stateful, where the compiler auto-injects the final assert;
+            // or UnsafeSmartContract, where a terminal asm({..., out_arity:
+            // 1}) provides the truthy stack value).
             if (m.visibility() == Visibility.PUBLIC
-                && contract.parentClass() != ParentClass.STATEFUL_SMART_CONTRACT) {
+                && contract.parentClass() == ParentClass.SMART_CONTRACT) {
                 if (!endsWithAssert(m.body())) {
                     error(
                         "public method '" + m.name() + "' must end with an assert() / assertThat() call",
@@ -349,10 +354,182 @@ public final class Validate {
                     );
                 }
             }
+            if (m.visibility() == Visibility.PUBLIC
+                && contract.parentClass() == ParentClass.UNSAFE_SMART_CONTRACT) {
+                if (!endsWithAssert(m.body()) && !endsWithTerminalAsm(m.body())) {
+                    error(
+                        "public method '" + m.name()
+                            + "' must end with an assert() call or a terminal asm({...}) with out_arity 1",
+                        m.sourceLocation()
+                    );
+                }
+            }
+
+            // Gate asm({...}) calls on UnsafeSmartContract and check the
+            // structural args.
+            validateAsmUsage(m);
 
             for (Statement s : m.body()) {
                 validateStatement(s);
             }
+        }
+
+        // --------------------------------------------------------------
+        // asm() intrinsic validation
+        // --------------------------------------------------------------
+
+        /**
+         * Walk a method body and validate every asm({...}) call. Gates the
+         * intrinsic on UnsafeSmartContract, confirms the
+         * parser-normalised arg shape, and enforces the
+         * expression-form-out-arity-1 invariant.
+         */
+        private void validateAsmUsage(MethodNode m) {
+            walkExpressionsInBody(m.body(), expr -> {
+                if (!isAsmCall(expr)) return;
+                CallExpr call = (CallExpr) expr;
+
+                if (contract.parentClass() != ParentClass.UNSAFE_SMART_CONTRACT) {
+                    error(
+                        "'asm' is only available in contracts extending UnsafeSmartContract; "
+                            + "got " + contract.parentClass().canonical()
+                            + ". Move the call into a class that extends UnsafeSmartContract "
+                            + "(and import { UnsafeSmartContract } from 'runar-lang').",
+                        m.sourceLocation()
+                    );
+                    return;
+                }
+
+                if (call.args().size() != 3) {
+                    error(
+                        "asm() expects exactly one object-literal argument "
+                            + "{ body, in_arity?, out_arity? }",
+                        m.sourceLocation()
+                    );
+                    return;
+                }
+
+                Expression bodyArg = call.args().get(0);
+                if (!(bodyArg instanceof ByteStringLiteral bsl)) {
+                    error("asm() body must be a hex string literal", m.sourceLocation());
+                } else {
+                    String body = bsl.value();
+                    if (body == null || body.isEmpty()) {
+                        error("asm() body must be a non-empty hex string literal", m.sourceLocation());
+                    } else if ((body.length() & 1) != 0) {
+                        error(
+                            "asm() body has odd hex length (" + body.length()
+                                + "); each opcode byte requires two hex characters",
+                            m.sourceLocation()
+                        );
+                    } else if (!isHexString(body)) {
+                        error(
+                            "asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed",
+                            m.sourceLocation()
+                        );
+                    }
+                }
+
+                Expression inArg = call.args().get(1);
+                if (!(inArg instanceof BigIntLiteral inBi) || inBi.value().signum() < 0) {
+                    error("asm() in_arity must be a non-negative integer literal", m.sourceLocation());
+                }
+
+                Expression outArg = call.args().get(2);
+                BigIntLiteral outBi = outArg instanceof BigIntLiteral b ? b : null;
+                if (outBi == null || outBi.value().signum() < 0) {
+                    error("asm() out_arity must be a non-negative integer literal", m.sourceLocation());
+                }
+
+                // Expression-form asm<T>({...}) returns a value that flows
+                // into a let-binding — exactly ONE stack value, so out_arity
+                // must be 1.
+                String returnType = call.asmReturnType();
+                if (returnType != null && !returnType.isEmpty()
+                    && outBi != null
+                    && !outBi.value().equals(java.math.BigInteger.ONE)) {
+                    error(
+                        "Expression-form asm<" + returnType + ">() must have out_arity 1 "
+                            + "(got " + outBi.value().toString()
+                            + "); only a single stack value can be bound to the result variable.",
+                        m.sourceLocation()
+                    );
+                }
+            });
+        }
+
+        private static boolean isAsmCall(Expression expr) {
+            if (!(expr instanceof CallExpr call)) return false;
+            return call.callee() instanceof Identifier id && "asm".equals(id.name());
+        }
+
+        @FunctionalInterface
+        private interface ExprSink {
+            void accept(Expression expr);
+        }
+
+        private static void walkExpressionsInBody(List<Statement> body, ExprSink sink) {
+            for (Statement s : body) walkExpressionsInStmt(s, sink);
+        }
+
+        private static void walkExpressionsInStmt(Statement s, ExprSink sink) {
+            if (s instanceof ExpressionStatement es) {
+                walkExpression(es.expression(), sink);
+            } else if (s instanceof VariableDeclStatement v) {
+                walkExpression(v.init(), sink);
+            } else if (s instanceof AssignmentStatement a) {
+                walkExpression(a.target(), sink);
+                walkExpression(a.value(), sink);
+            } else if (s instanceof IfStatement i) {
+                walkExpression(i.condition(), sink);
+                walkExpressionsInBody(i.thenBody(), sink);
+                if (i.elseBody() != null) walkExpressionsInBody(i.elseBody(), sink);
+            } else if (s instanceof ForStatement f) {
+                walkExpression(f.condition(), sink);
+                walkExpressionsInBody(f.body(), sink);
+            } else if (s instanceof ReturnStatement r) {
+                if (r.value() != null) walkExpression(r.value(), sink);
+            }
+        }
+
+        private static void walkExpression(Expression e, ExprSink sink) {
+            if (e == null) return;
+            sink.accept(e);
+            if (e instanceof BinaryExpr be) {
+                walkExpression(be.left(), sink);
+                walkExpression(be.right(), sink);
+            } else if (e instanceof UnaryExpr ue) {
+                walkExpression(ue.operand(), sink);
+            } else if (e instanceof CallExpr c) {
+                walkExpression(c.callee(), sink);
+                for (Expression a : c.args()) walkExpression(a, sink);
+            } else if (e instanceof MemberExpr me) {
+                walkExpression(me.object(), sink);
+            } else if (e instanceof TernaryExpr te) {
+                walkExpression(te.condition(), sink);
+                walkExpression(te.consequent(), sink);
+                walkExpression(te.alternate(), sink);
+            } else if (e instanceof IndexAccessExpr ia) {
+                walkExpression(ia.object(), sink);
+                walkExpression(ia.index(), sink);
+            } else if (e instanceof IncrementExpr ie) {
+                walkExpression(ie.operand(), sink);
+            } else if (e instanceof DecrementExpr de) {
+                walkExpression(de.operand(), sink);
+            } else if (e instanceof ArrayLiteralExpr al) {
+                for (Expression el : al.elements()) walkExpression(el, sink);
+            }
+        }
+
+        private static boolean isHexString(String s) {
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                boolean ok = (c >= '0' && c <= '9')
+                    || (c >= 'a' && c <= 'f')
+                    || (c >= 'A' && c <= 'F');
+                if (!ok) return false;
+            }
+            return true;
         }
 
         // --------------------------------------------------------------
@@ -460,6 +637,7 @@ public final class Validate {
             if (callee instanceof Identifier id) {
                 String name = id.name();
                 if (!"super".equals(name)
+                    && !"asm".equals(name)
                     && !BuiltinRegistry.isBuiltin(name)
                     && !isContractMethod(name)) {
                     error(
@@ -641,6 +819,38 @@ public final class Validate {
         if (!(e instanceof CallExpr c)) return false;
         if (!(c.callee() instanceof Identifier id)) return false;
         return "assert".equals(id.name()) || "assertThat".equals(id.name());
+    }
+
+    /**
+     * Reports whether the last statement of {@code body} is an
+     * {@code asm({...})} call with the parser-normalised positional args
+     * {@code (body, in_arity, out_arity)} and an {@code out_arity} literal
+     * equal to 1. If/else branches that both terminate in a terminal asm
+     * (or assert) also count, mirroring the asserts-on-both-branches rule.
+     */
+    private static boolean endsWithTerminalAsm(List<Statement> body) {
+        if (body.isEmpty()) return false;
+        Statement last = body.get(body.size() - 1);
+        if (last instanceof ExpressionStatement es) {
+            Expression expr = es.expression();
+            if (!(expr instanceof CallExpr c)) return false;
+            if (!(c.callee() instanceof Identifier id) || !"asm".equals(id.name())) return false;
+            // The parser always rewrites asm({...}) into positional
+            // (body, in_arity, out_arity).
+            if (c.args().size() == 3
+                && c.args().get(2) instanceof BigIntLiteral outArity
+                && outArity.value().equals(java.math.BigInteger.ONE)) {
+                return true;
+            }
+            return false;
+        }
+        if (last instanceof IfStatement it) {
+            boolean thenEnds = endsWithTerminalAsm(it.thenBody()) || endsWithAssert(it.thenBody());
+            boolean elseEnds = it.elseBody() != null
+                && (endsWithTerminalAsm(it.elseBody()) || endsWithAssert(it.elseBody()));
+            return thenEnds && elseEnds;
+        }
+        return false;
     }
 
     private static boolean isCompileTimeConstant(Expression e) {

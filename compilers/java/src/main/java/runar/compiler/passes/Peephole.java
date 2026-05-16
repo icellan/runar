@@ -12,6 +12,7 @@ import runar.compiler.ir.stack.OverOp;
 import runar.compiler.ir.stack.PickOp;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
+import runar.compiler.ir.stack.RawBytesOp;
 import runar.compiler.ir.stack.RollOp;
 import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackMethod;
@@ -112,9 +113,20 @@ public final class Peephole {
         return new Pass(out, changed);
     }
 
+    /**
+     * raw_bytes is a hard peephole barrier — no optimization window may
+     * span or rewrite across it, because the bytes are opaque and not
+     * guaranteed to form a well-formed opcode stream.
+     */
+    private static boolean isRawBytes(StackOp op) {
+        return op instanceof RawBytesOp;
+    }
+
     // ---------- window-2 rules ----------
 
     static List<StackOp> matchWindow2(StackOp a, StackOp b) {
+        if (isRawBytes(a) || isRawBytes(b)) return null;
+
         // PUSH x, DROP → remove both (dead value elimination)
         if (a instanceof PushOp && b instanceof DropOp) return List.of();
 
@@ -178,6 +190,7 @@ public final class Peephole {
     // ---------- window-3 rules ----------
 
     static List<StackOp> matchWindow3(StackOp a, StackOp b, StackOp c) {
+        if (isRawBytes(a) || isRawBytes(b) || isRawBytes(c)) return null;
         BigInteger av = pushBigInt(a);
         BigInteger bv = pushBigInt(b);
         if (av != null && bv != null) {
@@ -191,6 +204,7 @@ public final class Peephole {
     // ---------- window-4 rules ----------
 
     static List<StackOp> matchWindow4(StackOp a, StackOp b, StackOp c, StackOp d) {
+        if (isRawBytes(a) || isRawBytes(b) || isRawBytes(c) || isRawBytes(d)) return null;
         BigInteger av = pushBigInt(a);
         BigInteger cv = pushBigInt(c);
         if (av != null && cv != null) {

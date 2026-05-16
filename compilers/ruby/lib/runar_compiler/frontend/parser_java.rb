@@ -558,13 +558,14 @@ module RunarCompiler
           parent_class = case base_name
                          when "SmartContract"         then "SmartContract"
                          when "StatefulSmartContract" then "StatefulSmartContract"
+                         when "UnsafeSmartContract"   then "UnsafeSmartContract"
                          else
                            fatal("contract class in #{@file_name} must extend " \
-                                 "SmartContract or StatefulSmartContract, got #{base_name}")
+                                 "SmartContract, StatefulSmartContract, or UnsafeSmartContract, got #{base_name}")
                          end
         else
           fatal("contract class in #{@file_name} must extend " \
-                "SmartContract or StatefulSmartContract")
+                "SmartContract, StatefulSmartContract, or UnsafeSmartContract")
         end
 
         # Skip implements clause (parity with Java compiler: disallowed by

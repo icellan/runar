@@ -128,12 +128,14 @@ class _ValidationContext:
                     loc=prop.source_location,
                 )
 
-        # SmartContract requires all properties to be readonly
-        if self.contract.parent_class == "SmartContract":
+        # SmartContract (and the asm-escape-hatch UnsafeSmartContract) require
+        # all properties to be readonly.
+        if self.contract.parent_class in ("SmartContract", "UnsafeSmartContract"):
             for prop in self.contract.properties:
                 if not prop.readonly:
                     self._add_error(
-                        f"Property '{prop.name}' in SmartContract must be declared readonly",
+                        f"Property '{prop.name}' in {self.contract.parent_class} "
+                        f"must be declared readonly",
                         loc=prop.source_location,
                     )
 
@@ -237,11 +239,13 @@ class _ValidationContext:
                     loc=method.source_location,
                 )
 
-        # Public methods must end with assert() (unless StatefulSmartContract,
-        # where the compiler auto-injects the final assert)
+        # Public methods must end with an assert() call (unless
+        # StatefulSmartContract, where the compiler auto-injects the final
+        # assert; or UnsafeSmartContract, where a terminal asm({..., out_arity:
+        # 1}) provides the truthy stack value).
         if (
             method.visibility == "public"
-            and self.contract.parent_class != "StatefulSmartContract"
+            and self.contract.parent_class == "SmartContract"
         ):
             if not _ends_with_assert(method.body):
                 self._add_error(
@@ -249,13 +253,116 @@ class _ValidationContext:
                     loc=method.source_location,
                 )
 
+        # UnsafeSmartContract public methods must end with either an assert()
+        # call or a terminal asm({..., out_arity: 1}) -- either way the script
+        # has to leave a truthy value on the stack.
+        if (
+            method.visibility == "public"
+            and self.contract.parent_class == "UnsafeSmartContract"
+        ):
+            if not _ends_with_assert(method.body) and not _ends_with_terminal_asm(method.body):
+                self._add_error(
+                    f"public method '{method.name}' must end with an assert() call "
+                    f"or a terminal asm({{...}}) with out_arity 1",
+                    loc=method.source_location,
+                )
+
         # V24/V25: Warn on manual preimage/state-script boilerplate in StatefulSmartContract
         if self.contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
             _warn_manual_preimage_usage(method, self.warnings)
 
+        # Gate asm({...}) calls on UnsafeSmartContract and check the structural args.
+        self._validate_asm_usage(method)
+
         # Validate statements
         for stmt in method.body:
             self._validate_statement(stmt)
+
+    # -------------------------------------------------------------------
+    # asm() intrinsic validation
+    # -------------------------------------------------------------------
+
+    def _validate_asm_usage(self, method) -> None:
+        """Walk a method body and validate every asm({...}) call.
+
+        - Reject any asm() outside an UnsafeSmartContract.
+        - Confirm the parser-normalised arg shape: (body, in_arity, out_arity)
+          where body is a ByteString literal with even-length hex and the
+          arities are non-negative bigint literals.
+        - Expression-form asm<T>({...}) must have out_arity 1.
+
+        The parser already pushes most hex diagnostics; this pass is the
+        back-stop that runs even when the parser shape is well-formed and is
+        the only layer that knows about the contract's parentClass.
+        """
+        def visitor(expr: Expression) -> None:
+            if not _is_asm_call(expr):
+                return
+            assert isinstance(expr, CallExpr)
+
+            if self.contract.parent_class != "UnsafeSmartContract":
+                self._add_error(
+                    f"'asm' is only available in contracts extending "
+                    f"UnsafeSmartContract; got {self.contract.parent_class}. "
+                    f"Move the call into a class that extends "
+                    f"UnsafeSmartContract (and import {{ UnsafeSmartContract }} "
+                    f"from 'runar-lang')."
+                )
+                return
+
+            if len(expr.args) != 3:
+                self._add_error(
+                    "asm() expects exactly one object-literal argument "
+                    "{ body, in_arity?, out_arity? }"
+                )
+                return
+
+            body_arg = expr.args[0]
+            if not isinstance(body_arg, ByteStringLiteral):
+                self._add_error("asm() body must be a hex string literal")
+                return
+            body = body_arg.value
+            if len(body) == 0:
+                self._add_error(
+                    "asm() body must be a non-empty hex string literal"
+                )
+            elif len(body) % 2 != 0:
+                self._add_error(
+                    f"asm() body has odd hex length ({len(body)}); each "
+                    f"opcode byte requires two hex characters"
+                )
+            elif not re.fullmatch(r"[0-9a-fA-F]*", body):
+                self._add_error(
+                    "asm() body contains non-hex characters; only 0-9, a-f, "
+                    "A-F are allowed"
+                )
+
+            in_arity = expr.args[1]
+            if not isinstance(in_arity, BigIntLiteral) or in_arity.value < 0:
+                self._add_error(
+                    "asm() in_arity must be a non-negative integer literal"
+                )
+
+            out_arity = expr.args[2]
+            if not isinstance(out_arity, BigIntLiteral) or out_arity.value < 0:
+                self._add_error(
+                    "asm() out_arity must be a non-negative integer literal"
+                )
+
+            # Expression-form asm<T>({...}) returns a value that flows into a
+            # let-binding -- exactly ONE stack value, so out_arity must be 1.
+            if (
+                expr.asm_return_type
+                and isinstance(out_arity, BigIntLiteral)
+                and out_arity.value != 1
+            ):
+                self._add_error(
+                    f"Expression-form asm<{expr.asm_return_type}>() must have "
+                    f"out_arity 1 (got {out_arity.value}); only a single stack "
+                    f"value can be bound to the result variable."
+                )
+
+        _walk_expressions_in_body(method.body, visitor)
 
     # -------------------------------------------------------------------
     # Statement validation
@@ -412,6 +519,50 @@ def _is_assert_call(expr: Expression | None) -> bool:
     if not isinstance(expr.callee, Identifier):
         return False
     return expr.callee.name == "assert"
+
+
+def _is_asm_call(expr: Expression | None) -> bool:
+    """Return True if *expr* is a call to the asm compiler intrinsic."""
+    if not isinstance(expr, CallExpr):
+        return False
+    if not isinstance(expr.callee, Identifier):
+        return False
+    return expr.callee.name == "asm"
+
+
+def _ends_with_terminal_asm(body: list[Statement]) -> bool:
+    """Return True if the last statement of *body* is an asm({...}) call with
+    the parser-normalised positional args (body, in_arity, out_arity) and an
+    out_arity literal equal to 1.
+
+    If/else branches that both terminate in a terminal asm (or assert) also
+    count, mirroring the asserts-on-both-branches rule.
+    """
+    if len(body) == 0:
+        return False
+    last = body[-1]
+
+    if isinstance(last, ExpressionStmt):
+        if not _is_asm_call(last.expr):
+            return False
+        call = last.expr
+        assert isinstance(call, CallExpr)
+        # The parser always rewrites asm({...}) into positional
+        # (body, in_arity, out_arity).
+        if len(call.args) == 3:
+            out_arity = call.args[2]
+            if isinstance(out_arity, BigIntLiteral) and out_arity.value == 1:
+                return True
+        return False
+
+    if isinstance(last, IfStmt):
+        then_ends = _ends_with_terminal_asm(last.then) or _ends_with_assert(last.then)
+        else_ends = len(last.else_) > 0 and (
+            _ends_with_terminal_asm(last.else_) or _ends_with_assert(last.else_)
+        )
+        return then_ends and else_ends
+
+    return False
 
 
 def _is_compile_time_constant(expr: Expression | None) -> bool:

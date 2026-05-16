@@ -33,6 +33,7 @@ import runar.compiler.ir.anf.LoadParam;
 import runar.compiler.ir.anf.LoadProp;
 import runar.compiler.ir.anf.Loop;
 import runar.compiler.ir.anf.MethodCall;
+import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
 
@@ -720,7 +721,8 @@ public final class AnfOptimize {
             || v instanceof AddRawOutput
             || v instanceof AddDataOutput
             || v instanceof Call
-            || v instanceof MethodCall) {
+            || v instanceof MethodCall
+            || v instanceof RawScript) { // opaque byte span — DCE must never eliminate it
             return true;
         }
         if (v instanceof If ifv) {

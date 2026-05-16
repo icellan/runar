@@ -157,8 +157,9 @@ fn validateProperties(
         }
     }
 
-    // SmartContract requires all properties to be readonly
-    if (contract.parent_class == .smart_contract) {
+    // SmartContract (and the asm-escape-hatch UnsafeSmartContract) require all
+    // properties to be readonly.
+    if (contract.parent_class == .smart_contract or contract.parent_class == .unsafe_smart_contract) {
         for (contract.properties) |prop| {
             if (!prop.readonly) {
                 try errors.append(allocator, .{
@@ -253,12 +254,23 @@ fn validateMethods(
             }
         }
 
-        // Public methods must end with assert() (unless StatefulSmartContract,
-        // where the compiler auto-injects the final assert)
-        if (method.is_public and contract.parent_class != .stateful_smart_contract) {
+        // Public methods must end with an assert() call. For
+        // StatefulSmartContract the compiler auto-injects the final assert.
+        // For UnsafeSmartContract a terminal asm({..., out_arity: 1}) also
+        // counts — either way the script must leave a truthy value on the
+        // stack.
+        if (method.is_public and contract.parent_class == .smart_contract) {
             if (!endsWithAssert(method.body)) {
                 try errors.append(allocator, .{
                     .message = "public method must end with an assert() call",
+                    .severity = .@"error",
+                });
+            }
+        }
+        if (method.is_public and contract.parent_class == .unsafe_smart_contract) {
+            if (!endsWithAssert(method.body) and !endsWithTerminalAsm(method.body)) {
+                try errors.append(allocator, .{
+                    .message = "public method in UnsafeSmartContract must end with an assert() call or a terminal asm({...}) with out_arity 1",
                     .severity = .@"error",
                 });
             }
@@ -269,9 +281,227 @@ fn validateMethods(
             try warnManualPreimageUsage(allocator, method, warnings);
         }
 
+        // Gate asm({...}) calls on UnsafeSmartContract + check structural args.
+        try validateAsmUsage(allocator, contract, method, errors);
+
         // Validate for-loop bounds are compile-time constants
         for (method.body) |stmt| {
             try validateStatement(allocator, stmt, errors);
+        }
+    }
+}
+
+/// Check if a method body ends with an asm({...}) call whose normalized
+/// third positional arg (out_arity) is the integer literal 1. If/else
+/// branches that both terminate in a terminal asm (or assert) also count,
+/// mirroring the asserts-on-both-branches rule.
+fn endsWithTerminalAsm(body: []const Statement) bool {
+    if (body.len == 0) return false;
+    const last = body[body.len - 1];
+    return switch (last) {
+        .expr_stmt => |expr| switch (expr) {
+            .call => |c| blk: {
+                if (!std.mem.eql(u8, c.callee, "asm")) break :blk false;
+                if (c.args.len != 3) break :blk false;
+                break :blk switch (c.args[2]) {
+                    .literal_int => |i| i == 1,
+                    else => false,
+                };
+            },
+            else => false,
+        },
+        .if_stmt => |if_s| {
+            const then_ok = endsWithTerminalAsm(if_s.then_body) or endsWithAssert(if_s.then_body);
+            const else_ok = if (if_s.else_body) |eb|
+                (endsWithTerminalAsm(eb) or endsWithAssert(eb))
+            else
+                false;
+            return then_ok and else_ok;
+        },
+        else => false,
+    };
+}
+
+/// Walk a method body and validate every asm({...}) call:
+///   - Reject any asm() outside an UnsafeSmartContract.
+///   - Confirm the parser-normalised arg shape: (body, in_arity, out_arity)
+///     where body is a ByteString literal with even-length hex and the
+///     arities are non-negative bigint literals.
+fn validateAsmUsage(
+    allocator: Allocator,
+    contract: ContractNode,
+    method: MethodNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    for (method.body) |stmt| {
+        try walkStatementForAsm(allocator, stmt, contract, errors);
+    }
+}
+
+fn walkStatementForAsm(
+    allocator: Allocator,
+    stmt: Statement,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    switch (stmt) {
+        .expr_stmt => |e| try walkExprForAsm(allocator, e, contract, errors),
+        .const_decl => |cd| try walkExprForAsm(allocator, cd.value, contract, errors),
+        .let_decl => |ld| {
+            if (ld.value) |v| try walkExprForAsm(allocator, v, contract, errors);
+        },
+        .assign => |a| try walkExprForAsm(allocator, a.value, contract, errors),
+        .if_stmt => |if_s| {
+            try walkExprForAsm(allocator, if_s.condition, contract, errors);
+            for (if_s.then_body) |s| try walkStatementForAsm(allocator, s, contract, errors);
+            if (if_s.else_body) |eb| {
+                for (eb) |s| try walkStatementForAsm(allocator, s, contract, errors);
+            }
+        },
+        .for_stmt => |fs| {
+            for (fs.body) |s| try walkStatementForAsm(allocator, s, contract, errors);
+        },
+        .assert_stmt => |a| try walkExprForAsm(allocator, a.condition, contract, errors),
+        .return_stmt => |opt| {
+            if (opt) |e| try walkExprForAsm(allocator, e, contract, errors);
+        },
+    }
+}
+
+fn walkExprForAsm(
+    allocator: Allocator,
+    expr: Expression,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    switch (expr) {
+        .call => |c| {
+            if (std.mem.eql(u8, c.callee, "asm")) {
+                try checkAsmCall(allocator, c, contract, errors);
+            }
+            for (c.args) |arg| try walkExprForAsm(allocator, arg, contract, errors);
+        },
+        .method_call => |mc| {
+            for (mc.args) |arg| try walkExprForAsm(allocator, arg, contract, errors);
+        },
+        .binary_op => |b| {
+            try walkExprForAsm(allocator, b.left, contract, errors);
+            try walkExprForAsm(allocator, b.right, contract, errors);
+        },
+        .unary_op => |u| try walkExprForAsm(allocator, u.operand, contract, errors),
+        .ternary => |t| {
+            try walkExprForAsm(allocator, t.condition, contract, errors);
+            try walkExprForAsm(allocator, t.then_expr, contract, errors);
+            try walkExprForAsm(allocator, t.else_expr, contract, errors);
+        },
+        .index_access => |ia| {
+            try walkExprForAsm(allocator, ia.object, contract, errors);
+            try walkExprForAsm(allocator, ia.index, contract, errors);
+        },
+        .increment => |inc| try walkExprForAsm(allocator, inc.operand, contract, errors),
+        .decrement => |dec| try walkExprForAsm(allocator, dec.operand, contract, errors),
+        .array_literal => |al| {
+            for (al) |e| try walkExprForAsm(allocator, e, contract, errors);
+        },
+        .literal_int, .literal_bool, .literal_bytes, .identifier, .property_access => {},
+    }
+}
+
+fn checkAsmCall(
+    allocator: Allocator,
+    call: *const types.CallExpr,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    if (contract.parent_class != .unsafe_smart_contract) {
+        try errors.append(allocator, .{
+            .message = "'asm' is only available in contracts extending UnsafeSmartContract. Move the call into a class that extends UnsafeSmartContract.",
+            .severity = .@"error",
+        });
+        return;
+    }
+
+    if (call.args.len != 3) {
+        try errors.append(allocator, .{
+            .message = "asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }",
+            .severity = .@"error",
+        });
+        return;
+    }
+
+    // Body must be a ByteString literal with even-length hex.
+    switch (call.args[0]) {
+        .literal_bytes => |body| {
+            if (body.len == 0) {
+                try errors.append(allocator, .{
+                    .message = "asm() body must be a non-empty hex string literal",
+                    .severity = .@"error",
+                });
+            } else if (body.len % 2 != 0) {
+                try errors.append(allocator, .{
+                    .message = "asm() body has odd hex length; each opcode byte requires two hex characters",
+                    .severity = .@"error",
+                });
+            } else {
+                for (body) |c| {
+                    const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+                    if (!is_hex) {
+                        try errors.append(allocator, .{
+                            .message = "asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed",
+                            .severity = .@"error",
+                        });
+                        break;
+                    }
+                }
+            }
+        },
+        else => try errors.append(allocator, .{
+            .message = "asm() body must be a hex string literal",
+            .severity = .@"error",
+        }),
+    }
+
+    // in_arity must be a non-negative integer literal.
+    switch (call.args[1]) {
+        .literal_int => |i| {
+            if (i < 0) try errors.append(allocator, .{
+                .message = "asm() in_arity must be a non-negative integer literal",
+                .severity = .@"error",
+            });
+        },
+        else => try errors.append(allocator, .{
+            .message = "asm() in_arity must be a non-negative integer literal",
+            .severity = .@"error",
+        }),
+    }
+
+    // out_arity must be a non-negative integer literal.
+    var out_arity_val: ?i64 = null;
+    switch (call.args[2]) {
+        .literal_int => |i| {
+            if (i < 0) try errors.append(allocator, .{
+                .message = "asm() out_arity must be a non-negative integer literal",
+                .severity = .@"error",
+            }) else {
+                out_arity_val = i;
+            }
+        },
+        else => try errors.append(allocator, .{
+            .message = "asm() out_arity must be a non-negative integer literal",
+            .severity = .@"error",
+        }),
+    }
+
+    // Expression-form asm<T>({...}) returns a value that flows into a let
+    // binding — exactly ONE stack value, so out_arity must be 1.
+    if (call.asm_return_type.len > 0) {
+        if (out_arity_val) |v| {
+            if (v != 1) {
+                try errors.append(allocator, .{
+                    .message = "Expression-form asm<T>() must have out_arity 1; only a single stack value can be bound to the result variable.",
+                    .severity = .@"error",
+                });
+            }
         }
     }
 }

@@ -539,9 +539,11 @@ const Parser = struct {
             if (self.current.kind == .hash_bracket) {
                 const attr = self.parseAttribute();
 
-                if (std.mem.eql(u8, attr, "runar::contract") or std.mem.eql(u8, attr, "runar::stateful_contract")) {
+                if (std.mem.eql(u8, attr, "runar::contract") or std.mem.eql(u8, attr, "runar::stateful_contract") or std.mem.eql(u8, attr, "runar::unsafe_contract")) {
                     if (std.mem.eql(u8, attr, "runar::stateful_contract")) {
                         parent_class = .stateful_smart_contract;
+                    } else if (std.mem.eql(u8, attr, "runar::unsafe_contract")) {
+                        parent_class = .unsafe_smart_contract;
                     }
                     // Parse: [pub] struct Name { fields... }
                     _ = self.matchIdent("pub");

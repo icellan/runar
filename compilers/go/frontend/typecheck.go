@@ -757,6 +757,21 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 
 	// Direct builtin call
 	if id, ok := e.Callee.(Identifier); ok {
+		// asm is a compile-time intrinsic — the parser has already rewritten
+		// the { body, in_arity?, out_arity? } object-literal argument into
+		// three positional args (body, in_arity, out_arity). The statement
+		// form returns void; the expression form asm<T>({...}) carries the
+		// captured return type on AsmReturnType and produces a value of that
+		// type.
+		if id.Name == "asm" {
+			for _, arg := range e.Args {
+				tc.inferExprType(arg, env)
+			}
+			if e.AsmReturnType != "" {
+				return e.AsmReturnType
+			}
+			return "void"
+		}
 		if sig, ok := builtinFunctions[id.Name]; ok {
 			return tc.checkCallArgs(id.Name, sig, e.Args, env)
 		}
@@ -1136,6 +1151,10 @@ func inferExprTypeStatic(expr Expression) string {
 		return "bigint" // '-' and '~'
 	case CallExpr:
 		if id, ok := e.Callee.(Identifier); ok {
+			// Expression-form asm<T>({...}) statically yields type T.
+			if id.Name == "asm" && e.AsmReturnType != "" {
+				return e.AsmReturnType
+			}
 			if sig, ok := builtinFunctions[id.Name]; ok {
 				return sig.returnType
 			}

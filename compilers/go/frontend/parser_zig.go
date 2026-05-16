@@ -732,7 +732,7 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 		if ctorParamSet[properties[i].Name] {
 			properties[i].Initializer = nil
 		}
-		if p.parentClass == "SmartContract" {
+		if p.parentClass == "SmartContract" || p.parentClass == "UnsafeSmartContract" {
 			properties[i].Readonly = true
 		} else if !properties[i].Readonly && !hadInitializer && !mutatedProps[properties[i].Name] {
 			properties[i].Readonly = true
@@ -777,6 +777,8 @@ func (p *zigParser) parseContractMarker() {
 		parent := p.expect(zigTokIdent).value
 		if parent == "StatefulSmartContract" {
 			p.parentClass = "StatefulSmartContract"
+		} else if parent == "UnsafeSmartContract" {
+			p.parentClass = "UnsafeSmartContract"
 		} else {
 			p.parentClass = "SmartContract"
 		}

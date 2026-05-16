@@ -88,9 +88,21 @@ module RunarCompiler
     end
     private_class_method :_apply_one_pass
 
+    # --- Raw-bytes barrier ---
+
+    # raw_bytes is a hard peephole barrier -- no optimization window may span
+    # or rewrite across it, because the bytes are opaque and not guaranteed
+    # to form a well-formed opcode stream.
+    def self._raw_bytes?(op)
+      op[:op] == "raw_bytes"
+    end
+    private_class_method :_raw_bytes?
+
     # --- Window-2 rules ---
 
     def self._match_window2(a, b)
+      return nil if _raw_bytes?(a) || _raw_bytes?(b)
+
       if a[:op] == "push" && b[:op] == "drop" then return [] end
       if a[:op] == "dup" && b[:op] == "drop" then return [] end
       if a[:op] == "swap" && b[:op] == "swap" then return [] end
@@ -163,6 +175,8 @@ module RunarCompiler
     # --- Window-3 rules ---
 
     def self._match_window3(a, b, c)
+      return nil if _raw_bytes?(a) || _raw_bytes?(b) || _raw_bytes?(c)
+
       a_val = _push_bigint_value(a)
       b_val = _push_bigint_value(b)
 
@@ -185,6 +199,8 @@ module RunarCompiler
     # --- Window-4 rules ---
 
     def self._match_window4(a, b, c, d)
+      return nil if _raw_bytes?(a) || _raw_bytes?(b) || _raw_bytes?(c) || _raw_bytes?(d)
+
       a_val = _push_bigint_value(a)
       c_val = _push_bigint_value(c)
 

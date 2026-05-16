@@ -291,9 +291,14 @@ impl RustDslParser {
             if matches!(self.current().typ, TokenType::HashBracket) {
                 let attr = self.parse_attribute();
 
-                if attr == "runar::contract" || attr == "runar::stateful_contract" {
+                if attr == "runar::contract"
+                    || attr == "runar::stateful_contract"
+                    || attr == "runar::unsafe_contract"
+                {
                     if attr == "runar::stateful_contract" {
                         parent_class = "StatefulSmartContract".to_string();
+                    } else if attr == "runar::unsafe_contract" {
+                        parent_class = "UnsafeSmartContract".to_string();
                     }
                     // Parse struct
                     if matches!(self.current().typ, TokenType::Pub) { self.advance_clone(); }
@@ -414,6 +419,7 @@ impl RustDslParser {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier { name: "super".to_string() }),
                 args: super_args,
+                asm_return_type: None,
             },
             source_location: loc.clone(),
         };
@@ -627,6 +633,7 @@ impl RustDslParser {
                 expression: Expression::CallExpr {
                     callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
                     args: vec![expr],
+                    asm_return_type: None,
                 },
                 source_location: loc,
             });
@@ -649,6 +656,7 @@ impl RustDslParser {
                         left: Box::new(left),
                         right: Box::new(right),
                     }],
+                    asm_return_type: None,
                 },
                 source_location: loc,
             });
@@ -1007,7 +1015,7 @@ impl RustDslParser {
                         }
                     }
                 }
-                expr = Expression::CallExpr { callee: Box::new(expr), args };
+                expr = Expression::CallExpr { callee: Box::new(expr), args, asm_return_type: None };
             } else if matches!(self.current().typ, TokenType::Dot) {
                 self.advance_clone();
                 let prop = if let TokenType::Ident(name) = self.current().typ.clone() {
@@ -1423,7 +1431,7 @@ impl Test {
 
         // Should be assert(self.x === v)
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
-            if let Expression::CallExpr { callee, args } = expression {
+            if let Expression::CallExpr { callee, args, .. } = expression {
                 if let Expression::Identifier { name } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }

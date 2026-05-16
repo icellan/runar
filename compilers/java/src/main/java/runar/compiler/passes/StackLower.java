@@ -32,6 +32,7 @@ import runar.compiler.ir.anf.LoadParam;
 import runar.compiler.ir.anf.LoadProp;
 import runar.compiler.ir.anf.Loop;
 import runar.compiler.ir.anf.MethodCall;
+import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
 import runar.compiler.ir.stack.DropOp;
@@ -45,6 +46,7 @@ import runar.compiler.ir.stack.PlaceholderOp;
 import runar.compiler.ir.stack.PushCodeSepIndexOp;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
+import runar.compiler.ir.stack.RawBytesOp;
 import runar.compiler.ir.stack.RollOp;
 import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackMethod;
@@ -664,6 +666,8 @@ public final class StackLower {
                 lowerAddRawOutput(name, ad.satoshis(), ad.scriptBytes(), idx, lastUses);
             } else if (v instanceof ArrayLiteral al) {
                 lowerArrayLiteral(name, al.elements(), idx, lastUses);
+            } else if (v instanceof RawScript rs) {
+                lowerRawScript(name, rs.bytes(), rs.inArity(), rs.outArity());
             }
         }
 
@@ -2859,6 +2863,42 @@ public final class StackLower {
             emitOp(new DropOp());
             sm.pop();
             emitOp(new OpcodeOp("OP_BIN2NUM"));
+        }
+
+        // ---------------- raw_script ----------------
+
+        /**
+         * Lower a raw_script ANF node to a single opaque RawBytesOp.
+         *
+         * <p>The bytes pass through verbatim — the emit pass writes them
+         * as-is, and the peephole optimizer must not bridge across them.
+         * Stack-tracker bookkeeping consumes {@code inArity} items and
+         * pushes {@code outArity} items named after the binding so
+         * downstream PICK/ROLL/DROP refer to the correct logical slot.
+         */
+        void lowerRawScript(String bindingName, String bytesHex, int inArity, int outArity) {
+            if (sm.depth() < inArity) {
+                throw new RuntimeException(String.format(
+                    "raw_script binding '%s' requires %d stack items but only %d are present",
+                    bindingName, inArity, sm.depth()
+                ));
+            }
+            byte[] bytes;
+            try {
+                bytes = Emit.hexToBytes(bytesHex == null ? "" : bytesHex);
+            } catch (RuntimeException e) {
+                throw new RuntimeException(
+                    "raw_script binding '" + bindingName + "' has invalid hex bytes: " + e.getMessage()
+                );
+            }
+            emitOp(new RawBytesOp(bytes, inArity, outArity));
+            for (int i = 0; i < inArity; i++) sm.pop();
+            for (int i = 0; i < outArity; i++) {
+                String slotName = bindingName;
+                if (outArity != 1) slotName = bindingName + "." + i;
+                sm.push(slotName);
+            }
+            trackDepth();
         }
 
         // ---------------- array_literal ----------------

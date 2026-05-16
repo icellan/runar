@@ -1055,3 +1055,89 @@ func TestEncodePushData_Boundaries(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: raw_script ANF JSON round-trip — load, lower, emit; the emitted hex
+// must contain the input bytes verbatim, and a RawScriptSpan must be recorded.
+// ---------------------------------------------------------------------------
+
+func TestEmit_RawScriptRoundTrip(t *testing.T) {
+	// A minimal UnsafeSmartContract `unlock` method whose body is a single
+	// raw_script binding (the ANF shape produced by `asm({...})`). Bytes
+	// "5152935987" = OP_1 OP_2 OP_ADD OP_3 OP_EQUAL — an arbitrary opaque
+	// span the emitter must write verbatim.
+	const rawHex = "5152935987"
+	irJSON := `{
+		"contractName": "Anyone",
+		"properties": [],
+		"methods": [
+			{
+				"name": "unlock",
+				"params": [],
+				"isPublic": true,
+				"body": [
+					{ "name": "t0", "value": { "kind": "raw_script", "bytes": "` + rawHex + `", "in_arity": 0, "out_arity": 1 } }
+				]
+			}
+		]
+	}`
+
+	program, err := ir.LoadIRFromBytes([]byte(irJSON))
+	if err != nil {
+		t.Fatalf("LoadIRFromBytes failed: %v", err)
+	}
+
+	// Round-trip the marshalled JSON: in_arity 0 must survive.
+	if program.Methods[0].Body[0].Value.Bytes != rawHex {
+		t.Errorf("loaded raw_script bytes = %q, want %q", program.Methods[0].Body[0].Value.Bytes, rawHex)
+	}
+	if program.Methods[0].Body[0].Value.OutArity != 1 {
+		t.Errorf("loaded raw_script out_arity = %d, want 1", program.Methods[0].Body[0].Value.OutArity)
+	}
+
+	methods, err := LowerToStack(program)
+	if err != nil {
+		t.Fatalf("LowerToStack failed: %v", err)
+	}
+
+	// The lowered method must contain exactly one raw_bytes op carrying the
+	// decoded bytes.
+	var rawOps int
+	for _, m := range methods {
+		for _, op := range m.Ops {
+			if op.Op == "raw_bytes" {
+				rawOps++
+				if got := hex.EncodeToString(op.RawBytes); got != rawHex {
+					t.Errorf("raw_bytes op bytes = %q, want %q", got, rawHex)
+				}
+				if op.InArity != 0 || op.OutArity != 1 {
+					t.Errorf("raw_bytes op arities = (%d, %d), want (0, 1)", op.InArity, op.OutArity)
+				}
+			}
+		}
+	}
+	if rawOps != 1 {
+		t.Fatalf("expected exactly 1 raw_bytes op, got %d", rawOps)
+	}
+
+	result, err := Emit(methods)
+	if err != nil {
+		t.Fatalf("Emit failed: %v", err)
+	}
+
+	// The emitted hex must equal the input bytes verbatim (single-method
+	// contract, no dispatch preamble).
+	if result.ScriptHex != rawHex {
+		t.Errorf("emitted hex = %q, want %q", result.ScriptHex, rawHex)
+	}
+
+	// A RawScriptSpan covering the whole span must be recorded.
+	if len(result.RawScriptSpans) != 1 {
+		t.Fatalf("expected 1 RawScriptSpan, got %d", len(result.RawScriptSpans))
+	}
+	span := result.RawScriptSpans[0]
+	wantLen := len(rawHex) / 2
+	if span.Offset != 0 || span.Length != wantLen || span.InArity != 0 || span.OutArity != 1 {
+		t.Errorf("RawScriptSpan = %+v, want {Offset:0 Length:%d InArity:0 OutArity:1}", span, wantLen)
+	}
+}

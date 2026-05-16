@@ -18,6 +18,7 @@ import runar.compiler.ir.stack.PlaceholderOp;
 import runar.compiler.ir.stack.PushCodeSepIndexOp;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
+import runar.compiler.ir.stack.RawBytesOp;
 import runar.compiler.ir.stack.RollOp;
 import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackMethod;
@@ -37,6 +38,22 @@ import runar.compiler.ir.stack.TuckOp;
 public final class Emit {
 
     private Emit() {}
+
+    /**
+     * Byte range produced by a {@code raw_script} ANF node. The bytes are
+     * emitted verbatim by {@link Ctx#emitRawBytes}; the static analyzer
+     * reads these spans so it can skip the contents (which are opaque,
+     * peephole-barrier-protected, and not guaranteed to form a
+     * well-formed opcode stream).
+     */
+    public record RawScriptSpan(int offset, int length, int inArity, int outArity) {}
+
+    /**
+     * Structured emit result: hex + the raw_script span table. The legacy
+     * {@link #run(StackProgram)} entry point returns only the hex string;
+     * use {@link #runResult(StackProgram)} when the span table is needed.
+     */
+    public record EmitResult(String scriptHex, List<RawScriptSpan> rawScriptSpans) {}
 
     // ------------------------------------------------------------------
     // Opcode table
@@ -153,6 +170,15 @@ public final class Emit {
     // ------------------------------------------------------------------
 
     public static String run(StackProgram program) {
+        return runResult(program).scriptHex();
+    }
+
+    /**
+     * Structured variant of {@link #run(StackProgram)} that returns both
+     * the emitted hex and the raw_script span table. The span table is
+     * empty for programs that contain no {@code raw_script} ANF nodes.
+     */
+    public static EmitResult runResult(StackProgram program) {
         Ctx ctx = new Ctx();
 
         List<StackMethod> publicMethods = new java.util.ArrayList<>();
@@ -160,7 +186,9 @@ public final class Emit {
             if (!"constructor".equals(m.name())) publicMethods.add(m);
         }
 
-        if (publicMethods.isEmpty()) return "";
+        if (publicMethods.isEmpty()) {
+            return new EmitResult("", List.copyOf(ctx.rawScriptSpans));
+        }
 
         if (publicMethods.size() == 1) {
             for (StackOp op : publicMethods.get(0).ops()) emitStackOp(op, ctx);
@@ -168,7 +196,7 @@ public final class Emit {
             emitMethodDispatch(publicMethods, ctx);
         }
 
-        return ctx.hex.toString();
+        return new EmitResult(ctx.hex.toString(), List.copyOf(ctx.rawScriptSpans));
     }
 
     private static void emitMethodDispatch(List<StackMethod> methods, Ctx ctx) {
@@ -222,6 +250,12 @@ public final class Emit {
             ctx.appendHex("00");
         } else if (op instanceof PushCodeSepIndexOp) {
             ctx.appendHex("00");
+        } else if (op instanceof RawBytesOp rb) {
+            // Opaque opcode-byte span from a raw_script ANF node. Written
+            // verbatim with no re-encoding; the declared arities are
+            // recorded into the artifact's rawScriptSpans so the analyzer
+            // can treat the span as one opaque stack-effect step.
+            ctx.emitRawBytes(rb.bytes(), rb.inArity(), rb.outArity());
         }
     }
 
@@ -241,17 +275,36 @@ public final class Emit {
 
     private static final class Ctx {
         final StringBuilder hex = new StringBuilder();
+        final java.util.List<RawScriptSpan> rawScriptSpans = new java.util.ArrayList<>();
+        int byteLength = 0;
 
-        void appendHex(String s) { hex.append(s); }
+        void appendHex(String s) {
+            hex.append(s);
+            byteLength += s.length() / 2;
+        }
 
         void emitOpcode(String name) {
             Integer b = OPCODES.get(name);
             if (b == null) throw new RuntimeException("Unknown opcode: " + name);
-            hex.append(byteToHex(b));
+            appendHex(byteToHex(b));
         }
 
         void emitPush(PushValue value) {
             appendHex(encodePushValue(value));
+        }
+
+        /**
+         * Write a verbatim byte span emitted by a {@link RawBytesOp}.
+         * No re-encoding takes place. A {@link RawScriptSpan} capturing
+         * the span's offset, length, and declared stack-effect arities
+         * is recorded so the static analyzer can treat the span as one
+         * opaque stack-effect step.
+         */
+        void emitRawBytes(byte[] bytes, int inArity, int outArity) {
+            if (bytes == null || bytes.length == 0) return;
+            int offset = byteLength;
+            appendHex(bytesToHex(bytes));
+            rawScriptSpans.add(new RawScriptSpan(offset, bytes.length, inArity, outArity));
         }
     }
 
@@ -316,6 +369,34 @@ public final class Emit {
         }
         byte[] numBytes = encodeScriptNumber(n);
         return bytesToHex(encodePushData(numBytes));
+    }
+
+    /**
+     * Encodes a {@link BigInteger} as a Bitcoin Script push operation and
+     * returns the resulting hex bytes. Public for the asm() array-body
+     * encoder in the frontend.
+     */
+    public static String encodePushBigIntHex(BigInteger n) {
+        return encodePushBigInt(n);
+    }
+
+    /**
+     * Encodes raw bytes as a Bitcoin Script push-data operation and
+     * returns the result as a hex string. Public for the asm() array-body
+     * encoder ({@code push('<hex>')} elements).
+     */
+    public static String encodePushBytesHex(byte[] data) {
+        return bytesToHex(encodePushData(data));
+    }
+
+    /**
+     * Returns the single-byte encoding of a named BSV opcode (e.g.
+     * {@code OP_DUP}), or {@code -1} if the name is unknown. Public for
+     * the asm() array-body encoder in the frontend.
+     */
+    public static int opcodeByte(String name) {
+        Integer b = OPCODES.get(name);
+        return b == null ? -1 : (b & 0xff);
     }
 
     static byte[] encodePushData(byte[] data) {

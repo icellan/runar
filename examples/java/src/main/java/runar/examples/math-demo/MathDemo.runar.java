@@ -5,16 +5,23 @@ import java.math.BigInteger;
 import runar.lang.StatefulSmartContract;
 import runar.lang.annotations.Public;
 
+import static runar.lang.Builtins.abs;
 import static runar.lang.Builtins.assertThat;
+import static runar.lang.Builtins.bool;
 import static runar.lang.Builtins.clamp;
+import static runar.lang.Builtins.divmod;
 import static runar.lang.Builtins.gcd;
 import static runar.lang.Builtins.log2;
+import static runar.lang.Builtins.max;
+import static runar.lang.Builtins.min;
 import static runar.lang.Builtins.mulDiv;
 import static runar.lang.Builtins.percentOf;
 import static runar.lang.Builtins.pow;
 import static runar.lang.Builtins.safediv;
+import static runar.lang.Builtins.safemod;
 import static runar.lang.Builtins.sign;
 import static runar.lang.Builtins.sqrt;
+import static runar.lang.Builtins.within;
 
 /**
  * MathDemo -- exercises every built-in math function available in
@@ -109,5 +116,60 @@ class MathDemo extends StatefulSmartContract {
     @Public
     void computeLog2() {
         this.value = log2(this.value);
+    }
+
+    /** Replaces the stored value with its absolute value. */
+    @Public
+    void makeAbs() {
+        this.value = abs(this.value);
+    }
+
+    /** Replaces the stored value with {@code min(value, other)}. */
+    @Public
+    void takeMin(BigInteger other) {
+        this.value = min(this.value, other);
+    }
+
+    /** Replaces the stored value with {@code max(value, other)}. */
+    @Public
+    void takeMax(BigInteger other) {
+        this.value = max(this.value, other);
+    }
+
+    /**
+     * Asserts that the stored value lies in the half-open range
+     * {@code [lo, hi)} -- the semantics of Bitcoin Script's OP_WITHIN.
+     */
+    @Public
+    void assertWithin(BigInteger lo, BigInteger hi) {
+        assertThat(within(this.value, lo, hi));
+    }
+
+    /**
+     * Safe modulo -- replaces the stored value with
+     * {@code value mod divisor}, asserting that {@code divisor} is non-zero.
+     */
+    @Public
+    void moduloBy(BigInteger divisor) {
+        this.value = safemod(this.value, divisor);
+    }
+
+    /**
+     * Replaces the stored value with {@code value / divisor} via Rúnar's
+     * {@code divmod} builtin (canonical OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD
+     * OP_DROP sequence).
+     */
+    @Public
+    void divmodBy(BigInteger divisor) {
+        this.value = divmod(this.value, divisor);
+    }
+
+    /**
+     * Asserts that the stored value is "truthy" (non-zero) using the
+     * dedicated {@code bool} builtin which compiles to OP_0NOTEQUAL.
+     */
+    @Public
+    void assertNonZero() {
+        assertThat(bool(this.value));
     }
 }

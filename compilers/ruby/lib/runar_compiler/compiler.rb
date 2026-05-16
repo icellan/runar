@@ -75,6 +75,7 @@ module RunarCompiler
     :code_sep_index_slots,
     :code_separator_index,
     :code_separator_indices,
+    :raw_script_spans,
     :build_timestamp,
     :anf,
     keyword_init: true
@@ -93,6 +94,7 @@ module RunarCompiler
       code_sep_index_slots: [],
       code_separator_index: nil,
       code_separator_indices: nil,
+      raw_script_spans: nil,
       build_timestamp: "",
       anf: nil
     )
@@ -324,6 +326,7 @@ module RunarCompiler
       emit_result.code_separator_indices,
       code_sep_index_slots: emit_result.code_sep_index_slots,
       source_map: emit_result.source_map,
+      raw_script_spans: emit_result.raw_script_spans,
       stack_methods: stack_methods
     )
   end
@@ -592,6 +595,7 @@ module RunarCompiler
     code_separator_indices = nil,
     code_sep_index_slots: [],
     source_map: nil,
+    raw_script_spans: nil,
     stack_methods: nil,
     include_ir: false,
     include_source_map: true
@@ -708,6 +712,7 @@ module RunarCompiler
       code_sep_index_slots: code_sep_index_slots,
       code_separator_index: cs_index,
       code_separator_indices: cs_indices,
+      raw_script_spans: (raw_script_spans && !raw_script_spans.empty? ? raw_script_spans : nil),
       build_timestamp: Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     )
 
@@ -821,6 +826,17 @@ module RunarCompiler
     d["codeSeparatorIndex"] = artifact.code_separator_index unless artifact.code_separator_index.nil?
     d["codeSeparatorIndices"] = artifact.code_separator_indices unless artifact.code_separator_indices.nil?
 
+    if artifact.raw_script_spans && !artifact.raw_script_spans.empty?
+      d["rawScriptSpans"] = artifact.raw_script_spans.map do |span|
+        {
+          "offset" => span.offset,
+          "length" => span.length,
+          "inArity" => span.in_arity,
+          "outArity" => span.out_arity,
+        }
+      end
+    end
+
     d["buildTimestamp"] = artifact.build_timestamp
 
     d["anf"] = _serialize_anf_program(artifact.anf) unless artifact.anf.nil?
@@ -872,6 +888,13 @@ module RunarCompiler
       d["satoshis"] = v.satoshis unless v.satoshis.nil?
       d["stateValues"] = v.state_values unless v.state_values.nil?
       d["scriptBytes"] = v.script_bytes unless v.script_bytes.nil?
+      if v.kind == "raw_script"
+        # Opaque opcode-byte span -- emit bytes + arities explicitly so
+        # in_arity 0 / out_arity 0 survive the round-trip.
+        d["bytes"] = v.bytes || ""
+        d["in_arity"] = v.in_arity || 0
+        d["out_arity"] = v.out_arity || 0
+      end
       d
     end
 

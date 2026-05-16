@@ -9,6 +9,8 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
+
+	"github.com/icellan/runar/compilers/go/codegen"
 )
 
 // ---------------------------------------------------------------------------
@@ -82,7 +84,7 @@ func Parse(source []byte, fileName string) *ParseResult {
 
 	contract := p.findContract(root)
 	if contract == nil {
-		p.addError("no class extending SmartContract or StatefulSmartContract found")
+		p.addError("no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found")
 		return &ParseResult{Errors: p.errors}
 	}
 
@@ -172,11 +174,16 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 		return nil
 	}
 
-	// The heritage clause should contain "SmartContract" or "StatefulSmartContract"
+	// The heritage clause should contain "SmartContract",
+	// "StatefulSmartContract", or "UnsafeSmartContract". Order matters:
+	// both "StatefulSmartContract" and "UnsafeSmartContract" contain the
+	// substring "SmartContract", so they must be checked first.
 	heritageText := p.nodeText(heritage)
 	parentClass := ""
 	if strings.Contains(heritageText, "StatefulSmartContract") {
 		parentClass = "StatefulSmartContract"
+	} else if strings.Contains(heritageText, "UnsafeSmartContract") {
+		parentClass = "UnsafeSmartContract"
 	} else if strings.Contains(heritageText, "SmartContract") {
 		parentClass = "SmartContract"
 	} else {
@@ -974,6 +981,28 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 	case "subscript_expression":
 		return p.parseSubscriptExpression(node)
 
+	case "array":
+		// TypeScript array literal: [a, b, c]. Match the dedicated
+		// per-format parsers (sol, move, rust, python, zig, ruby, java)
+		// which all emit an ArrayLiteralExpr so checkMultiSig and other
+		// builtins that consume Sig[]/PubKey[] type-check across all
+		// 7 compilers. Anything that recurses into a child here must
+		// itself be a real expression — tree-sitter's "array" node
+		// children are punctuation tokens ("[", "]", ",") and inner
+		// expressions interleaved; filter to the parseable nodes.
+		elements := []Expression{}
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			t := child.Type()
+			if t == "[" || t == "]" || t == "," {
+				continue
+			}
+			if expr := p.parseExpression(child); expr != nil {
+				elements = append(elements, expr)
+			}
+		}
+		return ArrayLiteralExpr{Elements: elements}
+
 	case "identifier":
 		name := p.nodeText(node)
 		if name == "true" {
@@ -1187,6 +1216,18 @@ func (p *parseContext) parseCallExpression(node *sitter.Node) Expression {
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
 
+	// Special-case asm({ body, in_arity?, out_arity? }) — normalise the
+	// object-literal argument into a CallExpr with three positional args
+	// (body, in_arity, out_arity) so downstream passes only have to know
+	// how to walk a CallExpr. Both the hex-string body form and the
+	// array-form body are supported; the array form is encoded to a hex
+	// string at parse time so all downstream passes see identical IR.
+	// The optional generic type argument asm<T>(...) flags the
+	// expression form, captured on CallExpr.AsmReturnType.
+	if funcNode.Type() == "identifier" && p.nodeText(funcNode) == "asm" {
+		return p.parseAsmCall(node, argsNode)
+	}
+
 	callee := p.parseExpression(funcNode)
 	if callee == nil {
 		callee = Identifier{Name: "unknown"}
@@ -1198,6 +1239,318 @@ func (p *parseContext) parseCallExpression(node *sitter.Node) Expression {
 	}
 
 	return CallExpr{Callee: callee, Args: args}
+}
+
+// parseAsmCall decodes an asm({ body, in_arity?, out_arity? }) call into a
+// CallExpr whose positional args are
+//
+//	[ByteStringLiteral(body), BigIntLiteral(in_arity), BigIntLiteral(out_arity)].
+//
+// Two surface body shapes are accepted:
+//   - Hex string literal:  body: '76a90088ac'
+//   - Array of opcode names / push() calls:
+//     body: [OP_DUP, OP_HASH160, push('1234abcd'), OP_EQUALVERIFY]
+//     Each element is encoded to its byte representation at parse time,
+//     so the resulting IR is byte-identical to the equivalent hex body.
+//
+// The optional generic type argument asm<T>({...}) marks the expression
+// form; the captured T is stashed on CallExpr.AsmReturnType. T must be one
+// of bigint, boolean, or ByteString.
+//
+// On malformed input we still return a syntactically valid CallExpr so
+// later passes can produce additional diagnostics without crashing.
+func (p *parseContext) parseAsmCall(callNode, argsNode *sitter.Node) Expression {
+	calleeExpr := Identifier{Name: "asm"}
+
+	// Capture the generic type argument asm<T>({...}) if present, BEFORE
+	// arg-shape diagnostics so the expression form still records its
+	// return type even when other args are malformed.
+	asmReturnType := p.parseAsmGenericTypeArg(callNode)
+
+	// Collect the call arguments (skip punctuation).
+	var callArgs []*sitter.Node
+	if argsNode != nil {
+		for i := 0; i < int(argsNode.ChildCount()); i++ {
+			child := argsNode.Child(i)
+			t := child.Type()
+			if t == "(" || t == ")" || t == "," {
+				continue
+			}
+			callArgs = append(callArgs, child)
+		}
+	}
+
+	if len(callArgs) != 1 {
+		p.addError(fmt.Sprintf("asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }, got %d arguments", len(callArgs)))
+		return CallExpr{Callee: calleeExpr, Args: nil, AsmReturnType: asmReturnType}
+	}
+
+	objNode := callArgs[0]
+	if objNode.Type() != "object" {
+		p.addError(fmt.Sprintf("asm() argument must be an object literal { body: '<hex>', in_arity?: <int>, out_arity?: <int> }, got '%s'", objNode.Type()))
+		return CallExpr{Callee: calleeExpr, Args: nil, AsmReturnType: asmReturnType}
+	}
+
+	var bodyExpr Expression
+	var inArityExpr Expression
+	var outArityExpr Expression
+
+	for i := 0; i < int(objNode.ChildCount()); i++ {
+		prop := objNode.Child(i)
+		if prop.Type() != "pair" {
+			continue
+		}
+		keyNode := prop.ChildByFieldName("key")
+		valNode := prop.ChildByFieldName("value")
+		if keyNode == nil || valNode == nil {
+			continue
+		}
+		key := p.nodeText(keyNode)
+
+		switch key {
+		case "body":
+			if valNode.Type() == "string" || valNode.Type() == "template_string" {
+				raw := p.nodeText(valNode)
+				if len(raw) >= 2 {
+					raw = raw[1 : len(raw)-1]
+				}
+				bodyExpr = ByteStringLiteral{Value: raw}
+			} else if valNode.Type() == "array" {
+				encoded := p.encodeAsmArrayBody(valNode)
+				bodyExpr = ByteStringLiteral{Value: encoded}
+			} else {
+				p.addError(fmt.Sprintf("asm() body must be a hex string literal or an array of opcode names / push() calls; got '%s'.", valNode.Type()))
+				bodyExpr = ByteStringLiteral{Value: ""}
+			}
+		case "in_arity":
+			if parsed, ok := p.parseArityLiteral(valNode, "in_arity"); ok {
+				inArityExpr = BigIntLiteral{Value: big.NewInt(parsed)}
+			}
+		case "out_arity":
+			if parsed, ok := p.parseArityLiteral(valNode, "out_arity"); ok {
+				outArityExpr = BigIntLiteral{Value: big.NewInt(parsed)}
+			}
+		default:
+			p.addError(fmt.Sprintf("asm() does not accept the '%s' field; valid fields are 'body', 'in_arity', 'out_arity'.", key))
+		}
+	}
+
+	if bodyExpr == nil {
+		p.addError("asm() requires a 'body' field with a hex string literal value")
+		bodyExpr = ByteStringLiteral{Value: ""}
+	}
+	// Defaults: in_arity=0, out_arity=1. The out_arity=1 default reflects
+	// the public-method-must-terminate-truthy invariant.
+	if inArityExpr == nil {
+		inArityExpr = BigIntLiteral{Value: big.NewInt(0)}
+	}
+	if outArityExpr == nil {
+		outArityExpr = BigIntLiteral{Value: big.NewInt(1)}
+	}
+
+	return CallExpr{
+		Callee:        calleeExpr,
+		Args:          []Expression{bodyExpr, inArityExpr, outArityExpr},
+		AsmReturnType: asmReturnType,
+	}
+}
+
+// parseAsmGenericTypeArg parses the optional generic type argument on
+// asm<T>({...}). Returns the captured primitive type name when present and
+// valid, or "" if the call has no type argument. Pushes a diagnostic (and
+// returns "") when the type argument is present but not a primitive value
+// type (bigint / boolean / ByteString).
+func (p *parseContext) parseAsmGenericTypeArg(callNode *sitter.Node) string {
+	typeArgsNode := p.findChildByType(callNode, "type_arguments")
+	if typeArgsNode == nil {
+		return ""
+	}
+	var typeArgs []*sitter.Node
+	for i := 0; i < int(typeArgsNode.ChildCount()); i++ {
+		child := typeArgsNode.Child(i)
+		t := child.Type()
+		if t == "<" || t == ">" || t == "," {
+			continue
+		}
+		typeArgs = append(typeArgs, child)
+	}
+	if len(typeArgs) == 0 {
+		return ""
+	}
+	if len(typeArgs) > 1 {
+		p.addError(fmt.Sprintf("asm<T>() takes at most one type argument, got %d", len(typeArgs)))
+		return ""
+	}
+	text := strings.TrimSpace(p.nodeText(typeArgs[0]))
+	if text == "bigint" || text == "boolean" || text == "ByteString" {
+		return text
+	}
+	p.addError(fmt.Sprintf("asm<T>() return type must be 'bigint', 'boolean', or 'ByteString'; got '%s'", text))
+	return ""
+}
+
+// encodeAsmArrayBody encodes an asm({ body: [OP_DUP, push(0x42), ...] })
+// array literal to its hex byte representation. Uses the same push-encoding
+// helpers as the emit pass so the resulting bytes are byte-identical to what
+// the emitter would produce for the equivalent literal.
+func (p *parseContext) encodeAsmArrayBody(arrayNode *sitter.Node) string {
+	var hexStr string
+	for i := 0; i < int(arrayNode.ChildCount()); i++ {
+		elem := arrayNode.Child(i)
+		t := elem.Type()
+		if t == "[" || t == "]" || t == "," {
+			continue
+		}
+
+		if t == "identifier" {
+			name := p.nodeText(elem)
+			b, ok := codegen.OpcodeByte(name)
+			if !ok {
+				p.addError(fmt.Sprintf("Unknown opcode '%s' in asm() body array. Expected an OP_* identifier (e.g. OP_DUP, OP_HASH160) or a push(...) call.", name))
+				continue
+			}
+			hexStr += fmt.Sprintf("%02x", b)
+			continue
+		}
+
+		if t == "call_expression" {
+			calleeNode := elem.ChildByFieldName("function")
+			if calleeNode == nil || calleeNode.Type() != "identifier" || p.nodeText(calleeNode) != "push" {
+				calleeText := ""
+				if calleeNode != nil {
+					calleeText = p.nodeText(calleeNode)
+				}
+				p.addError(fmt.Sprintf("asm() body array call must be 'push(<literal>)', got '%s(...)'", calleeText))
+				continue
+			}
+			pushArgsNode := elem.ChildByFieldName("arguments")
+			var pushArgs []*sitter.Node
+			if pushArgsNode != nil {
+				for j := 0; j < int(pushArgsNode.ChildCount()); j++ {
+					c := pushArgsNode.Child(j)
+					ct := c.Type()
+					if ct == "(" || ct == ")" || ct == "," {
+						continue
+					}
+					pushArgs = append(pushArgs, c)
+				}
+			}
+			if len(pushArgs) != 1 {
+				p.addError(fmt.Sprintf("push() takes exactly one literal argument, got %d", len(pushArgs)))
+				continue
+			}
+			if pushed, ok := p.encodeAsmPushLiteral(pushArgs[0]); ok {
+				hexStr += pushed
+			}
+			continue
+		}
+
+		p.addError(fmt.Sprintf("asm() body array element must be an opcode identifier (e.g. OP_DUP) or a push(<literal>) call; got '%s'", t))
+	}
+	return hexStr
+}
+
+// encodeAsmPushLiteral encodes a literal argument passed to push(...) inside
+// an asm() body array. Returns the encoded hex string and true, or "" and
+// false if the literal is unrecognised (with a diagnostic pushed).
+func (p *parseContext) encodeAsmPushLiteral(node *sitter.Node) (string, bool) {
+	switch node.Type() {
+	case "number":
+		text := p.nodeText(node)
+		numStr := text
+		if strings.HasSuffix(numStr, "n") {
+			numStr = numStr[:len(numStr)-1]
+		}
+		bi := new(big.Int)
+		if _, ok := bi.SetString(numStr, 0); !ok {
+			if _, ok2 := bi.SetString(numStr, 10); !ok2 {
+				p.addError(fmt.Sprintf("push() argument is not a valid integer literal: '%s'", text))
+				return "", false
+			}
+		}
+		h, _ := codegen.EncodePushBigInt(bi)
+		return h, true
+
+	case "unary_expression":
+		opNode := node.ChildByFieldName("operator")
+		argNode := node.ChildByFieldName("argument")
+		if opNode != nil && argNode != nil && p.nodeText(opNode) == "-" && argNode.Type() == "number" {
+			text := p.nodeText(argNode)
+			numStr := text
+			if strings.HasSuffix(numStr, "n") {
+				numStr = numStr[:len(numStr)-1]
+			}
+			bi := new(big.Int)
+			if _, ok := bi.SetString(numStr, 0); !ok {
+				if _, ok2 := bi.SetString(numStr, 10); !ok2 {
+					p.addError(fmt.Sprintf("push() argument is not a valid integer literal: '%s'", text))
+					return "", false
+				}
+			}
+			bi.Neg(bi)
+			h, _ := codegen.EncodePushBigInt(bi)
+			return h, true
+		}
+		p.addError("push() argument must be a literal value (bigint, number, boolean, or hex string), got prefix expression")
+		return "", false
+
+	case "true":
+		return "51", true // OP_TRUE
+	case "false":
+		return "00", true // OP_FALSE (alias of OP_0)
+
+	case "string", "template_string":
+		raw := p.nodeText(node)
+		if len(raw) >= 2 {
+			raw = raw[1 : len(raw)-1]
+		}
+		if len(raw)%2 != 0 || !isHexString(raw) {
+			p.addError(fmt.Sprintf("push() ByteString argument must be even-length hex (got '%s')", raw))
+			return "", false
+		}
+		bytes := make([]byte, len(raw)/2)
+		for i := range bytes {
+			v := new(big.Int)
+			v.SetString(raw[i*2:i*2+2], 16)
+			bytes[i] = byte(v.Int64())
+		}
+		return codegen.EncodePushBytesHex(bytes), true
+	}
+
+	p.addError(fmt.Sprintf("push() argument must be a literal value (bigint, number, boolean, or hex string), got '%s'", node.Type()))
+	return "", false
+}
+
+// parseArityLiteral decodes a non-negative integer literal arity field for
+// asm(). Returns the value and true, or 0 and false (with a diagnostic) on
+// error.
+func (p *parseContext) parseArityLiteral(node *sitter.Node, fieldName string) (int64, bool) {
+	switch node.Type() {
+	case "number":
+		text := p.nodeText(node)
+		numStr := text
+		if strings.HasSuffix(numStr, "n") {
+			numStr = numStr[:len(numStr)-1]
+		}
+		bi := new(big.Int)
+		if _, ok := bi.SetString(numStr, 0); !ok {
+			if _, ok2 := bi.SetString(numStr, 10); !ok2 {
+				p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal, got '%s'", fieldName, text))
+				return 0, false
+			}
+		}
+		if bi.Sign() < 0 {
+			p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal, got '%s'", fieldName, text))
+			return 0, false
+		}
+		return bi.Int64(), true
+	case "unary_expression":
+		p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal", fieldName))
+		return 0, false
+	default:
+		p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal, got '%s'", fieldName, node.Type()))
+		return 0, false
+	}
 }
 
 func (p *parseContext) parseCallArgs(node *sitter.Node) []Expression {

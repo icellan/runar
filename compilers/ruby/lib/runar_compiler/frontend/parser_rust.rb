@@ -555,7 +555,8 @@ module RunarCompiler
           # Attributes at top level
           if check(TOK_HASH)
             attr = parse_attribute
-            if attr == "runar::contract" || attr == "runar::stateful_contract"
+            if attr == "runar::contract" || attr == "runar::stateful_contract" ||
+               attr == "runar::unsafe_contract"
               # Optional pub before struct
               advance if check(TOK_PUB)
               if check(TOK_STRUCT)
@@ -564,6 +565,11 @@ module RunarCompiler
                   @contract_name = result[:name]
                   parent_class = result[:parent_class]
                   properties = result[:properties]
+                  # The attribute is authoritative for the explicit
+                  # stateful / unsafe spellings; structural inference
+                  # only kicks in for the plain `#[runar::contract]`.
+                  parent_class = "StatefulSmartContract" if attr == "runar::stateful_contract"
+                  parent_class = "UnsafeSmartContract" if attr == "runar::unsafe_contract"
                 end
               end
               next

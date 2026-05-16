@@ -108,14 +108,19 @@ pub fn typeNodeToRunarType(tn: TypeNode) RunarType {
 }
 
 pub const ParentClass = enum {
-    smart_contract, stateful_smart_contract,
+    smart_contract, stateful_smart_contract, unsafe_smart_contract,
 
     pub fn toTsString(self: ParentClass) []const u8 {
-        return switch (self) { .smart_contract => "SmartContract", .stateful_smart_contract => "StatefulSmartContract" };
+        return switch (self) {
+            .smart_contract => "SmartContract",
+            .stateful_smart_contract => "StatefulSmartContract",
+            .unsafe_smart_contract => "UnsafeSmartContract",
+        };
     }
     pub fn fromTsString(s: []const u8) ?ParentClass {
         if (std.mem.eql(u8, s, "SmartContract")) return .smart_contract;
         if (std.mem.eql(u8, s, "StatefulSmartContract")) return .stateful_smart_contract;
+        if (std.mem.eql(u8, s, "UnsafeSmartContract")) return .unsafe_smart_contract;
         return null;
     }
 };
@@ -183,7 +188,15 @@ pub const Expression = union(enum) {
 pub const PropertyAccess = struct { object: []const u8, property: []const u8 };
 pub const BinaryOp = struct { op: BinOperator, left: Expression, right: Expression };
 pub const UnaryOp = struct { op: UnaryOperator, operand: Expression };
-pub const CallExpr = struct { callee: []const u8, args: []Expression };
+pub const CallExpr = struct {
+    callee: []const u8,
+    args: []Expression,
+    /// Captured generic type argument for the expression-form
+    /// `asm<T>({...})` compiler intrinsic. One of "bigint", "boolean", or
+    /// "ByteString" when present; empty for the statement form and every
+    /// non-asm call.
+    asm_return_type: []const u8 = "",
+};
 pub const MethodCall = struct { object: []const u8, method: []const u8, args: []Expression };
 pub const Ternary = struct { condition: Expression, then_expr: Expression, else_expr: Expression };
 pub const IndexAccess = struct { object: Expression, index: Expression };
@@ -306,6 +319,11 @@ pub const ANFValue = union(enum) {
     add_raw_output: ANFAddRawOutput,
     add_data_output: ANFAddDataOutput,
     array_literal: ANFArrayLiteral,
+    /// Opaque opcode-byte span emitted verbatim by the asm({...}) intrinsic.
+    /// Bytes are an even-length hex string of raw Bitcoin Script opcode bytes
+    /// with declared stack effect (in_arity / out_arity). Treated as a hard
+    /// peephole barrier and never folded or DCE'd.
+    raw_script: ANFRawScript,
 };
 
 // -- TypeScript-matching value structs (used by stack_lower.zig) --
@@ -331,6 +349,10 @@ pub const ANFAddRawOutput = struct { satoshis: []const u8, script_bytes: []const
 /// output.
 pub const ANFAddDataOutput = struct { satoshis: []const u8, script_bytes: []const u8 = "" };
 pub const ANFArrayLiteral = struct { elements: []const []const u8 };
+/// Opaque opcode-byte span emitted by the asm({...}) compiler intrinsic.
+/// `bytes` is an even-length hex string of raw Bitcoin Script opcode bytes;
+/// `in_arity` / `out_arity` declare the stack effect.
+pub const ANFRawScript = struct { bytes: []const u8, in_arity: i32, out_arity: i32 };
 
 // -- Internal lowering helpers (stack_lower-only). These are NOT ANFValue
 // -- variants; they are parameter shapes that stack_lower adapts the
@@ -395,7 +417,34 @@ pub const StackIf = struct { then: []StackOp, @"else": ?[]StackOp = null };
 pub const Placeholder = struct { param_index: u32, param_name: []const u8 };
 pub const PushValue = union(enum) { bytes: []const u8, integer: i64, boolean: bool };
 
-pub const StackInstruction = union(enum) { op: Opcode, push_data: []const u8, push_int: i64, push_bool: bool, push_codesep_index: void, placeholder: Placeholder };
+pub const StackInstruction = union(enum) {
+    op: Opcode,
+    push_data: []const u8,
+    push_int: i64,
+    push_bool: bool,
+    push_codesep_index: void,
+    placeholder: Placeholder,
+    /// Opaque opcode-byte span emitted verbatim by a raw_script ANF node.
+    /// The peephole optimizer treats this as a hard barrier; the emitter
+    /// writes the bytes as-is and records a `RawScriptSpan` in the artifact.
+    raw_bytes: RawBytes,
+};
+
+/// Backing payload for the `raw_bytes` StackInstruction variant. Bytes are
+/// emitted verbatim; in_arity / out_arity describe the declared stack effect
+/// and are recorded into the artifact's `rawScriptSpans` so the analyzer can
+/// treat the span as one opaque stack-effect step.
+pub const RawBytes = struct { bytes: []const u8, in_arity: i32, out_arity: i32 };
+
+/// Byte range produced by a raw_script ANF node. Emitted alongside the
+/// artifact so the static analyzer can skip the contents (which are opaque
+/// and not guaranteed to form a well-formed opcode stream).
+pub const RawScriptSpan = struct {
+    offset: u32,
+    length: u32,
+    in_arity: i32,
+    out_arity: i32,
+};
 
 // ============================================================================
 // Layer 4: Artifact Types (output of Pass 6: Emit) — maps to artifact.ts
@@ -408,6 +457,11 @@ pub const RunarArtifact = struct {
     state_fields: ?[]StateField = null, constructor_slots: ?[]ConstructorSlot = null,
     code_sep_index_slots: ?[]CodeSepIndexSlot = null,
     code_separator_index: ?u32 = null, code_separator_indices: ?[]u32 = null,
+    /// Byte ranges produced by raw_script ANF nodes (asm({...}) intrinsic).
+    /// Null when no asm() calls were emitted. Static analyzers should skip
+    /// these spans — the contents are opaque and not guaranteed to form a
+    /// well-formed opcode stream.
+    raw_script_spans: ?[]RawScriptSpan = null,
     build_timestamp: []const u8,
 };
 pub const Artifact = RunarArtifact;
@@ -529,6 +583,7 @@ test "PrimitiveTypeName round-trip" {
 test "ParentClass round-trip" {
     try std.testing.expectEqual(ParentClass.smart_contract, ParentClass.fromTsString("SmartContract").?);
     try std.testing.expectEqual(ParentClass.stateful_smart_contract, ParentClass.fromTsString("StatefulSmartContract").?);
+    try std.testing.expectEqual(ParentClass.unsafe_smart_contract, ParentClass.fromTsString("UnsafeSmartContract").?);
 }
 
 test "ConstValue equality" {

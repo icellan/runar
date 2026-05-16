@@ -34,6 +34,7 @@ import runar.compiler.ir.anf.LoadParam;
 import runar.compiler.ir.anf.LoadProp;
 import runar.compiler.ir.anf.Loop;
 import runar.compiler.ir.anf.MethodCall;
+import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
 import runar.compiler.ir.ast.ArrayLiteralExpr;
@@ -795,6 +796,16 @@ public final class AnfLower {
         private String lowerCallExpr(CallExpr e) {
             Expression callee = e.callee();
 
+            // asm({...}) compiler intrinsic — the parser has already
+            // normalised the object-literal argument into three positional
+            // args (body, in_arity, out_arity). Lower to a single opaque
+            // raw_script ANF binding. Diagnostics for malformed args were
+            // already pushed by the validator; we defensively coerce
+            // missing values to safe defaults here.
+            if (callee instanceof Identifier asmId && "asm".equals(asmId.name())) {
+                return lowerAsmCall(e);
+            }
+
             // super(...) call
             boolean isSuper = (callee instanceof Identifier sid && "super".equals(sid.name()))
                 || (callee instanceof MemberExpr msm
@@ -920,6 +931,32 @@ public final class AnfLower {
             return emit(new MethodCall(calleeRef, "call", argRefs));
         }
 
+        /**
+         * Lower an asm({...}) call to a single opaque raw_script ANF
+         * binding. The parser has already normalised the object-literal
+         * argument into three positional args
+         * {@code (body, in_arity, out_arity)} where body is a
+         * ByteStringLiteral hex and the arities are BigIntLiterals;
+         * malformed shapes are tolerated here so the validator's
+         * diagnostics are the ones surfaced.
+         */
+        private String lowerAsmCall(CallExpr e) {
+            String bytes = "";
+            int inArity = 0;
+            int outArity = 1;
+            List<Expression> args = e.args();
+            if (args.size() >= 1 && args.get(0) instanceof ByteStringLiteral bs) {
+                bytes = bs.value();
+            }
+            if (args.size() >= 2 && args.get(1) instanceof BigIntLiteral bi) {
+                inArity = bi.value().intValueExact();
+            }
+            if (args.size() >= 3 && args.get(2) instanceof BigIntLiteral bi2) {
+                outArity = bi2.value().intValueExact();
+            }
+            return emit(new RawScript(bytes, inArity, outArity));
+        }
+
         private static boolean isThisPropCall(Expression callee, String name) {
             if (callee instanceof PropertyAccessExpr pa && pa.property().equals(name)) {
                 return true;
@@ -1011,6 +1048,10 @@ public final class AnfLower {
             }
             if (expr instanceof CallExpr ce) {
                 if (ce.callee() instanceof Identifier cid) {
+                    // Expression-form asm<ByteString>({...}) yields a byte value.
+                    if ("asm".equals(cid.name())) {
+                        return "ByteString".equals(ce.asmReturnType());
+                    }
                     if (BYTE_RETURNING_FUNCTIONS.contains(cid.name())) return true;
                     if (cid.name().length() >= 7
                         && cid.name().substring(0, 7).equals("extract")) {

@@ -82,13 +82,14 @@ fn validate_properties(contract: &ContractNode, errors: &mut Vec<Diagnostic>, wa
         }
     }
 
-    // SmartContract requires all properties to be readonly
-    if contract.parent_class == "SmartContract" {
+    // SmartContract (and the asm-escape-hatch UnsafeSmartContract) require all
+    // properties to be readonly.
+    if contract.parent_class == "SmartContract" || contract.parent_class == "UnsafeSmartContract" {
         for prop in &contract.properties {
             if !prop.readonly {
                 errors.push(Diagnostic::error(format!(
-                    "property '{}' in SmartContract must be readonly. Use StatefulSmartContract for mutable state.",
-                    prop.name
+                    "property '{}' in {} must be readonly. Use StatefulSmartContract for mutable state.",
+                    prop.name, contract.parent_class
                 ), Some(prop.source_location.clone())));
             }
         }
@@ -258,10 +259,189 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
         }
     }
 
+    // UnsafeSmartContract public methods must end with either an assert() call
+    // or a terminal asm({..., out_arity: 1}) — either way the script has to
+    // leave a truthy value on the stack.
+    if method.visibility == Visibility::Public && contract.parent_class == "UnsafeSmartContract" {
+        if !ends_with_assert(&method.body) && !ends_with_terminal_asm(&method.body) {
+            errors.push(Diagnostic::error(format!(
+                "public method '{}' must end with an assert() call or a terminal asm({{...}}) with out_arity 1",
+                method.name
+            ), Some(method.source_location.clone())));
+        }
+    }
+
+    // Gate asm({...}) calls on UnsafeSmartContract and check the structural args.
+    validate_asm_usage(method, contract, errors);
+
     // Validate all statements in method body
     for stmt in &method.body {
         validate_statement(stmt, errors);
     }
+}
+
+/// Reports whether `expr` is a call to the `asm` compiler intrinsic.
+fn is_asm_call(expr: &Expression) -> bool {
+    if let Expression::CallExpr { callee, .. } = expr {
+        if let Expression::Identifier { name } = callee.as_ref() {
+            return name == "asm";
+        }
+    }
+    false
+}
+
+/// Reports whether the last statement of `body` is an asm({...}) call with the
+/// parser-normalised positional args (body, in_arity, out_arity) and an
+/// out_arity literal equal to 1.
+///
+/// If/else branches that both terminate in a terminal asm (or assert) also
+/// count, mirroring the asserts-on-both-branches rule.
+fn ends_with_terminal_asm(body: &[Statement]) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    let last = &body[body.len() - 1];
+
+    if let Statement::ExpressionStatement { expression, .. } = last {
+        if !is_asm_call(expression) {
+            return false;
+        }
+        if let Expression::CallExpr { args, .. } = expression {
+            // The parser always rewrites asm({...}) into positional
+            // (body, in_arity, out_arity).
+            if args.len() == 3 {
+                if let Expression::BigIntLiteral { value } = &args[2] {
+                    return *value == 1;
+                }
+            }
+        }
+        return false;
+    }
+
+    if let Statement::IfStatement {
+        then_branch,
+        else_branch,
+        ..
+    } = last
+    {
+        let then_ends = ends_with_terminal_asm(then_branch) || ends_with_assert(then_branch);
+        let else_ends = else_branch
+            .as_ref()
+            .map_or(false, |e| ends_with_terminal_asm(e) || ends_with_assert(e));
+        return then_ends && else_ends;
+    }
+
+    false
+}
+
+/// Walks a method body and validates every asm({...}) call:
+///
+///   - Reject any asm() outside an UnsafeSmartContract.
+///   - Confirm the parser-normalised arg shape: (body, in_arity, out_arity)
+///     where body is a ByteString literal with even-length hex and the arities
+///     are non-negative bigint literals.
+///   - Expression-form asm<T>({...}) must have out_arity 1.
+///
+/// The parser already pushes most hex diagnostics; this pass is the back-stop
+/// that runs even when the parser shape is well-formed and is the only layer
+/// that knows about the contract's parentClass.
+fn validate_asm_usage(
+    method: &MethodNode,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    walk_expressions_in_body(&method.body, &mut |expr| {
+        if !is_asm_call(expr) {
+            return;
+        }
+        let (args, asm_return_type) = match expr {
+            Expression::CallExpr {
+                args,
+                asm_return_type,
+                ..
+            } => (args, asm_return_type),
+            _ => return,
+        };
+
+        if contract.parent_class != "UnsafeSmartContract" {
+            errors.push(Diagnostic::error(format!(
+                "'asm' is only available in contracts extending UnsafeSmartContract; got {}. Move the call into a class that extends UnsafeSmartContract (and import {{ UnsafeSmartContract }} from 'runar-lang').",
+                contract.parent_class
+            ), None));
+            return;
+        }
+
+        if args.len() != 3 {
+            errors.push(Diagnostic::error(
+                "asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }",
+                None,
+            ));
+            return;
+        }
+
+        match &args[0] {
+            Expression::ByteStringLiteral { value } => {
+                if value.is_empty() {
+                    errors.push(Diagnostic::error(
+                        "asm() body must be a non-empty hex string literal",
+                        None,
+                    ));
+                } else if value.len() % 2 != 0 {
+                    errors.push(Diagnostic::error(format!(
+                        "asm() body has odd hex length ({}); each opcode byte requires two hex characters",
+                        value.len()
+                    ), None));
+                } else if !is_hex_string(value) {
+                    errors.push(Diagnostic::error(
+                        "asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed",
+                        None,
+                    ));
+                }
+            }
+            _ => {
+                errors.push(Diagnostic::error(
+                    "asm() body must be a hex string literal",
+                    None,
+                ));
+                return;
+            }
+        }
+
+        match &args[1] {
+            Expression::BigIntLiteral { value } if *value >= 0 => {}
+            _ => errors.push(Diagnostic::error(
+                "asm() in_arity must be a non-negative integer literal",
+                None,
+            )),
+        }
+
+        let out_arity_val = match &args[2] {
+            Expression::BigIntLiteral { value } if *value >= 0 => Some(*value),
+            _ => {
+                errors.push(Diagnostic::error(
+                    "asm() out_arity must be a non-negative integer literal",
+                    None,
+                ));
+                None
+            }
+        };
+
+        // Expression-form asm<T>({...}) returns a value that flows into a
+        // let-binding — exactly ONE stack value, so out_arity must be 1.
+        if let (Some(ret), Some(out)) = (asm_return_type.as_deref(), out_arity_val) {
+            if out != 1 {
+                errors.push(Diagnostic::error(format!(
+                    "Expression-form asm<{}>() must have out_arity 1 (got {}); only a single stack value can be bound to the result variable.",
+                    ret, out
+                ), None));
+            }
+        }
+    });
+}
+
+/// Reports whether `s` contains only hex digits (0-9, a-f, A-F).
+fn is_hex_string(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn ends_with_assert(body: &[Statement]) -> bool {
@@ -713,7 +893,7 @@ fn walk_expressions_in_statement(stmt: &Statement, visitor: &mut impl FnMut(&Exp
 fn walk_expression(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
     visitor(expr);
     match expr {
-        Expression::CallExpr { callee, args } => {
+        Expression::CallExpr { callee, args, .. } => {
             walk_expression(callee, visitor);
             for arg in args {
                 walk_expression(arg, visitor);

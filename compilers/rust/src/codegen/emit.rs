@@ -36,6 +36,24 @@ pub struct CodeSepIndexSlot {
 }
 
 // ---------------------------------------------------------------------------
+// RawScriptSpan
+// ---------------------------------------------------------------------------
+
+/// Records a byte range produced by a `raw_script` ANF node. The bytes are
+/// emitted verbatim by `emit_raw_bytes`; the static analyzer reads these spans
+/// so it can skip the contents (which are opaque, peephole-barrier-protected,
+/// and not guaranteed to form a well-formed opcode stream).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawScriptSpan {
+    pub offset: usize,
+    pub length: usize,
+    #[serde(rename = "inArity")]
+    pub in_arity: usize,
+    #[serde(rename = "outArity")]
+    pub out_arity: usize,
+}
+
+// ---------------------------------------------------------------------------
 // SourceMapping
 // ---------------------------------------------------------------------------
 
@@ -65,6 +83,8 @@ pub struct EmitResult {
     pub code_separator_indices: Vec<usize>,
     /// Source mappings (opcode index to source location).
     pub source_map: Vec<SourceMapping>,
+    /// Byte ranges produced by `raw_script` ANF nodes.
+    pub raw_script_spans: Vec<RawScriptSpan>,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +103,7 @@ struct EmitContext {
     source_map: Vec<SourceMapping>,
     /// Pending source location to attach to the next emitted opcode.
     pending_source_loc: Option<crate::ir::SourceLocation>,
+    raw_script_spans: Vec<RawScriptSpan>,
 }
 
 impl EmitContext {
@@ -98,6 +119,7 @@ impl EmitContext {
             opcode_index: 0,
             source_map: Vec::new(),
             pending_source_loc: None,
+            raw_script_spans: Vec::new(),
         }
     }
 
@@ -149,6 +171,30 @@ impl EmitContext {
         self.constructor_slots.push(ConstructorSlot {
             param_index,
             byte_offset,
+        });
+    }
+
+    /// Write a verbatim byte span emitted by a `raw_bytes` StackOp.
+    ///
+    /// No re-encoding takes place — the bytes go out as supplied. The ASM
+    /// column shows `<raw N bytes>` so the human-readable disassembly is honest
+    /// about the opacity. A `RawScriptSpan` capturing the span's offset,
+    /// length, and declared stack-effect arities is recorded so the static
+    /// analyzer can treat the span as one opaque stack-effect step.
+    fn emit_raw_bytes(&mut self, bytes: &[u8], in_arity: usize, out_arity: usize) {
+        if bytes.is_empty() {
+            return;
+        }
+        let offset = self.byte_length;
+        self.record_source_mapping();
+        self.append_hex(&hex::encode(bytes));
+        self.asm_parts.push(format!("<raw {} bytes>", bytes.len()));
+        self.opcode_index += 1;
+        self.raw_script_spans.push(RawScriptSpan {
+            offset,
+            length: bytes.len(),
+            in_arity,
+            out_arity,
         });
     }
 
@@ -320,6 +366,18 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
             ctx.emit_placeholder(*param_index, param_name);
             Ok(())
         }
+        StackOp::RawBytes {
+            bytes,
+            in_arity,
+            out_arity,
+        } => {
+            // Opaque opcode-byte span from a raw_script ANF node. Written
+            // verbatim with no re-encoding; the declared arities are recorded
+            // into the artifact's rawScriptSpans so the analyzer can treat the
+            // span as one opaque stack-effect step.
+            ctx.emit_raw_bytes(bytes, *in_arity, *out_arity);
+            Ok(())
+        }
         StackOp::PushCodeSepIndex => {
             // Emit an OP_0 placeholder that the SDK will replace with the
             // adjusted codeSeparatorIndex at runtime.
@@ -397,6 +455,7 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
             code_separator_index: -1,
             code_separator_indices: Vec::new(),
             source_map: Vec::new(),
+            raw_script_spans: Vec::new(),
         });
     }
 
@@ -419,6 +478,7 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         source_map: ctx.source_map,
+        raw_script_spans: ctx.raw_script_spans,
     })
 }
 
@@ -474,6 +534,7 @@ pub fn emit_method(method: &StackMethod) -> Result<EmitResult, String> {
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         source_map: ctx.source_map,
+        raw_script_spans: ctx.raw_script_spans,
     })
 }
 
@@ -1304,6 +1365,84 @@ mod tests {
     // encode_push_data: boundary values
     // -------------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Test: raw_script ANF JSON round-trip — load, lower, emit; the emitted hex
+    // must contain the input bytes verbatim, and a RawScriptSpan must be
+    // recorded. Mirrors Go's TestEmit_RawScriptRoundTrip.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_emit_raw_script_round_trip() {
+        use super::super::stack::{lower_to_stack, StackOp};
+        use crate::ir::loader::load_ir_from_str;
+
+        // A minimal UnsafeSmartContract `unlock` method whose body is a single
+        // raw_script binding (the ANF shape produced by `asm({...})`). Bytes
+        // "5152935987" = OP_1 OP_2 OP_ADD OP_3 OP_EQUAL — an arbitrary opaque
+        // span the emitter must write verbatim.
+        const RAW_HEX: &str = "5152935987";
+        let ir_json = format!(
+            r#"{{
+                "contractName": "Anyone",
+                "properties": [],
+                "methods": [
+                    {{
+                        "name": "unlock",
+                        "params": [],
+                        "isPublic": true,
+                        "body": [
+                            {{ "name": "t0", "value": {{ "kind": "raw_script", "bytes": "{}", "in_arity": 0, "out_arity": 1 }} }}
+                        ]
+                    }}
+                ]
+            }}"#,
+            RAW_HEX
+        );
+
+        let program = load_ir_from_str(&ir_json).expect("load_ir_from_str should succeed");
+
+        // Round-trip the loaded IR: in_arity 0 must survive.
+        match &program.methods[0].body[0].value {
+            crate::ir::ANFValue::RawScript { bytes, in_arity, out_arity } => {
+                assert_eq!(bytes, RAW_HEX, "loaded raw_script bytes");
+                assert_eq!(*in_arity, 0, "loaded raw_script in_arity");
+                assert_eq!(*out_arity, 1, "loaded raw_script out_arity");
+            }
+            other => panic!("expected RawScript binding, got {:?}", other),
+        }
+
+        let methods = lower_to_stack(&program).expect("lower_to_stack should succeed");
+
+        // The lowered method must contain exactly one raw_bytes op carrying the
+        // decoded bytes.
+        let mut raw_ops = 0;
+        for m in &methods {
+            for op in &m.ops {
+                if let StackOp::RawBytes { bytes, in_arity, out_arity } = op {
+                    raw_ops += 1;
+                    assert_eq!(hex::encode(bytes), RAW_HEX, "raw_bytes op bytes");
+                    assert_eq!(*in_arity, 0, "raw_bytes op in_arity");
+                    assert_eq!(*out_arity, 1, "raw_bytes op out_arity");
+                }
+            }
+        }
+        assert_eq!(raw_ops, 1, "expected exactly 1 raw_bytes op");
+
+        let result = emit(&methods).expect("emit should succeed");
+
+        // The emitted hex must equal the input bytes verbatim (single-method
+        // contract, no dispatch preamble).
+        assert_eq!(result.script_hex, RAW_HEX, "emitted hex must be verbatim");
+
+        // A RawScriptSpan covering the whole span must be recorded.
+        assert_eq!(result.raw_script_spans.len(), 1, "expected 1 RawScriptSpan");
+        let span = &result.raw_script_spans[0];
+        assert_eq!(span.offset, 0, "span offset");
+        assert_eq!(span.length, RAW_HEX.len() / 2, "span length");
+        assert_eq!(span.in_arity, 0, "span in_arity");
+        assert_eq!(span.out_arity, 1, "span out_arity");
+    }
+
     #[test]
     fn test_encode_push_data_boundaries() {
         // (data_len, expected_prefix_hex)
@@ -1331,5 +1470,98 @@ mod tests {
                 &got[..got.len().min(12)],
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact-byte goldens (T-10 from
+    // audits/cross-language-completeness-20260514.md §5.2).
+    //
+    // The inline emit tests above check opcode-presence (`assert!(hex.contains("ac"))`)
+    // or length, not byte sequences — byte correctness rests on the cross-tier
+    // golden harness. These tests pin the exact hex for three representative
+    // contracts under fold-OFF, matching the checked-in conformance goldens
+    // (e.g. `conformance/tests/basic-p2pkh/expected-script.hex` = "76a90088ac")
+    // and the TS peer assertions in `06-emit.test.ts` describe block
+    // "exact-byte goldens (T-10)". A drift in any pre-emit pass surfaces here
+    // as a localized regression instead of an opaque cross-tier mismatch.
+    // -----------------------------------------------------------------------
+
+    fn compile_to_fold_off_hex(source: &str, file_name: &str) -> String {
+        let opts = crate::CompileOptions {
+            disable_constant_folding: true,
+            ..Default::default()
+        };
+        let artifact = crate::compile_from_source_str_with_options(source, Some(file_name), &opts)
+            .expect("compile should succeed");
+        artifact.script
+    }
+
+    #[test]
+    fn test_p2pkh_exact_byte_golden() {
+        // Canonical P2PKH locking script (fold-OFF). The 0x00 byte is the
+        // OP_0 placeholder for the constructor `pubKeyHash` slot — the SDK
+        // splices the real 20-byte address in at deploy time. Matches
+        // conformance/tests/basic-p2pkh/expected-script.hex byte-for-byte.
+        let source = r#"
+            import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+            class P2PKH extends SmartContract {
+              readonly pubKeyHash: Addr;
+              constructor(pubKeyHash: Addr) { super(pubKeyHash); this.pubKeyHash = pubKeyHash; }
+              public unlock(sig: Sig, pubKey: PubKey) {
+                assert(hash160(pubKey) === this.pubKeyHash);
+                assert(checkSig(sig, pubKey));
+              }
+            }
+        "#;
+        let hex = compile_to_fold_off_hex(source, "P2PKH.runar.ts");
+        assert_eq!(hex, "76a90088ac");
+    }
+
+    #[test]
+    fn test_minimal_checksig_exact_byte_golden() {
+        // Smallest signature-gated contract. Emits OP_0 (placeholder for
+        // `owner: PubKey`) + OP_CHECKSIG = "00ac".
+        let source = r#"
+            import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';
+            class Owned extends SmartContract {
+              readonly owner: PubKey;
+              constructor(owner: PubKey) { super(owner); this.owner = owner; }
+              public unlock(sig: Sig): void {
+                assert(checkSig(sig, this.owner));
+              }
+            }
+        "#;
+        let hex = compile_to_fold_off_hex(source, "Owned.runar.ts");
+        assert_eq!(hex, "00ac");
+    }
+
+    #[test]
+    fn test_stateful_counter_exact_byte_golden() {
+        // Stateful contract with implicit txPreimage + state-continuation +
+        // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
+        // injection (0xab at position 2), the BIP-143 generator pubkey
+        // (0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),
+        // and the addOutput serialization path. Cross-checked against the TS
+        // peer test in `06-emit.test.ts` (exact-byte goldens describe block).
+        let source = r#"
+            import { StatefulSmartContract, assert } from 'runar-lang';
+            class Counter extends StatefulSmartContract {
+              count: bigint;
+              constructor(count: bigint) { super(count); this.count = count; }
+              public increment(): void {
+                this.count = this.count + 1n;
+                this.addOutput(1000n, this.count);
+              }
+            }
+        "#;
+        let hex = compile_to_fold_off_hex(source, "Counter.runar.ts");
+        let expected = concat!(
+            "76ab547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "ad697601687f7782012c947f758258947f758258947f7781768b7702e803785679016a7e7c58",
+            "807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000",
+            "019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a0419",
+            "76a9147b7e0288ac7e7c58807c7e7eaa7b820128947f7701207f75877777",
+        );
+        assert_eq!(hex, expected);
     }
 }

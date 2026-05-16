@@ -121,3 +121,105 @@ fn test_emit_reverse_32_deterministic() {
     let b = collect(|s| emit_reverse_32(s));
     assert_eq!(sig(&a), sig(&b), "emit_reverse_32 should be deterministic");
 }
+
+// ---------------------------------------------------------------------------
+// T-11: Op-count goldens for every EC emitter.
+//
+// The existing _nontrivial tests above only assert `ops.len() > 0` (or > N).
+// These goldens lock the exact op count for each Rust emitter so codegen
+// drift surfaces as a localized regression rather than only as a cross-tier
+// hex mismatch in the conformance harness. The counts match the Python /
+// TS / Java peers for every emitter EXCEPT ecMul / ecMulGen — those two
+// emit 4 fewer raw StackOps in the Rust tier than the other six (63824 /
+// 63826 vs the peer 63828 / 63830). The final compiled hex is still
+// byte-identical across all 7 tiers (enforced by the conformance harness),
+// so the divergence is in the pre-peephole StackOp granularity, not in
+// emitted opcodes — but it is real and pinned here so any further drift
+// fails locally.
+//
+// To update goldens after an intentional codegen change, run the Java peer
+// EcTest and the Python peer test_ec.py, copy the new numbers, and update
+// every tier together.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ec_add_op_count_golden() {
+    let ops = collect(|s| emit_ec_add(s));
+    assert_eq!(ops.len(), 8078, "ecAdd op count drift");
+}
+
+#[test]
+fn test_ec_mul_op_count_golden() {
+    let ops = collect(|s| emit_ec_mul(s));
+    // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
+    // module-level comment above. Final hex is byte-identical.
+    assert_eq!(ops.len(), 63824, "ecMul op count drift");
+}
+
+#[test]
+fn test_ec_mul_gen_op_count_golden() {
+    let ops = collect(|s| emit_ec_mul_gen(s));
+    // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
+    // module-level comment above. Final hex is byte-identical.
+    assert_eq!(ops.len(), 63826, "ecMulGen op count drift");
+}
+
+#[test]
+fn test_ec_negate_op_count_golden() {
+    let ops = collect(|s| emit_ec_negate(s));
+    assert_eq!(ops.len(), 945, "ecNegate op count drift");
+}
+
+#[test]
+fn test_ec_on_curve_op_count_golden() {
+    let ops = collect(|s| emit_ec_on_curve(s));
+    assert_eq!(ops.len(), 520, "ecOnCurve op count drift");
+}
+
+#[test]
+fn test_ec_mod_reduce_op_count_golden() {
+    let ops = collect(|s| emit_ec_mod_reduce(s));
+    assert_eq!(ops.len(), 8, "ecModReduce op count drift");
+}
+
+#[test]
+fn test_ec_encode_compressed_op_count_golden() {
+    let ops = collect(|s| emit_ec_encode_compressed(s));
+    assert_eq!(ops.len(), 14, "ecEncodeCompressed op count drift");
+}
+
+#[test]
+fn test_ec_make_point_op_count_golden() {
+    let ops = collect(|s| emit_ec_make_point(s));
+    assert_eq!(ops.len(), 467, "ecMakePoint op count drift");
+}
+
+#[test]
+fn test_ec_point_x_op_count_golden() {
+    let ops = collect(|s| emit_ec_point_x(s));
+    assert_eq!(ops.len(), 233, "ecPointX op count drift");
+}
+
+#[test]
+fn test_ec_point_y_op_count_golden() {
+    let ops = collect(|s| emit_ec_point_y(s));
+    assert_eq!(ops.len(), 234, "ecPointY op count drift");
+}
+
+// Representative byte/shape assertion for the smallest emitter — ecModReduce
+// is exactly 8 ops in a known sequence. Mirrors the Python peer
+// `test_ec_mod_reduce_is_exact_eight_ops`.
+#[test]
+fn test_ec_mod_reduce_exact_op_shape() {
+    let ops = collect(|s| emit_ec_mod_reduce(s));
+    assert_eq!(ops.len(), 8);
+    // Render with the Debug format and check the load-bearing tokens.
+    // Avoids depending on private enum variant fields that differ subtly
+    // across Rust/Python/Java.
+    let rendered = format!("{:?}", ops);
+    assert!(rendered.contains("OP_2DUP"), "expected OP_2DUP token, got: {}", rendered);
+    assert!(rendered.contains("OP_ADD"), "expected OP_ADD token, got: {}", rendered);
+    // Two OP_MOD occurrences (positions 1 and 7 in the Python peer).
+    let mod_count = rendered.matches("OP_MOD").count();
+    assert!(mod_count >= 2, "expected ≥2 OP_MOD tokens, got {} in: {}", mod_count, rendered);
+}

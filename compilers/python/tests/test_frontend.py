@@ -994,6 +994,47 @@ class TestANFLowering:
         kinds = [b.value.kind for b in check.body]
         assert "if" in kinds
 
+    def test_anf_lower_ternary(self):
+        """T-5: ternary expression lowers to an `if` ANF binding.
+
+        Mirrors the Java peer test (StackLowerTest#ternaryLowersToIfOpStructural)
+        and the Go/Rust peers. Localized regression detection — otherwise covered
+        only by the cross-tier golden harness.
+        """
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class TernaryDemo extends SmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public check(flag: boolean): void {
+    const result: bigint = flag ? this.limit + 1n : this.limit - 1n;
+    assert(result > 0n);
+  }
+}
+"""
+        result = parse_source(source, "TernaryDemo.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+        type_check(result.contract)
+
+        program = lower_to_anf(result.contract)
+        check = [m for m in program.methods if m.name == "check"][0]
+
+        if_bindings = [b for b in check.body if b.value.kind == "if"]
+        assert if_bindings, (
+            f"expected ternary to lower to `if` ANF node; got kinds: "
+            f"{[b.value.kind for b in check.body]}"
+        )
+        if_val = if_bindings[0].value
+        assert if_val.then, "ternary `then` branch should not be empty"
+        assert if_val.else_, "ternary `else` branch should not be empty"
+
     def test_anf_lower_binding_details(self):
         """Verify specific binding details for P2PKH: hash160 has 1 arg, checkSig has 2 args,
         and the === bin_op has result_type 'bytes'. Mirrors Go TestANFLower_P2PKH_BindingDetails."""

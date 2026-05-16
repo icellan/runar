@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
 // Re-export macros so `use runar::prelude::*` gets them too.
-pub use runar_lang_macros::{contract, stateful_contract};
+pub use runar_lang_macros::{contract, stateful_contract, unsafe_contract};
 
 // ---------------------------------------------------------------------------
 // Scalar types — type aliases so Rust arithmetic operators work directly
@@ -549,6 +549,39 @@ pub fn extract_outpoint(_p: &[u8]) -> ByteString {
 /// Returns a mock state script (empty bytes).
 pub fn get_state_script<T>(_contract: &T) -> ByteString {
     vec![]
+}
+
+// ---------------------------------------------------------------------------
+// asm — the raw-script escape hatch (UnsafeSmartContract only)
+// ---------------------------------------------------------------------------
+
+/// Structured argument for the `asm` compiler intrinsic. The Rúnar Rust-DSL
+/// frontend intercepts `asm(...)` calls at parse time and lowers them to a
+/// `raw_script` ANF node; this struct only exists so native `cargo test`
+/// compilation of contract source succeeds.
+#[derive(Debug, Clone)]
+pub struct AsmArgs {
+    /// An even-length hex string of the raw Bitcoin Script opcode bytes to
+    /// embed verbatim. The compiler does not re-encode or validate the
+    /// semantics of these bytes — only that the string is valid hex with an
+    /// even length.
+    pub body: String,
+    /// The number of stack items the embedded bytes consume on entry.
+    pub in_arity: i64,
+    /// The number of stack items the embedded bytes leave on exit.
+    pub out_arity: i64,
+}
+
+/// Embeds a raw Bitcoin Script byte sequence in a contract method. Only
+/// callable from inside a contract marked `#[runar::unsafe_contract]` — the
+/// Rúnar compiler enforces this. The Rust-DSL surface spelling is the
+/// positional form `asm(body, in_arity, out_arity)`; the compiler normalises
+/// every frontend to the same `raw_script` ANF node.
+///
+/// This runtime stub panics: `asm` is a compile-time intrinsic and cannot be
+/// executed off-chain.
+pub fn asm(_body: &str, _in_arity: i64, _out_arity: i64) {
+    panic!("asm() cannot be called at runtime — compile this contract with the Rúnar compiler");
 }
 
 // ---------------------------------------------------------------------------

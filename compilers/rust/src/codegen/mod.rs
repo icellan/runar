@@ -22,3 +22,4 @@ pub mod rabin;
 pub mod sha256;
 pub mod slh_dsa;
 pub mod stack;
+pub mod wots;

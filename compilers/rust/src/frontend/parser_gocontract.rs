@@ -713,6 +713,7 @@ impl<'a> GoParser<'a> {
             expression: Expression::CallExpr {
                 callee: Box::new(Expression::Identifier { name: "super".to_string() }),
                 args: super_args,
+                asm_return_type: None,
             },
             source_location: super_loc.clone(),
         });
@@ -837,6 +838,9 @@ impl<'a> GoParser<'a> {
                         }
                         "StatefulSmartContract" => {
                             parent_class = Some("StatefulSmartContract".to_string());
+                        }
+                        "UnsafeSmartContract" => {
+                            parent_class = Some("UnsafeSmartContract".to_string());
                         }
                         _ => {
                             // Might be a field of type runar.Type — but we need a field name first
@@ -1696,6 +1700,7 @@ impl<'a> GoParser<'a> {
                                 property: prop,
                             }),
                             args,
+                            asm_return_type: None,
                         };
                     } else {
                         // field access
@@ -1713,7 +1718,7 @@ impl<'a> GoParser<'a> {
                 TokenType::LParen => {
                     // Direct call: func(...)
                     let args = self.parse_call_args();
-                    expr = Expression::CallExpr { callee: Box::new(expr), args };
+                    expr = Expression::CallExpr { callee: Box::new(expr), args, asm_return_type: None };
                 }
 
                 _ => break,
@@ -1750,6 +1755,87 @@ impl<'a> GoParser<'a> {
                 let expr = self.parse_expr()?;
                 self.expect_tok(&TokenType::RParen);
                 Some(expr)
+            }
+
+            TokenType::LBracket => {
+                // Two shapes share the `[` prefix in the Go DSL:
+                //   1. Bare array literal `[a, b, c]` — emits ArrayLiteral.
+                //   2. Go composite literal `[N]T{a, b, c}` (also `[]T{...}`)
+                //      — peel off the leading `[N]…T` and emit ArrayLiteral
+                //      from the brace body so all 7 tiers lower to identical
+                //      Stack IR.
+                let saved = self.pos;
+                self.advance(); // consume '['
+                // Try to detect composite literal: `[ <number>? ] <type>+ {`.
+                let mut composite = false;
+                if matches!(self.current().typ, TokenType::Number(_) | TokenType::RBracket) {
+                    if matches!(self.current().typ, TokenType::Number(_)) {
+                        self.advance();
+                    }
+                    if matches!(self.current().typ, TokenType::RBracket) {
+                        self.advance(); // consume ']'
+                        // Consume any additional `[N]` dims for multi-dim arrays.
+                        while matches!(self.current().typ, TokenType::LBracket) {
+                            let dim_saved = self.pos;
+                            self.advance();
+                            if matches!(self.current().typ, TokenType::Number(_)) {
+                                self.advance();
+                            }
+                            if !matches!(self.current().typ, TokenType::RBracket) {
+                                self.pos = dim_saved;
+                                break;
+                            }
+                            self.advance();
+                        }
+                        // Consume the element type: `runar.Foo`, `Foo`, or `*Foo`.
+                        if matches!(self.current().typ, TokenType::Star) {
+                            self.advance();
+                        }
+                        if matches!(self.current().typ, TokenType::Ident(_)) {
+                            self.advance();
+                            while matches!(self.current().typ, TokenType::Dot) {
+                                self.advance();
+                                if matches!(self.current().typ, TokenType::Ident(_)) {
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        if matches!(self.current().typ, TokenType::LBrace) {
+                            composite = true;
+                            return Some(self.parse_go_brace_literal());
+                        }
+                    }
+                }
+                if !composite {
+                    self.pos = saved;
+                    self.advance(); // re-consume '['
+                }
+                let mut elements: Vec<Expression> = Vec::new();
+                while !matches!(self.current().typ, TokenType::RBracket | TokenType::Eof) {
+                    if matches!(self.current().typ, TokenType::Comma) {
+                        self.advance();
+                        continue;
+                    }
+                    if let Some(elem) = self.parse_expr() {
+                        elements.push(elem);
+                    } else {
+                        break;
+                    }
+                    if !matches!(self.current().typ, TokenType::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect_tok(&TokenType::RBracket);
+                Some(Expression::ArrayLiteral { elements })
+            }
+
+            TokenType::LBrace => {
+                // Nested composite literal body inside an outer multi-dim
+                // composite literal: `{e, e, …}` or `{ {…}, {…} }`.
+                Some(self.parse_go_brace_literal())
             }
 
             TokenType::Ident(name) => {
@@ -1798,6 +1884,7 @@ impl<'a> GoParser<'a> {
                         return Some(Expression::CallExpr {
                             callee: Box::new(Expression::Identifier { name: "byteString".to_string() }),
                             args,
+                            asm_return_type: None,
                         });
                     }
 
@@ -1808,6 +1895,7 @@ impl<'a> GoParser<'a> {
                         return Some(Expression::CallExpr {
                             callee: Box::new(Expression::Identifier { name: callee_name }),
                             args,
+                            asm_return_type: None,
                         });
                     }
 
@@ -1833,6 +1921,7 @@ impl<'a> GoParser<'a> {
                                     property: prop,
                                 }),
                                 args,
+                                asm_return_type: None,
                             });
                         }
 
@@ -1848,6 +1937,30 @@ impl<'a> GoParser<'a> {
 
             _ => None,
         }
+    }
+
+    /// Parse a Go composite-literal body `{e, e, …}`. Each element may
+    /// itself be a nested `{ … }` body for multi-dimensional arrays.
+    /// Returns an `ArrayLiteral`.
+    fn parse_go_brace_literal(&mut self) -> Expression {
+        self.expect_tok(&TokenType::LBrace);
+        let mut elements: Vec<Expression> = Vec::new();
+        while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
+            if matches!(self.current().typ, TokenType::LBrace) {
+                elements.push(self.parse_go_brace_literal());
+            } else if let Some(e) = self.parse_expr() {
+                elements.push(e);
+            } else {
+                break;
+            }
+            if matches!(self.current().typ, TokenType::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect_tok(&TokenType::RBrace);
+        Expression::ArrayLiteral { elements }
     }
 
     fn parse_call_args(&mut self) -> Vec<Expression> {
@@ -2187,7 +2300,7 @@ func (c *LitDemo) Check() {
         fn find_bytestring_lit(expr: &Expression) -> Option<String> {
             match expr {
                 Expression::ByteStringLiteral { value } => Some(value.clone()),
-                Expression::CallExpr { callee, args } => {
+                Expression::CallExpr { callee, args, .. } => {
                     if let Some(v) = find_bytestring_lit(callee) {
                         return Some(v);
                     }
@@ -2245,7 +2358,7 @@ func (c *VarDemo) Check(data runar.ByteString) {
                 Expression::BinaryExpr { left, right, .. } => {
                     has_plain_data_ident(left) || has_plain_data_ident(right)
                 }
-                Expression::CallExpr { callee, args } => {
+                Expression::CallExpr { callee, args, .. } => {
                     // must not be a byteString(...) call
                     if let Expression::Identifier { name } = &**callee {
                         if name == "byteString" {

@@ -340,7 +340,7 @@ class RustParser extends ParserCore<RustToken> {
     // Skip `use runar::prelude::*;` and other use declarations
     this.skipUseDecls();
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
     const properties: PropertyNode[] = [];
     const methods: MethodNode[] = [];
 
@@ -349,8 +349,13 @@ class RustParser extends ParserCore<RustToken> {
       // Skip attributes at top level (handled within struct/impl parsing)
       if (this.current().type === '#') {
         const attr = this.parseAttribute();
-        // Check for #[runar::contract] -> next should be struct
-        if (attr === 'runar::contract') {
+        // Check for #[runar::contract] / #[runar::stateful_contract] /
+        // #[runar::unsafe_contract] -> next should be struct
+        if (
+          attr === 'runar::contract' ||
+          attr === 'runar::stateful_contract' ||
+          attr === 'runar::unsafe_contract'
+        ) {
           // Optional pub keyword before struct
           if (this.current().type === 'pub') this.advance();
           if (this.current().type === 'struct') {
@@ -358,6 +363,11 @@ class RustParser extends ParserCore<RustToken> {
             if (result) {
               this.contractName = result.name;
               parentClass = result.parentClass;
+              if (attr === 'runar::stateful_contract') {
+                parentClass = 'StatefulSmartContract';
+              } else if (attr === 'runar::unsafe_contract') {
+                parentClass = 'UnsafeSmartContract';
+              }
               properties.push(...result.properties);
             }
           }
@@ -512,7 +522,7 @@ class RustParser extends ParserCore<RustToken> {
 
   private parseStructDecl(): {
     name: string;
-    parentClass: 'SmartContract' | 'StatefulSmartContract';
+    parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
     properties: PropertyNode[];
   } | null {
     this.expect('struct');

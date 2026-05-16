@@ -464,7 +464,7 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 		parentClass = parentTok.value
 	}
 
-	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" {
+	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
 		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
 	}
 
@@ -1521,11 +1521,29 @@ func (p *solParser) parseSolPrimary() Expression {
 		expr := p.parseSolExpression()
 		p.expect(solTokRParen)
 		return expr
+	case solTokLBracket:
+		// Array literal: [a, b, c]
+		return p.parseSolArrayLiteral()
 	default:
 		p.addError(fmt.Sprintf("line %d: unexpected token %q", tok.line, tok.value))
 		p.advance()
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
+}
+
+// parseSolArrayLiteral handles bare [a, b, c] array-literal expressions.
+func (p *solParser) parseSolArrayLiteral() Expression {
+	p.expect(solTokLBracket)
+	var elements []Expression
+	for !p.check(solTokRBracket) && !p.check(solTokEOF) {
+		elem := p.parseSolExpression()
+		elements = append(elements, elem)
+		if !p.match(solTokComma) {
+			break
+		}
+	}
+	p.expect(solTokRBracket)
+	return ArrayLiteralExpr{Elements: elements}
 }
 
 func (p *solParser) parseSolCallArgs() []Expression {

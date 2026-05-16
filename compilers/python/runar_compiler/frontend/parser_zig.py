@@ -679,7 +679,7 @@ class _ZigParser:
             had_initializer = prop.initializer is not None
             if prop.name in ctor_param_names:
                 prop.initializer = None
-            if self._parent_class == "SmartContract":
+            if self._parent_class in ("SmartContract", "UnsafeSmartContract"):
                 prop.readonly = True
             elif (not prop.readonly
                   and not had_initializer
@@ -719,6 +719,8 @@ class _ZigParser:
             parent = self._expect(TOK_IDENT, "identifier").value
             if parent == "StatefulSmartContract":
                 self._parent_class = "StatefulSmartContract"
+            elif parent == "UnsafeSmartContract":
+                self._parent_class = "UnsafeSmartContract"
             else:
                 self._parent_class = "SmartContract"
 

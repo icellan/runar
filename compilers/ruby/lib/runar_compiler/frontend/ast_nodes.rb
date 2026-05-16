@@ -67,8 +67,13 @@ module RunarCompiler
     UnaryExpr = Struct.new(:op, :operand, keyword_init: true)
 
     # A function/method call.
-    CallExpr = Struct.new(:callee, :args, keyword_init: true) do
-      def initialize(callee: nil, args: [])
+    #
+    # +asm_return_type+ is set only for the expression form `asm<T>({...})`
+    # of the asm compiler intrinsic. It carries the captured primitive return
+    # type ("bigint", "boolean", or "ByteString"); nil for the statement form
+    # and for every non-asm call.
+    CallExpr = Struct.new(:callee, :args, :asm_return_type, keyword_init: true) do
+      def initialize(callee: nil, args: [], asm_return_type: nil)
         super
       end
     end

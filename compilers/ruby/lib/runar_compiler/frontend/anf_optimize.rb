@@ -408,6 +408,7 @@ module RunarCompiler
       SIDE_EFFECT_KINDS = %w[
         assert update_prop check_preimage deserialize_state
         add_output add_raw_output add_data_output
+        raw_script
         if loop call method_call
       ].to_set.freeze
 

@@ -3,12 +3,34 @@
 ``runar.sdk.script_vm`` wraps the optional ``bsv-sdk`` ``Spend`` interpreter.
 ``bsv-sdk`` is an optional dependency (``runar-py`` itself is zero-dependency),
 so these tests ``importorskip`` it: they run when the ``script-vm`` extra is
-installed and skip cleanly otherwise.
+installed and skip cleanly otherwise — EXCEPT in CI, where a missing
+``bsv-sdk`` is treated as a hard failure (T-8 from
+audits/cross-language-completeness-20260514.md §5.2).
 """
 
 from __future__ import annotations
 
+import importlib.util
+import os
+
 import pytest
+
+# T-8: in CI we want a missing ``bsv-sdk`` to be loud, not a silent skip.
+# The Python SDK CI job (``.github/workflows/ci.yml`` → ``python-sdk`` →
+# ``pip install pytest slh-dsa bsv-sdk``) explicitly installs the
+# ``script-vm`` extra so test_script_vm.py runs its real path. If a future
+# CI change drops the install (or installs a broken bsv-sdk) the silent
+# importorskip below would let ScriptVM regressions ship uncaught; this
+# gate flips that into a hard, visible failure.
+if os.environ.get("CI") and importlib.util.find_spec("bsv") is None:
+    pytest.fail(
+        "test_script_vm.py: CI environment detected ($CI is set) but the "
+        "optional `bsv-sdk` package is not installed — the ScriptVM tests "
+        "would silently skip. Install the `script-vm` extra in CI "
+        "(`pip install runar[script-vm]` or `pip install bsv-sdk`). See "
+        "audits/cross-language-completeness-20260514.md T-8.",
+        pytrace=False,
+    )
 
 # Skip the whole module unless the optional bsv-sdk dependency is available.
 pytest.importorskip("bsv", reason="bsv-sdk not installed (runar[script-vm] extra)")

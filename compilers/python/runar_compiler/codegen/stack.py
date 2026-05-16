@@ -89,7 +89,7 @@ class StackOp:
 
     op: str = ""             # "push", "dup", "swap", "roll", "pick", "drop",
                              # "opcode", "if", "nip", "over", "rot", "tuck",
-                             # "placeholder"
+                             # "placeholder", "raw_bytes"
     value: Optional[PushValue] = None   # for push ops
     depth: int = 0           # for roll/pick (informational)
     code: str = ""           # for opcode ops (e.g. "OP_ADD")
@@ -98,6 +98,14 @@ class StackOp:
     param_index: int = 0     # for placeholder ops -- index into constructor params
     param_name: str = ""     # for placeholder ops -- name of constructor param
     source_loc: Optional[SourceLocation] = None  # debug source location for source maps
+
+    # raw_bytes -- opaque opcode-byte span emitted verbatim by a raw_script
+    # ANF node. Stack effect is declared via in_arity / out_arity; the bytes
+    # are never inspected and the peephole optimizer treats this op as a
+    # hard barrier.
+    raw_bytes: Optional[bytes] = None
+    in_arity: int = 0
+    out_arity: int = 0
 
 
 @dataclass
@@ -313,6 +321,10 @@ def collect_refs(value: ANFValue) -> list[str]:
         refs.append(value.script_bytes)
     elif kind == "array_literal":
         refs.extend(value.elements)
+    elif kind == "raw_script":
+        # Opaque byte span -- no SSA operand refs. Stack effect is declared
+        # via in_arity / out_arity.
+        pass
 
     return refs
 
@@ -861,6 +873,8 @@ class _LoweringContext:
             self._lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
         elif kind == "array_literal":
             self._lower_array_literal(name, value.elements, binding_index, last_uses)
+        elif kind == "raw_script":
+            self._lower_raw_script(name, value.bytes, value.in_arity, value.out_arity)
 
     # -----------------------------------------------------------------
     # Individual lowering methods
@@ -2398,6 +2412,48 @@ class _LoweringContext:
         self._track_depth()
 
     # -----------------------------------------------------------------
+    # raw_script
+    # -----------------------------------------------------------------
+
+    def _lower_raw_script(self, binding_name: str, bytes_hex: str | None,
+                          in_arity: int | None, out_arity: int | None) -> None:
+        """Lower a raw_script ANF node to a single opaque raw_bytes StackOp.
+
+        The bytes pass through verbatim -- the emit pass writes them as-is,
+        and the peephole optimizer must not bridge across them. Stack-tracker
+        bookkeeping consumes in_arity items and pushes out_arity items named
+        after the binding so downstream PICK/ROLL/DROP refer to the correct
+        logical slot.
+        """
+        in_arity = in_arity or 0
+        out_arity = out_arity or 0
+        if self.sm.depth() < in_arity:
+            raise ValueError(
+                f"raw_script binding '{binding_name}' requires {in_arity} "
+                f"stack items but only {self.sm.depth()} are present"
+            )
+        try:
+            raw = bytes.fromhex(bytes_hex or "")
+        except ValueError as exc:
+            raise ValueError(
+                f"raw_script binding '{binding_name}' has invalid hex bytes: {exc}"
+            ) from exc
+        self.emit_op(StackOp(
+            op="raw_bytes",
+            raw_bytes=raw,
+            in_arity=in_arity,
+            out_arity=out_arity,
+        ))
+        for _ in range(in_arity):
+            self.sm.pop()
+        for i in range(out_arity):
+            slot_name = binding_name
+            if out_arity != 1:
+                slot_name = f"{binding_name}.{i}"
+            self.sm.push(slot_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
     # checkMultiSig
     # -----------------------------------------------------------------
 
@@ -3283,70 +3339,10 @@ class _LoweringContext:
     # WOTS+ signature verification
     # -----------------------------------------------------------------
 
-    def _emit_wots_one_chain(self, chain_index: int) -> None:
-        """Emit one WOTS+ chain verification."""
-        # Save steps_copy = 15 - digit to alt
-        self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-        self.emit_op(StackOp(op="push", value=big_int_push(15)))
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-
-        # Save endpt, csum to alt
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-
-        # Split 32B sig element
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="push", value=big_int_push(32)))
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-        self.emit_op(StackOp(op="swap"))
-
-        # Hash loop
-        for j in range(15):
-            adrs_bytes = bytes([chain_index, j])
-            self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-            self.emit_op(StackOp(op="opcode", code="OP_0NOTEQUAL"))
-            self.emit_op(StackOp(
-                op="if",
-                then=[
-                    StackOp(op="opcode", code="OP_1SUB"),
-                ],
-                else_ops=[
-                    StackOp(op="swap"),
-                    StackOp(op="push", value=big_int_push(2)),
-                    StackOp(op="opcode", code="OP_PICK"),
-                    StackOp(op="push", value=PushValue(kind="bytes", bytes_val=adrs_bytes)),
-                    StackOp(op="opcode", code="OP_CAT"),
-                    StackOp(op="swap"),
-                    StackOp(op="opcode", code="OP_CAT"),
-                    StackOp(op="opcode", code="OP_SHA256"),
-                    StackOp(op="swap"),
-                ],
-            ))
-        self.emit_op(StackOp(op="drop"))
-
-        # Restore from altstack
-        self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-        self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-        self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-        self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-
-        # csum += steps_copy
-        self.emit_op(StackOp(op="opcode", code="OP_ROT"))
-        self.emit_op(StackOp(op="opcode", code="OP_ADD"))
-
-        # Concat endpoint to endpt_acc
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="push", value=big_int_push(3)))
-        self.emit_op(StackOp(op="opcode", code="OP_ROLL"))
-        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-
     def _lower_verify_wots(self, binding_name: str, args: list[str],
                            binding_index: int, last_uses: dict[str, int]) -> None:
+        """Brings all 3 args to the top, pops them, delegates to
+        wots.emit_verify_wots, and pushes the boolean result."""
         if len(args) < 3:
             raise RuntimeError("verifyWOTS requires 3 arguments: msg, sig, pubkey")
 
@@ -3356,106 +3352,9 @@ class _LoweringContext:
         for _ in range(3):
             self.sm.pop()
 
-        # Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
-        self.emit_op(StackOp(op="push", value=big_int_push(32)))
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-
-        # Rearrange: put pubSeed at bottom, hash msg
-        self.emit_op(StackOp(op="opcode", code="OP_ROT"))
-        self.emit_op(StackOp(op="opcode", code="OP_ROT"))
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="opcode", code="OP_SHA256"))
-
-        # Canonical layout
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="push", value=big_int_push(0)))
-        self.emit_op(StackOp(op="opcode", code="OP_0"))
-        self.emit_op(StackOp(op="push", value=big_int_push(3)))
-        self.emit_op(StackOp(op="opcode", code="OP_ROLL"))
-
-        # Process 32 bytes -> 64 message chains
-        for byte_idx in range(32):
-            if byte_idx < 31:
-                self.emit_op(StackOp(op="push", value=big_int_push(1)))
-                self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-                self.emit_op(StackOp(op="swap"))
-            # Unsigned byte conversion
-            self.emit_op(StackOp(op="push", value=big_int_push(0)))
-            self.emit_op(StackOp(op="push", value=big_int_push(1)))
-            self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
-            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
-            # Extract nibbles
-            self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-            self.emit_op(StackOp(op="push", value=big_int_push(16)))
-            self.emit_op(StackOp(op="opcode", code="OP_DIV"))
-            self.emit_op(StackOp(op="swap"))
-            self.emit_op(StackOp(op="push", value=big_int_push(16)))
-            self.emit_op(StackOp(op="opcode", code="OP_MOD"))
-
-            if byte_idx < 31:
-                self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-                self.emit_op(StackOp(op="swap"))
-                self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-            else:
-                self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-
-            self._emit_wots_one_chain(byte_idx * 2)  # high nibble chain
-
-            if byte_idx < 31:
-                self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-                self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-                self.emit_op(StackOp(op="swap"))
-                self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-            else:
-                self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-
-            self._emit_wots_one_chain(byte_idx * 2 + 1)  # low nibble chain
-
-            if byte_idx < 31:
-                self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-
-        # Checksum digits
-        self.emit_op(StackOp(op="swap"))
-        # d66
-        self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-        self.emit_op(StackOp(op="push", value=big_int_push(16)))
-        self.emit_op(StackOp(op="opcode", code="OP_MOD"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-        # d65
-        self.emit_op(StackOp(op="opcode", code="OP_DUP"))
-        self.emit_op(StackOp(op="push", value=big_int_push(16)))
-        self.emit_op(StackOp(op="opcode", code="OP_DIV"))
-        self.emit_op(StackOp(op="push", value=big_int_push(16)))
-        self.emit_op(StackOp(op="opcode", code="OP_MOD"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-        # d64
-        self.emit_op(StackOp(op="push", value=big_int_push(256)))
-        self.emit_op(StackOp(op="opcode", code="OP_DIV"))
-        self.emit_op(StackOp(op="push", value=big_int_push(16)))
-        self.emit_op(StackOp(op="opcode", code="OP_MOD"))
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-
-        # 3 checksum chains (indices 64, 65, 66)
-        for ci in range(3):
-            self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
-            self.emit_op(StackOp(op="push", value=big_int_push(0)))
-            self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-            self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-            self._emit_wots_one_chain(64 + ci)
-            self.emit_op(StackOp(op="swap"))
-            self.emit_op(StackOp(op="drop"))
-
-        # Final comparison
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="drop"))
-        self.emit_op(StackOp(op="opcode", code="OP_SHA256"))
-        self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
-        self.emit_op(StackOp(op="opcode", code="OP_EQUAL"))
-        # Clean up pubSeed
-        self.emit_op(StackOp(op="swap"))
-        self.emit_op(StackOp(op="drop"))
+        # Delegate to the WOTS+ codegen module
+        from runar_compiler.codegen.wots import emit_verify_wots
+        emit_verify_wots(lambda op: self.emit_op(op))
 
         self.sm.push(binding_name)
         self._track_depth()

@@ -567,6 +567,33 @@ fn expectContainsOp(items: []const Sha256Instruction, op_name: []const u8) !void
     return error.TestUnexpectedResult;
 }
 
+// ---------------------------------------------------------------------------
+// T-11: Op-count goldens for the SHA-256 helper bundles.
+//
+// The structural tests below check load-bearing opcodes (OP_LSHIFT, OP_XOR,
+// OP_NUM2BIN, ...) and bands (`> 100`, `> 200`) but not the total op count.
+// These goldens pin the Zig helper's bundle size against the Python /
+// Java peers (compilers/python/tests/codegen/test_sha256.py); a regression
+// in the helper surfaces here as a localized failure rather than only as
+// a cross-tier hex mismatch from the golden harness.
+// ---------------------------------------------------------------------------
+
+test "sha256 compress op-count golden" {
+    const allocator = std.testing.allocator;
+    var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer list.deinit(allocator);
+    try appendBuiltinInstructions(&list, allocator, .compress);
+    try std.testing.expectEqual(@as(usize, 21292), list.items.len);
+}
+
+test "sha256 finalize op-count golden" {
+    const allocator = std.testing.allocator;
+    var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer list.deinit(allocator);
+    try appendBuiltinInstructions(&list, allocator, .finalize);
+    try std.testing.expectEqual(@as(usize, 63941), list.items.len);
+}
+
 test "sha256 compress emits expected opcode families" {
     const allocator = std.testing.allocator;
     var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;

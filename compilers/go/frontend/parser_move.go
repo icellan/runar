@@ -585,6 +585,11 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 		p.skipUseDecl()
 	}
 
+	// `unsafe module Name { ... }` marks an UnsafeSmartContract — the
+	// asm-escape-hatch base class. Plain `module Name { ... }` infers
+	// SmartContract / StatefulSmartContract structurally as before.
+	isUnsafe := p.matchIdent("unsafe")
+
 	// module Name { ... }
 	if !p.matchIdent("module") {
 		return nil, fmt.Errorf("expected 'module' keyword")
@@ -599,6 +604,9 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	var properties []PropertyNode
 	var methods []MethodNode
 	parentClass := "SmartContract" // default
+	if isUnsafe {
+		parentClass = "UnsafeSmartContract"
+	}
 
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
 		// Skip use declarations inside the module
@@ -612,7 +620,9 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 			isStateful := p.checkIdent("resource")
 			if isStateful {
 				p.advance() // skip "resource"
-				parentClass = "StatefulSmartContract"
+				if !isUnsafe {
+					parentClass = "StatefulSmartContract"
+				}
 			}
 			props := p.parseMoveStruct()
 			properties = append(properties, props...)
@@ -622,7 +632,7 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 		// public fun or fun
 		if p.checkIdent("public") || p.checkIdent("fun") {
 			method, hasMutRecv := p.parseMoveFunction()
-			if hasMutRecv {
+			if hasMutRecv && !isUnsafe {
 				parentClass = "StatefulSmartContract"
 			}
 			methods = append(methods, method)
@@ -1481,11 +1491,30 @@ func (p *moveParser) parseMovePrimary() Expression {
 		p.expect(moveTokRParen)
 		return expr
 
+	case moveTokLBracket:
+		// Array literal: [a, b, c]
+		return p.parseMoveArrayLiteral()
+
 	default:
 		p.addError(fmt.Sprintf("line %d: unexpected token %q", tok.line, tok.value))
 		p.advance()
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
+}
+
+// parseMoveArrayLiteral handles bare [a, b, c] array-literal expressions.
+func (p *moveParser) parseMoveArrayLiteral() Expression {
+	p.expect(moveTokLBracket)
+	var elements []Expression
+	for !p.check(moveTokRBracket) && !p.check(moveTokEOF) {
+		elem := p.parseMoveExpression()
+		elements = append(elements, elem)
+		if !p.match(moveTokComma) {
+			break
+		}
+	}
+	p.expect(moveTokRBracket)
+	return ArrayLiteralExpr{Elements: elements}
 }
 
 func (p *moveParser) parseMoveCallArgs() []Expression {

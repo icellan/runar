@@ -375,6 +375,9 @@ fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
             // which breaks on load_param without collecting refs.
         }
         ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {}
+        // raw_script — opaque byte span, no SSA operand refs. Stack effect is
+        // declared via in_arity / out_arity.
+        ANFValue::RawScript { .. } => {}
         ANFValue::LoadConst { value } => {
             // Track @ref: aliases as references to prevent DCE
             if let serde_json::Value::String(s) = value {
@@ -473,6 +476,8 @@ fn has_side_effect(value: &ANFValue) -> bool {
             | ANFValue::AddDataOutput { .. }
             | ANFValue::MethodCall { .. }
             | ANFValue::Call { .. }
+            // opaque byte span — DCE must never eliminate it
+            | ANFValue::RawScript { .. }
     )
 }
 

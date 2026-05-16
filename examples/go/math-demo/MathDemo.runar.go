@@ -95,3 +95,57 @@ func (c *MathDemo) ScaleByRatio(numerator, denominator runar.Bigint) {
 func (c *MathDemo) ComputeLog2() {
 	c.Value = runar.Log2(c.Value)
 }
+
+// MakeAbs replaces the stored value with its absolute value.
+//
+// Use cases: magnitude comparison, distance calculation.
+func (c *MathDemo) MakeAbs() {
+	c.Value = runar.Abs(c.Value)
+}
+
+// TakeMin replaces the stored value with min(value, other).
+//
+// Use cases: capping bids, picking the smaller of two amounts.
+func (c *MathDemo) TakeMin(other runar.Bigint) {
+	c.Value = runar.Min(c.Value, other)
+}
+
+// TakeMax replaces the stored value with max(value, other).
+//
+// Use cases: enforcing reserve floors, picking the larger amount.
+func (c *MathDemo) TakeMax(other runar.Bigint) {
+	c.Value = runar.Max(c.Value, other)
+}
+
+// AssertWithin asserts that the stored value lies in the half-open range
+// [lo, hi), mirroring the semantics of Bitcoin Script's OP_WITHIN.
+//
+// Use cases: bounds-checked unlock parameters.
+func (c *MathDemo) AssertWithin(lo, hi runar.Bigint) {
+	runar.Assert(runar.Within(c.Value, lo, hi))
+}
+
+// ModuloBy is safe modulo — replaces the stored value with
+// value mod divisor, asserting that divisor is non-zero.
+//
+// Use cases: round-robin scheduling, modular index calculation.
+func (c *MathDemo) ModuloBy(divisor runar.Bigint) {
+	c.Value = runar.Safemod(c.Value, divisor)
+}
+
+// DivmodBy replaces the stored value with the quotient of value / divisor
+// via Rúnar's Divmod builtin (canonical OP_2DUP OP_DIV OP_ROT OP_ROT
+// OP_MOD OP_DROP sequence).
+//
+// Use cases: integer division with a side-effect on the modulo result.
+func (c *MathDemo) DivmodBy(divisor runar.Bigint) {
+	c.Value = runar.Divmod(c.Value, divisor)
+}
+
+// AssertNonZero asserts that the stored value is "truthy" (non-zero) using
+// the dedicated ToBool builtin which compiles to OP_0NOTEQUAL.
+//
+// Use cases: terminal liveness check for non-zero state.
+func (c *MathDemo) AssertNonZero() {
+	runar.Assert(runar.ToBool(c.Value))
+}

@@ -603,6 +603,11 @@ const LowerCtx = struct {
                     self.last_uses.put(self.allocator, elem, idx) catch return;
                 }
             },
+            .raw_script => {
+                // Opaque byte span — no SSA operand refs. Stack effect is
+                // declared via in_arity / out_arity and consumed by
+                // lowerRawScript directly.
+            },
         }
     }
 
@@ -838,7 +843,50 @@ const LowerCtx = struct {
             .check_preimage => |cp| try self.lowerCheckPreimage(binding.name, &.{cp.preimage}),
             .deserialize_state => |ds| try self.lowerDeserializeState(binding.name, &.{ds.preimage}),
             .array_literal => |al| try self.lowerArrayLiteral(binding.name, al.elements),
+            .raw_script => |rs| try self.lowerRawScript(binding.name, rs.bytes, rs.in_arity, rs.out_arity),
         }
+    }
+
+    /// Lower a raw_script ANF node to a single opaque raw_bytes
+    /// StackInstruction. The bytes pass through verbatim — the emit pass
+    /// writes them as-is, and the peephole optimizer must not bridge across
+    /// them. Stack-tracker bookkeeping consumes in_arity items and pushes
+    /// out_arity items named after the binding so downstream PICK/ROLL/DROP
+    /// refer to the correct logical slot.
+    fn lowerRawScript(self: *LowerCtx, bind_name: []const u8, bytes_hex: []const u8, in_arity: i32, out_arity: i32) !void {
+        if (in_arity < 0 or out_arity < 0) return LowerError.UnsupportedOperation;
+        const in_n: usize = @intCast(in_arity);
+        const out_n: usize = @intCast(out_arity);
+        if (self.stack.depth() < in_n) return LowerError.UnsupportedOperation;
+
+        if (bytes_hex.len % 2 != 0) return LowerError.UnsupportedOperation;
+        const decoded = try self.allocator.alloc(u8, bytes_hex.len / 2);
+        _ = std.fmt.hexToBytes(decoded, bytes_hex) catch {
+            self.allocator.free(decoded);
+            return LowerError.UnsupportedOperation;
+        };
+        // Track the buffer so it gets freed when the program is deinit'd.
+        try self.owned_push_data.append(self.allocator, decoded);
+
+        try self.emit(.{ .raw_bytes = .{ .bytes = decoded, .in_arity = in_arity, .out_arity = out_arity } });
+
+        var i: usize = 0;
+        while (i < in_n) : (i += 1) _ = self.stack.pop();
+
+        if (out_n == 1) {
+            try self.stack.push(self.allocator, bind_name);
+        } else {
+            var j: usize = 0;
+            while (j < out_n) : (j += 1) {
+                const slot = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ bind_name, j });
+                // The slot name is owned by the program lifetime alongside other
+                // allocations — track via owned_push_data ([]u8) cast to []const u8
+                // via append on slots list (StackMap stores []const u8 references).
+                try self.owned_push_data.append(self.allocator, slot);
+                try self.stack.push(self.allocator, slot);
+            }
+        }
+        self.trackDepth();
     }
 
     /// Lower an array literal to stack. Each element is brought to the top in
@@ -2291,18 +2339,43 @@ const LowerCtx = struct {
     }
 
     fn lowerDivMod(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        // divmod(a, b): returns the quotient (drops the remainder).
+        // Mirrors TS / Go / Java / Rust / Python / Ruby:
+        //   OP_2DUP  -> a b a b
+        //   OP_DIV   -> a b (a/b)
+        //   OP_ROT   -> b (a/b) a
+        //   OP_ROT   -> (a/b) a b
+        //   OP_MOD   -> (a/b) (a%b)
+        //   OP_DROP  -> (a/b)
+        // The previous Zig implementation used OP_OVER OP_OVER OP_MOD
+        // OP_ROT OP_ROT OP_DIV which produced the quotient on top but a
+        // different intermediate stack shape, breaking byte-level parity
+        // with the other 6 tiers (caught by the math-demo conformance
+        // fixture once the divmod method was added).
         if (args.len < 2) return LowerError.InvalidBuiltin;
+        // divmod(a, b): returns the quotient (drops the remainder).
+        // Mirrors TS / Go / Java / Rust / Python / Ruby:
+        //   OP_2DUP  -> a b a b
+        //   OP_DIV   -> a b (a/b)
+        //   OP_ROT   -> b (a/b) a
+        //   OP_ROT   -> (a/b) a b
+        //   OP_MOD   -> (a/b) (a%b)
+        //   OP_DROP  -> (a/b)
+        // The previous Zig implementation used OP_OVER OP_OVER OP_MOD
+        // OP_ROT OP_ROT OP_DIV which produced the quotient on top but a
+        // different intermediate stack shape, breaking byte-level parity
+        // with the other 6 tiers (caught by the math-demo conformance
+        // fixture once the divmod method was added).
         try self.bringToTopAuto(args[0]);
         try self.bringToTopAuto(args[1]);
-        try self.emitOp(.op_over);
-        try self.emitOp(.op_over);
-        try self.emitOp(.op_mod);
-        try self.emitOp(.op_rot);
-        try self.emitOp(.op_rot);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.emitOp(.op_2dup);
         try self.emitOp(.op_div);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_rot);
+        try self.emitOp(.op_rot);
+        try self.emitOp(.op_mod);
+        try self.emitOp(.op_drop);
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
@@ -4055,7 +4128,7 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         if (method.is_public and methodUsesDeserializeState(bindings)) {
             try ctx.cleanupExcessStack();
         }
-        if (!method.is_public or !endsWithAssert(bindings)) {
+        if (!method.is_public or (!endsWithAssert(bindings) and !endsWithTerminalRawScript(bindings))) {
             try ctx.emitOp(.op_1);
         }
 
@@ -4138,6 +4211,20 @@ fn endsWithAssert(bindings: []const types.ANFBinding) bool {
         // as ending-with-assert so we don't append an extra OP_1 at the
         // method tail.
         .@"if" => |ie| endsWithAssert(ie.then) and endsWithAssert(ie.@"else"),
+        else => false,
+    };
+}
+
+/// Returns true when the last binding is a `raw_script` with declared
+/// out_arity 1. Mirrors the validator's `endsWithTerminalAsm` rule — such a
+/// terminal asm({...}) leaves a single truthy value on the stack, so the
+/// stack lowerer must NOT append a trailing OP_1.
+fn endsWithTerminalRawScript(bindings: []const types.ANFBinding) bool {
+    if (bindings.len == 0) return false;
+    return switch (bindings[bindings.len - 1].value) {
+        .raw_script => |rs| rs.out_arity == 1,
+        .@"if" => |ie| (endsWithAssert(ie.then) or endsWithTerminalRawScript(ie.then)) and
+            (endsWithAssert(ie.@"else") or endsWithTerminalRawScript(ie.@"else")),
         else => false,
     };
 }

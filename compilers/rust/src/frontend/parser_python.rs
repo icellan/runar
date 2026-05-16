@@ -858,7 +858,10 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Indent);
         self.skip_newlines();
 
-        if parent_class != "SmartContract" && parent_class != "StatefulSmartContract" {
+        if parent_class != "SmartContract"
+            && parent_class != "StatefulSmartContract"
+            && parent_class != "UnsafeSmartContract"
+        {
             self.errors.push(Diagnostic::error(format!(
                 "Unknown parent class: {}",
                 parent_class
@@ -994,8 +997,9 @@ impl<'a> PyParser<'a> {
             type_node = self.parse_type();
         }
 
-        // In stateless contracts, all properties are readonly
-        if parent_class == "SmartContract" {
+        // In stateless contracts (SmartContract and UnsafeSmartContract), all
+        // properties are readonly.
+        if parent_class == "SmartContract" || parent_class == "UnsafeSmartContract" {
             is_readonly = true;
         }
 
@@ -1221,6 +1225,7 @@ impl<'a> PyParser<'a> {
                     name: "assert".to_string(),
                 }),
                 args: vec![expr],
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1400,6 +1405,7 @@ impl<'a> PyParser<'a> {
                     name: "super".to_string(),
                 }),
                 args,
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1983,6 +1989,7 @@ impl<'a> PyParser<'a> {
                                     property: prop,
                                 }),
                                 args,
+                                asm_return_type: None,
                             };
                         } else {
                             expr = Expression::CallExpr {
@@ -1991,6 +1998,7 @@ impl<'a> PyParser<'a> {
                                     property: prop,
                                 }),
                                 args,
+                                asm_return_type: None,
                             };
                         }
                     } else {
@@ -2010,6 +2018,7 @@ impl<'a> PyParser<'a> {
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
+                        asm_return_type: None,
                     };
                 }
                 Token::LBracket => {
@@ -2080,6 +2089,19 @@ impl<'a> PyParser<'a> {
                 self.expect(&Token::RParen);
                 expr
             }
+            Token::LBracket => {
+                // Array literal: [a, b, c]
+                let mut elements: Vec<Expression> = Vec::new();
+                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
+                    elements.push(self.parse_expression());
+                    if !matches!(self.peek(), Token::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RBracket);
+                Expression::ArrayLiteral { elements }
+            }
             other => {
                 self.errors
                     .push(Diagnostic::error(format!("Unexpected token in expression: {:?}", other), None));
@@ -2136,6 +2158,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
                 name: "super".to_string(),
             }),
             args: super_args,
+            asm_return_type: None,
         },
         source_location: SourceLocation {
             file: file.to_string(),

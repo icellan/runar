@@ -217,6 +217,56 @@ func (s *StatefulSmartContract) ResetOutputs() {
 }
 
 // ---------------------------------------------------------------------------
+// UnsafeSmartContract — the asm-escape-hatch base struct
+// ---------------------------------------------------------------------------
+
+// UnsafeSmartContract is the base struct for stateless Rúnar contracts that
+// need the raw-script escape hatch (Asm). Embed this in your contract struct.
+// Like SmartContract, all properties must be readonly — UnsafeSmartContract
+// trades the type-checked subset only for the bytes inside Asm calls, not for
+// mutable state. Use StatefulSmartContract for mutable state.
+type UnsafeSmartContract struct{}
+
+// GetStateScript returns a mock state script (empty bytes in test mode).
+// Mirrors StatefulSmartContract.GetStateScript; exposed here so unsafe
+// contracts can still build state-continuation outputs by hand when they
+// wrap them in Asm.
+func (u *UnsafeSmartContract) GetStateScript() ByteString {
+	return ""
+}
+
+// AsmArgs is the structured argument for the Asm compiler intrinsic. The Rúnar
+// Go-contract frontend intercepts Asm(...) calls at parse time and lowers them
+// to a raw_script ANF node; this struct only exists so native `go test`
+// compilation of contract source succeeds.
+type AsmArgs struct {
+	// Body is an even-length hex string of the raw Bitcoin Script opcode
+	// bytes to embed verbatim. The compiler does not re-encode or validate
+	// the semantics of these bytes — only that the string is valid hex with
+	// an even length.
+	Body string
+	// InArity is the number of stack items the embedded bytes consume on
+	// entry. Defaults to 0.
+	InArity int
+	// OutArity is the number of stack items the embedded bytes leave on
+	// exit. Defaults to 1 so that the common "terminal value of a public
+	// method" case works without ceremony.
+	OutArity int
+}
+
+// Asm embeds a raw Bitcoin Script byte sequence in a contract method. Only
+// callable from inside a contract that embeds UnsafeSmartContract — the
+// compiler enforces this. The Go-contract surface spelling is the positional
+// form Asm(body, inArity, outArity); the compiler normalises every frontend
+// to the same raw_script ANF node.
+//
+// This runtime stub panics: Asm is a compile-time intrinsic and cannot be
+// executed off-chain.
+func Asm(body string, inArity int, outArity int) {
+	panic("Asm() cannot be called at runtime — compile this contract with the Rúnar compiler")
+}
+
+// ---------------------------------------------------------------------------
 // Control flow
 // ---------------------------------------------------------------------------
 

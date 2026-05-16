@@ -3,7 +3,8 @@ package runar.compiler.ir.ast;
 /** The base class a contract extends. */
 public enum ParentClass {
     SMART_CONTRACT("SmartContract"),
-    STATEFUL_SMART_CONTRACT("StatefulSmartContract");
+    STATEFUL_SMART_CONTRACT("StatefulSmartContract"),
+    UNSAFE_SMART_CONTRACT("UnsafeSmartContract");
 
     private final String canonical;
 

@@ -594,8 +594,10 @@ func (p *javaParser) parseClass() *ContractNode {
 		parentClass = "SmartContract"
 	case "StatefulSmartContract":
 		parentClass = "StatefulSmartContract"
+	case "UnsafeSmartContract":
+		parentClass = "UnsafeSmartContract"
 	default:
-		p.addError(fmt.Sprintf("contract class %s must extend SmartContract or StatefulSmartContract, got %s", className, parentName))
+		p.addError(fmt.Sprintf("contract class %s must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got %s", className, parentName))
 		return nil
 	}
 

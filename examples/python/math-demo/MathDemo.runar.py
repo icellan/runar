@@ -17,8 +17,10 @@ math operations with authentication logic.
 
 from runar import (
     StatefulSmartContract, Bigint, public, assert_,
-    safediv, percent_of, clamp, sign, pow_, sqrt, gcd, mul_div, log2,
+    safediv, safemod, percent_of, clamp, sign, pow_, sqrt, gcd, mul_div,
+    log2, divmod_, abs, min, max, within,
 )
+from runar.builtins import bool_cast as bool
 
 class MathDemo(StatefulSmartContract):
     """Stateful contract that stores a single mutable ``value`` and exposes
@@ -111,3 +113,64 @@ class MathDemo(StatefulSmartContract):
         Use cases: bit-length calculation, binary search depth.
         """
         self.value = log2(self.value)
+
+    @public
+    def make_abs(self):
+        """Replaces the stored value with its absolute value.
+
+        Use cases: magnitude comparison, distance calculation.
+        """
+        self.value = abs(self.value)
+
+    @public
+    def take_min(self, other: Bigint):
+        """Replaces the stored value with min(value, other).
+
+        Use cases: capping bids, picking the smaller of two amounts.
+        """
+        self.value = min(self.value, other)
+
+    @public
+    def take_max(self, other: Bigint):
+        """Replaces the stored value with max(value, other).
+
+        Use cases: enforcing reserve floors, picking the larger amount.
+        """
+        self.value = max(self.value, other)
+
+    @public
+    def assert_within(self, lo: Bigint, hi: Bigint):
+        """Asserts that the stored value lies in the half-open range
+        [lo, hi), mirroring the semantics of Bitcoin Script's OP_WITHIN.
+
+        Use cases: bounds-checked unlock parameters.
+        """
+        assert_(within(self.value, lo, hi))
+
+    @public
+    def modulo_by(self, divisor: Bigint):
+        """Safe modulo -- replaces the stored value with ``value mod divisor``,
+        asserting that ``divisor`` is non-zero.
+
+        Use cases: round-robin scheduling, modular index calculation.
+        """
+        self.value = safemod(self.value, divisor)
+
+    @public
+    def divmod_by(self, divisor: Bigint):
+        """Replaces the stored value with the quotient of
+        ``value / divisor`` via Rúnar's ``divmod`` builtin (canonical
+        OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP sequence).
+
+        Use cases: integer division with a side-effect on the modulo result.
+        """
+        self.value = divmod_(self.value, divisor)
+
+    @public
+    def assert_non_zero(self):
+        """Asserts that the stored value is "truthy" (non-zero) using the
+        dedicated ``bool`` builtin which compiles to OP_0NOTEQUAL.
+
+        Use cases: terminal liveness check for non-zero state.
+        """
+        assert_(bool(self.value))

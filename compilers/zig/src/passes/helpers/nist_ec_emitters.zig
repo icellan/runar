@@ -1538,6 +1538,45 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
 // Tests
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// T-11: Op-count goldens for the Zig NIST EC helper bundles (P-256 / P-384).
+//
+// The "emits ops" tests below only assert `ops.len > 0`. These goldens
+// pin the Zig helper's pre-stack-lowering bundle size so a regression in
+// `buildBuiltinOps` surfaces here as a localized failure rather than
+// only as a cross-tier hex mismatch from the golden harness. Counts
+// differ slightly from the Python/Java peers because the Zig tier
+// represents control flow at the helper level as a single `.@"if"` op
+// with nested then/else slices; final compiled hex is byte-identical
+// (enforced by the conformance harness).
+// ---------------------------------------------------------------------------
+
+test "nist_ec helper op-count goldens" {
+    const cases = .{
+        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6495) },
+        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 69185) },
+        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 69187) },
+        .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 945) },
+        .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 543) },
+        .{ registry.CryptoBuiltin.p256_encode_compressed, "p256EncodeCompressed", @as(usize, 14) },
+        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11301) },
+        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 105255) },
+        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 105257) },
+        .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1393) },
+    };
+    inline for (cases) |c| {
+        var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);
+        defer bundle.deinit();
+        if (bundle.ops.len != c[2]) {
+            std.debug.print(
+                "{s}: op-count drift — got {d}, want {d}\n",
+                .{ c[1], bundle.ops.len, c[2] },
+            );
+        }
+        try std.testing.expectEqual(c[2], bundle.ops.len);
+    }
+}
+
 test "nist_ec_emitters: P-256 add emits ops" {
     var bundle = try buildBuiltinOps(std.testing.allocator, .p256_add);
     defer bundle.deinit();

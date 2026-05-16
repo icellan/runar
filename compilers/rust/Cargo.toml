@@ -22,3 +22,9 @@ num-traits = "0.2"
 swc_common = "0.37"
 swc_ecma_parser = "0.149"
 swc_ecma_ast = "0.118"
+
+# Bitcoin Script interpreter for the `debug` subcommand (G-6). Mirrors the
+# upstream wrap that packages/runar-rs's ScriptVm uses; pulled in here
+# directly because runar-lang depends on this crate and importing it back
+# would create a dependency cycle.
+bsv-sdk = ">=0.1, <0.3"

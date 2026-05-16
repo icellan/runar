@@ -94,6 +94,8 @@ module RunarCompiler
 
       if expr.is_a?(CallExpr)
         if expr.callee.is_a?(Identifier)
+          # Expression-form asm<ByteString>({...}) yields a byte value.
+          return expr.asm_return_type == "ByteString" if expr.callee.name == "asm"
           return true if BYTE_RETURNING_FUNCTIONS.include?(expr.callee.name)
           return true if expr.callee.name.length >= 7 && expr.callee.name[0, 7] == "extract"
         end
@@ -1091,6 +1093,32 @@ module RunarCompiler
           end)
         end
 
+        # asm({...}) compiler intrinsic -- the parser has already normalised
+        # the object-literal argument into three positional args
+        # (body, in_arity, out_arity). Lower it to a single opaque raw_script
+        # ANF binding; the hex body passes through unchanged. Diagnostics for
+        # malformed args were already pushed by the validator -- here we
+        # defensively coerce missing values to safe defaults.
+        if callee.is_a?(Identifier) && callee.name == "asm"
+          bytes = ""
+          in_arity = 0
+          out_arity = 1
+          if e.args.length >= 1 && e.args[0].is_a?(ByteStringLiteral)
+            bytes = e.args[0].value
+          end
+          if e.args.length >= 2 && e.args[1].is_a?(BigIntLiteral)
+            in_arity = e.args[1].value.to_i
+          end
+          if e.args.length >= 3 && e.args[2].is_a?(BigIntLiteral)
+            out_arity = e.args[2].value.to_i
+          end
+          return emit(IR::ANFValue.new(kind: "raw_script").tap do |v|
+            v.bytes = bytes
+            v.in_arity = in_arity
+            v.out_arity = out_arity
+          end)
+        end
+
         # Direct function call: sha256(x), checkSig(sig, pk), etc.
         if callee.is_a?(Identifier)
           arg_refs = _lower_args(e.args)
@@ -1833,6 +1861,9 @@ module RunarCompiler
       new_v.state_values = v.state_values
       new_v.script_bytes = v.script_bytes
       new_v.elements = v.elements
+      new_v.bytes = v.bytes
+      new_v.in_arity = v.in_arity
+      new_v.out_arity = v.out_arity
       new_v
     end
     private_class_method :_clone_anf_value

@@ -1815,3 +1815,67 @@ class Counter extends StatefulSmartContract {
 	// If txPreimage not referenced at all, that's also fine for this simple case
 	t.Logf("txPreimage not found as explicit binding (may be injected internally)")
 }
+
+// ---------------------------------------------------------------------------
+// Test: Ternary expression lowers to an `if` ANF node (T-5)
+//
+// Mirrors the Java peer test
+// (compilers/java/src/test/java/runar/compiler/passes/StackLowerTest.java
+// `ternaryLowersToIfOpStructural`). Localized regression detection for the
+// ternary → if-lowering path, which is otherwise only exercised via the
+// cross-tier golden harness.
+// ---------------------------------------------------------------------------
+
+func TestANFLower_Ternary(t *testing.T) {
+	source := `
+import { SmartContract, assert } from 'runar-lang';
+
+class TernaryDemo extends SmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public check(flag: boolean): void {
+    const result: bigint = flag ? this.limit + 1n : this.limit - 1n;
+    assert(result > 0n);
+  }
+}
+`
+	contract, _ := mustLowerToANF(t, source)
+	program := LowerToANF(contract)
+
+	var checkIdx = -1
+	for i, m := range program.Methods {
+		if m.Name == "check" {
+			checkIdx = i
+			break
+		}
+	}
+	if checkIdx == -1 {
+		t.Fatal("could not find 'check' method in ANF output")
+	}
+
+	method := program.Methods[checkIdx]
+
+	foundIf := false
+	for _, b := range method.Body {
+		if b.Value.Kind == "if" {
+			foundIf = true
+			if len(b.Value.Then) == 0 || len(b.Value.Else) == 0 {
+				t.Errorf("ternary `if` ANF node missing then/else bindings: then=%d else=%d",
+					len(b.Value.Then), len(b.Value.Else))
+			}
+			break
+		}
+	}
+	if !foundIf {
+		var kinds []string
+		for _, b := range method.Body {
+			kinds = append(kinds, b.Value.Kind)
+		}
+		t.Errorf("expected ternary to lower to `if` ANF node; got kinds: %v", kinds)
+	}
+}

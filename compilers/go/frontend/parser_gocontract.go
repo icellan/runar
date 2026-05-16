@@ -97,6 +97,9 @@ func (p *goContractParser) extractContract() *ContractNode {
 						case "StatefulSmartContract":
 							parentClass = "StatefulSmartContract"
 							found = true
+						case "UnsafeSmartContract":
+							parentClass = "UnsafeSmartContract"
+							found = true
 						}
 					}
 				}

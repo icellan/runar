@@ -88,7 +88,19 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 	return result, changed
 }
 
+// isRawBytes reports whether an op is an opaque raw_bytes span emitted by a
+// raw_script ANF node. raw_bytes is a hard peephole barrier — no optimization
+// window may span or rewrite across it, because the bytes are opaque and not
+// guaranteed to form a well-formed opcode stream.
+func isRawBytes(op StackOp) bool {
+	return op.Op == "raw_bytes"
+}
+
 func matchWindow2(a, b StackOp) ([]StackOp, bool) {
+	if isRawBytes(a) || isRawBytes(b) {
+		return nil, false
+	}
+
 	// PUSH x, DROP -> remove both (dead value elimination)
 	if a.Op == "push" && b.Op == "drop" {
 		return nil, true
@@ -227,6 +239,10 @@ func makePushBigInt(n *big.Int) StackOp {
 }
 
 func matchWindow3(a, b, c StackOp) ([]StackOp, bool) {
+	if isRawBytes(a) || isRawBytes(b) || isRawBytes(c) {
+		return nil, false
+	}
+
 	aVal := pushBigIntValue(a)
 	bVal := pushBigIntValue(b)
 
@@ -260,6 +276,10 @@ func matchWindow3(a, b, c StackOp) ([]StackOp, bool) {
 }
 
 func matchWindow4(a, b, c, d StackOp) ([]StackOp, bool) {
+	if isRawBytes(a) || isRawBytes(b) || isRawBytes(c) || isRawBytes(d) {
+		return nil, false
+	}
+
 	aVal := pushBigIntValue(a)
 	cVal := pushBigIntValue(c)
 

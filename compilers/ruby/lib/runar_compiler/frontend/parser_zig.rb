@@ -655,13 +655,13 @@ module RunarCompiler
           @constructor_node.params.each { |p| ctor_param_names.add(p.name) }
         end
 
-        # For SmartContract, all properties are readonly.
-        # For StatefulSmartContract: readonly iff explicitly marked OR has
-        # no initializer AND is not mutated in any method body.
+        # For SmartContract (and UnsafeSmartContract), all properties are
+        # readonly. For StatefulSmartContract: readonly iff explicitly marked
+        # OR has no initializer AND is not mutated in any method body.
         @properties = @properties.map do |prop|
           had_initializer = !prop.initializer.nil?
           stripped_initializer = ctor_param_names.include?(prop.name) ? nil : prop.initializer
-          readonly = if @parent_class == "SmartContract"
+          readonly = if @parent_class == "SmartContract" || @parent_class == "UnsafeSmartContract"
                        true
                      elsif prop.readonly
                        true
@@ -709,7 +709,11 @@ module RunarCompiler
           advance
           expect(TOK_DOT)
           parent_tok = expect(TOK_IDENT)
-          @parent_class = parent_tok.value == "StatefulSmartContract" ? "StatefulSmartContract" : "SmartContract"
+          @parent_class = case parent_tok.value
+                          when "StatefulSmartContract" then "StatefulSmartContract"
+                          when "UnsafeSmartContract"   then "UnsafeSmartContract"
+                          else "SmartContract"
+                          end
         end
 
         match_tok(TOK_SEMICOLON)

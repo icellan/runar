@@ -176,6 +176,7 @@ const KindTag = enum {
     load_param, load_prop, load_const, bin_op, unary_op, call, method_call,
     @"if", loop, assert, update_prop, get_state_script, check_preimage,
     deserialize_state, add_output, add_raw_output, add_data_output, array_literal,
+    raw_script,
 };
 
 const kind_map = std.StaticStringMap(KindTag).initComptime(.{
@@ -197,6 +198,7 @@ const kind_map = std.StaticStringMap(KindTag).initComptime(.{
     .{ "add_raw_output", .add_raw_output },
     .{ "add_data_output", .add_data_output },
     .{ "array_literal", .array_literal },
+    .{ "raw_script", .raw_script },
 });
 
 fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
@@ -234,7 +236,51 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
         .array_literal => .{ .array_literal = .{
             .elements = try parseStringArray(allocator, obj, "elements"),
         } },
+        .raw_script => try parseRawScript(allocator, obj),
     };
+}
+
+/// Parse a raw_script ANF value from JSON. Validates the hex-shape of the
+/// `bytes` field (even length, hex-only) and rejects negative arities.
+fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
+    const bytes_str = try getString(obj, "bytes");
+    if (bytes_str.len % 2 != 0) return ParseError.InvalidConstValue;
+    for (bytes_str) |c| {
+        const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+        if (!is_hex) return ParseError.InvalidConstValue;
+    }
+
+    const in_arity_val = obj.get("in_arity") orelse return ParseError.MissingField;
+    const in_arity: i32 = switch (in_arity_val) {
+        .integer => |i| @intCast(i),
+        .float => |f| blk: {
+            const i: i64 = @intFromFloat(f);
+            const roundtrip: f64 = @floatFromInt(i);
+            if (roundtrip != f) return ParseError.InvalidConstValue;
+            break :blk @intCast(i);
+        },
+        else => return ParseError.UnexpectedValueType,
+    };
+    if (in_arity < 0) return ParseError.InvalidConstValue;
+
+    const out_arity_val = obj.get("out_arity") orelse return ParseError.MissingField;
+    const out_arity: i32 = switch (out_arity_val) {
+        .integer => |i| @intCast(i),
+        .float => |f| blk: {
+            const i: i64 = @intFromFloat(f);
+            const roundtrip: f64 = @floatFromInt(i);
+            if (roundtrip != f) return ParseError.InvalidConstValue;
+            break :blk @intCast(i);
+        },
+        else => return ParseError.UnexpectedValueType,
+    };
+    if (out_arity < 0) return ParseError.InvalidConstValue;
+
+    return .{ .raw_script = .{
+        .bytes = try allocator.dupe(u8, bytes_str),
+        .in_arity = in_arity,
+        .out_arity = out_arity,
+    } };
 }
 
 fn parseLoadConst(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
@@ -1030,6 +1076,38 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
             try writer.writeAll(": ");
             try writeJsonString(writer, "array_literal");
             try writer.writeByte('\n');
+            try writeIndent(writer, depth);
+            try writer.writeByte('}');
+        },
+        .raw_script => |rs| {
+            try writer.writeAll("{\n");
+            // Sorted keys: bytes, in_arity, kind, out_arity. The arities are
+            // emitted unconditionally so in_arity 0 / out_arity 0 survive
+            // round-trips (matches the Go reference compiler).
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "bytes");
+            try writer.writeAll(": ");
+            try writeJsonString(writer, rs.bytes);
+            try writer.writeAll(",\n");
+
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "in_arity");
+            try writer.writeAll(": ");
+            try writer.print("{d}", .{rs.in_arity});
+            try writer.writeAll(",\n");
+
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "kind");
+            try writer.writeAll(": ");
+            try writeJsonString(writer, "raw_script");
+            try writer.writeAll(",\n");
+
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "out_arity");
+            try writer.writeAll(": ");
+            try writer.print("{d}", .{rs.out_arity});
+            try writer.writeByte('\n');
+
             try writeIndent(writer, depth);
             try writer.writeByte('}');
         },

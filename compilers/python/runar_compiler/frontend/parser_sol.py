@@ -9,6 +9,7 @@ from __future__ import annotations
 from runar_compiler.frontend.ast_nodes import (
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
+    ArrayLiteralExpr,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
     PropertyAccessExpr, MemberExpr, BinaryExpr, UnaryExpr, CallExpr,
     TernaryExpr, IndexAccessExpr, IncrementExpr, DecrementExpr,
@@ -391,7 +392,11 @@ class _SolParser:
             parent_tok = self.expect(TOK_IDENT)
             parent_class = parent_tok.value
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in (
+            "SmartContract",
+            "StatefulSmartContract",
+            "UnsafeSmartContract",
+        ):
             raise ValueError(f"unknown parent class: {parent_class}")
 
         self.expect(TOK_LBRACE)
@@ -1046,9 +1051,23 @@ class _SolParser:
             self.expect(TOK_RPAREN)
             return expr
 
+        if tok.kind == TOK_LBRACKET:
+            return self._parse_sol_array_literal()
+
         self.add_error(f"line {tok.line}: unexpected token {tok.value!r}")
         self.advance()
         return BigIntLiteral(value=0)
+
+    def _parse_sol_array_literal(self) -> Expression:
+        """Parse a bare array literal `[a, b, c]` and emit an ArrayLiteralExpr."""
+        self.expect(TOK_LBRACKET)
+        elements: list[Expression] = []
+        while not self.check(TOK_RBRACKET) and not self.check(TOK_EOF):
+            elements.append(self.parse_expression())
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RBRACKET)
+        return ArrayLiteralExpr(elements=elements)
 
     def _parse_call_args(self) -> list[Expression]:
         self.expect(TOK_LPAREN)

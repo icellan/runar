@@ -446,7 +446,7 @@ const Parser = struct {
             if (ParentClass.fromTsString(parent_tok.text)) |pc| {
                 parent_class = pc;
             } else {
-                self.addErrorFmt("unknown parent class: '{s}', expected SmartContract or StatefulSmartContract", .{parent_tok.text});
+                self.addErrorFmt("unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", .{parent_tok.text});
                 return null;
             }
         }
@@ -532,7 +532,7 @@ const Parser = struct {
         _ = self.match(.semicolon);
 
         // For SmartContract, all fields are readonly
-        const readonly = if (parent_class == .smart_contract) true else is_readonly;
+        const readonly = if (parent_class == .smart_contract or parent_class == .unsafe_smart_contract) true else is_readonly;
 
         return .{
             .name = name_tok.text,

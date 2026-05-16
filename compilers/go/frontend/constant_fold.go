@@ -542,6 +542,11 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		"check_preimage", "deserialize_state",
 		"add_output", "add_raw_output", "add_data_output":
 		return value
+
+	case "raw_script":
+		// Opaque byte span — never folded. Bytes are byte-canonical and the
+		// peephole optimizer treats it as a hard barrier.
+		return value
 	}
 
 	return value

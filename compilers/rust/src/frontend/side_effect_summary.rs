@@ -225,7 +225,7 @@ fn collect_expr(
                 }
             }
         }
-        Expression::CallExpr { callee, args } => {
+        Expression::CallExpr { callee, args, .. } => {
             // this.X(...) or member.X(...) — output intrinsics or
             // private method calls.
             let callee_name: Option<&str> = match callee.as_ref() {

@@ -38,6 +38,7 @@ const zero_bytes_32 = [_]u8{0} ** 32;
 const zero_bytes_40 = [_]u8{0} ** 40;
 const zero_bytes_48 = [_]u8{0} ** 48;
 const two_pow_63_script_num = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00 };
+const two_pow_64_script_num = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
 const Builder = struct {
     allocator: Allocator,
@@ -446,10 +447,12 @@ fn appendBytesToUnsignedNumToBuilder(
     try builder.emitOp("OP_NUM2BIN");
     try builder.emitOp("OP_CAT");
     try builder.emitOp("OP_BIN2NUM");
-    if (bit_count < byte_len * 8) {
-        try appendPowerOfTwoModulusToBuilder(builder, bit_count);
-        try builder.emitOp("OP_MOD");
-    }
+    // Always emit modulus to match TS reference. The TS / Rust / Python /
+    // Ruby / Java compilers unconditionally push `1 << bit_count` and OP_MOD;
+    // skipping it when bit_count == byte_len*8 (i.e. count is a multiple of
+    // eight) produces byte-divergent output for the 256s/256f param sets.
+    try appendPowerOfTwoModulusToBuilder(builder, bit_count);
+    try builder.emitOp("OP_MOD");
 }
 
 fn appendPowerOfTwoModulusToBuilder(builder: *Builder, exponent: usize) PqEmitterError!void {
@@ -457,8 +460,14 @@ fn appendPowerOfTwoModulusToBuilder(builder: *Builder, exponent: usize) PqEmitte
         try builder.emitPushInt(@intCast(@as(u64, 1) << @intCast(exponent)));
         return;
     }
-
-    try builder.emitPushData(two_pow_63_script_num[0..]);
+    if (exponent == 63) {
+        try builder.emitPushData(two_pow_63_script_num[0..]);
+        return;
+    }
+    // exponent == 64 is reached for SHA2_256f (h=68, hp=4 → h-hp = 64).
+    // 1 << 64 does not fit in i64, so emit the precomputed script-number
+    // bytes directly. Larger exponents are not used by any FIPS 205 SHA2 set.
+    try builder.emitPushData(two_pow_64_script_num[0..]);
 }
 
 fn appendNumToBigEndianToBuilder(builder: *Builder, width: usize) PqEmitterError!void {
@@ -795,7 +804,13 @@ fn emitSLHFors(builder: *Builder, p: SLHCodegenParams) PqEmitterError!void {
         const byte_start = bit_start / 8;
         const bit_offset = bit_start % 8;
         const bits_in_first = @min(8 - bit_offset, a);
-        const take = if (a > bits_in_first) @divFloor(bit_offset + a + 7, 8) else @as(usize, 1);
+        // Match the TS / Rust / Python / Ruby / Java reference exactly:
+        // `take = (a <= bits_in_first) ? 1 : 2`. Using a ceil(...)/8 formula
+        // here produces a different byte-extraction width for the 192s/256s
+        // param sets (a=14) when the bit window straddles three bytes; all
+        // five reference tiers deliberately cap `take` at 2 and rely on the
+        // OP_MOD below to mask off any out-of-range bits.
+        const take: usize = if (a > bits_in_first) 2 else 1;
 
         if (byte_start > 0) {
             try builder.emitPushInt(@intCast(byte_start));
@@ -811,8 +826,12 @@ fn emitSLHFors(builder: *Builder, p: SLHCodegenParams) PqEmitterError!void {
         try builder.emitOp("OP_NUM2BIN");
         try builder.emitOp("OP_CAT");
         try builder.emitOp("OP_BIN2NUM");
-        const total_bits = take * 8;
-        const right_shift = total_bits - bit_offset - a;
+        // Signed math: with TS-style take=2 capping, `total_bits - bit_offset
+        // - a` can be negative (e.g. 192s i=1 → 16 - 6 - 14 = -4). In that
+        // case the reference compilers skip the OP_DIV. Use signed arithmetic
+        // here to avoid usize underflow.
+        const total_bits: i64 = @as(i64, @intCast(take)) * 8;
+        const right_shift: i64 = total_bits - @as(i64, @intCast(bit_offset)) - @as(i64, @intCast(a));
         if (right_shift > 0) {
             try builder.emitPushInt(@intCast(@as(usize, 1) << @intCast(right_shift)));
             try builder.emitOp("OP_DIV");

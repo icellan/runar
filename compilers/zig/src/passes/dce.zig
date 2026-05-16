@@ -145,6 +145,10 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
         .array_literal => |al| {
             for (al.elements) |e| try used.put(e, {});
         },
+        .raw_script => {
+            // Opaque byte span — no SSA operand refs. Stack effect is declared
+            // via in_arity / out_arity and consumed by the stack lowerer.
+        },
     }
 }
 
@@ -153,6 +157,9 @@ pub fn hasSideEffect(v: types.ANFValue) bool {
     return switch (v) {
         .assert, .update_prop, .check_preimage, .deserialize_state,
         .add_output, .add_raw_output, .add_data_output, .@"if", .loop, .call, .method_call,
+        // raw_script bytes are opaque — DCE must never eliminate them, even
+        // when the binding is unreferenced.
+        .raw_script,
         => true,
         else => false,
     };

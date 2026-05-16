@@ -825,8 +825,10 @@ const Parser = struct {
         var parent_class: ParentClass = .smart_contract;
         if (std.mem.eql(u8, parent_class_name, "StatefulSmartContract")) {
             parent_class = .stateful_smart_contract;
+        } else if (std.mem.eql(u8, parent_class_name, "UnsafeSmartContract")) {
+            parent_class = .unsafe_smart_contract;
         } else if (!std.mem.eql(u8, parent_class_name, "SmartContract")) {
-            self.addErrorFmt("unknown parent class: '{s}', expected SmartContract or StatefulSmartContract", .{parent_class_name});
+            self.addErrorFmt("unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", .{parent_class_name});
             return null;
         }
 
@@ -1076,8 +1078,9 @@ const Parser = struct {
             }
         }
 
-        // In stateless contracts, all properties are readonly
-        if (parent_class == .smart_contract) {
+        // In stateless contracts (SmartContract and UnsafeSmartContract),
+        // all properties are readonly.
+        if (parent_class == .smart_contract or parent_class == .unsafe_smart_contract) {
             is_readonly = true;
         }
 

@@ -2,6 +2,7 @@ import {
   StatefulSmartContract,
   assert,
   safediv,
+  safemod,
   percentOf,
   clamp,
   sign,
@@ -10,6 +11,12 @@ import {
   gcd,
   mulDiv,
   log2,
+  abs,
+  min,
+  max,
+  within,
+  divmod,
+  bool,
 } from 'runar-lang';
 
 /**
@@ -125,5 +132,73 @@ class MathDemo extends StatefulSmartContract {
    */
   public computeLog2() {
     this.value = log2(this.value);
+  }
+
+  /**
+   * Replaces the stored value with its absolute value.
+   *
+   * Use cases: magnitude comparison, distance calculation.
+   */
+  public makeAbs() {
+    this.value = abs(this.value);
+  }
+
+  /**
+   * Replaces the stored value with min(value, other).
+   *
+   * Use cases: capping bids, picking the smaller of two amounts.
+   */
+  public takeMin(other: bigint) {
+    this.value = min(this.value, other);
+  }
+
+  /**
+   * Replaces the stored value with max(value, other).
+   *
+   * Use cases: enforcing reserve floors, picking the larger of two amounts.
+   */
+  public takeMax(other: bigint) {
+    this.value = max(this.value, other);
+  }
+
+  /**
+   * Asserts that the stored value lies in the half-open range [lo, hi),
+   * mirroring the semantics of Bitcoin Script's OP_WITHIN.
+   *
+   * Use cases: bounds-checked unlock parameters.
+   */
+  public assertWithin(lo: bigint, hi: bigint) {
+    assert(within(this.value, lo, hi));
+  }
+
+  /**
+   * Safe modulo — replaces the stored value with `value mod divisor`,
+   * asserting that `divisor` is non-zero.
+   *
+   * Use cases: round-robin scheduling, modular index calculation.
+   */
+  public moduloBy(divisor: bigint) {
+    this.value = safemod(this.value, divisor);
+  }
+
+  /**
+   * Replaces the stored value with the quotient of `value / divisor`,
+   * derived from Rúnar's `divmod` builtin that emits the canonical
+   * OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP sequence.
+   *
+   * Use cases: integer division with a side-effect on the modulo result.
+   */
+  public divmodBy(divisor: bigint) {
+    this.value = divmod(this.value, divisor);
+  }
+
+  /**
+   * Asserts that the stored value is "truthy" (non-zero) using the
+   * dedicated `bool` builtin, which compiles to OP_0NOTEQUAL.
+   *
+   * Use cases: terminal liveness check for non-zero state.
+   */
+  public assertNonZero() {
+    assert(bool(this.value));
   }
 }

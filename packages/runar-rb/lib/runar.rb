@@ -127,6 +127,13 @@ module Kernel
     Runar.check_preimage(preimage)
   end
 
+  # asm() compiler intrinsic — a compile-time-only escape hatch. The runtime
+  # stub raises; contracts must be run through the Runar compiler. Exposed
+  # here so native Ruby execution of contract source resolves the call.
+  def asm(*args)
+    Runar.asm(*args)
+  end
+
   def verify_rabin_sig(msg, sig, padding, pk)
     Runar.verify_rabin_sig(msg, sig, padding, pk)
   end

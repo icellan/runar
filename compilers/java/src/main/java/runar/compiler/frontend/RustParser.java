@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
 import runar.compiler.ir.ast.BinaryExpr;
@@ -699,9 +700,13 @@ public final class RustParser {
             if (s.check(TOK_HASH_BRACKET)) {
                 String attr = parseAttribute(s);
 
-                if (attr.equals("runar::contract") || attr.equals("runar::stateful_contract")) {
+                if (attr.equals("runar::contract")
+                    || attr.equals("runar::stateful_contract")
+                    || attr.equals("runar::unsafe_contract")) {
                     if (attr.equals("runar::stateful_contract")) {
                         parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+                    } else if (attr.equals("runar::unsafe_contract")) {
+                        parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                     }
 
                     // Parse struct
@@ -777,7 +782,9 @@ public final class RustParser {
                 break;
             }
         }
-        if (anyMutable) parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+        if (anyMutable && parentClass != ParentClass.UNSAFE_SMART_CONTRACT) {
+            parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+        }
 
         if (contractName.isEmpty()) {
             s.addError("No Runar contract struct found");
@@ -1458,6 +1465,6 @@ public final class RustParser {
             if (!s.matchTok(TOK_COMMA)) break;
         }
         s.expect(TOK_RBRACKET);
-        return new CallExpr(new Identifier("FixedArray"), elements);
+        return new ArrayLiteralExpr(elements);
     }
 }

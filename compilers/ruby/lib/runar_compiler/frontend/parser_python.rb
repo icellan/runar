@@ -693,7 +693,7 @@ module RunarCompiler
         expect(TOK_INDENT)
         skip_newlines
 
-        unless %w[SmartContract StatefulSmartContract].include?(parent_class)
+        unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
           add_error("Unknown parent class: #{parent_class}")
           raise "Unknown parent class: #{parent_class}"
         end
@@ -784,8 +784,9 @@ module RunarCompiler
           type_node = parse_type
         end
 
-        # In stateless contracts, all properties are readonly
-        is_readonly = true if parent_class == "SmartContract"
+        # In stateless contracts (SmartContract and UnsafeSmartContract), all
+        # properties are readonly.
+        is_readonly = true if parent_class == "SmartContract" || parent_class == "UnsafeSmartContract"
 
         # Check for initializer: = value
         initializer = nil

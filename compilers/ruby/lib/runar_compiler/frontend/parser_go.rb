@@ -674,12 +674,14 @@ module RunarCompiler
         while !check(TOK_RBRACE) && !check(TOK_EOF)
           prop_loc = loc
 
-          # Check for embedded type: runar.SmartContract / runar.StatefulSmartContract
+          # Check for embedded type:
+          # runar.SmartContract / runar.StatefulSmartContract / runar.UnsafeSmartContract
           if check_ident("runar") && peek_next.kind == TOK_DOT
             advance # skip 'runar'
             advance # skip '.'
             embed_name = expect(TOK_IDENT).value
             parent_class = "StatefulSmartContract" if embed_name == "StatefulSmartContract"
+            parent_class = "UnsafeSmartContract" if embed_name == "UnsafeSmartContract"
             next
           end
 

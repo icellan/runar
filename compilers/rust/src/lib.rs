@@ -362,6 +362,7 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
         emit_result.code_separator_indices,
         true, // include ANF IR for SDK state auto-computation
         emit_result.source_map,
+        emit_result.raw_script_spans,
     );
     Ok(artifact)
 }
@@ -514,6 +515,7 @@ pub fn compile_from_source_str_with_result(
                 emit_result.code_separator_indices,
                 true,
                 emit_result.source_map,
+                emit_result.raw_script_spans,
             );
             result.script_hex = Some(emit_result.script_hex);
             result.script_asm = Some(emit_result.script_asm);

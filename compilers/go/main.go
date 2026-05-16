@@ -29,6 +29,13 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "debug":
+			os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+			if err := runDebug(); err != nil {
+				fmt.Fprintf(os.Stderr, "debug: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 		// Unknown non-flag first arg: fall through to the flag parser,
 		// which will either accept it (e.g. user passed a stray positional)

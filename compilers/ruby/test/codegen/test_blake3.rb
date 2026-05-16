@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'codegen_helper'
+require 'runar_compiler/codegen/blake3'
 
 # Unit-vector tests for the Ruby BLAKE3 codegen module
 # (compilers/ruby/lib/runar_compiler/codegen/blake3.rb).
@@ -69,5 +70,28 @@ class TestBlake3Codegen < Minitest::Test
     assert_includes asm, 'OP_ADD'
     assert_includes asm, 'OP_XOR'
     assert_operator artifact.script.length / 2, :>, 1_000
+  end
+
+  # ---------------------------------------------------------------------------
+  # T-11: Op-count goldens for the BLAKE3 emitters.
+  #
+  # The ASM-substring tests above catch a gross regression but not byte-level
+  # codegen drift. Numbers mirror the Python peer
+  # (compilers/python/tests/codegen/test_blake3.py) and the Java reference at
+  # the same commit. Final hex is byte-identical across all 7 tiers
+  # (enforced by the conformance harness); these goldens are an in-process
+  # localized-regression gate.
+  # ---------------------------------------------------------------------------
+
+  def test_blake3_compress_op_count_golden
+    ops = []
+    RunarCompiler::Codegen::Blake3.emit_blake3_compress(->(op) { ops << op })
+    assert_equal 10819, ops.length, "blake3Compress op count drift"
+  end
+
+  def test_blake3_hash_op_count_golden
+    ops = []
+    RunarCompiler::Codegen::Blake3.emit_blake3_hash(->(op) { ops << op })
+    assert_equal 10829, ops.length, "blake3Hash op count drift"
   end
 end

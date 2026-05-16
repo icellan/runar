@@ -47,4 +47,32 @@ pub const MathDemo = struct {
     pub fn computeLog2(self: *MathDemo) void {
         self.value = runar.log2(self.value);
     }
+
+    pub fn makeAbs(self: *MathDemo) void {
+        self.value = runar.abs(self.value);
+    }
+
+    pub fn takeMin(self: *MathDemo, other: i64) void {
+        self.value = runar.min(self.value, other);
+    }
+
+    pub fn takeMax(self: *MathDemo, other: i64) void {
+        self.value = runar.max(self.value, other);
+    }
+
+    pub fn assertWithin(self: *MathDemo, lo: i64, hi: i64) void {
+        runar.assert(runar.within(self.value, lo, hi));
+    }
+
+    pub fn moduloBy(self: *MathDemo, divisor: i64) void {
+        self.value = runar.safemod(self.value, divisor);
+    }
+
+    pub fn divmodBy(self: *MathDemo, divisor: i64) void {
+        self.value = runar.divmod(self.value, divisor);
+    }
+
+    pub fn assertNonZero(self: *MathDemo) void {
+        runar.assert(runar.bool(self.value));
+    }
 };

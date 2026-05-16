@@ -233,6 +233,7 @@ module RunarCompiler
           kind name raw_value op left right result_type operand func args
           object method cond then else_ count iter_var body value_ref
           preimage satoshis state_values script_bytes elements
+          bytes in_arity out_arity
           const_string const_big_int const_bool const_int
         ]
 
@@ -268,3 +269,8 @@ module RunarCompiler
     end
   end
 end
+
+# Run the CLI when this file is executed directly (e.g.
+# `ruby -Ilib lib/runar_compiler/cli.rb --source ...`). When merely required
+# as a library, defining the module is all that should happen.
+RunarCompiler::CLI.run if $PROGRAM_NAME == __FILE__

@@ -619,7 +619,8 @@ public final class ZigParser {
                 if (ctorParamNames.contains(prop.name())) {
                     init = null;
                 }
-                if (parentClass == ParentClass.SMART_CONTRACT) {
+                if (parentClass == ParentClass.SMART_CONTRACT
+                    || parentClass == ParentClass.UNSAFE_SMART_CONTRACT) {
                     readonly = true;
                 } else if (!readonly && !hadInitializer && !mutated.contains(prop.name())) {
                     readonly = true;
@@ -679,6 +680,8 @@ public final class ZigParser {
                 String parent = expect(Kind.IDENT, "identifier").value;
                 if ("StatefulSmartContract".equals(parent)) {
                     parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+                } else if ("UnsafeSmartContract".equals(parent)) {
+                    parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 } else {
                     parentClass = ParentClass.SMART_CONTRACT;
                 }

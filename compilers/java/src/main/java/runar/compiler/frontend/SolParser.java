@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
 import runar.compiler.ir.ast.BinaryExpr;
@@ -541,6 +542,9 @@ public final class SolParser {
                     break;
                 case "StatefulSmartContract":
                     parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+                    break;
+                case "UnsafeSmartContract":
+                    parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                     break;
                 default:
                     throw new ParseException("unknown parent class: " + parentClassName);
@@ -1232,9 +1236,27 @@ public final class SolParser {
                 return expr;
             }
 
+            if (tok.kind == TOK_LBRACKET) {
+                return parseArrayLiteral();
+            }
+
             addError("line " + tok.line + ": unexpected token '" + tok.value + "'");
             advance();
             return new BigIntLiteral(BigInteger.ZERO);
+        }
+
+        // Parse a bare array literal `[a, b, c]` and emit an ArrayLiteralExpr.
+        Expression parseArrayLiteral() {
+            expect(TOK_LBRACKET);
+            List<Expression> elements = new ArrayList<>();
+            while (!check(TOK_RBRACKET) && !check(TOK_EOF)) {
+                elements.add(parseExpression());
+                if (!match(TOK_COMMA)) {
+                    break;
+                }
+            }
+            expect(TOK_RBRACKET);
+            return new ArrayLiteralExpr(elements);
         }
 
         List<Expression> parseCallArgs() {

@@ -31,6 +31,7 @@ import runar.compiler.ir.anf.LoadParam;
 import runar.compiler.ir.anf.LoadProp;
 import runar.compiler.ir.anf.Loop;
 import runar.compiler.ir.anf.MethodCall;
+import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
 
@@ -163,8 +164,53 @@ public final class AnfLoader {
                 asString(obj.get("scriptBytes"))
             );
             case "array_literal" -> new ArrayLiteral(toStringList(obj.get("elements")));
+            case "raw_script" -> toRawScript(obj);
             default -> throw new RuntimeException("unknown ANF value kind: " + kind);
         };
+    }
+
+    /**
+     * Decode a raw_script ANF value. Validates the hex body shape (even
+     * length, hex chars) and non-negative arities up front so malformed IR
+     * fails fast at load time rather than at lowering time.
+     */
+    private static RawScript toRawScript(Map<?, ?> obj) {
+        String bytes = asString(obj.get("bytes"));
+        if (bytes == null) bytes = "";
+        if ((bytes.length() & 1) != 0) {
+            throw new RuntimeException(
+                "raw_script bytes have odd hex length " + bytes.length()
+            );
+        }
+        if (!isHexString(bytes)) {
+            throw new RuntimeException(
+                "raw_script bytes contain non-hex characters"
+            );
+        }
+        int inArity = asInt(obj.get("in_arity"));
+        int outArity = asInt(obj.get("out_arity"));
+        if (inArity < 0) {
+            throw new RuntimeException(
+                "raw_script has negative in_arity " + inArity
+            );
+        }
+        if (outArity < 0) {
+            throw new RuntimeException(
+                "raw_script has negative out_arity " + outArity
+            );
+        }
+        return new RawScript(bytes, inArity, outArity);
+    }
+
+    private static boolean isHexString(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean ok = (c >= '0' && c <= '9')
+                || (c >= 'a' && c <= 'f')
+                || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
     }
 
     private static ConstValue toConst(Object v) {

@@ -580,6 +580,19 @@ public final class Typecheck {
                 return "void";
             }
 
+            // asm is a compile-time intrinsic — the parser has already
+            // rewritten the { body, in_arity?, out_arity? } object-literal
+            // argument into three positional args (body, in_arity,
+            // out_arity). The statement form returns void; the expression
+            // form asm<T>({...}) carries the captured return type on
+            // asmReturnType and produces a value of that type.
+            if (callee instanceof Identifier asmId && "asm".equals(asmId.name())) {
+                for (Expression a : e.args()) inferExpr(a, env);
+                String rt = e.asmReturnType();
+                if (rt != null && !rt.isEmpty()) return rt;
+                return "void";
+            }
+
             // Direct builtin / contract-method call
             if (callee instanceof Identifier id) {
                 String name = id.name();

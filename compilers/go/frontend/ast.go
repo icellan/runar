@@ -198,6 +198,12 @@ func (UnaryExpr) exprMarker() {}
 type CallExpr struct {
 	Callee Expression
 	Args   []Expression
+
+	// AsmReturnType is set only for the expression form `asm<T>({...})` of
+	// the asm compiler intrinsic. It carries the captured primitive return
+	// type ("bigint", "boolean", or "ByteString"); empty for the statement
+	// form and for every non-asm call.
+	AsmReturnType string
 }
 
 func (CallExpr) exprMarker() {}

@@ -719,6 +719,7 @@ public final class RbParser {
             switch (parentClassName) {
                 case "SmartContract" -> parentClass = ParentClass.SMART_CONTRACT;
                 case "StatefulSmartContract" -> parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+                case "UnsafeSmartContract" -> parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 default -> {
                     errors.add(file + ":" + firstPart.line + ": unknown parent class: " + parentClassName);
                     return null;
@@ -890,8 +891,10 @@ public final class RbParser {
                 }
             }
 
-            // Stateless contracts: all properties readonly.
-            if (parentClass == ParentClass.SMART_CONTRACT) {
+            // Stateless contracts (SmartContract and UnsafeSmartContract):
+            // all properties readonly.
+            if (parentClass == ParentClass.SMART_CONTRACT
+                || parentClass == ParentClass.UNSAFE_SMART_CONTRACT) {
                 isReadonly = true;
             }
 

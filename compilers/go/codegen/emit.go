@@ -152,6 +152,21 @@ type SourceMapping struct {
 }
 
 // ---------------------------------------------------------------------------
+// RawScriptSpan
+// ---------------------------------------------------------------------------
+
+// RawScriptSpan records a byte range produced by a raw_script ANF node. The
+// bytes are emitted verbatim by emitRawBytes; the static analyzer reads these
+// spans so it can skip the contents (which are opaque, peephole-barrier-
+// protected, and not guaranteed to form a well-formed opcode stream).
+type RawScriptSpan struct {
+	Offset   int `json:"offset"`
+	Length   int `json:"length"`
+	InArity  int `json:"inArity"`
+	OutArity int `json:"outArity"`
+}
+
+// ---------------------------------------------------------------------------
 // EmitResult
 // ---------------------------------------------------------------------------
 
@@ -164,6 +179,7 @@ type EmitResult struct {
 	CodeSeparatorIndex     int   // -1 if no OP_CODESEPARATOR was emitted
 	CodeSeparatorIndices   []int // per-method byte offsets
 	SourceMap              []SourceMapping
+	RawScriptSpans         []RawScriptSpan // byte ranges produced by raw_script ANF nodes
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +197,7 @@ type emitContext struct {
 	opcodeIndex            int
 	sourceMap              []SourceMapping
 	pendingSourceLoc       *ir.SourceLocation
+	rawScriptSpans         []RawScriptSpan
 }
 
 func newEmitContext() *emitContext {
@@ -251,6 +268,30 @@ func (ctx *emitContext) emitPlaceholder(paramIndex int) {
 	ctx.constructorSlots = append(ctx.constructorSlots, ConstructorSlot{
 		ParamIndex: paramIndex,
 		ByteOffset: byteOffset,
+	})
+}
+
+// emitRawBytes writes a verbatim byte span emitted by a raw_bytes StackOp.
+//
+// No re-encoding takes place — the bytes go out as supplied. The ASM column
+// shows `<raw N bytes>` so the human-readable disassembly is honest about the
+// opacity. A RawScriptSpan capturing the span's offset, length, and declared
+// stack-effect arities is recorded so the static analyzer can treat the span
+// as one opaque stack-effect step.
+func (ctx *emitContext) emitRawBytes(bytes []byte, inArity, outArity int) {
+	if len(bytes) == 0 {
+		return
+	}
+	offset := ctx.byteLength
+	ctx.recordSourceMapping()
+	ctx.appendHex(hex.EncodeToString(bytes))
+	ctx.appendAsm(fmt.Sprintf("<raw %d bytes>", len(bytes)))
+	ctx.nextOpcodeIndex()
+	ctx.rawScriptSpans = append(ctx.rawScriptSpans, RawScriptSpan{
+		Offset:   offset,
+		Length:   len(bytes),
+		InArity:  inArity,
+		OutArity: outArity,
 	})
 }
 
@@ -383,9 +424,24 @@ func encodePushValue(value PushValue) (hexStr string, asmStr string) {
 
 // EncodePushBigInt encodes a big.Int as a push operation, using small-integer
 // opcodes (OP_0..OP_16, OP_1NEGATE) where possible.
-// Exported for testing.
+// Exported for testing and for the frontend asm() array-body encoder.
 func EncodePushBigInt(n *big.Int) (hexStr string, asmStr string) {
 	return encodePushBigInt(n)
+}
+
+// EncodePushBytesHex encodes raw bytes as a Bitcoin Script push-data operation
+// and returns the result as a hex string. Exported for the frontend asm()
+// array-body encoder (push('<hex>') elements).
+func EncodePushBytesHex(data []byte) string {
+	return hex.EncodeToString(encodePushData(data))
+}
+
+// OpcodeByte returns the single-byte encoding of a named BSV opcode (e.g.
+// "OP_DUP"). The second return value is false if the name is unknown.
+// Exported for the frontend asm() array-body encoder.
+func OpcodeByte(name string) (byte, bool) {
+	b, ok := opcodes[name]
+	return b, ok
 }
 
 func encodePushBigInt(n *big.Int) (hexStr string, asmStr string) {
@@ -445,6 +501,12 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		return emitIf(op.Then, op.Else, ctx)
 	case "placeholder":
 		ctx.emitPlaceholder(op.ParamIndex)
+	case "raw_bytes":
+		// Opaque opcode-byte span from a raw_script ANF node. Written
+		// verbatim with no re-encoding; the declared arities are recorded
+		// into the artifact's rawScriptSpans so the analyzer can treat the
+		// span as one opaque stack-effect step.
+		ctx.emitRawBytes(op.RawBytes, op.InArity, op.OutArity)
 	case "push_codesep_index":
 		// Emit an OP_0 placeholder that the SDK will replace with the adjusted
 		// codeSeparatorIndex at runtime.
@@ -543,6 +605,7 @@ func Emit(methods []StackMethod) (*EmitResult, error) {
 		CodeSeparatorIndex:   ctx.codeSeparatorIndex,
 		CodeSeparatorIndices: ctx.codeSeparatorIndices,
 		SourceMap:            ctx.sourceMap,
+		RawScriptSpans:       ctx.rawScriptSpans,
 	}, nil
 }
 
@@ -612,5 +675,6 @@ func EmitMethod(method *StackMethod) (*EmitResult, error) {
 		CodeSeparatorIndex:   ctx.codeSeparatorIndex,
 		CodeSeparatorIndices: ctx.codeSeparatorIndices,
 		SourceMap:            ctx.sourceMap,
+		RawScriptSpans:       ctx.rawScriptSpans,
 	}, nil
 }

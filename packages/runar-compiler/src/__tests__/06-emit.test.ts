@@ -661,4 +661,86 @@ describe('Pass 6: Emit', () => {
       expect(OPCODES['OP_PICK']).toBe(0x79);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Exact-byte goldens (T-10 from
+  // audits/cross-language-completeness-20260514.md §5.2).
+  //
+  // The other test blocks above check "valid hex" / length / opcode-presence;
+  // they catch a crash or gross regression but not byte-level codegen drift.
+  // The bytes asserted here were captured under the same pipeline as
+  // `compileToEmit` (parse → ANF → stack → peephole → emit, with constant
+  // folding NOT applied) and match the conformance goldens stamped under
+  // fold-OFF. A change to any pre-emit pass that nudges the bytes will fail
+  // here as a localized regression instead of an opaque cross-tier mismatch.
+  // ---------------------------------------------------------------------------
+
+  describe('exact-byte goldens (T-10)', () => {
+    it('canonical P2PKH compiles to OP_DUP OP_HASH160 OP_0 OP_EQUALVERIFY OP_CHECKSIG', () => {
+      // Fold-OFF emit of the canonical P2PKH locking script. The 0x00 (OP_0)
+      // is the placeholder for the constructor's `pubKeyHash` slot — the SDK
+      // splices the real 20-byte address in at deploy time. This matches the
+      // checked-in conformance golden
+      // `conformance/tests/basic-p2pkh/expected-script.hex`.
+      const source = `
+        import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+        class P2PKH extends SmartContract {
+          readonly pubKeyHash: Addr;
+          constructor(pubKeyHash: Addr) { super(pubKeyHash); this.pubKeyHash = pubKeyHash; }
+          public unlock(sig: Sig, pubKey: PubKey) {
+            assert(hash160(pubKey) === this.pubKeyHash);
+            assert(checkSig(sig, pubKey));
+          }
+        }
+      `;
+      const result = compileToEmit(source);
+      expect(result.scriptHex).toBe('76a90088ac');
+    });
+
+    it('minimal stateless checkSig contract compiles to OP_0 OP_CHECKSIG', () => {
+      // Smallest possible signature-gated contract: one PubKey slot, one
+      // `checkSig(sig, this.owner)` call. The 0x00 byte is the OP_0
+      // placeholder for the constructor's `owner` slot.
+      const source = `
+        import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';
+        class Owned extends SmartContract {
+          readonly owner: PubKey;
+          constructor(owner: PubKey) { super(owner); this.owner = owner; }
+          public unlock(sig: Sig): void {
+            assert(checkSig(sig, this.owner));
+          }
+        }
+      `;
+      const result = compileToEmit(source);
+      expect(result.scriptHex).toBe('00ac');
+    });
+
+    it('canonical stateful Counter (StatefulSmartContract + addOutput) emits exact bytes', () => {
+      // Stateful contract with implicit txPreimage / state-continuation /
+      // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
+      // injection (0xab at position 2), the BIP-143 generator pubkey
+      // (0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),
+      // and the addOutput serialization path. A regression in any of these
+      // emits would shift the bytes here.
+      const source = `
+        import { StatefulSmartContract, assert } from 'runar-lang';
+        class Counter extends StatefulSmartContract {
+          count: bigint;
+          constructor(count: bigint) { super(count); this.count = count; }
+          public increment(): void {
+            this.count = this.count + 1n;
+            this.addOutput(1000n, this.count);
+          }
+        }
+      `;
+      const result = compileToEmit(source);
+      expect(result.scriptHex).toBe(
+        '76ab547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' +
+        'ad697601687f7782012c947f758258947f758258947f7781768b7702e803785679016a7e7c58' +
+        '807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000' +
+        '019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a0419' +
+        '76a9147b7e0288ac7e7c58807c7e7eaa7b820128947f7701207f75877777'
+      );
+    });
+  });
 });

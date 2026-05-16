@@ -287,6 +287,11 @@ pub enum Expression {
     CallExpr {
         callee: Box<Expression>,
         args: Vec<Expression>,
+        /// Set only for the expression form `asm<T>({...})` of the asm
+        /// compiler intrinsic. Carries the captured primitive return type
+        /// ("bigint", "boolean", or "ByteString"); `None` for the statement
+        /// form and for every non-asm call.
+        asm_return_type: Option<String>,
     },
     MemberExpr {
         object: Box<Expression>,

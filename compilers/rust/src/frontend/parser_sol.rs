@@ -661,6 +661,7 @@ impl<'a> SolParser<'a> {
                 args: params.iter().map(|p| Expression::Identifier {
                     name: p.name.clone(),
                 }).collect(),
+                asm_return_type: None,
             },
             source_location: loc.clone(),
         };
@@ -992,6 +993,7 @@ impl<'a> SolParser<'a> {
                     name: "assert".to_string(),
                 }),
                 args: vec![expr],
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1471,6 +1473,7 @@ impl<'a> SolParser<'a> {
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
+                        asm_return_type: None,
                     };
                 }
                 Token::LBracket => {
@@ -1533,12 +1536,26 @@ impl<'a> SolParser<'a> {
                         name: "assert".to_string(),
                     }),
                     args: vec![arg],
+                    asm_return_type: None,
                 }
             }
             Token::LParen => {
                 let expr = self.parse_expression();
                 self.expect(&Token::RParen);
                 expr
+            }
+            Token::LBracket => {
+                // Array literal: [a, b, c]
+                let mut elements: Vec<Expression> = Vec::new();
+                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
+                    elements.push(self.parse_expression());
+                    if !matches!(self.peek(), Token::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RBracket);
+                Expression::ArrayLiteral { elements }
             }
             other => {
                 self.errors
@@ -1637,12 +1654,13 @@ fn sol_rename_identifiers_in_expr(
                 Expression::Identifier { name }
             }
         }
-        Expression::CallExpr { callee, args } => Expression::CallExpr {
+        Expression::CallExpr { callee, args, .. } => Expression::CallExpr {
             callee: Box::new(sol_rename_identifiers_in_expr(*callee, rename_map)),
             args: args
                 .into_iter()
                 .map(|a| sol_rename_identifiers_in_expr(a, rename_map))
                 .collect(),
+            asm_return_type: None,
         },
         Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
             op,
@@ -1726,7 +1744,7 @@ fn sol_rewrite_expr_bare_props(
                 Expression::Identifier { name }
             }
         }
-        Expression::CallExpr { callee, args } => {
+        Expression::CallExpr { callee, args, .. } => {
             if let Expression::Identifier { ref name } = *callee {
                 if method_names.contains(name) && !locals.contains(name) && !prop_names.contains(name) {
                     let new_args: Vec<Expression> = args
@@ -1741,6 +1759,7 @@ fn sol_rewrite_expr_bare_props(
                             property: name.clone(),
                         }),
                         args: new_args,
+                        asm_return_type: None,
                     };
                 }
             }
@@ -1750,6 +1769,7 @@ fn sol_rewrite_expr_bare_props(
                     .into_iter()
                     .map(|a| sol_rewrite_expr_bare_props(a, prop_names, locals, method_names))
                     .collect(),
+                asm_return_type: None,
             }
         }
         Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {

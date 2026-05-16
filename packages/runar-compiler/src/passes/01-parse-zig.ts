@@ -277,7 +277,7 @@ interface ParsedType {
 
 class ZigParser extends ParserCore<ZigToken> {
   private contractName = 'UnnamedContract';
-  private parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+  private parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
   private properties: PropertyNode[] = [];
   private methods: MethodNode[] = [];
   private constructorNode: MethodNode | null = null;
@@ -420,7 +420,7 @@ class ZigParser extends ParserCore<ZigToken> {
     this.properties = this.properties.map((property) => ({
       ...property,
       initializer: ctorParamNames.has(property.name) ? undefined : property.initializer,
-      readonly: this.parentClass === 'SmartContract' || property.readonly || (this.parentClass === 'StatefulSmartContract' && !property.readonly && property.initializer === undefined && !this.methodsMutateProperty(property.name)),
+      readonly: this.parentClass === 'SmartContract' || this.parentClass === 'UnsafeSmartContract' || property.readonly || (this.parentClass === 'StatefulSmartContract' && !property.readonly && property.initializer === undefined && !this.methodsMutateProperty(property.name)),
     }));
 
     const methodNames = new Set(this.methods.map(method => method.name));
@@ -452,9 +452,13 @@ class ZigParser extends ParserCore<ZigToken> {
       this.advance();
       this.expect('.');
       const parent = this.expect('ident').value;
-      this.parentClass = parent === 'StatefulSmartContract'
-        ? 'StatefulSmartContract'
-        : 'SmartContract';
+      if (parent === 'StatefulSmartContract') {
+        this.parentClass = 'StatefulSmartContract';
+      } else if (parent === 'UnsafeSmartContract') {
+        this.parentClass = 'UnsafeSmartContract';
+      } else {
+        this.parentClass = 'SmartContract';
+      }
     }
 
     if (this.current().type === ';') this.advance();

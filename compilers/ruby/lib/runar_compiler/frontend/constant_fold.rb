@@ -436,6 +436,12 @@ module RunarCompiler
           return new_v
         end
 
+        if kind == "raw_script"
+          # Opaque byte span -- never folded. Bytes are byte-canonical and
+          # the peephole optimizer treats it as a hard barrier.
+          return value
+        end
+
         # Terminal / side-effecting kinds pass through
         value
       end

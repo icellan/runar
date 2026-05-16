@@ -426,7 +426,7 @@ const Parser = struct {
 
         const pc = parent_class.?;
         for (properties.items) |*prop| {
-            if (pc == .smart_contract) { prop.readonly = true; } else {
+            if (pc == .smart_contract or pc == .unsafe_smart_contract) { prop.readonly = true; } else {
                 var is_explicit_readonly = false;
                 for (explicit_readonly_fields.items) |fname| {
                     if (std.mem.eql(u8, fname, prop.name)) {
@@ -452,12 +452,13 @@ const Parser = struct {
     }
 
     fn parseParentClass(self: *Parser) ?ParentClass {
-        if (!self.checkIdent("runar")) { self.addError("expected 'runar.SmartContract' or 'runar.StatefulSmartContract'"); return null; }
+        if (!self.checkIdent("runar")) { self.addError("expected 'runar.SmartContract', 'runar.StatefulSmartContract', or 'runar.UnsafeSmartContract'"); return null; }
         _ = self.bump();
         if (self.expect(.dot) == null) return null;
         const ct = self.expect(.ident) orelse return null;
         if (std.mem.eql(u8, ct.text, "SmartContract")) return .smart_contract;
         if (std.mem.eql(u8, ct.text, "StatefulSmartContract")) return .stateful_smart_contract;
+        if (std.mem.eql(u8, ct.text, "UnsafeSmartContract")) return .unsafe_smart_contract;
         self.addErrorFmt("unknown contract type: '{s}'", .{ct.text});
         return null;
     }

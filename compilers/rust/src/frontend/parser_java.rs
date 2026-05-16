@@ -595,9 +595,10 @@ impl<'a> JavaParser<'a> {
             match name.as_str() {
                 "SmartContract" => "SmartContract".to_string(),
                 "StatefulSmartContract" => "StatefulSmartContract".to_string(),
+                "UnsafeSmartContract" => "UnsafeSmartContract".to_string(),
                 other => {
                     self.error(format!(
-                        "contract class in {} must extend SmartContract or StatefulSmartContract, got {}",
+                        "contract class in {} must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got {}",
                         self.file, other
                     ));
                     return None;
@@ -605,7 +606,7 @@ impl<'a> JavaParser<'a> {
             }
         } else {
             self.error(format!(
-                "contract class in {} must extend SmartContract or StatefulSmartContract",
+                "contract class in {} must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract",
                 self.file
             ));
             return None;
@@ -1705,6 +1706,7 @@ impl<'a> JavaParser<'a> {
                                 property: prop,
                             }),
                             args,
+                            asm_return_type: None,
                         });
                     } else {
                         expr = Expression::MemberExpr {
@@ -1727,6 +1729,7 @@ impl<'a> JavaParser<'a> {
                     expr = promote_literal_calls(Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
+                        asm_return_type: None,
                     });
                 }
                 TokenType::PlusPlus => {
@@ -1825,6 +1828,7 @@ impl<'a> JavaParser<'a> {
                                 property: prop,
                             }),
                             args,
+                            asm_return_type: None,
                         });
                     }
                     return Some(Expression::PropertyAccess { property: prop });
@@ -1843,6 +1847,7 @@ impl<'a> JavaParser<'a> {
                             name: "super".to_string(),
                         }),
                         args,
+                        asm_return_type: None,
                     });
                 }
                 // `super.method(args)` — fall back to an identifier followed
@@ -1970,7 +1975,7 @@ impl<'a> JavaParser<'a> {
 ///
 /// This is the Rust analogue of the Java parser's `convertCall` helper.
 fn promote_literal_calls(expr: Expression) -> Expression {
-    if let Expression::CallExpr { callee, args } = &expr {
+    if let Expression::CallExpr { callee, args, .. } = &expr {
         // X.fromHex("hex") → ByteStringLiteral(hex)
         if args.len() == 1 {
             if let Expression::MemberExpr { property, .. } = callee.as_ref() {
@@ -2065,6 +2070,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::CallExpr {
                     callee: Box::new(Expression::Identifier { name: "abs".to_string() }),
                     args: vec![(**object).clone()],
+                    asm_return_type: None,
                 };
             }
             // <expr>.equals(<expr>) — Java's value-equality method. Lower to
@@ -2086,6 +2092,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::CallExpr {
                     callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
                     args: args.clone(),
+                    asm_return_type: None,
                 };
             }
         }
@@ -2206,7 +2213,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
 }
 
 fn compare_to_receiver_arg(e: &Expression) -> Option<(Expression, Expression)> {
-    let Expression::CallExpr { callee, args } = e else { return None; };
+    let Expression::CallExpr { callee, args, .. } = e else { return None; };
     let Expression::MemberExpr { object, property } = callee.as_ref() else { return None; };
     if property != "compareTo" || args.len() != 1 {
         return None;
@@ -2251,6 +2258,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
                 name: "super".to_string(),
             }),
             args: super_args,
+            asm_return_type: None,
         },
         source_location: loc.clone(),
     });
@@ -2350,7 +2358,7 @@ mod tests {
 
         match &ctor.body[0] {
             Statement::ExpressionStatement { expression, .. } => match expression {
-                Expression::CallExpr { callee, args } => {
+                Expression::CallExpr { callee, args, .. } => {
                     match callee.as_ref() {
                         Expression::Identifier { name } => assert_eq!(name, "super"),
                         other => panic!("expected super identifier, got {:?}", other),
@@ -2413,7 +2421,7 @@ mod tests {
             other => panic!("expected ExpressionStatement, got {:?}", other),
         };
         let first_call = match first {
-            Expression::CallExpr { callee, args } => {
+            Expression::CallExpr { callee, args, .. } => {
                 match callee.as_ref() {
                     Expression::Identifier { name } => assert_eq!(name, "assert"),
                     other => panic!("expected assert callee, got {:?}", other),

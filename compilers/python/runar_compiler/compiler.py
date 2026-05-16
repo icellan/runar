@@ -96,6 +96,8 @@ class Artifact:
     code_separator_indices: list[int] | None = None
     build_timestamp: str = ""
     anf: ANFProgram | None = None
+    # Byte ranges produced by raw_script ANF nodes (asm({...}) calls).
+    raw_script_spans: list | None = None
 
 
 SCHEMA_VERSION = "runar-v0.5.0"
@@ -282,6 +284,7 @@ def compile_from_program(program: ANFProgram, disable_constant_folding: bool = F
         emit_result.code_separator_indices,
         source_map=emit_result.source_map,
         stack_methods=stack_methods,
+        raw_script_spans=emit_result.raw_script_spans,
     )
 
 
@@ -494,6 +497,7 @@ def _assemble_artifact(
     stack_methods: list | None = None,
     include_ir: bool = False,
     include_source_map: bool = True,
+    raw_script_spans: list | None = None,
 ) -> Artifact:
     """Build the final output artifact from the compilation products."""
     # Build ABI
@@ -598,6 +602,7 @@ def _assemble_artifact(
         code_separator_index=cs_index,
         code_separator_indices=cs_indices,
         build_timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        raw_script_spans=raw_script_spans if raw_script_spans else None,
     )
 
     # Always include ANF IR for stateful contracts — the SDK uses it
@@ -699,6 +704,16 @@ def artifact_to_json(artifact: Artifact) -> str:
         d["codeSeparatorIndex"] = artifact.code_separator_index
     if artifact.code_separator_indices is not None:
         d["codeSeparatorIndices"] = artifact.code_separator_indices
+    if artifact.raw_script_spans:
+        d["rawScriptSpans"] = [
+            {
+                "offset": s.offset,
+                "length": s.length,
+                "inArity": s.in_arity,
+                "outArity": s.out_arity,
+            }
+            for s in artifact.raw_script_spans
+        ]
     d["buildTimestamp"] = artifact.build_timestamp
     if artifact.anf is not None:
         d["anf"] = _serialize_anf_program(artifact.anf)
@@ -759,6 +774,12 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
             d["stateValues"] = v.state_values
         if v.script_bytes is not None:
             d["scriptBytes"] = v.script_bytes
+        if v.kind == "raw_script":
+            # Opaque opcode-byte span -- emit bytes + arities explicitly so
+            # in_arity 0 / out_arity 0 survive the round-trip.
+            d["bytes"] = v.bytes or ""
+            d["in_arity"] = v.in_arity or 0
+            d["out_arity"] = v.out_arity or 0
         return d
 
     def _ser_binding(b: Any) -> dict[str, Any]:
@@ -1095,6 +1116,7 @@ def _compile_from_source_str_with_result(
         emit_result.code_separator_indices,
         source_map=emit_result.source_map,
         stack_methods=stack_methods,
+        raw_script_spans=emit_result.raw_script_spans,
     )
     result.artifact = artifact
     result.script_hex = emit_result.script_hex

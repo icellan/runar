@@ -479,7 +479,7 @@ module RunarCompiler
           parent_class = "StatefulSmartContract"
         end
 
-        unless %w[SmartContract StatefulSmartContract].include?(parent_class)
+        unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
           raise "unknown parent class: #{parent_class}"
         end
 

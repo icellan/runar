@@ -395,6 +395,10 @@ module RunarCompiler
           expr.op == "!" ? "boolean" : "bigint"
         when CallExpr
           if expr.callee.is_a?(Identifier)
+            # Expression-form asm<T>({...}) statically yields type T.
+            if expr.callee.name == "asm" && !expr.asm_return_type.nil?
+              return expr.asm_return_type
+            end
             sig = BUILTIN_FUNCTIONS[expr.callee.name]
             return sig.return_type unless sig.nil?
           end
@@ -738,6 +742,19 @@ module RunarCompiler
         # super() call
         if expr.callee.is_a?(Identifier) && expr.callee.name == "super"
           expr.args.each { |arg| infer_expr_type(arg, env) }
+          return "void"
+        end
+
+        # asm is a compile-time intrinsic -- the parser has already rewritten
+        # the { body, in_arity?, out_arity? } object-literal argument into
+        # three positional args (body, in_arity, out_arity). The statement
+        # form returns void; the expression form asm<T>({...}) carries the
+        # captured return type on asm_return_type and produces a value of
+        # that type.
+        if expr.callee.is_a?(Identifier) && expr.callee.name == "asm"
+          expr.args.each { |arg| infer_expr_type(arg, env) }
+          return expr.asm_return_type unless expr.asm_return_type.nil?
+
           return "void"
         end
 

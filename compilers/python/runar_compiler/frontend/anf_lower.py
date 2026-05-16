@@ -176,6 +176,9 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
 
     if isinstance(expr, CallExpr):
         if isinstance(expr.callee, Identifier):
+            # Expression-form asm<ByteString>({...}) yields a byte value.
+            if expr.callee.name == "asm":
+                return expr.asm_return_type == "ByteString"
             if expr.callee.name in _BYTE_RETURNING_FUNCTIONS:
                 return True
             if len(expr.callee.name) >= 7 and expr.callee.name[:7] == "extract":
@@ -1027,6 +1030,29 @@ class _LowerCtx:
                     kind="method_call", object=this_ref,
                     method=callee.property, args=arg_refs,
                 ))
+
+        # asm({...}) compiler intrinsic -- the parser has already normalised
+        # the object-literal argument into three positional args
+        # (body, in_arity, out_arity). Lower it to a single opaque raw_script
+        # ANF binding; the hex body passes through unchanged. Diagnostics for
+        # malformed args were already pushed by the validator -- here we
+        # defensively coerce missing values to safe defaults.
+        if isinstance(callee, Identifier) and callee.name == "asm":
+            bytes_hex = ""
+            in_arity = 0
+            out_arity = 1
+            if len(e.args) >= 1 and isinstance(e.args[0], ByteStringLiteral):
+                bytes_hex = e.args[0].value
+            if len(e.args) >= 2 and isinstance(e.args[1], BigIntLiteral):
+                in_arity = e.args[1].value
+            if len(e.args) >= 3 and isinstance(e.args[2], BigIntLiteral):
+                out_arity = e.args[2].value
+            return self.emit(ANFValue(
+                kind="raw_script",
+                bytes=bytes_hex,
+                in_arity=in_arity,
+                out_arity=out_arity,
+            ))
 
         # Direct function call: sha256(x), checkSig(sig, pk), etc.
         if isinstance(callee, Identifier):

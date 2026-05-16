@@ -269,3 +269,109 @@ fn test_emit_verify_slh_dsa_all_param_sets() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// T-11: Op-count goldens for the non-EC crypto emitters.
+//
+// The _nontrivial tests above only assert `ops.len() > 0` (or > N).
+// These goldens lock the exact op count for each Rust emitter so codegen
+// drift surfaces as a localized regression rather than only as a cross-tier
+// hex mismatch in the conformance harness. Numbers mirror the Python peer
+// (compilers/python/tests/codegen/test_p256_p384.py, test_blake3.py); any
+// drift here typically indicates a real codegen change worth reviewing.
+// Rust pre-peephole StackOp granularity can differ slightly from the
+// other tiers; in that case keep this golden at the Rust value and note
+// it (see ecMul / ecMulGen in `ec_codegen_tests.rs` for the precedent).
+// ---------------------------------------------------------------------------
+
+// -- Blake3 ----------------------------------------------------------------
+
+#[test]
+fn test_blake3_compress_op_count_golden() {
+    let ops = collect(|s| emit_blake3_compress(s));
+    assert_eq!(ops.len(), 10819, "blake3_compress op count drift");
+}
+
+#[test]
+fn test_blake3_hash_op_count_golden() {
+    let ops = collect(|s| emit_blake3_hash(s));
+    assert_eq!(ops.len(), 10829, "blake3_hash op count drift");
+}
+
+// -- P-256 -----------------------------------------------------------------
+
+#[test]
+fn test_p256_add_op_count_golden() {
+    let ops = collect(|s| emit_p256_add(s));
+    assert_eq!(ops.len(), 6505, "p256_add op count drift");
+}
+
+#[test]
+fn test_p256_mul_op_count_golden() {
+    let ops = collect(|s| emit_p256_mul(s));
+    // Rust emits 4 fewer raw StackOps than Python/Java peers; same pattern
+    // as ecMul (see ec_codegen_tests.rs module comment). Final hex is
+    // byte-identical (enforced by the conformance harness).
+    assert_eq!(ops.len(), 73302, "p256_mul op count drift");
+}
+
+#[test]
+fn test_p256_mul_gen_op_count_golden() {
+    let ops = collect(|s| emit_p256_mul_gen(s));
+    // See p256_mul_op_count_golden comment.
+    assert_eq!(ops.len(), 73304, "p256_mul_gen op count drift");
+}
+
+#[test]
+fn test_p256_negate_op_count_golden() {
+    let ops = collect(|s| emit_p256_negate(s));
+    assert_eq!(ops.len(), 945, "p256_negate op count drift");
+}
+
+#[test]
+fn test_p256_on_curve_op_count_golden() {
+    let ops = collect(|s| emit_p256_on_curve(s));
+    assert_eq!(ops.len(), 546, "p256_on_curve op count drift");
+}
+
+#[test]
+fn test_p256_encode_compressed_op_count_golden() {
+    let ops = collect(|s| emit_p256_encode_compressed(s));
+    assert_eq!(ops.len(), 14, "p256_encode_compressed op count drift");
+}
+
+#[test]
+fn test_verify_ecdsa_p256_op_count_golden() {
+    let ops = collect(|s| emit_verify_ecdsa_p256(s));
+    // Rust emits 8 fewer raw StackOps than Python/Java peers (a verify
+    // computes two mul/mul_gen invocations × the 4-op divergence).
+    assert_eq!(ops.len(), 163581, "verify_ecdsa_p256 op count drift");
+}
+
+// -- P-384 -----------------------------------------------------------------
+
+#[test]
+fn test_p384_add_op_count_golden() {
+    let ops = collect(|s| emit_p384_add(s));
+    assert_eq!(ops.len(), 11311, "p384_add op count drift");
+}
+
+#[test]
+fn test_p384_mul_op_count_golden() {
+    let ops = collect(|s| emit_p384_mul(s));
+    // See ec_codegen_tests.rs module comment for the 4-op divergence pattern.
+    assert_eq!(ops.len(), 111420, "p384_mul op count drift");
+}
+
+#[test]
+fn test_p384_mul_gen_op_count_golden() {
+    let ops = collect(|s| emit_p384_mul_gen(s));
+    // See p384_mul_op_count_golden comment.
+    assert_eq!(ops.len(), 111422, "p384_mul_gen op count drift");
+}
+
+#[test]
+fn test_p384_negate_op_count_golden() {
+    let ops = collect(|s| emit_p384_negate(s));
+    assert_eq!(ops.len(), 1393, "p384_negate op count drift");
+}

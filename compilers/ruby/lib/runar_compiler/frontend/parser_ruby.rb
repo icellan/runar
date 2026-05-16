@@ -775,7 +775,7 @@ module RunarCompiler
 
         skip_newlines
 
-        unless %w[SmartContract StatefulSmartContract].include?(parent_class)
+        unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
           @errors << "#{@file}:#{first_part.line}: unknown parent class: #{parent_class}"
           return nil
         end
@@ -956,8 +956,9 @@ module RunarCompiler
           end
         end
 
-        # In stateless contracts, all properties are always readonly
-        is_readonly = true if parent_class == "SmartContract"
+        # In stateless contracts (SmartContract and UnsafeSmartContract), all
+        # properties are always readonly.
+        is_readonly = true if parent_class == "SmartContract" || parent_class == "UnsafeSmartContract"
 
         # Skip rest of line
         advance while peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF

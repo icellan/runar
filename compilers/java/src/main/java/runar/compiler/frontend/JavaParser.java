@@ -221,14 +221,19 @@ public final class JavaParser {
     private static ParentClass determineParentClass(ClassTree cls, String filename) {
         Tree parent = cls.getExtendsClause();
         if (parent == null) {
-            throw new ParseException("contract class in " + filename + " must extend SmartContract or StatefulSmartContract");
+            throw new ParseException(
+                "contract class in " + filename
+                    + " must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract"
+            );
         }
         String name = typeSimpleName(parent);
         return switch (name) {
             case "SmartContract" -> ParentClass.SMART_CONTRACT;
             case "StatefulSmartContract" -> ParentClass.STATEFUL_SMART_CONTRACT;
+            case "UnsafeSmartContract" -> ParentClass.UNSAFE_SMART_CONTRACT;
             default -> throw new ParseException(
-                "contract class in " + filename + " must extend SmartContract or StatefulSmartContract, got " + name
+                "contract class in " + filename
+                    + " must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got " + name
             );
         };
     }
@@ -600,6 +605,21 @@ public final class JavaParser {
             && mi.getArguments().get(0) instanceof LiteralTree hex
             && hex.getValue() instanceof String hs) {
             return new ByteStringLiteral(hs);
+        }
+        // Recognise asm("<hex>", in_arity, out_arity) — the asm() intrinsic
+        // body is the only call position where a bare String literal is legal.
+        // Lower the body to a ByteStringLiteral so the bare-String rejection
+        // in convertLiteral never fires for it.
+        if (callee instanceof IdentifierTree id && id.getName().contentEquals("asm")
+            && !mi.getArguments().isEmpty()
+            && mi.getArguments().get(0) instanceof LiteralTree body
+            && body.getValue() instanceof String bodyStr) {
+            List<Expression> asmArgs = new ArrayList<>(mi.getArguments().size());
+            asmArgs.add(new ByteStringLiteral(bodyStr));
+            for (int i = 1; i < mi.getArguments().size(); i++) {
+                asmArgs.add(convertExpression(mi.getArguments().get(i), filename, cu));
+            }
+            return new CallExpr(new Identifier("asm"), asmArgs);
         }
         // Recognise BigInteger.valueOf(<int literal>) → BigIntLiteral, and
         // Bigint.of(<int literal>) as the equivalent shorthand on the Bigint

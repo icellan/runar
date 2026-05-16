@@ -4,6 +4,7 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
 import runar.compiler.ir.ast.BinaryExpr;
@@ -535,6 +536,12 @@ public final class MoveParser {
                 skipUseDecl();
             }
 
+            // `unsafe module Name { ... }` marks an UnsafeSmartContract --
+            // the asm-escape-hatch base class. Plain `module Name { ... }`
+            // infers SmartContract / StatefulSmartContract structurally as
+            // before.
+            boolean isUnsafe = matchIdent("unsafe");
+
             if (!matchIdent("module")) {
                 throw new ParseException("expected 'module' keyword");
             }
@@ -546,7 +553,9 @@ public final class MoveParser {
 
             List<PropertyNode> properties = new ArrayList<>();
             List<MethodNode> methods = new ArrayList<>();
-            ParentClass parentClass = ParentClass.SMART_CONTRACT;
+            ParentClass parentClass = isUnsafe
+                ? ParentClass.UNSAFE_SMART_CONTRACT
+                : ParentClass.SMART_CONTRACT;
 
             while (!check(Kind.RBRACE) && !check(Kind.EOF)) {
                 if (checkIdent("use")) {
@@ -567,7 +576,7 @@ public final class MoveParser {
                             break;
                         }
                     }
-                    if (isResource || anyMutable) {
+                    if (!isUnsafe && (isResource || anyMutable)) {
                         parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                     }
                     properties.addAll(props);
@@ -576,7 +585,7 @@ public final class MoveParser {
 
                 if (checkIdent("public") || checkIdent("fun")) {
                     FnResult r = parseFunction();
-                    if (r.hasMut) {
+                    if (r.hasMut && !isUnsafe) {
                         parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
                     }
                     methods.add(r.method);
@@ -1254,9 +1263,27 @@ public final class MoveParser {
                 return e;
             }
 
+            if (tok.kind() == Kind.LBRACKET) {
+                return parseArrayLiteral();
+            }
+
             errors.add("line " + tok.line() + ": unexpected token " + repr(tok.value()));
             advance();
             return new BigIntLiteral(BigInteger.ZERO);
+        }
+
+        // Parse a bare array literal `[a, b, c]` and emit an ArrayLiteralExpr.
+        Expression parseArrayLiteral() {
+            expect(Kind.LBRACKET);
+            List<Expression> elements = new ArrayList<>();
+            while (!check(Kind.RBRACKET) && !check(Kind.EOF)) {
+                elements.add(parseExpression());
+                if (!match(Kind.COMMA)) {
+                    break;
+                }
+            }
+            expect(Kind.RBRACKET);
+            return new ArrayLiteralExpr(elements);
         }
 
         List<Expression> parseCallArgs() {

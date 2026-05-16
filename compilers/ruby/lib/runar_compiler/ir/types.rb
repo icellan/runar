@@ -117,7 +117,12 @@ module RunarCompiler
                     # -- add_raw_output ------------------------------------
                     :script_bytes,
                     # -- array_literal -------------------------------------
-                    :elements
+                    :elements,
+                    # -- raw_script: opaque opcode-byte span with declared
+                    #    stack arity (emitted by the asm() intrinsic).
+                    :bytes,
+                    :in_arity,
+                    :out_arity
 
       def initialize(kind: "", **_opts)
         @kind = kind
@@ -148,6 +153,9 @@ module RunarCompiler
         @state_values = nil
         @script_bytes = nil
         @elements = nil
+        @bytes = nil
+        @in_arity = nil
+        @out_arity = nil
       end
     end
 
@@ -263,6 +271,9 @@ module RunarCompiler
       v.state_values = d["stateValues"]
       v.script_bytes = d["scriptBytes"]
       v.elements    = d["elements"]
+      v.bytes       = d["bytes"]
+      v.in_arity    = d["in_arity"]
+      v.out_arity   = d["out_arity"]
 
       # Nested bindings
       if d.key?("then") && !d["then"].nil?

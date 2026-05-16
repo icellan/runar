@@ -793,7 +793,7 @@ const Parser = struct {
             if (ParentClass.fromTsString(parent_tok.text)) |pc| {
                 parent_class = pc;
             } else {
-                self.addErrorFmt("unknown parent class: '{s}', expected SmartContract or StatefulSmartContract", .{parent_tok.text});
+                self.addErrorFmt("unknown parent class: '{s}', expected SmartContract, StatefulSmartContract, or UnsafeSmartContract", .{parent_tok.text});
                 return null;
             }
             _ = self.expect(.rparen);
@@ -893,8 +893,9 @@ const Parser = struct {
         if (self.checkIdent("Readonly")) {
             is_readonly = true;
         }
-        // In SmartContract, all properties are automatically readonly
-        if (parent_class == .smart_contract) {
+        // In SmartContract (and UnsafeSmartContract), all properties are
+        // automatically readonly.
+        if (parent_class == .smart_contract or parent_class == .unsafe_smart_contract) {
             is_readonly = true;
         }
 

@@ -44,6 +44,7 @@ const KNOWN_KINDS: &[&str] = &[
     "add_raw_output",
     "add_data_output",
     "array_literal",
+    "raw_script",
 ];
 
 fn kind_name(value: &ANFValue) -> &'static str {
@@ -66,7 +67,14 @@ fn kind_name(value: &ANFValue) -> &'static str {
         ANFValue::AddRawOutput { .. } => "add_raw_output",
         ANFValue::AddDataOutput { .. } => "add_data_output",
         ANFValue::ArrayLiteral { .. } => "array_literal",
+        ANFValue::RawScript { .. } => "raw_script",
     }
+}
+
+/// Reports whether `s` contains only hex digits (0-9, a-f, A-F).
+/// An empty string is considered valid hex.
+fn is_hex_string(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn validate_ir(program: &ANFProgram) -> Result<(), String> {
@@ -137,6 +145,23 @@ fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), S
             }
             ANFValue::Loop { body, .. } => {
                 validate_bindings(body, method_name)?;
+            }
+            ANFValue::RawScript { bytes, .. } => {
+                // Opaque opcode-byte span — the bytes must be a well-formed
+                // even-length hex string. in_arity / out_arity are usize, so
+                // non-negativity is enforced at the type level.
+                if bytes.len() % 2 != 0 {
+                    return Err(format!(
+                        "IR validation: method {} binding {} raw_script bytes have odd hex length {}",
+                        method_name, binding.name, bytes.len()
+                    ));
+                }
+                if !is_hex_string(bytes) {
+                    return Err(format!(
+                        "IR validation: method {} binding {} raw_script bytes contain non-hex characters",
+                        method_name, binding.name
+                    ));
+                }
             }
             _ => {}
         }

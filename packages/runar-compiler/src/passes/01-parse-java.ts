@@ -389,22 +389,24 @@ class JavaParser {
     const className = nameTok.value;
     const classLoc: SourceLocation = { file: this.file, line: classTok.line, column: classTok.column };
 
-    // Require `extends SmartContract | StatefulSmartContract`
+    // Require `extends SmartContract | StatefulSmartContract | UnsafeSmartContract`
     if (this.current().type !== 'extends') {
       this.errorAt(this.current(),
-        `contract class must extend SmartContract or StatefulSmartContract`);
+        `contract class must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract`);
       return { contract: null, errors: this.errors };
     }
     this.advance();
     const parentName = this.parseQualifiedNameSimple();
-    let parentClass: 'SmartContract' | 'StatefulSmartContract';
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
     if (parentName === 'SmartContract') {
       parentClass = 'SmartContract';
     } else if (parentName === 'StatefulSmartContract') {
       parentClass = 'StatefulSmartContract';
+    } else if (parentName === 'UnsafeSmartContract') {
+      parentClass = 'UnsafeSmartContract';
     } else {
       this.errorAt(nameTok,
-        `contract class must extend SmartContract or StatefulSmartContract, got ${parentName}`);
+        `contract class must extend SmartContract, StatefulSmartContract, or UnsafeSmartContract, got ${parentName}`);
       return { contract: null, errors: this.errors };
     }
 

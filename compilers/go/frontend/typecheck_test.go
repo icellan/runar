@@ -2085,3 +2085,54 @@ class MultiSig extends SmartContract {
 		t.Errorf("expected no type errors for two distinct Sigs used once each, got: %s", strings.Join(tcResult.ErrorStrings(), "; "))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: Contract with a Point-typed property typechecks cleanly (T-12).
+// Mirrors the TS coverage in packages/runar-compiler/src/__tests__/ec.test.ts.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_PointProperty(t *testing.T) {
+	source := `
+import { SmartContract, assert, Point, ecOnCurve } from 'runar-lang';
+
+class EcOnCurveTest extends SmartContract {
+  readonly p: Point;
+
+  constructor(p: Point) {
+    super(p);
+    this.p = p;
+  }
+
+  public verify(): void {
+    assert(ecOnCurve(this.p));
+  }
+}
+`
+	contract := mustParseTS(t, source)
+
+	// Surface the property type in the AST so a regression that drops Point
+	// from the recognized type set (parser.go:354-356 TS peer) surfaces here.
+	if len(contract.Properties) != 1 {
+		t.Fatalf("expected 1 property, got %d", len(contract.Properties))
+	}
+	prop := contract.Properties[0]
+	if prop.Name != "p" {
+		t.Fatalf("expected property name p, got %q", prop.Name)
+	}
+	prim, ok := prop.Type.(PrimitiveType)
+	if !ok {
+		t.Fatalf("expected PrimitiveType for Point property, got %T", prop.Type)
+	}
+	if prim.Name != "Point" {
+		t.Fatalf("expected property type Point, got %q", prim.Name)
+	}
+
+	valResult := Validate(contract)
+	if len(valResult.Errors) > 0 {
+		t.Fatalf("validation failed: %s", strings.Join(valResult.ErrorStrings(), "; "))
+	}
+	tcResult := TypeCheck(contract)
+	if len(tcResult.Errors) > 0 {
+		t.Errorf("expected no type errors for Point-typed property, got: %s", strings.Join(tcResult.ErrorStrings(), "; "))
+	}
+}

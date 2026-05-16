@@ -473,9 +473,11 @@ func (p *rustMacroParser) parse() *ContractNode {
 			attr := p.parseAttribute()
 
 			switch {
-			case attr == "runar::contract" || attr == "runar::stateful_contract":
+			case attr == "runar::contract" || attr == "runar::stateful_contract" || attr == "runar::unsafe_contract":
 				if attr == "runar::stateful_contract" {
 					parentClass = "StatefulSmartContract"
+				} else if attr == "runar::unsafe_contract" {
+					parentClass = "UnsafeSmartContract"
 				}
 				// Parse: (pub)? struct Name { ... }
 				p.match(rustTokPub)
@@ -1305,6 +1307,10 @@ func (p *rustMacroParser) parsePrimary() Expression {
 		p.expect(rustTokRParen)
 		return expr
 
+	case rustTokLBracket:
+		// Array literal: [a, b, c]
+		return p.parseRustArrayLiteral()
+
 	case rustTokIdent:
 		p.advance()
 		mapped := rustMapBuiltin(t.value)
@@ -1319,6 +1325,23 @@ func (p *rustMacroParser) parsePrimary() Expression {
 		})
 		return Identifier{Name: "unknown"}
 	}
+}
+
+// parseRustArrayLiteral handles bare [a, b, c] array-literal expressions in
+// the Rust DSL parser. References (`&expr`) are stripped at the unary layer
+// by `parseUnary`, so element parsing simply delegates to parseExpression.
+func (p *rustMacroParser) parseRustArrayLiteral() Expression {
+	p.expect(rustTokLBracket)
+	var elements []Expression
+	for p.current().kind != rustTokRBracket && p.current().kind != rustTokEOF {
+		elem := p.parseExpression()
+		elements = append(elements, elem)
+		if !p.match(rustTokComma) {
+			break
+		}
+	}
+	p.expect(rustTokRBracket)
+	return ArrayLiteralExpr{Elements: elements}
 }
 
 // ---------------------------------------------------------------------------

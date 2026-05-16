@@ -59,6 +59,49 @@ pub const OutputSnapshot = struct {
 
 pub const SmartContract = struct {};
 
+/// UnsafeSmartContract is the base struct for stateless Rúnar contracts that
+/// need the raw-script escape hatch (`asm`). Embed (or assign as the parent
+/// marker on Zig-DSL contracts) so the Rúnar compiler routes the source
+/// through the `UnsafeSmartContract` parent-class branch. Like
+/// `SmartContract`, all properties must be readonly — `UnsafeSmartContract`
+/// trades the type-checked subset only for the bytes inside `asm` calls, not
+/// for mutable state. Use `StatefulSmartContract` for mutable state.
+pub const UnsafeSmartContract = struct {};
+
+/// Structured argument for the `asm` compiler intrinsic. The Rúnar Zig-DSL
+/// frontend intercepts `asm(...)` calls at parse time and lowers them to a
+/// `raw_script` ANF node; this struct only exists so native `zig build test`
+/// compilation of contract source succeeds.
+pub const AsmArgs = struct {
+    /// Even-length hex string of raw Bitcoin Script opcode bytes to embed
+    /// verbatim. The compiler does not re-encode or validate the semantics
+    /// of these bytes — only that the string is valid hex with an even
+    /// length.
+    body: []const u8,
+    /// Number of stack items the embedded bytes consume on entry. Defaults
+    /// to 0.
+    in_arity: i64 = 0,
+    /// Number of stack items the embedded bytes leave on exit. Defaults to
+    /// 1 so the common "terminal value of a public method" case works
+    /// without ceremony.
+    out_arity: i64 = 1,
+};
+
+/// Embeds a raw Bitcoin Script byte sequence in a contract method. Only
+/// callable from inside a contract that uses `UnsafeSmartContract` as the
+/// parent marker — the compiler enforces this. The Zig-DSL surface spelling
+/// is the positional form `asm(body, in_arity, out_arity)`; the compiler
+/// normalises every frontend to the same `raw_script` ANF node.
+///
+/// This runtime stub panics: `asm` is a compile-time intrinsic and cannot be
+/// executed off-chain.
+pub fn asm_(body: []const u8, in_arity: i64, out_arity: i64) void {
+    _ = body;
+    _ = in_arity;
+    _ = out_arity;
+    @panic("asm() cannot be called at runtime — compile this contract with the Rúnar compiler");
+}
+
 pub const StatefulSmartContractError = error{
     UnsupportedOutputValue,
 };

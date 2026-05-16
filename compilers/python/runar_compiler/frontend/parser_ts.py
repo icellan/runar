@@ -456,7 +456,10 @@ class _TsParser:
             # Skip anything else at top level
             self._skip_statement()
 
-        raise ValueError("no class extending SmartContract or StatefulSmartContract found")
+        raise ValueError(
+            "no class extending SmartContract, StatefulSmartContract, "
+            "or UnsafeSmartContract found"
+        )
 
     def _skip_import(self) -> None:
         """Skip an import statement."""
@@ -509,9 +512,14 @@ class _TsParser:
             parent_tok = self.expect(TOK_IDENT)
             parent_class = parent_tok.value
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in (
+            "SmartContract",
+            "StatefulSmartContract",
+            "UnsafeSmartContract",
+        ):
             raise ValueError(
-                f"no class extending SmartContract or StatefulSmartContract found"
+                f"no class extending SmartContract, StatefulSmartContract, "
+                f"or UnsafeSmartContract found"
             )
 
         self.expect(TOK_LBRACE)
@@ -1281,6 +1289,16 @@ class _TsParser:
             if name == "super":
                 return Identifier(name="super")
 
+            # asm({ body, in_arity?, out_arity? }) compiler intrinsic.
+            # Normalise into a CallExpr with three positional args so
+            # downstream passes only have to walk a CallExpr. Both the hex
+            # body and array body forms are accepted; the optional generic
+            # type argument asm<T>(...) flags the expression form.
+            if name == "asm" and (
+                self.check(TOK_LPAREN) or self.check(TOK_LT)
+            ):
+                return self._parse_asm_call()
+
             # Function call: name(...)
             if self.check(TOK_LPAREN):
                 args = self._parse_call_args()
@@ -1313,6 +1331,253 @@ class _TsParser:
                 break
         self.expect(TOK_RBRACKET)
         return ArrayLiteralExpr(elements=elements)
+
+    # -- asm() compiler intrinsic -------------------------------------------
+
+    def _parse_asm_call(self) -> Expression:
+        """Decode an ``asm({ body, in_arity?, out_arity? })`` call into a
+        CallExpr whose positional args are
+        ``[ByteStringLiteral(body), BigIntLiteral(in_arity), BigIntLiteral(out_arity)]``.
+
+        Two surface body shapes are accepted:
+          - Hex string literal:  ``body: '76a90088ac'``
+          - Array of opcode names / push() calls:
+            ``body: [OP_DUP, OP_HASH160, push('1234abcd'), OP_EQUALVERIFY]``
+
+        The optional generic type argument ``asm<T>({...})`` marks the
+        expression form; the captured T is stashed on
+        ``CallExpr.asm_return_type``. On malformed input we still return a
+        syntactically valid CallExpr so later passes can produce additional
+        diagnostics without crashing.
+        """
+        callee = Identifier(name="asm")
+
+        # Capture the generic type argument asm<T>({...}) if present, BEFORE
+        # arg-shape diagnostics so the expression form still records its
+        # return type even when other args are malformed.
+        asm_return_type = ""
+        if self.match(TOK_LT):
+            type_tok = self.expect(TOK_IDENT)
+            text = type_tok.value
+            if text in ("bigint", "boolean", "ByteString"):
+                asm_return_type = text
+            else:
+                self.add_error(
+                    f"asm<T>() return type must be 'bigint', 'boolean', or "
+                    f"'ByteString'; got {text!r}"
+                )
+            self.expect(TOK_GT)
+
+        self.expect(TOK_LPAREN)
+
+        body_expr: Expression | None = None
+        in_arity_expr: Expression | None = None
+        out_arity_expr: Expression | None = None
+
+        if not self.check(TOK_LBRACE):
+            tok = self.peek()
+            self.add_error(
+                "asm() argument must be an object literal "
+                "{ body: '<hex>', in_arity?: <int>, out_arity?: <int> }, "
+                f"got {tok.value!r}"
+            )
+            # Best-effort: consume to the closing paren.
+            while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
+                self.advance()
+            self.match(TOK_RPAREN)
+            return CallExpr(callee=callee, args=[], asm_return_type=asm_return_type)
+
+        self.expect(TOK_LBRACE)
+        while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
+            key_tok = self.expect(TOK_IDENT)
+            key = key_tok.value
+            self.expect(TOK_COLON)
+
+            if key == "body":
+                if self.check(TOK_STRING):
+                    str_tok = self.advance()
+                    body_expr = ByteStringLiteral(value=str_tok.value)
+                elif self.check(TOK_LBRACKET):
+                    body_expr = ByteStringLiteral(value=self._encode_asm_array_body())
+                else:
+                    tok = self.peek()
+                    self.add_error(
+                        "asm() body must be a hex string literal or an array "
+                        "of opcode names / push() calls; got "
+                        f"{tok.value!r}."
+                    )
+                    body_expr = ByteStringLiteral(value="")
+                    # skip the offending value token
+                    if not self.check(TOK_COMMA) and not self.check(TOK_RBRACE):
+                        self.advance()
+            elif key == "in_arity":
+                in_arity_expr = self._parse_asm_arity_literal("in_arity")
+            elif key == "out_arity":
+                out_arity_expr = self._parse_asm_arity_literal("out_arity")
+            else:
+                self.add_error(
+                    f"asm() does not accept the {key!r} field; valid fields "
+                    "are 'body', 'in_arity', 'out_arity'."
+                )
+                if not self.check(TOK_COMMA) and not self.check(TOK_RBRACE):
+                    self.advance()
+
+            if not self.match(TOK_COMMA):
+                break
+
+        self.expect(TOK_RBRACE)
+        self.expect(TOK_RPAREN)
+
+        if body_expr is None:
+            self.add_error(
+                "asm() requires a 'body' field with a hex string literal value"
+            )
+            body_expr = ByteStringLiteral(value="")
+        # Defaults: in_arity=0, out_arity=1. The out_arity=1 default reflects
+        # the public-method-must-terminate-truthy invariant.
+        if in_arity_expr is None:
+            in_arity_expr = BigIntLiteral(value=0)
+        if out_arity_expr is None:
+            out_arity_expr = BigIntLiteral(value=1)
+
+        return CallExpr(
+            callee=callee,
+            args=[body_expr, in_arity_expr, out_arity_expr],
+            asm_return_type=asm_return_type,
+        )
+
+    def _parse_asm_arity_literal(self, field_name: str) -> Expression:
+        """Parse a non-negative integer literal arity field for asm()."""
+        if self.check(TOK_NUMBER):
+            num_tok = self.advance()
+            try:
+                val = int(num_tok.value, 0)
+            except ValueError:
+                val = -1
+            if val < 0:
+                self.add_error(
+                    f"asm() {field_name} must be a non-negative integer "
+                    f"literal, got {num_tok.value!r}"
+                )
+                return BigIntLiteral(value=0)
+            return BigIntLiteral(value=val)
+        tok = self.peek()
+        self.add_error(
+            f"asm() {field_name} must be a non-negative integer literal, "
+            f"got {tok.value!r}"
+        )
+        if not self.check(TOK_COMMA) and not self.check(TOK_RBRACE):
+            self.advance()
+        return BigIntLiteral(value=0)
+
+    def _encode_asm_array_body(self) -> str:
+        """Encode an ``asm({ body: [OP_DUP, push(0x42), ...] })`` array literal
+        to its hex byte representation. Uses the same push-encoding helpers as
+        the emit pass so the bytes are byte-identical to what the emitter
+        would produce for the equivalent literal.
+        """
+        from runar_compiler.codegen.emit import (
+            OPCODES,
+            encode_push_big_int,
+            encode_push_data,
+        )
+
+        hex_str = ""
+        self.expect(TOK_LBRACKET)
+        while not self.check(TOK_RBRACKET) and not self.check(TOK_EOF):
+            if self.check(TOK_IDENT):
+                name = self.advance().value
+                # push(<literal>) call.
+                if name == "push" and self.check(TOK_LPAREN):
+                    self.expect(TOK_LPAREN)
+                    pushed = self._encode_asm_push_literal(
+                        OPCODES, encode_push_big_int, encode_push_data
+                    )
+                    self.expect(TOK_RPAREN)
+                    hex_str += pushed
+                else:
+                    b = OPCODES.get(name)
+                    if b is None:
+                        self.add_error(
+                            f"Unknown opcode {name!r} in asm() body array. "
+                            "Expected an OP_* identifier (e.g. OP_DUP, "
+                            "OP_HASH160) or a push(...) call."
+                        )
+                    else:
+                        hex_str += f"{b:02x}"
+            else:
+                tok = self.peek()
+                self.add_error(
+                    "asm() body array element must be an opcode identifier "
+                    "(e.g. OP_DUP) or a push(<literal>) call; got "
+                    f"{tok.value!r}"
+                )
+                self.advance()
+
+            if not self.match(TOK_COMMA):
+                break
+        self.expect(TOK_RBRACKET)
+        return hex_str
+
+    def _encode_asm_push_literal(
+        self, opcodes, encode_push_big_int, encode_push_data
+    ) -> str:
+        """Encode a literal argument passed to ``push(...)`` inside an asm()
+        body array. Returns the encoded hex string ('' on error).
+        """
+        tok = self.peek()
+        # Negative number: -<number>
+        if self.check(TOK_MINUS):
+            self.advance()
+            if self.check(TOK_NUMBER):
+                num_tok = self.advance()
+                try:
+                    val = -int(num_tok.value, 0)
+                except ValueError:
+                    self.add_error(
+                        "push() argument is not a valid integer literal: "
+                        f"{num_tok.value!r}"
+                    )
+                    return ""
+                h, _ = encode_push_big_int(val)
+                return h
+            self.add_error(
+                "push() argument must be a literal value (bigint, number, "
+                "boolean, or hex string), got prefix expression"
+            )
+            return ""
+        if self.check(TOK_NUMBER):
+            num_tok = self.advance()
+            try:
+                val = int(num_tok.value, 0)
+            except ValueError:
+                self.add_error(
+                    "push() argument is not a valid integer literal: "
+                    f"{num_tok.value!r}"
+                )
+                return ""
+            h, _ = encode_push_big_int(val)
+            return h
+        if self.check(TOK_IDENT) and tok.value in ("true", "false"):
+            self.advance()
+            return "51" if tok.value == "true" else "00"
+        if self.check(TOK_STRING):
+            str_tok = self.advance()
+            raw = str_tok.value
+            import re as _re
+            if len(raw) % 2 != 0 or not _re.fullmatch(r"[0-9a-fA-F]*", raw):
+                self.add_error(
+                    f"push() ByteString argument must be even-length hex "
+                    f"(got {raw!r})"
+                )
+                return ""
+            return encode_push_data(bytes.fromhex(raw)).hex()
+        self.add_error(
+            "push() argument must be a literal value (bigint, number, "
+            f"boolean, or hex string), got {tok.value!r}"
+        )
+        self.advance()
+        return ""
 
 
 def _parse_number(s: str) -> Expression:

@@ -23,7 +23,9 @@ test {
     _ = @import("tests/e2e.zig");
     _ = @import("tests/math_builtins.zig");
     _ = @import("tests/hash_builtins.zig");
+    _ = @import("tests/check_multisig.zig");
     _ = @import("tests/language_constructs.zig");
+    _ = @import("tests/frontend.zig");
     _ = @import("compiler_api.zig");
     _ = @import("passes/helpers/koalabear_emitters.zig");
     _ = @import("passes/helpers/poseidon2_koalabear.zig");

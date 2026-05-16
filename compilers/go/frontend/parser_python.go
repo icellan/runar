@@ -871,7 +871,7 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 		p.expect(pyTokRParen)
 	}
 
-	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" {
+	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "UnsafeSmartContract" {
 		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
 	}
 
@@ -1019,8 +1019,9 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 	if p.checkIdent("Readonly") {
 		isReadonly = true
 	}
-	// In SmartContract, all properties are automatically readonly
-	if parentClass == "SmartContract" {
+	// In SmartContract (and UnsafeSmartContract), all properties are
+	// automatically readonly.
+	if parentClass == "SmartContract" || parentClass == "UnsafeSmartContract" {
 		isReadonly = true
 	}
 

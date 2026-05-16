@@ -752,6 +752,21 @@ const TypeChecker = struct {
             return .void;
         }
 
+        // asm() compile-time intrinsic — the parser has already rewritten
+        // any { body, in_arity?, out_arity? } object-literal argument into
+        // three positional args. The statement form returns void; the
+        // expression form asm<T>({...}) carries the captured return type on
+        // CallExpr.asm_return_type and produces a value of that type.
+        if (std.mem.eql(u8, name, "asm")) {
+            for (call.args) |arg| _ = self.inferExprType(arg, env);
+            if (call.asm_return_type.len > 0) {
+                if (std.mem.eql(u8, call.asm_return_type, "bigint")) return .bigint;
+                if (std.mem.eql(u8, call.asm_return_type, "boolean")) return .boolean;
+                if (std.mem.eql(u8, call.asm_return_type, "ByteString")) return .byte_string;
+            }
+            return .void;
+        }
+
         // Builtin function
         if (builtin_functions.get(name)) |func_sig| {
             return self.checkCallArgs(name, func_sig, call.args, env);
@@ -1091,6 +1106,12 @@ fn inferExprTypeStatic(expr: Expression) RunarType {
             };
         },
         .call => |call| {
+            // Expression-form asm<T>({...}) statically yields type T.
+            if (std.mem.eql(u8, call.callee, "asm") and call.asm_return_type.len > 0) {
+                if (std.mem.eql(u8, call.asm_return_type, "bigint")) return .bigint;
+                if (std.mem.eql(u8, call.asm_return_type, "boolean")) return .boolean;
+                if (std.mem.eql(u8, call.asm_return_type, "ByteString")) return .byte_string;
+            }
             if (builtin_functions.get(call.callee)) |func_sig| return func_sig.return_type;
             return .unknown;
         },

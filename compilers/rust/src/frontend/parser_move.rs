@@ -535,11 +535,20 @@ impl<'a> MoveParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_module(&mut self) -> Option<ContractNode> {
+        // `unsafe module Name { ... }` marks an UnsafeSmartContract — the
+        // asm-escape-hatch base class. Plain `module Name { ... }` infers
+        // SmartContract / StatefulSmartContract structurally as before.
+        let mut is_unsafe = false;
+
         // Skip until 'module'
         while *self.peek() != Token::Module && *self.peek() != Token::Eof {
             // Also allow struct at top level without module wrapper
             if *self.peek() == Token::Struct || *self.peek() == Token::Resource || *self.peek() == Token::Public {
-                return self.parse_top_level_without_module();
+                return self.parse_top_level_without_module(is_unsafe);
+            }
+            // `unsafe` immediately before `module` marks an UnsafeSmartContract.
+            if matches!(self.peek(), Token::Ident(n) if n == "unsafe") {
+                is_unsafe = true;
             }
             self.advance();
         }
@@ -550,7 +559,7 @@ impl<'a> MoveParser<'a> {
         }
 
         self.advance(); // consume 'module'
-        let _module_name = self.expect_ident();
+        let module_name = self.expect_ident();
 
         // Optional :: address
         if *self.peek() == Token::ColonColon {
@@ -560,20 +569,24 @@ impl<'a> MoveParser<'a> {
 
         self.expect(&Token::LBrace);
 
-        let result = self.parse_module_body();
+        let result = self.parse_module_body(is_unsafe, Some(module_name));
 
         self.expect(&Token::RBrace);
 
         result
     }
 
-    fn parse_top_level_without_module(&mut self) -> Option<ContractNode> {
-        self.parse_module_body()
+    fn parse_top_level_without_module(&mut self, is_unsafe: bool) -> Option<ContractNode> {
+        self.parse_module_body(is_unsafe, None)
     }
 
-    fn parse_module_body(&mut self) -> Option<ContractNode> {
+    fn parse_module_body(&mut self, is_unsafe: bool, module_name: Option<String>) -> Option<ContractNode> {
         let mut contract_name: Option<String> = None;
-        let mut parent_class = "SmartContract".to_string();
+        let mut parent_class = if is_unsafe {
+            "UnsafeSmartContract".to_string()
+        } else {
+            "SmartContract".to_string()
+        };
         let mut properties: Vec<PropertyNode> = Vec::new();
         let mut methods: Vec<MethodNode> = Vec::new();
         let mut is_resource = false;
@@ -607,7 +620,9 @@ impl<'a> MoveParser<'a> {
                         let (name, pc, props) = self.parse_struct();
                         contract_name = Some(name.clone());
                         self.struct_name = name;
-                        parent_class = pc;
+                        if !is_unsafe {
+                            parent_class = pc;
+                        }
                         properties = props;
                     } else {
                         self.errors.push(Diagnostic::error(format!(
@@ -620,7 +635,9 @@ impl<'a> MoveParser<'a> {
                     let (name, pc, props) = self.parse_struct();
                     contract_name = Some(name.clone());
                     self.struct_name = name;
-                    parent_class = pc;
+                    if !is_unsafe {
+                        parent_class = pc;
+                    }
                     properties = props;
                 }
                 Token::Public => {
@@ -648,24 +665,44 @@ impl<'a> MoveParser<'a> {
         let contract_name = match contract_name {
             Some(n) => n,
             None => {
-                self.errors
-                    .push(Diagnostic::error("No 'struct' declaration found in module", None));
-                return None;
+                // `unsafe module Name { ... }` legitimately has no `struct`
+                // (no state). Fall back to the module name as the contract name.
+                if is_unsafe {
+                    if let Some(n) = module_name {
+                        self.struct_name = n.clone();
+                        n
+                    } else {
+                        self.errors
+                            .push(Diagnostic::error("No 'struct' declaration found in module", None));
+                        return None;
+                    }
+                } else {
+                    self.errors
+                        .push(Diagnostic::error("No 'struct' declaration found in module", None));
+                    return None;
+                }
             }
         };
 
-        // If struct was marked as "resource" or has mutable fields, it's stateful
-        if is_resource {
-            parent_class = "StatefulSmartContract".to_string();
-        } else {
-            let has_mutable = properties.iter().any(|p| !p.readonly);
-            if has_mutable {
+        // If struct was marked as "resource" or has mutable fields, it's
+        // stateful — UNLESS the module is marked `unsafe`, in which case it
+        // stays an UnsafeSmartContract regardless of structural shape.
+        if !is_unsafe {
+            if is_resource {
                 parent_class = "StatefulSmartContract".to_string();
+            } else {
+                let has_mutable = properties.iter().any(|p| !p.readonly);
+                if has_mutable {
+                    parent_class = "StatefulSmartContract".to_string();
+                }
             }
         }
 
-        // Determine readonly based on parent class
-        let is_stateless = parent_class == "SmartContract";
+        // Determine readonly based on parent class. SmartContract and the
+        // asm-escape-hatch UnsafeSmartContract both make every property
+        // readonly.
+        let is_stateless =
+            parent_class == "SmartContract" || parent_class == "UnsafeSmartContract";
         if is_stateless {
             for prop in &mut properties {
                 prop.readonly = true;
@@ -1031,13 +1068,14 @@ impl<'a> MoveParser<'a> {
                 op,
                 operand: Box::new(self.convert_self_to_this(*operand)),
             },
-            Expression::CallExpr { callee, args } => {
+            Expression::CallExpr { callee, args, .. } => {
                 let new_callee = self.convert_self_to_this(*callee);
                 let new_args: Vec<Expression> =
                     args.into_iter().map(|a| self.convert_self_to_this(a)).collect();
                 Expression::CallExpr {
                     callee: Box::new(new_callee),
                     args: new_args,
+                    asm_return_type: None,
                 }
             }
             Expression::TernaryExpr {
@@ -1122,6 +1160,7 @@ impl<'a> MoveParser<'a> {
                     name: "assert".to_string(),
                 }),
                 args: vec![expr],
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1149,6 +1188,7 @@ impl<'a> MoveParser<'a> {
                     left: Box::new(left),
                     right: Box::new(right),
                 }],
+                asm_return_type: None,
             },
             source_location: self.loc(),
         }
@@ -1607,6 +1647,7 @@ impl<'a> MoveParser<'a> {
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
+                        asm_return_type: None,
                     };
                 }
                 Token::LBracket => {
@@ -1651,6 +1692,19 @@ impl<'a> MoveParser<'a> {
                 self.expect(&Token::RParen);
                 expr
             }
+            Token::LBracket => {
+                // Array literal: [a, b, c]
+                let mut elements: Vec<Expression> = Vec::new();
+                while !matches!(self.peek(), Token::RBracket | Token::Eof) {
+                    elements.push(self.parse_expression());
+                    if !matches!(self.peek(), Token::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&Token::RBracket);
+                Expression::ArrayLiteral { elements }
+            }
             other => {
                 self.errors
                     .push(Diagnostic::error(format!("Unexpected token in expression: {:?}", other), None));
@@ -1694,6 +1748,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
                 name: "super".to_string(),
             }),
             args: super_args,
+            asm_return_type: None,
         },
         source_location: SourceLocation {
             file: file.to_string(),
@@ -1910,7 +1965,7 @@ module test {
 
         // Should be assert(self.x === y)
         if let Statement::ExpressionStatement { expression, .. } = &body[0] {
-            if let Expression::CallExpr { callee, args } = expression {
+            if let Expression::CallExpr { callee, args, .. } = expression {
                 if let Expression::Identifier { name } = callee.as_ref() {
                     assert_eq!(name, "assert");
                 }

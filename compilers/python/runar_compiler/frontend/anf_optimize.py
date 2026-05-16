@@ -392,4 +392,6 @@ def _has_side_effect(v: ANFValue) -> bool:
         "loop",
         "call",
         "method_call",
+        # Opaque byte span -- DCE must never eliminate it.
+        "raw_script",
     )

@@ -457,7 +457,10 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
             }
         }
 
-        // Terminal / side-effecting kinds pass through
+        // Terminal / side-effecting kinds pass through.
+        // raw_script is an opaque byte span — never folded across; the bytes
+        // are byte-canonical and the peephole optimizer treats it as a hard
+        // barrier.
         ANFValue::Assert { .. }
         | ANFValue::UpdateProp { .. }
         | ANFValue::GetStateScript { .. }
@@ -466,7 +469,8 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
         | ANFValue::AddOutput { .. }
         | ANFValue::AddRawOutput { .. }
         | ANFValue::AddDataOutput { .. }
-        | ANFValue::ArrayLiteral { .. } => value.clone(),
+        | ANFValue::ArrayLiteral { .. }
+        | ANFValue::RawScript { .. } => value.clone(),
     }
 }
 

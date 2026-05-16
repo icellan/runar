@@ -13,6 +13,7 @@ interface CompileOptions {
   disableConstantFolding?: boolean;
   fromIr?: string;
   hex?: boolean;
+  parseOnly?: boolean;
 }
 
 interface CompilerDiagnosticLike {
@@ -58,7 +59,7 @@ export async function compileCommand(
 
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
-  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean }) => unknown;
+  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; parseOnly?: boolean }) => unknown;
   type CompileFromANFFn = (
     program: unknown,
     options?: { disableConstantFolding?: boolean },
@@ -168,6 +169,14 @@ export async function compileCommand(
     return;
   }
 
+  // --parse-only requires source files. Bail out clearly so users don't
+  // get the silent "0 succeeded, 0 failed" summary.
+  if (options.parseOnly && files.length === 0) {
+    console.error('  Error: --parse-only requires at least one source file.');
+    process.exitCode = 1;
+    return;
+  }
+
   let successCount = 0;
   let errorCount = 0;
 
@@ -175,7 +184,9 @@ export async function compileCommand(
     const resolvedPath = path.resolve(process.cwd(), filePath);
     const baseName = path.basename(resolvedPath, path.extname(resolvedPath));
 
-    console.log(`Compiling: ${resolvedPath}`);
+    if (!options.hex && !options.parseOnly) {
+      console.log(`Compiling: ${resolvedPath}`);
+    }
 
     // Read source
     let source: string;
@@ -198,10 +209,40 @@ export async function compileCommand(
 
     let compileResult: CompileResultLike;
     try {
-      compileResult = compile(source, { fileName: resolvedPath, disableConstantFolding: options.disableConstantFolding }) as CompileResultLike;
+      compileResult = compile(source, {
+        fileName: resolvedPath,
+        disableConstantFolding: options.disableConstantFolding,
+        parseOnly: options.parseOnly,
+      }) as CompileResultLike;
     } catch (err) {
       console.error(`  Compilation error: ${(err as Error).message}`);
       errorCount++;
+      continue;
+    }
+
+    // --parse-only mode: success means parse + (early-exit) succeeded with
+    // no error diagnostics. There is no artifact to write — emit the same
+    // "parser ok" marker as the other 6 compilers' --parse-only mode so
+    // tooling (conformance runner, etc.) can rely on a uniform contract.
+    if (options.parseOnly) {
+      if (!compileResult.success) {
+        const errors = (compileResult.diagnostics ?? [])
+          .filter(d => d.severity === 'error')
+          .map(d => d.message)
+          .filter((m): m is string => typeof m === 'string' && m.length > 0);
+        if (errors.length > 0) {
+          console.error(`  Parse failed:`);
+          for (const msg of errors) {
+            console.error(`    - ${msg}`);
+          }
+        } else {
+          console.error('  Parse failed.');
+        }
+        errorCount++;
+        continue;
+      }
+      process.stdout.write('parser ok\n');
+      successCount++;
       continue;
     }
 
@@ -233,6 +274,21 @@ export async function compileCommand(
       };
     }
 
+    // --hex mode: print only the script hex on stdout (no artifact file
+    // written, no chatter). Matches the other 6 CLIs' --hex semantics for
+    // source input and the --from-ir + --hex pipeline above.
+    if (options.hex) {
+      const scriptHex = artifact['script'];
+      if (typeof scriptHex !== 'string') {
+        console.error('  Error: artifact has no script hex.');
+        errorCount++;
+        continue;
+      }
+      process.stdout.write(scriptHex + '\n');
+      successCount++;
+      continue;
+    }
+
     // Write artifact
     const artifactPath = path.join(outputDir, `${baseName}.json`);
     fs.writeFileSync(
@@ -252,10 +308,14 @@ export async function compileCommand(
     successCount++;
   }
 
-  console.log('');
-  console.log(
-    `Compilation complete: ${successCount} succeeded, ${errorCount} failed`,
-  );
+  // --hex / --parse-only modes are piping-friendly; suppress the summary so
+  // stdout stays a clean machine-readable line (matches --from-ir + --hex).
+  if (!options.hex && !options.parseOnly) {
+    console.log('');
+    console.log(
+      `Compilation complete: ${successCount} succeeded, ${errorCount} failed`,
+    );
+  }
 
   if (errorCount > 0) {
     process.exitCode = 1;

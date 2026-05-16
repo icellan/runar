@@ -1006,7 +1006,7 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
 
         Expression::UnaryExpr { op, operand } => lower_unary_expr(op, operand, ctx),
 
-        Expression::CallExpr { callee, args } => lower_call_expr(callee, args, ctx),
+        Expression::CallExpr { callee, args, .. } => lower_call_expr(callee, args, ctx),
 
         Expression::TernaryExpr {
             condition,
@@ -1369,6 +1369,34 @@ fn lower_call_expr(
         }
     }
 
+    // asm({...}) compiler intrinsic — the parser has already normalised the
+    // object-literal argument into three positional args
+    // (body, in_arity, out_arity). Lower it to a single opaque raw_script ANF
+    // binding; the hex body passes through unchanged. Diagnostics for
+    // malformed args were already pushed by the validator — here we
+    // defensively coerce missing values to safe defaults.
+    if let Expression::Identifier { name } = callee {
+        if name == "asm" {
+            let mut bytes = String::new();
+            let mut in_arity: usize = 0;
+            let mut out_arity: usize = 1;
+            if let Some(Expression::ByteStringLiteral { value }) = args.get(0) {
+                bytes = value.clone();
+            }
+            if let Some(Expression::BigIntLiteral { value }) = args.get(1) {
+                in_arity = (*value).max(0) as usize;
+            }
+            if let Some(Expression::BigIntLiteral { value }) = args.get(2) {
+                out_arity = (*value).max(0) as usize;
+            }
+            return ctx.emit(ANFValue::RawScript {
+                bytes,
+                in_arity,
+                out_arity,
+            });
+        }
+    }
+
     // Direct function call: sha256(x), checkSig(sig, pk), etc.
     if let Expression::Identifier { name } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
@@ -1588,8 +1616,16 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
             false
         }
 
-        Expression::CallExpr { callee, .. } => {
+        Expression::CallExpr {
+            callee,
+            asm_return_type,
+            ..
+        } => {
             if let Expression::Identifier { name } = callee.as_ref() {
+                // Expression-form asm<ByteString>({...}) yields a byte value.
+                if name == "asm" {
+                    return asm_return_type.as_deref() == Some("ByteString");
+                }
                 if BYTE_RETURNING_FUNCTIONS.contains(&name.as_str()) {
                     return true;
                 }
@@ -1888,9 +1924,12 @@ fn collect_update_branches(
 fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue {
     let r = |s: &str| -> String { map.get(s).cloned().unwrap_or_else(|| s.to_string()) };
     match value {
-        ANFValue::LoadParam { .. } | ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {
-            value.clone()
-        }
+        // raw_script carries an opaque byte span with no SSA operand refs —
+        // nothing to remap.
+        ANFValue::LoadParam { .. }
+        | ANFValue::LoadProp { .. }
+        | ANFValue::GetStateScript {}
+        | ANFValue::RawScript { .. } => value.clone(),
         ANFValue::LoadConst { value: v } => {
             if let Some(s) = v.as_str() {
                 if s.starts_with("@ref:") {
@@ -2608,5 +2647,59 @@ class Counter extends StatefulSmartContract {
             "stateful method should have '_changeAmount' as an implicit param, got: {:?}",
             param_names
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ternary expression lowers to an ANFValue::If node (T-5)
+    // Mirrors the Java peer test (StackLowerTest#ternaryLowersToIfOpStructural)
+    // and the Go peer (anf_lower_test.go TestANFLower_Ternary). Localized
+    // regression detection — otherwise covered only by the cross-tier golden
+    // harness.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ternary_lowers_to_if() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class TernaryDemo extends SmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public check(flag: boolean): void {
+    const result: bigint = flag ? this.limit + 1n : this.limit - 1n;
+    assert(result > 0n);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let check = program
+            .methods
+            .iter()
+            .find(|m| m.name == "check")
+            .expect("could not find 'check' method");
+
+        let if_binding = check
+            .body
+            .iter()
+            .find(|b| matches!(b.value, ANFValue::If { .. }));
+
+        let if_value = if_binding
+            .map(|b| &b.value)
+            .expect("expected ternary to lower to an ANFValue::If binding");
+
+        if let ANFValue::If { then, else_branch, .. } = if_value {
+            assert!(!then.is_empty(), "ternary `then` branch should not be empty");
+            assert!(
+                !else_branch.is_empty(),
+                "ternary `else` branch should not be empty"
+            );
+        }
     }
 }

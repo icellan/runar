@@ -280,7 +280,14 @@ jobs:
       # in those test files). Locally devs can omit it; pytest's skipif
       # gate falls back to the documented environmental skip — see
       # docs/test-skips.md.
-      - run: pip install pytest slh-dsa
+      #
+      # `bsv-sdk` is the upstream BSV SDK that `runar.sdk.script_vm` wraps
+      # (T-8 from audits/cross-language-completeness-20260514.md §5.2). We
+      # install it in CI so test_script_vm.py runs its real path instead of
+      # silently skipping via `pytest.importorskip("bsv")`. The companion
+      # CI-gate in test_script_vm.py FAILS the suite if bsv-sdk is missing
+      # when `$CI` is set, so a regression here is caught loudly.
+      - run: pip install pytest slh-dsa bsv-sdk
       - name: SDK tests
         run: cd packages/runar-py && python -m pytest
       - name: Example tests (real SLH-DSA enabled via slh-dsa pkg)

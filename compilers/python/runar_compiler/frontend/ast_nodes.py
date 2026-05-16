@@ -125,6 +125,11 @@ class CallExpr:
 
     callee: Expression
     args: list[Expression] = field(default_factory=list)
+    # Set only for the expression form ``asm<T>({...})`` of the asm compiler
+    # intrinsic. Carries the captured primitive return type ("bigint",
+    # "boolean", or "ByteString"); empty for the statement form and for
+    # every non-asm call.
+    asm_return_type: str = ""
 
 
 @dataclass

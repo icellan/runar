@@ -49,6 +49,15 @@ pub enum StackOp {
         param_name: String,
     },
     PushCodeSepIndex,
+    /// An opaque opcode-byte span emitted verbatim by a `raw_script` ANF node.
+    /// The stack effect is declared via `in_arity` / `out_arity`; the bytes are
+    /// never inspected and the peephole optimizer treats this op as a hard
+    /// barrier.
+    RawBytes {
+        bytes: Vec<u8>,
+        in_arity: usize,
+        out_arity: usize,
+    },
 }
 
 /// Typed value for push operations.
@@ -378,6 +387,10 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
         }
         ANFValue::ArrayLiteral { elements } => {
             refs.extend(elements.iter().cloned());
+        }
+        ANFValue::RawScript { .. } => {
+            // Opaque byte span — no SSA operand refs. Stack effect is declared
+            // via in_arity / out_arity.
         }
     }
     refs
@@ -992,6 +1005,9 @@ impl LoweringContext {
             }
             ANFValue::ArrayLiteral { elements } => {
                 self.lower_array_literal(name, elements, binding_index, last_uses);
+            }
+            ANFValue::RawScript { bytes, in_arity, out_arity } => {
+                self.lower_raw_script(name, bytes, *in_arity, *out_arity);
             }
         }
     }
@@ -2447,6 +2463,53 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// Lower a `raw_script` ANF node to a single opaque `raw_bytes` StackOp.
+    ///
+    /// The bytes pass through verbatim — the emit pass writes them as-is, and
+    /// the peephole optimizer must not bridge across them. Stack-tracker
+    /// bookkeeping consumes `in_arity` items and pushes `out_arity` items named
+    /// after the binding so downstream PICK/ROLL/DROP refer to the correct
+    /// logical slot.
+    fn lower_raw_script(
+        &mut self,
+        binding_name: &str,
+        bytes_hex: &str,
+        in_arity: usize,
+        out_arity: usize,
+    ) {
+        if self.sm.depth() < in_arity {
+            panic!(
+                "raw_script binding '{}' requires {} stack items but only {} are present",
+                binding_name,
+                in_arity,
+                self.sm.depth()
+            );
+        }
+        let bytes = hex::decode(bytes_hex).unwrap_or_else(|e| {
+            panic!(
+                "raw_script binding '{}' has invalid hex bytes: {}",
+                binding_name, e
+            )
+        });
+        self.emit_op(StackOp::RawBytes {
+            bytes,
+            in_arity,
+            out_arity,
+        });
+        for _ in 0..in_arity {
+            self.sm.pop();
+        }
+        for i in 0..out_arity {
+            let slot_name = if out_arity != 1 {
+                format!("{}.{}", binding_name, i)
+            } else {
+                binding_name.to_string()
+            };
+            self.sm.push(&slot_name);
+        }
+        self.track_depth();
+    }
+
     fn lower_check_multi_sig(
         &mut self,
         binding_name: &str,
@@ -3513,79 +3576,9 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// Emit one WOTS+ chain with RFC 8391 tweakable hash.
-    /// Stack entry: pubSeed(bottom) sig csum endpt digit(top)
-    /// Stack exit:  pubSeed(bottom) sigRest newCsum newEndpt
-    fn emit_wots_one_chain(&mut self, chain_index: usize) {
-        // Save steps_copy = 15 - digit to alt (for checksum accumulation later)
-        self.emit_op(StackOp::Opcode("OP_DUP".into()));
-        self.emit_op(StackOp::Push(PushValue::Int(15)));
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#1: steps_copy
-
-        // Save endpt, csum to alt. Leave pubSeed+sig+digit on main.
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#2: endpt
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#3: csum
-        // main: pubSeed sig digit
-
-        // Split 32B sig element
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Push(PushValue::Int(32)));
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#4: sigRest
-        self.emit_op(StackOp::Swap);
-        // main: pubSeed sigElem digit
-
-        // Hash loop: skip first `digit` iterations, then apply F for the rest.
-        // When digit > 0: decrement (skip). When digit == 0: hash at step j.
-        // Stack: pubSeed(depth2) sigElem(depth1) digit(depth0=top)
-        for j in 0..15usize {
-            let adrs_bytes = vec![chain_index as u8, j as u8];
-            self.emit_op(StackOp::Opcode("OP_DUP".into()));
-            self.emit_op(StackOp::Opcode("OP_0NOTEQUAL".into()));
-            self.emit_op(StackOp::If {
-                then_ops: vec![
-                    StackOp::Opcode("OP_1SUB".into()),            // skip: digit--
-                ],
-                else_ops: vec![
-                    StackOp::Swap,                                  // pubSeed digit X
-                    StackOp::Push(PushValue::Int(2)),
-                    StackOp::Opcode("OP_PICK".into()),            // copy pubSeed
-                    StackOp::Push(PushValue::Bytes(adrs_bytes)),   // ADRS [chainIndex, j]
-                    StackOp::Opcode("OP_CAT".into()),              // pubSeed || adrs
-                    StackOp::Swap,                                  // bring X to top
-                    StackOp::Opcode("OP_CAT".into()),              // pubSeed || adrs || X
-                    StackOp::Opcode("OP_SHA256".into()),           // F result
-                    StackOp::Swap,                                  // pubSeed new_X digit(=0)
-                ],
-            });
-        }
-        self.emit_op(StackOp::Drop); // drop digit (now 0)
-        // main: pubSeed endpoint
-
-        // Restore from alt (LIFO): sigRest, csum, endpt_acc, steps_copy
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-
-        // csum += steps_copy
-        self.emit_op(StackOp::Rot);
-        self.emit_op(StackOp::Opcode("OP_ADD".into()));
-
-        // Concat endpoint to endpt_acc
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Push(PushValue::Int(3)));
-        self.emit_op(StackOp::Opcode("OP_ROLL".into()));
-        self.emit_op(StackOp::Opcode("OP_CAT".into()));
-    }
-
     /// WOTS+ signature verification with RFC 8391 tweakable hash (post-quantum).
-    /// Parameters: w=16, n=32 (SHA-256), len=67 chains.
-    /// pubkey is 64 bytes: pubSeed(32) || pkRoot(32).
+    /// Brings all 3 args to the top, pops them, delegates to wots::emit_verify_wots,
+    /// and pushes the boolean result.
     fn lower_verify_wots(
         &mut self,
         binding_name: &str,
@@ -3600,115 +3593,9 @@ impl LoweringContext {
             self.bring_to_top(arg, is_last);
         }
         for _ in 0..3 { self.sm.pop(); }
-        // main: msg sig pubkey(64B: pubSeed||pkRoot)
 
-        // Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
-        self.emit_op(StackOp::Push(PushValue::Int(32)));
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));          // msg sig pubSeed pkRoot
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));    // pkRoot → alt
-
-        // Rearrange: put pubSeed at bottom, hash msg
-        self.emit_op(StackOp::Rot);                                 // sig pubSeed msg
-        self.emit_op(StackOp::Rot);                                 // pubSeed msg sig
-        self.emit_op(StackOp::Swap);                                // pubSeed sig msg
-        self.emit_op(StackOp::Opcode("OP_SHA256".into()));         // pubSeed sig msgHash
-
-        // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Push(PushValue::Int(0)));
-        self.emit_op(StackOp::Opcode("OP_0".into()));
-        self.emit_op(StackOp::Push(PushValue::Int(3)));
-        self.emit_op(StackOp::Opcode("OP_ROLL".into()));
-
-        // Process 32 bytes → 64 message chains
-        for byte_idx in 0..32 {
-            if byte_idx < 31 {
-                self.emit_op(StackOp::Push(PushValue::Int(1)));
-                self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-                self.emit_op(StackOp::Swap);
-            }
-            // Unsigned byte conversion
-            self.emit_op(StackOp::Push(PushValue::Int(0)));
-            self.emit_op(StackOp::Push(PushValue::Int(1)));
-            self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
-            self.emit_op(StackOp::Opcode("OP_CAT".into()));
-            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
-            // Extract nibbles
-            self.emit_op(StackOp::Opcode("OP_DUP".into()));
-            self.emit_op(StackOp::Push(PushValue::Int(16)));
-            self.emit_op(StackOp::Opcode("OP_DIV".into()));
-            self.emit_op(StackOp::Swap);
-            self.emit_op(StackOp::Push(PushValue::Int(16)));
-            self.emit_op(StackOp::Opcode("OP_MOD".into()));
-
-            if byte_idx < 31 {
-                self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-                self.emit_op(StackOp::Swap);
-                self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-            } else {
-                self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-            }
-
-            self.emit_wots_one_chain(byte_idx * 2); // high nibble chain
-
-            if byte_idx < 31 {
-                self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-                self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-                self.emit_op(StackOp::Swap);
-                self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-            } else {
-                self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-            }
-
-            self.emit_wots_one_chain(byte_idx * 2 + 1); // low nibble chain
-
-            if byte_idx < 31 {
-                self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-            }
-        }
-
-        // Checksum digits
-        self.emit_op(StackOp::Swap);
-        // d66
-        self.emit_op(StackOp::Opcode("OP_DUP".into()));
-        self.emit_op(StackOp::Push(PushValue::Int(16)));
-        self.emit_op(StackOp::Opcode("OP_MOD".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-        // d65
-        self.emit_op(StackOp::Opcode("OP_DUP".into()));
-        self.emit_op(StackOp::Push(PushValue::Int(16)));
-        self.emit_op(StackOp::Opcode("OP_DIV".into()));
-        self.emit_op(StackOp::Push(PushValue::Int(16)));
-        self.emit_op(StackOp::Opcode("OP_MOD".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-        // d64
-        self.emit_op(StackOp::Push(PushValue::Int(256)));
-        self.emit_op(StackOp::Opcode("OP_DIV".into()));
-        self.emit_op(StackOp::Push(PushValue::Int(16)));
-        self.emit_op(StackOp::Opcode("OP_MOD".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-
-        // 3 checksum chains (indices 64, 65, 66)
-        for ci in 0..3 {
-            self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
-            self.emit_op(StackOp::Push(PushValue::Int(0)));
-            self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-            self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-            self.emit_wots_one_chain(64 + ci);
-            self.emit_op(StackOp::Swap);
-            self.emit_op(StackOp::Drop);
-        }
-
-        // Final comparison
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Drop);
-        // main: pubSeed endptAcc
-        self.emit_op(StackOp::Opcode("OP_SHA256".into()));
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into())); // pkRoot
-        self.emit_op(StackOp::Opcode("OP_EQUAL".into()));
-        // Clean up pubSeed
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Drop);
+        // Delegate to wots module
+        super::wots::emit_verify_wots(&mut |op| self.ops.push(op));
 
         self.sm.push(binding_name);
         self.track_depth();

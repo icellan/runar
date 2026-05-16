@@ -93,8 +93,19 @@ def _apply_one_pass(ops: list[StackOp]) -> tuple[list[StackOp], bool]:
     return result, changed
 
 
+def _is_raw_bytes(op: StackOp) -> bool:
+    """Return True if *op* is an opaque raw_bytes span emitted by a raw_script
+    ANF node. raw_bytes is a hard peephole barrier -- no optimization window
+    may span or rewrite across it, because the bytes are opaque and not
+    guaranteed to form a well-formed opcode stream.
+    """
+    return op.op == "raw_bytes"
+
+
 def _match_window2(a: StackOp, b: StackOp) -> Optional[list[StackOp]]:
     """Try to match a window-2 peephole rule.  Returns replacement list or None."""
+    if _is_raw_bytes(a) or _is_raw_bytes(b):
+        return None
 
     # PUSH x, DROP -> remove both (dead value elimination)
     if a.op == "push" and b.op == "drop":
@@ -203,6 +214,8 @@ def _match_window2(a: StackOp, b: StackOp) -> Optional[list[StackOp]]:
 
 def _match_window3(a: StackOp, b: StackOp, c: StackOp) -> Optional[list[StackOp]]:
     """Try to match a window-3 peephole rule."""
+    if _is_raw_bytes(a) or _is_raw_bytes(b) or _is_raw_bytes(c):
+        return None
     a_val = _push_bigint_value(a)
     b_val = _push_bigint_value(b)
     if a_val is not None and b_val is not None:
@@ -219,6 +232,8 @@ def _match_window4(
     a: StackOp, b: StackOp, c: StackOp, d: StackOp
 ) -> Optional[list[StackOp]]:
     """Try to match a window-4 peephole rule."""
+    if _is_raw_bytes(a) or _is_raw_bytes(b) or _is_raw_bytes(c) or _is_raw_bytes(d):
+        return None
     a_val = _push_bigint_value(a)
     c_val = _push_bigint_value(c)
     if a_val is not None and c_val is not None:

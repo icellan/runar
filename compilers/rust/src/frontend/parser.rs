@@ -8,11 +8,11 @@ use swc_common::{FileName, SourceMap};
 use swc_ecma_ast as swc;
 use swc_ecma_ast::{
     Accessibility, AssignExpr, AssignOp, AssignTarget, CallExpr, Callee, Class, ClassDecl,
-    ClassMember, Decl, EsVersion, Expr, ForStmt, IfStmt, Lit, MemberExpr as SwcMemberExpr,
-    MemberProp, ModuleDecl, ModuleItem, Param, ParamOrTsParamProp, Pat, PropName, ReturnStmt,
-    SimpleAssignTarget, Stmt, SuperProp, TsEntityName, TsKeywordTypeKind, TsLit,
-    TsParamPropParam, TsType, UnaryExpr as SwcUnaryExpr, UpdateExpr, UpdateOp, VarDecl,
-    VarDeclKind, VarDeclOrExpr,
+    ClassMember, Decl, EsVersion, Expr, ExprOrSpread, ForStmt, IfStmt, Lit,
+    MemberExpr as SwcMemberExpr, MemberProp, ModuleDecl, ModuleItem, Param, ParamOrTsParamProp,
+    Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt, SuperProp,
+    TsEntityName, TsKeywordTypeKind, TsLit, TsParamPropParam, TsType, UnaryExpr as SwcUnaryExpr,
+    UpdateExpr, UpdateOp, VarDecl, VarDeclKind, VarDeclOrExpr,
 };
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 
@@ -117,7 +117,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let class_decl = match contract_class {
         Some(c) => c,
         None => {
-            errors.push(Diagnostic::error("No class extending SmartContract or StatefulSmartContract found", None));
+            errors.push(Diagnostic::error("No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", None));
             return ParseResult {
                 contract: None,
                 errors,
@@ -160,7 +160,10 @@ fn get_base_class_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Ident(ident) => {
             let name = ident.sym.as_ref();
-            if name == "SmartContract" || name == "StatefulSmartContract" {
+            if name == "SmartContract"
+                || name == "StatefulSmartContract"
+                || name == "UnsafeSmartContract"
+            {
                 Some(name)
             } else {
                 None
@@ -1073,6 +1076,22 @@ fn parse_call_expression(
     file: &str,
     errors: &mut Vec<Diagnostic>,
 ) -> Expression {
+    // Special-case asm({ body, in_arity?, out_arity? }) — normalise the
+    // object-literal argument into a CallExpr with three positional args
+    // (body, in_arity, out_arity) so downstream passes only have to know how
+    // to walk a CallExpr. Both the hex-string body form and the array-form
+    // body are supported; the array form is encoded to a hex string at parse
+    // time so all downstream passes see identical IR. The optional generic
+    // type argument asm<T>(...) flags the expression form, captured on
+    // CallExpr.asm_return_type.
+    if let Callee::Expr(callee_expr) = &call.callee {
+        if let Expr::Ident(ident) = callee_expr.as_ref() {
+            if ident.sym.as_ref() == "asm" {
+                return parse_asm_call(call, file, errors);
+            }
+        }
+    }
+
     let callee = match &call.callee {
         Callee::Expr(e) => parse_expression(e, file, errors),
         Callee::Super(_) => Expression::Identifier {
@@ -1095,6 +1114,444 @@ fn parse_call_expression(
     Expression::CallExpr {
         callee: Box::new(callee),
         args,
+        asm_return_type: None,
+    }
+}
+
+/// Decode an `asm({ body, in_arity?, out_arity? })` call into a CallExpr whose
+/// positional args are
+///
+///   [ByteStringLiteral(body), BigIntLiteral(in_arity), BigIntLiteral(out_arity)].
+///
+/// Two surface body shapes are accepted:
+///   - Hex string literal:  body: '76a90088ac'
+///   - Array of opcode names / push() calls:
+///     body: [OP_DUP, OP_HASH160, push('1234abcd'), OP_EQUALVERIFY]
+///     Each element is encoded to its byte representation at parse time, so
+///     the resulting IR is byte-identical to the equivalent hex body.
+///
+/// The optional generic type argument asm<T>({...}) marks the expression form;
+/// the captured T is stashed on CallExpr.asm_return_type. T must be one of
+/// bigint, boolean, or ByteString.
+///
+/// On malformed input we still return a syntactically valid CallExpr so later
+/// passes can produce additional diagnostics without crashing.
+fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> Expression {
+    let callee = Box::new(Expression::Identifier {
+        name: "asm".to_string(),
+    });
+
+    // Capture the generic type argument asm<T>({...}) if present, BEFORE
+    // arg-shape diagnostics so the expression form still records its return
+    // type even when other args are malformed.
+    let asm_return_type = parse_asm_generic_type_arg(call, errors);
+
+    if call.args.len() != 1 {
+        errors.push(Diagnostic::error(
+            format!(
+                "asm() expects exactly one object-literal argument {{ body, in_arity?, out_arity? }}, got {} arguments",
+                call.args.len()
+            ),
+            None,
+        ));
+        return Expression::CallExpr {
+            callee,
+            args: Vec::new(),
+            asm_return_type,
+        };
+    }
+
+    let obj = match call.args[0].expr.as_ref() {
+        Expr::Object(obj) => obj,
+        other => {
+            errors.push(Diagnostic::error(
+                format!(
+                    "asm() argument must be an object literal {{ body: '<hex>', in_arity?: <int>, out_arity?: <int> }}, got '{}'",
+                    expr_kind_name(other)
+                ),
+                None,
+            ));
+            return Expression::CallExpr {
+                callee,
+                args: Vec::new(),
+                asm_return_type,
+            };
+        }
+    };
+
+    let mut body_expr: Option<Expression> = None;
+    let mut in_arity_expr: Option<Expression> = None;
+    let mut out_arity_expr: Option<Expression> = None;
+
+    for prop in &obj.props {
+        let kv = match prop {
+            PropOrSpread::Prop(p) => match p.as_ref() {
+                Prop::KeyValue(kv) => kv,
+                _ => continue,
+            },
+            PropOrSpread::Spread(_) => continue,
+        };
+        let key = match &kv.key {
+            PropName::Ident(id) => id.sym.to_string(),
+            PropName::Str(s) => s.value.to_string(),
+            _ => continue,
+        };
+
+        match key.as_str() {
+            "body" => match kv.value.as_ref() {
+                Expr::Lit(Lit::Str(s)) => {
+                    body_expr = Some(Expression::ByteStringLiteral {
+                        value: s.value.to_string(),
+                    });
+                }
+                Expr::Tpl(tpl) if tpl.exprs.is_empty() && tpl.quasis.len() == 1 => {
+                    body_expr = Some(Expression::ByteStringLiteral {
+                        value: tpl.quasis[0].raw.to_string(),
+                    });
+                }
+                Expr::Array(arr) => {
+                    let encoded = encode_asm_array_body(arr, errors);
+                    body_expr = Some(Expression::ByteStringLiteral { value: encoded });
+                }
+                other => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "asm() body must be a hex string literal or an array of opcode names / push() calls; got '{}'.",
+                            expr_kind_name(other)
+                        ),
+                        None,
+                    ));
+                    body_expr = Some(Expression::ByteStringLiteral {
+                        value: String::new(),
+                    });
+                }
+            },
+            "in_arity" => {
+                if let Some(v) = parse_arity_literal(&kv.value, "in_arity", errors) {
+                    in_arity_expr = Some(Expression::BigIntLiteral { value: v });
+                }
+            }
+            "out_arity" => {
+                if let Some(v) = parse_arity_literal(&kv.value, "out_arity", errors) {
+                    out_arity_expr = Some(Expression::BigIntLiteral { value: v });
+                }
+            }
+            other => {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "asm() does not accept the '{}' field; valid fields are 'body', 'in_arity', 'out_arity'.",
+                        other
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    let body_expr = body_expr.unwrap_or_else(|| {
+        errors.push(Diagnostic::error(
+            "asm() requires a 'body' field with a hex string literal value",
+            None,
+        ));
+        Expression::ByteStringLiteral {
+            value: String::new(),
+        }
+    });
+    // Defaults: in_arity=0, out_arity=1. The out_arity=1 default reflects the
+    // public-method-must-terminate-truthy invariant.
+    let in_arity_expr = in_arity_expr.unwrap_or(Expression::BigIntLiteral { value: 0 });
+    let out_arity_expr = out_arity_expr.unwrap_or(Expression::BigIntLiteral { value: 1 });
+
+    let _ = file;
+    Expression::CallExpr {
+        callee,
+        args: vec![body_expr, in_arity_expr, out_arity_expr],
+        asm_return_type,
+    }
+}
+
+/// Parse the optional generic type argument on asm<T>({...}). Returns the
+/// captured primitive type name when present and valid, or `None` if the call
+/// has no type argument. Pushes a diagnostic (and returns `None`) when the
+/// type argument is present but not a primitive value type
+/// (bigint / boolean / ByteString).
+fn parse_asm_generic_type_arg(call: &CallExpr, errors: &mut Vec<Diagnostic>) -> Option<String> {
+    let type_args = call.type_args.as_ref()?;
+    if type_args.params.is_empty() {
+        return None;
+    }
+    if type_args.params.len() > 1 {
+        errors.push(Diagnostic::error(
+            format!(
+                "asm<T>() takes at most one type argument, got {}",
+                type_args.params.len()
+            ),
+            None,
+        ));
+        return None;
+    }
+    let name = match type_args.params[0].as_ref() {
+        TsType::TsKeywordType(kw) => match kw.kind {
+            TsKeywordTypeKind::TsBigIntKeyword => "bigint".to_string(),
+            TsKeywordTypeKind::TsBooleanKeyword => "boolean".to_string(),
+            other => format!("{:?}", other),
+        },
+        TsType::TsTypeRef(tref) => match &tref.type_name {
+            TsEntityName::Ident(id) => id.sym.to_string(),
+            TsEntityName::TsQualifiedName(_) => "<qualified>".to_string(),
+        },
+        other => format!("{:?}", other),
+    };
+    if name == "bigint" || name == "boolean" || name == "ByteString" {
+        Some(name)
+    } else {
+        errors.push(Diagnostic::error(
+            format!(
+                "asm<T>() return type must be 'bigint', 'boolean', or 'ByteString'; got '{}'",
+                name
+            ),
+            None,
+        ));
+        None
+    }
+}
+
+/// Encode an asm({ body: [OP_DUP, push(0x42), ...] }) array literal to its hex
+/// byte representation. Uses the same push-encoding helpers as the emit pass
+/// so the resulting bytes are byte-identical to what the emitter would produce
+/// for the equivalent literal.
+fn encode_asm_array_body(
+    arr: &swc_ecma_ast::ArrayLit,
+    errors: &mut Vec<Diagnostic>,
+) -> String {
+    use crate::codegen::opcodes::opcode_byte;
+    let mut hex_str = String::new();
+    for elem in &arr.elems {
+        let elem = match elem {
+            Some(ExprOrSpread { spread: None, expr }) => expr,
+            Some(_) => {
+                errors.push(Diagnostic::error(
+                    "Spread elements are not supported in asm() body arrays",
+                    None,
+                ));
+                continue;
+            }
+            None => {
+                errors.push(Diagnostic::error(
+                    "Sparse asm() body arrays are not supported",
+                    None,
+                ));
+                continue;
+            }
+        };
+        match elem.as_ref() {
+            Expr::Ident(id) => {
+                let name = id.sym.as_ref();
+                match opcode_byte(name) {
+                    Some(b) => hex_str.push_str(&format!("{:02x}", b)),
+                    None => errors.push(Diagnostic::error(
+                        format!(
+                            "Unknown opcode '{}' in asm() body array. Expected an OP_* identifier (e.g. OP_DUP, OP_HASH160) or a push(...) call.",
+                            name
+                        ),
+                        None,
+                    )),
+                }
+            }
+            Expr::Call(call) => {
+                let is_push = matches!(&call.callee, Callee::Expr(e)
+                    if matches!(e.as_ref(), Expr::Ident(id) if id.sym.as_ref() == "push"));
+                if !is_push {
+                    let callee_text = match &call.callee {
+                        Callee::Expr(e) => match e.as_ref() {
+                            Expr::Ident(id) => id.sym.to_string(),
+                            _ => "<expr>".to_string(),
+                        },
+                        _ => "<expr>".to_string(),
+                    };
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "asm() body array call must be 'push(<literal>)', got '{}(...)'",
+                            callee_text
+                        ),
+                        None,
+                    ));
+                    continue;
+                }
+                if call.args.len() != 1 {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "push() takes exactly one literal argument, got {}",
+                            call.args.len()
+                        ),
+                        None,
+                    ));
+                    continue;
+                }
+                if let Some(pushed) = encode_asm_push_literal(&call.args[0].expr, errors) {
+                    hex_str.push_str(&pushed);
+                }
+            }
+            other => errors.push(Diagnostic::error(
+                format!(
+                    "asm() body array element must be an opcode identifier (e.g. OP_DUP) or a push(<literal>) call; got '{}'",
+                    expr_kind_name(other)
+                ),
+                None,
+            )),
+        }
+    }
+    hex_str
+}
+
+/// Encode a literal argument passed to push(...) inside an asm() body array.
+/// Returns the encoded hex string, or `None` if the literal is unrecognised
+/// (with a diagnostic pushed).
+fn encode_asm_push_literal(expr: &Expr, errors: &mut Vec<Diagnostic>) -> Option<String> {
+    use crate::codegen::emit::encode_push_int;
+    match expr {
+        Expr::Lit(Lit::Num(num)) => {
+            let (h, _) = encode_push_int(num.value as i128);
+            Some(h)
+        }
+        Expr::Lit(Lit::BigInt(bi)) => {
+            let v = bigint_to_i128(bi);
+            let (h, _) = encode_push_int(v);
+            Some(h)
+        }
+        Expr::Unary(unary) if unary.op == swc::UnaryOp::Minus => {
+            match unary.arg.as_ref() {
+                Expr::Lit(Lit::Num(num)) => {
+                    let (h, _) = encode_push_int(-(num.value as i128));
+                    Some(h)
+                }
+                Expr::Lit(Lit::BigInt(bi)) => {
+                    let v = bigint_to_i128(bi);
+                    let (h, _) = encode_push_int(-v);
+                    Some(h)
+                }
+                _ => {
+                    errors.push(Diagnostic::error(
+                        "push() argument must be a literal value (bigint, number, boolean, or hex string), got prefix expression",
+                        None,
+                    ));
+                    None
+                }
+            }
+        }
+        Expr::Lit(Lit::Bool(b)) => {
+            // OP_TRUE = 0x51, OP_FALSE = 0x00 (alias of OP_0)
+            Some(if b.value { "51".to_string() } else { "00".to_string() })
+        }
+        Expr::Lit(Lit::Str(s)) => encode_asm_push_hex(&s.value, errors),
+        Expr::Tpl(tpl) if tpl.exprs.is_empty() && tpl.quasis.len() == 1 => {
+            encode_asm_push_hex(&tpl.quasis[0].raw, errors)
+        }
+        other => {
+            errors.push(Diagnostic::error(
+                format!(
+                    "push() argument must be a literal value (bigint, number, boolean, or hex string), got '{}'",
+                    expr_kind_name(other)
+                ),
+                None,
+            ));
+            None
+        }
+    }
+}
+
+/// Encode a hex-string ByteString literal argument to push(...) into its
+/// push-data byte representation.
+fn encode_asm_push_hex(raw: &str, errors: &mut Vec<Diagnostic>) -> Option<String> {
+    use crate::codegen::emit::encode_push_data;
+    if raw.len() % 2 != 0 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        errors.push(Diagnostic::error(
+            format!(
+                "push() ByteString argument must be even-length hex (got '{}')",
+                raw
+            ),
+            None,
+        ));
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    for i in (0..raw.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&raw[i..i + 2], 16).unwrap());
+    }
+    Some(hex::encode(encode_push_data(&bytes)))
+}
+
+/// Decode a non-negative integer literal arity field for asm(). Returns the
+/// value, or `None` (with a diagnostic) on error.
+fn parse_arity_literal(
+    expr: &Expr,
+    field_name: &str,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<i128> {
+    match expr {
+        Expr::Lit(Lit::Num(num)) => {
+            let v = num.value;
+            if v < 0.0 || v.fract() != 0.0 {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "asm() {} must be a non-negative integer literal, got '{}'",
+                        field_name, v
+                    ),
+                    None,
+                ));
+                return None;
+            }
+            Some(v as i128)
+        }
+        Expr::Lit(Lit::BigInt(bi)) => {
+            let v = bigint_to_i128(bi);
+            if v < 0 {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "asm() {} must be a non-negative integer literal, got '{}'",
+                        field_name, v
+                    ),
+                    None,
+                ));
+                return None;
+            }
+            Some(v)
+        }
+        Expr::Unary(_) => {
+            errors.push(Diagnostic::error(
+                format!("asm() {} must be a non-negative integer literal", field_name),
+                None,
+            ));
+            None
+        }
+        other => {
+            errors.push(Diagnostic::error(
+                format!(
+                    "asm() {} must be a non-negative integer literal, got '{}'",
+                    field_name,
+                    expr_kind_name(other)
+                ),
+                None,
+            ));
+            None
+        }
+    }
+}
+
+/// Short human-readable kind name for an SWC expression, for diagnostics.
+fn expr_kind_name(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Object(_) => "object",
+        Expr::Array(_) => "array",
+        Expr::Lit(Lit::Str(_)) => "string",
+        Expr::Lit(Lit::Num(_)) => "number",
+        Expr::Lit(Lit::Bool(_)) => "boolean",
+        Expr::Lit(Lit::BigInt(_)) => "bigint",
+        Expr::Tpl(_) => "template_string",
+        Expr::Ident(_) => "identifier",
+        Expr::Call(_) => "call_expression",
+        Expr::Unary(_) => "unary_expression",
+        _ => "expression",
     }
 }
 

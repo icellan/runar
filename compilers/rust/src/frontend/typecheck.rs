@@ -615,7 +615,11 @@ impl<'a> TypeChecker<'a> {
 
             Expression::UnaryExpr { op, operand } => self.check_unary_expr(op, operand, env),
 
-            Expression::CallExpr { callee, args } => self.check_call_expr(callee, args, env),
+            Expression::CallExpr {
+                callee,
+                args,
+                asm_return_type,
+            } => self.check_call_expr(callee, args, asm_return_type.as_deref(), env),
 
             Expression::TernaryExpr {
                 condition,
@@ -890,6 +894,7 @@ impl<'a> TypeChecker<'a> {
         &mut self,
         callee: &Expression,
         args: &[Expression],
+        asm_return_type: Option<&str>,
         env: &mut TypeEnv,
     ) -> TType {
         // super() call in constructor
@@ -897,6 +902,24 @@ impl<'a> TypeChecker<'a> {
             if name == "super" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
+                }
+                return VOID.to_string();
+            }
+        }
+
+        // asm is a compile-time intrinsic — the parser has already rewritten
+        // the { body, in_arity?, out_arity? } object-literal argument into
+        // three positional args (body, in_arity, out_arity). The statement
+        // form returns void; the expression form asm<T>({...}) carries the
+        // captured return type on asm_return_type and produces a value of that
+        // type.
+        if let Expression::Identifier { name } = callee {
+            if name == "asm" {
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                if let Some(t) = asm_return_type {
+                    return t.to_string();
                 }
                 return VOID.to_string();
             }
@@ -1339,9 +1362,19 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
             UnaryOp::Not => BOOLEAN.to_string(),
             _ => BIGINT.to_string(),
         },
-        Expression::CallExpr { callee, .. } => {
+        Expression::CallExpr {
+            callee,
+            asm_return_type,
+            ..
+        } => {
             let builtins = builtin_functions();
             if let Expression::Identifier { name } = callee.as_ref() {
+                // Expression-form asm<T>({...}) statically yields type T.
+                if name == "asm" {
+                    if let Some(t) = asm_return_type {
+                        return t.to_string();
+                    }
+                }
                 if let Some(sig) = builtins.get(name.as_str()) {
                     return sig.return_type.to_string();
                 }

@@ -35,6 +35,11 @@ pub const EmitContext = struct {
     code_sep_index_slots: std.ArrayListUnmanaged(types.CodeSepIndexSlot) = .empty,
     /// Byte offsets of OP_CODESEPARATOR instructions.
     code_separator_indices: std.ArrayListUnmanaged(u32) = .empty,
+    /// Byte ranges produced by raw_script ANF nodes (asm({...}) intrinsic).
+    /// Each entry records the (offset, length, in_arity, out_arity) span so
+    /// the static analyzer can treat the bytes as one opaque stack-effect
+    /// step. Empty when no asm() calls were emitted.
+    raw_script_spans: std.ArrayListUnmanaged(types.RawScriptSpan) = .empty,
     /// Source map: records which opcode corresponds to which source location.
     source_map: std.ArrayListUnmanaged(types.SourceMapping) = .empty,
     /// Pending source location to record on the next emitted opcode.
@@ -58,6 +63,7 @@ pub const EmitContext = struct {
         self.constructor_slots.deinit(self.allocator);
         self.code_sep_index_slots.deinit(self.allocator);
         self.code_separator_indices.deinit(self.allocator);
+        self.raw_script_spans.deinit(self.allocator);
         self.source_map.deinit(self.allocator);
     }
 
@@ -168,6 +174,30 @@ pub const EmitContext = struct {
         });
     }
 
+    /// Emit an opaque raw_bytes span produced by a raw_script ANF node. The
+    /// bytes pass through verbatim — no re-encoding takes place. The ASM
+    /// column shows `<raw N bytes>` so the human-readable disassembly is
+    /// honest about the opacity. A RawScriptSpan capturing (offset, length,
+    /// in_arity, out_arity) is recorded so the static analyzer can treat the
+    /// span as one opaque stack-effect step.
+    pub fn emitRawBytes(self: *EmitContext, bytes: []const u8, in_arity: i32, out_arity: i32) !void {
+        if (bytes.len == 0) return;
+        const offset = self.byte_offset;
+        try self.recordSourceMapping();
+        try self.script_bytes.appendSlice(self.allocator, bytes);
+        self.byte_offset += @intCast(bytes.len);
+        self.opcode_index += 1;
+        const asm_str = try std.fmt.allocPrint(self.allocator, "<raw {d} bytes>", .{bytes.len});
+        try self.owned_asm_parts.append(self.allocator, asm_str);
+        try self.asm_parts.append(self.allocator, asm_str);
+        try self.raw_script_spans.append(self.allocator, .{
+            .offset = offset,
+            .length = @intCast(bytes.len),
+            .in_arity = in_arity,
+            .out_arity = out_arity,
+        });
+    }
+
     /// Get the final hex-encoded script. Caller owns the returned memory.
     pub fn getHex(self: *EmitContext) ![]u8 {
         return opcodes.bytesToHex(self.allocator, self.script_bytes.items);
@@ -275,6 +305,13 @@ pub fn emitStackInstruction(ctx: *EmitContext, inst: types.StackInstruction) !vo
         .placeholder => |ph| {
             try ctx.recordConstructorSlot(ph.param_index);
             try ctx.emitOpcode(.op_0);
+        },
+        .raw_bytes => |rb| {
+            // Opaque opcode-byte span from a raw_script ANF node. Written
+            // verbatim with no re-encoding; the declared arities are recorded
+            // into the artifact's rawScriptSpans so the analyzer can treat
+            // the span as one opaque stack-effect step.
+            try ctx.emitRawBytes(rb.bytes, rb.in_arity, rb.out_arity);
         },
     }
 }
@@ -892,6 +929,12 @@ fn emitANFValueJson(w: anytype, value: types.ANFValue) error{OutOfMemory}!void {
         },
         .array_literal => {
             try w.writeAll("{\"kind\":\"array_literal\"}");
+        },
+        .raw_script => |rs| {
+            try w.writeAll("{\"kind\":\"raw_script\",\"bytes\":");
+            try writeJsonString(w, rs.bytes);
+            try w.print(",\"in_arity\":{d},\"out_arity\":{d}", .{ rs.in_arity, rs.out_arity });
+            try w.writeByte('}');
         },
     }
 }
@@ -1691,4 +1734,41 @@ test "byte offset tracking" {
 
     try ctx.emitScriptNumber(1000); // 1 len + 2 data = 3 bytes
     try std.testing.expectEqual(@as(u32, 9), ctx.byte_offset);
+}
+
+// ---------------------------------------------------------------------------
+// raw_script ANF round-trip: lower a single raw_script binding to stack IR,
+// emit, and verify the output hex equals the input bytes verbatim and a
+// RawScriptSpan was recorded. Mirrors Go's TestEmit_RawScriptRoundTrip.
+// ---------------------------------------------------------------------------
+
+test "emit raw_script round-trip writes bytes verbatim and records a span" {
+    const allocator = std.testing.allocator;
+
+    // Bytes "5152935987" = OP_1 OP_2 OP_ADD OP_3 OP_EQUAL — an arbitrary
+    // opaque span the emitter must write verbatim. The Go reference uses
+    // the same bytes for parity.
+    const raw_hex = "5152935987";
+    const raw_bytes = try opcodes.hexToBytes(allocator, raw_hex);
+    defer allocator.free(raw_bytes);
+
+    var ctx = EmitContext.init(allocator);
+    defer ctx.deinit();
+
+    try emitStackInstruction(&ctx, .{ .raw_bytes = .{
+        .bytes = raw_bytes,
+        .in_arity = 0,
+        .out_arity = 1,
+    } });
+
+    const hex = try ctx.getHex();
+    defer allocator.free(hex);
+
+    try std.testing.expectEqualStrings(raw_hex, hex);
+    try std.testing.expectEqual(@as(usize, 1), ctx.raw_script_spans.items.len);
+    const span = ctx.raw_script_spans.items[0];
+    try std.testing.expectEqual(@as(u32, 0), span.offset);
+    try std.testing.expectEqual(@as(u32, raw_hex.len / 2), span.length);
+    try std.testing.expectEqual(@as(i32, 0), span.in_arity);
+    try std.testing.expectEqual(@as(i32, 1), span.out_arity);
 }

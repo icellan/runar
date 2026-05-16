@@ -850,6 +850,7 @@ public final class PyParser {
             switch (parentClassName) {
                 case "SmartContract" -> parentClass = ParentClass.SMART_CONTRACT;
                 case "StatefulSmartContract" -> parentClass = ParentClass.STATEFUL_SMART_CONTRACT;
+                case "UnsafeSmartContract" -> parentClass = ParentClass.UNSAFE_SMART_CONTRACT;
                 default -> throw new ParseException("unknown parent class: " + parentClassName);
             }
 
@@ -937,7 +938,10 @@ public final class PyParser {
             if (checkIdent("Readonly")) {
                 isReadonly = true;
             }
-            if (parentClassName.equals("SmartContract")) {
+            // In SmartContract (and UnsafeSmartContract), all properties
+            // are automatically readonly.
+            if (parentClassName.equals("SmartContract")
+                || parentClassName.equals("UnsafeSmartContract")) {
                 isReadonly = true;
             }
 

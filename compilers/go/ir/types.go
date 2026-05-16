@@ -148,6 +148,11 @@ type ANFValue struct {
 
 	// array_literal
 	Elements []string `json:"elements,omitempty"`
+
+	// raw_script — opaque opcode-byte span with declared stack arity.
+	Bytes    string `json:"bytes,omitempty"`
+	InArity  int    `json:"in_arity,omitempty"`
+	OutArity int    `json:"out_arity,omitempty"`
 }
 
 // MarshalJSON emits only the fields relevant to v.Kind so the byte-level
@@ -265,6 +270,12 @@ func (v ANFValue) MarshalJSON() ([]byte, error) {
 		} else {
 			out["elements"] = v.Elements
 		}
+	case "raw_script":
+		// Opaque opcode-byte span — emit bytes + arities explicitly so
+		// in_arity 0 / out_arity 0 survive (omitempty would drop them).
+		out["bytes"] = v.Bytes
+		out["in_arity"] = v.InArity
+		out["out_arity"] = v.OutArity
 	default:
 		// Fall back to the struct-tag shape for any unknown kind so we
 		// don't silently drop fields while debugging new variants.

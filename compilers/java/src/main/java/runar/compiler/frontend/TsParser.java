@@ -611,7 +611,7 @@ public final class TsParser {
                 skipStatement();
             }
 
-            throw new ParseException("no class extending SmartContract or StatefulSmartContract found");
+            throw new ParseException("no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found");
         }
 
         void skipImport() {
@@ -667,8 +667,12 @@ public final class TsParser {
                 parentClass = parentTok.value;
             }
 
-            if (!parentClass.equals("SmartContract") && !parentClass.equals("StatefulSmartContract")) {
-                throw new ParseException("no class extending SmartContract or StatefulSmartContract found");
+            if (!parentClass.equals("SmartContract")
+                && !parentClass.equals("StatefulSmartContract")
+                && !parentClass.equals("UnsafeSmartContract")) {
+                throw new ParseException(
+                    "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+                );
             }
 
             expect(TOK_LBRACE);
@@ -1416,6 +1420,12 @@ public final class TsParser {
                 if (name.equals("super")) {
                     return new Identifier("super");
                 }
+                // asm({...}) / asm<T>({...}) compiler intrinsic — must be
+                // recognised before the generic LT lookahead in
+                // parseRelational to avoid ambiguity with comparison.
+                if ("asm".equals(name) && (check(TOK_LPAREN) || check(TOK_LT))) {
+                    return parseAsmCall();
+                }
                 if (check(TOK_LPAREN)) {
                     List<Expression> args = parseCallArgs();
                     return new CallExpr(new Identifier(name), args);
@@ -1451,6 +1461,294 @@ public final class TsParser {
             }
             expect(TOK_RBRACKET);
             return new ArrayLiteralExpr(elements);
+        }
+
+        // -- asm() compiler intrinsic ------------------------------------
+
+        /**
+         * Decode {@code asm({ body, in_arity?, out_arity? })} (and
+         * {@code asm<T>({...})}) into a {@link CallExpr} with three
+         * positional args
+         * {@code [ByteStringLiteral(body), BigIntLiteral(in_arity),
+         * BigIntLiteral(out_arity)]}.
+         */
+        Expression parseAsmCall() throws ParseException {
+            Identifier callee = new Identifier("asm");
+
+            // asm<T>(...) — capture the generic type argument BEFORE
+            // diagnosing arg shape errors so the expression form still
+            // records its return type even when other args are malformed.
+            String asmReturnType = null;
+            if (match(TOK_LT)) {
+                if (check(TOK_IDENT)) {
+                    Token typeTok = advance();
+                    String text = typeTok.value;
+                    if ("bigint".equals(text) || "boolean".equals(text) || "ByteString".equals(text)) {
+                        asmReturnType = text;
+                    } else {
+                        addError("asm<T>() return type must be 'bigint', 'boolean', or 'ByteString'; got '"
+                            + text + "'");
+                    }
+                }
+                if (!match(TOK_GT)) {
+                    addError("expected '>' to close asm<T>()");
+                }
+            }
+
+            if (!check(TOK_LPAREN)) {
+                addError("expected '(' after asm");
+                return new CallExpr(callee, List.of(), asmReturnType);
+            }
+            expect(TOK_LPAREN);
+
+            // Exactly one argument: an object literal { body, in_arity?, out_arity? }.
+            if (!check(TOK_LBRACE)) {
+                addError("asm() argument must be an object literal { body: '<hex>', in_arity?: <int>, out_arity?: <int> }");
+                while (!check(TOK_RPAREN) && !check(TOK_EOF)) advance();
+                match(TOK_RPAREN);
+                return new CallExpr(callee, List.of(), asmReturnType);
+            }
+            expect(TOK_LBRACE);
+
+            Expression bodyExpr = null;
+            Expression inArityExpr = null;
+            Expression outArityExpr = null;
+
+            while (!check(TOK_RBRACE) && !check(TOK_EOF)) {
+                if (!check(TOK_IDENT)) {
+                    addError("asm() object key must be an identifier");
+                    advance();
+                    continue;
+                }
+                Token keyTok = advance();
+                String key = keyTok.value;
+                if (!match(TOK_COLON)) {
+                    addError("expected ':' after asm() object key '" + key + "'");
+                }
+                switch (key) {
+                    case "body" -> bodyExpr = parseAsmBody();
+                    case "in_arity" -> inArityExpr = parseAsmArityLiteral("in_arity");
+                    case "out_arity" -> outArityExpr = parseAsmArityLiteral("out_arity");
+                    default -> {
+                        addError("asm() does not accept the '" + key
+                            + "' field; valid fields are 'body', 'in_arity', 'out_arity'.");
+                        skipAsmPropertyValue();
+                    }
+                }
+                if (!match(TOK_COMMA)) break;
+            }
+            expect(TOK_RBRACE);
+            expect(TOK_RPAREN);
+
+            if (bodyExpr == null) {
+                addError("asm() requires a 'body' field with a hex string literal value");
+                bodyExpr = new ByteStringLiteral("");
+            }
+            // Defaults: in_arity=0, out_arity=1.
+            if (inArityExpr == null) inArityExpr = new BigIntLiteral(BigInteger.ZERO);
+            if (outArityExpr == null) outArityExpr = new BigIntLiteral(BigInteger.ONE);
+
+            return new CallExpr(callee, List.of(bodyExpr, inArityExpr, outArityExpr), asmReturnType);
+        }
+
+        /** Parse the asm() body — either a hex string literal or an array of opcodes / push() calls. */
+        Expression parseAsmBody() throws ParseException {
+            Token t = peek();
+            if (t.kind == TOK_STRING) {
+                advance();
+                return new ByteStringLiteral(t.value);
+            }
+            if (t.kind == TOK_LBRACKET) {
+                String hex = encodeAsmArrayBody();
+                return new ByteStringLiteral(hex);
+            }
+            addError("asm() body must be a hex string literal or an array of opcode names / push() calls; got '"
+                + t.value + "'");
+            return new ByteStringLiteral("");
+        }
+
+        /**
+         * Encode an {@code asm({ body: [OP_DUP, push(0x42), ...] })} array
+         * literal to its hex byte representation. Uses the same
+         * push-encoding helpers as the emit pass so the resulting bytes
+         * are byte-identical to what the emitter would produce for the
+         * equivalent literal.
+         */
+        String encodeAsmArrayBody() throws ParseException {
+            expect(TOK_LBRACKET);
+            StringBuilder hex = new StringBuilder();
+            while (!check(TOK_RBRACKET) && !check(TOK_EOF)) {
+                if (check(TOK_IDENT)) {
+                    Token nameTok = advance();
+                    if (check(TOK_LPAREN)) {
+                        // push(<literal>)
+                        if (!"push".equals(nameTok.value)) {
+                            addError("asm() body array call must be 'push(<literal>)', got '"
+                                + nameTok.value + "(...)'");
+                            // skip arg list
+                            expect(TOK_LPAREN);
+                            int depth = 1;
+                            while (depth > 0 && !check(TOK_EOF)) {
+                                if (check(TOK_LPAREN)) depth++;
+                                else if (check(TOK_RPAREN)) depth--;
+                                if (depth > 0) advance();
+                            }
+                            match(TOK_RPAREN);
+                        } else {
+                            expect(TOK_LPAREN);
+                            String pushed = encodeAsmPushLiteral();
+                            hex.append(pushed);
+                            expect(TOK_RPAREN);
+                        }
+                    } else {
+                        int b = runar.compiler.passes.Emit.opcodeByte(nameTok.value);
+                        if (b < 0) {
+                            addError("Unknown opcode '" + nameTok.value + "' in asm() body array. "
+                                + "Expected an OP_* identifier (e.g. OP_DUP, OP_HASH160) or a push(...) call.");
+                        } else {
+                            hex.append(String.format("%02x", b));
+                        }
+                    }
+                } else {
+                    addError("asm() body array element must be an opcode identifier (e.g. OP_DUP) "
+                        + "or a push(<literal>) call; got '" + t().value + "'");
+                    advance();
+                }
+                if (!match(TOK_COMMA)) break;
+            }
+            expect(TOK_RBRACKET);
+            return hex.toString();
+        }
+
+        /** Encode a literal argument passed to push(...) inside an asm() body array. */
+        String encodeAsmPushLiteral() throws ParseException {
+            Token t = peek();
+            boolean negative = false;
+            if (t.kind == TOK_MINUS) {
+                advance();
+                negative = true;
+                t = peek();
+            }
+            if (t.kind == TOK_NUMBER) {
+                advance();
+                BigInteger bi;
+                String s = t.value;
+                try {
+                    if (s.startsWith("0x") || s.startsWith("0X")) {
+                        bi = new BigInteger(s.substring(2), 16);
+                    } else if (s.startsWith("0o") || s.startsWith("0O")) {
+                        bi = new BigInteger(s.substring(2), 8);
+                    } else if (s.startsWith("0b") || s.startsWith("0B")) {
+                        bi = new BigInteger(s.substring(2), 2);
+                    } else {
+                        bi = new BigInteger(s);
+                    }
+                } catch (NumberFormatException ex) {
+                    addError("push() argument is not a valid integer literal: '" + s + "'");
+                    return "";
+                }
+                if (negative) bi = bi.negate();
+                return runar.compiler.passes.Emit.encodePushBigIntHex(bi);
+            }
+            if (t.kind == TOK_IDENT) {
+                if ("true".equals(t.value)) {
+                    advance();
+                    return "51"; // OP_TRUE
+                }
+                if ("false".equals(t.value)) {
+                    advance();
+                    return "00"; // OP_FALSE (alias of OP_0)
+                }
+            }
+            if (t.kind == TOK_STRING) {
+                advance();
+                String raw = t.value == null ? "" : t.value;
+                if ((raw.length() & 1) != 0 || !isHexChars(raw)) {
+                    addError("push() ByteString argument must be even-length hex (got '" + raw + "')");
+                    return "";
+                }
+                byte[] data = new byte[raw.length() / 2];
+                for (int i = 0; i < data.length; i++) {
+                    int hi = Character.digit(raw.charAt(i * 2), 16);
+                    int lo = Character.digit(raw.charAt(i * 2 + 1), 16);
+                    data[i] = (byte) ((hi << 4) | lo);
+                }
+                return runar.compiler.passes.Emit.encodePushBytesHex(data);
+            }
+            addError("push() argument must be a literal value (bigint, number, boolean, or hex string), got '"
+                + t.value + "'");
+            advance();
+            return "";
+        }
+
+        Expression parseAsmArityLiteral(String fieldName) throws ParseException {
+            Token t = peek();
+            if (t.kind == TOK_MINUS) {
+                addError("asm() " + fieldName + " must be a non-negative integer literal");
+                advance(); // consume -
+                if (check(TOK_NUMBER)) advance();
+                return new BigIntLiteral(BigInteger.ZERO);
+            }
+            if (t.kind != TOK_NUMBER) {
+                addError("asm() " + fieldName + " must be a non-negative integer literal, got '"
+                    + t.value + "'");
+                advance();
+                return new BigIntLiteral(BigInteger.ZERO);
+            }
+            advance();
+            BigInteger bi;
+            String s = t.value;
+            try {
+                if (s.startsWith("0x") || s.startsWith("0X")) {
+                    bi = new BigInteger(s.substring(2), 16);
+                } else if (s.startsWith("0o") || s.startsWith("0O")) {
+                    bi = new BigInteger(s.substring(2), 8);
+                } else if (s.startsWith("0b") || s.startsWith("0B")) {
+                    bi = new BigInteger(s.substring(2), 2);
+                } else {
+                    bi = new BigInteger(s);
+                }
+            } catch (NumberFormatException ex) {
+                addError("asm() " + fieldName + " must be a non-negative integer literal, got '" + s + "'");
+                return new BigIntLiteral(BigInteger.ZERO);
+            }
+            if (bi.signum() < 0) {
+                addError("asm() " + fieldName + " must be a non-negative integer literal");
+                return new BigIntLiteral(BigInteger.ZERO);
+            }
+            return new BigIntLiteral(bi);
+        }
+
+        /** Skip one property value when an unknown asm() key is encountered. */
+        void skipAsmPropertyValue() throws ParseException {
+            int parenDepth = 0;
+            int bracketDepth = 0;
+            int braceDepth = 0;
+            while (!check(TOK_EOF)) {
+                if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0) {
+                    if (check(TOK_COMMA) || check(TOK_RBRACE)) return;
+                }
+                Token tk = peek();
+                if (tk.kind == TOK_LPAREN) parenDepth++;
+                else if (tk.kind == TOK_RPAREN) parenDepth = Math.max(0, parenDepth - 1);
+                else if (tk.kind == TOK_LBRACKET) bracketDepth++;
+                else if (tk.kind == TOK_RBRACKET) bracketDepth = Math.max(0, bracketDepth - 1);
+                else if (tk.kind == TOK_LBRACE) braceDepth++;
+                else if (tk.kind == TOK_RBRACE) braceDepth = Math.max(0, braceDepth - 1);
+                advance();
+            }
+        }
+
+        private Token t() { return peek(); }
+
+        private static boolean isHexChars(String s) {
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 

@@ -486,6 +486,11 @@ def _fold_value(value: ANFValue, env: ConstEnv) -> ANFValue:
             iter_var=value.iter_var,
         )
 
+    if kind == "raw_script":
+        # Opaque byte span -- never folded. Bytes are byte-canonical and the
+        # peephole optimizer treats it as a hard barrier.
+        return value
+
     # Terminal / side-effecting kinds pass through
     return value
 

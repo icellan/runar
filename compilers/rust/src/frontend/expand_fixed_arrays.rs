@@ -705,7 +705,7 @@ impl<'a> ExpandContext<'a> {
                     operand: Box::new(o),
                 }
             }
-            Expression::CallExpr { callee, args } => {
+            Expression::CallExpr { callee, args, .. } => {
                 let c = self.rewrite_expression(callee, prelude);
                 let new_args: Vec<Expression> = args
                     .iter()
@@ -714,6 +714,7 @@ impl<'a> ExpandContext<'a> {
                 Expression::CallExpr {
                     callee: Box::new(c),
                     args: new_args,
+                    asm_return_type: None,
                 }
             }
             Expression::MemberExpr { object, property } => {
@@ -1027,6 +1028,7 @@ impl<'a> ExpandContext<'a> {
                     name: "assert".to_string(),
                 }),
                 args: vec![Expression::BoolLiteral { value: false }],
+                asm_return_type: None,
             },
             source_location: loc.clone(),
         };

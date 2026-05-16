@@ -1296,9 +1296,12 @@ func EmitVerifySLHDSA(emit func(StackOp), paramKey string) {
 		e(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 		e(StackOp{Op: "opcode", Code: "OP_CAT"})
 		e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
-		// Use OP_MOD instead of OP_AND to avoid byte-length mismatch
-		modulus := int64(1) << (p.H - hp)
-		e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(modulus)}})
+		// Use OP_MOD instead of OP_AND to avoid byte-length mismatch.
+		// Use big.Int.Lsh: p.H - hp can be >= 63 for the "f" parameter sets
+		// (e.g. 128f/192f: shift=63 wraps int64 to negative; 256f: shift=64
+		// overflows int64 to 0), which would silently corrupt the modulus.
+		modulus := new(big.Int).Lsh(big.NewInt(1), uint(p.H-hp))
+		e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: modulus}})
 		e(StackOp{Op: "opcode", Code: "OP_MOD"})
 	})
 

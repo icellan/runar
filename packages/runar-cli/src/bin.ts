@@ -35,7 +35,8 @@ program
   .option('--asm', 'print ASM to stdout')
   .option('--disable-constant-folding', 'disable ANF constant folding pass')
   .option('--from-ir <path>', 'compile from an ANF IR JSON file (skips parse/validate/typecheck/anf-lower)')
-  .option('--hex', 'with --from-ir, print only the script hex to stdout (no artifact JSON)')
+  .option('--hex', 'print only the script hex to stdout (no artifact JSON)')
+  .option('--parse-only', 'stop after parse + validate; print "parser ok" on success (requires source input)')
   .action(compileCommand);
 
 program

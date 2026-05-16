@@ -230,11 +230,12 @@ class SolParser {
     const nameToken = this.expect('ident');
     const contractName = nameToken.value;
 
-    // Optional: is SmartContract / StatefulSmartContract
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    // Optional: is SmartContract / StatefulSmartContract / UnsafeSmartContract
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
     if (this.match('is')) {
       const parent = this.expect('ident').value;
       if (parent === 'StatefulSmartContract') parentClass = 'StatefulSmartContract';
+      else if (parent === 'UnsafeSmartContract') parentClass = 'UnsafeSmartContract';
     }
 
     this.expect('{');

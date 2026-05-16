@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/asm-raw-script/Anyone.runar.ts",
+    ".runar.sol": "../../../examples/sol/asm-raw-script/Anyone.runar.sol",
+    ".runar.move": "../../../examples/move/asm-raw-script/Anyone.runar.move",
+    ".runar.go": "../../../examples/go/asm-raw-script/Anyone.runar.go",
+    ".runar.rs": "../../../examples/rust/asm-raw-script/Anyone.runar.rs",
+    ".runar.py": "../../../examples/python/asm-raw-script/Anyone.runar.py",
+    ".runar.zig": "../../../examples/zig/asm-raw-script/Anyone.runar.zig",
+    ".runar.rb": "../../../examples/ruby/asm-raw-script/Anyone.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/asm-raw-script/Anyone.runar.java"
+  }
+}

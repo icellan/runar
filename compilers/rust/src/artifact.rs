@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::codegen::emit::{CodeSepIndexSlot, ConstructorSlot, SourceMapping};
+use crate::codegen::emit::{CodeSepIndexSlot, ConstructorSlot, RawScriptSpan, SourceMapping};
 use crate::ir::{ANFProgram, ANFProperty, ANFSyntheticArrayLevel};
 
 // ---------------------------------------------------------------------------
@@ -114,6 +114,8 @@ pub struct RunarArtifact {
     pub code_separator_index: Option<usize>,
     #[serde(rename = "codeSeparatorIndices", skip_serializing_if = "Option::is_none")]
     pub code_separator_indices: Option<Vec<usize>>,
+    #[serde(rename = "rawScriptSpans", skip_serializing_if = "Vec::is_empty", default)]
+    pub raw_script_spans: Vec<RawScriptSpan>,
     #[serde(rename = "buildTimestamp")]
     pub build_timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +140,7 @@ pub fn assemble_artifact(
     code_separator_indices: Vec<usize>,
     include_anf: bool,
     source_mappings: Vec<SourceMapping>,
+    raw_script_spans: Vec<RawScriptSpan>,
 ) -> RunarArtifact {
     // Build constructor params from properties, excluding those with initializers
     // (properties with default values are not constructor parameters).
@@ -270,6 +273,7 @@ pub fn assemble_artifact(
         code_sep_index_slots,
         code_separator_index: cs_index,
         code_separator_indices: cs_indices,
+        raw_script_spans,
         build_timestamp: now,
         anf,
     }
