@@ -4,8 +4,9 @@ import {
   SLH_SHA2_128s, SLH_SHA2_128f,
   SLH_SHA2_192s, SLH_SHA2_256s,
 } from '../slh-dsa.js';
+import { runSlowTests } from '../../test-env.js';
 
-describe('SLH-DSA reference implementation', () => {
+describe.skipIf(!runSlowTests)('SLH-DSA reference implementation', () => {
   // Use a fixed seed for deterministic tests
   const seed128 = new Uint8Array(48); // 3*16 = 48 bytes for n=16
   seed128[0] = 0x42;

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract, slhKeygen, slhSign, SLH_SHA2_128s } from 'runar-testing';
+import { TestContract, slhKeygen, slhSign, SLH_SHA2_128s, runSlowTests } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'PostQuantumSLHDSANaiveInsecure.runar.sol'), 'utf8');
@@ -13,7 +13,7 @@ function toHex(bytes: Uint8Array): string {
 }
 
 // PEDAGOGY: this contract is intentionally broken — see contract header.
-describe('PostQuantumSLHDSANaiveInsecure (Solidity)', () => {
+describe.skipIf(!runSlowTests)('PostQuantumSLHDSANaiveInsecure (Solidity)', () => {
   const params = SLH_SHA2_128s;
   const slhSeed = new Uint8Array(3 * params.n);
   slhSeed[0] = 0x42;

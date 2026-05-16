@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { TestContract, slhKeygen, slhSign, SLH_SHA2_128s, ALICE, BOB, signTestMessage } from 'runar-testing';
+import { TestContract, slhKeygen, slhSign, SLH_SHA2_128s, ALICE, BOB, signTestMessage, runSlowTests } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'SPHINCSWallet.runar.ts'), 'utf8');
@@ -37,7 +37,7 @@ slhSeed[0] = 0x42;
 const { sk, pk } = slhKeygen(params, slhSeed);
 const slhdsaPubKeyHash = hash160(pk);
 
-describe('SPHINCSWallet (Hybrid ECDSA + SLH-DSA-SHA2-128s)', () => {
+describe.skipIf(!runSlowTests)('SPHINCSWallet (Hybrid ECDSA + SLH-DSA-SHA2-128s)', () => {
   it('accepts a valid hybrid spend', () => {
     const contract = TestContract.fromSource(source, {
       ecdsaPubKeyHash: ecdsaPubKeyHashHex,

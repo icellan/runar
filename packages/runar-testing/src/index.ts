@@ -100,6 +100,9 @@ export {
 } from './crypto/rabin.js';
 export type { RabinKeyPair } from './crypto/rabin.js';
 
+// Test-environment helpers (CI gate for slow tests)
+export { IS_CI, runSlowTests } from './test-env.js';
+
 // Post-quantum crypto primitives
 export { wotsKeygen, wotsSign, wotsVerify, WOTS_PARAMS } from './crypto/wots.js';
 export type { WOTSKeyPair } from './crypto/wots.js';
