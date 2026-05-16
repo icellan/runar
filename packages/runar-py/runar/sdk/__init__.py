@@ -36,6 +36,11 @@ from runar.sdk.ordinals import (
     bsv21_deploy_mint, bsv21_transfer,
 )
 from runar.sdk.gorillapool import GorillaPoolProvider
+from runar.sdk.envelope import (
+    canonical_json,
+    sign_envelope, verify_envelope,
+    SignedEnvelope, VerifyEnvelopeResult, VerifyEnvelopeReason, SignFn,
+)
 
 __all__ = [
     'Utxo', 'TransactionData', 'Transaction', 'TxInput', 'TxOutput',
@@ -63,4 +68,6 @@ __all__ = [
     'bsv20_deploy', 'bsv20_mint', 'bsv20_transfer',
     'bsv21_deploy_mint', 'bsv21_transfer',
     'GorillaPoolProvider',
+    'canonical_json', 'sign_envelope', 'verify_envelope',
+    'SignedEnvelope', 'VerifyEnvelopeResult', 'VerifyEnvelopeReason', 'SignFn',
 ]

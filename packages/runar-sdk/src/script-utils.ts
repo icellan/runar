@@ -7,6 +7,15 @@ import type { RunarArtifact } from 'runar-ir-schema';
 import { findLastOpReturn } from './state.js';
 
 /**
+ * Hash a 66- or 130-char hex secp256k1 public key into its 40-char hex
+ * hash160 (RIPEMD160(SHA256(pubkey))). Used as the `changePKH` argument
+ * to contract methods and as the input to `buildP2PKHScript`.
+ */
+export function pubkeyToPKH(pubkeyHex: string): string {
+  return Utils.toHex(Hash.hash160(Utils.toArray(pubkeyHex, 'hex')));
+}
+
+/**
  * Build a standard P2PKH locking script hex from an address, pubkey hash,
  * or public key.
  *
@@ -27,9 +36,7 @@ export function buildP2PKHScript(addressOrPubKey: string): string {
     pubKeyHash = addressOrPubKey;
   } else if (/^[0-9a-fA-F]{66}$/.test(addressOrPubKey) || /^[0-9a-fA-F]{130}$/.test(addressOrPubKey)) {
     // Compressed (33 bytes) or uncompressed (65 bytes) public key — hash it
-    const pubKeyBytes = Utils.toArray(addressOrPubKey, 'hex');
-    const hash160Bytes = Hash.hash160(pubKeyBytes);
-    pubKeyHash = Utils.toHex(hash160Bytes);
+    pubKeyHash = pubkeyToPKH(addressOrPubKey);
   } else {
     // Decode Base58Check address to extract the 20-byte pubkey hash
     const decoded = Utils.fromBase58Check(addressOrPubKey);

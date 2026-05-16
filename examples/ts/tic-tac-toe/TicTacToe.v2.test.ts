@@ -3,10 +3,16 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compile } from 'runar-compiler';
+import { TestContract, ALICE, BOB, signTestMessage } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const v1Source = readFileSync(join(__dirname, 'TicTacToe.runar.ts'), 'utf8');
 const v2Source = readFileSync(join(__dirname, 'TicTacToe.v2.runar.ts'), 'utf8');
+
+const PLAYER_X = ALICE.pubKey;
+const PLAYER_O = BOB.pubKey;
+const SIG_X = signTestMessage(ALICE.privKey);
+const SIG_O = signTestMessage(BOB.privKey);
 
 describe('TicTacToe v2 (FixedArray) — byte equality', () => {
   it('compiles the hand-rolled v1 contract', () => {
@@ -75,3 +81,48 @@ function findFirstHexDiff(a: string, b: string): number {
   }
   return n;
 }
+
+describe('TicTacToe v2 (FixedArray) — interpreter execution', () => {
+  it('move writes this.board[position] and regroups state.board as an array', () => {
+    const game = TestContract.fromSource(v2Source, {
+      playerX: PLAYER_X,
+      betAmount: 1000n,
+      playerO: PLAYER_O,
+      board: [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n],
+      turn: 1n,
+      status: 1n,
+    }, 'TicTacToe.v2.runar.ts');
+
+    const result = game.call('move', { position: 4n, player: PLAYER_X, sig: SIG_X });
+    if (!result.success) console.error('move error:', result.error);
+    expect(result.success).toBe(true);
+
+    const board = game.state.board as bigint[];
+    expect(Array.isArray(board)).toBe(true);
+    expect(board.length).toBe(9);
+    expect(board[4]).toBe(1n);
+    expect(board[0]).toBe(0n);
+    expect(game.state.turn).toBe(2n);
+  });
+
+  it('accepts a pre-seeded board and rejects a move on an occupied cell', () => {
+    const game = TestContract.fromSource(v2Source, {
+      playerX: PLAYER_X,
+      betAmount: 1000n,
+      playerO: PLAYER_O,
+      board: [1n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n],
+      turn: 2n,
+      status: 1n,
+    }, 'TicTacToe.v2.runar.ts');
+
+    const occupied = game.call('move', { position: 0n, player: PLAYER_O, sig: SIG_O });
+    expect(occupied.success).toBe(false);
+
+    const ok = game.call('move', { position: 1n, player: PLAYER_O, sig: SIG_O });
+    expect(ok.success).toBe(true);
+    const board = game.state.board as bigint[];
+    expect(board[0]).toBe(1n);
+    expect(board[1]).toBe(2n);
+    expect(game.state.turn).toBe(1n);
+  });
+});

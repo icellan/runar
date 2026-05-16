@@ -27,7 +27,8 @@ export { RunarContract } from './contract.js';
 
 // Transaction building
 export { buildDeployTransaction, selectUtxos, estimateDeployFee } from './deployment.js';
-export { buildCallTransaction, estimateCallFee } from './calling.js';
+export { buildCallTransaction, estimateCallFee, estimateFeeForArtifact } from './calling.js';
+export type { EstimateFeeForArtifactOpts } from './calling.js';
 
 // State management
 export {
@@ -41,7 +42,18 @@ export {
 export { computeOpPushTx } from './oppushtx.js';
 
 // Script utilities
-export { buildP2PKHScript, extractConstructorArgs, matchesArtifact } from './script-utils.js';
+export { buildP2PKHScript, extractConstructorArgs, matchesArtifact, pubkeyToPKH } from './script-utils.js';
+
+// Signed-envelope wire protocol for overlay apps
+export { canonicalJson, signEnvelope, verifyEnvelope } from './envelope.js';
+export type {
+  SignedEnvelope,
+  SignEnvelopeOpts,
+  EnvelopeSigner,
+  VerifyEnvelopeOpts,
+  VerifyEnvelopeResult,
+  VerifyEnvelopeReason,
+} from './envelope.js';
 
 // Token management
 export { TokenWallet } from './tokens.js';

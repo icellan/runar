@@ -149,6 +149,15 @@ When adding a new frontend format parser:
 ### Seven Compilers Must Stay in Sync
 Any language feature change must be implemented in TypeScript, Go, Rust, Python, Zig, Ruby, AND Java. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has golden-file tests (including WOTS+, SLH-DSA, and EC primitives) that all 7 compilers must pass once the Java compiler's cross-format parsers and deferred crypto codegen modules land. The SDK output conformance suite in `conformance/sdk-output/` verifies all 7 SDKs produce identical deployed locking scripts.
 
+### Seven SDKs Must Stay in Sync (wire-protocol primitives)
+The deployment SDKs in `packages/runar-{ts,go,rs,py,zig,rb,java}` are seven independent implementations of the same on-chain surface (deploy / call / state-serialize / sign / verify). **Wire-protocol primitives — anything whose bytes cross a tier boundary — must be byte-identical across all seven SDKs.** Today that covers:
+- **`canonicalJson`** — RFC 8785 / JCS-compliant serializer. Used to hash payloads before signing. Two implementations producing different bytes for the same JSON value silently break every cross-tier signature.
+- **`SignedEnvelope` + `signEnvelope` + `verifyEnvelope`** — the signed-broadcast wire protocol used by overlay apps (`runar-overlay-express` server, `runar-react` browser hooks, plus any non-TS overlay backend). All seven SDKs must accept the same envelope shape, produce signatures verifiable by every other tier, and return the same `VerifyEnvelopeReason` for the same rejection case.
+
+Convenience wrappers around tier-local primitives (`pubkeyToPKH`, `estimateFeeForArtifact`, `LocalSigner`, provider classes) do NOT need cross-tier parity — they're per-tier ergonomic surface. Sync the **wire bytes**, not the API shape.
+
+Cross-tier interop tests live in `conformance/sdk-envelope/` (a single TS-signed envelope fixture + a known-bad envelope per rejection reason, replayed against every tier's `verifyEnvelope`). Any envelope-related code change must round-trip through this fixture.
+
 ### Contract Model
 - `SmartContract` — stateless, all properties `readonly`, developer writes full logic
 - `StatefulSmartContract` — compiler auto-injects `checkPreimage` at method entry and state continuation at exit

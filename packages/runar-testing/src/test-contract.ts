@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
-import type { ContractNode } from 'runar-ir-schema';
-import { compile } from 'runar-compiler';
+import type { ContractNode, TypeNode } from 'runar-ir-schema';
+import { compile, expandFixedArrays } from 'runar-compiler';
 import { RunarInterpreter } from './interpreter/index.js';
 import type { RunarValue, InterpreterResult } from './interpreter/index.js';
 import { bytesToHex } from './vm/utils.js';
@@ -70,17 +70,81 @@ function fromRunarValue(val: RunarValue): unknown {
 }
 
 // ---------------------------------------------------------------------------
+// FixedArray shape support
+// ---------------------------------------------------------------------------
+
+type FixedArrayShape =
+  | { kind: 'scalar' }
+  | { kind: 'array'; length: number; element: FixedArrayShape };
+
+function shapeFromType(type: TypeNode): FixedArrayShape {
+  if (type.kind === 'fixed_array_type') {
+    return { kind: 'array', length: type.length, element: shapeFromType(type.element) };
+  }
+  return { kind: 'scalar' };
+}
+
+function setRunarProp(
+  out: Record<string, RunarValue>,
+  baseName: string,
+  shape: FixedArrayShape | undefined,
+  value: unknown,
+): void {
+  if (!shape || shape.kind === 'scalar') {
+    out[baseName] = toRunarValue(value);
+    return;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`Property '${baseName}' is FixedArray; expected array, got ${typeof value}`);
+  }
+  if (value.length !== shape.length) {
+    throw new Error(`Property '${baseName}' expected ${shape.length} elements, got ${value.length}`);
+  }
+  for (let i = 0; i < shape.length; i++) {
+    setRunarProp(out, `${baseName}__${i}`, shape.element, value[i]);
+  }
+}
+
+function getRunarProp(
+  baseName: string,
+  shape: FixedArrayShape | undefined,
+  flat: Record<string, RunarValue>,
+): unknown {
+  if (!shape || shape.kind === 'scalar') {
+    const val = flat[baseName];
+    return val !== undefined ? fromRunarValue(val) : undefined;
+  }
+  const arr: unknown[] = [];
+  for (let i = 0; i < shape.length; i++) {
+    arr.push(getRunarProp(`${baseName}__${i}`, shape.element, flat));
+  }
+  return arr;
+}
+
+// ---------------------------------------------------------------------------
 // TestContract
 // ---------------------------------------------------------------------------
 
 export class TestContract {
   private readonly contract: ContractNode;
   private readonly interpreter: RunarInterpreter;
+  private readonly shapeMap: Map<string, FixedArrayShape>;
+  private readonly syntheticLeafPrefixes: string[];
 
-  private constructor(contract: ContractNode, interpreter: RunarInterpreter) {
+  private constructor(
+    contract: ContractNode,
+    interpreter: RunarInterpreter,
+    shapeMap: Map<string, FixedArrayShape>,
+  ) {
     this.contract = contract;
     this.interpreter = interpreter;
+    this.shapeMap = shapeMap;
+    this.syntheticLeafPrefixes = Array.from(shapeMap.keys()).map(name => `${name}__`);
     this.interpreter.setContract(contract);
+  }
+
+  private isSyntheticLeaf(key: string): boolean {
+    return this.syntheticLeafPrefixes.some(prefix => key.startsWith(prefix));
   }
 
   /**
@@ -102,10 +166,30 @@ export class TestContract {
       throw new Error(`Compilation failed:\n${errors}`);
     }
 
+    // Snapshot FixedArray property shapes from the pre-expansion AST.
+    // Synthetic leaf names follow the compiler's convention `${name}__${i}`
+    // (recursively), see compilers/.../03b-expand-fixed-arrays.ts.
+    const shapeMap = new Map<string, FixedArrayShape>();
+    for (const prop of result.contract.properties) {
+      if (prop.type.kind === 'fixed_array_type') {
+        shapeMap.set(prop.name, shapeFromType(prop.type));
+      }
+    }
+
+    const expanded = expandFixedArrays(result.contract);
+    if (expanded.errors.length > 0) {
+      throw new Error(
+        `FixedArray expansion failed:\n${expanded.errors.map(e => e.message).join('\n')}`,
+      );
+    }
+    const contract = expanded.contract;
+
     const props: Record<string, RunarValue> = {};
 
-    // Auto-populate initial values from property initializers
-    for (const prop of result.contract.properties) {
+    // Auto-populate initial values from property initializers. After
+    // expandFixedArrays, every property is scalar — array literals have
+    // already been distributed across the synthetic siblings.
+    for (const prop of contract.properties) {
       if (prop.initializer && !(prop.name in initialState)) {
         const val = extractInitializerValue(prop.initializer);
         if (val !== undefined) {
@@ -115,13 +199,13 @@ export class TestContract {
     }
 
     for (const [key, value] of Object.entries(initialState)) {
-      props[key] = toRunarValue(value);
+      setRunarProp(props, key, shapeMap.get(key), value);
     }
 
     const interpreter = new RunarInterpreter(props);
     // Cast through unknown: runar-compiler's ContractNode may have slightly
     // wider type unions than runar-ir-schema's (e.g. "void" PrimitiveTypeName).
-    return new TestContract(result.contract as unknown as ContractNode, interpreter);
+    return new TestContract(contract as unknown as ContractNode, interpreter, shapeMap);
   }
 
   /**
@@ -154,7 +238,11 @@ export class TestContract {
       const snapshot: OutputSnapshot = {
         satoshis: out.satoshis.kind === 'bigint' ? out.satoshis.value : 0n,
       };
+      for (const [topName, shape] of this.shapeMap) {
+        snapshot[topName] = getRunarProp(topName, shape, out.stateValues);
+      }
       for (const [key, val] of Object.entries(out.stateValues)) {
+        if (this.shapeMap.has(key) || this.isSyntheticLeaf(key)) continue;
         snapshot[key] = fromRunarValue(val);
       }
       return snapshot;
@@ -173,7 +261,11 @@ export class TestContract {
   get state(): Record<string, unknown> {
     const runarState = this.interpreter.getState();
     const result: Record<string, unknown> = {};
+    for (const [topName, shape] of this.shapeMap) {
+      result[topName] = getRunarProp(topName, shape, runarState);
+    }
     for (const [key, val] of Object.entries(runarState)) {
+      if (this.shapeMap.has(key) || this.isSyntheticLeaf(key)) continue;
       result[key] = fromRunarValue(val);
     }
     return result;

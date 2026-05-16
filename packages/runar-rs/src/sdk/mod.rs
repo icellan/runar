@@ -13,6 +13,7 @@ pub mod anf_interpreter;
 pub mod codegen;
 pub mod script_utils;
 pub mod script_vm;
+pub mod envelope;
 pub mod token_wallet;
 pub mod wallet;
 pub mod woc_provider;
@@ -47,3 +48,9 @@ pub use ordinals::{
     bsv21_deploy_mint, bsv21_transfer,
 };
 pub use gorillapool::GorillaPoolProvider;
+pub use envelope::{
+    canonical_json,
+    sign_envelope, verify_envelope,
+    SignedEnvelope, SignEnvelopeOpts, SignFn,
+    VerifyEnvelopeOpts, VerifyEnvelopeResult, VerifyEnvelopeReason,
+};

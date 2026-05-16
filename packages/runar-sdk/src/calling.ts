@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { Transaction, LockingScript, UnlockingScript } from '@bsv/sdk';
+import type { RunarArtifact } from 'runar-ir-schema';
 import type { UTXO } from './types.js';
 import { buildP2PKHScript } from './script-utils.js';
 
@@ -170,6 +171,32 @@ export function estimateCallFee(
   const changeOutputSize = P2PKH_OUTPUT_SIZE;
   const txSize = TX_OVERHEAD + contractInputSize + fundingInputsSize + contractOutputSize + changeOutputSize;
   return Math.ceil(txSize * feeRate / 1000);
+}
+
+export interface EstimateFeeForArtifactOpts {
+  /** Sat/byte. Default 0.1. */
+  feeRate?: number;
+  /** Number of continuation outputs. Default 1. */
+  outputCount?: number;
+  /** Unlocking-script byte length. Default: ceil(artifact.script.length / 4). */
+  unlockingScriptLen?: number;
+}
+
+/**
+ * Estimate the fee for a single call against a deployed contract built
+ * from the given artifact. Wraps {@link estimateCallFee} with defaults
+ * derived from the artifact and accepts `feeRate` in sat/byte (vs the
+ * sat/kilobyte unit `estimateCallFee` itself takes).
+ */
+export function estimateFeeForArtifact(
+  artifact: RunarArtifact,
+  opts: EstimateFeeForArtifactOpts = {},
+): number {
+  const satPerByte = opts.feeRate ?? 0.1;
+  const outputs = opts.outputCount ?? 1;
+  const lockingLen = artifact.script.length / 2;
+  const unlockingLen = opts.unlockingScriptLen ?? Math.ceil(artifact.script.length / 4);
+  return estimateCallFee(lockingLen, unlockingLen, outputs, satPerByte * 1000);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,172 @@
+{
+  "fixture_version": 1,
+  "notes": "Cross-tier interop fixture for the signed-envelope wire protocol. Every Runar SDK (TS/Go/Rust/Python/Zig/Ruby/Java) must consume this and produce byte-identical canonical_json output + verify the valid envelope + reject each tampered envelope with the listed reason.",
+  "alice_priv_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "alice_pub_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "nonce": 1700000000000,
+  "expires_at": 1700000030000,
+  "verify_now_ms": 1700000000500,
+  "canonical_json_vectors": [
+    {
+      "input": {
+        "a": 1,
+        "b": 2
+      },
+      "expected": "{\"a\":1,\"b\":2}"
+    },
+    {
+      "input": {
+        "b": 2,
+        "a": 1
+      },
+      "expected": "{\"a\":1,\"b\":2}"
+    },
+    {
+      "input": [
+        1,
+        2,
+        3
+      ],
+      "expected": "[1,2,3]"
+    },
+    {
+      "input": null,
+      "expected": "null"
+    },
+    {
+      "input": true,
+      "expected": "true"
+    },
+    {
+      "input": false,
+      "expected": "false"
+    },
+    {
+      "input": 42,
+      "expected": "42"
+    },
+    {
+      "input": 0,
+      "expected": "0"
+    },
+    {
+      "input": -7,
+      "expected": "-7"
+    },
+    {
+      "input": "hi",
+      "expected": "\"hi\""
+    },
+    {
+      "input": "",
+      "expected": "\"\""
+    },
+    {
+      "input": {
+        "kind": "hello",
+        "n": 7
+      },
+      "expected": "{\"kind\":\"hello\",\"n\":7}"
+    },
+    {
+      "input": {
+        "outer": {
+          "z": 1,
+          "a": [
+            3,
+            2,
+            1
+          ]
+        },
+        "list": [
+          {
+            "y": 1,
+            "x": 2
+          }
+        ],
+        "n": null,
+        "b": true,
+        "s": "hi"
+      },
+      "expected": "{\"b\":true,\"list\":[{\"x\":2,\"y\":1}],\"n\":null,\"outer\":{\"a\":[3,2,1],\"z\":1},\"s\":\"hi\"}"
+    },
+    {
+      "input": {
+        "t": "a\tb"
+      },
+      "expected": "{\"t\":\"a\\tb\"}"
+    },
+    {
+      "input": {
+        "q": "say \"hi\""
+      },
+      "expected": "{\"q\":\"say \\\"hi\\\"\"}"
+    },
+    {
+      "input": {
+        "b": "\\"
+      },
+      "expected": "{\"b\":\"\\\\\"}"
+    }
+  ],
+  "valid_envelope": {
+    "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+    "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+    "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "nonce": 1700000000000,
+    "expiresAt": 1700000030000
+  },
+  "rejection_vectors": [
+    {
+      "reason": "missing-fields",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "reason": "expired",
+      "envelope": {
+        "payload": "{\"expiresAt\":1000000000001,\"nonce\":1000000000000,\"ok\":1}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1000000000000,
+        "expiresAt": 1000000000001
+      }
+    },
+    {
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "not json{",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "reason": "envelope-mismatch",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000001,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d7015202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    }
+  ],
+  "note_on_pubkey_not_allowed": "pubkey-not-allowed cannot be expressed in a tier-agnostic fixture: it depends on caller-supplied expected_keys. Each tier verifies this reason in its own unit tests by passing a non-matching allowlist; the wire bytes are independent."
+}

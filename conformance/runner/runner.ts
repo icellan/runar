@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { join, basename, resolve, dirname, extname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { execSync, spawn } from 'child_process';
@@ -7,6 +7,12 @@ import { JavaDaemon } from './java-daemon.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+/** Best-effort recursive remove. Silently swallows ENOENT and EBUSY so a
+ *  cleanup pass on a never-created or already-deleted path is a no-op. */
+function safeRm(p: string): void {
+  try { rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
 const GO_COMPILER_DIR = resolve(__dirname, '../../compilers/go');
 const RUST_COMPILER_DIR = resolve(__dirname, '../../compilers/rust');
 const PYTHON_COMPILER_DIR = resolve(__dirname, '../../compilers/python');
@@ -413,13 +419,15 @@ function splitCmd(s: string): { cmd: string; args: string[] } {
  */
 async function runTsCompiler(source: string, sourceFile: string): Promise<CompilerOutput> {
   const start = performance.now();
+  let tmpFile = '';
+  let artifactDir = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    const artifactDir = join(tmpDir, `artifacts-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    artifactDir = join(tmpDir, `artifacts-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     if (!existsSync(artifactDir)) mkdirSync(artifactDir, { recursive: true });
 
     const cliEntry = resolve(__dirname, '../../packages/runar-cli/src/bin.ts');
@@ -481,6 +489,9 @@ async function runTsCompiler(source: string, sourceFile: string): Promise<Compil
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
+    if (artifactDir) safeRm(artifactDir);
   }
 }
 
@@ -494,10 +505,11 @@ async function runGoCompiler(source: string, sourceFile: string): Promise<Compil
   const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `go-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `go-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     // Get IR output
@@ -540,6 +552,8 @@ async function runGoCompiler(source: string, sourceFile: string): Promise<Compil
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -553,10 +567,11 @@ async function runRustCompiler(source: string, sourceFile: string): Promise<Comp
   const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `rust-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `rust-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     const irRes = await runCmd(
@@ -597,6 +612,8 @@ async function runRustCompiler(source: string, sourceFile: string): Promise<Comp
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -628,10 +645,11 @@ async function runPythonCompiler(source: string, sourceFile: string): Promise<Co
   const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `python-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `python-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     const irRes = await runCmd(
@@ -672,6 +690,8 @@ async function runPythonCompiler(source: string, sourceFile: string): Promise<Co
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -712,10 +732,11 @@ async function runZigCompiler(source: string, sourceFile: string): Promise<Compi
   const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `zig-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `zig-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     const irRes = await runCmd(
@@ -756,6 +777,8 @@ async function runZigCompiler(source: string, sourceFile: string): Promise<Compi
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -783,10 +806,11 @@ async function runRubyCompiler(source: string, sourceFile: string): Promise<Comp
   const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `ruby-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `ruby-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     const irRes = await runCmd(
@@ -827,6 +851,8 @@ async function runRubyCompiler(source: string, sourceFile: string): Promise<Comp
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -978,6 +1004,8 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
         error: err instanceof Error ? err.message : String(err),
         durationMs,
       };
+    } finally {
+      safeRm(tmpFile);
     }
   }
 
@@ -985,10 +1013,11 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
   const binary = findJavaBinary();
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     const irRes = await runCmd(
@@ -1029,6 +1058,8 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
       error: err instanceof Error ? err.message : String(err),
       durationMs,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -1065,12 +1096,14 @@ interface ParseOnlyDeps {
 
 async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
   const start = performance.now();
+  let tmpFile = '';
+  let driverFile = '';
   try {
     // Invoke the in-process compiler with `parseOnly: true`. Reusing the same
     // tsx loader / CLI process layout the runner already uses for `runTsCompiler`.
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     const tsxLoader = resolveTsxLoader();
@@ -1082,7 +1115,7 @@ async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
       `const r = compile(src, { fileName: ${JSON.stringify(tmpFile)}, parseOnly: true });` +
       `if (!r.success) { for (const d of r.diagnostics) { if (d.severity === 'error') process.stderr.write('parse error: ' + (d.message||'') + '\\n'); } process.exit(1); }` +
       `process.stdout.write('parser ok\\n');`;
-    const driverFile = join(tmpDir, `driver-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
+    driverFile = join(tmpDir, `driver-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
     writeFileSync(driverFile, driverInline, 'utf-8');
     const result = await runCmd(
       'node',
@@ -1106,6 +1139,9 @@ async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
       error: err instanceof Error ? err.message : String(err),
       durationMs: performance.now() - start,
     };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
+    if (driverFile) safeRm(driverFile);
   }
 }
 
@@ -1114,10 +1150,11 @@ async function runGoParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-go-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-go-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
     const res = await runCmd(
       cmd,
@@ -1131,6 +1168,8 @@ async function runGoParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
     return { compiler: 'go', success: true, durationMs };
   } catch (err) {
     return { compiler: 'go', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -1139,10 +1178,11 @@ async function runRustParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-rust-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-rust-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
     const res = await runCmd(
       cmd,
@@ -1156,6 +1196,8 @@ async function runRustParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
     return { compiler: 'rust', success: true, durationMs };
   } catch (err) {
     return { compiler: 'rust', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -1164,10 +1206,11 @@ async function runPythonParseOnly({ source, sourceFile }: ParseOnlyDeps): Promis
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-python-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-python-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
     const res = await runCmd(
       cmd,
@@ -1181,6 +1224,8 @@ async function runPythonParseOnly({ source, sourceFile }: ParseOnlyDeps): Promis
     return { compiler: 'python', success: true, durationMs };
   } catch (err) {
     return { compiler: 'python', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -1189,10 +1234,11 @@ async function runZigParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<P
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-zig-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-zig-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
     const res = await runCmd(
       cmd,
@@ -1206,6 +1252,8 @@ async function runZigParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<P
     return { compiler: 'zig', success: true, durationMs };
   } catch (err) {
     return { compiler: 'zig', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -1214,10 +1262,11 @@ async function runRubyParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
   const start = performance.now();
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-ruby-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-ruby-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
     const res = await runCmd(
       cmd,
@@ -1231,6 +1280,8 @@ async function runRubyParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
     return { compiler: 'ruby', success: true, durationMs };
   } catch (err) {
     return { compiler: 'ruby', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
@@ -1252,16 +1303,19 @@ async function runJavaParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
       return { compiler: 'java', success: true, durationMs };
     } catch (err) {
       return { compiler: 'java', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+    } finally {
+      safeRm(tmpFile);
     }
   }
   // One-shot fallback (RUNAR_JAVA_DAEMON=0).
   const binary = findJavaBinary();
   if (!binary) return undefined;
   const { cmd, args: bin_args } = splitCmd(binary);
+  let tmpFile = '';
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `parseonly-java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    tmpFile = join(tmpDir, `parseonly-java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
     const res = await runCmd(
       cmd,
@@ -1275,6 +1329,8 @@ async function runJavaParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
     return { compiler: 'java', success: true, durationMs };
   } catch (err) {
     return { compiler: 'java', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  } finally {
+    if (tmpFile) safeRm(tmpFile);
   }
 }
 
