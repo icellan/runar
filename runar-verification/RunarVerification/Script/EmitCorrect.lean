@@ -241,6 +241,7 @@ theorem emitStackOp_eq_emitStackOpFast : ∀ (op : StackOp),
         rw [emitOps_eq_emitOpsFast (head :: tail)]
   | .placeholder _ _ => by unfold emitStackOp emitStackOpFast; rfl
   | .pushCodesepIndex => by unfold emitStackOp emitStackOpFast; rfl
+  | .rawBytes _ => by unfold emitStackOp emitStackOpFast; rfl
 
 theorem emitOps_eq_emitOpsFast : ∀ (ops : List StackOp),
     emitOps ops = emitOpsFast ops

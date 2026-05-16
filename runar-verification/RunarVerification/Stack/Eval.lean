@@ -775,6 +775,7 @@ def stepNonIf (op : StackOp) (s : StackState) : EvalResult StackState :=
   | .ifOp _ _   => .error (.unsupported "ifOp must be handled by runOps")
   | .placeholder _ _   => .ok (s.push (.vBigint 0))
   | .pushCodesepIndex  => .ok (s.push (.vBigint 0))
+  | .rawBytes b        => .ok (s.push (.vBytes b))
 
 /--
 Run a list of ops sequentially, threading the state. Inlines the
@@ -912,6 +913,9 @@ theorem stepNonIf_swap (s : StackState) :
 
 theorem stepNonIf_opcode (code : String) (s : StackState) :
     stepNonIf (.opcode code) s = runOpcode code s := rfl
+
+theorem stepNonIf_rawBytes (s : StackState) (b : ByteArray) :
+    stepNonIf (.rawBytes b) s = .ok (s.push (.vBytes b)) := rfl
 
 theorem runOps_nil (s : StackState) : runOps [] s = .ok s := by
   unfold runOps; rfl

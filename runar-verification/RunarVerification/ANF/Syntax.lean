@@ -189,6 +189,17 @@ inductive ANFValue where
   | addDataOutput   (satoshis : TempRef) (scriptBytes : TempRef) : ANFValue
   /-- `{kind: "array_literal", elements}` — fixed-length array. -/
   | arrayLiteral    (elements : List TempRef) : ANFValue
+  /--
+  `{kind: "raw_script", bytes, in_arity, out_arity}` — an opaque
+  opcode-byte span with declared stack arity. Mirrors the TS reference
+  `RawScript` interface (`packages/runar-compiler/src/ir/anf-ir.ts:189`):
+  the `bytes` hex-string is the verbatim Bitcoin Script payload, and
+  `inArity` / `outArity` are the declared stack effect. The compiler
+  treats the node as a hard optimisation barrier; we mirror that by
+  carrying the decoded bytes directly so downstream proofs can reason
+  about a single literal push.
+  -/
+  | rawScript       (bytes : ByteArray) (inArity outArity : Nat) : ANFValue
 
 /--
 A single let-binding `let <name> = <value>`.

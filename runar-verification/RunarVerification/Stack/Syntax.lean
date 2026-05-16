@@ -116,6 +116,15 @@ inductive StackOp where
   in the OP_CODESEPARATOR index for state-method dispatch.
   -/
   | pushCodesepIndex : StackOp
+  /--
+  Raw script bytes verbatim. Lowered from an ANF `raw_script` value,
+  it emits the carried bytes directly with no opcode prefix and
+  evaluates by pushing the bytes onto the stack as a `vBytes` value.
+  Used by the `asm-raw-script` fixture family so the compiler can
+  splice in pre-encoded scriptlets without round-tripping through
+  the named-opcode table.
+  -/
+  | rawBytes (bytes : ByteArray) : StackOp
   deriving Inhabited
 
 /-! ## Containers

@@ -26,3 +26,7 @@ lean_exe pipelineGolden where
 lean_exe differential where
   root := `tests.Differential
   supportInterpreter := true
+
+lean_exe pipelineConformance where
+  root := `tests.PipelineConformance
+  supportInterpreter := true

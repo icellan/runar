@@ -116,6 +116,9 @@ def freeNames : ANFValue → List String
   | .addRawOutput sats sb => [sats, sb]
   | .addDataOutput sats sb => [sats, sb]
   | .arrayLiteral elems => elems
+  -- `raw_script` carries no operand `TempRef`s — its payload is the
+  -- verbatim opcode-byte span itself.
+  | .rawScript _ _ _ => []
 
 /-! ## Builtin signatures
 

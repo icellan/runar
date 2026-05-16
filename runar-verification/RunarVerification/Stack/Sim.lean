@@ -662,6 +662,15 @@ theorem runOps_append : ∀ (ops1 ops2 : List StackOp) (s : StackState),
           cases stepNonIf .pushCodesepIndex s with
           | error e => rfl
           | ok s' => exact ih ops2 s'
+      | rawBytes b =>
+          rw [List.cons_append,
+              runOps_cons_nonIf_eq (.rawBytes b) (rest ++ ops2) s
+                (fun _ _ h => StackOp.noConfusion h),
+              runOps_cons_nonIf_eq (.rawBytes b) rest s
+                (fun _ _ h => StackOp.noConfusion h)]
+          cases stepNonIf (.rawBytes b) s with
+          | error e => rfl
+          | ok s' => exact ih ops2 s'
 
 /-! ### Phase 6 Step 4 tail — Per-opcode operational reduction
 

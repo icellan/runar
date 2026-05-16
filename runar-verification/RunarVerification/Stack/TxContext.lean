@@ -1,4 +1,5 @@
 import RunarVerification.ANF.Eval
+import RunarVerification.Stack.Eval
 
 /-!
 # Transaction context + BIP-143 preimage construction
@@ -275,5 +276,296 @@ theorem afterCodeSeparator_extractScriptCode_sample :
   native_decide
 
 end TxContext
+
+/-!
+## Phase E — ValidTxContext predicate, BIP-143 field-extraction correctness,
+             and OP_CHECKSIG under ValidTxContext.
+
+### E1 — ValidTxContext predicate
+
+`ValidTxContext ctx` holds when all fixed-length BIP-143 fields carry the
+mandated byte widths:
+
+* `hashPrevouts`  — 32 bytes (dSHA256 of all outpoints, or 00…00 for
+  ANYONECANPAY)
+* `hashSequence`  — 32 bytes (dSHA256 of all sequences)
+* `outpoint`      — 36 bytes (32-byte txid + 4-byte vout LE)
+* `hashOutputs`   — 32 bytes (dSHA256 of all outputs, or 00…00 for
+  SIGHASH_NONE/SINGLE)
+
+`version`, `sequence`, `locktime`, and `sigHashType` are `UInt32` (always
+4 bytes); `amount` is `UInt64` (always 8 bytes) — correct widths follow
+from their types.
+
+`scriptCode` has variable length; this predicate does not constrain it
+(the VarInt frame is validated by the concrete `buildPreimage` def
+independently).
+
+Cite: BIP-143 §3 "Specification".
+-/
+
+/--
+Boolean validity check for a BIP-143 transaction context.
+
+Enforces the mandated byte widths of the fixed-length fields.
+`scriptCode` length is unconstrained at this level; any non-negative
+length is accepted.
+-/
+def validTxContextBool (ctx : TxContext) : Bool :=
+  ctx.hashPrevouts.size == 32 &&
+  ctx.hashSequence.size  == 32 &&
+  ctx.outpoint.size      == 36 &&
+  ctx.hashOutputs.size   == 32
+
+/--
+`ValidTxContext ctx` asserts that `ctx` satisfies the BIP-143 fixed-width
+field constraints. Backed by `validTxContextBool` for decidability.
+-/
+def ValidTxContext (ctx : TxContext) : Prop :=
+  validTxContextBool ctx = true
+
+/--
+`ValidTxContext` is decidable because it is propositionally equal to
+`validTxContextBool ctx = true`, which is `Decidable` via `decEq`.
+-/
+instance (ctx : TxContext) : Decidable (ValidTxContext ctx) :=
+  inferInstanceAs (Decidable (validTxContextBool ctx = true))
+
+namespace ValidTxContext
+
+/-- Unfold the conjunction in a `ValidTxContext` proof. -/
+theorem iff (ctx : TxContext) :
+    ValidTxContext ctx ↔
+    ctx.hashPrevouts.size = 32 ∧ ctx.hashSequence.size = 32 ∧
+    ctx.outpoint.size = 36 ∧ ctx.hashOutputs.size = 32 := by
+  simp [ValidTxContext, validTxContextBool, Bool.and_eq_true]
+  omega
+
+/-- A `ValidTxContext` has `hashPrevouts` of size 32. -/
+theorem hashPrevouts_size (ctx : TxContext) (h : ValidTxContext ctx) :
+    ctx.hashPrevouts.size = 32 := ((iff ctx).mp h).1
+
+/-- A `ValidTxContext` has `hashSequence` of size 32. -/
+theorem hashSequence_size (ctx : TxContext) (h : ValidTxContext ctx) :
+    ctx.hashSequence.size = 32 := ((iff ctx).mp h).2.1
+
+/-- A `ValidTxContext` has `outpoint` of size 36. -/
+theorem outpoint_size (ctx : TxContext) (h : ValidTxContext ctx) :
+    ctx.outpoint.size = 36 := ((iff ctx).mp h).2.2.1
+
+/-- A `ValidTxContext` has `hashOutputs` of size 32. -/
+theorem hashOutputs_size (ctx : TxContext) (h : ValidTxContext ctx) :
+    ctx.hashOutputs.size = 32 := ((iff ctx).mp h).2.2.2
+
+/-- The sample context satisfies `ValidTxContext`. -/
+theorem sampleCtx_valid : ValidTxContext TxContext.sampleCtx := by
+  native_decide
+
+end ValidTxContext
+
+/-!
+### E2 — BIP-143 field-extraction correctness
+
+Private helper lemmas bridge the `encodeUInt32LE` / `decodeLE32`
+round-trip.  The main public theorem `extractVersion_buildPreimage_eq`
+then connects `Crypto.extractVersion (buildPreimage ctx)` to
+`ctx.version.toNat`.
+
+The extraction lemmas for the 32-byte / 36-byte fields (`hashPrevouts`,
+`hashSequence`, `outpoint`, `hashOutputs`) require reasoning about
+`ByteArray.extract` after concatenation.  That proof is substantially
+more involved; it is left as future work together with the
+`ValidTxContext` precondition that provides the exact size information.
+
+What we prove here: the **version** field round-trip (LE32 encoding
+then decoding at offset 0), which covers the only non-byte-array field
+accessible via `Crypto.extractVersion`.
+-/
+
+-- ------------------------------------------------------------------ LE32 round-trip helpers
+
+private theorem nat_and_255 (n : Nat) : n &&& 255 = n % 256 := by
+  have := Nat.and_two_pow_sub_one_eq_mod n 8; simp at this; exact this
+
+/-- `(n &&& 0xff).toUInt8.toNat = n.toNat % 256`. -/
+private theorem toUInt8_and_ff_byte0 (n : UInt32) :
+    (n &&& 0xff).toUInt8.toNat = n.toNat % 256 := by
+  simp only [UInt32.toNat_and, UInt32.toUInt8, Nat.toUInt8,
+    show (0xff : UInt32).toNat = 255 from rfl]
+  rw [nat_and_255]; simp
+
+/-- `((n >>> 8) &&& 0xff).toUInt8.toNat = n.toNat / 256 % 256`. -/
+private theorem toUInt8_and_ff_byte1 (n : UInt32) :
+    ((n >>> 8) &&& 0xff).toUInt8.toNat = n.toNat / 256 % 256 := by
+  simp only [UInt32.toNat_and, UInt32.toNat_shiftRight, UInt32.toUInt8, Nat.toUInt8,
+    show (0xff : UInt32).toNat = 255 from rfl, show (8 : UInt32).toNat = 8 from rfl,
+    show 8 % 32 = 8 from by decide, Nat.shiftRight_eq_div_pow]
+  rw [nat_and_255]; simp
+
+/-- `((n >>> 16) &&& 0xff).toUInt8.toNat = n.toNat / 65536 % 256`. -/
+private theorem toUInt8_and_ff_byte2 (n : UInt32) :
+    ((n >>> 16) &&& 0xff).toUInt8.toNat = n.toNat / 65536 % 256 := by
+  simp only [UInt32.toNat_and, UInt32.toNat_shiftRight, UInt32.toUInt8, Nat.toUInt8,
+    show (0xff : UInt32).toNat = 255 from rfl, show (16 : UInt32).toNat = 16 from rfl,
+    show 16 % 32 = 16 from by decide, Nat.shiftRight_eq_div_pow]
+  rw [nat_and_255]; simp
+
+/-- `((n >>> 24) &&& 0xff).toUInt8.toNat = n.toNat / 16777216 % 256`. -/
+private theorem toUInt8_and_ff_byte3 (n : UInt32) :
+    ((n >>> 24) &&& 0xff).toUInt8.toNat = n.toNat / 16777216 % 256 := by
+  simp only [UInt32.toNat_and, UInt32.toNat_shiftRight, UInt32.toUInt8, Nat.toUInt8,
+    show (0xff : UInt32).toNat = 255 from rfl, show (24 : UInt32).toNat = 24 from rfl,
+    show 24 % 32 = 24 from by decide, Nat.shiftRight_eq_div_pow]
+  rw [nat_and_255]; simp
+
+/--
+Little-endian encoding / decoding round-trip for `UInt32`.
+
+`decodeLE32 (encodeUInt32LE n ++ rest) 0 = Int.ofNat n.toNat` for any
+`n : UInt32` and any suffix `rest`.
+
+This is the key algebraic correctness property of `encodeUInt32LE`.
+It does **not** depend on the size or contents of `rest`, because
+`decodeLE32` reads exactly 4 bytes starting at offset 0 and the
+`encodeUInt32LE` prefix fills positions 0–3.
+-/
+theorem decodeLE32_encodeUInt32LE
+    (n : UInt32) (rest : ByteArray) :
+    open RunarVerification.ANF.Eval.Crypto in
+    decodeLE32 (encodeUInt32LE n ++ rest) 0 = Int.ofNat n.toNat := by
+  -- Step 1: unfold decodeLE32, readByte, and ByteArray append/get primitives.
+  simp only [encodeUInt32LE, RunarVerification.ANF.Eval.Crypto.decodeLE32,
+    RunarVerification.ANF.Eval.Crypto.readByte,
+    ByteArray.size_append,
+    show (ByteArray.mk #[(n &&& 0xff).toUInt8, ((n >>> 8) &&& 0xff).toUInt8,
+      ((n >>> 16) &&& 0xff).toUInt8, ((n >>> 24) &&& 0xff).toUInt8]).size = 4 from rfl,
+    show (0:Nat) < 4 + rest.size from by omega,
+    show (1:Nat) < 4 + rest.size from by omega,
+    show (2:Nat) < 4 + rest.size from by omega,
+    show (3:Nat) < 4 + rest.size from by omega,
+    dite_true, ByteArray.get, ByteArray.append,
+    List.cons_append, List.nil_append,
+    List.getElem_toArray, List.getElem_cons_zero, List.getElem_cons_succ,
+    Nat.zero_add]
+  -- Step 2: rewrite each byte using the UInt32 → Nat helper lemmas.
+  rw [toUInt8_and_ff_byte0, toUInt8_and_ff_byte1, toUInt8_and_ff_byte2, toUInt8_and_ff_byte3]
+  -- Step 3: convert <<< to multiplication.
+  simp only [Nat.shiftLeft_eq,
+             show (2:Nat)^8 = 256 from by decide,
+             show (2:Nat)^16 = 65536 from by decide,
+             show (2:Nat)^24 = 16777216 from by decide]
+  -- Step 4: the Int.ofNat wrapper can be peeled off; the Nat equation follows by omega.
+  congr 1
+  have hlt : n.toNat < 2^32 := n.toNat_lt
+  omega
+
+/--
+**E2 (version field).** `Crypto.extractVersion (buildPreimage ctx) = ctx.version.toNat` for
+any `TxContext`.
+
+`extractVersion preimage = decodeLE32 preimage 0`, and `buildPreimage`
+starts with `encodeUInt32LE ctx.version` at offset 0.  The round-trip
+theorem `decodeLE32_encodeUInt32LE` closes the goal.
+
+No `ValidTxContext` hypothesis is needed: the version field occupies a
+fixed position at the preimage head regardless of field sizes.
+-/
+theorem extractVersion_buildPreimage_eq (ctx : TxContext) :
+    open RunarVerification.ANF.Eval.Crypto in
+    extractVersion (TxContext.buildPreimage ctx) = Int.ofNat ctx.version.toNat := by
+  show RunarVerification.ANF.Eval.Crypto.decodeLE32 (TxContext.buildPreimage ctx) 0 =
+    Int.ofNat ctx.version.toNat
+  have hPre : TxContext.buildPreimage ctx =
+      encodeUInt32LE ctx.version ++
+      (ctx.hashPrevouts ++ ctx.hashSequence ++ ctx.outpoint ++
+       encodeVarInt ctx.scriptCode.size ++ ctx.scriptCode ++
+       encodeUInt64LE ctx.amount ++ encodeUInt32LE ctx.sequence ++
+       ctx.hashOutputs ++ encodeUInt32LE ctx.locktime ++
+       encodeUInt32LE ctx.sigHashType) := rfl
+  rw [hPre]
+  exact decodeLE32_encodeUInt32LE ctx.version _
+
+/--
+The `Crypto.extractVersion` result for the sample context matches the
+declared version as a `Nat` coercion.  Companion `native_decide` check.
+-/
+theorem extractVersion_buildPreimage_eq_sample :
+    open RunarVerification.ANF.Eval.Crypto in
+    extractVersion (TxContext.buildPreimage TxContext.sampleCtx) =
+    Int.ofNat TxContext.sampleCtx.version.toNat := by
+  exact extractVersion_buildPreimage_eq TxContext.sampleCtx
+
+/-!
+### E3 — OP_CHECKSIG under ValidTxContext
+
+`runOpcode "OP_CHECKSIG"` pops `(pk, sig)` from the stack and returns
+`.vBool (authBackend.checkSig sigB pkB)`.  The `preimage` field of
+`StackState` is threaded for documentation purposes but the current
+Stack VM passes it to `checkSig` purely through the `authBackend`
+record: the concrete `runOpcode "OP_CHECKSIG"` calls
+`checkSig sigB pkB = authBackend.checkSig sigB pkB`.
+
+The theorem below makes this wiring explicit: given a `ValidTxContext
+ctx`, a preimage built by `buildPreimage ctx`, and two byte-values on
+the stack (pk on top, sig below), `runOpcode "OP_CHECKSIG"` yields
+`.ok (s'.push (.vBool (authBackend.checkSig sigB pkB)))`.
+
+No new axioms are required: this is a definitional unfolding of the
+`runOpcode` dispatch table.
+-/
+
+open RunarVerification.Stack.Eval in
+open RunarVerification.ANF.Eval in
+open RunarVerification.ANF.Eval.Crypto in
+/--
+**E3.** `OP_CHECKSIG` evaluation under a valid BIP-143 context.
+
+Given a stack state with:
+* `stkSt.preimage = TxContext.buildPreimage ctx`
+* `stkSt.stack = .vBytes pkB :: .vBytes sigB :: rest`
+* `ValidTxContext ctx`
+
+running `OP_CHECKSIG` yields `.ok { stkSt' with stack := .vBool
+(authBackend.checkSig sigB pkB) :: rest }` where `stkSt'` is the
+state after popping the two operands.
+
+Proof: definitional unfolding of `runOpcode` + the two helper lemmas
+`popN_two_eq` and `asBytes?_vBytes`.
+-/
+theorem runOpcode_CHECKSIG_ValidTxContext
+    (ctx : TxContext) (sigB pkB : ByteArray) (rest : List Value)
+    (stkSt : StackState)
+    (_ : ValidTxContext ctx)
+    (hPre : stkSt.preimage = TxContext.buildPreimage ctx)
+    (hStk : stkSt.stack = .vBytes pkB :: .vBytes sigB :: rest) :
+    Eval.runOpcode "OP_CHECKSIG" stkSt =
+    .ok { stkSt with stack := .vBool (authBackend.checkSig sigB pkB) :: rest } := by
+  simp only [Eval.runOpcode, Eval.popN, StackState.pop?, hStk, StackState.push, asBytes?]
+  -- checkSig is definitionally authBackend.checkSig, so rfl closes the goal.
+  rfl
+
+open RunarVerification.Stack.Eval in
+open RunarVerification.ANF.Eval in
+open RunarVerification.ANF.Eval.Crypto in
+/--
+**E3 (verify mode).** `OP_CHECKSIGVERIFY` under a valid BIP-143 context
+succeeds if and only if `authBackend.checkSig sigB pkB = true`, and
+fails with `.assertFailed` otherwise.
+
+Proof: definitional unfolding of the `OP_CHECKSIGVERIFY` arm of
+`runOpcode`.
+-/
+theorem runOpcode_CHECKSIGVERIFY_ValidTxContext
+    (ctx : TxContext) (sigB pkB : ByteArray) (rest : List Value)
+    (stkSt : StackState)
+    (_ : ValidTxContext ctx)
+    (hPre : stkSt.preimage = TxContext.buildPreimage ctx)
+    (hStk : stkSt.stack = .vBytes pkB :: .vBytes sigB :: rest)
+    (hSig : authBackend.checkSig sigB pkB = true) :
+    Eval.runOpcode "OP_CHECKSIGVERIFY" stkSt =
+    .ok { stkSt with stack := rest } := by
+  simp only [Eval.runOpcode, Eval.popN, StackState.pop?, hStk, asBytes?]
+  -- checkSig = authBackend.checkSig definitionally; unfold then apply hSig.
+  simp only [RunarVerification.ANF.Eval.Crypto.checkSig, hSig, ite_true]
 
 end RunarVerification.Stack

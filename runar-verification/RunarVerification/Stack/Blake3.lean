@@ -1,4 +1,5 @@
 import RunarVerification.Stack.Syntax
+import RunarVerification.Stack.Eval
 
 /-!
 # BLAKE3 codegen — Phase 4 (port of `packages/runar-compiler/src/passes/blake3-codegen.ts`)
@@ -507,6 +508,103 @@ def b3HashOps : List StackOp :=
   , .swap ]
   -- Splice compression ops.
   ++ b3CompressOps
+
+/-! ## Codegen-to-spec equivalence (Phase B3)
+
+The codegen-to-spec link below is taken as an **axiom**, not a proved
+theorem, because composing the byte-level Bitcoin Script semantics of
+the ~1000 emitted `StackOp`s (16 message-word unpacks, 7 rounds × 8
+quarter-round G-calls, canonical reorder, XOR-and-pack output stage)
+into the BLAKE3 reference function would require:
+
+* Concrete Lean models of `OP_LSHIFT`, `OP_RSHIFT`, `OP_AND`, `OP_OR`,
+  `OP_XOR` on `ByteArray` operands of the exact lengths the codegen
+  produces (4-byte LE / BE words and 32-byte hash blocks);
+* A `bin2num` / `num2bin` 4-byte-LE bijection lemma the codegen uses
+  for `add32`;
+* A proof that the codegen's state-tracker accounting (`StateTracker`)
+  preserves the BLAKE3 round-function ordering at the bit level.
+
+This is `≈3 days` of work per the phase plan; the axiom shim
+matches the **B10 Rabin** pattern (codegen-to-spec link sits in the
+crypto family's own `Stack/*.lean` to avoid an import cycle with
+`Crypto/Spec.lean`), per the project's plan-level guidance.
+
+**Soundness story.** The trust commitment is twofold:
+
+1. `Crypto.blake3Hash` and `Crypto.blake3Compress` are bare function
+   symbols in `ANF/Eval.lean`; this module asserts that the emitted
+   `StackOp` list `b3HashOps` (resp. `b3CompressOps`) executes to
+   those symbols' values on the documented stack shapes.
+2. Runtime confidence that those symbols match the BLAKE3 reference
+   implementation is handled outside Lean by the TypeScript reference
+   in `packages/runar-compiler/src/passes/blake3-codegen.ts` and its
+   conformance fixtures; the BLAKE3 algorithm is specified in:
+     **"BLAKE3: one function, fast everywhere"**, Jack O'Connor,
+     Jean-Philippe Aumasson, Samuel Neves, Zooko Wilcox-O'Hearn,
+     §2 (compression function `F`) + §3 (Merkle-tree mode).
+     <https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf>
+
+The codegen-to-spec axioms below assert *byte equivalence between the
+emitted op sequence and the spec'd hash function*. They do **not**
+assert collision-resistance or any other cryptographic property of
+BLAKE3 itself — those properties remain external assumptions.
+-/
+
+open RunarVerification.ANF.Eval (Value EvalResult)
+open RunarVerification.ANF.Eval.Crypto (blake3Hash blake3Compress)
+
+/-- **Codegen-to-spec for `b3HashOps`** (BLAKE3 single-block hash entry).
+
+Given a `StackState` whose top element is a `ByteArray` of length at
+most 64 bytes, running `b3HashOps` yields a `StackState` whose top
+element is the 32-byte BLAKE3 hash of those bytes (with the rest of
+the stack unchanged).
+
+The length bound `msg.size ≤ 64` mirrors the codegen's single-block
+domain — the emitted op list pads `msg` with `64 - msg.size` zero
+bytes and feeds the result through one compression. Inputs longer
+than 64 bytes are out of scope for `b3HashOps` (multi-block Merkle
+chaining is a separate codegen path not yet present).
+
+See module-level comment for the soundness story. Citation:
+BLAKE3 spec §2 (compression function `F`) + `emitBlake3Hash` at
+`packages/runar-compiler/src/passes/blake3-codegen.ts:418-447`. -/
+axiom runOps_b3HashOps_eq (msg : ByteArray) (rest : List Value)
+    (s : Eval.StackState) (hLen : msg.size ≤ 64)
+    (hStack : s.stack = .vBytes msg :: rest) :
+    Eval.runOps b3HashOps s
+      = .ok { s with stack := .vBytes (blake3Hash msg) :: rest }
+
+/-- **Codegen-to-spec for `b3CompressOps`** (BLAKE3 compression function).
+
+Given a `StackState` whose top two elements are a 64-byte block (TOS)
+and a 32-byte chaining value (depth 1), running `b3CompressOps` yields
+a `StackState` whose top element is the 32-byte BLAKE3 compression
+output `blake3Compress cv block`, with the rest of the stack unchanged
+(net depth: -1).
+
+The length preconditions `cv.size = 32` and `block.size = 64` mirror
+the BLAKE3 compression-function domain (8 × 32-bit chaining-value
+words + 16 × 32-bit message words). Inputs of any other length are out
+of scope for the compression codegen.
+
+The single-block hash identity is the well-known
+`blake3 m = blake3Compress IV (pad₆₄ m)` for `m.size ≤ 64`, where
+`IV` is the BLAKE3 initialization vector and `pad₆₄ m` zero-pads
+`m` to 64 bytes. We do **not** restate that identity as a separate
+axiom because `b3HashOps` is the operational concatenation of the IV
+push, the zero-pad, and `b3CompressOps`; `runOps_b3HashOps_eq` above
+is the direct top-level statement clients consume.
+
+See module-level comment for the soundness story. Citation:
+BLAKE3 spec §2.1 (compression function `F`) + `generateCompressOps`
+at `packages/runar-compiler/src/passes/blake3-codegen.ts:260-388`. -/
+axiom runOps_b3CompressOps_eq (cv block : ByteArray) (rest : List Value)
+    (s : Eval.StackState) (hCv : cv.size = 32) (hBlock : block.size = 64)
+    (hStack : s.stack = .vBytes block :: .vBytes cv :: rest) :
+    Eval.runOps b3CompressOps s
+      = .ok { s with stack := .vBytes (blake3Compress cv block) :: rest }
 
 end Blake3
 end RunarVerification.Stack

@@ -162,6 +162,10 @@ def valueIsWFAux (fuel : Nat) (env : ScopeEnv) : ANFValue → Bool
   | .addRawOutput sats sb => env.resolves sats && env.resolves sb
   | .addDataOutput sats sb => env.resolves sats && env.resolves sb
   | .arrayLiteral elems => elems.all env.resolves
+  -- `raw_script` is a self-contained literal opcode-byte span; it
+  -- carries no `TempRef` operands and is unconditionally well-formed.
+  -- (Stack-effect arity is the operational lowerer's concern, not WF's.)
+  | .rawScript _ _ _ => true
 
 /-- A binding list is WF when every binding's value is WF in the cumulative scope. -/
 def bindingsAreWFAux (fuel : Nat) (env : ScopeEnv) : List ANFBinding → Bool

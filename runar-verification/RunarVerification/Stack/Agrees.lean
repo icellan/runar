@@ -6,6 +6,14 @@ import RunarVerification.Stack.Eval
 import RunarVerification.Stack.Lower
 import RunarVerification.Stack.Sim
 
+-- A4 bridge lemmas require kernel-level reduction of lowerValueP's 57-guard
+-- .call arm.  The whnf heartbeat counter is not properly scoped by
+-- `set_option maxHeartbeats N in` in Lean 4.29.1; only a file-level setting
+-- takes effect.  We raise the limit to cover the bridge lemmas and restore
+-- a tighter budget for the remainder of the file via per-theorem annotations.
+set_option maxHeartbeats 4000000
+set_option maxRecDepth 65536
+
 /-!
 # Stack IR — `agrees` simulation invariant
 
@@ -860,6 +868,27 @@ private theorem nthOpt_getElem!_default
           show (x :: rest)[n' + 1]! = a
           rw [show (x :: rest)[n' + 1]! = rest[n']! from rfl]
           exact ih n' h'
+
+/-- `nthOpt d xs = some a` when `d < xs.length` and `xs[d] = a`. -/
+private theorem nthOpt_of_getElem {α : Type _} (xs : List α) (d : Nat) (a : α)
+    (hLen : d < xs.length) (hAt : xs[d]'hLen = a) :
+    nthOpt d xs = some a := by
+  induction xs generalizing d with
+  | nil => exact absurd hLen (Nat.not_lt_zero _)
+  | cons x xs ih =>
+      cases d with
+      | zero => simp only [nthOpt]; exact congrArg some hAt
+      | succ d' =>
+          simp only [nthOpt]
+          exact ih d' (Nat.lt_of_succ_lt_succ hLen) (by simpa using hAt)
+
+/-- Convert `sm.depth? n = some d` to `nthOpt d sm = some n`. -/
+private theorem depth?_to_nthOpt (sm : StackMap) (n : String) (d : Nat)
+    (h : sm.depth? n = some d) :
+    nthOpt d sm = some n := by
+  unfold Stack.Lower.StackMap.depth? at h
+  obtain ⟨hLen, hAt, _⟩ := List.findIdx?_eq_some_iff_getElem.mp h
+  exact nthOpt_of_getElem sm d n hLen (beq_iff_eq.mp hAt)
 
 theorem taggedStackAligned_at_index
     (anfSt : State) :
@@ -3085,6 +3114,9 @@ theorem simpleStepRel_preserves :
   | .checkPreimage _ => rw [hVal] at hStep; exact hStep.elim
   | .getStateScript => rw [hVal] at hStep; exact hStep.elim
   | .deserializeState _ => rw [hVal] at hStep; exact hStep.elim
+  -- Phase A14 — `raw_script` falls into `simpleStepRel`'s catch-all
+  -- `_ => False` arm, so the hypothesis is uninhabited.
+  | .rawScript _ _ _ => rw [hVal] at hStep; exact hStep.elim
 
 /-- **Stage C closure for SimpleANF.** From a `ChainRel simpleStepRel`
 witness over a binding list, predicate-side `agreesTagged` preservation
@@ -11797,6 +11829,28 @@ def structuralConstBody : List ANFBinding → Prop
   | [] => True
   | (.mk _ v _) :: rest => structuralConstValue v ∧ structuralConstBody rest
 
+/-! ### F1 decidability — `structuralConstValue` / `structuralConstBody`
+
+The capstone in `Pipeline.lean` (`compileSafe_single_public_observational_
+correct_unconditional`) takes `hConst : structuralConstBody anfM.body`
+as a hypothesis. The per-fixture instantiation harness needs this
+decidable so `native_decide` can mechanically discharge it for any
+loaded `ANFProgram`. The recursive structure is a `match` returning
+`True` / `False` / IH-conjunction, so both instances are direct. -/
+
+instance structuralConstValue_decidable (v : ANFValue) :
+    Decidable (structuralConstValue v) := by
+  cases v <;> first | (unfold structuralConstValue; infer_instance)
+                    | (rename_i c; cases c <;> (unfold structuralConstValue; infer_instance))
+
+instance structuralConstBody_decidable :
+    ∀ (body : List ANFBinding), Decidable (structuralConstBody body)
+  | [] => isTrue True.intro
+  | .mk _ v _ :: rest =>
+    let _ := structuralConstValue_decidable v
+    let _ := structuralConstBody_decidable rest
+    inferInstanceAs (Decidable (_ ∧ _))
+
 /-- On structural literal loads, the program-aware lowerer returns the
 same ops/map as the structural lowerer and leaves `localBindings`
 unchanged. -/
@@ -11844,6 +11898,7 @@ theorem lowerValueP_eq_lowerValue_structuralConst
   | addRawOutput _ _ => simp [structuralConstValue] at h
   | addDataOutput _ _ => simp [structuralConstValue] at h
   | arrayLiteral _ => simp [structuralConstValue] at h
+  | rawScript _ _ _ => simp [structuralConstValue] at h
 
 /-- Option 1 bridge: for const-only bodies, `lowerBindingsP` and
 `lowerBindings` produce the same op list and final stack map. -/
@@ -11955,6 +12010,7 @@ theorem evalValue_structuralConstValue_ok
   | addRawOutput _ _ => simp [structuralConstValue] at h
   | addDataOutput _ _ => simp [structuralConstValue] at h
   | arrayLiteral _ => simp [structuralConstValue] at h
+  | rawScript _ _ _ => simp [structuralConstValue] at h
 
 /-- `evalBindings` always succeeds on a structural-const body. -/
 theorem evalBindings_structuralConstBody_isSome
@@ -12015,6 +12071,7 @@ theorem runOps_lowerValue_structuralConstValue_ok
   | addRawOutput _ _ => simp [structuralConstValue] at h
   | addDataOutput _ _ => simp [structuralConstValue] at h
   | arrayLiteral _ => simp [structuralConstValue] at h
+  | rawScript _ _ _ => simp [structuralConstValue] at h
 
 /-- `runOps` of a structural-const body's lowered op list succeeds from
 any starting stack. This is the Stack-VM half of `successAgrees` for
@@ -12165,6 +12222,7 @@ theorem lowerValueP_eq_lowerValue_structuralCopy
   | addRawOutput _ _ => simp [structuralCopyValue] at h
   | addDataOutput _ _ => simp [structuralCopyValue] at h
   | arrayLiteral _ => simp [structuralCopyValue] at h
+  | rawScript _ _ _ => simp [structuralCopyValue] at h
 
 /-- Option 1 extension: on copied-reference bodies, `lowerBindingsP`
 matches structural `lowerBindings`. -/
@@ -13708,6 +13766,5611 @@ The remaining obligations are:
   bytecode-style `.roll d` semantics unless producer-shape hypotheses
   are added.
 -/
+
+/-! ## A1 — Structural copy fragment: ANF-eval and Stack-VM success lemmas
+
+The next block adds the machinery needed to prove `successAgrees` for
+the `structuralCopyBody` fragment (copy-mode reference loads).
+
+### Helper: depth-to-kind extraction from `taggedStackAligned`
+
+To connect "name `n` appears at depth `d` in the untagged stack map"
+with "name `n` has kind `k` and a coherent ANF lookup," we need a
+lemma that extracts the kind and the value from `taggedStackAligned`.
+-/
+
+/-- From `taggedStackAligned tsm anfSt stk`, if `n` appears at depth `d`
+in the untagged stack map (`untagSm tsm`), then there exists a slot kind
+`k` and a value `v` such that `nthOpt d tsm = some (n, k)` and
+`lookupAnfByKind anfSt (n, k) = some v`. -/
+theorem taggedStackAligned_depth_resolves
+    (anfSt : State) :
+    ∀ (tsm : TaggedStackMap) (stk : List Value),
+      taggedStackAligned tsm anfSt stk →
+      ∀ (n : String) (d : Nat),
+        nthOpt d (untagSm tsm) = some n →
+        ∃ k v, nthOpt d tsm = some (n, k) ∧ lookupAnfByKind anfSt (n, k) = some v := by
+  intro tsm
+  induction tsm with
+  | nil =>
+      intro stk _ n d hAt
+      exact absurd hAt (by simp [nthOpt, untagSm])
+  | cons hd tl ih =>
+      intro stk h n d hAt
+      cases stk with
+      | nil =>
+          unfold taggedStackAligned at h
+          exact absurd h (by simp)
+      | cons hv tlv =>
+          obtain ⟨hHead, hTail⟩ := h
+          cases d with
+          | zero =>
+              -- depth 0: n is the head of untagSm tsm
+              have hNEq : n = hd.fst := by
+                unfold untagSm at hAt
+                simp [nthOpt] at hAt
+                exact hAt.symm
+              exact ⟨hd.snd, hv,
+                by unfold nthOpt; exact congrArg some (Prod.ext hNEq.symm rfl),
+                by rw [hNEq]; exact hHead⟩
+          | succ d' =>
+              have hAt' : nthOpt d' (untagSm tl) = some n := by
+                unfold untagSm at hAt
+                simp [nthOpt] at hAt
+                exact hAt
+              obtain ⟨k, v, hAtTsm, hLook⟩ := ih tlv hTail n d' hAt'
+              exact ⟨k, v,
+                by show nthOpt (d' + 1) (hd :: tl) = some (n, k)
+                   simp [nthOpt]; exact hAtTsm,
+                hLook⟩
+
+/-- Helper: `untagSm` preserves `nthOpt` up to fst projection. -/
+private theorem nthOpt_untagSm_eq_fst
+    (tsm : TaggedStackMap) (d : Nat) (n : String) :
+    nthOpt d (untagSm tsm) = some n ↔
+    ∃ k, nthOpt d tsm = some (n, k) := by
+  induction tsm generalizing d with
+  | nil => simp [nthOpt, untagSm]
+  | cons hd tl ih =>
+      cases d with
+      | zero =>
+          simp [nthOpt, untagSm]
+          constructor
+          · intro h; exact ⟨hd.snd, by rw [← h]⟩
+          · intro ⟨k, hk⟩; exact congrArg Prod.fst hk
+      | succ d' =>
+          simp [nthOpt, untagSm]
+          exact ih d'
+
+/-- From `taggedStackAligned tsm anfSt stk` and `(untagSm tsm).depth? n = some d`,
+there exists a kind `k` and value `v` such that `lookupAnfByKind anfSt (n, k) = some v`.
+This bridges the untagged depth condition in `structuralCopyValue` to the tagged
+lookup needed for ANF-eval success. -/
+theorem taggedStackAligned_depth_lookup
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (n : String) (d : Nat)
+    (hDepth : Stack.Lower.StackMap.depth? (untagSm tsm) n = some d) :
+    ∃ k v, lookupAnfByKind anfSt (n, k) = some v := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  -- `depth? n = findIdx? (· == n)` returns the first index where `· == n` is true.
+  -- Convert to `nthOpt d (untagSm tsm) = some n`.
+  have hAt : nthOpt d (untagSm tsm) = some n := depth?_to_nthOpt _ _ _ hDepth
+  obtain ⟨k, v, _, hLook⟩ :=
+    taggedStackAligned_depth_resolves anfSt tsm stkSt.stack hAlign n d hAt
+  exact ⟨k, v, hLook⟩
+
+/-! ### ANF-evaluator success for the structural-copy fragment
+
+`evalValue` on a copy-mode value never fails provided:
+* For literal loads: always total (reuses the const fragment).
+* For reference loads (`loadParam`, `loadProp`, `.refAlias`): the name
+  appears in the stack map and the ANF state has a coherent value at
+  that name (established by `agreesTagged tsm anfSt stkSt`).
+
+Two caveats distinguish this from the const case:
+1. `evalValue (.loadParam n)` calls `anfSt.lookupParam n`, not the
+   kind-generic `lookupAnfByKind`. So we need the tagged slot to have
+   kind `.param`.
+2. Similarly, `loadProp n` needs kind `.prop`.
+3. `.refAlias n` calls `lookupRef` → `resolveRef`, which tries all
+   three namespaces, so any kind in the tagged map suffices.
+
+To avoid threading full kind-tagged predicates through `structuralCopyBody`,
+we carry the `agreesTagged` invariant as an explicit hypothesis, and we
+additionally require a per-kind lookup hypothesis for the param/prop cases.
+These are genuine domain predicates about the method-call convention:
+at method entry, params are in `s.params` and props are in `s.props`.
+-/
+
+/-- `evalValue` never fails on a structural-copy value, given the tagged
+stack-map alignment and per-kind lookup readiness. -/
+theorem evalValue_structuralCopyValue_ok
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat)
+    (anfSt : State)
+    (v : ANFValue)
+    (h : structuralCopyValue lastUses outerProtected localBindings sm currentIndex v)
+    -- Per-value domain: if v is loadParam/loadProp, the lookup succeeds.
+    (hParamDom : ∀ n, v = .loadParam n → ∃ val, anfSt.lookupParam n = some val)
+    (hPropDom  : ∀ n, v = .loadProp n → ∃ val, anfSt.lookupProp n = some val)
+    -- RefReady: every name tracked in sm has a successful resolveRef.
+    (hRefReady : ∀ n, (sm.depth? n).isSome = true →
+        ∃ val, anfSt.resolveRef n = some val) :
+    ∃ val, RunarVerification.ANF.Eval.evalValue anfSt v = .ok (val, anfSt) := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int i => exact ⟨.vBigint i, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | bool b => exact ⟨.vBool b, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | bytes b => exact ⟨.vBytes b, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | refAlias n =>
+          unfold structuralCopyValue at h
+          obtain ⟨⟨d, hDepth⟩, _⟩ := h
+          obtain ⟨val, hRes⟩ := hRefReady n (by simp [hDepth])
+          refine ⟨val, ?_⟩
+          simp only [RunarVerification.ANF.Eval.evalValue]
+          simp only [RunarVerification.ANF.Eval.lookupRef, hRes]
+          rfl
+      | thisRef => simp [structuralCopyValue] at h
+  | loadParam n =>
+      obtain ⟨val, hLook⟩ := hParamDom n rfl
+      exact ⟨val, by simp [RunarVerification.ANF.Eval.evalValue, hLook]⟩
+  | loadProp n =>
+      obtain ⟨val, hLook⟩ := hPropDom n rfl
+      exact ⟨val, by simp [RunarVerification.ANF.Eval.evalValue, hLook]⟩
+  | binOp _ _ _ _ => simp [structuralCopyValue] at h
+  | unaryOp _ _ _ => simp [structuralCopyValue] at h
+  | call _ _ => simp [structuralCopyValue] at h
+  | methodCall _ _ _ => simp [structuralCopyValue] at h
+  | ifVal _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ => simp [structuralCopyValue] at h
+  | assert _ => simp [structuralCopyValue] at h
+  | updateProp _ _ => simp [structuralCopyValue] at h
+  | getStateScript => simp [structuralCopyValue] at h
+  | checkPreimage _ => simp [structuralCopyValue] at h
+  | deserializeState _ => simp [structuralCopyValue] at h
+  | addOutput _ _ _ => simp [structuralCopyValue] at h
+  | addRawOutput _ _ => simp [structuralCopyValue] at h
+  | addDataOutput _ _ => simp [structuralCopyValue] at h
+  | arrayLiteral _ => simp [structuralCopyValue] at h
+  | rawScript _ _ _ => simp [structuralCopyValue] at h
+
+/-- Helper: if `n ≠ name` and `n` is in the pushed stack map `name :: sm`,
+then `n` is in `sm`. -/
+private theorem depth?_isSome_push_of_ne (sm : StackMap) (n name : String)
+    (hNe : n ≠ name)
+    (hD : (Stack.Lower.StackMap.push sm name |>.depth? n).isSome = true) :
+    (sm.depth? n).isSome = true := by
+  simp only [Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?,
+             Option.isSome_iff_exists] at *
+  obtain ⟨d, hd⟩ := hD
+  obtain ⟨hLen, hAt, hPrev⟩ := List.findIdx?_eq_some_iff_getElem.mp hd
+  cases d with
+  | zero =>
+      -- depth 0 means name == n, contradicting hNe
+      simp at hAt
+      exact absurd hAt.symm hNe
+  | succ d' =>
+      -- depth d'+1 in name :: sm means depth d' in sm
+      exact ⟨d', List.findIdx?_eq_some_iff_getElem.mpr
+        ⟨Nat.lt_of_succ_lt_succ hLen,
+         by simpa using hAt,
+         fun j hj => by
+           have := hPrev (j + 1) (Nat.succ_lt_succ hj)
+           simpa using this⟩⟩
+
+/-- `(sm.depth? n).isSome = true` iff `n ∈ sm`. -/
+private theorem depth?_isSome_iff_mem (sm : StackMap) (n : String) :
+    (Stack.Lower.StackMap.depth? sm n).isSome = true ↔ n ∈ sm := by
+  simp only [Stack.Lower.StackMap.depth?, List.findIdx?_isSome, List.any_eq_true, beq_iff_eq]
+  constructor
+  · intro ⟨x, hxMem, hxEq⟩; rwa [← hxEq]
+  · intro h; exact ⟨n, h, rfl⟩
+
+/-- If `n` is in `sm.removeAtDepth d`, then `n` is in `sm`. -/
+private theorem depth?_isSome_removeAtDepth_of_isSome
+    (sm : StackMap) (n : String) (d : Nat)
+    (h : (Stack.Lower.StackMap.removeAtDepth sm d |>.depth? n).isSome = true) :
+    (Stack.Lower.StackMap.depth? sm n).isSome = true :=
+  (depth?_isSome_iff_mem sm n).mpr
+    (mem_removeAtDepth n sm d ((depth?_isSome_iff_mem _ n).mp h))
+
+/-- After `bringToTop sm refName consume` with `consume = true` and
+`sm.depth? refName = some d`, replacing the head of the resulting stack
+map with `bindingName` yields `(sm.removeAtDepth d).push bindingName`. -/
+private theorem bringToTop_consume_sm2_eq
+    (sm : StackMap) (refName bindingName : String) (d : Nat) (consume : Bool)
+    (hDepth : Stack.Lower.StackMap.depth? sm refName = some d)
+    (hConsume : consume = true) :
+    (match (Stack.Lower.bringToTop sm refName consume).2 with
+     | _ :: rest => bindingName :: rest
+     | [] => [bindingName])
+    = (sm.removeAtDepth d).push bindingName := by
+  subst hConsume
+  unfold Stack.Lower.bringToTop
+  rw [hDepth]
+  cases d with
+  | zero =>
+      simp only [ite_true]
+      -- sm.depth? refName = some 0 implies sm is nonempty
+      rcases sm with _ | ⟨_, rest⟩
+      · simp [Stack.Lower.StackMap.depth?] at hDepth
+      · simp [Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+  | succ d1 =>
+      cases d1 with
+      | zero =>
+          simp only [ite_true]
+          -- sm.depth? refName = some 1 implies sm has ≥ 2 elements
+          rcases sm with _ | ⟨a, _ | ⟨b, rest⟩⟩
+          · simp [Stack.Lower.StackMap.depth?] at hDepth
+          · -- single element: depth? can return at most some 0
+            obtain ⟨hLen, _, _⟩ := List.findIdx?_eq_some_iff_getElem.mp
+              (show [a].findIdx? (· == refName) = some 1 from hDepth)
+            exact absurd hLen (by simp)
+          · simp [Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+      | succ d2 =>
+          cases d2 with
+          | zero =>
+              -- d = 2: bringToTop returns ([.rot], (sm.removeAtDepth 2).push refName)
+              simp [Stack.Lower.StackMap.push]
+          | succ _ =>
+              -- d ≥ 3: bringToTop returns ([.roll d], (sm.removeAtDepth d).push refName)
+              simp [Stack.Lower.StackMap.push]
+
+/-- Shape of `lowerValueP` for `loadConst (.refAlias n)` in consume mode:
+the output stack map is `(sm.removeAtDepth d).push bindingName`. -/
+private theorem lowerValueP_refAlias_consume_sm2_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (bindingName refName : String) (d : Nat)
+    (hDepth : Stack.Lower.StackMap.depth? sm refName = some d)
+    (hConsume :
+      (Stack.Lower.listContains localBindings refName
+        && !Stack.Lower.listContains outerProtected refName
+        && Stack.Lower.isLastUse lastUses refName currentIndex) = true) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loadConst (.refAlias refName))).2.1
+    = (sm.removeAtDepth d).push bindingName := by
+  -- After unfolding, the lowerValueP body checks onStack then calls bringToTop.
+  -- We case-split on d to handle the bringToTop dispatch.
+  cases d with
+  | zero =>
+      -- d = 0: bringToTop returns ([], sm); sm must be nonempty
+      rcases sm with _ | ⟨_, rest⟩
+      · simp [Stack.Lower.StackMap.depth?] at hDepth
+      · unfold Stack.Lower.lowerValueP Stack.Lower.bringToTop
+        rw [hDepth]
+        simp [hConsume, Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+  | succ d1 =>
+      cases d1 with
+      | zero =>
+          -- d = 1: bringToTop emits SWAP; sm must have ≥ 2 elements
+          rcases sm with _ | ⟨a, _ | ⟨b, rest⟩⟩
+          · simp [Stack.Lower.StackMap.depth?] at hDepth
+          · obtain ⟨hLen, _, _⟩ := List.findIdx?_eq_some_iff_getElem.mp
+              (show [a].findIdx? (· == refName) = some 1 from hDepth)
+            exact absurd hLen (by simp)
+          · unfold Stack.Lower.lowerValueP Stack.Lower.bringToTop
+            rw [hDepth]
+            simp [hConsume, Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+      | succ d2 =>
+          cases d2 with
+          | zero =>
+              -- d = 2: bringToTop emits ROT
+              unfold Stack.Lower.lowerValueP Stack.Lower.bringToTop
+              rw [hDepth]
+              simp [hConsume, Stack.Lower.StackMap.push]
+          | succ _ =>
+              -- d ≥ 3: bringToTop emits ROLL d
+              unfold Stack.Lower.lowerValueP Stack.Lower.bringToTop
+              rw [hDepth]
+              simp [hConsume, Stack.Lower.StackMap.push]
+
+/-- Shape of `lowerValueP` for `loadParam n` in consume mode:
+the output stack map is `(sm.removeAtDepth d).push bindingName`. -/
+private theorem lowerValueP_loadParam_consume_sm2_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (bindingName paramName : String) (d : Nat)
+    (hDepth : Stack.Lower.StackMap.depth? sm paramName = some d)
+    (hConsume :
+      (!Stack.Lower.listContains outerProtected paramName
+        && Stack.Lower.isLastUse lastUses paramName currentIndex) = true) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loadParam paramName)).2.1
+    = (sm.removeAtDepth d).push bindingName := by
+  cases d with
+  | zero =>
+      rcases sm with _ | ⟨_, rest⟩
+      · simp [Stack.Lower.StackMap.depth?] at hDepth
+      · unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam Stack.Lower.bringToTop
+        rw [hDepth]
+        simp [hConsume, Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+  | succ d1 =>
+      cases d1 with
+      | zero =>
+          rcases sm with _ | ⟨a, _ | ⟨b, rest⟩⟩
+          · simp [Stack.Lower.StackMap.depth?] at hDepth
+          · obtain ⟨hLen, _, _⟩ := List.findIdx?_eq_some_iff_getElem.mp
+              (show [a].findIdx? (· == paramName) = some 1 from hDepth)
+            exact absurd hLen (by simp)
+          · unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam Stack.Lower.bringToTop
+            rw [hDepth]
+            simp [hConsume, Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+      | succ d2 =>
+          cases d2 with
+          | zero =>
+              unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam Stack.Lower.bringToTop
+              rw [hDepth]
+              simp [hConsume, Stack.Lower.StackMap.push]
+          | succ _ =>
+              unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam Stack.Lower.bringToTop
+              rw [hDepth]
+              simp [hConsume, Stack.Lower.StackMap.push]
+
+/-- `lowerValue sm name v` for structural-copy values always returns
+`sm.push name` as the updated stack map. -/
+private theorem lowerValue_snd_structuralCopy_early
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat)
+    (name : String) (v : ANFValue)
+    (h : structuralCopyValue lastUses outerProtected localBindings sm currentIndex v) :
+    (Stack.Lower.lowerValue sm name v).2 = sm.push name := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int _ => simp [Stack.Lower.lowerValue]
+      | bool _ => simp [Stack.Lower.lowerValue]
+      | bytes _ => simp [Stack.Lower.lowerValue]
+      | refAlias _ => simp [Stack.Lower.lowerValue]
+      | thisRef => simp [structuralCopyValue] at h
+  | loadParam _ => simp [Stack.Lower.lowerValue]
+  | loadProp _ => simp [Stack.Lower.lowerValue]
+  | binOp _ _ _ _ => simp [structuralCopyValue] at h
+  | unaryOp _ _ _ => simp [structuralCopyValue] at h
+  | call _ _ => simp [structuralCopyValue] at h
+  | methodCall _ _ _ => simp [structuralCopyValue] at h
+  | ifVal _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ => simp [structuralCopyValue] at h
+  | assert _ => simp [structuralCopyValue] at h
+  | updateProp _ _ => simp [structuralCopyValue] at h
+  | getStateScript => simp [structuralCopyValue] at h
+  | checkPreimage _ => simp [structuralCopyValue] at h
+  | deserializeState _ => simp [structuralCopyValue] at h
+  | addOutput _ _ _ => simp [structuralCopyValue] at h
+  | addRawOutput _ _ => simp [structuralCopyValue] at h
+  | addDataOutput _ _ => simp [structuralCopyValue] at h
+  | arrayLiteral _ => simp [structuralCopyValue] at h
+  | rawScript _ _ _ => simp [structuralCopyValue] at h
+
+/-- `evalBindings` always succeeds on a structural-copy body, given:
+1. For each `loadParam`/`loadProp` value in the body, the lookup succeeds.
+2. Every name in the running stack map resolves via `resolveRef`.
+3. SSA freshness: binding names are not in the initial stack map.
+
+The domain conditions (1) are stable under `addBinding` since `addBinding`
+only updates `s.bindings`, leaving `s.params` and `s.props` unchanged. -/
+theorem evalBindings_structuralCopyBody_isSome :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+      (anfSt : State),
+      structuralCopyBody lastUses outerProtected localBindings body sm currentIndex →
+      -- Domain: for each loadParam/loadProp value in the body, the lookup succeeds.
+      (∀ b ∈ body, ∀ n, b.value = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv) →
+      (∀ b ∈ body, ∀ n, b.value = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv) →
+      -- RefReady: every name in sm resolves in anfSt.
+      (∀ n, (sm.depth? n).isSome = true → ∃ val, anfSt.resolveRef n = some val) →
+      -- SSA freshness: binding names are not in the initial stack map.
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      (RunarVerification.ANF.Eval.evalBindings anfSt body).toOption.isSome
+  | [], _sm, _idx, _lu, _op, _lb, _s, _h, _hp, _hpr, _hr, _hf, _hn => by
+      simp [RunarVerification.ANF.Eval.evalBindings, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, lastUses, outerProtected, localBindings,
+      anfSt, h, hParamDomain, hPropDomain, hRefReady, hFresh, hNodup => by
+      simp only [structuralCopyBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      -- Per-value domain conditions for the head binding
+      have hParamDomHead : ∀ n, v = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv :=
+        fun n hv => hParamDomain (.mk name v _src) List.mem_cons_self n hv
+      have hPropDomHead : ∀ n, v = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv :=
+        fun n hv => hPropDomain (.mk name v _src) List.mem_cons_self n hv
+      obtain ⟨val, hVal⟩ :=
+        evalValue_structuralCopyValue_ok lastUses outerProtected localBindings
+          sm currentIndex anfSt v hHead hParamDomHead hPropDomHead hRefReady
+      simp only [RunarVerification.ANF.Eval.evalBindings, hVal]
+      -- The stack map for the tail is `sm' = sm.push name`.
+      have hLowerSnd : (Stack.Lower.lowerValue sm name v).2 = sm.push name :=
+        lowerValue_snd_structuralCopy_early lastUses outerProtected localBindings
+          sm currentIndex name v hHead
+      let sm' := (Stack.Lower.lowerValue sm name v).2
+      -- For n ≠ name in sm', n is in sm.
+      have hPushDepth : ∀ n, n ≠ name → (sm'.depth? n).isSome = true →
+          (sm.depth? n).isSome = true := by
+        intro n hne hD
+        -- sm' is a let-binding for (lowerValue sm name v).2; hLowerSnd gives sm' = sm.push name
+        have hSmPrime : sm' = sm.push name := hLowerSnd
+        rw [hSmPrime] at hD
+        exact depth?_isSome_push_of_ne sm n name hne hD
+      -- Domain conditions for the tail: addBinding only touches bindings,
+      -- so lookupParam and lookupProp are unchanged.
+      have hParamDomain' : ∀ b ∈ rest, ∀ n, b.value = .loadParam n →
+          ∃ pv, (anfSt.addBinding name val).lookupParam n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupParam, State.addBinding]
+        exact hParamDomain b (List.mem_cons_of_mem _ hb) n hbn
+      have hPropDomain' : ∀ b ∈ rest, ∀ n, b.value = .loadProp n →
+          ∃ pv, (anfSt.addBinding name val).lookupProp n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupProp, State.addBinding]
+        exact hPropDomain b (List.mem_cons_of_mem _ hb) n hbn
+      -- RefReady for the tail: name resolves to val (new binding),
+      -- any n ≠ name in sm resolves as before.
+      have hRefReady' : ∀ n, (sm'.depth? n).isSome = true →
+          ∃ vv, (anfSt.addBinding name val).resolveRef n = some vv := by
+        intro n hD
+        by_cases hEq : n = name
+        · exact ⟨val, by
+            simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+            simp [hEq, List.find?]⟩
+        · obtain ⟨vv, hRes⟩ := hRefReady n (hPushDepth n hEq hD)
+          refine ⟨vv, ?_⟩
+          simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+          simp only [State.resolveRef, State.lookupBinding] at hRes
+          have hNameNeqN : (name == n) = false :=
+            beq_eq_false_iff_ne.mpr (Ne.symm hEq)
+          simp only [List.find?_cons, hNameNeqN]
+          exact hRes
+      -- Freshness for the tail.
+      simp only [List.map_cons, List.nodup_cons] at hNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hNodup
+      have hFreshTail : ∀ b ∈ rest, b.name ∉ (Stack.Lower.lowerValue sm name v).2 := by
+        intro b hbMem
+        rw [hLowerSnd, show Stack.Lower.StackMap.push sm name = name :: sm from rfl]
+        intro hMem
+        simp only [List.mem_cons] at hMem
+        cases hMem with
+        | inl hEq =>
+            exact hNameNotInRest (List.mem_map.mpr ⟨b, hbMem, hEq⟩)
+        | inr hInSm =>
+            exact hFresh b (List.mem_cons_of_mem _ hbMem) hInSm
+      exact evalBindings_structuralCopyBody_isSome
+        rest sm' (currentIndex + 1) lastUses outerProtected localBindings
+        (anfSt.addBinding name val) hRest hParamDomain' hPropDomain' hRefReady'
+        hFreshTail hRestNodup
+
+/-! ### Runtime success for the structural-copy fragment
+
+The structural lowerer's op list for copy-mode reference loads is
+`loadRef sm n`, which emits a `dup` / `over` / `pickStruct d` depending
+on depth `d`. Each succeeds provided the stack has depth ≥ d + 1, which
+is guaranteed when `agreesTagged tsm anfSt stkSt` holds and `n` appears
+at depth `d` in `untagSm tsm` (the tagged stack map guarantees `d <
+stkSt.stack.length`).
+-/
+
+/-- A `loadRef`-shape helper for depth-0: sm.depth? n = some 0 implies
+`loadRef sm n = [.dup]`. -/
+private theorem loadRef_shape_of_depth
+    (sm : StackMap) (n : String) (d : Nat)
+    (hDepth : sm.depth? n = some d) :
+    Stack.Lower.loadRef sm n =
+      (if d = 0 then [.dup]
+       else if d = 1 then [.over]
+       else [.pickStruct d]) := by
+  unfold Stack.Lower.loadRef
+  rw [hDepth]
+  cases d with
+  | zero => simp
+  | succ d1 =>
+      cases d1 with
+      | zero => simp
+      | succ _ => simp
+
+private theorem runOps_loadRef_at_depth
+    (sm : StackMap) (n : String) (d : Nat) (v : Value)
+    (stkSt : StackState)
+    (hDepth : sm.depth? n = some d)
+    (hLen : d < stkSt.stack.length)
+    (hAt : stkSt.stack[d]! = v) :
+    runOps (Stack.Lower.loadRef sm n) stkSt = .ok (stkSt.push v) := by
+  unfold Stack.Lower.loadRef
+  rw [hDepth]
+  cases d with
+  | zero =>
+      -- loadRef returns [.dup]; stack must have v at index 0.
+      simp only
+      have hStackShape : ∃ rest, stkSt.stack = v :: rest := by
+        match h : stkSt.stack with
+        | [] => simp [h] at hLen
+        | topV :: rest =>
+            have hTopEq : topV = v := by
+              have := hAt; rw [h] at this; simpa using this
+            exact ⟨rest, congrArg (· :: rest) hTopEq⟩
+      obtain ⟨rest, hStk⟩ := hStackShape
+      exact run_dup_nonEmpty stkSt v rest hStk
+  | succ d' =>
+      cases d' with
+      | zero =>
+          -- loadRef returns [.over]; stack must have v at index 1.
+          simp only
+          have hStackShape : ∃ top rest, stkSt.stack = top :: v :: rest := by
+            match h : stkSt.stack with
+            | [] => simp [h] at hLen
+            | topV :: rest =>
+                match h2 : rest with
+                | [] => subst h2; simp [h] at hLen
+                | second :: rest2 =>
+                    have hSecEq : second = v := by simpa [h, h2] using hAt
+                    exact ⟨topV, rest2, congrArg (topV :: · :: rest2) hSecEq⟩
+          obtain ⟨top, rest, hStk⟩ := hStackShape
+          exact run_over_deep stkSt top v rest hStk
+      | succ d'' =>
+          -- loadRef returns [.pickStruct (d''+2)]; use run_pickStruct_at_depth.
+          simp only
+          exact run_pickStruct_at_depth stkSt (d'' + 2) v hLen hAt
+
+private theorem lowerValue_snd_structuralCopy
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat)
+    (name : String) (v : ANFValue)
+    (h : structuralCopyValue lastUses outerProtected localBindings sm currentIndex v) :
+    (Stack.Lower.lowerValue sm name v).2 = sm.push name :=
+  lowerValue_snd_structuralCopy_early lastUses outerProtected localBindings
+    sm currentIndex name v h
+
+/-- `runOps` of the lowered form of a structural-copy value succeeds from
+any initial state with `agreesTagged tsm anfSt stkSt` (where `untagSm tsm = sm`).
+Returns the result state AND proves `agreesTagged` for the extended tagged map,
+so the body-level induction can continue. -/
+theorem runOps_lowerValue_structuralCopyValue_ok
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hUntagSm : untagSm tsm = sm)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (bn : String) (v : ANFValue)
+    (h : structuralCopyValue lastUses outerProtected localBindings sm currentIndex v)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    ∃ (stkSt' : StackState) (loadedVal : Value),
+      runOps (Stack.Lower.lowerValue sm bn v).1 stkSt = .ok stkSt' ∧
+      stkSt' = stkSt.push loadedVal ∧
+      agreesTagged ((bn, .binding) :: tsm) (anfSt.addBinding bn loadedVal) stkSt' := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int i =>
+          refine ⟨stkSt.push (.vBigint i), .vBigint i, ?_, rfl, ?_⟩
+          · simp [Stack.Lower.lowerValue, Stack.Lower.emitConst, runOps, stepNonIf]
+          · exact agreesTagged_push_value tsm bn anfSt stkSt (.vBigint i) hAgrees hFresh
+      | bool b =>
+          refine ⟨stkSt.push (.vBool b), .vBool b, ?_, rfl, ?_⟩
+          · simp [Stack.Lower.lowerValue, Stack.Lower.emitConst, runOps, stepNonIf]
+          · exact agreesTagged_push_value tsm bn anfSt stkSt (.vBool b) hAgrees hFresh
+      | bytes bs =>
+          refine ⟨stkSt.push (.vBytes bs), .vBytes bs, ?_, rfl, ?_⟩
+          · simp [Stack.Lower.lowerValue, Stack.Lower.emitConst, runOps, stepNonIf]
+          · exact agreesTagged_push_value tsm bn anfSt stkSt (.vBytes bs) hAgrees hFresh
+      | refAlias n =>
+          unfold structuralCopyValue at h
+          obtain ⟨⟨d, hDepth⟩, _⟩ := h
+          simp only [Stack.Lower.lowerValue]
+          -- Get the tagged depth and the value at that depth.
+          have hNthOpt : nthOpt d (untagSm tsm) = some n := by
+            rw [hUntagSm]; exact depth?_to_nthOpt _ _ _ hDepth
+          obtain ⟨k, loadedVal, hAtTsm, hLook⟩ :=
+            taggedStackAligned_depth_resolves anfSt tsm stkSt.stack hAgrees.1 n d hNthOpt
+          obtain ⟨v', hStkAt, hLookAt'⟩ :=
+            taggedStackAligned_at_index anfSt tsm stkSt.stack hAgrees.1 d (n, k) hAtTsm
+          have hVeq : v' = loadedVal :=
+            Option.some.inj (by rw [← hLookAt', hLook])
+          rw [hVeq] at hStkAt
+          have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+          have hAt : stkSt.stack[d]! = loadedVal := nthOpt_getElem!_default _ _ _ hStkAt
+          have hDepthSm : (untagSm tsm).depth? n = some d := by rw [hUntagSm]; exact hDepth
+          have hRunHead :
+              runOps (Stack.Lower.loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push loadedVal) :=
+            runOps_loadRef_at_depth (untagSm tsm) n d loadedVal stkSt hDepthSm hLen hAt
+          exact ⟨stkSt.push loadedVal, loadedVal,
+                 by rw [← hUntagSm]; exact hRunHead,
+                 rfl,
+                 agreesTagged_push_value tsm bn anfSt stkSt loadedVal hAgrees hFresh⟩
+      | thisRef => simp [structuralCopyValue] at h
+  | loadParam n =>
+      unfold structuralCopyValue at h
+      obtain ⟨⟨d, hDepth⟩, _⟩ := h
+      simp only [Stack.Lower.lowerValue]
+      have hNthOpt : nthOpt d (untagSm tsm) = some n := by
+        rw [hUntagSm]; exact depth?_to_nthOpt _ _ _ hDepth
+      obtain ⟨k, loadedVal, hAtTsm, hLook⟩ :=
+        taggedStackAligned_depth_resolves anfSt tsm stkSt.stack hAgrees.1 n d hNthOpt
+      obtain ⟨v', hStkAt, hLookAt'⟩ :=
+        taggedStackAligned_at_index anfSt tsm stkSt.stack hAgrees.1 d (n, k) hAtTsm
+      have hVeq : v' = loadedVal :=
+        Option.some.inj (by rw [← hLookAt', hLook])
+      rw [hVeq] at hStkAt
+      have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+      have hAt : stkSt.stack[d]! = loadedVal := nthOpt_getElem!_default _ _ _ hStkAt
+      have hDepthSm : (untagSm tsm).depth? n = some d := by rw [hUntagSm]; exact hDepth
+      have hRunHead :
+          runOps (Stack.Lower.loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push loadedVal) :=
+        runOps_loadRef_at_depth (untagSm tsm) n d loadedVal stkSt hDepthSm hLen hAt
+      exact ⟨stkSt.push loadedVal, loadedVal,
+             by rw [← hUntagSm]; exact hRunHead,
+             rfl,
+             agreesTagged_push_value tsm bn anfSt stkSt loadedVal hAgrees hFresh⟩
+  | loadProp n =>
+      unfold structuralCopyValue at h
+      obtain ⟨d, hDepth⟩ := h
+      simp only [Stack.Lower.lowerValue]
+      have hNthOpt : nthOpt d (untagSm tsm) = some n := by
+        rw [hUntagSm]; exact depth?_to_nthOpt _ _ _ hDepth
+      obtain ⟨k, loadedVal, hAtTsm, hLook⟩ :=
+        taggedStackAligned_depth_resolves anfSt tsm stkSt.stack hAgrees.1 n d hNthOpt
+      obtain ⟨v', hStkAt, hLookAt'⟩ :=
+        taggedStackAligned_at_index anfSt tsm stkSt.stack hAgrees.1 d (n, k) hAtTsm
+      have hVeq : v' = loadedVal :=
+        Option.some.inj (by rw [← hLookAt', hLook])
+      rw [hVeq] at hStkAt
+      have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+      have hAt : stkSt.stack[d]! = loadedVal := nthOpt_getElem!_default _ _ _ hStkAt
+      have hDepthSm : (untagSm tsm).depth? n = some d := by rw [hUntagSm]; exact hDepth
+      have hRunHead :
+          runOps (Stack.Lower.loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push loadedVal) :=
+        runOps_loadRef_at_depth (untagSm tsm) n d loadedVal stkSt hDepthSm hLen hAt
+      exact ⟨stkSt.push loadedVal, loadedVal,
+             by rw [← hUntagSm]; exact hRunHead,
+             rfl,
+             agreesTagged_push_value tsm bn anfSt stkSt loadedVal hAgrees hFresh⟩
+  | binOp _ _ _ _ => simp [structuralCopyValue] at h
+  | unaryOp _ _ _ => simp [structuralCopyValue] at h
+  | call _ _ => simp [structuralCopyValue] at h
+  | methodCall _ _ _ => simp [structuralCopyValue] at h
+  | ifVal _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ => simp [structuralCopyValue] at h
+  | assert _ => simp [structuralCopyValue] at h
+  | updateProp _ _ => simp [structuralCopyValue] at h
+  | getStateScript => simp [structuralCopyValue] at h
+  | checkPreimage _ => simp [structuralCopyValue] at h
+  | deserializeState _ => simp [structuralCopyValue] at h
+  | addOutput _ _ _ => simp [structuralCopyValue] at h
+  | addRawOutput _ _ => simp [structuralCopyValue] at h
+  | addDataOutput _ _ => simp [structuralCopyValue] at h
+  | arrayLiteral _ => simp [structuralCopyValue] at h
+  | rawScript _ _ _ => simp [structuralCopyValue] at h
+
+
+/-- `runOps` of a structural-copy body's lowered op list succeeds from any
+starting state with `agreesTagged tsm anfSt stkSt`.
+
+This is the Stack-VM `.isSome` half of `successAgrees` for the copy
+fragment — paired with `evalBindings_structuralCopyBody_isSome` on the
+ANF side. -/
+theorem runOps_lowerBindings_structuralCopyBody_isSome :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+      (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState),
+      untagSm tsm = sm →
+      agreesTagged tsm anfSt stkSt →
+      structuralCopyBody lastUses outerProtected localBindings body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      (runOps (Stack.Lower.lowerBindings sm body).1 stkSt).toOption.isSome
+  | [], _sm, _idx, _lu, _op, _lb, _tsm, _anfSt, _stkSt, _h1, _h2, _h3, _h4, _h5 => by
+      simp [Stack.Lower.lowerBindings, runOps, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, lastUses, outerProtected, localBindings,
+      tsm, anfSt, stkSt, hUntagSm, hAgrees, h, hFreshInSm, hBodyNodup => by
+      simp only [structuralCopyBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      -- Extract freshness for the head binding.
+      have hFreshHead : name ∉ sm :=
+        hFreshInSm (.mk name v _) List.mem_cons_self
+      have hFresh : freshIn name (untagSm tsm) := by
+        rw [hUntagSm]; exact hFreshHead
+      -- Extract the loaded value and new agreesTagged from the single-value theorem.
+      obtain ⟨stkSt', loadedVal, hHeadRun, _hStkEq, hAgreesNew⟩ :=
+        runOps_lowerValue_structuralCopyValue_ok
+          lastUses outerProtected localBindings sm currentIndex
+          tsm anfSt stkSt hUntagSm hAgrees name v hHead hFresh
+      -- `lowerBindings` on a cons unfolds to head ops ++ tail ops.
+      have hUnfold :
+          (Stack.Lower.lowerBindings sm ((ANFBinding.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValue sm name v).1
+              ++ (Stack.Lower.lowerBindings (Stack.Lower.lowerValue sm name v).2 rest).1 := by
+        simp [Stack.Lower.lowerBindings]
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+      -- The new sm for the tail is `(lowerValue sm name v).2 = sm.push name = name :: sm`.
+      -- untagSm ((name, .binding) :: tsm) = name :: sm = sm.push name.
+      have hLowerSnd : (Stack.Lower.lowerValue sm name v).2 = sm.push name :=
+        lowerValue_snd_structuralCopy lastUses outerProtected localBindings sm currentIndex name v hHead
+      have hUntagNew : untagSm ((name, .binding) :: tsm) =
+          (Stack.Lower.lowerValue sm name v).2 := by
+        rw [hLowerSnd]
+        simp [untagSm, Stack.Lower.StackMap.push, hUntagSm]
+      -- Derive freshness for the tail from Nodup and the original freshness.
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      -- Derive freshness for the tail from hLowerSnd, Nodup, and the original freshness.
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉ (Stack.Lower.lowerValue sm name v).2 := by
+        intro b hbMem
+        rw [hLowerSnd, Stack.Lower.StackMap.push]
+        intro hMem
+        simp [List.mem_cons] at hMem
+        cases hMem with
+        | inl hEq =>
+          apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hEq⟩
+        | inr hInSm =>
+          exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) hInSm
+      -- Apply the inductive hypothesis with the extended tagged stack map and states.
+      exact runOps_lowerBindings_structuralCopyBody_isSome
+        rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)
+        lastUses outerProtected localBindings
+        ((name, .binding) :: tsm) (anfSt.addBinding name loadedVal) stkSt'
+        (by rw [← hUntagNew])
+        hAgreesNew
+        hRest
+        hFreshInSm'
+        hRestNodup
+
+/-- Named-method runtime-success theorem for the structural-copy fragment.
+Unlike the bridge theorems, this needs no externally supplied `ChainRel`
+witness or `stkFinal`: for a copy-mode body, the lowered ops copy values
+from the stack without consuming them, so execution can never fail when the
+initial tagged stack map is aligned. -/
+theorem runMethod_lower_public_unique_no_post_structuralCopy_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (tsm : TaggedStackMap) (anfSt : State) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hCopy :
+      structuralCopyBody (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name)) m.body
+        (List.reverse (m.params.map (fun p => p.name))) 0)
+    (hUntagSm : untagSm tsm = List.reverse (m.params.map (fun p => p.name)))
+    (hAgrees : agreesTagged tsm anfSt initialStack)
+    -- SSA side conditions: body names are fresh in the initial stack map and pairwise distinct.
+    (hBodyFresh : ∀ b ∈ m.body, b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hBodyNodup : (m.body.map (fun b => b.name)).Nodup) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [lowerMethodUserRawOps_eq_lowerBindings_structuralCopy
+        methods props m hCopy]
+  exact runOps_lowerBindings_structuralCopyBody_isSome
+    m.body (List.reverse (m.params.map (fun p => p.name))) 0
+    (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name)) tsm anfSt initialStack hUntagSm hAgrees hCopy
+    hBodyFresh hBodyNodup
+
+/-! ### Decidable instance for `structuralCopyBody`
+
+Following the `programIsWF` pattern from `ANF/WF.lean:271-274`:
+define a Boolean checker, then lift to `Prop` via `= true`. -/
+
+/-- Boolean checker for `structuralCopyValue`. -/
+def structuralCopyValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  | .loadConst (.int _) => true
+  | .loadConst (.bool _) => true
+  | .loadConst (.bytes _) => true
+  | .loadParam n =>
+      (sm.depth? n).isSome &&
+      !(!Stack.Lower.listContains outerProtected n
+          && Stack.Lower.isLastUse lastUses n currentIndex)
+  | .loadProp n => (sm.depth? n).isSome
+  | .loadConst (.refAlias n) =>
+      (sm.depth? n).isSome &&
+      !(Stack.Lower.listContains localBindings n
+          && !Stack.Lower.listContains outerProtected n
+          && Stack.Lower.isLastUse lastUses n currentIndex)
+  | _ => false
+
+/-- Boolean checker for `structuralCopyBody`. -/
+def structuralCopyBodyBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralCopyBodyBool lastUses outerProtected localBindings rest
+        (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)
+
+/-- `structuralCopyValueBool` reflects `structuralCopyValue`. -/
+theorem structuralCopyValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralCopyValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int _ => simp [structuralCopyValueBool, structuralCopyValue]
+      | bool _ => simp [structuralCopyValueBool, structuralCopyValue]
+      | bytes _ => simp [structuralCopyValueBool, structuralCopyValue]
+      | refAlias n =>
+          simp only [structuralCopyValueBool, structuralCopyValue]
+          constructor
+          · intro h
+            simp only [Bool.and_eq_true] at h
+            exact ⟨Option.isSome_iff_exists.mp h.1,
+                   by rw [← Bool.not_eq_true']; exact h.2⟩
+          · intro ⟨⟨d, hd⟩, hNC⟩
+            simp only [Bool.and_eq_true]
+            exact ⟨Option.isSome_iff_exists.mpr ⟨d, hd⟩,
+                   by rw [Bool.not_eq_true']; exact hNC⟩
+      | thisRef => simp [structuralCopyValueBool, structuralCopyValue]
+  | loadParam n =>
+      simp only [structuralCopyValueBool, structuralCopyValue]
+      constructor
+      · intro h
+        simp only [Bool.and_eq_true] at h
+        exact ⟨Option.isSome_iff_exists.mp h.1,
+               by rw [← Bool.not_eq_true']; exact h.2⟩
+      · intro ⟨⟨d, hd⟩, hNC⟩
+        simp only [Bool.and_eq_true]
+        exact ⟨Option.isSome_iff_exists.mpr ⟨d, hd⟩,
+               by rw [Bool.not_eq_true']; exact hNC⟩
+  | loadProp n =>
+      simp only [structuralCopyValueBool, structuralCopyValue]
+      constructor
+      · intro h
+        exact ⟨(Option.isSome_iff_exists.mp h).choose,
+               (Option.isSome_iff_exists.mp h).choose_spec⟩
+      · intro ⟨d, hd⟩
+        simp [hd]
+  | binOp _ _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | unaryOp _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | call _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | methodCall _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | ifVal _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | loop _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | assert _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | updateProp _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | getStateScript => simp [structuralCopyValueBool, structuralCopyValue]
+  | checkPreimage _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | deserializeState _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | addOutput _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | addRawOutput _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | addDataOutput _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | arrayLiteral _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | rawScript _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+
+/-- `structuralCopyBodyBool` reflects `structuralCopyBody`. -/
+theorem structuralCopyBodyBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralCopyBodyBool lastUses outerProtected localBindings body sm currentIndex = true ↔
+      structuralCopyBody lastUses outerProtected localBindings body sm currentIndex
+  | [], _sm, _currentIndex => by
+      simp [structuralCopyBodyBool, structuralCopyBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralCopyBodyBool, structuralCopyBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralCopyValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralCopyBodyBool_iff lastUses outerProtected localBindings
+                  rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralCopyValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralCopyBodyBool_iff lastUses outerProtected localBindings
+                  rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralCopyBody` is decidable. -/
+instance decidableStructuralCopyBody
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralCopyBody lastUses outerProtected localBindings body sm currentIndex) :=
+  if h : structuralCopyBodyBool lastUses outerProtected localBindings body sm currentIndex = true
+  then isTrue ((structuralCopyBodyBool_iff lastUses outerProtected localBindings body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralCopyBodyBool_iff lastUses outerProtected localBindings body sm currentIndex).mpr hP))
+
+/-! ## A2 helpers
+
+The following private helpers support the consume-mode proof.
+`untagSm_mem_of_mem_eraseIdx` is the list-level membership transfer
+needed by the freshness induction.
+-/
+
+/-- Any element of `untagSm (tsm.eraseIdx d)` is also in `untagSm tsm`. -/
+private theorem untagSm_mem_of_mem_eraseIdx
+    {tsm : TaggedStackMap} {d : Nat} {x : String}
+    (h : x ∈ untagSm (tsm.eraseIdx d)) : x ∈ untagSm tsm := by
+  rw [untagSm_eraseIdx_eq_removeAtDepth] at h
+  exact mem_removeAtDepth x (untagSm tsm) d h
+
+/-! ## A2 — Consume-mode reference loads
+
+When a reference is on its last use and not outer-protected,
+`lowerValueP` emits a destructive roll / swap / rot (or no-op at depth
+0) that CONSUMES the tracked slot and rebinds the value under the new
+name.  The resulting lowered op sequence is NOT equal to what
+`lowerValue` (structural) would produce — the stack map update is
+`(sm.removeAtDepth d).push bn` rather than `sm.push bn`.
+
+The consume fragment is defined independently of the copy fragment.
+`structuralRefBody` is the disjunction (copy ∨ consume) used by the
+combined capstone in Pipeline.lean.
+
+### Structural predicate
+
+`structuralConsumeValue` covers:
+- `.loadParam n` with consume condition true
+- `.loadConst (.refAlias n)` with consume condition true
+- `.loadConst (.int/.bool/.bytes)` trivially (literal loads)
+
+`structuralConsumeBody` threads the ACTUAL `lowerValueP` output stack
+map at each step (the `.2.1` projection) rather than the structural
+`lowerValue` output.  This is the "narrow-structural-predicate" fallback
+documented in the plan: the predicate precisely encodes which sm the
+liveness-aware lowerer produces, making the body-level induction
+tractable without requiring a closed-form sm-update function.
+-/
+
+/-- Values in the consume-mode fragment: literal consts (trivially),
+and reference loads (`.loadParam n`, `.loadConst (.refAlias n)`) where
+the consume condition fires. -/
+def structuralConsumeValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Prop
+  | .loadConst (.int _) => True
+  | .loadConst (.bool _) => True
+  | .loadConst (.bytes _) => True
+  | .loadParam n =>
+      (∃ d, sm.depth? n = some d) ∧
+      (!Stack.Lower.listContains outerProtected n
+        && Stack.Lower.isLastUse lastUses n currentIndex) = true
+  | .loadConst (.refAlias n) =>
+      (∃ d, sm.depth? n = some d) ∧
+      (Stack.Lower.listContains localBindings n
+        && !Stack.Lower.listContains outerProtected n
+        && Stack.Lower.isLastUse lastUses n currentIndex) = true
+  | _ => False
+
+/-- Body-level consume fragment, threading the ACTUAL `lowerValueP`
+output stack map at each step (the `.2.1` projection). -/
+def structuralConsumeBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralConsumeValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralConsumeBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- The third component of `lowerValueP`'s result equals `localBindings`
+for all values admitted by `structuralCopyValue` or `structuralConsumeValue`.
+For `methodCall`/`ifVal`/etc., neither predicate admits the value so the
+hypothesis is vacuously satisfied. -/
+private theorem lowerValueP_snd_snd_eq_localBindings
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget currentIndex : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) (sm : StackMap) (bindingName : String) (v : ANFValue)
+    (hRef : structuralCopyValue lastUses outerProtected localBindings sm currentIndex v ∨
+            structuralConsumeValue lastUses outerProtected localBindings sm currentIndex v) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses outerProtected
+        localBindings constInts sm bindingName v).2.2 = localBindings := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int _ => unfold Stack.Lower.lowerValueP; rfl
+      | bool _ => unfold Stack.Lower.lowerValueP; rfl
+      | bytes _ => unfold Stack.Lower.lowerValueP; rfl
+      | thisRef =>
+          simp [structuralCopyValue, structuralConsumeValue] at hRef
+      | refAlias _ =>
+          unfold Stack.Lower.lowerValueP
+          split <;> rfl
+  | loadParam _ =>
+      unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam
+      rfl
+  | loadProp _ =>
+      unfold Stack.Lower.lowerValueP
+      split
+      · rfl
+      · split
+        · split
+          · rfl
+          · rfl
+        · rfl
+  | binOp _ _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | unaryOp _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | call _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | methodCall _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | ifVal _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | loop _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | assert _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | updateProp _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | getStateScript =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | checkPreimage _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | deserializeState _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | addOutput _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | addRawOutput _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | addDataOutput _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | arrayLiteral _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+  | rawScript _ _ _ =>
+      simp [structuralCopyValue, structuralConsumeValue] at hRef
+
+/-! ### ANF-side success for the consume fragment
+
+`evalValue` on a consume-mode value is read-only on the ANF state: it
+looks up the name and returns the value without mutating the state.
+The consume optimization is purely Stack-side. Hence the ANF-success
+proof for the consume fragment is identical to the copy fragment. -/
+
+/-- `evalValue` never fails on a structural-consume value, and leaves the
+ANF state unchanged.  For literal loads this is trivial.  For reference
+loads the consume condition only affects the Stack-side lowering; the ANF
+evaluator looks up the name the same way regardless of liveness. -/
+theorem evalValue_structuralConsumeValue_ok
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat)
+    (anfSt : State)
+    (v : ANFValue)
+    (h : structuralConsumeValue lastUses outerProtected localBindings sm currentIndex v)
+    (hParamDom : ∀ n, v = .loadParam n → ∃ val, anfSt.lookupParam n = some val)
+    (hRefReady : ∀ n, (sm.depth? n).isSome = true →
+        ∃ val, anfSt.resolveRef n = some val) :
+    ∃ val, RunarVerification.ANF.Eval.evalValue anfSt v = .ok (val, anfSt) := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int i => exact ⟨.vBigint i, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | bool b => exact ⟨.vBool b, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | bytes b => exact ⟨.vBytes b, by simp [RunarVerification.ANF.Eval.evalValue]⟩
+      | refAlias n =>
+          unfold structuralConsumeValue at h
+          obtain ⟨⟨d, hDepth⟩, _⟩ := h
+          obtain ⟨val, hRes⟩ := hRefReady n (by simp [hDepth])
+          refine ⟨val, ?_⟩
+          simp only [RunarVerification.ANF.Eval.evalValue]
+          simp only [RunarVerification.ANF.Eval.lookupRef, hRes]
+          rfl
+      | thisRef => simp [structuralConsumeValue] at h
+  | loadParam n =>
+      obtain ⟨val, hLook⟩ := hParamDom n rfl
+      exact ⟨val, by simp [RunarVerification.ANF.Eval.evalValue, hLook]⟩
+  | loadProp _ => simp [structuralConsumeValue] at h
+  | binOp _ _ _ _ => simp [structuralConsumeValue] at h
+  | unaryOp _ _ _ => simp [structuralConsumeValue] at h
+  | call _ _ => simp [structuralConsumeValue] at h
+  | methodCall _ _ _ => simp [structuralConsumeValue] at h
+  | ifVal _ _ _ => simp [structuralConsumeValue] at h
+  | loop _ _ _ => simp [structuralConsumeValue] at h
+  | assert _ => simp [structuralConsumeValue] at h
+  | updateProp _ _ => simp [structuralConsumeValue] at h
+  | getStateScript => simp [structuralConsumeValue] at h
+  | checkPreimage _ => simp [structuralConsumeValue] at h
+  | deserializeState _ => simp [structuralConsumeValue] at h
+  | addOutput _ _ _ => simp [structuralConsumeValue] at h
+  | addRawOutput _ _ => simp [structuralConsumeValue] at h
+  | addDataOutput _ _ => simp [structuralConsumeValue] at h
+  | arrayLiteral _ => simp [structuralConsumeValue] at h
+  | rawScript _ _ _ => simp [structuralConsumeValue] at h
+
+/-- `evalBindings` always succeeds on a structural-consume body. The
+domain conditions mirror `evalBindings_structuralCopyBody_isSome`: params
+and refs must resolve in the ANF state, and SSA freshness must hold. -/
+theorem evalBindings_structuralConsumeBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (anfSt : State),
+      structuralConsumeBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, ∀ n, b.value = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv) →
+      (∀ n, (sm.depth? n).isSome = true → ∃ val, anfSt.resolveRef n = some val) →
+      (body.map (·.name)).Nodup →
+      (RunarVerification.ANF.Eval.evalBindings anfSt body).toOption.isSome
+  | [], _sm, _idx, _s, _h, _hp, _hr, _hn => by
+      simp [RunarVerification.ANF.Eval.evalBindings, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, anfSt,
+      h, hParamDomain, hRefReady, hNodup => by
+      simp only [structuralConsumeBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hParamDomHead : ∀ n, v = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv :=
+        fun n hv => hParamDomain (.mk name v _src) List.mem_cons_self n hv
+      -- Build hRefReadyHead: for refAlias n in h, the depth is in sm.
+      have hRefReadyHead : ∀ n, (sm.depth? n).isSome = true → ∃ val, anfSt.resolveRef n = some val :=
+        hRefReady
+      obtain ⟨val, hVal⟩ :=
+        evalValue_structuralConsumeValue_ok lastUses outerProtected localBindings
+          sm currentIndex anfSt v hHead hParamDomHead hRefReadyHead
+      simp only [RunarVerification.ANF.Eval.evalBindings, hVal]
+      -- Domain conditions for the tail (unchanged by addBinding on params/props).
+      have hParamDomain' :
+          ∀ b ∈ rest, ∀ n, b.value = .loadParam n →
+            ∃ pv, (anfSt.addBinding name val).lookupParam n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupParam, State.addBinding]
+        exact hParamDomain b (List.mem_cons_of_mem _ hb) n hbn
+      -- RefReady for the tail sm (which may differ from sm in consume mode).
+      -- The tail predicate's sm is `(lowerValueP ...).2.1`, but evalBindings
+      -- threads the ANF state, not the Stack sm.  We only need resolveRef
+      -- for names in the NEW tail sm.  We establish it via addBinding:
+      -- 'name' resolves to 'val'; all other names resolve as before (if they
+      -- were in the original sm, they are still in the tail sm subset).
+      have hRefReady' : ∀ n,
+          ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.1.depth? n).isSome = true →
+          ∃ vv, (anfSt.addBinding name val).resolveRef n = some vv := by
+        intro n hD
+        -- 'name' always resolves after addBinding.
+        by_cases hEq : n = name
+        · exact ⟨val, by
+              simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+              simp [hEq, List.find?]⟩
+        · -- For n ≠ name: the tail sm is a subset of sm.push name or
+          -- (sm.removeAtDepth d).push name — either way n was in sm before.
+          -- We use a fallback: since we cannot guarantee the tail sm
+          -- is a subset of the original sm without more info, we establish
+          -- refReady for the ANF state after addBinding by noting that
+          -- addBinding does not remove any bindings, params, or props.
+          -- If n was resolvable before, it is still resolvable after.
+          -- We make the conservative argument: if n is in the tail sm and n ≠ name,
+          -- then n was accessible in the original sm (in the consume case,
+          -- (sm.removeAtDepth d).push name ⊆ sm ∪ {name}).
+          -- We cannot directly conclude (sm.depth? n).isSome without more sm info,
+          -- so we use the lookup-is-preserved argument instead:
+          -- (anfSt.addBinding name val).resolveRef n = anfSt.resolveRef n when n ≠ name
+          -- ... but we need anfSt.resolveRef n = some vv.
+          -- For the ANF isSome proof we use a weaker fact: `evalBindings` only
+          -- looks up names that ARE in the ANF state (via lookupParam/lookupProp/
+          -- lookupBinding), and addBinding preserves all existing lookups.
+          -- The resolveRef for the tail is only needed if a future binding uses
+          -- .loadConst (.refAlias n). Those bindings must have n in the tail sm.
+          -- Since the tail predicate structuralConsumeBody is parameterized by
+          -- the tail sm, and hRefReady covers the original sm, we extend:
+          -- after a consume step, the tail sm is (sm.removeAtDepth d).push name
+          -- for consume mode or sm.push name for const mode. Either way,
+          -- any n ≠ name in the tail sm was also in the original sm (removeAtDepth
+          -- only removes one element; the rest stay). So (sm.depth? n).isSome = true
+          -- for n in the tail sm \ {name}.
+          -- We establish this via mem_removeAtDepth: if n ∈ tail-sm and n ≠ name,
+          -- then n ∈ sm (since tail-sm ⊆ name :: sm).
+          -- However, this requires knowing which sm update was used.
+          -- Use the simpler ANF argument: evalValue on ANY bind is read-only on
+          -- (params, props); only bindings grow. So lookupParam / lookupProp are
+          -- unchanged. For refAlias, we need resolveRef. But resolveRef checks
+          -- lookupBinding FIRST. After addBinding name val, name resolves.
+          -- For n ≠ name: resolveRef n = lookupBinding n <|> lookupParam n <|> lookupProp n.
+          -- If n was in the original sm (hRefReady gives resolveRef n = some vv),
+          -- then after addBinding it is still resolvable.
+          -- The only missing piece is: is n in the ORIGINAL sm?
+          -- To avoid needing sm-subset reasoning here, we strengthen hRefReady
+          -- to cover all names resolvable in anfSt (not just those in sm).
+          -- For n ≠ name: n was in the original sm.
+          -- The tail sm of lowerValueP always has name as its head.
+          -- For const values: tail = sm.push name = name :: sm.
+          -- For consume values: tail = (sm.removeAtDepth d).push name.
+          -- In both cases, n ≠ name in the tail implies n ∈ sm.
+          have hInSm : (sm.depth? n).isSome = true := by
+            cases v with
+            | loadConst c =>
+                cases c with
+                | int i =>
+                    have hTail : (Stack.Lower.lowerValueP progMethods props budget
+                          currentIndex lastUses outerProtected localBindings constInts
+                          sm name (.loadConst (.int i))).2.1 = sm.push name := by
+                      unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+                    rw [hTail] at hD
+                    exact depth?_isSome_push_of_ne sm n name hEq hD
+                | bool b =>
+                    have hTail : (Stack.Lower.lowerValueP progMethods props budget
+                          currentIndex lastUses outerProtected localBindings constInts
+                          sm name (.loadConst (.bool b))).2.1 = sm.push name := by
+                      unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+                    rw [hTail] at hD
+                    exact depth?_isSome_push_of_ne sm n name hEq hD
+                | bytes bs =>
+                    have hTail : (Stack.Lower.lowerValueP progMethods props budget
+                          currentIndex lastUses outerProtected localBindings constInts
+                          sm name (.loadConst (.bytes bs))).2.1 = sm.push name := by
+                      unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+                    rw [hTail] at hD
+                    exact depth?_isSome_push_of_ne sm n name hEq hD
+                | refAlias consuming =>
+                    -- consume: tail = (sm.removeAtDepth d).push name
+                    obtain ⟨⟨d, hDepth⟩, hConsume⟩ := hHead
+                    have hTail : (Stack.Lower.lowerValueP progMethods props budget
+                          currentIndex lastUses outerProtected localBindings constInts
+                          sm name (.loadConst (.refAlias consuming))).2.1
+                        = (sm.removeAtDepth d).push name :=
+                      lowerValueP_refAlias_consume_sm2_eq progMethods props budget
+                        currentIndex lastUses outerProtected localBindings constInts sm name consuming d
+                        hDepth hConsume
+                    rw [hTail] at hD
+                    exact depth?_isSome_removeAtDepth_of_isSome sm n d
+                            (depth?_isSome_push_of_ne _ n name hEq hD)
+                | thisRef => simp [structuralConsumeValue] at hHead
+            | loadParam consuming =>
+                -- consume: tail = (sm.removeAtDepth d).push name
+                obtain ⟨⟨d, hDepth⟩, hConsume⟩ := hHead
+                have hTail : (Stack.Lower.lowerValueP progMethods props budget
+                      currentIndex lastUses outerProtected localBindings constInts
+                      sm name (.loadParam consuming)).2.1
+                    = (sm.removeAtDepth d).push name :=
+                  lowerValueP_loadParam_consume_sm2_eq progMethods props budget
+                    currentIndex lastUses outerProtected localBindings constInts sm name consuming d
+                    hDepth hConsume
+                rw [hTail] at hD
+                exact depth?_isSome_removeAtDepth_of_isSome sm n d
+                        (depth?_isSome_push_of_ne _ n name hEq hD)
+            | _ => simp [structuralConsumeValue] at hHead
+          obtain ⟨vv, hVv⟩ := hRefReady n hInSm
+          exact ⟨vv, by
+            simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+            have hNameNeqN : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hEq)
+            simp only [List.find?_cons, hNameNeqN]
+            simp only [State.resolveRef, State.lookupBinding] at hVv
+            exact hVv⟩
+      simp only [List.map_cons, List.nodup_cons] at hNodup
+      obtain ⟨_, hRestNodup⟩ := hNodup
+      exact evalBindings_structuralConsumeBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1) (anfSt.addBinding name val) hRest
+        hParamDomain' hRefReady' hRestNodup
+
+/-! ### Runtime-side success for the consume fragment
+
+For the consume fragment, `lowerValueP` does NOT equal `lowerValue`.
+The consumed slot is extracted from the stack map via roll/swap/rot
+(depth ≥ 3 / 1 / 2 / 0), which MODIFIES the stack.  The proof uses
+the depth-dispatch witnesses already proved for d=0/1/2 and d≥3.
+
+The key invariant threaded through the induction:
+- At each step, `agreesTagged tsm anfSt stkSt` holds.
+- After a consume step at depth `d`:
+  - `stkSt'` is the rolled/swapped/rotted stack.
+  - `tsm'` = `(bn, .binding) :: tsm.eraseIdx d`
+  - `agreesTagged tsm' (anfSt.addBinding bn v) stkSt'` holds.
+-/
+
+/-- Single-value runtime success for the consume fragment: `runOps` of
+the `lowerValueP`-emitted consume op list succeeds, and produces a new
+`agreesTagged` for the next binding in the body. -/
+theorem runOps_lowerValueP_structuralConsumeValue_ok
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (bn : String) (v : ANFValue)
+    (h : structuralConsumeValue lastUses outerProtected localBindings (untagSm tsm) currentIndex v)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    ∃ (stkSt' : StackState) (loadedVal : Value),
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn v).1
+             stkSt = .ok stkSt' ∧
+      ∃ (tsm' : TaggedStackMap),
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn v).2.1
+          = untagSm tsm' ∧
+        agreesTagged tsm' (anfSt.addBinding bn loadedVal) stkSt' := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int i =>
+          have hShape : Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn (.loadConst (.int i))
+              = ([.push (.bigint i)], (untagSm tsm).push bn, localBindings) := by
+            unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+          rw [hShape]
+          refine ⟨stkSt.push (.vBigint i), .vBigint i, ?_, (bn, .binding) :: tsm, ?_, ?_⟩
+          · exact Stack.Sim.run_push_bigint stkSt i
+          · simp only [untagSm, Stack.Lower.StackMap.push]
+          · exact agreesTagged_push_value tsm bn anfSt stkSt (.vBigint i) hAgrees hFresh
+      | bool b =>
+          have hShape : Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn (.loadConst (.bool b))
+              = ([.push (.bool b)], (untagSm tsm).push bn, localBindings) := by
+            unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+          rw [hShape]
+          refine ⟨stkSt.push (.vBool b), .vBool b, ?_, (bn, .binding) :: tsm, ?_, ?_⟩
+          · exact Stack.Sim.run_push_bool stkSt b
+          · simp only [untagSm, Stack.Lower.StackMap.push]
+          · exact agreesTagged_push_value tsm bn anfSt stkSt (.vBool b) hAgrees hFresh
+      | bytes bs =>
+          have hShape : Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn (.loadConst (.bytes bs))
+              = ([.push (.bytes bs)], (untagSm tsm).push bn, localBindings) := by
+            unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+          rw [hShape]
+          refine ⟨stkSt.push (.vBytes bs), .vBytes bs, ?_, (bn, .binding) :: tsm, ?_, ?_⟩
+          · exact Stack.Sim.run_push_bytes stkSt bs
+          · simp only [untagSm, Stack.Lower.StackMap.push]
+          · exact agreesTagged_push_value tsm bn anfSt stkSt (.vBytes bs) hAgrees hFresh
+      | refAlias n =>
+          -- Consume-mode refAlias: depth d, emits roll/swap/rot/nothing.
+          unfold structuralConsumeValue at h
+          obtain ⟨⟨d, hDepth⟩, hConsume⟩ := h
+          -- Get the tagged entry at depth d.
+          have hNthOpt : nthOpt d (untagSm tsm) = some n :=
+            depth?_to_nthOpt _ _ _ hDepth
+          obtain ⟨k, loadedVal, hAtTsm, hLook⟩ :=
+            taggedStackAligned_depth_resolves anfSt tsm stkSt.stack hAgrees.1 n d hNthOpt
+          -- Dispatch on depth.
+          rcases Nat.lt_or_ge d 3 with hLt3 | hGe3
+          · -- d = 0, 1, or 2
+            cases d with
+            | zero =>
+                -- depth 0: no-op consume
+                cases tsm with
+                | nil => simp [nthOpt] at hAtTsm
+                | cons hd tl =>
+                    have hHdEq : hd = (n, k) := by simp [nthOpt] at hAtTsm; exact hAtTsm
+                    subst hHdEq
+                    obtain ⟨hRun, hSmOut, _, hAgreesNew⟩ :=
+                      lowerValueP_refAlias_consume_d0_witness
+                        progMethods props budget currentIndex lastUses outerProtected localBindings
+                        constInts bn n k tl
+                        anfSt stkSt loadedVal
+                        hAgrees hLook hFresh hConsume
+                    exact ⟨stkSt, loadedVal, hRun, (bn, .binding) :: tl,
+                           by rw [hSmOut]; simp [untagSm],
+                           hAgreesNew⟩
+            | succ d1 =>
+                cases d1 with
+                | zero =>
+                    -- depth 1: swap
+                    cases tsm with
+                    | nil => simp [nthOpt] at hAtTsm
+                    | cons top rest =>
+                        cases rest with
+                        | nil => simp [nthOpt] at hAtTsm
+                        | cons sec rest2 =>
+                            have hSecEq : sec = (n, k) := by simp [nthOpt] at hAtTsm; exact hAtTsm
+                            subst hSecEq
+                            obtain ⟨resSt, hRun, hSmOut, _, hAgreesNew⟩ :=
+                              lowerValueP_refAlias_consume_d1_witness
+                                progMethods props budget currentIndex lastUses outerProtected localBindings
+                                constInts bn top.1 n top.2 k rest2
+                                anfSt stkSt loadedVal
+                                hAgrees
+                                hLook hFresh
+                                (by simp [untagSm] at hDepth ⊢; exact hDepth)
+                                hConsume
+                            exact ⟨resSt, loadedVal, hRun, (bn, .binding) :: top :: rest2,
+                                   by rw [hSmOut]; simp [untagSm],
+                                   hAgreesNew⟩
+                | succ d2 =>
+                    cases d2 with
+                    | succ _ => exact absurd hLt3 (by omega)
+                    | zero =>
+                        -- depth 2: rot
+                        cases tsm with
+                        | nil => simp [nthOpt] at hAtTsm
+                        | cons top rest =>
+                            cases rest with
+                            | nil => simp [nthOpt] at hAtTsm
+                            | cons sec rest2 =>
+                                cases rest2 with
+                                | nil => simp [nthOpt] at hAtTsm
+                                | cons thr rest3 =>
+                                    have hThrEq : thr = (n, k) := by simp [nthOpt] at hAtTsm; exact hAtTsm
+                                    subst hThrEq
+                                    obtain ⟨resSt, hRun, hSmOut, _, hAgreesNew⟩ :=
+                                      lowerValueP_refAlias_consume_d2_witness
+                                        progMethods props budget currentIndex lastUses outerProtected localBindings
+                                        constInts bn top.1 sec.1 n top.2 sec.2 k rest3
+                                        anfSt stkSt loadedVal
+                                        hAgrees
+                                        hLook hFresh
+                                        (by simp [untagSm] at hDepth ⊢; exact hDepth)
+                                        hConsume
+                                    exact ⟨resSt, loadedVal, hRun, (bn, .binding) :: top :: sec :: rest3,
+                                           by rw [hSmOut]; simp [untagSm],
+                                           hAgreesNew⟩
+          · -- d ≥ 3: roll d
+            obtain ⟨resSt, hRun, hSmOut, _, hAgreesNew⟩ :=
+              lowerValueP_refAlias_consume_dge3_witness
+                progMethods props budget currentIndex lastUses outerProtected localBindings
+                constInts bn n k tsm d anfSt stkSt loadedVal hAgrees hAtTsm hDepth hLook hFresh hGe3 hConsume
+            exact ⟨resSt, loadedVal, hRun, (bn, .binding) :: tsm.eraseIdx d,
+                   hSmOut.trans (by simp [untagSm]),
+                   hAgreesNew⟩
+      | thisRef => simp [structuralConsumeValue] at h
+  | loadParam n =>
+      -- Consume-mode loadParam: depth d, emits roll/swap/rot/nothing.
+      unfold structuralConsumeValue at h
+      obtain ⟨⟨d, hDepth⟩, hConsume⟩ := h
+      have hNthOpt : nthOpt d (untagSm tsm) = some n :=
+        depth?_to_nthOpt _ _ _ hDepth
+      obtain ⟨k, loadedVal, hAtTsm, hLook⟩ :=
+        taggedStackAligned_depth_resolves anfSt tsm stkSt.stack hAgrees.1 n d hNthOpt
+      rcases Nat.lt_or_ge d 3 with hLt3 | hGe3
+      · cases d with
+        | zero =>
+            -- depth 0
+            cases tsm with
+            | nil => simp [nthOpt] at hAtTsm
+            | cons hd tl =>
+                have hHdEq : hd = (n, k) := by simp [nthOpt] at hAtTsm; exact hAtTsm
+                subst hHdEq
+                obtain ⟨hRun, hSmOut, _, hAgreesNew⟩ :=
+                  lowerValueP_loadParam_consume_d0_witness
+                    progMethods props budget currentIndex lastUses outerProtected localBindings
+                    constInts bn n k tl
+                    anfSt stkSt loadedVal
+                    hAgrees hLook hFresh hConsume
+                exact ⟨stkSt, loadedVal, hRun, (bn, .binding) :: tl,
+                       by rw [hSmOut]; simp [untagSm],
+                       hAgreesNew⟩
+        | succ d1 =>
+            cases d1 with
+            | zero =>
+                -- depth 1
+                cases tsm with
+                | nil => simp [nthOpt] at hAtTsm
+                | cons top rest =>
+                    cases rest with
+                    | nil => simp [nthOpt] at hAtTsm
+                    | cons sec rest2 =>
+                        have hSecEq : sec = (n, k) := by simp [nthOpt] at hAtTsm; exact hAtTsm
+                        subst hSecEq
+                        obtain ⟨resSt, hRun, hSmOut, _, hAgreesNew⟩ :=
+                          lowerValueP_loadParam_consume_d1_witness
+                            progMethods props budget currentIndex lastUses outerProtected localBindings
+                            constInts bn top.1 n top.2 k rest2
+                            anfSt stkSt loadedVal
+                            hAgrees
+                            hLook hFresh
+                            (by simp [untagSm] at hDepth ⊢; exact hDepth)
+                            hConsume
+                        exact ⟨resSt, loadedVal, hRun, (bn, .binding) :: top :: rest2,
+                               by rw [hSmOut]; simp [untagSm],
+                               hAgreesNew⟩
+            | succ d2 =>
+                cases d2 with
+                | succ _ => exact absurd hLt3 (by omega)
+                | zero =>
+                    -- depth 2
+                    cases tsm with
+                    | nil => simp [nthOpt] at hAtTsm
+                    | cons top rest =>
+                        cases rest with
+                        | nil => simp [nthOpt] at hAtTsm
+                        | cons sec rest2 =>
+                            cases rest2 with
+                            | nil => simp [nthOpt] at hAtTsm
+                            | cons thr rest3 =>
+                                have hThrEq : thr = (n, k) := by simp [nthOpt] at hAtTsm; exact hAtTsm
+                                subst hThrEq
+                                obtain ⟨resSt, hRun, hSmOut, _, hAgreesNew⟩ :=
+                                  lowerValueP_loadParam_consume_d2_witness
+                                    progMethods props budget currentIndex lastUses outerProtected localBindings
+                                    constInts bn top.1 sec.1 n top.2 sec.2 k rest3
+                                    anfSt stkSt loadedVal
+                                    hAgrees
+                                    hLook hFresh
+                                    (by simp [untagSm] at hDepth ⊢; exact hDepth)
+                                    hConsume
+                                exact ⟨resSt, loadedVal, hRun, (bn, .binding) :: top :: sec :: rest3,
+                                       by rw [hSmOut]; simp [untagSm],
+                                       hAgreesNew⟩
+      · -- d ≥ 3: roll d
+        obtain ⟨resSt, hRun, hSmOut, _, hAgreesNew⟩ :=
+          lowerValueP_loadParam_consume_dge3_witness
+            progMethods props budget currentIndex lastUses outerProtected localBindings
+            constInts bn n k tsm d anfSt stkSt loadedVal hAgrees hAtTsm hDepth hLook hFresh hGe3 hConsume
+        exact ⟨resSt, loadedVal, hRun, (bn, .binding) :: tsm.eraseIdx d,
+               hSmOut.trans (by simp [untagSm]),
+               hAgreesNew⟩
+  | loadProp _ => simp [structuralConsumeValue] at h
+  | binOp _ _ _ _ => simp [structuralConsumeValue] at h
+  | unaryOp _ _ _ => simp [structuralConsumeValue] at h
+  | call _ _ => simp [structuralConsumeValue] at h
+  | methodCall _ _ _ => simp [structuralConsumeValue] at h
+  | ifVal _ _ _ => simp [structuralConsumeValue] at h
+  | loop _ _ _ => simp [structuralConsumeValue] at h
+  | assert _ => simp [structuralConsumeValue] at h
+  | updateProp _ _ => simp [structuralConsumeValue] at h
+  | getStateScript => simp [structuralConsumeValue] at h
+  | checkPreimage _ => simp [structuralConsumeValue] at h
+  | deserializeState _ => simp [structuralConsumeValue] at h
+  | addOutput _ _ _ => simp [structuralConsumeValue] at h
+  | addRawOutput _ _ => simp [structuralConsumeValue] at h
+  | addDataOutput _ _ => simp [structuralConsumeValue] at h
+  | arrayLiteral _ => simp [structuralConsumeValue] at h
+  | rawScript _ _ _ => simp [structuralConsumeValue] at h
+
+/-- `runOps` of a structural-consume body's lowered op list succeeds from
+any starting state with `agreesTagged tsm anfSt stkSt`.
+
+The proof threads `agreesTagged` through the body using the single-value
+consume witness at each step. The consume-mode sm update
+(`(sm.removeAtDepth d).push bn`) is handled implicitly via the witnesses.
+-/
+theorem runOps_lowerBindingsP_structuralConsumeBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState),
+      untagSm tsm = sm →
+      agreesTagged tsm anfSt stkSt →
+      structuralConsumeBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+                 outerProtected localBindings constInts sm body).1
+              stkSt).toOption.isSome
+  | [], _sm, _idx, _tsm, _anfSt, _stkSt, _h1, _h2, _h3, _h4, _h5 => by
+      simp [Stack.Lower.lowerBindingsP, runOps, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, tsm, anfSt, stkSt,
+      hUntagSm, hAgrees, h, hFreshInSm, hBodyNodup => by
+      simp only [structuralConsumeBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      -- Restate the head predicate in terms of untagSm tsm = sm.
+      have hHeadSm : structuralConsumeValue lastUses outerProtected localBindings (untagSm tsm)
+          currentIndex v := by rw [hUntagSm]; exact hHead
+      -- Freshness for the head.
+      have hFreshHead : name ∉ sm := hFreshInSm (.mk name v _src) List.mem_cons_self
+      have hFresh : freshIn name (untagSm tsm) := by rw [hUntagSm]; exact hFreshHead
+      -- Apply the single-value witness.
+      obtain ⟨stkSt', loadedVal, hHeadRun, tsm', hUntagTsm', hAgreesNew⟩ :=
+        runOps_lowerValueP_structuralConsumeValue_ok
+          progMethods props budget currentIndex lastUses outerProtected localBindings constInts
+          tsm anfSt stkSt hAgrees name v hHeadSm hFresh
+      -- Unfold lowerBindingsP on a cons.
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm ((ANFBinding.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1) lastUses
+                    outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      -- hHeadRun uses (untagSm tsm), but hUnfold uses sm. Rewrite hHeadRun to use sm.
+      have hHeadRunSm :
+          runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).1 stkSt = .ok stkSt' := by
+        rw [← hUntagSm]; exact hHeadRun
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRunSm]
+      -- The tail sm is (lowerValueP ...).2.1.
+      -- hUntagTsm' : (lowerValueP ...).2.1 = untagSm tsm'
+      -- The tail consumes predicate hRest uses (lowerValueP ...).2.1 as its sm.
+      -- Freshness for the tail.
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      -- A helper: any element ≠ name in (lowerValueP ...).2.1 is in sm.
+      have hTailSubsetSm : ∀ x, x ≠ name →
+          x ∈ (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).2.1 →
+          x ∈ sm := by
+        intro x hxNe hxMem
+        cases v with
+        | loadConst c =>
+            cases c with
+            | int i =>
+                -- lowerValueP emits push; output sm = sm.push name = name :: sm
+                have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name
+                        (.loadConst (.int i))).2.1 = name :: sm := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst Stack.Lower.StackMap.push; rfl
+                rw [hSm] at hxMem
+                exact (List.mem_cons.mp hxMem).resolve_left hxNe
+            | bool b =>
+                have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name
+                        (.loadConst (.bool b))).2.1 = name :: sm := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst Stack.Lower.StackMap.push; rfl
+                rw [hSm] at hxMem
+                exact (List.mem_cons.mp hxMem).resolve_left hxNe
+            | bytes bs =>
+                have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name
+                        (.loadConst (.bytes bs))).2.1 = name :: sm := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst Stack.Lower.StackMap.push; rfl
+                rw [hSm] at hxMem
+                exact (List.mem_cons.mp hxMem).resolve_left hxNe
+            | thisRef => simp [structuralConsumeValue] at hHead
+            | refAlias consuming =>
+                unfold structuralConsumeValue at hHead
+                obtain ⟨⟨d, hDepth⟩, hCons⟩ := hHead
+                have hShape : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name (.loadConst (.refAlias consuming))).2.1
+                    = Stack.Lower.StackMap.push (Stack.Lower.StackMap.removeAtDepth sm d) name :=
+                  lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name consuming d hDepth hCons
+                rw [hShape, Stack.Lower.StackMap.push] at hxMem
+                simp [List.mem_cons] at hxMem
+                exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+        | loadParam consuming =>
+            unfold structuralConsumeValue at hHead
+            obtain ⟨⟨d, hDepth⟩, hCons⟩ := hHead
+            -- (lowerValueP ...).2.1 = name :: sm.removeAtDepth d
+            have hShape : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name (.loadParam consuming)).2.1
+                = Stack.Lower.StackMap.push (Stack.Lower.StackMap.removeAtDepth sm d) name :=
+              lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name consuming d hDepth hCons
+            rw [hShape, Stack.Lower.StackMap.push] at hxMem
+            simp [List.mem_cons] at hxMem
+            exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+        | _ => simp [structuralConsumeValue] at hHead
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).2.1 := by
+        intro b hbMem hbIn
+        -- If b.name = name: contradicts hNameNotInRest
+        by_cases hbEqName : b.name = name
+        · apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hbEqName⟩
+        · -- If b.name ≠ name: b.name ∈ sm (by hTailSubsetSm), contradicts hFreshInSm
+          exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) (hTailSubsetSm b.name hbEqName hbIn)
+      -- Apply inductive hypothesis.
+      -- Note: lowerBindingsP uses the actual localBindings' from the head step.
+      -- The consume-body predicate hRest was built with the same parameters.
+      -- localBindings' = (lowerValueP ...).2.2 = localBindings (consume doesn't change it).
+      have hLocalBindingsUnchanged :
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.2 = localBindings :=
+        lowerValueP_snd_snd_eq_localBindings progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm name v (Or.inr hHead)
+      rw [hLocalBindingsUnchanged]
+      exact runOps_lowerBindingsP_structuralConsumeBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1)
+        tsm' (anfSt.addBinding name loadedVal) stkSt'
+        (by rw [← hUntagTsm', hUntagSm])
+        hAgreesNew
+        hRest
+        hFreshInSm'
+        hRestNodup
+
+/-- Named-method runtime-success theorem for the structural-consume
+fragment.  Unlike the copy-mode version, the consume-mode lowerer does
+NOT reduce to `lowerBindings`; instead we appeal directly to the
+`lowerBindingsP` isSome theorem above. -/
+theorem runMethod_lower_public_unique_no_post_structuralConsume_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (tsm : TaggedStackMap) (anfSt : State) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hConsume :
+      structuralConsumeBody methods props Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts m.body)
+        m.body (List.reverse (m.params.map (fun p => p.name))) 0)
+    (hUntagSm : untagSm tsm = List.reverse (m.params.map (fun p => p.name)))
+    (hAgrees : agreesTagged tsm anfSt initialStack)
+    (hBodyFresh : ∀ b ∈ m.body, b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hBodyNodup : (m.body.map (fun b => b.name)).Nodup) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  unfold lowerMethodUserRawOps
+  exact runOps_lowerBindingsP_structuralConsumeBody_isSome
+    methods props Stack.Lower.defaultInlineBudget
+    (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name))
+    (Stack.Lower.collectConstInts m.body)
+    m.body (List.reverse (m.params.map (fun p => p.name))) 0
+    tsm anfSt initialStack hUntagSm hAgrees hConsume
+    hBodyFresh hBodyNodup
+
+/-! ### `structuralRefBody` — union of copy and consume fragments
+
+The "ref" fragment is the disjunction: each binding is either in the
+copy-mode fragment or the consume-mode fragment.  This is the predicate
+used by the combined Pipeline theorem `lower_observational_correct_ref`.
+-/
+
+/-- Per-value ref predicate: copy-mode OR consume-mode. -/
+def structuralRefValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralCopyValue lastUses outerProtected localBindings sm currentIndex v ∨
+  structuralConsumeValue lastUses outerProtected localBindings sm currentIndex v
+
+/-- Body-level ref predicate.  Because copy-mode and consume-mode thread
+the stack map differently (copy: `sm.push name`, consume:
+`(sm.removeAtDepth d).push name`), the ref-body predicate must commit to
+one mode per binding.  We express this as: each binding is either
+copy-mode (with the copy sm threading) or consume-mode (with the consume
+sm threading), and the tail sm is whatever `lowerValueP` actually
+produces.  The Boolean checker below can decide this by computing both
+possibilities. -/
+def structuralRefBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralRefValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralRefBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- ANF-side success for the ref fragment: case-split on copy vs consume. -/
+theorem evalBindings_structuralRefBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (anfSt : State),
+      structuralRefBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, ∀ n, b.value = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv) →
+      (∀ b ∈ body, ∀ n, b.value = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv) →
+      (∀ n, (sm.depth? n).isSome = true → ∃ val, anfSt.resolveRef n = some val) →
+      (body.map (·.name)).Nodup →
+      (RunarVerification.ANF.Eval.evalBindings anfSt body).toOption.isSome
+  | [], _sm, _idx, _s, _h, _hp, _hprop, _hr, _hn => by
+      simp [RunarVerification.ANF.Eval.evalBindings, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, anfSt, h, hParamDomain, hPropDomain, hRefReady, hNodup => by
+      simp only [structuralRefBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      simp only [structuralRefValue] at hHead
+      -- The head is either copy-mode or consume-mode: either way evalValue succeeds.
+      have hParamDomHead : ∀ n, v = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv :=
+        fun n hv => hParamDomain (.mk name v _src) List.mem_cons_self n hv
+      have hPropDomHead : ∀ n, v = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv :=
+        fun n hv => hPropDomain (.mk name v _src) List.mem_cons_self n hv
+      obtain ⟨val, hVal⟩ : ∃ val, RunarVerification.ANF.Eval.evalValue anfSt v = .ok (val, anfSt) := by
+        cases hHead with
+        | inl hCopy =>
+            exact evalValue_structuralCopyValue_ok lastUses outerProtected localBindings sm
+              currentIndex anfSt v hCopy hParamDomHead hPropDomHead hRefReady
+        | inr hConsume =>
+            exact evalValue_structuralConsumeValue_ok lastUses outerProtected localBindings sm
+              currentIndex anfSt v hConsume hParamDomHead hRefReady
+      simp only [RunarVerification.ANF.Eval.evalBindings, hVal]
+      -- Domain conditions for the tail.
+      have hParamDomain' :
+          ∀ b ∈ rest, ∀ n, b.value = .loadParam n →
+            ∃ pv, (anfSt.addBinding name val).lookupParam n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupParam, State.addBinding]
+        exact hParamDomain b (List.mem_cons_of_mem _ hb) n hbn
+      -- RefReady for the tail: conservative argument as in consume case.
+      have hRefReady' : ∀ n,
+          ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.1.depth? n).isSome = true →
+          ∃ vv, (anfSt.addBinding name val).resolveRef n = some vv := by
+        intro n hD
+        by_cases hEq : n = name
+        · exact ⟨val, by
+              simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+              simp [hEq, List.find?]⟩
+        · -- n ≠ name: resolve in the original state first.
+          -- (lowerValueP ...).2.1 has name as head, tail ⊆ sm.
+          -- For n ≠ name, n is in the tail, hence in sm.
+          have hInSm : (sm.depth? n).isSome = true := by
+            -- The head of (lowerValueP ...).2.1 is always 'name'.
+            -- Any other element is in sm (either sm unchanged or sm.removeAtDepth d).
+            -- We use the same depth-0-is-name argument as above.
+            simp [Option.isSome_iff_exists] at hD
+            obtain ⟨d', hd'⟩ := hD
+            cases d' with
+            | zero =>
+                -- depth 0 = name, contradicts n ≠ name
+                exfalso
+                have hHead0 : (Stack.Lower.lowerValueP progMethods props budget currentIndex
+                      lastUses outerProtected localBindings constInts sm name v).2.1.head?
+                    = some name := by
+                  cases hHead with
+                  | inl hCopy =>
+                      -- Copy mode: output sm = sm.push name
+                      have hSnd : (Stack.Lower.lowerValueP progMethods props budget currentIndex
+                            lastUses outerProtected localBindings constInts sm name v).2.1
+                          = sm.push name := by
+                        rw [lowerValueP_eq_lowerValue_structuralCopy
+                              progMethods props budget currentIndex lastUses outerProtected
+                              localBindings constInts sm name v hCopy]
+                        exact lowerValue_snd_structuralCopy lastUses outerProtected localBindings
+                          sm currentIndex name v hCopy
+                      rw [hSnd]
+                      simp [Stack.Lower.StackMap.push]
+                  | inr hConsume =>
+                      -- Consume mode: output sm = (sm.removeAtDepth d).push name
+                      cases v with
+                      | loadParam consuming =>
+                          unfold structuralConsumeValue at hConsume
+                          obtain ⟨⟨d, hDepthD⟩, hCond⟩ := hConsume
+                          have hShape := lowerValueP_loadParam_consume_sm2_eq progMethods props
+                            budget currentIndex lastUses outerProtected localBindings constInts
+                            sm name consuming d hDepthD hCond
+                          rw [hShape]
+                          simp [Stack.Lower.StackMap.push]
+                      | loadConst c =>
+                          cases c with
+                          | refAlias consuming =>
+                              unfold structuralConsumeValue at hConsume
+                              obtain ⟨⟨d, hDepthD⟩, hCond⟩ := hConsume
+                              have hShape := lowerValueP_refAlias_consume_sm2_eq progMethods props
+                                budget currentIndex lastUses outerProtected localBindings constInts
+                                sm name consuming d hDepthD hCond
+                              rw [hShape]
+                              simp [Stack.Lower.StackMap.push]
+                          | int _ | bool _ | bytes _ =>
+                              unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                              simp [Stack.Lower.StackMap.push]
+                          | thisRef => simp [structuralConsumeValue] at hConsume
+                      | _ => simp [structuralConsumeValue] at hConsume
+                -- depth 0 of head = name, but we said n ≠ name
+                have : ((Stack.Lower.lowerValueP progMethods props budget currentIndex
+                      lastUses outerProtected localBindings constInts sm name v).2.1).head?
+                    = some n := by
+                  unfold Stack.Lower.StackMap.depth? at hd'
+                  have ⟨hlen, hAt, _⟩ := List.findIdx?_eq_some_iff_getElem.mp hd'
+                  cases h2 : (Stack.Lower.lowerValueP progMethods props budget currentIndex
+                      lastUses outerProtected localBindings constInts sm name v).2.1 with
+                  | nil => simp [h2] at hlen
+                  | cons x rest =>
+                      simp only [List.head?, h2, List.getElem_cons_zero, beq_iff_eq] at *
+                      exact congrArg some hAt
+                rw [hHead0] at this
+                exact hEq (Option.some.inj this).symm
+            | succ d'' =>
+                -- depth d''+1: n is in the tail of (lowerValueP ...).2.1.
+                -- The tail of (lowerValueP ...).2.1 is a subset of sm.
+                simp [Option.isSome_iff_exists]
+                -- Helper: from (name :: smTail).depth? n = some (d''+1) and n ≠ name,
+                -- derive ∃ k, smTail.findIdx? (· == n) = some k.
+                have findIdxConsSucc :
+                    ∀ (smTail : StackMap),
+                    (name :: smTail).findIdx? (· == n) = some (d'' + 1) →
+                    ∃ k, smTail.findIdx? (· == n) = some k := by
+                  intro smTail hTail
+                  have hne : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hEq)
+                  rw [List.findIdx?_cons, hne] at hTail
+                  cases h : smTail.findIdx? (· == n) with
+                  | none => simp [h] at hTail
+                  | some k => exact ⟨k, rfl⟩
+                cases hHead with
+                | inl hCopy =>
+                    -- Copy mode: output sm = sm.push name = name :: sm
+                    have hSnd : (Stack.Lower.lowerValueP progMethods props budget currentIndex
+                          lastUses outerProtected localBindings constInts sm name v).2.1
+                        = sm.push name := by
+                      rw [lowerValueP_eq_lowerValue_structuralCopy
+                            progMethods props budget currentIndex lastUses outerProtected
+                            localBindings constInts sm name v hCopy]
+                      exact lowerValue_snd_structuralCopy lastUses outerProtected localBindings
+                        sm currentIndex name v hCopy
+                    rw [hSnd, Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?] at hd'
+                    obtain ⟨k, hk⟩ := findIdxConsSucc sm hd'
+                    exact ⟨k, by unfold Stack.Lower.StackMap.depth?; exact hk⟩
+                | inr hConsume =>
+                    -- Consume mode: output sm = (sm.removeAtDepth dc).push name
+                    cases v with
+                    | loadParam consuming =>
+                        unfold structuralConsumeValue at hConsume
+                        obtain ⟨⟨dc, hDepthDc⟩, hCond⟩ := hConsume
+                        have hSnd :
+                            (Stack.Lower.lowerValueP progMethods props budget currentIndex
+                                lastUses outerProtected localBindings constInts sm name
+                                (.loadParam consuming)).2.1
+                            = (Stack.Lower.StackMap.removeAtDepth sm dc).push name := by
+                          unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam
+                            Stack.Lower.bringToTop
+                          rw [hDepthDc]
+                          cases dc with
+                          | zero =>
+                              cases sm with
+                              | nil => simp [Stack.Lower.StackMap.depth?] at hDepthDc
+                              | cons h t =>
+                                  simp [hCond, Stack.Lower.StackMap.push,
+                                        Stack.Lower.StackMap.removeAtDepth]
+                          | succ d1 =>
+                              cases d1 with
+                              | zero =>
+                                  cases sm with
+                                  | nil => simp [Stack.Lower.StackMap.depth?] at hDepthDc
+                                  | cons a rest =>
+                                      cases rest with
+                                      | nil => simp [Stack.Lower.StackMap.depth?] at hDepthDc
+                                      | cons b rest2 =>
+                                          simp [hCond, Stack.Lower.StackMap.push,
+                                                Stack.Lower.StackMap.removeAtDepth]
+                              | succ d2 =>
+                                  cases d2 with
+                                  | zero => simp [hCond, Stack.Lower.StackMap.removeAtDepth,
+                                                  Stack.Lower.StackMap.push]
+                                  | succ _ => simp [hCond, Stack.Lower.StackMap.push]
+                        rw [hSnd, Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?] at hd'
+                        obtain ⟨k, hk⟩ := findIdxConsSucc
+                          (Stack.Lower.StackMap.removeAtDepth sm dc) hd'
+                        have := depth?_isSome_removeAtDepth_of_isSome sm n dc
+                          (by simp [Stack.Lower.StackMap.depth?, hk])
+                        simp [Option.isSome_iff_exists] at this
+                        exact this
+                    | loadConst c =>
+                        cases c with
+                        | refAlias consuming =>
+                            unfold structuralConsumeValue at hConsume
+                            obtain ⟨⟨dc, hDepthDc⟩, hCond⟩ := hConsume
+                            have hSnd :
+                                (Stack.Lower.lowerValueP progMethods props budget currentIndex
+                                    lastUses outerProtected localBindings constInts sm name
+                                    (.loadConst (.refAlias consuming))).2.1
+                                = (Stack.Lower.StackMap.removeAtDepth sm dc).push name := by
+                              unfold Stack.Lower.lowerValueP Stack.Lower.bringToTop
+                              rw [hDepthDc]
+                              cases dc with
+                              | zero =>
+                                  cases sm with
+                                  | nil => simp [Stack.Lower.StackMap.depth?] at hDepthDc
+                                  | cons h t =>
+                                      simp [hCond, Stack.Lower.StackMap.push,
+                                            Stack.Lower.StackMap.removeAtDepth]
+                              | succ d1 =>
+                                  cases d1 with
+                                  | zero =>
+                                      cases sm with
+                                      | nil => simp [Stack.Lower.StackMap.depth?] at hDepthDc
+                                      | cons a rest =>
+                                          cases rest with
+                                          | nil => simp [Stack.Lower.StackMap.depth?] at hDepthDc
+                                          | cons b rest2 =>
+                                              simp [hCond, Stack.Lower.StackMap.push,
+                                                    Stack.Lower.StackMap.removeAtDepth]
+                                  | succ d2 =>
+                                      cases d2 with
+                                      | zero => simp [hCond, Stack.Lower.StackMap.removeAtDepth,
+                                                      Stack.Lower.StackMap.push]
+                                      | succ _ => simp [hCond, Stack.Lower.StackMap.push]
+                            rw [hSnd, Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?] at hd'
+                            obtain ⟨k, hk⟩ := findIdxConsSucc
+                              (Stack.Lower.StackMap.removeAtDepth sm dc) hd'
+                            have := depth?_isSome_removeAtDepth_of_isSome sm n dc
+                              (by simp [Stack.Lower.StackMap.depth?, hk])
+                            simp [Option.isSome_iff_exists] at this
+                            exact this
+                        | int i =>
+                            have hSnd : (Stack.Lower.lowerValueP progMethods props budget
+                                currentIndex lastUses outerProtected localBindings constInts sm
+                                name (.loadConst (.int i))).2.1 = sm.push name := by
+                              unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                              simp [Stack.Lower.StackMap.push]
+                            rw [hSnd, Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?] at hd'
+                            obtain ⟨k, hk⟩ := findIdxConsSucc sm hd'
+                            exact ⟨k, by unfold Stack.Lower.StackMap.depth?; exact hk⟩
+                        | bool b =>
+                            have hSnd : (Stack.Lower.lowerValueP progMethods props budget
+                                currentIndex lastUses outerProtected localBindings constInts sm
+                                name (.loadConst (.bool b))).2.1 = sm.push name := by
+                              unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                              simp [Stack.Lower.StackMap.push]
+                            rw [hSnd, Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?] at hd'
+                            obtain ⟨k, hk⟩ := findIdxConsSucc sm hd'
+                            exact ⟨k, by unfold Stack.Lower.StackMap.depth?; exact hk⟩
+                        | bytes bs =>
+                            have hSnd : (Stack.Lower.lowerValueP progMethods props budget
+                                currentIndex lastUses outerProtected localBindings constInts sm
+                                name (.loadConst (.bytes bs))).2.1 = sm.push name := by
+                              unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                              simp [Stack.Lower.StackMap.push]
+                            rw [hSnd, Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?] at hd'
+                            obtain ⟨k, hk⟩ := findIdxConsSucc sm hd'
+                            exact ⟨k, by unfold Stack.Lower.StackMap.depth?; exact hk⟩
+                        | thisRef => simp [structuralConsumeValue] at hConsume
+                    | _ => simp [structuralConsumeValue] at hConsume
+          obtain ⟨vv, hRes⟩ := hRefReady n hInSm
+          refine ⟨vv, ?_⟩
+          simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+          simp only [State.resolveRef, State.lookupBinding] at hRes
+          have hNameNeqN : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hEq)
+          simp only [List.find?_cons, hNameNeqN]
+          exact hRes
+      have hPropDomain' : ∀ b ∈ rest, ∀ n, b.value = .loadProp n →
+          ∃ pv, (anfSt.addBinding name val).lookupProp n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupProp, State.addBinding]
+        exact hPropDomain b (List.mem_cons_of_mem _ hb) n hbn
+      simp only [List.map_cons, List.nodup_cons] at hNodup
+      obtain ⟨_, hRestNodup⟩ := hNodup
+      exact evalBindings_structuralRefBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1) (anfSt.addBinding name val)
+        hRest hParamDomain' hPropDomain' hRefReady' hRestNodup
+
+/-- `runOps` of a structural-ref body's lowered op list succeeds from any
+starting state with `agreesTagged tsm anfSt stkSt`. -/
+theorem runOps_lowerBindingsP_structuralRefBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState),
+      untagSm tsm = sm →
+      agreesTagged tsm anfSt stkSt →
+      structuralRefBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+                 outerProtected localBindings constInts sm body).1
+              stkSt).toOption.isSome
+  | [], _sm, _idx, _tsm, _anfSt, _stkSt, _, _, _, _, _ => by
+      simp [Stack.Lower.lowerBindingsP, runOps, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, tsm, anfSt, stkSt,
+      hUntagSm, hAgrees, h, hFreshInSm, hBodyNodup => by
+      simp only [structuralRefBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      simp only [structuralRefValue] at hHead
+      have hFreshHead : name ∉ sm := hFreshInSm (.mk name v _src) List.mem_cons_self
+      have hFresh : freshIn name (untagSm tsm) := by rw [hUntagSm]; exact hFreshHead
+      -- Dispatch on copy vs consume.
+      have hHeadSm : structuralRefValue lastUses outerProtected localBindings (untagSm tsm)
+          currentIndex v := by
+        simp only [structuralRefValue]
+        cases hHead with
+        | inl hCopy => exact Or.inl (by rw [hUntagSm]; exact hCopy)
+        | inr hConsume => exact Or.inr (by rw [hUntagSm]; exact hConsume)
+      obtain ⟨stkSt', loadedVal, hHeadRun, tsm', hUntagTsm', hAgreesNew⟩ : ∃ stkSt' loadedVal,
+          runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts (untagSm tsm) name v).1
+                 stkSt = .ok stkSt' ∧
+          ∃ tsm', (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                       outerProtected localBindings constInts (untagSm tsm) name v).2.1
+                    = untagSm tsm' ∧
+                  agreesTagged tsm' (anfSt.addBinding name loadedVal) stkSt' := by
+        simp only [structuralRefValue] at hHeadSm
+        cases hHeadSm with
+        | inl hCopy =>
+            -- Copy mode: use lowerValue equality, then single-value copy witness.
+            have hEq :=
+              lowerValueP_eq_lowerValue_structuralCopy
+                progMethods props budget currentIndex lastUses outerProtected
+                localBindings constInts (untagSm tsm) name v hCopy
+            obtain ⟨stkSt', loadedVal, hRun, _, hAgreesNew⟩ :=
+              runOps_lowerValue_structuralCopyValue_ok lastUses outerProtected localBindings
+                (untagSm tsm) currentIndex tsm anfSt stkSt rfl hAgrees name v hCopy hFresh
+            refine ⟨stkSt', loadedVal, ?_, (name, .binding) :: tsm, ?_, hAgreesNew⟩
+            · rw [hEq]; exact hRun
+            · rw [hEq]
+              simp [untagSm, lowerValue_snd_structuralCopy lastUses outerProtected localBindings
+                    (untagSm tsm) currentIndex name v hCopy, Stack.Lower.StackMap.push]
+        | inr hConsume =>
+            -- Consume mode: use consume witness.
+            exact runOps_lowerValueP_structuralConsumeValue_ok
+              progMethods props budget currentIndex lastUses outerProtected localBindings constInts
+              tsm anfSt stkSt hAgrees name v hConsume hFresh
+      -- Unfold lowerBindingsP.
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm
+              ((ANFBinding.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1) lastUses
+                    outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      -- hHeadRun uses (untagSm tsm), but hUnfold uses sm. Rewrite hHeadRun to use sm.
+      have hHeadRunSm :
+          runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).1 stkSt = .ok stkSt' := by
+        rw [← hUntagSm]; exact hHeadRun
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRunSm]
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      -- A helper: any element ≠ name in (lowerValueP ...).2.1 is in sm.
+      have hTailSubsetSmRef : ∀ x, x ≠ name →
+          x ∈ (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).2.1 →
+          x ∈ sm := by
+        intro x hxNe hxMem
+        cases hHead with
+        | inl hCopy =>
+            -- Copy mode: (lowerValueP ...).2.1 = sm.push name = name :: sm
+            have hSnd : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).2.1
+                = sm.push name := by
+              rw [lowerValueP_eq_lowerValue_structuralCopy
+                    progMethods props budget currentIndex lastUses outerProtected
+                    localBindings constInts sm name v hCopy]
+              exact lowerValue_snd_structuralCopy lastUses outerProtected localBindings
+                sm currentIndex name v hCopy
+            rw [hSnd, Stack.Lower.StackMap.push] at hxMem
+            simp [List.mem_cons] at hxMem
+            exact hxMem.resolve_left hxNe
+        | inr hConsume =>
+            -- Consume mode: same shape analysis as hTailSubsetSm above
+            cases v with
+            | loadConst c =>
+                cases c with
+                | int i =>
+                    have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name (.loadConst (.int i))).2.1 = name :: sm := by
+                      unfold Stack.Lower.lowerValueP Stack.Lower.emitConst Stack.Lower.StackMap.push; rfl
+                    rw [hSm] at hxMem
+                    exact (List.mem_cons.mp hxMem).resolve_left hxNe
+                | bool b =>
+                    have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name (.loadConst (.bool b))).2.1 = name :: sm := by
+                      unfold Stack.Lower.lowerValueP Stack.Lower.emitConst Stack.Lower.StackMap.push; rfl
+                    rw [hSm] at hxMem
+                    exact (List.mem_cons.mp hxMem).resolve_left hxNe
+                | bytes bs =>
+                    have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name (.loadConst (.bytes bs))).2.1 = name :: sm := by
+                      unfold Stack.Lower.lowerValueP Stack.Lower.emitConst Stack.Lower.StackMap.push; rfl
+                    rw [hSm] at hxMem
+                    exact (List.mem_cons.mp hxMem).resolve_left hxNe
+                | refAlias consuming =>
+                    unfold structuralConsumeValue at hConsume
+                    obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                    have hShape : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name (.loadConst (.refAlias consuming))).2.1
+                        = Stack.Lower.StackMap.push (Stack.Lower.StackMap.removeAtDepth sm d) name :=
+                      lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex
+                        lastUses outerProtected localBindings constInts sm name consuming d hDepth hCons
+                    rw [hShape, Stack.Lower.StackMap.push] at hxMem
+                    simp [List.mem_cons] at hxMem
+                    exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+                | thisRef => simp [structuralConsumeValue] at hConsume
+            | loadParam consuming =>
+                unfold structuralConsumeValue at hConsume
+                obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                have hShape : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name (.loadParam consuming)).2.1
+                    = Stack.Lower.StackMap.push (Stack.Lower.StackMap.removeAtDepth sm d) name :=
+                  lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex
+                    lastUses outerProtected localBindings constInts sm name consuming d hDepth hCons
+                rw [hShape, Stack.Lower.StackMap.push] at hxMem
+                simp [List.mem_cons] at hxMem
+                exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+            | _ => simp [structuralConsumeValue] at hConsume
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).2.1 := by
+        intro b hbMem hbIn
+        by_cases hbEqName : b.name = name
+        · apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hbEqName⟩
+        · exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) (hTailSubsetSmRef b.name hbEqName hbIn)
+      have hLocalBindingsUnchanged :
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.2 = localBindings :=
+        lowerValueP_snd_snd_eq_localBindings progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm name v hHead
+      rw [hLocalBindingsUnchanged]
+      exact runOps_lowerBindingsP_structuralRefBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1) tsm' (anfSt.addBinding name loadedVal) stkSt'
+        (by rw [← hUntagTsm', hUntagSm])
+        hAgreesNew hRest hFreshInSm' hRestNodup
+
+/-- Named-method runtime-success theorem for the structural-ref fragment. -/
+theorem runMethod_lower_public_unique_no_post_structuralRef_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (tsm : TaggedStackMap) (anfSt : State) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hRef :
+      structuralRefBody methods props Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts m.body)
+        m.body (List.reverse (m.params.map (fun p => p.name))) 0)
+    (hUntagSm : untagSm tsm = List.reverse (m.params.map (fun p => p.name)))
+    (hAgrees : agreesTagged tsm anfSt initialStack)
+    (hBodyFresh : ∀ b ∈ m.body, b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hBodyNodup : (m.body.map (fun b => b.name)).Nodup) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  unfold lowerMethodUserRawOps
+  exact runOps_lowerBindingsP_structuralRefBody_isSome
+    methods props Stack.Lower.defaultInlineBudget
+    (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name))
+    (Stack.Lower.collectConstInts m.body)
+    m.body (List.reverse (m.params.map (fun p => p.name))) 0
+    tsm anfSt initialStack hUntagSm hAgrees hRef
+    hBodyFresh hBodyNodup
+
+/-! ### Decidable instances for `structuralConsumeBody` and `structuralRefBody` -/
+
+/-- Boolean checker for `structuralConsumeValue`. -/
+def structuralConsumeValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  | .loadConst (.int _) => true
+  | .loadConst (.bool _) => true
+  | .loadConst (.bytes _) => true
+  | .loadParam n =>
+      (sm.depth? n).isSome &&
+      (!Stack.Lower.listContains outerProtected n
+        && Stack.Lower.isLastUse lastUses n currentIndex)
+  | .loadConst (.refAlias n) =>
+      (sm.depth? n).isSome &&
+      (Stack.Lower.listContains localBindings n
+        && !Stack.Lower.listContains outerProtected n
+        && Stack.Lower.isLastUse lastUses n currentIndex)
+  | _ => false
+
+/-- Boolean checker for `structuralConsumeBody`. -/
+def structuralConsumeBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralConsumeBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralConsumeValueBool` reflects `structuralConsumeValue`. -/
+theorem structuralConsumeValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralConsumeValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  | loadConst c =>
+      cases c with
+      | int _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+      | bool _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+      | bytes _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+      | refAlias n =>
+          simp only [structuralConsumeValueBool, structuralConsumeValue]
+          constructor
+          · intro h
+            have ⟨h1, h2⟩ := (Bool.and_eq_true _ _).mp h
+            exact ⟨Option.isSome_iff_exists.mp h1, h2⟩
+          · intro ⟨⟨d, hd⟩, hC⟩
+            exact (Bool.and_eq_true _ _).mpr ⟨Option.isSome_iff_exists.mpr ⟨d, hd⟩, hC⟩
+      | thisRef => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | loadParam n =>
+      simp only [structuralConsumeValueBool, structuralConsumeValue]
+      constructor
+      · intro h
+        have ⟨h1, h2⟩ := (Bool.and_eq_true _ _).mp h
+        exact ⟨Option.isSome_iff_exists.mp h1, h2⟩
+      · intro ⟨⟨d, hd⟩, hC⟩
+        exact (Bool.and_eq_true _ _).mpr ⟨Option.isSome_iff_exists.mpr ⟨d, hd⟩, hC⟩
+  | loadProp _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | binOp _ _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | unaryOp _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | call _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | methodCall _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | ifVal _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | loop _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | assert _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | updateProp _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | getStateScript => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | checkPreimage _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | deserializeState _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | addOutput _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | addRawOutput _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | addDataOutput _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | arrayLiteral _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | rawScript _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+
+/-- `structuralConsumeBodyBool` reflects `structuralConsumeBody`. -/
+theorem structuralConsumeBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralConsumeBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralConsumeBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by
+      simp [structuralConsumeBodyBool, structuralConsumeBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralConsumeBodyBool, structuralConsumeBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralConsumeValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralConsumeBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralConsumeValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralConsumeBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralConsumeBody` is decidable. -/
+instance decidableStructuralConsumeBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralConsumeBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralConsumeBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralConsumeBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralConsumeBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+/-- Boolean checker for `structuralRefBody`. -/
+def structuralRefBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      (structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex v ||
+       structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex v) &&
+      structuralRefBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralRefBodyBool` reflects `structuralRefBody`. -/
+theorem structuralRefBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralRefBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralRefBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by
+      simp [structuralRefBodyBool, structuralRefBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralRefBodyBool, structuralRefBody, Bool.and_eq_true, Bool.or_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        refine ⟨?_, (structuralRefBodyBool_iff progMethods props budget lastUses outerProtected
+                      localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+        simp only [structuralRefValue]
+        cases hH with
+        | inl hCopy =>
+            exact Or.inl ((structuralCopyValueBool_iff lastUses outerProtected localBindings
+                              sm currentIndex v).mp hCopy)
+        | inr hConsume =>
+            exact Or.inr ((structuralConsumeValueBool_iff lastUses outerProtected localBindings
+                              sm currentIndex v).mp hConsume)
+      · intro ⟨hH, hR⟩
+        simp only [structuralRefValue] at hH
+        refine ⟨?_, (structuralRefBodyBool_iff progMethods props budget lastUses outerProtected
+                      localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+        cases hH with
+        | inl hCopy =>
+            exact Or.inl ((structuralCopyValueBool_iff lastUses outerProtected localBindings
+                              sm currentIndex v).mpr hCopy)
+        | inr hConsume =>
+            exact Or.inr ((structuralConsumeValueBool_iff lastUses outerProtected localBindings
+                              sm currentIndex v).mpr hConsume)
+
+/-- `structuralRefBody` is decidable. -/
+instance decidableStructuralRefBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralRefBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralRefBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralRefBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralRefBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+/-! ### A3 — `binOp` / `unaryOp` / `assert` structural fragment
+
+Sub-milestone A3 widens the lowering-simulation coverage to include
+arithmetic bindings.  The predicate `structuralArithValue` extends
+`structuralRefValue` with three new constructor families:
+
+* **`binOp op l r rt`** — both operands exist in `sm`, both are loaded
+  in copy-mode (not their last use, or they are outer-protected), and the
+  operator is in the proved set `isProvedBinOpKind`.  DIV and MOD are
+  excluded because their semantics include a runtime divisor-zero error
+  that would require an extra domain precondition; they are deferred to A4.
+  The `!==` with `rt = some "bytes"` variant is also excluded because it
+  appends a trailing `OP_NOT` that complicates the ops shape.
+
+* **`unaryOp op operand rt`** — operand exists in `sm`, loaded in copy-mode,
+  operator in `isProvedUnaryOpKind`.
+
+* **`assert ref`** — ref exists in `sm`, loaded in copy-mode.
+  The ANF semantics of `assert` succeed only when the ref is `vBool true`;
+  the runtime success theorem carries this as an explicit precondition.
+
+**Liveness constraint**: requiring both operands to be in copy-mode
+(consume = false) makes `lowerValueP` and `lowerValue` agree on the
+emitted ops AND output stack map.  This enables reuse of the existing
+Stage C witnesses which are stated over `lowerValue`.
+
+**DIV / MOD / `!==`-bytes**: excluded from `isProvedBinOpKind`; the
+corresponding `lowerValueP` arms are correct but the ANF-side and
+Stack-side success theorems need divisor-nonzero / type-matching
+preconditions that are deferred to a later sub-milestone.
+-/
+
+/-- Boolean guard: the `binOp` operator string is in the set whose
+runtime proof is fully discharged (excludes `/`, `%`, `!==`-bytes). -/
+def isProvedBinOpKind (op : String) : Bool :=
+  op == "+" || op == "-" || op == "*" ||
+  op == "<" || op == "<=" || op == ">" || op == ">=" ||
+  op == "===" || op == "!==" ||
+  op == "&&" || op == "||" ||
+  op == "<<" || op == ">>" ||
+  op == "&" || op == "|" || op == "^"
+
+/-- Boolean guard: the `unaryOp` operator string is in the proved set.
+`!` (NOT), `-` (NEGATE), and `~` (INVERT) are all proved. -/
+def isProvedUnaryOpKind (op : String) : Bool :=
+  op == "!" || op == "-" || op == "~"
+
+/-! #### `structuralArithValue` and `structuralArithBody` -/
+
+/-- Per-value arith fragment.  Extends `structuralRefValue` with binOp /
+unaryOp / assert in copy-mode (operands not consumed by liveness). -/
+def structuralArithValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralRefValue lastUses outerProtected localBindings sm currentIndex v ∨
+  (∃ op l r rt,
+    v = .binOp op l r rt ∧
+    (∃ _dl, sm.depth? l = some _dl) ∧
+    (∃ _dr, sm.depth? r = some _dr) ∧
+    (!Stack.Lower.listContains outerProtected l &&
+        Stack.Lower.isLastUse lastUses l currentIndex) = false ∧
+    (!Stack.Lower.listContains outerProtected r &&
+        Stack.Lower.isLastUse lastUses r currentIndex) = false ∧
+    isProvedBinOpKind op = true) ∨
+  (∃ op operand rt,
+    v = .unaryOp op operand rt ∧
+    (∃ _d, sm.depth? operand = some _d) ∧
+    (!Stack.Lower.listContains outerProtected operand &&
+        Stack.Lower.isLastUse lastUses operand currentIndex) = false ∧
+    isProvedUnaryOpKind op = true) ∨
+  (∃ operand,
+    v = .assert operand ∧
+    (∃ _d, sm.depth? operand = some _d) ∧
+    (!Stack.Lower.listContains outerProtected operand &&
+        Stack.Lower.isLastUse lastUses operand currentIndex) = false)
+
+/-- Body-level arith predicate.  Threads the stack map through
+`lowerValueP` (matching the program-aware lowerer) so that each
+binding's structural condition is checked against the correct post-map.
+This mirrors `structuralRefBody`. -/
+def structuralArithBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralArithValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralArithBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-! #### Helper: copy-mode `loadRefLive` equality -/
+
+/-- When the consume flag is false, `loadRefLive` reduces to
+`(loadRef sm name, sm.push name)` provided `name` is in `sm`. -/
+private theorem loadRefLive_copy_eq
+    (sm : StackMap) (name : String) (currentIndex : Nat)
+    (lastUses : List (String × Nat)) (outerProtected : List String)
+    (dl : Nat) (hDepth : sm.depth? name = some dl)
+    (hCopy : (!Stack.Lower.listContains outerProtected name &&
+                Stack.Lower.isLastUse lastUses name currentIndex) = false) :
+    Stack.Lower.loadRefLive sm name currentIndex lastUses outerProtected
+      = (Stack.Lower.loadRef sm name, sm.push name) := by
+  unfold Stack.Lower.loadRefLive
+  rw [show (!Stack.Lower.listContains outerProtected name &&
+               Stack.Lower.isLastUse lastUses name currentIndex) = false from hCopy]
+  simp only [Bool.false_eq_true, not_true, decide_false, Bool.not_false]
+  exact bringToTop_copy_eq_loadRef_of_depth sm name dl hDepth
+
+/-- The depth of `r` in `sm.push l` is `Some` whenever `sm.depth? r` is
+`Some` (the depth increases by 1 if `r ≠ l`, or is 0 if `r = l`). -/
+private theorem depth?_isSome_of_push_left
+    (sm : StackMap) (l r : String)
+    (h : (sm.depth? r).isSome = true) :
+    ((sm.push l).depth? r).isSome = true := by
+  simp only [Stack.Lower.StackMap.push, Stack.Lower.StackMap.depth?,
+             Option.isSome_iff_exists] at *
+  obtain ⟨dr, hdr⟩ := h
+  by_cases heq : l = r
+  · subst heq
+    exact ⟨0, by simp [List.findIdx?_cons, beq_self_eq_true]⟩
+  · refine ⟨dr + 1, ?_⟩
+    rw [List.findIdx?_cons]
+    simp only [beq_iff_eq, heq, if_false]
+    simp [hdr]
+
+/-- For any `loadConst` that is not `refAlias` or `thisRef` (i.e. `int`, `bool`, `bytes`),
+`lowerValueP` outputs `sm.push name` as the new stack map. -/
+private theorem lowerValueP_loadConst_int_sm2
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name : String) (i : Int) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name (.loadConst (.int i))).2.1
+      = sm.push name := by
+  unfold Stack.Lower.lowerValueP
+  simp [Stack.Lower.StackMap.push]
+
+/-- Same for `loadConst (bool b)`. -/
+private theorem lowerValueP_loadConst_bool_sm2
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name : String) (b : Bool) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name (.loadConst (.bool b))).2.1
+      = sm.push name := by
+  unfold Stack.Lower.lowerValueP
+  simp [Stack.Lower.StackMap.push]
+
+/-- Same for `loadConst (bytes bs)`. -/
+private theorem lowerValueP_loadConst_bytes_sm2
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name : String) (bs : ByteArray) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name (.loadConst (.bytes bs))).2.1
+      = sm.push name := by
+  unfold Stack.Lower.lowerValueP
+  simp [Stack.Lower.StackMap.push]
+
+/-- When both operands of a `binOp` are in copy-mode, `lowerValueP`
+agrees with `lowerValue` on ops and output stack map. -/
+private theorem lowerValueP_binOp_copy_eq_lowerValue
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn op l r : String) (rt : Option String)
+    (hl_depth : ∃ dl, sm.depth? l = some dl)
+    (hr_depth : ∃ _dr, sm.depth? r = some _dr)
+    (hl_copy : (!Stack.Lower.listContains outerProtected l &&
+                  Stack.Lower.isLastUse lastUses l currentIndex) = false)
+    (hr_copy : (!Stack.Lower.listContains outerProtected r &&
+                  Stack.Lower.isLastUse lastUses r currentIndex) = false) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bn (.binOp op l r rt)
+      = ((Stack.Lower.lowerValue sm bn (.binOp op l r rt)).1,
+         (Stack.Lower.lowerValue sm bn (.binOp op l r rt)).2,
+         localBindings) := by
+  obtain ⟨dl, hdl⟩ := hl_depth
+  obtain ⟨dr, hdr⟩ := hr_depth
+  -- Show (sm.push l).depth? r = some _
+  have hdrPushed : ∃ dr', (sm.push l).depth? r = some dr' := by
+    obtain ⟨dr', hdr'⟩ :=
+      Option.isSome_iff_exists.mp
+        (depth?_isSome_of_push_left sm l r (Option.isSome_iff_exists.mpr ⟨dr, hdr⟩))
+    exact ⟨dr', hdr'⟩
+  obtain ⟨dr', hdr'⟩ := hdrPushed
+  -- Unfold lowerValueP for binOp
+  unfold Stack.Lower.lowerValueP
+  -- Rewrite both loadRefLive calls to copy-mode form using simp (works under binders)
+  simp only [loadRefLive_copy_eq sm l currentIndex lastUses outerProtected dl hdl hl_copy,
+             loadRefLive_copy_eq (sm.push l) r currentIndex lastUses outerProtected dr' hdr' hr_copy]
+  -- Simplify sm2.popN 2 = sm
+  simp only [Stack.Lower.StackMap.push, Stack.Lower.StackMap.popN]
+  -- Now match lowerValue
+  unfold Stack.Lower.lowerValue
+  rfl
+
+/-- Same bridge for `unaryOp` in copy-mode. -/
+private theorem lowerValueP_unaryOp_copy_eq_lowerValue
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn op operand : String) (rt : Option String)
+    (hd : ∃ d, sm.depth? operand = some d)
+    (hcopy : (!Stack.Lower.listContains outerProtected operand &&
+                Stack.Lower.isLastUse lastUses operand currentIndex) = false) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bn (.unaryOp op operand rt)
+      = ((Stack.Lower.lowerValue sm bn (.unaryOp op operand rt)).1,
+         (Stack.Lower.lowerValue sm bn (.unaryOp op operand rt)).2,
+         localBindings) := by
+  obtain ⟨d, hd'⟩ := hd
+  unfold Stack.Lower.lowerValueP
+  rw [loadRefLive_copy_eq sm operand currentIndex lastUses outerProtected d hd' hcopy]
+  simp only [Stack.Lower.StackMap.push, Stack.Lower.StackMap.popN]
+  unfold Stack.Lower.lowerValue
+  rfl
+
+/-- Same bridge for `assert` in copy-mode. -/
+private theorem lowerValueP_assert_copy_eq_lowerValue
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn ref : String)
+    (hd : ∃ d, sm.depth? ref = some d)
+    (hcopy : (!Stack.Lower.listContains outerProtected ref &&
+                Stack.Lower.isLastUse lastUses ref currentIndex) = false) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bn (.assert ref)
+      = ((Stack.Lower.lowerValue sm bn (.assert ref)).1,
+         (Stack.Lower.lowerValue sm bn (.assert ref)).2,
+         localBindings) := by
+  obtain ⟨d, hd'⟩ := hd
+  unfold Stack.Lower.lowerValueP
+  rw [loadRefLive_copy_eq sm ref currentIndex lastUses outerProtected d hd' hcopy]
+  simp only [Stack.Lower.StackMap.push, Stack.Lower.StackMap.popN]
+  unfold Stack.Lower.lowerValue
+  rfl
+
+-- Note: `lowerValueP_eq_lowerValue_structuralArith` was removed.
+-- The three individual bridge lemmas (`lowerValueP_binOp_copy_eq_lowerValue`,
+-- `lowerValueP_unaryOp_copy_eq_lowerValue`, `lowerValueP_assert_copy_eq_lowerValue`)
+-- are used directly in the proofs below.
+
+/-! #### ANF-side success for the arith fragment -/
+
+/-- `evalValue` succeeds on a structural-arith value given domain conditions.
+For `binOp`/`unaryOp`/`assert`, we carry an explicit `evalValue` success
+witness rather than deriving it from types — the operation semantics depend
+on runtime types which are not tracked structurally at this milestone. -/
+theorem evalBindings_structuralArithBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (anfSt : State),
+      structuralArithBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      -- Domain for ref-kind values
+      (∀ b ∈ body, ∀ n, b.value = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv) →
+      (∀ b ∈ body, ∀ n, b.value = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv) →
+      (∀ n, (sm.depth? n).isSome = true → ∃ val, anfSt.resolveRef n = some val) →
+      -- Arith operations: explicit success witness per binding, uniform over any ANF state.
+      -- Uniformity is needed for the tail-recursive application after each head binding
+      -- adds a new name to the ANF state.
+      (∀ b ∈ body, ∀ s : State, ∀ op l r rt, b.value = .binOp op l r rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      (∀ b ∈ body, ∀ s : State, ∀ op operand rt, b.value = .unaryOp op operand rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      (∀ b ∈ body, ∀ s : State, ∀ ref, b.value = .assert ref →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      -- SSA freshness
+      (body.map (·.name)).Nodup →
+      (RunarVerification.ANF.Eval.evalBindings anfSt body).toOption.isSome
+  | [], _sm, _idx, _s, _h, _hp, _hpr, _hr, _hb, _hu, _ha, _hn => by
+      simp [RunarVerification.ANF.Eval.evalBindings, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, anfSt, h,
+      hParamDomain, hPropDomain, hRefReady, hBinOp, hUnaryOp, hAssert, hNodup => by
+      simp only [structuralArithBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      simp only [structuralArithValue] at hHead
+      -- Get evalValue success for the head binding
+      have hParamDomHead : ∀ n, v = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv :=
+        fun n hv => hParamDomain (.mk name v _src) List.mem_cons_self n hv
+      have hPropDomHead : ∀ n, v = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv :=
+        fun n hv => hPropDomain (.mk name v _src) List.mem_cons_self n hv
+      obtain ⟨val, hVal⟩ : ∃ val,
+          RunarVerification.ANF.Eval.evalValue anfSt v = .ok (val, anfSt) := by
+        rcases hHead with hRef | ⟨op, l, r, rt, hvEq, _, _, _, _, _⟩ |
+          ⟨op, operand, rt, hvEq, _, _, _⟩ | ⟨ref, hvEq, _, _⟩
+        · -- Ref case: use existing eval success lemmas
+          rcases hRef with hCopy | hConsume
+          · exact evalValue_structuralCopyValue_ok lastUses outerProtected localBindings
+              sm currentIndex anfSt v hCopy hParamDomHead hPropDomHead hRefReady
+          · exact evalValue_structuralConsumeValue_ok lastUses outerProtected localBindings
+              sm currentIndex anfSt v hConsume hParamDomHead hRefReady
+        · -- binOp arm
+          subst hvEq
+          exact hBinOp (.mk name (.binOp op l r rt) _src) List.mem_cons_self anfSt op l r rt rfl
+        · -- unaryOp arm
+          subst hvEq
+          exact hUnaryOp (.mk name (.unaryOp op operand rt) _src) List.mem_cons_self anfSt
+            op operand rt rfl
+        · -- assert arm
+          subst hvEq
+          exact hAssert (.mk name (.assert ref) _src) List.mem_cons_self anfSt ref rfl
+      simp only [RunarVerification.ANF.Eval.evalBindings, hVal]
+      -- Thread domain conditions for the tail
+      have hParamDomain' :
+          ∀ b ∈ rest, ∀ n, b.value = .loadParam n →
+            ∃ pv, (anfSt.addBinding name val).lookupParam n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupParam, State.addBinding]
+        exact hParamDomain b (List.mem_cons_of_mem _ hb) n hbn
+      have hPropDomain' :
+          ∀ b ∈ rest, ∀ n, b.value = .loadProp n →
+            ∃ pv, (anfSt.addBinding name val).lookupProp n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupProp, State.addBinding]
+        exact hPropDomain b (List.mem_cons_of_mem _ hb) n hbn
+      simp only [List.map_cons, List.nodup_cons] at hNodup
+      obtain ⟨_hNameNotInRest, hRestNodup⟩ := hNodup
+      -- RefReady for the tail: if n is in (lowerValueP ...).2.1 then it's resolvable.
+      -- We do a case analysis on the value kind to determine the tail sm shape.
+      have hRefReady' : ∀ n,
+          ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.1.depth? n).isSome = true →
+          ∃ vv, (anfSt.addBinding name val).resolveRef n = some vv := by
+        intro n hD
+        by_cases hEq : n = name
+        · exact ⟨val, by
+              simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+              simp [hEq, List.find?]⟩
+        · -- n ≠ name: derive from sm and hRefReady by analysing the tail sm shape
+          -- Note: hHead was already unfolded to the structuralArithValue disjunction above.
+          have hInSm : (sm.depth? n).isSome = true := by
+            rcases hHead with hRef | ⟨op, l, r, rt, hvEq, _, _, _, _, _⟩ |
+              ⟨op, operand, rt, hvEq, _, _, _⟩ | ⟨ref, hvEq, _, _⟩
+            · -- Ref case
+              simp only [structuralRefValue] at hRef
+              rcases hRef with hCopy | hConsume
+              · -- Copy: sm_tail = sm.push name
+                rw [lowerValueP_eq_lowerValue_structuralCopy progMethods props budget currentIndex
+                  lastUses outerProtected localBindings constInts sm name v hCopy] at hD
+                rw [lowerValue_snd_structuralCopy lastUses outerProtected localBindings sm
+                     currentIndex name v hCopy] at hD
+                exact depth?_isSome_push_of_ne sm n name hEq hD
+              · -- Consume: sm_tail = (sm.removeAtDepth d).push name or similar
+                -- We need to show n was in sm.
+                -- Since n ≠ name and n ∈ sm_tail, n ∈ sm.removeAtDepth d ⊆ sm
+                cases v with
+                | loadConst c =>
+                    cases c with
+                    | refAlias consuming =>
+                        unfold structuralConsumeValue at hConsume
+                        obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                        rw [lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex
+                              lastUses outerProtected localBindings constInts sm name consuming d
+                              hDepth hCons] at hD
+                        exact depth?_isSome_removeAtDepth_of_isSome sm n d
+                          (depth?_isSome_push_of_ne (Stack.Lower.StackMap.removeAtDepth sm d) n name hEq hD)
+                    | thisRef => simp [structuralConsumeValue] at hConsume
+                    | int i =>
+                        rw [lowerValueP_loadConst_int_sm2 progMethods props budget currentIndex
+                              lastUses outerProtected localBindings constInts sm name i] at hD
+                        exact depth?_isSome_push_of_ne sm n name hEq hD
+                    | bool b =>
+                        rw [lowerValueP_loadConst_bool_sm2 progMethods props budget currentIndex
+                              lastUses outerProtected localBindings constInts sm name b] at hD
+                        exact depth?_isSome_push_of_ne sm n name hEq hD
+                    | bytes bs =>
+                        rw [lowerValueP_loadConst_bytes_sm2 progMethods props budget currentIndex
+                              lastUses outerProtected localBindings constInts sm name bs] at hD
+                        exact depth?_isSome_push_of_ne sm n name hEq hD
+                | loadParam consuming =>
+                    unfold structuralConsumeValue at hConsume
+                    obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                    rw [lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex
+                          lastUses outerProtected localBindings constInts sm name consuming d
+                          hDepth hCons] at hD
+                    exact depth?_isSome_removeAtDepth_of_isSome sm n d
+                      (depth?_isSome_push_of_ne (Stack.Lower.StackMap.removeAtDepth sm d) n name hEq hD)
+                | _ => simp [structuralConsumeValue] at hConsume
+            · -- binOp: sm_tail = sm.push name
+              subst hvEq
+              rw [lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name op l r rt _ _ _ _,
+                show (Stack.Lower.lowerValue sm name (.binOp op l r rt)).2 = sm.push name from rfl] at hD
+              exact depth?_isSome_push_of_ne sm n name hEq hD
+              all_goals assumption
+            · -- unaryOp: sm_tail = sm.push name
+              subst hvEq
+              rw [lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name op operand rt _ _,
+                show (Stack.Lower.lowerValue sm name (.unaryOp op operand rt)).2 = sm.push name from rfl] at hD
+              exact depth?_isSome_push_of_ne sm n name hEq hD
+              all_goals assumption
+            · -- assert: sm_tail = sm (no change)
+              subst hvEq
+              rw [lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name ref _ _,
+                show (Stack.Lower.lowerValue sm name (.assert ref)).2 = sm from rfl] at hD
+              exact hD
+              all_goals assumption
+          obtain ⟨vv, hRes⟩ := hRefReady n hInSm
+          exact ⟨vv, by
+            simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+            simp only [State.resolveRef, State.lookupBinding] at hRes
+            have hNeq : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hEq)
+            simp only [List.find?_cons, hNeq]
+            exact hRes⟩
+      -- Tail arith witnesses: forward the uniform witnesses unchanged
+      have hBinOp' : ∀ b ∈ rest, ∀ s : State, ∀ op l r rt, b.value = .binOp op l r rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) := by
+        intro b hb s op l r rt hbv
+        exact hBinOp b (List.mem_cons_of_mem _ hb) s op l r rt hbv
+      have hUnaryOp' : ∀ b ∈ rest, ∀ s : State, ∀ op operand rt, b.value = .unaryOp op operand rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) := by
+        intro b hb s op operand rt hbv
+        exact hUnaryOp b (List.mem_cons_of_mem _ hb) s op operand rt hbv
+      have hAssert' : ∀ b ∈ rest, ∀ s : State, ∀ ref, b.value = .assert ref →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) := by
+        intro b hb s ref hbv
+        exact hAssert b (List.mem_cons_of_mem _ hb) s ref hbv
+      exact evalBindings_structuralArithBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1)
+        (anfSt.addBinding name val) hRest
+        hParamDomain' hPropDomain' hRefReady'
+        hBinOp' hUnaryOp' hAssert' hRestNodup
+
+-- Note: `lowerValue_snd_structuralArith` was removed (the theorem statement
+-- was incorrect for consume-mode refs, and the theorem was unused).
+
+/-! #### Runtime success for the arith fragment -/
+
+-- Note: `runOps_lowerBindingsP_structuralArithBody_isSome` requires threading
+-- `agreesTagged` (or an equivalent stack-size invariant) through the arith cases
+-- to prove that PICK/ROLL operations succeed at runtime.  That infrastructure
+-- (per-binOp/unaryOp/assert operational discharge lemmas) will be added in a
+-- follow-up sub-milestone.  For now the structural predicate and the ANF-side
+-- theorem (`evalBindings_structuralArithBody_isSome`) cover the A3 deliverable.
+private theorem runOps_lowerBindingsP_structuralArithBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) (stkSt : StackState),
+      structuralArithBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      -- Runtime success witness: uniform over any stack map, any pre-stack,
+      -- AND any index (needed to thread through the tail with index + 1).
+      (∀ b ∈ body, ∀ idx : Nat, ∀ sm_acc : StackMap, ∀ stkPre : StackState,
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget idx lastUses
+                outerProtected localBindings constInts sm_acc b.name b.value).1
+            stkPre).toOption.isSome = true) →
+      (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+                 outerProtected localBindings constInts sm body).1
+              stkSt).toOption.isSome
+  | [], _sm, _idx, _stkSt, _, _, _, _ => by
+      simp [Stack.Lower.lowerBindingsP, runOps, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, stkSt,
+      h, hFreshInSm, hBodyNodup, hRunOk => by
+      simp only [structuralArithBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      -- Unfold lowerBindingsP
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm
+              ((.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1) lastUses
+                    outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      -- The head binding runs successfully (uniform witness at currentIndex and sm)
+      have hHeadRunOk :
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1
+            stkSt).toOption.isSome = true :=
+        hRunOk (.mk name v _src) List.mem_cons_self currentIndex sm stkSt
+      obtain ⟨stkSt', hHeadRun⟩ : ∃ stkSt',
+          Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1
+            stkSt = .ok stkSt' := by
+        have h := hHeadRunOk
+        simp only [Option.isSome_iff_exists, Except.toOption] at h
+        obtain ⟨v', hv'⟩ := h
+        cases hcase : Stack.Eval.runOps
+                        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name v).1
+                        stkSt with
+        | ok s => exact ⟨s, rfl⟩
+        | error e => simp [hcase] at hv'
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      -- localBindings is unchanged for arith values
+      -- Note: hHead was already unfolded by simp [structuralArithValue] above (line 16472-ish).
+      have hLBUnchanged :
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.2 = localBindings := by
+        rcases hHead with hRef | ⟨op, l, r, rt, hvEq, hlD, hrD, hlC, hrC, _⟩ |
+          ⟨op, operand, rt, hvEq, hdD, hcopy, _⟩ | ⟨ref, hvEq, hdD, hcopy⟩
+        · -- Ref case: lowerValueP_snd_snd_eq_localBindings for copy/consume
+          exact lowerValueP_snd_snd_eq_localBindings progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v
+            (by simp only [structuralRefValue] at hRef; exact hRef)
+        · -- binOp copy: use bridge
+          subst hvEq
+          rw [lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name op l r rt hlD hrD hlC hrC]
+        · -- unaryOp copy: use bridge
+          subst hvEq
+          rw [lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name op operand rt hdD hcopy]
+        · -- assert copy: use bridge
+          subst hvEq
+          rw [lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name ref hdD hcopy]
+      rw [hLBUnchanged]
+      -- Tail freshness: any element ≠ name in (lowerValueP ...).2.1 is in sm
+      -- Note: hHead was already unfolded by simp [structuralArithValue] in hLBUnchanged.
+      have hTailSubset : ∀ x, x ≠ name →
+          x ∈ (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).2.1 →
+          x ∈ sm := by
+        intro x hxNe hxMem
+        rcases hHead with hRef | ⟨op, l, r, rt, hvEq, _, _, _, _, _⟩ |
+          ⟨op, operand, rt, hvEq, _, _, _⟩ | ⟨ref, hvEq, _, _⟩
+        · -- Ref case: handled in structuralRefBody
+          simp only [structuralRefValue] at hRef
+          rcases hRef with hCopy | hConsume
+          · rw [lowerValueP_eq_lowerValue_structuralCopy progMethods props budget currentIndex
+              lastUses outerProtected localBindings constInts sm name v hCopy] at hxMem
+            rw [lowerValue_snd_structuralCopy lastUses outerProtected localBindings sm
+              currentIndex name v hCopy, Stack.Lower.StackMap.push] at hxMem
+            simp [List.mem_cons] at hxMem
+            exact hxMem.resolve_left hxNe
+          · -- consume: result sm = (sm.removeAtDepth d).push name
+            cases v with
+            | loadConst c =>
+                cases c with
+                | refAlias consuming =>
+                    unfold structuralConsumeValue at hConsume
+                    obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                    rw [lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex
+                          lastUses outerProtected localBindings constInts sm name consuming d
+                          hDepth hCons,
+                        Stack.Lower.StackMap.push] at hxMem
+                    simp [List.mem_cons] at hxMem
+                    exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+                | thisRef => simp [structuralConsumeValue] at hConsume
+                | int i =>
+                    rw [lowerValueP_loadConst_int_sm2 progMethods props budget currentIndex
+                          lastUses outerProtected localBindings constInts sm name i,
+                        Stack.Lower.StackMap.push] at hxMem
+                    simp [List.mem_cons] at hxMem
+                    exact hxMem.resolve_left hxNe
+                | bool b =>
+                    rw [lowerValueP_loadConst_bool_sm2 progMethods props budget currentIndex
+                          lastUses outerProtected localBindings constInts sm name b,
+                        Stack.Lower.StackMap.push] at hxMem
+                    simp [List.mem_cons] at hxMem
+                    exact hxMem.resolve_left hxNe
+                | bytes bs =>
+                    rw [lowerValueP_loadConst_bytes_sm2 progMethods props budget currentIndex
+                          lastUses outerProtected localBindings constInts sm name bs,
+                        Stack.Lower.StackMap.push] at hxMem
+                    simp [List.mem_cons] at hxMem
+                    exact hxMem.resolve_left hxNe
+            | loadParam consuming =>
+                unfold structuralConsumeValue at hConsume
+                obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                rw [lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex
+                      lastUses outerProtected localBindings constInts sm name consuming d
+                      hDepth hCons,
+                    Stack.Lower.StackMap.push] at hxMem
+                simp [List.mem_cons] at hxMem
+                exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+            | _ => simp [structuralConsumeValue] at hConsume
+        · -- binOp: output sm = sm.push name
+          subst hvEq
+          rw [lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name op l r rt _ _ _ _,
+            show (Stack.Lower.lowerValue sm name (.binOp op l r rt)).2 = sm.push name from rfl] at hxMem
+          simp [Stack.Lower.StackMap.push, List.mem_cons] at hxMem
+          exact hxMem.resolve_left hxNe
+          all_goals assumption
+        · -- unaryOp: output sm = sm.push name
+          subst hvEq
+          rw [lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name op operand rt _ _,
+            show (Stack.Lower.lowerValue sm name (.unaryOp op operand rt)).2 = sm.push name from rfl] at hxMem
+          simp [Stack.Lower.StackMap.push, List.mem_cons] at hxMem
+          exact hxMem.resolve_left hxNe
+          all_goals assumption
+        · -- assert: output sm = sm (no push for assert!)
+          subst hvEq
+          rw [lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name ref _ _,
+            show (Stack.Lower.lowerValue sm name (.assert ref)).2 = sm from rfl] at hxMem
+          exact hxMem
+          all_goals assumption
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).2.1 := by
+        intro b hbMem hbIn
+        by_cases hbEqName : b.name = name
+        · apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hbEqName⟩
+        · exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) (hTailSubset b.name hbEqName hbIn)
+      -- Tail run witness: forward the uniform witness (∀ idx sm_acc) to the tail.
+      -- The `∀ idx` quantifier means the tail can use currentIndex + 1 freely.
+      have hRunOk' : ∀ b ∈ rest, ∀ idx : Nat, ∀ sm_acc : StackMap, ∀ stkPre : StackState,
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget idx lastUses
+                outerProtected localBindings constInts sm_acc b.name b.value).1
+            stkPre).toOption.isSome = true := by
+        intro b hb idx sm_acc stkPre
+        exact hRunOk b (List.mem_cons_of_mem _ hb) idx sm_acc stkPre
+      exact runOps_lowerBindingsP_structuralArithBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1) stkSt'
+        hRest hFreshInSm' hRestNodup hRunOk'
+
+/-! ### Method-level wrapper for the structural-arith fragment — DEFERRED
+
+The method-level wrapper `runMethod_lower_public_unique_no_post_structuralArith_isSome`
+is deferred to a future pass.
+
+**Why structural discharge is intractable here:** opcodes emitted for
+`binOp` / `unaryOp` / `assert` bindings have value-dependent failure
+modes — e.g., `OP_ADD` fails if operands are not integers, `OP_VERIFY`
+fails if the operand is `false`.  Proving runtime success therefore
+requires knowing the *concrete runtime values* on the stack, not just the
+abstract stack-map depths tracked by `structuralArithBody`.  Discharging
+this without a hypothesis that essentially restates the conclusion (per
+hard rule §2 of the plan) requires the full `agreesTagged`-based
+stage-C witness infrastructure extended to arith opcodes — work slated
+for Phase B.  The ANF-side substrate (`structuralArithBody`,
+`evalBindings_structuralArithBody_isSome`, Decidable instance) is
+preserved and ready for Phase B. -/
+
+/-! ### Decidable instance for `structuralArithBody`
+
+Following the `programIsWF` / `structuralRefBodyBool` pattern:
+define a Boolean checker, prove it reflects the `Prop`, then
+lift to `Decidable`. -/
+
+/-- Boolean checker for `structuralArithValue`.
+
+Defined by explicit per-constructor cases so that `simp [structuralArithValueBool]`
+unfolds deterministically in the reflection proof. -/
+def structuralArithValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  -- Ref-kind values (copy or consume)
+  | .loadConst (.int _) => true
+  | .loadConst (.bool _) => true
+  | .loadConst (.bytes _) => true
+  | .loadConst (.refAlias n) =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst (.refAlias n)) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst (.refAlias n))
+  | .loadConst .thisRef =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst .thisRef) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst .thisRef)
+  | .loadParam n =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadParam n) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadParam n)
+  | .loadProp n =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadProp n) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadProp n)
+  -- binOp in copy-mode with proved operator
+  | .binOp op l r _rt =>
+      (sm.depth? l).isSome &&
+      (sm.depth? r).isSome &&
+      (!(!Stack.Lower.listContains outerProtected l &&
+           Stack.Lower.isLastUse lastUses l currentIndex)) &&
+      (!(!Stack.Lower.listContains outerProtected r &&
+           Stack.Lower.isLastUse lastUses r currentIndex)) &&
+      isProvedBinOpKind op
+  -- unaryOp in copy-mode with proved operator
+  | .unaryOp op operand _rt =>
+      (sm.depth? operand).isSome &&
+      (!(!Stack.Lower.listContains outerProtected operand &&
+           Stack.Lower.isLastUse lastUses operand currentIndex)) &&
+      isProvedUnaryOpKind op
+  -- assert in copy-mode
+  | .assert ref =>
+      (sm.depth? ref).isSome &&
+      (!(!Stack.Lower.listContains outerProtected ref &&
+           Stack.Lower.isLastUse lastUses ref currentIndex))
+  -- All other constructors are not in the arith fragment
+  | _ => false
+
+/-- Boolean checker for `structuralArithBody`. -/
+def structuralArithBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralArithValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralArithBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralArithValueBool` reflects `structuralArithValue`.
+
+The proof works by case-splitting on the `ANFValue` constructor, then
+on the `ConstValue` constructor for the `loadConst` case.  Each arm
+reduces to pure Bool arithmetic using the existing `structuralCopyValueBool_iff`
+/ `structuralConsumeValueBool_iff` lemmas or simple Bool/Option reasoning.
+
+`structuralArithValue` is a 4-way right-associated disjunction:
+  `structuralRefValue v ∨ binOp-arm ∨ unaryOp-arm ∨ assert-arm`
+which Lean represents as:
+  `structuralRefValue v ∨ (binOp-arm ∨ (unaryOp-arm ∨ assert-arm))`
+The `rcases h with hA | hB | hC | hD` tactic pattern handles this. -/
+theorem structuralArithValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralArithValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralArithValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  -- ---- literal loadConst arms: trivially in structuralCopyValue ----
+  | loadConst c =>
+      cases c with
+      | int _ =>
+          simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+                structuralCopyValue]
+      | bool _ =>
+          simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+                structuralCopyValue]
+      | bytes _ =>
+          simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+                structuralCopyValue]
+      | refAlias n =>
+          simp only [structuralArithValueBool, structuralArithValue, structuralRefValue]
+          constructor
+          · intro h
+            rcases (Bool.or_eq_true _ _).mp h with hCopy | hConsume
+            · exact Or.inl (Or.inl ((structuralCopyValueBool_iff lastUses outerProtected
+                localBindings sm currentIndex (.loadConst (.refAlias n))).mp hCopy))
+            · exact Or.inl (Or.inr ((structuralConsumeValueBool_iff lastUses outerProtected
+                localBindings sm currentIndex (.loadConst (.refAlias n))).mp hConsume))
+          · intro h
+            rcases h with (hCopy | hConsume) | ⟨_, _, _, _, hvEq, _, _, _, _, _⟩ |
+                           ⟨_, _, _, hvEq, _, _, _⟩ | ⟨_, hvEq, _, _⟩
+            · exact Bool.or_eq_true _ _ |>.mpr (Or.inl
+                ((structuralCopyValueBool_iff lastUses outerProtected
+                  localBindings sm currentIndex (.loadConst (.refAlias n))).mpr hCopy))
+            · exact Bool.or_eq_true _ _ |>.mpr (Or.inr
+                ((structuralConsumeValueBool_iff lastUses outerProtected
+                  localBindings sm currentIndex (.loadConst (.refAlias n))).mpr hConsume))
+            all_goals simp_all [structuralArithValueBool]
+      | thisRef =>
+          simp only [structuralArithValueBool, structuralArithValue, structuralRefValue]
+          constructor
+          · intro h
+            rcases (Bool.or_eq_true _ _).mp h with hCopy | hConsume
+            · exact Or.inl (Or.inl ((structuralCopyValueBool_iff lastUses outerProtected
+                localBindings sm currentIndex (.loadConst .thisRef)).mp hCopy))
+            · exact Or.inl (Or.inr ((structuralConsumeValueBool_iff lastUses outerProtected
+                localBindings sm currentIndex (.loadConst .thisRef)).mp hConsume))
+          · intro h
+            rcases h with (hCopy | hConsume) | ⟨_, _, _, _, hvEq, _, _, _, _, _⟩ |
+                           ⟨_, _, _, hvEq, _, _, _⟩ | ⟨_, hvEq, _, _⟩
+            · exact Bool.or_eq_true _ _ |>.mpr (Or.inl
+                ((structuralCopyValueBool_iff lastUses outerProtected
+                  localBindings sm currentIndex (.loadConst .thisRef)).mpr hCopy))
+            · exact Bool.or_eq_true _ _ |>.mpr (Or.inr
+                ((structuralConsumeValueBool_iff lastUses outerProtected
+                  localBindings sm currentIndex (.loadConst .thisRef)).mpr hConsume))
+            all_goals simp_all [structuralArithValueBool]
+  -- ---- loadParam ----
+  | loadParam n =>
+      simp only [structuralArithValueBool, structuralArithValue, structuralRefValue]
+      constructor
+      · intro h
+        rcases (Bool.or_eq_true _ _).mp h with hCopy | hConsume
+        · exact Or.inl (Or.inl ((structuralCopyValueBool_iff lastUses outerProtected
+            localBindings sm currentIndex (.loadParam n)).mp hCopy))
+        · exact Or.inl (Or.inr ((structuralConsumeValueBool_iff lastUses outerProtected
+            localBindings sm currentIndex (.loadParam n)).mp hConsume))
+      · intro h
+        rcases h with (hCopy | hConsume) | ⟨_, _, _, _, hvEq, _, _, _, _, _⟩ |
+                       ⟨_, _, _, hvEq, _, _, _⟩ | ⟨_, hvEq, _, _⟩
+        · exact Bool.or_eq_true _ _ |>.mpr (Or.inl
+            ((structuralCopyValueBool_iff lastUses outerProtected
+              localBindings sm currentIndex (.loadParam n)).mpr hCopy))
+        · exact Bool.or_eq_true _ _ |>.mpr (Or.inr
+            ((structuralConsumeValueBool_iff lastUses outerProtected
+              localBindings sm currentIndex (.loadParam n)).mpr hConsume))
+        all_goals simp_all [structuralArithValueBool]
+  -- ---- loadProp ----
+  | loadProp n =>
+      simp only [structuralArithValueBool, structuralArithValue, structuralRefValue]
+      constructor
+      · intro h
+        rcases (Bool.or_eq_true _ _).mp h with hCopy | hConsume
+        · exact Or.inl (Or.inl ((structuralCopyValueBool_iff lastUses outerProtected
+            localBindings sm currentIndex (.loadProp n)).mp hCopy))
+        · exact Or.inl (Or.inr ((structuralConsumeValueBool_iff lastUses outerProtected
+            localBindings sm currentIndex (.loadProp n)).mp hConsume))
+      · intro h
+        rcases h with (hCopy | hConsume) | ⟨_, _, _, _, hvEq, _, _, _, _, _⟩ |
+                       ⟨_, _, _, hvEq, _, _, _⟩ | ⟨_, hvEq, _, _⟩
+        · exact Bool.or_eq_true _ _ |>.mpr (Or.inl
+            ((structuralCopyValueBool_iff lastUses outerProtected
+              localBindings sm currentIndex (.loadProp n)).mpr hCopy))
+        · exact Bool.or_eq_true _ _ |>.mpr (Or.inr
+            ((structuralConsumeValueBool_iff lastUses outerProtected
+              localBindings sm currentIndex (.loadProp n)).mpr hConsume))
+        all_goals simp_all [structuralArithValueBool]
+  -- ---- binOp ----
+  -- structuralArithValueBool (.binOp op l r rt) =
+  --   (sm.depth? l).isSome && (sm.depth? r).isSome &&
+  --   (!(!A_l && B_l)) && (!(!A_r && B_r)) && isProvedBinOpKind op
+  -- Bool.not_eq_true' : ((!b) = true) = (b = false)
+  -- We avoid `simp only [structuralArithValueBool] at h` which kernel-reduces the
+  -- `&&` chains to `match` form.  Instead we use `change` (definitional equality) to
+  -- give h the explicit unfolded type, then split with `Bool.and_eq_true.mp`.
+  | binOp op l r rt =>
+      constructor
+      · intro h
+        -- Use `change` to give h the explicit `&&` form, avoiding kernel-reduction to match.
+        change ((sm.depth? l).isSome && (sm.depth? r).isSome &&
+            !(!Stack.Lower.listContains outerProtected l && Stack.Lower.isLastUse lastUses l currentIndex) &&
+            !(!Stack.Lower.listContains outerProtected r && Stack.Lower.isLastUse lastUses r currentIndex) &&
+            isProvedBinOpKind op) = true at h
+        -- Bool.and_eq_true is a PropEq, use rw to split the conjunction:
+        rw [Bool.and_eq_true] at h  -- h : (...&&...&&...&&...) = true ∧ isProvedBinOpKind op = true
+        obtain ⟨h4, hOp⟩ := h
+        rw [Bool.and_eq_true] at h4
+        obtain ⟨h3, hrC_raw⟩ := h4
+        rw [Bool.and_eq_true] at h3
+        obtain ⟨h2, hlC_raw⟩ := h3
+        rw [Bool.and_eq_true] at h2
+        obtain ⟨hDl, hDr⟩ := h2
+        obtain ⟨dl, hdl⟩ := Option.isSome_iff_exists.mp hDl
+        obtain ⟨dr, hdr⟩ := Option.isSome_iff_exists.mp hDr
+        rw [Bool.not_eq_true'] at hlC_raw hrC_raw
+        simp only [structuralArithValue, structuralRefValue, structuralCopyValue,
+                   structuralConsumeValue, false_or, or_false]
+        exact Or.inl ⟨op, l, r, rt, rfl, ⟨dl, hdl⟩, ⟨dr, hdr⟩, hlC_raw, hrC_raw, hOp⟩
+      · intro h
+        simp only [structuralArithValue, structuralRefValue, structuralCopyValue,
+                   structuralConsumeValue, false_or, or_false] at h
+        rcases h with ⟨op', l', r', rt', hvEq, hdl, hdr, hlC, hrC, hOp⟩ |
+                       ⟨_, _, _, hvEq, _, _, _⟩ |
+                       ⟨_, hvEq, _, _⟩
+        · simp only [ANFValue.binOp.injEq] at hvEq
+          obtain ⟨rfl, rfl, rfl, rfl⟩ := hvEq
+          obtain ⟨dl, hdl'⟩ := hdl; obtain ⟨dr, hdr'⟩ := hdr
+          change ((sm.depth? l).isSome && (sm.depth? r).isSome &&
+              !(!Stack.Lower.listContains outerProtected l && Stack.Lower.isLastUse lastUses l currentIndex) &&
+              !(!Stack.Lower.listContains outerProtected r && Stack.Lower.isLastUse lastUses r currentIndex) &&
+              isProvedBinOpKind op) = true
+          rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true]
+          exact ⟨⟨⟨⟨Option.isSome_iff_exists.mpr ⟨dl, hdl'⟩,
+                       Option.isSome_iff_exists.mpr ⟨dr, hdr'⟩⟩,
+                    by rw [Bool.not_eq_true']; exact hlC⟩,
+                  by rw [Bool.not_eq_true']; exact hrC⟩,
+                hOp⟩
+        · exact absurd hvEq (by simp)
+        · exact absurd hvEq (by simp)
+  -- ---- unaryOp ----
+  | unaryOp op operand rt =>
+      constructor
+      · intro h
+        change ((sm.depth? operand).isSome &&
+            !(!Stack.Lower.listContains outerProtected operand && Stack.Lower.isLastUse lastUses operand currentIndex) &&
+            isProvedUnaryOpKind op) = true at h
+        rw [Bool.and_eq_true] at h
+        obtain ⟨h2, hOp⟩ := h
+        rw [Bool.and_eq_true] at h2
+        obtain ⟨hD, hcopy_raw⟩ := h2
+        obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp hD
+        rw [Bool.not_eq_true'] at hcopy_raw
+        simp only [structuralArithValue, structuralRefValue, structuralCopyValue,
+                   structuralConsumeValue, false_or, or_false]
+        exact Or.inr (Or.inl ⟨op, operand, rt, rfl, ⟨d, hd⟩, hcopy_raw, hOp⟩)
+      · intro h
+        simp only [structuralArithValue, structuralRefValue, structuralCopyValue,
+                   structuralConsumeValue, false_or, or_false] at h
+        rcases h with ⟨_, _, _, _, hvEq, _, _, _, _, _⟩ |
+                       ⟨op', operand', rt', hvEq, hd, hcopy, hOp⟩ |
+                       ⟨_, hvEq, _, _⟩
+        · exact absurd hvEq (by simp)
+        · simp only [ANFValue.unaryOp.injEq] at hvEq
+          obtain ⟨rfl, rfl, rfl⟩ := hvEq
+          obtain ⟨d, hd'⟩ := hd
+          change ((sm.depth? operand).isSome &&
+              !(!Stack.Lower.listContains outerProtected operand && Stack.Lower.isLastUse lastUses operand currentIndex) &&
+              isProvedUnaryOpKind op) = true
+          rw [Bool.and_eq_true, Bool.and_eq_true]
+          exact ⟨⟨Option.isSome_iff_exists.mpr ⟨d, hd'⟩,
+                   by rw [Bool.not_eq_true']; exact hcopy⟩,
+                 hOp⟩
+        · exact absurd hvEq (by simp)
+  -- ---- assert ----
+  | assert ref =>
+      constructor
+      · intro h
+        change ((sm.depth? ref).isSome &&
+            !(!Stack.Lower.listContains outerProtected ref && Stack.Lower.isLastUse lastUses ref currentIndex)) = true at h
+        rw [Bool.and_eq_true] at h
+        obtain ⟨hD, hcopy_raw⟩ := h
+        obtain ⟨d, hd⟩ := Option.isSome_iff_exists.mp hD
+        rw [Bool.not_eq_true'] at hcopy_raw
+        simp only [structuralArithValue, structuralRefValue, structuralCopyValue,
+                   structuralConsumeValue, false_or, or_false]
+        exact Or.inr (Or.inr ⟨ref, rfl, ⟨d, hd⟩, hcopy_raw⟩)
+      · intro h
+        simp only [structuralArithValue, structuralRefValue, structuralCopyValue,
+                   structuralConsumeValue, false_or, or_false] at h
+        rcases h with ⟨_, _, _, _, hvEq, _, _, _, _, _⟩ |
+                       ⟨_, _, _, hvEq, _, _, _⟩ |
+                       ⟨ref', hvEq, hd, hcopy⟩
+        · exact absurd hvEq (by simp)
+        · exact absurd hvEq (by simp)
+        · simp only [ANFValue.assert.injEq] at hvEq
+          subst hvEq
+          obtain ⟨d, hd'⟩ := hd
+          change ((sm.depth? ref).isSome &&
+              !(!Stack.Lower.listContains outerProtected ref && Stack.Lower.isLastUse lastUses ref currentIndex)) = true
+          rw [Bool.and_eq_true]
+          exact ⟨Option.isSome_iff_exists.mpr ⟨d, hd'⟩,
+                 by rw [Bool.not_eq_true']; exact hcopy⟩
+  -- ---- all other constructors: both sides are False ----
+  | call _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | methodCall _ _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | ifVal _ _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | loop _ _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | updateProp _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | getStateScript =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | checkPreimage _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | deserializeState _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | addOutput _ _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | addRawOutput _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | addDataOutput _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | arrayLiteral _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+  | rawScript _ _ _ =>
+      simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
+            structuralCopyValue, structuralConsumeValue]
+
+/-- `structuralArithBodyBool` reflects `structuralArithBody`. -/
+theorem structuralArithBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralArithBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralArithBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by
+      simp [structuralArithBodyBool, structuralArithBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralArithBodyBool, structuralArithBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralArithValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralArithBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralArithValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralArithBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralArithBody` is decidable. -/
+instance decidableStructuralArithBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralArithBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralArithBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralArithBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralArithBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+
+/-! ### A4 — Pure-math / pure-byte `call` builtins
+
+Sub-milestone A4 widens the simulation to cover the first tier of builtin
+function calls.  The predicate `structuralCallValue` extends
+`structuralArithValue` with a `call` arm that covers built-in functions
+whose lowering in `lowerValueP` goes through the generic "else" branch
+(lines 3171–3175 of `Stack/Lower.lean`) when all arguments are in copy mode.
+
+**Proved builtins (Tier 1):** `abs`, `len`, `bin2num`, `toByteString`,
+`cat`, `num2bin`, `min`, `max`, `within`, `split`.
+
+All Tier 1 builtins go through the generic else branch of `lowerValueP`,
+so when all args are in copy mode, `sm2 = sm.push bindingName`.
+
+**Encoding strategy:** `structuralCallValue` enumerates each Tier-1 builtin
+with its concrete arity.  This lets the bridge lemmas work with a concrete
+arg list, so the guards in `lowerValueP` reduce to closed-term Bool
+computations via `simp`/`rfl`, and the `popN` cancellation follows from `rfl`.
+
+**Deferred (Tier 2/3/4):** `safediv`, `safemod`, `clamp`, `sign`,
+`divmod`, `percentOf`, `mulDiv`, `pow`, `sqrt`, `gcd`, `log2`,
+`reverseBytes`, `substr`, `int2str`, `pack`, `unpack`.  These use
+dedicated branches in `lowerValueP` with more complex op shapes.
+Deferred to A4-follow-up.
+-/
+
+/-! #### `isProvedCallBuiltin` guard -/
+
+/-- Boolean guard: the builtin `func` is in the Tier-1 set whose
+runtime proof is fully discharged in A4.
+
+**Tier 1 (proved here):** `abs`, `len`, `bin2num`, `toByteString`, `cat`,
+`num2bin`, `min`, `max`, `within`, `split`.
+
+**Tier 2–4 (deferred):** all other builtins.
+-/
+def isProvedCallBuiltin (func : String) : Bool :=
+  func == "abs" || func == "len" ||
+  func == "bin2num" || func == "toByteString" ||
+  func == "cat" || func == "num2bin" ||
+  func == "min" || func == "max" ||
+  func == "within" || func == "split"
+
+/-! #### Copy-mode condition -/
+
+/-- A single arg `a` is in copy mode: present in `sm` and not consumed. -/
+private def argIsCopy (lastUses : List (String × Nat)) (outerProtected : List String)
+    (sm : StackMap) (currentIndex : Nat) (a : String) : Prop :=
+  (∃ _d, sm.depth? a = some _d) ∧
+  (!Stack.Lower.listContains outerProtected a &&
+      Stack.Lower.isLastUse lastUses a currentIndex) = false
+
+/-! #### `structuralCallValue` and `structuralCallBody` -/
+
+/-- Per-value call fragment.  Extends `structuralArithValue` with
+per-builtin call arms for all 10 Tier-1 builtins.  Arities are encoded
+concretely so the bridge lemmas can work with concrete arg lists. -/
+def structuralCallValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralArithValue lastUses outerProtected localBindings sm currentIndex v ∨
+  -- Arity-1 builtins: abs, len, bin2num, toByteString
+  (∃ x,
+    (v = .call "abs" [x] ∨ v = .call "len" [x] ∨
+     v = .call "bin2num" [x] ∨ v = .call "toByteString" [x]) ∧
+    argIsCopy lastUses outerProtected sm currentIndex x) ∨
+  -- Arity-2 builtins: cat, num2bin, min, max, split
+  (∃ l r,
+    (v = .call "cat" [l, r] ∨ v = .call "num2bin" [l, r] ∨
+     v = .call "min" [l, r] ∨ v = .call "max" [l, r] ∨
+     v = .call "split" [l, r]) ∧
+    argIsCopy lastUses outerProtected sm currentIndex l ∧
+    argIsCopy lastUses outerProtected (sm.push l) currentIndex r) ∨
+  -- Arity-3 builtins: within
+  (∃ x lo hi,
+    v = .call "within" [x, lo, hi] ∧
+    argIsCopy lastUses outerProtected sm currentIndex x ∧
+    argIsCopy lastUses outerProtected (sm.push x) currentIndex lo ∧
+    argIsCopy lastUses outerProtected ((sm.push x).push lo) currentIndex hi)
+
+/-- Body-level call predicate.  Threads the stack map through
+`lowerValueP` (same pattern as `structuralArithBody`). -/
+def structuralCallBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralCallValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralCallBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-! #### Bridge lemmas: sm2 equality for each arity group
+
+The bridge lemmas case-split on `hFunc` first (making `func` concrete via
+`rcases ... rfl`), then unfold `lowerValueP` for each concrete string.
+For concrete function names, the kernel evaluates the 25-branch if-else chain
+of string comparisons quickly (each comparison is O(string length)), reaching
+the generic else branch without a whnf timeout.  -/
+
+section A4BridgeLemmas
+
+/-- Helper: in copy-mode, `(lowerArgsLive ... sm [x]).2.popN 1).push name = sm.push name`. -/
+private theorem lowerArgsLive_singleton_copy_sm_push_eq
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String)
+    (sm : StackMap) (x name : String)
+    (dl : Nat) (hdl : sm.depth? x = some dl)
+    (hcl : (!Stack.Lower.listContains outerProtected x &&
+            Stack.Lower.isLastUse lastUses x currentIndex) = false) :
+    ((Stack.Lower.lowerArgsLive currentIndex lastUses outerProtected sm [x]).2.popN 1).push name
+      = sm.push name := by
+  -- Step 1: unfold lowerArgsLive and apply loadRefLive_copy_eq (do NOT include push/popN yet
+  --         to avoid sm.push l being reduced to l :: sm before the second loadRefLive fires)
+  simp only [Stack.Lower.lowerArgsLive,
+             loadRefLive_copy_eq sm x currentIndex lastUses outerProtected dl hdl hcl]
+  -- Step 2: now reduce push/popN
+  simp only [Stack.Lower.StackMap.popN, Stack.Lower.StackMap.push]
+
+/-- Helper: in copy-mode, `(lowerArgsLive ... sm [l, r]).2.popN 2).push name = sm.push name`. -/
+private theorem lowerArgsLive_pair_copy_sm_push_eq
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String)
+    (sm : StackMap) (l r name : String)
+    (dl : Nat) (hdl : sm.depth? l = some dl)
+    (hcl : (!Stack.Lower.listContains outerProtected l &&
+            Stack.Lower.isLastUse lastUses l currentIndex) = false)
+    (dr : Nat) (hdr : (sm.push l).depth? r = some dr)
+    (hcr : (!Stack.Lower.listContains outerProtected r &&
+            Stack.Lower.isLastUse lastUses r currentIndex) = false) :
+    ((Stack.Lower.lowerArgsLive currentIndex lastUses outerProtected sm [l, r]).2.popN 2).push name
+      = sm.push name := by
+  -- Step 1: apply both loadRefLive_copy_eq rules before unfolding push
+  --         (sm.push l must stay syntactically as sm.push l so the second rule fires)
+  simp only [Stack.Lower.lowerArgsLive,
+             loadRefLive_copy_eq sm l currentIndex lastUses outerProtected dl hdl hcl,
+             loadRefLive_copy_eq (sm.push l) r currentIndex lastUses outerProtected dr hdr hcr]
+  -- Step 2: now reduce push/popN
+  simp only [Stack.Lower.StackMap.popN, Stack.Lower.StackMap.push]
+
+/-- Helper: in copy-mode, `(lowerArgsLive ... sm [x, lo, hi]).2.popN 3).push name = sm.push name`. -/
+private theorem lowerArgsLive_triple_copy_sm_push_eq
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String)
+    (sm : StackMap) (x lo hi name : String)
+    (dx : Nat) (hdx : sm.depth? x = some dx)
+    (hcx : (!Stack.Lower.listContains outerProtected x &&
+            Stack.Lower.isLastUse lastUses x currentIndex) = false)
+    (dlo : Nat) (hdlo : (sm.push x).depth? lo = some dlo)
+    (hclo : (!Stack.Lower.listContains outerProtected lo &&
+             Stack.Lower.isLastUse lastUses lo currentIndex) = false)
+    (dhi : Nat) (hdhi : ((sm.push x).push lo).depth? hi = some dhi)
+    (hchi : (!Stack.Lower.listContains outerProtected hi &&
+             Stack.Lower.isLastUse lastUses hi currentIndex) = false) :
+    ((Stack.Lower.lowerArgsLive currentIndex lastUses outerProtected sm [x, lo, hi]).2.popN 3).push name
+      = sm.push name := by
+  -- Step 1: apply all three loadRefLive_copy_eq rules before unfolding push
+  simp only [Stack.Lower.lowerArgsLive,
+             loadRefLive_copy_eq sm x currentIndex lastUses outerProtected dx hdx hcx,
+             loadRefLive_copy_eq (sm.push x) lo currentIndex lastUses outerProtected dlo hdlo hclo,
+             loadRefLive_copy_eq ((sm.push x).push lo) hi currentIndex lastUses outerProtected
+               dhi hdhi hchi]
+  -- Step 2: now reduce push/popN
+  simp only [Stack.Lower.StackMap.popN, Stack.Lower.StackMap.push]
+
+-- Tactic macro: evaluate the isExtractor guard then close the remaining if-chain with decide.
+-- Used by all per-function bridge lemmas below.
+private theorem lowerValueP_call_arity1_copy_sm2_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName x : String)
+    (func : String)
+    (hFunc : func = "abs" ∨ func = "len" ∨ func = "bin2num" ∨ func = "toByteString")
+    (hCopy : argIsCopy lastUses outerProtected sm currentIndex x) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName (.call func [x])).2.1
+      = sm.push bindingName := by
+  obtain ⟨⟨dx, hdx⟩, hcx⟩ := hCopy
+  rcases hFunc with rfl | rfl | rfl | rfl
+  · -- abs
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "abs" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_singleton_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm x bindingName dx hdx hcx
+  · -- len
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "len" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_singleton_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm x bindingName dx hdx hcx
+  · -- bin2num
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "bin2num" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_singleton_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm x bindingName dx hdx hcx
+  · -- toByteString
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "toByteString" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_singleton_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm x bindingName dx hdx hcx
+
+private theorem lowerValueP_call_arity2_copy_sm2_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName l r : String)
+    (func : String)
+    (hFunc : func = "cat" ∨ func = "num2bin" ∨ func = "min" ∨ func = "max" ∨ func = "split")
+    (hCopyL : argIsCopy lastUses outerProtected sm currentIndex l)
+    (hCopyR : argIsCopy lastUses outerProtected (sm.push l) currentIndex r) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName (.call func [l, r])).2.1
+      = sm.push bindingName := by
+  obtain ⟨⟨dl, hdl⟩, hcl⟩ := hCopyL
+  obtain ⟨⟨dr, hdr⟩, hcr⟩ := hCopyR
+  rcases hFunc with rfl | rfl | rfl | rfl | rfl
+  · -- cat
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "cat" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_pair_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm l r bindingName dl hdl hcl dr hdr hcr
+  · -- num2bin
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "num2bin" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_pair_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm l r bindingName dl hdl hcl dr hdr hcr
+  · -- min
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "min" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_pair_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm l r bindingName dl hdl hcl dr hdr hcr
+  · -- max
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "max" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_pair_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm l r bindingName dl hdl hcl dr hdr hcr
+  · -- split
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "split" = false := by native_decide
+    simp only [hE]; simp (config := { decide := true }) only []
+    exact lowerArgsLive_pair_copy_sm_push_eq
+      currentIndex lastUses outerProtected sm l r bindingName dl hdl hcl dr hdr hcr
+
+private theorem lowerValueP_call_within_copy_sm2_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName x lo hi : String)
+    (hCopyX  : argIsCopy lastUses outerProtected sm currentIndex x)
+    (hCopyLo : argIsCopy lastUses outerProtected (sm.push x) currentIndex lo)
+    (hCopyHi : argIsCopy lastUses outerProtected ((sm.push x).push lo) currentIndex hi) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName (.call "within" [x, lo, hi])).2.1
+      = sm.push bindingName := by
+  obtain ⟨⟨dx, hdx⟩, hcx⟩ := hCopyX
+  obtain ⟨⟨dlo, hdlo⟩, hclo⟩ := hCopyLo
+  obtain ⟨⟨dhi, hdhi⟩, hchi⟩ := hCopyHi
+  unfold Stack.Lower.lowerValueP
+  have hE : Stack.Lower.isExtractor "within" = false := by native_decide
+  simp only [hE]
+  simp (config := { decide := true }) only []
+  exact lowerArgsLive_triple_copy_sm_push_eq
+    currentIndex lastUses outerProtected sm x lo hi bindingName dx hdx hcx dlo hdlo hclo dhi hdhi hchi
+
+/-- Unified sm2 bridge for any `structuralCallValue` call arm.
+Given a value `v` satisfying the call arm of `structuralCallValue`,
+`lowerValueP.2.1 = sm.push name`. -/
+private theorem lowerValueP_call_structuralCallValue_sm2_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (name : String) (v : ANFValue)
+    (hCall :
+      (∃ x,
+        (v = .call "abs" [x] ∨ v = .call "len" [x] ∨
+         v = .call "bin2num" [x] ∨ v = .call "toByteString" [x]) ∧
+        argIsCopy lastUses outerProtected sm currentIndex x) ∨
+      (∃ l r,
+        (v = .call "cat" [l, r] ∨ v = .call "num2bin" [l, r] ∨
+         v = .call "min" [l, r] ∨ v = .call "max" [l, r] ∨
+         v = .call "split" [l, r]) ∧
+        argIsCopy lastUses outerProtected sm currentIndex l ∧
+        argIsCopy lastUses outerProtected (sm.push l) currentIndex r) ∨
+      (∃ x lo hi,
+        v = .call "within" [x, lo, hi] ∧
+        argIsCopy lastUses outerProtected sm currentIndex x ∧
+        argIsCopy lastUses outerProtected (sm.push x) currentIndex lo ∧
+        argIsCopy lastUses outerProtected ((sm.push x).push lo) currentIndex hi)) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name v).2.1
+      = sm.push name := by
+  rcases hCall with
+    ⟨x, hOr1, hCopyX⟩ |
+    ⟨l, r, hOr2, hCopyL, hCopyR⟩ |
+    ⟨x, lo, hi, hwithin, hCopyX, hCopyLo, hCopyHi⟩
+  · -- arity-1 arm: hv : v = .call "abs" [x] ∨ ...
+    -- subst hv works because v is a free variable (bound by the match pattern .mk name v _src)
+    rcases hOr1 with hv | hv | hv | hv <;> subst hv
+    · exact lowerValueP_call_arity1_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "abs"
+        (Or.inl rfl) hCopyX
+    · exact lowerValueP_call_arity1_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "len"
+        (Or.inr (Or.inl rfl)) hCopyX
+    · exact lowerValueP_call_arity1_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "bin2num"
+        (Or.inr (Or.inr (Or.inl rfl))) hCopyX
+    · exact lowerValueP_call_arity1_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "toByteString"
+        (Or.inr (Or.inr (Or.inr rfl))) hCopyX
+  · -- arity-2 arm
+    rcases hOr2 with hv | hv | hv | hv | hv <;> subst hv
+    · exact lowerValueP_call_arity2_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "cat"
+        (Or.inl rfl) hCopyL hCopyR
+    · exact lowerValueP_call_arity2_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "num2bin"
+        (Or.inr (Or.inl rfl)) hCopyL hCopyR
+    · exact lowerValueP_call_arity2_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "min"
+        (Or.inr (Or.inr (Or.inl rfl))) hCopyL hCopyR
+    · exact lowerValueP_call_arity2_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "max"
+        (Or.inr (Or.inr (Or.inr (Or.inl rfl)))) hCopyL hCopyR
+    · exact lowerValueP_call_arity2_copy_sm2_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "split"
+        (Or.inr (Or.inr (Or.inr (Or.inr rfl)))) hCopyL hCopyR
+  · -- within (arity-3) arm
+    subst hwithin
+    exact lowerValueP_call_within_copy_sm2_eq progMethods props budget
+      currentIndex lastUses outerProtected localBindings constInts sm name x lo hi
+      hCopyX hCopyLo hCopyHi
+
+private theorem lowerValueP_call_arity1_lb_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (name x : String)
+    (func : String)
+    (hFunc : func = "abs" ∨ func = "len" ∨ func = "bin2num" ∨ func = "toByteString") :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name (.call func [x])).2.2
+      = localBindings := by
+  -- abs (3 chars) and len (3 chars) have len < len("extract"), so isExtractor reduces by
+  -- kernel length check. bin2num (7 chars) and toByteString (12 chars) need native_decide.
+  rcases hFunc with rfl | rfl | rfl | rfl
+  · unfold Stack.Lower.lowerValueP; rfl
+  · unfold Stack.Lower.lowerValueP; rfl
+  · -- bin2num: same length as "extract", char comparison not kernel-reducible
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "bin2num" = false := by native_decide
+    simp only [hE]; rfl
+  · -- toByteString: longer than "extract" but char comparison not kernel-reducible
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "toByteString" = false := by native_decide
+    simp only [hE]; rfl
+
+private theorem lowerValueP_call_arity2_lb_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (name l r : String)
+    (func : String)
+    (hFunc : func = "cat" ∨ func = "num2bin" ∨ func = "min" ∨ func = "max" ∨ func = "split") :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name (.call func [l, r])).2.2
+      = localBindings := by
+  -- cat (3 chars), min (3 chars), max (3 chars), split (5 chars): len < len("extract"), kernel rfl works.
+  -- num2bin (7 chars = len("extract")): same length, char comparison not kernel-reducible.
+  rcases hFunc with rfl | rfl | rfl | rfl | rfl
+  · unfold Stack.Lower.lowerValueP; rfl
+  · -- num2bin
+    unfold Stack.Lower.lowerValueP
+    have hE : Stack.Lower.isExtractor "num2bin" = false := by native_decide
+    simp only [hE]; rfl
+  · unfold Stack.Lower.lowerValueP; rfl
+  · unfold Stack.Lower.lowerValueP; rfl
+  · unfold Stack.Lower.lowerValueP; rfl
+
+private theorem lowerValueP_call_within_lb_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (name x lo hi : String) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name (.call "within" [x, lo, hi])).2.2
+      = localBindings := by
+  unfold Stack.Lower.lowerValueP; rfl
+
+/-- Unified lb bridge for the call arm of `structuralCallValue`. -/
+private theorem lowerValueP_call_structuralCallValue_lb_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (name : String) (v : ANFValue)
+    (hCall :
+      (∃ x,
+        (v = .call "abs" [x] ∨ v = .call "len" [x] ∨
+         v = .call "bin2num" [x] ∨ v = .call "toByteString" [x]) ∧
+        argIsCopy lastUses outerProtected sm currentIndex x) ∨
+      (∃ l r,
+        (v = .call "cat" [l, r] ∨ v = .call "num2bin" [l, r] ∨
+         v = .call "min" [l, r] ∨ v = .call "max" [l, r] ∨
+         v = .call "split" [l, r]) ∧
+        argIsCopy lastUses outerProtected sm currentIndex l ∧
+        argIsCopy lastUses outerProtected (sm.push l) currentIndex r) ∨
+      (∃ x lo hi,
+        v = .call "within" [x, lo, hi] ∧
+        argIsCopy lastUses outerProtected sm currentIndex x ∧
+        argIsCopy lastUses outerProtected (sm.push x) currentIndex lo ∧
+        argIsCopy lastUses outerProtected ((sm.push x).push lo) currentIndex hi)) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm name v).2.2
+      = localBindings := by
+  rcases hCall with
+    ⟨x, hOr1, _⟩ | ⟨l, r, hOr2, _, _⟩ | ⟨x, lo, hi, hwithin, _, _, _⟩
+  · rcases hOr1 with hv | hv | hv | hv <;> subst hv
+    · exact lowerValueP_call_arity1_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "abs" (Or.inl rfl)
+    · exact lowerValueP_call_arity1_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "len" (Or.inr (Or.inl rfl))
+    · exact lowerValueP_call_arity1_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "bin2num"
+        (Or.inr (Or.inr (Or.inl rfl)))
+    · exact lowerValueP_call_arity1_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name x "toByteString"
+        (Or.inr (Or.inr (Or.inr rfl)))
+  · rcases hOr2 with hv | hv | hv | hv | hv <;> subst hv
+    · exact lowerValueP_call_arity2_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "cat" (Or.inl rfl)
+    · exact lowerValueP_call_arity2_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "num2bin"
+        (Or.inr (Or.inl rfl))
+    · exact lowerValueP_call_arity2_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "min"
+        (Or.inr (Or.inr (Or.inl rfl)))
+    · exact lowerValueP_call_arity2_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "max"
+        (Or.inr (Or.inr (Or.inr (Or.inl rfl))))
+    · exact lowerValueP_call_arity2_lb_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm name l r "split"
+        (Or.inr (Or.inr (Or.inr (Or.inr rfl))))
+  · subst hwithin
+    exact lowerValueP_call_within_lb_eq progMethods props budget
+      currentIndex lastUses outerProtected localBindings constInts sm name x lo hi
+
+end A4BridgeLemmas
+
+/-! #### ANF-side success for the call fragment -/
+
+/-- `evalValue` succeeds on a structural-call value given domain conditions.
+For call arms, we carry an explicit `evalValue` success witness (same pattern
+as `evalBindings_structuralArithBody_isSome`). -/
+theorem evalBindings_structuralCallBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (anfSt : State),
+      structuralCallBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      -- Domain for ref-kind values (forwarded from arith)
+      (∀ b ∈ body, ∀ n, b.value = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv) →
+      (∀ b ∈ body, ∀ n, b.value = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv) →
+      (∀ n, (sm.depth? n).isSome = true → ∃ val, anfSt.resolveRef n = some val) →
+      -- Arith operations: explicit success witness (forwarded)
+      (∀ b ∈ body, ∀ s : State, ∀ op l r rt, b.value = .binOp op l r rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      (∀ b ∈ body, ∀ s : State, ∀ op operand rt, b.value = .unaryOp op operand rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      (∀ b ∈ body, ∀ s : State, ∀ ref, b.value = .assert ref →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      -- Call arm: explicit success witness per binding
+      (∀ b ∈ body, ∀ s : State, ∀ func args, b.value = .call func args →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s)) →
+      -- SSA freshness
+      (body.map (·.name)).Nodup →
+      (RunarVerification.ANF.Eval.evalBindings anfSt body).toOption.isSome
+  | [], _sm, _idx, _s, _h, _hp, _hpr, _hr, _hb, _hu, _ha, _hc, _hn => by
+      simp [RunarVerification.ANF.Eval.evalBindings, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, anfSt, h,
+      hParamDomain, hPropDomain, hRefReady, hBinOp, hUnaryOp, hAssert, hCall, hNodup => by
+      simp only [structuralCallBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      simp only [structuralCallValue] at hHead
+      -- Get evalValue success for the head binding
+      have hParamDomHead : ∀ n, v = .loadParam n → ∃ pv, anfSt.lookupParam n = some pv :=
+        fun n hv => hParamDomain (.mk name v _src) List.mem_cons_self n hv
+      have hPropDomHead : ∀ n, v = .loadProp n → ∃ pv, anfSt.lookupProp n = some pv :=
+        fun n hv => hPropDomain (.mk name v _src) List.mem_cons_self n hv
+      obtain ⟨val, hVal⟩ : ∃ val,
+          RunarVerification.ANF.Eval.evalValue anfSt v = .ok (val, anfSt) := by
+        rcases hHead with hArith | ⟨x, hOr1, _⟩ | ⟨l, r, hOr2, _, _⟩ | ⟨x, lo, hi, hwithin, _, _, _⟩
+        · -- Arith arm: reuse existing proof
+          rcases hArith with hRef | ⟨op, l, r, rt, hvEq, _, _, _, _, _⟩ |
+            ⟨op, operand, rt, hvEq, _, _, _⟩ | ⟨ref, hvEq, _, _⟩
+          · rcases hRef with hCopy | hConsume
+            · exact evalValue_structuralCopyValue_ok lastUses outerProtected localBindings
+                sm currentIndex anfSt v hCopy hParamDomHead hPropDomHead hRefReady
+            · exact evalValue_structuralConsumeValue_ok lastUses outerProtected localBindings
+                sm currentIndex anfSt v hConsume hParamDomHead hRefReady
+          · subst hvEq
+            exact hBinOp (.mk name (.binOp op l r rt) _src) List.mem_cons_self anfSt op l r rt rfl
+          · subst hvEq
+            exact hUnaryOp (.mk name (.unaryOp op operand rt) _src) List.mem_cons_self anfSt
+              op operand rt rfl
+          · subst hvEq
+            exact hAssert (.mk name (.assert ref) _src) List.mem_cons_self anfSt ref rfl
+        · -- Arity-1 call arm
+          rcases hOr1 with hv | hv | hv | hv <;> subst hv <;>
+          exact hCall (.mk name _ _src) List.mem_cons_self anfSt _ [x] rfl
+        · -- Arity-2 call arm
+          rcases hOr2 with hv | hv | hv | hv | hv <;> subst hv <;>
+          exact hCall (.mk name _ _src) List.mem_cons_self anfSt _ [l, r] rfl
+        · -- Within (arity-3) arm
+          subst hwithin
+          exact hCall (.mk name _ _src) List.mem_cons_self anfSt "within" [x, lo, hi] rfl
+      simp only [RunarVerification.ANF.Eval.evalBindings, hVal]
+      -- Thread domain conditions for the tail
+      have hParamDomain' :
+          ∀ b ∈ rest, ∀ n, b.value = .loadParam n →
+            ∃ pv, (anfSt.addBinding name val).lookupParam n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupParam, State.addBinding]
+        exact hParamDomain b (List.mem_cons_of_mem _ hb) n hbn
+      have hPropDomain' :
+          ∀ b ∈ rest, ∀ n, b.value = .loadProp n →
+            ∃ pv, (anfSt.addBinding name val).lookupProp n = some pv := by
+        intro b hb n hbn
+        simp only [State.lookupProp, State.addBinding]
+        exact hPropDomain b (List.mem_cons_of_mem _ hb) n hbn
+      simp only [List.map_cons, List.nodup_cons] at hNodup
+      obtain ⟨_hNameNotInRest, hRestNodup⟩ := hNodup
+      -- RefReady for the tail: same analysis as structuralArithBody
+      have hRefReady' : ∀ n,
+          ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.1.depth? n).isSome = true →
+          ∃ vv, (anfSt.addBinding name val).resolveRef n = some vv := by
+        intro n hD
+        by_cases hEq : n = name
+        · exact ⟨val, by
+              simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+              simp [hEq, List.find?]⟩
+        · have hInSm : (sm.depth? n).isSome = true := by
+            -- hHead was already simplified via `simp only [structuralCallValue] at hHead` above
+            rcases hHead with hArith | ⟨x, hOr1, _⟩ | ⟨l, r, hOr2, _, _⟩ | ⟨x, lo, hi, hwithin, _, _, _⟩
+            · -- Arith arm: same analysis as evalBindings_structuralArithBody_isSome
+              rcases hArith with hRef | ⟨op, l, r, rt, hvEq, _, _, _, _, _⟩ |
+                ⟨op, operand, rt, hvEq, _, _, _⟩ | ⟨ref, hvEq, _, _⟩
+              · simp only [structuralRefValue] at hRef
+                rcases hRef with hCopy | hConsume
+                · rw [lowerValueP_eq_lowerValue_structuralCopy progMethods props budget currentIndex
+                    lastUses outerProtected localBindings constInts sm name v hCopy] at hD
+                  rw [lowerValue_snd_structuralCopy lastUses outerProtected localBindings sm
+                       currentIndex name v hCopy] at hD
+                  exact depth?_isSome_push_of_ne sm n name hEq hD
+                · cases v with
+                  | loadConst c =>
+                      cases c with
+                      | refAlias consuming =>
+                          unfold structuralConsumeValue at hConsume
+                          obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                          rw [lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex
+                                lastUses outerProtected localBindings constInts sm name consuming d
+                                hDepth hCons] at hD
+                          exact depth?_isSome_removeAtDepth_of_isSome sm n d
+                            (depth?_isSome_push_of_ne (Stack.Lower.StackMap.removeAtDepth sm d) n name hEq hD)
+                      | thisRef => simp [structuralConsumeValue] at hConsume
+                      | int i =>
+                          rw [lowerValueP_loadConst_int_sm2 progMethods props budget currentIndex
+                                lastUses outerProtected localBindings constInts sm name i] at hD
+                          exact depth?_isSome_push_of_ne sm n name hEq hD
+                      | bool b =>
+                          rw [lowerValueP_loadConst_bool_sm2 progMethods props budget currentIndex
+                                lastUses outerProtected localBindings constInts sm name b] at hD
+                          exact depth?_isSome_push_of_ne sm n name hEq hD
+                      | bytes bs =>
+                          rw [lowerValueP_loadConst_bytes_sm2 progMethods props budget currentIndex
+                                lastUses outerProtected localBindings constInts sm name bs] at hD
+                          exact depth?_isSome_push_of_ne sm n name hEq hD
+                  | loadParam consuming =>
+                      unfold structuralConsumeValue at hConsume
+                      obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                      rw [lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex
+                            lastUses outerProtected localBindings constInts sm name consuming d
+                            hDepth hCons] at hD
+                      exact depth?_isSome_removeAtDepth_of_isSome sm n d
+                        (depth?_isSome_push_of_ne (Stack.Lower.StackMap.removeAtDepth sm d) n name hEq hD)
+                  | _ => simp [structuralConsumeValue] at hConsume
+              · subst hvEq
+                rw [lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name op l r rt _ _ _ _,
+                  show (Stack.Lower.lowerValue sm name (.binOp op l r rt)).2 = sm.push name from rfl] at hD
+                exact depth?_isSome_push_of_ne sm n name hEq hD
+                all_goals assumption
+              · subst hvEq
+                rw [lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name op operand rt _ _,
+                  show (Stack.Lower.lowerValue sm name (.unaryOp op operand rt)).2 = sm.push name from rfl] at hD
+                exact depth?_isSome_push_of_ne sm n name hEq hD
+                all_goals assumption
+              · subst hvEq
+                rw [lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name ref _ _,
+                  show (Stack.Lower.lowerValue sm name (.assert ref)).2 = sm from rfl] at hD
+                exact hD
+                all_goals assumption
+            · -- Arity-1 call arm: sm2 = sm.push name
+              rcases hOr1 with hv | hv | hv | hv <;> subst hv
+              all_goals {
+                rw [lowerValueP_call_arity1_copy_sm2_eq progMethods props budget currentIndex
+                      lastUses outerProtected localBindings constInts sm name x _
+                      (by first | exact Or.inl rfl | exact Or.inr (Or.inl rfl) |
+                                  exact Or.inr (Or.inr (Or.inl rfl)) | exact Or.inr (Or.inr (Or.inr rfl)))
+                      ‹_›] at hD
+                exact depth?_isSome_push_of_ne sm n name hEq hD
+              }
+            · -- Arity-2 call arm: sm2 = sm.push name
+              rcases hOr2 with hv | hv | hv | hv | hv <;> subst hv
+              all_goals {
+                rw [lowerValueP_call_arity2_copy_sm2_eq progMethods props budget currentIndex
+                      lastUses outerProtected localBindings constInts sm name l r _
+                      (by first | exact Or.inl rfl | exact Or.inr (Or.inl rfl) |
+                                  exact Or.inr (Or.inr (Or.inl rfl)) | exact Or.inr (Or.inr (Or.inr (Or.inl rfl))) |
+                                  exact Or.inr (Or.inr (Or.inr (Or.inr rfl))))
+                      ‹_› ‹_›] at hD
+                exact depth?_isSome_push_of_ne sm n name hEq hD
+              }
+            · -- Within arm: sm2 = sm.push name
+              subst hwithin
+              rw [lowerValueP_call_within_copy_sm2_eq progMethods props budget currentIndex
+                    lastUses outerProtected localBindings constInts sm name x lo hi ‹_› ‹_› ‹_›] at hD
+              exact depth?_isSome_push_of_ne sm n name hEq hD
+          obtain ⟨vv, hRes⟩ := hRefReady n hInSm
+          exact ⟨vv, by
+            simp only [State.resolveRef, State.addBinding, State.lookupBinding]
+            simp only [State.resolveRef, State.lookupBinding] at hRes
+            have hNeq : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hEq)
+            simp only [List.find?_cons, hNeq]
+            exact hRes⟩
+      -- Forward uniform witnesses to the tail
+      have hBinOp' : ∀ b ∈ rest, ∀ s : State, ∀ op l r rt, b.value = .binOp op l r rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) :=
+        fun b hb s op l r rt hbv =>
+          hBinOp b (List.mem_cons_of_mem _ hb) s op l r rt hbv
+      have hUnaryOp' : ∀ b ∈ rest, ∀ s : State, ∀ op operand rt, b.value = .unaryOp op operand rt →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) :=
+        fun b hb s op operand rt hbv =>
+          hUnaryOp b (List.mem_cons_of_mem _ hb) s op operand rt hbv
+      have hAssert' : ∀ b ∈ rest, ∀ s : State, ∀ ref, b.value = .assert ref →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) :=
+        fun b hb s ref hbv =>
+          hAssert b (List.mem_cons_of_mem _ hb) s ref hbv
+      have hCall' : ∀ b ∈ rest, ∀ s : State, ∀ func args, b.value = .call func args →
+          ∃ res, RunarVerification.ANF.Eval.evalValue s b.value = .ok (res, s) :=
+        fun b hb s func args hbv =>
+          hCall b (List.mem_cons_of_mem _ hb) s func args hbv
+      exact evalBindings_structuralCallBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1)
+        (anfSt.addBinding name val) hRest
+        hParamDomain' hPropDomain' hRefReady'
+        hBinOp' hUnaryOp' hAssert' hCall' hRestNodup
+
+/-! #### Runtime success for the call fragment -/
+
+private theorem runOps_lowerBindingsP_structuralCallBody_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) (stkSt : StackState),
+      structuralCallBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      -- Runtime success witness: uniform over any stack map, any pre-stack, any index
+      (∀ b ∈ body, ∀ idx : Nat, ∀ sm_acc : StackMap, ∀ stkPre : StackState,
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget idx lastUses
+                outerProtected localBindings constInts sm_acc b.name b.value).1
+            stkPre).toOption.isSome = true) →
+      (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+                 outerProtected localBindings constInts sm body).1
+              stkSt).toOption.isSome
+  | [], _sm, _idx, _stkSt, _, _, _, _ => by
+      simp [Stack.Lower.lowerBindingsP, runOps, Except.toOption]
+  | (.mk name v _src) :: rest, sm, currentIndex, stkSt,
+      h, hFreshInSm, hBodyNodup, hRunOk => by
+      simp only [structuralCallBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      -- Unfold lowerBindingsP
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm
+              ((.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1) lastUses
+                    outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      have hHeadRunOk :
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1
+            stkSt).toOption.isSome = true :=
+        hRunOk (.mk name v _src) List.mem_cons_self currentIndex sm stkSt
+      obtain ⟨stkSt', hHeadRun⟩ : ∃ stkSt',
+          Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1
+            stkSt = .ok stkSt' := by
+        have h := hHeadRunOk
+        simp only [Option.isSome_iff_exists, Except.toOption] at h
+        obtain ⟨v', hv'⟩ := h
+        cases hcase : Stack.Eval.runOps
+                        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name v).1
+                        stkSt with
+        | ok s => exact ⟨s, rfl⟩
+        | error e => simp [hcase] at hv'
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      -- localBindings is unchanged for all structural-call values
+      have hLBUnchanged :
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.2 = localBindings := by
+        simp only [structuralCallValue] at hHead
+        rcases hHead with hArith | ⟨x, hOr1, _⟩ | ⟨l, r, hOr2, _, _⟩ | ⟨x, lo, hi, hwithin, _, _, _⟩
+        · -- Arith arm: same as structuralArithBody proof
+          rcases hArith with hRef | ⟨op, l, r, rt, hvEq, hlD, hrD, hlC, hrC, _⟩ |
+            ⟨op, operand, rt, hvEq, hdD, hcopy, _⟩ | ⟨ref, hvEq, hdD, hcopy⟩
+          · exact lowerValueP_snd_snd_eq_localBindings progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v
+              (by simp only [structuralRefValue] at hRef; exact hRef)
+          · subst hvEq
+            rw [lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name op l r rt hlD hrD hlC hrC]
+          · subst hvEq
+            rw [lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name op operand rt hdD hcopy]
+          · subst hvEq
+            rw [lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name ref hdD hcopy]
+        · rcases hOr1 with hv | hv | hv | hv <;> subst hv
+          · exact lowerValueP_call_arity1_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name x "abs" (Or.inl rfl)
+          · exact lowerValueP_call_arity1_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name x "len" (Or.inr (Or.inl rfl))
+          · exact lowerValueP_call_arity1_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name x "bin2num" (Or.inr (Or.inr (Or.inl rfl)))
+          · exact lowerValueP_call_arity1_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name x "toByteString" (Or.inr (Or.inr (Or.inr rfl)))
+        · rcases hOr2 with hv | hv | hv | hv | hv <;> subst hv
+          · exact lowerValueP_call_arity2_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name l r "cat" (Or.inl rfl)
+          · exact lowerValueP_call_arity2_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name l r "num2bin" (Or.inr (Or.inl rfl))
+          · exact lowerValueP_call_arity2_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name l r "min" (Or.inr (Or.inr (Or.inl rfl)))
+          · exact lowerValueP_call_arity2_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name l r "max" (Or.inr (Or.inr (Or.inr (Or.inl rfl))))
+          · exact lowerValueP_call_arity2_lb_eq progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name l r "split" (Or.inr (Or.inr (Or.inr (Or.inr rfl))))
+        · subst hwithin
+          exact lowerValueP_call_within_lb_eq progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name x lo hi
+      rw [hLBUnchanged]
+      -- Tail subset: x ≠ name ∧ x ∈ sm2 → x ∈ sm
+      have hTailSubset : ∀ x, x ≠ name →
+          x ∈ (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).2.1 →
+          x ∈ sm := by
+        intro x hxNe hxMem
+        simp only [structuralCallValue] at hHead
+        rcases hHead with hArith | ⟨ax, hOr1, _⟩ | ⟨al, ar, hOr2, _, _⟩ | ⟨ax, lo, hi, hwithin, _, _, _⟩
+        · -- Arith arm: same as structuralArithBody proof
+          rcases hArith with hRef | ⟨op, l, r, rt, hvEq, _, _, _, _, _⟩ |
+            ⟨op, operand, rt, hvEq, _, _, _⟩ | ⟨ref, hvEq, _, _⟩
+          · simp only [structuralRefValue] at hRef
+            rcases hRef with hCopy | hConsume
+            · rw [lowerValueP_eq_lowerValue_structuralCopy progMethods props budget currentIndex
+                lastUses outerProtected localBindings constInts sm name v hCopy] at hxMem
+              rw [lowerValue_snd_structuralCopy lastUses outerProtected localBindings sm
+                currentIndex name v hCopy, Stack.Lower.StackMap.push] at hxMem
+              simp [List.mem_cons] at hxMem
+              exact hxMem.resolve_left hxNe
+            · cases v with
+              | loadConst c =>
+                  cases c with
+                  | refAlias consuming =>
+                      unfold structuralConsumeValue at hConsume
+                      obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                      rw [lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex
+                            lastUses outerProtected localBindings constInts sm name consuming d
+                            hDepth hCons, Stack.Lower.StackMap.push] at hxMem
+                      simp [List.mem_cons] at hxMem
+                      exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+                  | thisRef => simp [structuralConsumeValue] at hConsume
+                  | int i =>
+                      rw [lowerValueP_loadConst_int_sm2 progMethods props budget currentIndex
+                            lastUses outerProtected localBindings constInts sm name i,
+                          Stack.Lower.StackMap.push] at hxMem
+                      simp [List.mem_cons] at hxMem
+                      exact hxMem.resolve_left hxNe
+                  | bool b =>
+                      rw [lowerValueP_loadConst_bool_sm2 progMethods props budget currentIndex
+                            lastUses outerProtected localBindings constInts sm name b,
+                          Stack.Lower.StackMap.push] at hxMem
+                      simp [List.mem_cons] at hxMem
+                      exact hxMem.resolve_left hxNe
+                  | bytes bs =>
+                      rw [lowerValueP_loadConst_bytes_sm2 progMethods props budget currentIndex
+                            lastUses outerProtected localBindings constInts sm name bs,
+                          Stack.Lower.StackMap.push] at hxMem
+                      simp [List.mem_cons] at hxMem
+                      exact hxMem.resolve_left hxNe
+              | loadParam consuming =>
+                  unfold structuralConsumeValue at hConsume
+                  obtain ⟨⟨d, hDepth⟩, hCons⟩ := hConsume
+                  rw [lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex
+                        lastUses outerProtected localBindings constInts sm name consuming d
+                        hDepth hCons, Stack.Lower.StackMap.push] at hxMem
+                  simp [List.mem_cons] at hxMem
+                  exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+              | _ => simp [structuralConsumeValue] at hConsume
+          · subst hvEq
+            rw [lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name op l r rt _ _ _ _,
+              show (Stack.Lower.lowerValue sm name (.binOp op l r rt)).2 = sm.push name from rfl] at hxMem
+            simp [Stack.Lower.StackMap.push, List.mem_cons] at hxMem
+            exact hxMem.resolve_left hxNe
+            all_goals assumption
+          · subst hvEq
+            rw [lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name op operand rt _ _,
+              show (Stack.Lower.lowerValue sm name (.unaryOp op operand rt)).2 = sm.push name from rfl] at hxMem
+            simp [Stack.Lower.StackMap.push, List.mem_cons] at hxMem
+            exact hxMem.resolve_left hxNe
+            all_goals assumption
+          · subst hvEq
+            rw [lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name ref _ _,
+              show (Stack.Lower.lowerValue sm name (.assert ref)).2 = sm from rfl] at hxMem
+            exact hxMem
+            all_goals assumption
+        · -- Arity-1 call: sm2 = sm.push name
+          rcases hOr1 with hv | hv | hv | hv <;> subst hv
+          all_goals {
+            rw [lowerValueP_call_arity1_copy_sm2_eq progMethods props budget currentIndex
+                  lastUses outerProtected localBindings constInts sm name ax _
+                  (by first | exact Or.inl rfl | exact Or.inr (Or.inl rfl) |
+                              exact Or.inr (Or.inr (Or.inl rfl)) | exact Or.inr (Or.inr (Or.inr rfl)))
+                  ‹_›, Stack.Lower.StackMap.push] at hxMem
+            simp [List.mem_cons] at hxMem
+            exact hxMem.resolve_left hxNe
+          }
+        · -- Arity-2 call: sm2 = sm.push name
+          rcases hOr2 with hv | hv | hv | hv | hv <;> subst hv
+          all_goals {
+            rw [lowerValueP_call_arity2_copy_sm2_eq progMethods props budget currentIndex
+                  lastUses outerProtected localBindings constInts sm name al ar _
+                  (by first | exact Or.inl rfl | exact Or.inr (Or.inl rfl) |
+                              exact Or.inr (Or.inr (Or.inl rfl)) | exact Or.inr (Or.inr (Or.inr (Or.inl rfl))) |
+                              exact Or.inr (Or.inr (Or.inr (Or.inr rfl))))
+                  ‹_› ‹_›, Stack.Lower.StackMap.push] at hxMem
+            simp [List.mem_cons] at hxMem
+            exact hxMem.resolve_left hxNe
+          }
+        · -- Within: sm2 = sm.push name
+          subst hwithin
+          rw [lowerValueP_call_within_copy_sm2_eq progMethods props budget currentIndex
+                lastUses outerProtected localBindings constInts sm name ax lo hi ‹_› ‹_› ‹_›,
+              Stack.Lower.StackMap.push] at hxMem
+          simp [List.mem_cons] at hxMem
+          exact hxMem.resolve_left hxNe
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).2.1 := by
+        intro b hbMem hbIn
+        by_cases hbEqName : b.name = name
+        · apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hbEqName⟩
+        · exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) (hTailSubset b.name hbEqName hbIn)
+      have hRunOk' : ∀ b ∈ rest, ∀ idx : Nat, ∀ sm_acc : StackMap, ∀ stkPre : StackState,
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget idx lastUses
+                outerProtected localBindings constInts sm_acc b.name b.value).1
+            stkPre).toOption.isSome = true :=
+        fun b hb idx sm_acc stkPre =>
+          hRunOk b (List.mem_cons_of_mem _ hb) idx sm_acc stkPre
+      exact runOps_lowerBindingsP_structuralCallBody_isSome
+        progMethods props budget lastUses outerProtected localBindings constInts
+        rest _ (currentIndex + 1) stkSt'
+        hRest hFreshInSm' hRestNodup hRunOk'
+
+/-! ### Method-level wrapper for the structural-call fragment — DEFERRED
+
+`runMethod_lower_public_unique_no_post_structuralCall_isSome` is
+deferred to a future pass.  Call builtins (`checkSig`, `hash256`, `cat`,
+`abs`, etc.) each emit a concrete opcode sequence whose runtime success
+depends on the concrete types of operands on the stack.  For example,
+`OP_SHA256` succeeds only if the operand is a byte-string; `OP_CAT`
+succeeds only if both operands are byte-strings ≤ 520 bytes.  Proving
+success without a hypothesis that restates the conclusion requires the
+per-builtin operational discharge theorems planned for Phase B.  The
+structural predicate, `evalBindings_structuralCallBody_isSome`, and
+Decidable instance are preserved as substrate. -/
+
+/-! ### Decidable instance for `structuralCallBody`
+
+Following the `structuralArithBodyBool` pattern:
+define a Boolean checker, prove it reflects the `Prop`, then lift to `Decidable`.
+-/
+
+/-- Boolean checker for `argIsCopy`. -/
+private def argIsCopyBool (lastUses : List (String × Nat)) (outerProtected : List String)
+    (sm : StackMap) (currentIndex : Nat) (a : String) : Bool :=
+  (sm.depth? a).isSome &&
+  (!(!Stack.Lower.listContains outerProtected a &&
+       Stack.Lower.isLastUse lastUses a currentIndex))
+
+/-- `argIsCopyBool` reflects `argIsCopy`. -/
+private theorem argIsCopyBool_iff
+    (lastUses : List (String × Nat)) (outerProtected : List String)
+    (sm : StackMap) (currentIndex : Nat) (a : String) :
+    argIsCopyBool lastUses outerProtected sm currentIndex a = true ↔
+    argIsCopy lastUses outerProtected sm currentIndex a := by
+  simp only [argIsCopyBool, argIsCopy, Bool.and_eq_true, Option.isSome_iff_exists,
+             Bool.not_eq_true', Bool.not_eq_false']
+
+/-- Boolean checker for `structuralCallValue`. -/
+def structuralCallValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  -- Inherit all arith cases
+  | .loadConst (.int _) => true
+  | .loadConst (.bool _) => true
+  | .loadConst (.bytes _) => true
+  | .loadConst (.refAlias n) =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst (.refAlias n)) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst (.refAlias n))
+  | .loadConst .thisRef =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst .thisRef) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadConst .thisRef)
+  | .loadParam n =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadParam n) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadParam n)
+  | .loadProp n =>
+      structuralCopyValueBool lastUses outerProtected localBindings sm currentIndex (.loadProp n) ||
+      structuralConsumeValueBool lastUses outerProtected localBindings sm currentIndex (.loadProp n)
+  | .binOp op l r _rt =>
+      (sm.depth? l).isSome &&
+      (sm.depth? r).isSome &&
+      (!(!Stack.Lower.listContains outerProtected l &&
+           Stack.Lower.isLastUse lastUses l currentIndex)) &&
+      (!(!Stack.Lower.listContains outerProtected r &&
+           Stack.Lower.isLastUse lastUses r currentIndex)) &&
+      isProvedBinOpKind op
+  | .unaryOp op operand _rt =>
+      (sm.depth? operand).isSome &&
+      (!(!Stack.Lower.listContains outerProtected operand &&
+           Stack.Lower.isLastUse lastUses operand currentIndex)) &&
+      isProvedUnaryOpKind op
+  | .assert ref =>
+      (sm.depth? ref).isSome &&
+      (!(!Stack.Lower.listContains outerProtected ref &&
+           Stack.Lower.isLastUse lastUses ref currentIndex))
+  -- Tier-1 arity-1 call builtins
+  | .call "abs" [x] => argIsCopyBool lastUses outerProtected sm currentIndex x
+  | .call "len" [x] => argIsCopyBool lastUses outerProtected sm currentIndex x
+  | .call "bin2num" [x] => argIsCopyBool lastUses outerProtected sm currentIndex x
+  | .call "toByteString" [x] => argIsCopyBool lastUses outerProtected sm currentIndex x
+  -- Tier-1 arity-2 call builtins
+  | .call "cat" [l, r] =>
+      argIsCopyBool lastUses outerProtected sm currentIndex l &&
+      argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r
+  | .call "num2bin" [l, r] =>
+      argIsCopyBool lastUses outerProtected sm currentIndex l &&
+      argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r
+  | .call "min" [l, r] =>
+      argIsCopyBool lastUses outerProtected sm currentIndex l &&
+      argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r
+  | .call "max" [l, r] =>
+      argIsCopyBool lastUses outerProtected sm currentIndex l &&
+      argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r
+  | .call "split" [l, r] =>
+      argIsCopyBool lastUses outerProtected sm currentIndex l &&
+      argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r
+  -- Tier-1 arity-3 call builtin: within
+  | .call "within" [x, lo, hi] =>
+      argIsCopyBool lastUses outerProtected sm currentIndex x &&
+      argIsCopyBool lastUses outerProtected (sm.push x) currentIndex lo &&
+      argIsCopyBool lastUses outerProtected ((sm.push x).push lo) currentIndex hi
+  -- All other constructors are not in the call fragment
+  | _ => false
+
+/-- Characterize `structuralCallValueBool` on `.call func args` as a disjunction over
+    the 10 specific call patterns.  This helper is used by `structuralCallValueBool_iff`
+    to avoid a `split at h` that would enumerate all 21 match arms. -/
+private theorem structuralCallValueBool_call_cases
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (func : String) (args : List String)
+    (h : structuralCallValueBool lastUses outerProtected localBindings sm currentIndex
+           (.call func args) = true) :
+    (func = "abs"         ∧ ∃ x,          args = [x]         ∧ argIsCopyBool lastUses outerProtected sm currentIndex x = true) ∨
+    (func = "len"         ∧ ∃ x,          args = [x]         ∧ argIsCopyBool lastUses outerProtected sm currentIndex x = true) ∨
+    (func = "bin2num"     ∧ ∃ x,          args = [x]         ∧ argIsCopyBool lastUses outerProtected sm currentIndex x = true) ∨
+    (func = "toByteString" ∧ ∃ x,         args = [x]         ∧ argIsCopyBool lastUses outerProtected sm currentIndex x = true) ∨
+    (func = "cat"         ∧ ∃ l r,        args = [l, r]      ∧ argIsCopyBool lastUses outerProtected sm currentIndex l = true ∧ argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r = true) ∨
+    (func = "num2bin"     ∧ ∃ l r,        args = [l, r]      ∧ argIsCopyBool lastUses outerProtected sm currentIndex l = true ∧ argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r = true) ∨
+    (func = "min"         ∧ ∃ l r,        args = [l, r]      ∧ argIsCopyBool lastUses outerProtected sm currentIndex l = true ∧ argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r = true) ∨
+    (func = "max"         ∧ ∃ l r,        args = [l, r]      ∧ argIsCopyBool lastUses outerProtected sm currentIndex l = true ∧ argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r = true) ∨
+    (func = "split"       ∧ ∃ l r,        args = [l, r]      ∧ argIsCopyBool lastUses outerProtected sm currentIndex l = true ∧ argIsCopyBool lastUses outerProtected (sm.push l) currentIndex r = true) ∨
+    (func = "within"      ∧ ∃ x lo hi,    args = [x, lo, hi] ∧ argIsCopyBool lastUses outerProtected sm currentIndex x = true ∧ argIsCopyBool lastUses outerProtected (sm.push x) currentIndex lo = true ∧ argIsCopyBool lastUses outerProtected ((sm.push x).push lo) currentIndex hi = true) := by
+  simp only [structuralCallValueBool] at h
+  split at h
+  -- Goals 1-10: non-call arms; discriminant equality is false → contradiction
+  · simp_all  -- loadConst (.int _)
+  · simp_all  -- loadConst (.bool _)
+  · simp_all  -- loadConst (.bytes _)
+  · simp_all  -- loadConst (.refAlias n)
+  · simp_all  -- loadConst .thisRef
+  · simp_all  -- loadParam n
+  · simp_all  -- loadProp n
+  · simp_all  -- binOp op l r _rt
+  · simp_all  -- unaryOp op operand _rt
+  · simp_all  -- assert ref
+  -- Goals 11-20: call-specific arms; each introduces pattern vars + a discriminant equality
+  -- Use ANFValue.call.inj on the discriminant to unify func/args with the specific pattern
+  · rename_i x hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    exact Or.inl ⟨rfl, x, rfl, h⟩
+  · rename_i x hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    exact Or.inr (Or.inl ⟨rfl, x, rfl, h⟩)
+  · rename_i x hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    exact Or.inr (Or.inr (Or.inl ⟨rfl, x, rfl, h⟩))
+  · rename_i x hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    exact Or.inr (Or.inr (Or.inr (Or.inl ⟨rfl, x, rfl, h⟩)))
+  · rename_i l r hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    rw [Bool.and_eq_true] at h
+    exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨rfl, l, r, rfl, h.1, h.2⟩))))
+  · rename_i l r hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    rw [Bool.and_eq_true] at h
+    exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨rfl, l, r, rfl, h.1, h.2⟩)))))
+  · rename_i l r hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    rw [Bool.and_eq_true] at h
+    exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨rfl, l, r, rfl, h.1, h.2⟩))))))
+  · rename_i l r hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    rw [Bool.and_eq_true] at h
+    exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨rfl, l, r, rfl, h.1, h.2⟩)))))))
+  · rename_i l r hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    rw [Bool.and_eq_true] at h
+    exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨rfl, l, r, rfl, h.1, h.2⟩))))))))
+  · rename_i x lo hi hdisc
+    obtain ⟨hf, ha⟩ := ANFValue.call.inj hdisc; subst hf; subst ha
+    rw [Bool.and_eq_true, Bool.and_eq_true] at h
+    exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨rfl, x, lo, hi, rfl, h.1.1, h.1.2, h.2⟩))))))))
+  -- Goal 21: catch-all (h : false = true)
+  · exact absurd h (by decide)
+
+/-- Boolean checker for `structuralCallBody`. -/
+def structuralCallBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralCallValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralCallBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+
+/-- `structuralCallValueBool` reflects `structuralCallValue`. -/
+theorem structuralCallValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralCallValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralCallValue lastUses outerProtected localBindings sm currentIndex v := by
+  -- Delegate all non-call constructors entirely to structuralArithValueBool_iff
+  -- (structuralCallValueBool agrees with structuralArithValueBool on those arms)
+  cases v with
+  | loadConst c =>
+      simp only [structuralCallValue]
+      constructor
+      · intro h
+        exact Or.inl ((structuralArithValueBool_iff lastUses outerProtected localBindings sm
+          currentIndex (.loadConst c)).mp (by
+            cases c with
+            | int _ => simpa [structuralCallValueBool, structuralArithValueBool] using h
+            | bool _ => simpa [structuralCallValueBool, structuralArithValueBool] using h
+            | bytes _ => simpa [structuralCallValueBool, structuralArithValueBool] using h
+            | refAlias n => simpa [structuralCallValueBool, structuralArithValueBool] using h
+            | thisRef => simpa [structuralCallValueBool, structuralArithValueBool] using h))
+      · intro h
+        rcases h with hA | ⟨x, hOr, _⟩ | ⟨l, r, hOr, _, _⟩ | ⟨x, lo, hi, hv, _, _, _⟩
+        · exact (by
+            cases c with
+            | int _ => simpa [structuralCallValueBool, structuralArithValueBool] using
+                (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+                  currentIndex (.loadConst (.int _))).mpr hA
+            | bool _ => simpa [structuralCallValueBool, structuralArithValueBool] using
+                (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+                  currentIndex (.loadConst (.bool _))).mpr hA
+            | bytes _ => simpa [structuralCallValueBool, structuralArithValueBool] using
+                (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+                  currentIndex (.loadConst (.bytes _))).mpr hA
+            | refAlias n => simpa [structuralCallValueBool, structuralArithValueBool] using
+                (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+                  currentIndex (.loadConst (.refAlias n))).mpr hA
+            | thisRef => simpa [structuralCallValueBool, structuralArithValueBool] using
+                (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+                  currentIndex (.loadConst .thisRef)).mpr hA)
+        · rcases hOr with hv | hv | hv | hv <;> simp_all
+        · rcases hOr with hv | hv | hv | hv | hv <;> simp_all
+        · simp_all
+  | loadParam n =>
+      simp only [structuralCallValue]
+      constructor
+      · intro h
+        exact Or.inl ((structuralArithValueBool_iff lastUses outerProtected localBindings sm
+          currentIndex (.loadParam n)).mp (by simpa [structuralCallValueBool, structuralArithValueBool] using h))
+      · intro h
+        rcases h with hA | ⟨x, hOr, _⟩ | ⟨l, r, hOr, _, _⟩ | ⟨x, lo, hi, hv, _, _, _⟩
+        · simpa [structuralCallValueBool, structuralArithValueBool] using
+            (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+              currentIndex (.loadParam n)).mpr hA
+        · rcases hOr with hv | hv | hv | hv <;> simp_all
+        · rcases hOr with hv | hv | hv | hv | hv <;> simp_all
+        · simp_all
+  | loadProp n =>
+      simp only [structuralCallValue]
+      constructor
+      · intro h
+        exact Or.inl ((structuralArithValueBool_iff lastUses outerProtected localBindings sm
+          currentIndex (.loadProp n)).mp (by simpa [structuralCallValueBool, structuralArithValueBool] using h))
+      · intro h
+        rcases h with hA | ⟨x, hOr, _⟩ | ⟨l, r, hOr, _, _⟩ | ⟨x, lo, hi, hv, _, _, _⟩
+        · simpa [structuralCallValueBool, structuralArithValueBool] using
+            (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+              currentIndex (.loadProp n)).mpr hA
+        · rcases hOr with hv | hv | hv | hv <;> simp_all
+        · rcases hOr with hv | hv | hv | hv | hv <;> simp_all
+        · simp_all
+  | binOp op l r rt =>
+      simp only [structuralCallValue]
+      constructor
+      · intro h
+        exact Or.inl ((structuralArithValueBool_iff lastUses outerProtected localBindings sm
+          currentIndex (.binOp op l r rt)).mp (by simpa [structuralCallValueBool, structuralArithValueBool] using h))
+      · intro h
+        rcases h with hA | ⟨x, hOr, _⟩ | ⟨l', r', hOr, _, _⟩ | ⟨x, lo, hi, hv, _, _, _⟩
+        · simpa [structuralCallValueBool, structuralArithValueBool] using
+            (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+              currentIndex (.binOp op l r rt)).mpr hA
+        · rcases hOr with hv | hv | hv | hv <;> simp_all
+        · rcases hOr with hv | hv | hv | hv | hv <;> simp_all
+        · simp_all
+  | unaryOp op operand rt =>
+      simp only [structuralCallValue]
+      constructor
+      · intro h
+        exact Or.inl ((structuralArithValueBool_iff lastUses outerProtected localBindings sm
+          currentIndex (.unaryOp op operand rt)).mp (by simpa [structuralCallValueBool, structuralArithValueBool] using h))
+      · intro h
+        rcases h with hA | ⟨x, hOr, _⟩ | ⟨l, r, hOr, _, _⟩ | ⟨x, lo, hi, hv, _, _, _⟩
+        · simpa [structuralCallValueBool, structuralArithValueBool] using
+            (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+              currentIndex (.unaryOp op operand rt)).mpr hA
+        · rcases hOr with hv | hv | hv | hv <;> simp_all
+        · rcases hOr with hv | hv | hv | hv | hv <;> simp_all
+        · simp_all
+  | assert ref =>
+      simp only [structuralCallValue]
+      constructor
+      · intro h
+        exact Or.inl ((structuralArithValueBool_iff lastUses outerProtected localBindings sm
+          currentIndex (.assert ref)).mp (by simpa [structuralCallValueBool, structuralArithValueBool] using h))
+      · intro h
+        rcases h with hA | ⟨x, hOr, _⟩ | ⟨l, r, hOr, _, _⟩ | ⟨x, lo, hi, hv, _, _, _⟩
+        · simpa [structuralCallValueBool, structuralArithValueBool] using
+            (structuralArithValueBool_iff lastUses outerProtected localBindings sm
+              currentIndex (.assert ref)).mpr hA
+        · rcases hOr with hv | hv | hv | hv <;> simp_all
+        · rcases hOr with hv | hv | hv | hv | hv <;> simp_all
+        · simp_all
+  | call func args =>
+      simp only [structuralCallValue, structuralArithValue, structuralRefValue,
+                 structuralCopyValue, structuralConsumeValue]
+      constructor
+      · -- Forward: structuralCallValueBool true → structuralCallValue
+        -- Use the helper lemma to avoid split-at-h producing all 21 match arms
+        intro h
+        rcases structuralCallValueBool_call_cases lastUses outerProtected localBindings
+                 sm currentIndex func args h with
+          ⟨rfl, x, rfl, hx⟩ |
+          ⟨rfl, x, rfl, hx⟩ |
+          ⟨rfl, x, rfl, hx⟩ |
+          ⟨rfl, x, rfl, hx⟩ |
+          ⟨rfl, l, r, rfl, hl, hr⟩ |
+          ⟨rfl, l, r, rfl, hl, hr⟩ |
+          ⟨rfl, l, r, rfl, hl, hr⟩ |
+          ⟨rfl, l, r, rfl, hl, hr⟩ |
+          ⟨rfl, l, r, rfl, hl, hr⟩ |
+          ⟨rfl, x, lo, hi, rfl, hx, hlo, hhi⟩
+        -- abs
+        · exact Or.inr (Or.inl ⟨x, Or.inl rfl, (argIsCopyBool_iff _ _ _ _ _).mp hx⟩)
+        -- len
+        · exact Or.inr (Or.inl ⟨x, Or.inr (Or.inl rfl), (argIsCopyBool_iff _ _ _ _ _).mp hx⟩)
+        -- bin2num
+        · exact Or.inr (Or.inl ⟨x, Or.inr (Or.inr (Or.inl rfl)), (argIsCopyBool_iff _ _ _ _ _).mp hx⟩)
+        -- toByteString
+        · exact Or.inr (Or.inl ⟨x, Or.inr (Or.inr (Or.inr rfl)), (argIsCopyBool_iff _ _ _ _ _).mp hx⟩)
+        -- cat
+        · exact Or.inr (Or.inr (Or.inl ⟨l, r, Or.inl rfl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hr⟩))
+        -- num2bin
+        · exact Or.inr (Or.inr (Or.inl ⟨l, r, Or.inr (Or.inl rfl),
+            (argIsCopyBool_iff _ _ _ _ _).mp hl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hr⟩))
+        -- min
+        · exact Or.inr (Or.inr (Or.inl ⟨l, r, Or.inr (Or.inr (Or.inl rfl)),
+            (argIsCopyBool_iff _ _ _ _ _).mp hl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hr⟩))
+        -- max
+        · exact Or.inr (Or.inr (Or.inl ⟨l, r, Or.inr (Or.inr (Or.inr (Or.inl rfl))),
+            (argIsCopyBool_iff _ _ _ _ _).mp hl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hr⟩))
+        -- split
+        · exact Or.inr (Or.inr (Or.inl ⟨l, r, Or.inr (Or.inr (Or.inr (Or.inr rfl))),
+            (argIsCopyBool_iff _ _ _ _ _).mp hl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hr⟩))
+        -- within
+        · exact Or.inr (Or.inr (Or.inr ⟨x, lo, hi, rfl,
+            (argIsCopyBool_iff _ _ _ _ _).mp hx,
+            (argIsCopyBool_iff _ _ _ _ _).mp hlo,
+            (argIsCopyBool_iff _ _ _ _ _).mp hhi⟩))
+      · -- Backward: structuralCallValue → structuralCallValueBool true
+        intro h
+        -- structuralArithValue (.call func args) is always False
+        rcases h with hArith | ⟨x, hOr1, hCopyX⟩ | ⟨l, r, hOr2, hCopyL, hCopyR⟩ |
+                                ⟨x, lo, hi, hwithin, hCopyX, hCopyLo, hCopyHi⟩
+        · -- arith arm: call cannot be arith
+          rcases hArith with (hCopy | hConsume) | ⟨_, _, _, _, hv, _, _, _, _, _⟩ |
+                              ⟨_, _, _, hv, _, _, _⟩ | ⟨_, hv, _, _⟩ <;>
+          simp_all
+        · -- arity-1 arm
+          -- hOr1 : ANFValue.call func args = .call "abs" [x] ∨ ...
+          -- Use ANFValue.call.inj to extract func = "abs" and args = [x], then subst
+          rcases hOr1 with hv | hv | hv | hv
+          · -- abs
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool]
+            exact (argIsCopyBool_iff lastUses outerProtected sm currentIndex x).mpr hCopyX
+          · -- len
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool]
+            exact (argIsCopyBool_iff lastUses outerProtected sm currentIndex x).mpr hCopyX
+          · -- bin2num
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool]
+            exact (argIsCopyBool_iff lastUses outerProtected sm currentIndex x).mpr hCopyX
+          · -- toByteString
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool]
+            exact (argIsCopyBool_iff lastUses outerProtected sm currentIndex x).mpr hCopyX
+        · -- arity-2 arm
+          rcases hOr2 with hv | hv | hv | hv | hv
+          · -- cat
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool, Bool.and_eq_true]
+            exact ⟨(argIsCopyBool_iff lastUses outerProtected sm currentIndex l).mpr hCopyL,
+                   (argIsCopyBool_iff lastUses outerProtected (sm.push l) currentIndex r).mpr hCopyR⟩
+          · -- num2bin
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool, Bool.and_eq_true]
+            exact ⟨(argIsCopyBool_iff lastUses outerProtected sm currentIndex l).mpr hCopyL,
+                   (argIsCopyBool_iff lastUses outerProtected (sm.push l) currentIndex r).mpr hCopyR⟩
+          · -- min
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool, Bool.and_eq_true]
+            exact ⟨(argIsCopyBool_iff lastUses outerProtected sm currentIndex l).mpr hCopyL,
+                   (argIsCopyBool_iff lastUses outerProtected (sm.push l) currentIndex r).mpr hCopyR⟩
+          · -- max
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool, Bool.and_eq_true]
+            exact ⟨(argIsCopyBool_iff lastUses outerProtected sm currentIndex l).mpr hCopyL,
+                   (argIsCopyBool_iff lastUses outerProtected (sm.push l) currentIndex r).mpr hCopyR⟩
+          · -- split
+            obtain ⟨hf, ha⟩ := ANFValue.call.inj hv; subst hf; subst ha
+            simp only [structuralCallValueBool, Bool.and_eq_true]
+            exact ⟨(argIsCopyBool_iff lastUses outerProtected sm currentIndex l).mpr hCopyL,
+                   (argIsCopyBool_iff lastUses outerProtected (sm.push l) currentIndex r).mpr hCopyR⟩
+        · -- within arm
+          obtain ⟨hf, ha⟩ := ANFValue.call.inj hwithin; subst hf; subst ha
+          simp only [structuralCallValueBool, Bool.and_eq_true]
+          exact ⟨⟨(argIsCopyBool_iff lastUses outerProtected sm currentIndex x).mpr hCopyX,
+                   (argIsCopyBool_iff lastUses outerProtected (sm.push x) currentIndex lo).mpr hCopyLo⟩,
+                 (argIsCopyBool_iff lastUses outerProtected ((sm.push x).push lo) currentIndex hi).mpr hCopyHi⟩
+  | methodCall _ _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | ifVal _ _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | loop _ _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | updateProp _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | getStateScript =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | checkPreimage _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | deserializeState _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | addOutput _ _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | addRawOutput _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | addDataOutput _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | arrayLiteral _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+  | rawScript _ _ _ =>
+      simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
+            structuralRefValue, structuralCopyValue, structuralConsumeValue]
+
+/-- `structuralCallBodyBool` reflects `structuralCallBody`. -/
+theorem structuralCallBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralCallBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralCallBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by
+      simp [structuralCallBodyBool, structuralCallBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralCallBodyBool, structuralCallBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralCallValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralCallBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralCallValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralCallBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralCallBody` is decidable. -/
+instance decidableStructuralCallBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralCallBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralCallBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralCallBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralCallBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+
+
+/-! ## Sub-milestones A5–A8 — `update_prop`, `if_val`, `loop`, `method_call`
+
+These four sub-milestones each define a structural predicate extending the
+previous one in a chain:
+
+  structuralCallValue ⊆ structuralUpdatePropValue ⊆ structuralIfValValue
+    ⊆ structuralLoopValue ⊆ structuralMethodCallValue
+
+Each predicate adds one new ANF constructor.  Runtime success for all
+constructors is guaranteed externally via the uniform `hRunOk` witness.
+
+**Narrowings**:
+- A5 (`update_prop`): requires `ref` in copy mode.
+- A6 (`if_val`): requires `cond` in copy mode; branch bodies unconstrained.
+- A7 (`loop`): any `loop` constructor accepted.
+- A8 (`method_call`): any `methodCall` constructor accepted.
+
+### Shared list-induction helper -/
+
+/-- Core list-induction lemma: given that `hRunOk` witnesses runtime success
+for every binding in `body` (uniformly over any `localBindings` and `sm`),
+the full lowered binding-list `runOps` succeeds.
+
+The `localBindings` parameter is universally quantified inside the conclusion
+so that the inductive step can pass the updated `localBindings` produced by
+`lowerValueP` to the recursive call. -/
+private theorem runOps_lowerBindingsP_isSome_of_hRunOk
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected : List String)
+    (constInts : List (String × Int))
+    -- Runtime success witness: uniform over any localBindings, sm, idx, and pre-stack
+    (hRunOk_global : ∀ (b : ANFBinding), ∀ lb : List String, ∀ idx : Nat,
+        ∀ sm_acc : StackMap, ∀ stkPre : StackState,
+        (Stack.Eval.runOps
+          (Stack.Lower.lowerValueP progMethods props budget idx lastUses
+              outerProtected lb constInts sm_acc b.name b.value).1
+          stkPre).toOption.isSome = true) :
+    ∀ (body : List ANFBinding) (localBindings : List String) (sm : StackMap)
+      (currentIndex : Nat) (stkSt : StackState),
+      (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+                 outerProtected localBindings constInts sm body).1
+              stkSt).toOption.isSome
+  | [], _lb, _sm, _idx, _stkSt => by
+      simp [Stack.Lower.lowerBindingsP, runOps, Except.toOption]
+  | (.mk name v _src) :: rest, localBindings, sm, currentIndex, stkSt => by
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm
+              ((.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1) lastUses
+                    outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      have hHeadRunOk :
+          (Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1
+            stkSt).toOption.isSome = true :=
+        hRunOk_global (.mk name v _src) localBindings currentIndex sm stkSt
+      obtain ⟨stkSt', hHeadRun⟩ : ∃ stkSt',
+          Stack.Eval.runOps
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1
+            stkSt = .ok stkSt' := by
+        have hiso := hHeadRunOk
+        simp only [Option.isSome_iff_exists, Except.toOption] at hiso
+        obtain ⟨v', hv'⟩ := hiso
+        cases hcase : Stack.Eval.runOps
+                        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                            outerProtected localBindings constInts sm name v).1
+                        stkSt with
+        | ok s  => exact ⟨s, rfl⟩
+        | error _ => simp [hcase, Except.toOption] at hv'
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+      exact runOps_lowerBindingsP_isSome_of_hRunOk
+        progMethods props budget lastUses outerProtected constInts hRunOk_global
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.2
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1) stkSt'
+
+/-! ## Sub-milestone A5 — `update_prop` -/
+
+/-- Per-value predicate for the `update_prop` fragment.
+Extends `structuralCallValue` with a disjunct for `.updateProp`.
+The disjunct requires that the `ref` operand is in `sm` (copy mode). -/
+def structuralUpdatePropValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralCallValue lastUses outerProtected localBindings sm currentIndex v ∨
+  ∃ propName ref,
+    v = .updateProp propName ref ∧
+    argIsCopy lastUses outerProtected sm currentIndex ref
+
+/-- Body-level `update_prop` predicate. -/
+def structuralUpdatePropBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralUpdatePropValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralUpdatePropBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- Boolean checker for `structuralUpdatePropValue`. -/
+def structuralUpdatePropValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  | .updateProp _propName ref =>
+      argIsCopyBool lastUses outerProtected sm currentIndex ref
+  | v =>
+      structuralCallValueBool lastUses outerProtected localBindings sm currentIndex v
+
+/-- `structuralUpdatePropValueBool` reflects `structuralUpdatePropValue`. -/
+theorem structuralUpdatePropValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralUpdatePropValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralUpdatePropValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  | updateProp propName ref =>
+      simp only [structuralUpdatePropValueBool, structuralUpdatePropValue]
+      constructor
+      · intro h
+        exact Or.inr ⟨propName, ref, rfl,
+          (argIsCopyBool_iff lastUses outerProtected sm currentIndex ref).mp h⟩
+      · intro h
+        rcases h with hCall | ⟨p, r, hv, hCopy⟩
+        · -- .updateProp is not in any arm of structuralCallValue
+          simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                structuralCopyValue, structuralConsumeValue, structuralConstValue] at hCall
+        · simp only [ANFValue.updateProp.injEq] at hv
+          obtain ⟨_, rfl⟩ := hv
+          exact (argIsCopyBool_iff lastUses outerProtected sm currentIndex ref).mpr hCopy
+  | _ =>
+      simp only [structuralUpdatePropValueBool, structuralUpdatePropValue]
+      constructor
+      · intro h
+        exact Or.inl
+          ((structuralCallValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mp h)
+      · intro h
+        rcases h with hCall | ⟨_, _, hv, _⟩
+        · exact (structuralCallValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mpr hCall
+        · simp at hv
+
+/-- Boolean checker for `structuralUpdatePropBody`. -/
+def structuralUpdatePropBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralUpdatePropValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralUpdatePropBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralUpdatePropBodyBool` reflects `structuralUpdatePropBody`. -/
+theorem structuralUpdatePropBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralUpdatePropBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralUpdatePropBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by simp [structuralUpdatePropBodyBool, structuralUpdatePropBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralUpdatePropBodyBool, structuralUpdatePropBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralUpdatePropValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralUpdatePropBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralUpdatePropValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralUpdatePropBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralUpdatePropBody` is decidable. -/
+instance decidableStructuralUpdatePropBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralUpdatePropBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralUpdatePropBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralUpdatePropBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralUpdatePropBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+/-! ### Method-level wrapper for `update_prop` — DEFERRED
+
+`runMethod_lower_public_unique_no_post_structuralUpdateProp_isSome` is
+deferred to a future pass.  The `updateProp` lowering emits
+`OP_RUNAR_UPDATEPROP_UNSUPPORTED` (see `Stack/Lower.lean:lowerValue`),
+which has no concrete runtime semantics in the current evaluator.
+Proving runtime success therefore requires either extending the evaluator
+with update-prop semantics (Phase D work) or proving the op sequence
+succeeds via the full agreesTagged infrastructure.  The structural
+predicate, `evalBindings_structuralUpdatePropBody_isSome`, and Decidable
+instance are preserved as substrate for Phase D. -/
+
+/-! ## Sub-milestone A6 — `if_val`
+
+Narrowing: `cond` must be in copy mode; branch bodies unconstrained. -/
+
+/-- Per-value predicate for the `if_val` (narrowed) fragment. -/
+def structuralIfValValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralUpdatePropValue lastUses outerProtected localBindings sm currentIndex v ∨
+  ∃ cond thnBs elsBs,
+    v = .ifVal cond thnBs elsBs ∧
+    argIsCopy lastUses outerProtected sm currentIndex cond
+
+/-- Body-level `if_val` predicate. -/
+def structuralIfValBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralIfValValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralIfValBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- Boolean checker for `structuralIfValValue`. -/
+def structuralIfValValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  | .ifVal cond _thnBs _elsBs =>
+      argIsCopyBool lastUses outerProtected sm currentIndex cond
+  | v =>
+      structuralUpdatePropValueBool lastUses outerProtected localBindings sm currentIndex v
+
+/-- `structuralIfValValueBool` reflects `structuralIfValValue`. -/
+theorem structuralIfValValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralIfValValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralIfValValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  | ifVal cond thnBs elsBs =>
+      simp only [structuralIfValValueBool, structuralIfValValue]
+      constructor
+      · intro h
+        exact Or.inr ⟨cond, thnBs, elsBs, rfl,
+          (argIsCopyBool_iff lastUses outerProtected sm currentIndex cond).mp h⟩
+      · intro h
+        rcases h with hPrev | ⟨c, _, _, hveq, hCopy⟩
+        · -- .ifVal is not in structuralUpdatePropValue
+          simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                structuralRefValue, structuralCopyValue, structuralConsumeValue,
+                structuralConstValue] at hPrev
+        · simp only [ANFValue.ifVal.injEq] at hveq
+          obtain ⟨rfl, _, _⟩ := hveq
+          exact (argIsCopyBool_iff lastUses outerProtected sm currentIndex cond).mpr hCopy
+  | _ =>
+      simp only [structuralIfValValueBool, structuralIfValValue]
+      constructor
+      · intro h
+        exact Or.inl
+          ((structuralUpdatePropValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mp h)
+      · intro h
+        rcases h with hPrev | ⟨_, _, _, hveq, _⟩
+        · exact (structuralUpdatePropValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mpr hPrev
+        · simp at hveq
+
+/-- Boolean checker for `structuralIfValBody`. -/
+def structuralIfValBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralIfValValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralIfValBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralIfValBodyBool` reflects `structuralIfValBody`. -/
+theorem structuralIfValBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralIfValBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralIfValBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by simp [structuralIfValBodyBool, structuralIfValBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralIfValBodyBool, structuralIfValBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralIfValValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralIfValBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralIfValValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralIfValBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralIfValBody` is decidable. -/
+instance decidableStructuralIfValBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralIfValBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralIfValBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralIfValBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralIfValBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+/-! ### Method-level wrapper for `if_val` — DEFERRED
+
+`runMethod_lower_public_unique_no_post_structuralIfVal_isSome` is
+deferred to a future pass.  The `ifVal` lowering emits an `.ifOp` node
+whose branch-composition semantics require proving that both branches
+succeed independently given the concrete stack state.  This requires
+an agreesTagged-based both-branch discharge (the plan's A6 step 3), which
+depends on the full Stage C infrastructure for the branch bodies — work
+slated for A6 proper.  The structural predicate,
+`evalBindings_structuralIfValBody_isSome`, and Decidable instance are
+preserved as substrate. -/
+
+/-! ## Sub-milestone A7 — `loop`
+
+Narrowing: any `loop` binding accepted. -/
+
+/-- Per-value predicate for the `loop` (narrowed) fragment. -/
+def structuralLoopValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralIfValValue lastUses outerProtected localBindings sm currentIndex v ∨
+  ∃ count body iterVar,
+    v = .loop count body iterVar
+
+/-- Body-level `loop` predicate. -/
+def structuralLoopBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralLoopValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralLoopBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- Boolean checker for `structuralLoopValue`. -/
+def structuralLoopValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  | .loop _count _body _iterVar => true
+  | v =>
+      structuralIfValValueBool lastUses outerProtected localBindings sm currentIndex v
+
+/-- `structuralLoopValueBool` reflects `structuralLoopValue`. -/
+theorem structuralLoopValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralLoopValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralLoopValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  | loop count body iterVar =>
+      simp only [structuralLoopValueBool, structuralLoopValue]
+      constructor
+      · intro _h; exact Or.inr ⟨count, body, iterVar, rfl⟩
+      · intro _h; trivial
+  | _ =>
+      simp only [structuralLoopValueBool, structuralLoopValue]
+      constructor
+      · intro h
+        exact Or.inl
+          ((structuralIfValValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mp h)
+      · intro h
+        rcases h with hPrev | ⟨_, _, _, hveq⟩
+        · exact (structuralIfValValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mpr hPrev
+        · simp at hveq
+
+/-- Boolean checker for `structuralLoopBody`. -/
+def structuralLoopBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralLoopValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralLoopBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralLoopBodyBool` reflects `structuralLoopBody`. -/
+theorem structuralLoopBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralLoopBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralLoopBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by simp [structuralLoopBodyBool, structuralLoopBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralLoopBodyBool, structuralLoopBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralLoopValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralLoopBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralLoopValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralLoopBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralLoopBody` is decidable. -/
+instance decidableStructuralLoopBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralLoopBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralLoopBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralLoopBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralLoopBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+/-! ### Method-level wrapper for `loop` — DEFERRED
+
+`runMethod_lower_public_unique_no_post_structuralLoop_isSome` is
+deferred to a future pass.  Loops lower to `unrollIter bodyOps count`
+(see `Stack/Lower.lean:lowerValue`).  Proving that the unrolled sequence
+succeeds requires induction on `count` with a per-iteration body witness.
+Each iteration's body witness itself depends on value-typed operands (the
+loop counter) being correct at each step — the same value-dependent
+failure mode that blocks arith.  Work slated for A7 proper (plan §A7).
+The structural predicate, Decidable instance, and substrate are
+preserved. -/
+
+/-! ## Sub-milestone A8 — `method_call`
+
+Narrowing: any `methodCall` binding accepted. -/
+
+/-- Per-value predicate for the `method_call` (narrowed) fragment. -/
+def structuralMethodCallValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralLoopValue lastUses outerProtected localBindings sm currentIndex v ∨
+  ∃ obj method args,
+    v = .methodCall obj method args
+
+/-- Body-level `method_call` predicate. -/
+def structuralMethodCallBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralMethodCallValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralMethodCallBody progMethods props budget lastUses outerProtected localBindings constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- Boolean checker for `structuralMethodCallValue`. -/
+def structuralMethodCallValueBool
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
+  | .methodCall _obj _method _args => true
+  | v =>
+      structuralLoopValueBool lastUses outerProtected localBindings sm currentIndex v
+
+/-- `structuralMethodCallValueBool` reflects `structuralMethodCallValue`. -/
+theorem structuralMethodCallValueBool_iff
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) :
+    structuralMethodCallValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
+    structuralMethodCallValue lastUses outerProtected localBindings sm currentIndex v := by
+  cases v with
+  | methodCall obj method args =>
+      simp only [structuralMethodCallValueBool, structuralMethodCallValue]
+      constructor
+      · intro _h; exact Or.inr ⟨obj, method, args, rfl⟩
+      · intro _h; trivial
+  | _ =>
+      simp only [structuralMethodCallValueBool, structuralMethodCallValue]
+      constructor
+      · intro h
+        exact Or.inl
+          ((structuralLoopValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mp h)
+      · intro h
+        rcases h with hPrev | ⟨_, _, _, hveq⟩
+        · exact (structuralLoopValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mpr hPrev
+        · simp at hveq
+
+/-- Boolean checker for `structuralMethodCallBody`. -/
+def structuralMethodCallBodyBool
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → Bool
+  | [], _sm, _currentIndex => true
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralMethodCallValueBool lastUses outerProtected localBindings sm currentIndex v &&
+      structuralMethodCallBodyBool progMethods props budget lastUses outerProtected localBindings
+        constInts rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+
+/-- `structuralMethodCallBodyBool` reflects `structuralMethodCallBody`. -/
+theorem structuralMethodCallBodyBool_iff
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralMethodCallBodyBool progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex = true ↔
+      structuralMethodCallBody progMethods props budget lastUses outerProtected localBindings
+          constInts body sm currentIndex
+  | [], _sm, _currentIndex => by simp [structuralMethodCallBodyBool, structuralMethodCallBody]
+  | (.mk name v _) :: rest, sm, currentIndex => by
+      simp only [structuralMethodCallBodyBool, structuralMethodCallBody, Bool.and_eq_true]
+      constructor
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralMethodCallValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mp hH,
+               (structuralMethodCallBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mp hR⟩
+      · intro ⟨hH, hR⟩
+        exact ⟨(structuralMethodCallValueBool_iff lastUses outerProtected localBindings
+                  sm currentIndex v).mpr hH,
+               (structuralMethodCallBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts rest _ (currentIndex + 1)).mpr hR⟩
+
+/-- `structuralMethodCallBody` is decidable. -/
+instance decidableStructuralMethodCallBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat) :
+    Decidable (structuralMethodCallBody progMethods props budget lastUses outerProtected
+        localBindings constInts body sm currentIndex) :=
+  if h : structuralMethodCallBodyBool progMethods props budget lastUses outerProtected localBindings
+            constInts body sm currentIndex = true
+  then isTrue ((structuralMethodCallBodyBool_iff progMethods props budget lastUses outerProtected
+                  localBindings constInts body sm currentIndex).mp h)
+  else isFalse (fun hP =>
+    h ((structuralMethodCallBodyBool_iff progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex).mpr hP))
+
+/-! ### Method-level wrapper for `method_call` — DEFERRED
+
+`runMethod_lower_public_unique_no_post_structuralMethodCall_isSome` is
+deferred to a future pass.  The `methodCall` lowering either inlines the
+callee body (budget > 0) or emits `OP_RUNAR_METHODCALL_NOPROG` (budget =
+0).  In the inlining case, proving runtime success reduces to the same
+problem for the inlined body — which may itself contain arith ops or
+further method calls.  This requires the full recursive-body witness
+infrastructure planned for A8.  The structural predicate, Decidable
+instance, and substrate are preserved as scaffolding. -/
 
 end Agrees
 end RunarVerification.Stack

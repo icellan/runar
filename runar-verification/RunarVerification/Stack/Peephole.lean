@@ -1163,6 +1163,13 @@ theorem runOps_cons_pushCodesepIndex_eq (rest : List StackOp) (s : StackState) :
       | .ok s'   => runOps rest s' := by
   apply runOps.eq_3; intro thn els h; exact StackOp.noConfusion h
 
+theorem runOps_cons_rawBytes_eq (b : ByteArray) (rest : List StackOp) (s : StackState) :
+    runOps (StackOp.rawBytes b :: rest) s
+    = match stepNonIf (StackOp.rawBytes b) s with
+      | .error e => .error e
+      | .ok s'   => runOps rest s' := by
+  apply runOps.eq_3; intro thn els h; exact StackOp.noConfusion h
+
 /-- Step 1: `runOps (.drop :: rest)` on a freshly-pushed state strips that value. -/
 theorem runOps_drop_pushed (s : StackState) (v : ANF.Eval.Value)
     (rest : List StackOp) :
@@ -1216,6 +1223,29 @@ def noIfOp : List StackOp → Prop
   | [] => True
   | .ifOp _ _ :: _ => False
   | _ :: rest => noIfOp rest
+
+/-- Boolean checker for `noIfOp`. Returns `true` iff no element of `ops`
+is an `.ifOp` constructor. -/
+def noIfOpBool : List StackOp → Bool
+  | [] => true
+  | .ifOp _ _ :: _ => false
+  | _ :: rest => noIfOpBool rest
+
+/-- `noIfOpBool` reflects `noIfOp`. -/
+theorem noIfOpBool_iff (ops : List StackOp) :
+    noIfOpBool ops = true ↔ noIfOp ops := by
+  induction ops with
+  | nil => simp [noIfOpBool, noIfOp]
+  | cons op rest ih =>
+      cases op with
+      | ifOp _ _ => simp [noIfOpBool, noIfOp]
+      | _ => simp [noIfOpBool, noIfOp, ih]
+
+/-- `noIfOp` is decidable via the Boolean checker. -/
+instance (ops : List StackOp) : Decidable (noIfOp ops) :=
+  if h : noIfOpBool ops = true
+  then isTrue ((noIfOpBool_iff ops).mp h)
+  else isFalse (fun hNo => h ((noIfOpBool_iff ops).mpr hNo))
 
 /-- For a non-`ifOp` op, `runOps (op :: applyXxx rest) s = runOps (op :: rest) s`
 when `runOps (applyXxx rest) s' = runOps rest s'` for the post-op state `s'`.
@@ -1335,6 +1365,15 @@ private theorem runOps_cons_pushCodesepIndex_cong (a b : List StackOp) (s : Stac
     runOps (.pushCodesepIndex :: a) s = runOps (.pushCodesepIndex :: b) s := by
   rw [runOps_cons_pushCodesepIndex_eq, runOps_cons_pushCodesepIndex_eq]
   cases hStep : stepNonIf .pushCodesepIndex s with
+  | error e => rfl
+  | ok s'   => exact h s'
+
+private theorem runOps_cons_rawBytes_cong (bs : ByteArray)
+    (a b : List StackOp) (s : StackState)
+    (h : ∀ s', runOps a s' = runOps b s') :
+    runOps (.rawBytes bs :: a) s = runOps (.rawBytes bs :: b) s := by
+  rw [runOps_cons_rawBytes_eq, runOps_cons_rawBytes_eq]
+  cases hStep : stepNonIf (.rawBytes bs) s with
   | error e => rfl
   | ok s'   => exact h s'
 
@@ -1656,6 +1695,14 @@ def precondMet : OpExpectation → StackState → Prop
 -- (Decidable instance for `precondMet` deferred to Phase 3m — not load-bearing
 -- for the current pass_sound proof recipe; the precondition check is symbolic.)
 
+/-- F1 decidability: `precondMet` is a pattern-match returning `True`
+or `False`. Each arm is decidable by `decide` on the underlying
+`match` expression. Required transitively by `wellTypedRun` /
+`peepholePassAllFlat_preconditions`'s Decidable instances. -/
+instance precondMet_decidable (e : OpExpectation) (s : StackState) :
+    Decidable (precondMet e s) := by
+  cases e <;> simp [precondMet] <;> (first | (split <;> infer_instance) | infer_instance)
+
 /-! ### `opPrecondition` table (Phase 3m)
 
 The expectation an op imposes on the stack at its execution position.
@@ -1751,6 +1798,58 @@ theorem wellTypedRun_cons (op : StackOp) (rest : List StackOp) (s : StackState) 
       precondMet (opPrecondition op) s ∧
       (∀ s', stepNonIf op s = .ok s' → wellTypedRun rest s') :=
   Iff.rfl
+
+/-! ### F1 decidability for `wellTypedRun`
+
+`wellTypedRun` is `Prop`-valued and uses `∀ s', stepNonIf op s = .ok s' → …`
+to thread the post-step state. `stepNonIf op s` is a *functional* expression
+returning a `Stack.Eval.Result StackState` (either `.ok` of a unique
+witness or `.error`). The universal quantifier is therefore vacuous on
+`.error` and collapses to a single check on `.ok`'s payload. We
+formalise this via the equivalent `wellTypedRunBool` checker and then
+transport its `Decidable` instance back to the `Prop` form.
+
+Pattern: `def wellTypedRunBool` mirrors `wellTypedRun` but consumes
+`stepNonIf`'s result eagerly; `wellTypedRunBool_iff_wellTypedRun`
+proves the two are propositionally equal, and the `Decidable` instance
+falls out via `inferInstanceAs ∘ decidable_of_iff`. -/
+
+def wellTypedRunBool : List StackOp → StackState → Bool
+  | [], _ => true
+  | op :: rest, s =>
+      (decide (precondMet (opPrecondition op) s)) &&
+      (match stepNonIf op s with
+       | .ok s' => wellTypedRunBool rest s'
+       | .error _ => true)
+
+theorem wellTypedRunBool_iff_wellTypedRun :
+    ∀ (ops : List StackOp) (s : StackState),
+      wellTypedRunBool ops s = true ↔ wellTypedRun ops s
+  | [], _ => by simp [wellTypedRunBool, wellTypedRun]
+  | op :: rest, s => by
+    unfold wellTypedRunBool wellTypedRun
+    constructor
+    · intro h
+      rw [Bool.and_eq_true] at h
+      obtain ⟨hPre, hRest⟩ := h
+      refine ⟨of_decide_eq_true hPre, ?_⟩
+      intro s' hStep
+      have : wellTypedRunBool rest s' = true := by
+        rw [hStep] at hRest; exact hRest
+      exact (wellTypedRunBool_iff_wellTypedRun rest s').mp this
+    · intro ⟨hPre, hStep⟩
+      rw [Bool.and_eq_true]
+      refine ⟨decide_eq_true hPre, ?_⟩
+      cases hRes : stepNonIf op s with
+      | error _ => rfl
+      | ok s' =>
+          have := hStep s' hRes
+          exact (wellTypedRunBool_iff_wellTypedRun rest s').mpr this
+
+instance wellTypedRun_decidable (ops : List StackOp) (s : StackState) :
+    Decidable (wellTypedRun ops s) :=
+  decidable_of_iff (wellTypedRunBool ops s = true)
+    (wellTypedRunBool_iff_wellTypedRun ops s)
 
 /-! ### Typed cong lemmas (Phase 3n)
 
@@ -1878,6 +1977,15 @@ private theorem runOps_cons_pushCodesepIndex_cong_typed
     runOps (.pushCodesepIndex :: a) s = runOps (.pushCodesepIndex :: b) s := by
   rw [runOps_cons_pushCodesepIndex_eq, runOps_cons_pushCodesepIndex_eq]
   cases hStep : stepNonIf .pushCodesepIndex s with
+  | error e => rfl
+  | ok s'   => exact h s' hStep
+
+private theorem runOps_cons_rawBytes_cong_typed (bs : ByteArray)
+    (a b : List StackOp) (s : StackState)
+    (h : ∀ s', stepNonIf (.rawBytes bs) s = .ok s' → runOps a s' = runOps b s') :
+    runOps (.rawBytes bs :: a) s = runOps (.rawBytes bs :: b) s := by
+  rw [runOps_cons_rawBytes_eq, runOps_cons_rawBytes_eq]
+  cases hStep : stepNonIf (.rawBytes bs) s with
   | error e => rfl
   | ok s'   => exact h s' hStep
 
@@ -2166,6 +2274,10 @@ theorem doubleNot_pass_sound :
         show runOps (.pushCodesepIndex :: applyDoubleNot rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDoubleNot rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `dropAfterPush_pass_sound` — Phase 3j -/
 
@@ -2230,6 +2342,7 @@ theorem dropAfterPush_pass_sound :
           | .ifOp _ _ :: _ => rfl
           | .placeholder _ _ :: _ => rfl
           | .pushCodesepIndex :: _ => rfl
+          | .rawBytes _ :: _ => rfl
         rw [hRewrite]
         exact runOps_cons_push_cong v _ _ s (fun s' => ih hRest' s')
     | .dup      =>
@@ -2271,6 +2384,9 @@ theorem dropAfterPush_pass_sound :
     | .pushCodesepIndex =>
         show runOps (.pushCodesepIndex :: applyDropAfterPush rest') s = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong _ _ s (fun s' => ih hRest' s')
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDropAfterPush rest') s = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong b _ _ s (fun s' => ih hRest' s')
 
 /-! ### `doubleNegate_pass_sound` — Phase 3q
 
@@ -2399,6 +2515,10 @@ theorem doubleNegate_pass_sound :
         show runOps (.pushCodesepIndex :: applyDoubleNegate rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDoubleNegate rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `addZero_pass_sound` — Phase 3q
 
@@ -2527,6 +2647,10 @@ theorem addZero_pass_sound :
         show runOps (.pushCodesepIndex :: applyAddZero rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyAddZero rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `subZero_pass_sound` — Phase 3q (mirrors `addZero_pass_sound`). -/
 
@@ -2641,6 +2765,10 @@ theorem subZero_pass_sound :
         show runOps (.pushCodesepIndex :: applySubZero rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applySubZero rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `oneAdd_pass_sound` — Phase 3q
 
@@ -2787,6 +2915,10 @@ theorem oneAdd_pass_sound :
         show runOps (.pushCodesepIndex :: applyOneAdd rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyOneAdd rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `doubleSha256_pass_sound` — Phase 3q
 
@@ -3016,6 +3148,10 @@ theorem doubleSha256_pass_sound :
         show runOps (.pushCodesepIndex :: applyDoubleSha256 rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDoubleSha256 rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `dupDrop_pass_sound` — Phase 3s
 
@@ -3112,6 +3248,10 @@ theorem dupDrop_pass_sound :
         show runOps (.pushCodesepIndex :: applyDupDrop rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDupDrop rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `doubleSwap_pass_sound` — Phase 3s
 
@@ -3216,6 +3356,10 @@ theorem doubleSwap_pass_sound :
         show runOps (.pushCodesepIndex :: applyDoubleSwap rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDoubleSwap rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `numEqualVerifyFuse_pass_sound` — Phase 3s
 
@@ -3344,6 +3488,10 @@ theorem numEqualVerifyFuse_pass_sound :
         show runOps (.pushCodesepIndex :: applyNumEqualVerifyFuse rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyNumEqualVerifyFuse rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `checkSigVerifyFuse_pass_sound` — Phase 3s
 
@@ -3590,6 +3738,10 @@ theorem checkSigVerifyFuse_pass_sound :
         show runOps (.pushCodesepIndex :: applyCheckSigVerifyFuse rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyCheckSigVerifyFuse rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `equalVerifyFuse_pass_sound_int` — Phase 3s (int-restricted)
 
@@ -3773,6 +3925,10 @@ theorem equalVerifyFuse_pass_sound_int :
         show runOps (.pushCodesepIndex :: applyEqualVerifyFuse rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyEqualVerifyFuse rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ## Phase 3r — Composition `peepholePassProved` of the 7 proven rules
 
@@ -3833,6 +3989,7 @@ theorem applyDropAfterPush_preserves_noIfOp :
           | .ifOp _ _ :: _ => rfl
           | .placeholder _ _ :: _ => rfl
           | .pushCodesepIndex :: _ => rfl
+          | .rawBytes _ :: _ => rfl
       | .dup      => rfl
       | .swap     => rfl
       | .drop     => rfl
@@ -3846,6 +4003,7 @@ theorem applyDropAfterPush_preserves_noIfOp :
       | .opcode _ => rfl
       | .placeholder _ _ => rfl
       | .pushCodesepIndex => rfl
+      | .rawBytes _ => rfl
     rw [hRewrite]
     cases op with
     | ifOp _ _ => exact absurd h (by simp [noIfOp])
@@ -4142,6 +4300,7 @@ theorem applyDropAfterPush_preserves_wellTypedRun :
           | .ifOp _ _ :: _ => rfl
           | .placeholder _ _ :: _ => rfl
           | .pushCodesepIndex :: _ => rfl
+          | .rawBytes _ :: _ => rfl
       | .dup      => rfl
       | .swap     => rfl
       | .drop     => rfl
@@ -4155,6 +4314,7 @@ theorem applyDropAfterPush_preserves_wellTypedRun :
       | .opcode _ => rfl
       | .placeholder _ _ => rfl
       | .pushCodesepIndex => rfl
+      | .rawBytes _ => rfl
     rw [hRewrite]
     exact wellTypedRun_cons_via_ih op rest' (applyDropAfterPush rest') s hWT
       (fun s' _ hWTRest => ih hRest' s' hWTRest)
@@ -5399,6 +5559,10 @@ theorem equalVerifyFuse_pass_sound_bytes :
         show runOps (.pushCodesepIndex :: applyEqualVerifyFuse rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyEqualVerifyFuse rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `equalVerifyFuse_eitherStrict` — unified precondition
 
@@ -5421,6 +5585,60 @@ theorem equalVerifyFuse_eitherStrict_cons (op : StackOp) (rest : List StackOp) (
       ((if isOpEqual op then (precondMet .twoInts s ∨ precondMet .twoBytes s) else True) ∧
         (∀ s', stepNonIf op s = .ok s' → equalVerifyFuse_eitherStrict rest s')) :=
   Iff.rfl
+
+/-! F1 decidability — same `Bool`-mirror pattern as `wellTypedRun`. The
+`if isOpEqual op then …` head check decides via the existing
+`precondMet` Decidable instance, and the `∀ s'` tail collapses on
+`stepNonIf`'s functional result. -/
+
+def equalVerifyFuse_eitherStrictBool : List StackOp → StackState → Bool
+  | [], _ => true
+  | op :: rest, s =>
+      (if isOpEqual op
+        then decide (precondMet .twoInts s ∨ precondMet .twoBytes s)
+        else true) &&
+      (match stepNonIf op s with
+       | .ok s' => equalVerifyFuse_eitherStrictBool rest s'
+       | .error _ => true)
+
+theorem equalVerifyFuse_eitherStrictBool_iff :
+    ∀ (ops : List StackOp) (s : StackState),
+      equalVerifyFuse_eitherStrictBool ops s = true ↔
+        equalVerifyFuse_eitherStrict ops s
+  | [], _ => by simp [equalVerifyFuse_eitherStrictBool, equalVerifyFuse_eitherStrict]
+  | op :: rest, s => by
+    unfold equalVerifyFuse_eitherStrictBool equalVerifyFuse_eitherStrict
+    constructor
+    · intro h
+      rw [Bool.and_eq_true] at h
+      obtain ⟨hHead, hRest⟩ := h
+      refine ⟨?_, ?_⟩
+      · by_cases hEq : isOpEqual op
+        · rw [if_pos hEq] at hHead ⊢
+          exact of_decide_eq_true hHead
+        · rw [if_neg hEq]; trivial
+      · intro s' hStep
+        have : equalVerifyFuse_eitherStrictBool rest s' = true := by
+          rw [hStep] at hRest; exact hRest
+        exact (equalVerifyFuse_eitherStrictBool_iff rest s').mp this
+    · intro ⟨hHead, hStep⟩
+      rw [Bool.and_eq_true]
+      refine ⟨?_, ?_⟩
+      · by_cases hEq : isOpEqual op
+        · rw [if_pos hEq] at hHead ⊢
+          exact decide_eq_true hHead
+        · rw [if_neg hEq]
+      · cases hRes : stepNonIf op s with
+        | error _ => rfl
+        | ok s' =>
+            have := hStep s' hRes
+            exact (equalVerifyFuse_eitherStrictBool_iff rest s').mpr this
+
+instance equalVerifyFuse_eitherStrict_decidable
+    (ops : List StackOp) (s : StackState) :
+    Decidable (equalVerifyFuse_eitherStrict ops s) :=
+  decidable_of_iff (equalVerifyFuse_eitherStrictBool ops s = true)
+    (equalVerifyFuse_eitherStrictBool_iff ops s)
 
 /-- Unified `equalVerifyFuse_pass_sound`. At each OP_EQUAL firing position,
 case-split on the `eitherStrict` disjunction and apply the int or bytes
@@ -5612,6 +5830,10 @@ theorem equalVerifyFuse_pass_sound :
         show runOps (.pushCodesepIndex :: applyEqualVerifyFuse rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyEqualVerifyFuse rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ## Phase 3u — additional 2-op rules from `peephole.ts`
 
@@ -5791,6 +6013,10 @@ theorem oneSub_pass_sound :
         show runOps (.pushCodesepIndex :: applyOneSub rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyOneSub rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `doubleOver_pass_sound` — Phase 3u
 
@@ -5958,6 +6184,10 @@ theorem doubleOver_pass_sound :
         show runOps (.pushCodesepIndex :: applyDoubleOver rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDoubleOver rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `doubleDrop_pass_sound` — Phase 3u
 
@@ -6128,6 +6358,10 @@ theorem doubleDrop_pass_sound :
         show runOps (.pushCodesepIndex :: applyDoubleDrop rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyDoubleDrop rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `zeroNumEqual_pass_sound` — Phase 3u
 
@@ -6314,6 +6548,10 @@ theorem zeroNumEqual_pass_sound :
         show runOps (.pushCodesepIndex :: applyZeroNumEqual rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyZeroNumEqual rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `pushPushAdd_pass_sound` — Phase 3u stretch
 
@@ -6465,6 +6703,10 @@ theorem pushPushAdd_pass_sound :
         show runOps (.pushCodesepIndex :: applyPushPushAdd rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyPushPushAdd rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `pushPushSub_pass_sound` — Phase 3u stretch
 
@@ -6606,6 +6848,10 @@ theorem pushPushSub_pass_sound :
         show runOps (.pushCodesepIndex :: applyPushPushSub rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyPushPushSub rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `pushPushMul_pass_sound` — Phase 3u stretch
 
@@ -6760,6 +7006,10 @@ theorem pushPushMul_pass_sound :
         show runOps (.pushCodesepIndex :: applyPushPushMul rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyPushPushMul rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ## Phase 7.9.b — 4-op chain folding (TS reference `peephole.ts:402-432`)
 
@@ -7071,6 +7321,10 @@ theorem checkMultiSigVerifyFuse_pass_sound :
         show runOps (.pushCodesepIndex :: applyCheckMultiSigVerifyFuse rest') s
              = runOps (.pushCodesepIndex :: rest') s
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b =>
+        show runOps (.rawBytes b :: applyCheckMultiSigVerifyFuse rest') s
+             = runOps (.rawBytes b :: rest') s
+        exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### Roll/Pick combinator rules
 
@@ -8368,6 +8622,7 @@ theorem applyPushOneAdd_runOps_eq :
     | opcode code => exact runOps_cons_opcode_cong code _ _ s (fun s' => ih hRestNoIf s')
     | placeholder i n => exact runOps_cons_placeholder_cong i n _ _ s (fun s' => ih hRestNoIf s')
     | pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong _ _ s (fun s' => ih hRestNoIf s')
+    | rawBytes b => exact runOps_cons_rawBytes_cong b _ _ s (fun s' => ih hRestNoIf s')
     | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
 theorem applyPushOneSub_runOps_eq :
@@ -8420,6 +8675,7 @@ theorem applyPushOneSub_runOps_eq :
     | opcode code => exact runOps_cons_opcode_cong code _ _ s (fun s' => ih hRestNoIf s')
     | placeholder i n => exact runOps_cons_placeholder_cong i n _ _ s (fun s' => ih hRestNoIf s')
     | pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong _ _ s (fun s' => ih hRestNoIf s')
+    | rawBytes b => exact runOps_cons_rawBytes_cong b _ _ s (fun s' => ih hRestNoIf s')
     | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
 theorem applyPushOneAdd_preserves_noIfOp :
@@ -8457,6 +8713,7 @@ theorem applyPushOneAdd_preserves_noIfOp :
     | opcode code => simpa [noIfOp] using ih hRestNoIf
     | placeholder i n => simpa [noIfOp] using ih hRestNoIf
     | pushCodesepIndex => simpa [noIfOp] using ih hRestNoIf
+    | rawBytes b => simpa [noIfOp] using ih hRestNoIf
     | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
 theorem applyPushOneSub_preserves_noIfOp :
@@ -8494,6 +8751,7 @@ theorem applyPushOneSub_preserves_noIfOp :
     | opcode code => simpa [noIfOp] using ih hRestNoIf
     | placeholder i n => simpa [noIfOp] using ih hRestNoIf
     | pushCodesepIndex => simpa [noIfOp] using ih hRestNoIf
+    | rawBytes b => simpa [noIfOp] using ih hRestNoIf
     | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
 private theorem postFoldOp_id_of_not_ifOp (op : StackOp)
@@ -8515,6 +8773,7 @@ private theorem postFoldOp_id_of_not_ifOp (op : StackOp)
   | opcode code => rfl
   | placeholder i n => rfl
   | pushCodesepIndex => rfl
+  | rawBytes b => rfl
 
 private theorem postFoldList_eq_of_noIfOp :
     ∀ (ops : List StackOp), noIfOp ops → postFoldList ops = ops := by
@@ -8950,6 +9209,7 @@ private theorem rollPickRewriteOne_eq_singleton_of_opNoop
   | opcode code => rfl
   | placeholder i n => rfl
   | pushCodesepIndex => rfl
+  | rawBytes b => rfl
   | ifOp thn els => rfl
 
 private theorem applyRollPickFold_eq_self_of_flatNoop :
@@ -9016,6 +9276,7 @@ theorem applyRollPickFold_preserves_noIfOp :
       | opcode code => simpa [rollPickRewriteOne, noIfOp] using ih hRest
       | placeholder i n => simpa [rollPickRewriteOne, noIfOp] using ih hRest
       | pushCodesepIndex => simpa [rollPickRewriteOne, noIfOp] using ih hRest
+      | rawBytes b => simpa [rollPickRewriteOne, noIfOp] using ih hRest
       | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
 private theorem rollPickOp_id_of_not_ifOp (op : StackOp)
@@ -9037,6 +9298,7 @@ private theorem rollPickOp_id_of_not_ifOp (op : StackOp)
   | opcode code => rfl
   | placeholder i n => rfl
   | pushCodesepIndex => rfl
+  | rawBytes b => rfl
 
 private theorem rollPickListTRgo_eq_of_noIfOp :
     ∀ (ops : List StackOp) (acc : List StackOp), noIfOp ops →
@@ -9139,6 +9401,80 @@ theorem rollPickDepthOK_cons (op : StackOp) (rest : List StackOp) (s : StackStat
       (∀ s', stepNonIf op s = .ok s' → rollPickDepthOK rest s') :=
   Iff.rfl
 
+/-! ### F1 decidability for `rollPickDepthOK`
+
+The Boolean check mirrors `wellTypedRun`'s recipe (collapse the
+`∀ s', stepNonIf … → …` via a `match` on `stepNonIf`'s functional
+result), plus a per-head case on whether the head op is a `.roll`/`.pick`.
+Only the `.roll`/`.pick` arms impose a real depth check; every other op
+is unconstrained at the head. -/
+
+/-- True iff `op` is a `.roll d` or `.pick d` whose depth fits the
+current stack. For every non-`.roll`/`.pick` head op the bound is
+vacuously satisfied. -/
+def rollPickHeadOK (op : StackOp) (s : StackState) : Bool :=
+  match op with
+  | .roll d => decide (s.stack.length ≥ d + 1)
+  | .pick d => decide (s.stack.length ≥ d + 1)
+  | _ => true
+
+theorem rollPickHeadOK_iff (op : StackOp) (s : StackState) :
+    rollPickHeadOK op s = true ↔
+      (∀ d, (op = .roll d ∨ op = .pick d) → s.stack.length ≥ d + 1) := by
+  unfold rollPickHeadOK
+  constructor
+  · intro h d hOr
+    cases hOr with
+    | inl hEq =>
+        subst hEq
+        simp at h
+        exact h
+    | inr hEq =>
+        subst hEq
+        simp at h
+        exact h
+  · intro h
+    cases op <;> simp
+    case roll d => exact h d (Or.inl rfl)
+    case pick d => exact h d (Or.inr rfl)
+
+def rollPickDepthOKBool : List StackOp → StackState → Bool
+  | [], _ => true
+  | op :: rest, s =>
+      rollPickHeadOK op s &&
+      (match stepNonIf op s with
+       | .ok s' => rollPickDepthOKBool rest s'
+       | .error _ => true)
+
+theorem rollPickDepthOKBool_iff_rollPickDepthOK :
+    ∀ (ops : List StackOp) (s : StackState),
+      rollPickDepthOKBool ops s = true ↔ rollPickDepthOK ops s
+  | [], _ => by simp [rollPickDepthOKBool, rollPickDepthOK]
+  | op :: rest, s => by
+    unfold rollPickDepthOKBool rollPickDepthOK
+    constructor
+    · intro h
+      rw [Bool.and_eq_true] at h
+      obtain ⟨hHead, hRest⟩ := h
+      refine ⟨(rollPickHeadOK_iff op s).mp hHead, ?_⟩
+      intro s' hStep
+      have : rollPickDepthOKBool rest s' = true := by
+        rw [hStep] at hRest; exact hRest
+      exact (rollPickDepthOKBool_iff_rollPickDepthOK rest s').mp this
+    · intro ⟨hHead, hStep⟩
+      rw [Bool.and_eq_true]
+      refine ⟨(rollPickHeadOK_iff op s).mpr hHead, ?_⟩
+      cases hRes : stepNonIf op s with
+      | error _ => rfl
+      | ok s' =>
+          have := hStep s' hRes
+          exact (rollPickDepthOKBool_iff_rollPickDepthOK rest s').mpr this
+
+instance rollPickDepthOK_decidable (ops : List StackOp) (s : StackState) :
+    Decidable (rollPickDepthOK ops s) :=
+  decidable_of_iff (rollPickDepthOKBool ops s = true)
+    (rollPickDepthOKBool_iff_rollPickDepthOK ops s)
+
 /-- General `runOps` soundness of `applyRollPickFold` for `noIfOp`
 inputs, under the `rollPickDepthOK` depth invariant. Both fired and
 non-fired rewrites are covered: `rollPickRewriteOne_runOps_eq` discharges
@@ -9213,6 +9549,9 @@ theorem applyRollPickFold_runOps_eq :
           (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
     | pushCodesepIndex =>
         exact runOps_cons_pushCodesepIndex_cong_typed _ _ s
+          (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
+    | rawBytes b =>
+        exact runOps_cons_rawBytes_cong_typed b _ _ s
           (fun s' hStep => ih hRestNoIf s' (hTailDepth s' hStep))
     | ifOp thn els => exact absurd hNoIf (by simp [noIfOp])
 
@@ -9495,6 +9834,19 @@ def peepholePassAllFlat_preconditions
     (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
       (applyZeroNumEqual (passAllInner15 ops)))) s
 
+/-- F1 decidability for the bundled precondition. It is a four-way
+conjunction of already-decidable component predicates
+(`wellTypedRun` × 3 + `equalVerifyFuse_eitherStrict`), so the
+`Decidable` instance is fully derived. Lean's automatic conjunction
+synthesis would discharge this transparently; we make it explicit so
+`native_decide` finds the targeted instance without backtracking
+through the unfolded conjuncts at every elaboration. -/
+instance peepholePassAllFlat_preconditions_decidable
+    (ops : List StackOp) (s : StackState) :
+    Decidable (peepholePassAllFlat_preconditions ops s) := by
+  unfold peepholePassAllFlat_preconditions
+  infer_instance
+
 set_option maxHeartbeats 1600000 in
 /-- Discharge `peepholePassAllFlat_sound` from a bundled precondition. -/
 theorem peepholePassAllFlat_runOps_eq
@@ -9625,6 +9977,12 @@ private theorem preprocessOpListReversedAux_noIf
         unfold preprocessOpListReversedAux
         unfold preprocessOp
         rw [ih (.pushCodesepIndex :: acc) hRest]
+        rfl
+    | rawBytes b =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.rawBytes b :: acc) hRest]
         rfl
 
 /-- Phase 7.9.c: After fixing the streaming-driver pair-direction bug,
@@ -10021,6 +10379,7 @@ theorem applyPushAddPushAdd_runOps_eq :
     | .opcode code  => exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
     | .placeholder i n => exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
     | .pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b => exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 theorem applyPushAddPushSub_runOps_eq :
     ∀ (ops : List StackOp), noIfOp ops →
@@ -10140,6 +10499,7 @@ theorem applyPushAddPushSub_runOps_eq :
     | .opcode code  => exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
     | .placeholder i n => exact runOps_cons_placeholder_cong_typed i n _ _ s ihTyped
     | .pushCodesepIndex => exact runOps_cons_pushCodesepIndex_cong_typed _ _ s ihTyped
+    | .rawBytes b => exact runOps_cons_rawBytes_cong_typed b _ _ s ihTyped
 
 /-! ### `noIfOp` preservation under chain-fold rules. -/
 
@@ -10555,6 +10915,7 @@ private theorem chainFoldOp_id_of_not_ifOp (op : StackOp)
   | opcode code     => unfold chainFoldOp; rfl
   | placeholder i n => unfold chainFoldOp; rfl
   | pushCodesepIndex => unfold chainFoldOp; rfl
+  | rawBytes b      => unfold chainFoldOp; rfl
 
 /-- `chainFoldListTRgo` is left-fold-then-reverse: under `noIfOp ops`,
 each `chainFoldOp op = op`, so the walker simply prepends ops to acc and

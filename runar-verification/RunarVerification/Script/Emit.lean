@@ -206,6 +206,7 @@ def emitStackOp : StackOp → ByteArray
       ByteArray.mk #[0x63] ++ thnBytes ++ elseSection ++ ByteArray.mk #[0x68]
   | .placeholder _ _ => ByteArray.mk #[0x00]   -- OP_0 placeholder
   | .pushCodesepIndex => ByteArray.mk #[0x00]  -- OP_0 placeholder
+  | .rawBytes b      => b                      -- spliced bytes verbatim
 
 /-- Emit a flat op list as a concatenated byte array. -/
 def emitOps : List StackOp → ByteArray
@@ -262,6 +263,7 @@ def emitStackOpFast : StackOp → ByteArray
       ByteArray.mk #[0x63] ++ thnBytes ++ elseSection ++ ByteArray.mk #[0x68]
   | .placeholder _ _ => ByteArray.mk #[0x00]
   | .pushCodesepIndex => ByteArray.mk #[0x00]
+  | .rawBytes b      => b
 
 def emitOpsFastAux : ByteArray → List StackOp → ByteArray
   | acc, [] => acc
@@ -759,6 +761,9 @@ private theorem emitStackOpPatchedChecked_flat_no_patch_sites_eq_emitStackOp
       simp [flatStackOpHasNoPatchSites] at hNoPatch
   | pushCodesepIndex =>
       simp [flatStackOpHasNoPatchSites] at hNoPatch
+  | rawBytes b =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState,
+        PatchState.append, appendBA_eq_append]
 
 private theorem emitOpsPatchedAuxChecked_flat_no_patch_sites_eq_emitOps :
     ∀ (ops : List StackOp) (acc : ByteArray),
@@ -901,6 +906,8 @@ private theorem emitStackOpPatchedChecked_no_patch_sites_eq_emitStackOp
       simp [stackOpHasNoPatchSites] at hNoPatch
   | pushCodesepIndex =>
       simp [stackOpHasNoPatchSites] at hNoPatch
+  | rawBytes b =>
+      simp [emitStackOpPatchedChecked, emitStackOp, noPatchState_append_bytes]
   | ifOp thn els =>
       -- Common preparation for every IF case: extract `thn` no-patch-sites
       -- and run the inductive step on `thn`.

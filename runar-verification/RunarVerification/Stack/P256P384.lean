@@ -1,5 +1,7 @@
 import RunarVerification.Stack.Syntax
 import RunarVerification.Stack.Ec
+import RunarVerification.Stack.Eval
+import RunarVerification.Crypto.Spec
 
 /-!
 # NIST P-256 / P-384 EC codegen — Phase 4 (port of
@@ -985,6 +987,149 @@ def emitP384EncodeCompressed : List StackOp :=
 /-- P-384 ECDSA verification. -/
 def emitVerifyECDSA_P384 : List StackOp :=
   cEmitVerifyECDSAOps p384Params p384Group p384B p384SqrtExp p384GX p384GY
+
+/-! ## Codegen-to-spec axioms (Phase B5)
+
+Each emit function above is large (`cEmitMulOps` alone is ~250+ ops),
+and proving operational equivalence against the abstract `Crypto.pX*`
+primitives by direct unfolding of `runOps` is out of scope for the
+current verification phase: it requires modelling BSV Script's
+field-arithmetic opcodes (`OP_MOD`, `OP_LSHIFTNUM`, etc.) over the
+relevant `Int` semantics, plus the byte-reversal / `OP_BIN2NUM`
+glue.
+
+We commit to that equivalence here as a narrow `axiom` family per
+emit function, mirroring the secp256k1 pattern in §2 of
+`Crypto/Spec.lean`. Each axiom asserts: when the runtime stack
+matches the expected ABI shape (operands as 64-byte / 96-byte
+`vBytes` blobs, scalars as `vBigint`, etc.), executing the emitted
+ops leaves a single `vBytes`/`vBool` result on top of the stack
+holding the value of the corresponding `Crypto.pX*` primitive.
+
+These axioms are listed in the trust manifest under the FIPS 186-4
+heading; a future iteration may discharge them by formalising BSV
+field-arithmetic opcodes against `ZMod p256P` / `ZMod p384P` and
+re-running each emit function.
+
+Reference: FIPS 186-4 ("Digital Signature Standard (DSS)"),
+§D.1.2.3 (P-256) and §D.1.2.4 (P-384). Source-of-truth for the
+emit functions: `packages/runar-compiler/src/passes/p256-p384-codegen.ts`.
+-/
+
+open RunarVerification.Stack.Eval (StackState runOps)
+open RunarVerification.ANF.Eval
+
+/-! ### P-256 codegen-to-spec axioms -/
+
+/-- `emitP256Add`: stack `[p1, p2, …]` (top = p2) reduces to
+`[p256Add p1 p2, …]`. -/
+axiom emitP256Add_runOps_eq (stkSt : StackState) (p1 p2 : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p2 :: .vBytes p1 :: rest) :
+    runOps emitP256Add stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p256Add p1 p2) :: rest }
+
+/-- `emitP256Mul`: stack `[point, scalar, …]` (top = scalar) reduces to
+`[p256Mul point scalar, …]`. -/
+axiom emitP256Mul_runOps_eq (stkSt : StackState) (p : ByteArray) (k : Int)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBigint k :: .vBytes p :: rest) :
+    runOps emitP256Mul stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p256Mul p k) :: rest }
+
+/-- `emitP256MulGen`: stack `[scalar, …]` reduces to
+`[p256MulGen scalar, …]` (`G` is pushed inline by the emit code). -/
+axiom emitP256MulGen_runOps_eq (stkSt : StackState) (k : Int)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBigint k :: rest) :
+    runOps emitP256MulGen stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p256MulGen k) :: rest }
+
+/-- `emitP256Negate`: stack `[point, …]` reduces to
+`[p256Negate point, …]` (computed inline as `(x, p − y)`). -/
+axiom emitP256Negate_runOps_eq (stkSt : StackState) (p : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p :: rest) :
+    runOps emitP256Negate stkSt
+    = .ok { stkSt with stack := .vBytes (RunarVerification.Crypto.Spec.p256Negate p) :: rest }
+
+/-- `emitP256OnCurve`: stack `[point, …]` reduces to `[p256OnCurve point, …]`. -/
+axiom emitP256OnCurve_runOps_eq (stkSt : StackState) (p : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p :: rest) :
+    runOps emitP256OnCurve stkSt
+    = .ok { stkSt with stack := .vBool (Crypto.p256OnCurve p) :: rest }
+
+/-- `emitP256EncodeCompressed`: stack `[point, …]` reduces to
+`[p256EncodeCompressed point, …]`. -/
+axiom emitP256EncodeCompressed_runOps_eq (stkSt : StackState) (p : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p :: rest) :
+    runOps emitP256EncodeCompressed stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p256EncodeCompressed p) :: rest }
+
+/-- `emitVerifyECDSA_P256`: stack `[msg, sig, pk, …]` (top = pk) reduces to
+`[verifyECDSA_P256 sig pk msg, …]`. The argument order on the runtime stack
+matches `cEmitVerifyECDSAOps`'s `Tracker.init` order: `_msg`, `_sig`, `_pk`. -/
+axiom emitVerifyECDSA_P256_runOps_eq (stkSt : StackState)
+    (msg sig pk : ByteArray) (rest : List Value)
+    (hStk : stkSt.stack = .vBytes pk :: .vBytes sig :: .vBytes msg :: rest) :
+    runOps emitVerifyECDSA_P256 stkSt
+    = .ok { stkSt with stack := .vBool (Crypto.verifyECDSA_P256 sig pk msg) :: rest }
+
+/-! ### P-384 codegen-to-spec axioms (mirror P-256) -/
+
+/-- `emitP384Add`: stack `[p1, p2, …]` reduces to `[p384Add p1 p2, …]`. -/
+axiom emitP384Add_runOps_eq (stkSt : StackState) (p1 p2 : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p2 :: .vBytes p1 :: rest) :
+    runOps emitP384Add stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p384Add p1 p2) :: rest }
+
+/-- `emitP384Mul`: stack `[point, scalar, …]` reduces to
+`[p384Mul point scalar, …]`. -/
+axiom emitP384Mul_runOps_eq (stkSt : StackState) (p : ByteArray) (k : Int)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBigint k :: .vBytes p :: rest) :
+    runOps emitP384Mul stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p384Mul p k) :: rest }
+
+/-- `emitP384MulGen`: stack `[scalar, …]` reduces to `[p384MulGen scalar, …]`. -/
+axiom emitP384MulGen_runOps_eq (stkSt : StackState) (k : Int)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBigint k :: rest) :
+    runOps emitP384MulGen stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p384MulGen k) :: rest }
+
+/-- `emitP384Negate`: stack `[point, …]` reduces to `[p384Negate point, …]`. -/
+axiom emitP384Negate_runOps_eq (stkSt : StackState) (p : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p :: rest) :
+    runOps emitP384Negate stkSt
+    = .ok { stkSt with stack := .vBytes (RunarVerification.Crypto.Spec.p384Negate p) :: rest }
+
+/-- `emitP384OnCurve`: stack `[point, …]` reduces to `[p384OnCurve point, …]`. -/
+axiom emitP384OnCurve_runOps_eq (stkSt : StackState) (p : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p :: rest) :
+    runOps emitP384OnCurve stkSt
+    = .ok { stkSt with stack := .vBool (Crypto.p384OnCurve p) :: rest }
+
+/-- `emitP384EncodeCompressed`: stack `[point, …]` reduces to
+`[p384EncodeCompressed point, …]`. -/
+axiom emitP384EncodeCompressed_runOps_eq (stkSt : StackState) (p : ByteArray)
+    (rest : List Value)
+    (hStk : stkSt.stack = .vBytes p :: rest) :
+    runOps emitP384EncodeCompressed stkSt
+    = .ok { stkSt with stack := .vBytes (Crypto.p384EncodeCompressed p) :: rest }
+
+/-- `emitVerifyECDSA_P384`: stack `[msg, sig, pk, …]` reduces to
+`[verifyECDSA_P384 sig pk msg, …]`. -/
+axiom emitVerifyECDSA_P384_runOps_eq (stkSt : StackState)
+    (msg sig pk : ByteArray) (rest : List Value)
+    (hStk : stkSt.stack = .vBytes pk :: .vBytes sig :: .vBytes msg :: rest) :
+    runOps emitVerifyECDSA_P384 stkSt
+    = .ok { stkSt with stack := .vBool (Crypto.verifyECDSA_P384 sig pk msg) :: rest }
 
 end P256P384
 end RunarVerification.Stack

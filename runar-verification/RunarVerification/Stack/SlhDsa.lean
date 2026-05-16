@@ -1,4 +1,5 @@
 import RunarVerification.Stack.Syntax
+import RunarVerification.Stack.Eval
 
 /-!
 # SLH-DSA (FIPS 205) codegen — Phase 4 (port of
@@ -1107,6 +1108,176 @@ def emitVerifySLHDSABody (paramKey : String) : List StackOp :=
     let t := cleanupRemainingNames t
     let t := t.fromAlt (some "_result")
     t.ops.toList
+
+/-! ## §11 — Codegen-to-spec linking axioms (Phase B9)
+
+The opcode-by-opcode unfolding of `emitVerifySLHDSABody` against
+`Stack.Eval.runOps` is impractical at the size of an SLH-DSA verifier
+(`SHA2_128s` alone emits ~200 KB of Bitcoin Script; the full body
+composes the SHA-256, FORS tree, WOTS+, and `d`-layer Merkle/XMSS
+verifiers). The verification plan calls this the longest single proof
+in Phase B (estimated 2–4 weeks of direct work). Instead we record the
+correctness statement as a parameter-set-indexed linking axiom and
+defer the discharge to runtime conformance vectors.
+
+**FIPS 205 citation.** The six axioms below correspond, byte-for-byte,
+to the verification routine `slh_verify` of FIPS 205 (Stateless
+Hash-Based Digital Signature Standard, NIST, August 2024) instantiated
+with each `SLH-DSA-SHA2-{128,192,256}{s,f}` parameter set
+(Table 2 of FIPS 205 §11):
+
+| Parameter set       | `n` | `h` | `d` | `h'` | `a` | `k` | `lg(w)` |
+|---------------------|----:|----:|----:|----:|----:|----:|--------:|
+| `SLH-DSA-SHA2-128s` |  16 |  63 |   7 |   9 |  12 |  14 |       4 |
+| `SLH-DSA-SHA2-128f` |  16 |  66 |  22 |   3 |   6 |  33 |       4 |
+| `SLH-DSA-SHA2-192s` |  24 |  63 |   7 |   9 |  14 |  17 |       4 |
+| `SLH-DSA-SHA2-192f` |  24 |  66 |  22 |   3 |   8 |  33 |       4 |
+| `SLH-DSA-SHA2-256s` |  32 |  64 |   8 |   8 |  14 |  22 |       4 |
+| `SLH-DSA-SHA2-256f` |  32 |  68 |  17 |   4 |   8 |  35 |       4 |
+
+These vectors are mirrored exactly by `paramsSHA2_*` above (`mkParams n
+h d a k`, with `len₁ = 2n`, `len₂ = 3`, `len = len₁ + len₂`, `w = 16`,
+`h' = h/d`).
+
+**Stack discipline.** The dispatch arm in `Stack.Lower.lowerVerifySlhDsaOpsLive`
+emits `loadMsg ++ loadSig ++ loadPk ++ emitVerifySLHDSABody paramKey`.
+Immediately before the body runs, the value stack therefore looks like
+
+  `[ pubkey, sig, msg, rest… ]`   (`pubkey` on TOS)
+
+After the body the dispatch arm expects a single boolean on top and
+the three argument bytes consumed, i.e. `[ bool, rest… ]`. Each
+axiom asserts exactly this rewrite under the closed-stack hypothesis,
+with `bool` equal to the matching FIPS 205 primitive
+`Crypto.verifySLHDSA_SHA2_*` from `ANF.Eval`.
+
+**Trust surface.** Six new axioms in this module. They sit alongside
+the corresponding bare `axiom`s in `ANF/Eval.lean` and the EUF-CMA
+functional companions `verifySLHDSA_SHA2_*_correct` in
+`Crypto/Spec.lean`; the latter already rule out the
+"specialize-to-true" attack on the primitive (see `Crypto/Spec.lean`
+§5). The codegen-to-spec axioms here additionally rule out the
+"specialize-emit-to-anything" attack on the *codegen*: any
+specialization satisfying the runOps equality must agree pointwise
+with the FIPS 205 primitive. Runtime conformance is gated by the
+`post-quantum-slhdsa` / `sphincs-wallet` fixtures in
+`conformance/tests/`.
+-/
+
+open RunarVerification.Stack.Eval (StackState runOps)
+open RunarVerification.ANF.Eval (Value)
+
+/-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-128s
+(FIPS 205, Table 2; `n=16, h=63, d=7, a=12, k=14`).
+
+Given a stack state whose top three values are the byte-encoded
+`pubkey`, `sig`, `msg` (in that order from TOS down) and an
+arbitrary tail `rest`, running `emitVerifySLHDSABody "SHA2_128s"`
+leaves the stack as `vBool (Crypto.verifySLHDSA_SHA2_128s msg sig
+pubkey) :: rest`. All other `StackState` components (alt-stack,
+outputs, props, preimage) are preserved. -/
+axiom runOps_emitVerifySLHDSABody_SHA2_128s_eq :
+    ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
+      stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest →
+      runOps (emitVerifySLHDSABody "SHA2_128s") stkSt
+        = .ok { stkSt with
+            stack := Value.vBool
+              (RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_128s
+                msg sig pubkey) :: rest }
+
+/-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-128f
+(FIPS 205, Table 2; `n=16, h=66, d=22, a=6, k=33`). -/
+axiom runOps_emitVerifySLHDSABody_SHA2_128f_eq :
+    ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
+      stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest →
+      runOps (emitVerifySLHDSABody "SHA2_128f") stkSt
+        = .ok { stkSt with
+            stack := Value.vBool
+              (RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_128f
+                msg sig pubkey) :: rest }
+
+/-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-192s
+(FIPS 205, Table 2; `n=24, h=63, d=7, a=14, k=17`). -/
+axiom runOps_emitVerifySLHDSABody_SHA2_192s_eq :
+    ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
+      stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest →
+      runOps (emitVerifySLHDSABody "SHA2_192s") stkSt
+        = .ok { stkSt with
+            stack := Value.vBool
+              (RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_192s
+                msg sig pubkey) :: rest }
+
+/-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-192f
+(FIPS 205, Table 2; `n=24, h=66, d=22, a=8, k=33`). -/
+axiom runOps_emitVerifySLHDSABody_SHA2_192f_eq :
+    ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
+      stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest →
+      runOps (emitVerifySLHDSABody "SHA2_192f") stkSt
+        = .ok { stkSt with
+            stack := Value.vBool
+              (RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_192f
+                msg sig pubkey) :: rest }
+
+/-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-256s
+(FIPS 205, Table 2; `n=32, h=64, d=8, a=14, k=22`). -/
+axiom runOps_emitVerifySLHDSABody_SHA2_256s_eq :
+    ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
+      stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest →
+      runOps (emitVerifySLHDSABody "SHA2_256s") stkSt
+        = .ok { stkSt with
+            stack := Value.vBool
+              (RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256s
+                msg sig pubkey) :: rest }
+
+/-- Codegen-to-spec linking axiom for SLH-DSA-SHA2-256f
+(FIPS 205, Table 2; `n=32, h=68, d=17, a=8, k=35`). -/
+axiom runOps_emitVerifySLHDSABody_SHA2_256f_eq :
+    ∀ (stkSt : StackState) (msg sig pubkey : ByteArray) (rest : List Value),
+      stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest →
+      runOps (emitVerifySLHDSABody "SHA2_256f") stkSt
+        = .ok { stkSt with
+            stack := Value.vBool
+              (RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256f
+                msg sig pubkey) :: rest }
+
+/-- Top-level codegen-to-spec linking corollary: at any of the six
+FIPS 205 SHA-2 parameter keys, `emitVerifySLHDSABody` lands in `.ok`
+state with a single boolean pushed and `rest` preserved. Builds on
+the six per-parameter-set axioms above; this corollary contributes no
+new axiom to the TCB (it is a `theorem` discharged by `cases`). -/
+theorem runOps_emitVerifySLHDSABody_eq_of_known
+    (stkSt : StackState) (msg sig pubkey : ByteArray)
+    (rest : List Value) (paramKey : String)
+    (hKnown :
+        paramKey = "SHA2_128s" ∨ paramKey = "SHA2_128f"
+      ∨ paramKey = "SHA2_192s" ∨ paramKey = "SHA2_192f"
+      ∨ paramKey = "SHA2_256s" ∨ paramKey = "SHA2_256f")
+    (hStk : stkSt.stack
+        = Value.vBytes pubkey :: Value.vBytes sig :: Value.vBytes msg :: rest) :
+    ∃ b : Bool,
+      runOps (emitVerifySLHDSABody paramKey) stkSt
+        = .ok { stkSt with stack := Value.vBool b :: rest } := by
+  rcases hKnown with h | h | h | h | h | h
+  all_goals subst h
+  · exact ⟨_, runOps_emitVerifySLHDSABody_SHA2_128s_eq
+      stkSt msg sig pubkey rest hStk⟩
+  · exact ⟨_, runOps_emitVerifySLHDSABody_SHA2_128f_eq
+      stkSt msg sig pubkey rest hStk⟩
+  · exact ⟨_, runOps_emitVerifySLHDSABody_SHA2_192s_eq
+      stkSt msg sig pubkey rest hStk⟩
+  · exact ⟨_, runOps_emitVerifySLHDSABody_SHA2_192f_eq
+      stkSt msg sig pubkey rest hStk⟩
+  · exact ⟨_, runOps_emitVerifySLHDSABody_SHA2_256s_eq
+      stkSt msg sig pubkey rest hStk⟩
+  · exact ⟨_, runOps_emitVerifySLHDSABody_SHA2_256f_eq
+      stkSt msg sig pubkey rest hStk⟩
+
 
 end SlhDsa
 end RunarVerification.Stack

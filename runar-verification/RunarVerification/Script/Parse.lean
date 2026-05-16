@@ -205,6 +205,7 @@ def emitStackOpL : StackOp → List UInt8
       0x63 :: thnBytes ++ elseSection ++ [0x68]
   | .placeholder _ _ => [0x00]
   | .pushCodesepIndex => [0x00]
+  | .rawBytes b      => b.toList
 
 def emitOpsL : List StackOp → List UInt8
   | [] => []
@@ -699,6 +700,116 @@ inductive AreRunarEmittable : List StackOp → Prop where
   | cons (op : StackOp) (rest : List StackOp)
       (hOp : RunarEmittable op) (hRest : AreRunarEmittable rest) :
       AreRunarEmittable (op :: rest)
+
+/-! ### F1 decidability for `RunarEmittable` / `AreRunarEmittable`
+
+Both predicates are inductively defined with a small fixed shape. The
+Boolean checkers `runarEmittableBool` / `areRunarEmittableBool` walk the
+same shape and the `_iff` lemmas establish propositional equivalence. -/
+
+def runarEmittableBool : StackOp → Bool
+  | .dup => true
+  | .swap => true
+  | .nip => true
+  | .over => true
+  | .rot => true
+  | .tuck => true
+  | .drop => true
+  | .roll d => decide (1 ≤ d ∧ d ≤ 16)
+  | .pick d => decide (1 ≤ d ∧ d ≤ 16)
+  | .opcode name => isAllowedOpcodeName name
+  | _ => false
+
+theorem runarEmittableBool_iff_RunarEmittable :
+    ∀ (op : StackOp), runarEmittableBool op = true ↔ RunarEmittable op := by
+  intro op
+  cases op
+  case dup => exact ⟨fun _ => .dup, fun _ => rfl⟩
+  case swap => exact ⟨fun _ => .swap, fun _ => rfl⟩
+  case nip => exact ⟨fun _ => .nip, fun _ => rfl⟩
+  case over => exact ⟨fun _ => .over, fun _ => rfl⟩
+  case rot => exact ⟨fun _ => .rot, fun _ => rfl⟩
+  case tuck => exact ⟨fun _ => .tuck, fun _ => rfl⟩
+  case drop => exact ⟨fun _ => .drop, fun _ => rfl⟩
+  case roll d =>
+    constructor
+    · intro h
+      unfold runarEmittableBool at h
+      exact .roll d (of_decide_eq_true h)
+    · intro h
+      cases h with
+      | roll _ hd => unfold runarEmittableBool; exact decide_eq_true hd
+  case pick d =>
+    constructor
+    · intro h
+      unfold runarEmittableBool at h
+      exact .pick d (of_decide_eq_true h)
+    · intro h
+      cases h with
+      | pick _ hd => unfold runarEmittableBool; exact decide_eq_true hd
+  case opcode name =>
+    constructor
+    · intro h
+      unfold runarEmittableBool at h
+      exact .opcode name h
+    · intro h
+      cases h with
+      | opcode _ hAllow => unfold runarEmittableBool; exact hAllow
+  case push v =>
+    constructor
+    · intro h; simp [runarEmittableBool] at h
+    · intro h; cases h
+  case pickStruct d =>
+    constructor
+    · intro h; simp [runarEmittableBool] at h
+    · intro h; cases h
+  case ifOp t e =>
+    constructor
+    · intro h; simp [runarEmittableBool] at h
+    · intro h; cases h
+  case placeholder i n =>
+    constructor
+    · intro h; simp [runarEmittableBool] at h
+    · intro h; cases h
+  case pushCodesepIndex =>
+    constructor
+    · intro h; simp [runarEmittableBool] at h
+    · intro h; cases h
+  case rawBytes b =>
+    constructor
+    · intro h; simp [runarEmittableBool] at h
+    · intro h; cases h
+
+instance runarEmittable_decidable (op : StackOp) : Decidable (RunarEmittable op) :=
+  decidable_of_iff (runarEmittableBool op = true)
+    (runarEmittableBool_iff_RunarEmittable op)
+
+def areRunarEmittableBool : List StackOp → Bool
+  | [] => true
+  | op :: rest => runarEmittableBool op && areRunarEmittableBool rest
+
+theorem areRunarEmittableBool_iff_AreRunarEmittable :
+    ∀ (ops : List StackOp),
+      areRunarEmittableBool ops = true ↔ AreRunarEmittable ops
+  | [] => ⟨fun _ => .nil, fun _ => rfl⟩
+  | op :: rest => by
+    unfold areRunarEmittableBool
+    rw [Bool.and_eq_true]
+    constructor
+    · intro ⟨hHead, hRest⟩
+      exact .cons op rest
+        ((runarEmittableBool_iff_RunarEmittable op).mp hHead)
+        ((areRunarEmittableBool_iff_AreRunarEmittable rest).mp hRest)
+    · intro h
+      cases h with
+      | cons _ _ hOp hRest =>
+          exact ⟨(runarEmittableBool_iff_RunarEmittable op).mpr hOp,
+                 (areRunarEmittableBool_iff_AreRunarEmittable rest).mpr hRest⟩
+
+instance areRunarEmittable_decidable (ops : List StackOp) :
+    Decidable (AreRunarEmittable ops) :=
+  decidable_of_iff (areRunarEmittableBool ops = true)
+    (areRunarEmittableBool_iff_AreRunarEmittable ops)
 
 /-! ## Per-shape round-trip lemmas (list-level)
 
@@ -2369,6 +2480,161 @@ inductive AreRunarEmittableWithIf : List StackOp → Prop where
 
 end
 
+/-! ### F1 decidability for `RunarEmittableWithIf` / `AreRunarEmittableWithIf`
+
+The mutual inductive structure walks both `StackOp` and `List StackOp`.
+The Boolean checkers below mirror the mutual recursion using `StackOp`'s
+generated structural recursor: the `.ifOp thn els` arm recurses through
+both `thn` and (when `els = some (head :: tail)`) the else body. -/
+
+mutual
+
+def runarEmittableWithIfBool : StackOp → Bool
+  | .ifOp thn none => areRunarEmittableWithIfBool thn
+  | .ifOp _ (some []) => false
+  | .ifOp thn (some (h :: t)) =>
+      areRunarEmittableWithIfBool thn && areRunarEmittableWithIfBool (h :: t)
+  | op => runarEmittableBool op
+
+def areRunarEmittableWithIfBool : List StackOp → Bool
+  | [] => true
+  | op :: rest => runarEmittableWithIfBool op && areRunarEmittableWithIfBool rest
+
+end
+
+mutual
+
+theorem runarEmittableWithIfBool_iff :
+    ∀ (op : StackOp),
+      runarEmittableWithIfBool op = true ↔ RunarEmittableWithIf op
+  | .ifOp thn none => by
+      unfold runarEmittableWithIfBool
+      constructor
+      · intro h
+        exact .if_none thn ((areRunarEmittableWithIfBool_iff thn).mp h)
+      · intro h
+        cases h with
+        | flat _ hFlat => cases hFlat
+        | if_none _ hThn => exact (areRunarEmittableWithIfBool_iff thn).mpr hThn
+  | .ifOp thn (some []) => by
+      unfold runarEmittableWithIfBool
+      constructor
+      · intro h; exact absurd h (by decide)
+      · intro h
+        cases h with
+        | flat _ hFlat => cases hFlat
+  | .ifOp thn (some (eh :: et)) => by
+      unfold runarEmittableWithIfBool
+      rw [Bool.and_eq_true]
+      constructor
+      · intro ⟨hThn, hEls⟩
+        exact .if_some_cons thn eh et
+          ((areRunarEmittableWithIfBool_iff thn).mp hThn)
+          ((areRunarEmittableWithIfBool_iff (eh :: et)).mp hEls)
+      · intro h
+        cases h with
+        | flat _ hFlat => cases hFlat
+        | if_some_cons _ _ _ hThn hEls =>
+            exact ⟨(areRunarEmittableWithIfBool_iff thn).mpr hThn,
+                   (areRunarEmittableWithIfBool_iff (eh :: et)).mpr hEls⟩
+  | .dup => Iff.intro (fun _ => .flat .dup .dup) (fun _ => rfl)
+  | .swap => Iff.intro (fun _ => .flat .swap .swap) (fun _ => rfl)
+  | .nip => Iff.intro (fun _ => .flat .nip .nip) (fun _ => rfl)
+  | .over => Iff.intro (fun _ => .flat .over .over) (fun _ => rfl)
+  | .rot => Iff.intro (fun _ => .flat .rot .rot) (fun _ => rfl)
+  | .tuck => Iff.intro (fun _ => .flat .tuck .tuck) (fun _ => rfl)
+  | .drop => Iff.intro (fun _ => .flat .drop .drop) (fun _ => rfl)
+  | .roll d => by
+      unfold runarEmittableWithIfBool
+      rw [show runarEmittableBool (.roll d) = decide (1 ≤ d ∧ d ≤ 16) from rfl]
+      constructor
+      · intro h; exact .flat _ (.roll d (of_decide_eq_true h))
+      · intro h
+        cases h with
+        | flat _ hFlat =>
+            cases hFlat with
+            | roll _ hd => exact decide_eq_true hd
+  | .pick d => by
+      unfold runarEmittableWithIfBool
+      rw [show runarEmittableBool (.pick d) = decide (1 ≤ d ∧ d ≤ 16) from rfl]
+      constructor
+      · intro h; exact .flat _ (.pick d (of_decide_eq_true h))
+      · intro h
+        cases h with
+        | flat _ hFlat =>
+            cases hFlat with
+            | pick _ hd => exact decide_eq_true hd
+  | .opcode name => by
+      unfold runarEmittableWithIfBool
+      rw [show runarEmittableBool (.opcode name) = isAllowedOpcodeName name from rfl]
+      constructor
+      · intro h; exact .flat _ (.opcode name h)
+      · intro h
+        cases h with
+        | flat _ hFlat =>
+            cases hFlat with
+            | opcode _ hAllow => exact hAllow
+  | .push v => by
+      unfold runarEmittableWithIfBool
+      simp [runarEmittableBool]
+      intro h
+      cases h with
+      | flat _ hFlat => cases hFlat
+  | .pickStruct d => by
+      unfold runarEmittableWithIfBool
+      simp [runarEmittableBool]
+      intro h
+      cases h with
+      | flat _ hFlat => cases hFlat
+  | .placeholder i n => by
+      unfold runarEmittableWithIfBool
+      simp [runarEmittableBool]
+      intro h
+      cases h with
+      | flat _ hFlat => cases hFlat
+  | .pushCodesepIndex => by
+      unfold runarEmittableWithIfBool
+      simp [runarEmittableBool]
+      intro h
+      cases h with
+      | flat _ hFlat => cases hFlat
+  | .rawBytes _ => by
+      unfold runarEmittableWithIfBool
+      simp [runarEmittableBool]
+      intro h
+      cases h with
+      | flat _ hFlat => cases hFlat
+
+theorem areRunarEmittableWithIfBool_iff :
+    ∀ (ops : List StackOp),
+      areRunarEmittableWithIfBool ops = true ↔ AreRunarEmittableWithIf ops
+  | [] => ⟨fun _ => .nil, fun _ => rfl⟩
+  | op :: rest => by
+    unfold areRunarEmittableWithIfBool
+    rw [Bool.and_eq_true]
+    constructor
+    · intro ⟨hHead, hRest⟩
+      exact .cons op rest
+        ((runarEmittableWithIfBool_iff op).mp hHead)
+        ((areRunarEmittableWithIfBool_iff rest).mp hRest)
+    · intro h
+      cases h with
+      | cons _ _ hOp hRest =>
+          exact ⟨(runarEmittableWithIfBool_iff op).mpr hOp,
+                 (areRunarEmittableWithIfBool_iff rest).mpr hRest⟩
+
+end
+
+instance runarEmittableWithIf_decidable (op : StackOp) :
+    Decidable (RunarEmittableWithIf op) :=
+  decidable_of_iff (runarEmittableWithIfBool op = true)
+    (runarEmittableWithIfBool_iff op)
+
+instance areRunarEmittableWithIf_decidable (ops : List StackOp) :
+    Decidable (AreRunarEmittableWithIf ops) :=
+  decidable_of_iff (areRunarEmittableWithIfBool ops = true)
+    (areRunarEmittableWithIfBool_iff ops)
+
 theorem RunarEmittable.toWithIf (op : StackOp) (h : RunarEmittable op) :
     RunarEmittableWithIf op :=
   .flat op h
@@ -3926,6 +4192,133 @@ theorem parseDispatchN_emit_round_trip
         simpa using this
       rw [hStrip]
       rfl
+
+/-! ## `AreRunarEmittableWithIfAndPatches` — wider predicate for C1
+
+Extends `AreRunarEmittableWithIf` by also admitting `pushCodesepIndex`
+and `.opcode "OP_CODESEPARATOR"`. These two ops appear in
+`compileSafeWithCodeSepPatches`-compiled stateful contracts and are
+excluded from `AreRunarEmittableWithIf` because they break the
+`emitWithCodeSepPatches → emitFast` byte-equality used in the
+no-patch-site round-trip.
+
+This wider predicate is the gate for the C1 round-trip theorem, which
+connects `runParsedBytes (emitWithCodeSepPatches ..).bytes` to
+`runOpsPc stackM.ops` at the `successAgrees` level.
+
+## Decidability
+
+Defined via Boolean checkers so that the `Decidable` instance is
+automatic:
+
+```
+AreRunarEmittableWithIfAndPatches ops := areRunarEmittableWithIfAndPatchesL ops = true
+```
+-/
+
+-- Boolean checkers for the `WithIfAndPatches` class.
+-- `isRunarEmittableWithIfAndPatchesOp` mirrors `RunarEmittableWithIf` but adds:
+--   * `pushCodesepIndex` — always admitted.
+--   * `.opcode "OP_CODESEPARATOR"` — admitted regardless of the 14-name
+--     `isAllowedOpcodeName` allowlist.
+-- The two functions are mutually recursive because `.ifOp` bodies are lists.
+mutual
+
+def isRunarEmittableWithIfAndPatchesOp : StackOp → Bool
+  | .dup | .swap | .nip | .over | .rot | .tuck | .drop => true
+  | .roll d => decide (1 ≤ d ∧ d ≤ 16)
+  | .pick d => decide (1 ≤ d ∧ d ≤ 16)
+  | .opcode name => isAllowedOpcodeName name || (name == "OP_CODESEPARATOR")
+  | .pushCodesepIndex => true
+  | .ifOp thn none => areRunarEmittableWithIfAndPatchesL thn
+  | .ifOp thn (some els) =>
+      areRunarEmittableWithIfAndPatchesL thn &&
+      areRunarEmittableWithIfAndPatchesL els
+  | _ => false
+
+def areRunarEmittableWithIfAndPatchesL : List StackOp → Bool
+  | [] => true
+  | op :: rest =>
+      isRunarEmittableWithIfAndPatchesOp op &&
+      areRunarEmittableWithIfAndPatchesL rest
+
+end
+
+/-- A list of ops is in the `WithIfAndPatches` class. -/
+def AreRunarEmittableWithIfAndPatches (ops : List StackOp) : Prop :=
+  areRunarEmittableWithIfAndPatchesL ops = true
+
+instance (ops : List StackOp) : Decidable (AreRunarEmittableWithIfAndPatches ops) :=
+  inferInstanceAs (Decidable (areRunarEmittableWithIfAndPatchesL ops = true))
+
+/-! ### Inclusion: `AreRunarEmittableWithIf ⊆ AreRunarEmittableWithIfAndPatches`
+
+Every op admitted by `AreRunarEmittableWithIf` is also admitted by
+`AreRunarEmittableWithIfAndPatches`. This gives a monotonicity lemma
+free of charge and lets callers narrow from the wider predicate.
+-/
+
+-- Mutual inclusion lemmas: `AreRunarEmittableWithIf ⊆ AreRunarEmittableWithIfAndPatches`.
+-- Proved by mutual recursion on the WithIf inductive.
+mutual
+
+private theorem isRunarEmittableWithIfAndPatchesOp_of_RunarEmittableWithIf
+    (op : StackOp) (h : RunarEmittableWithIf op) :
+    isRunarEmittableWithIfAndPatchesOp op = true := by
+  cases h with
+  | flat op hFlat =>
+      cases hFlat with
+      | dup => rfl
+      | swap => rfl
+      | nip => rfl
+      | over => rfl
+      | rot => rfl
+      | tuck => rfl
+      | drop => rfl
+      | roll d hd =>
+          simp [isRunarEmittableWithIfAndPatchesOp]; exact ⟨hd.1, hd.2⟩
+      | pick d hd =>
+          simp [isRunarEmittableWithIfAndPatchesOp]; exact ⟨hd.1, hd.2⟩
+      | opcode name hAllow =>
+          simp [isRunarEmittableWithIfAndPatchesOp, hAllow]
+  | if_none thn hThn =>
+      simp [isRunarEmittableWithIfAndPatchesOp,
+        areRunarEmittableWithIfAndPatchesL_of_AreRunarEmittableWithIf thn hThn]
+  | if_some_cons thn elsHead elsTail hThn hEls =>
+      simp [isRunarEmittableWithIfAndPatchesOp,
+        areRunarEmittableWithIfAndPatchesL_of_AreRunarEmittableWithIf thn hThn,
+        areRunarEmittableWithIfAndPatchesL_of_AreRunarEmittableWithIf
+          (elsHead :: elsTail) hEls]
+
+private theorem areRunarEmittableWithIfAndPatchesL_of_AreRunarEmittableWithIf
+    (ops : List StackOp) (h : AreRunarEmittableWithIf ops) :
+    areRunarEmittableWithIfAndPatchesL ops = true := by
+  cases h with
+  | nil => rfl
+  | cons op rest hOp hRest =>
+      simp [areRunarEmittableWithIfAndPatchesL,
+        isRunarEmittableWithIfAndPatchesOp_of_RunarEmittableWithIf op hOp,
+        areRunarEmittableWithIfAndPatchesL_of_AreRunarEmittableWithIf rest hRest]
+
+end
+
+/-- Every `AreRunarEmittableWithIf` op list is in `AreRunarEmittableWithIfAndPatches`. -/
+theorem AreRunarEmittableWithIf.toWithIfAndPatches
+    (ops : List StackOp) (h : AreRunarEmittableWithIf ops) :
+    AreRunarEmittableWithIfAndPatches ops :=
+  areRunarEmittableWithIfAndPatchesL_of_AreRunarEmittableWithIf ops h
+
+/-! ### Key sample checks (decidable by `native_decide`) -/
+
+theorem areRunarEmittableWithIfAndPatchesL_pushCodesepIndex_singleton :
+    areRunarEmittableWithIfAndPatchesL [.pushCodesepIndex] = true := rfl
+
+theorem areRunarEmittableWithIfAndPatchesL_opcode_codesep_singleton :
+    areRunarEmittableWithIfAndPatchesL [.opcode "OP_CODESEPARATOR"] = true := rfl
+
+theorem areRunarEmittableWithIfAndPatchesL_codesep_then_push_singleton :
+    areRunarEmittableWithIfAndPatchesL
+      [.opcode "OP_CODESEPARATOR", .pushCodesepIndex] = true := rfl
 
 end Parse
 end RunarVerification.Script

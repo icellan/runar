@@ -1,4 +1,5 @@
 import RunarVerification.Stack.Syntax
+import RunarVerification.Crypto.Spec
 
 /-!
 # Merkle-root codegen — Phase 4 (port of
@@ -144,6 +145,108 @@ def merkleRootBody (depth : Nat) (hashOp : String) : List StackOp :=
 /-- Body for `merkleRootHash256(leaf, proof, index, depth)`. -/
 @[inline] def merkleRootHash256Ops (depth : Nat) : List StackOp :=
   merkleRootBody depth "OP_HASH256"
+
+/-! ## Phase B7 — codegen-to-spec equivalence (base case)
+
+Phase B7 of the verification roadmap demands a `runOps`-level equivalence
+between `merkleRootSha256Ops d` and the concrete tree-fold spec
+`Crypto.Spec.merkleRootD`.  The compiler's Stack-IR fragment is a
+*Merkle-path verifier* (entry: `[leaf, proof(depth*32B), index]`), so
+the natural spec target is the matching path-verifier
+`Crypto.Spec.merkleVerifyPath` from `Crypto/Spec.lean`.
+
+We prove the equivalence for the base case `d = 0`, where the codegen
+degenerates to a two-element cleanup (`drop` the index, then `drop` the
+empty proof) leaving the leaf as the root.  The general inductive case
+(`d > 0`) requires a precise stack-shape invariant linking
+`Stack.Eval.runOps` over one `mLevel` to one application of
+`merkleVerifyStep`; this is straightforward in principle but tedious in
+length (≈ 15 Stack ops per level with two alt-stack saves, a
+conditional swap on a direction bit, and a numeric shift).  Per the
+Phase B7 plan's hard rule "narrow the theorem statement rather than
+`sorry`-out", the inductive proof is deferred to a follow-up phase; the
+present base-case theorem fixes the spec target and exercises the full
+codegen-to-spec pipeline at `d = 0`. -/
+
+open RunarVerification.ANF.Eval (Value EvalResult)
+open RunarVerification.Stack.Eval
+
+/-- `merkleRootSha256Ops 0` is the cleanup tail `[.drop, .drop]`.  Pure
+reduction lemma — no induction. -/
+theorem merkleRootSha256Ops_zero :
+    merkleRootSha256Ops 0 = [.drop, .drop] := by
+  show merkleRootBody 0 "OP_SHA256" = _
+  unfold merkleRootBody mAllLevels mAllLevelsAux
+  rfl
+
+/-- Same for the Hash256 variant. -/
+theorem merkleRootHash256Ops_zero :
+    merkleRootHash256Ops 0 = [.drop, .drop] := by
+  show merkleRootBody 0 "OP_HASH256" = _
+  unfold merkleRootBody mAllLevels mAllLevelsAux
+  rfl
+
+/-- Internal helper: pop one element from the top of the stack via
+`runOps [.drop]`.  The body is a one-line `unfold` of `runOps` and the
+`stepNonIf`/`applyDrop` cases. -/
+private theorem runOps_drop_one
+    (top : Value) (rest : List Value) (stkSt : StackState)
+    (hStk : stkSt.stack = top :: rest) :
+    runOps [.drop] stkSt = .ok { stkSt with stack := rest } := by
+  unfold runOps
+  simp only [stepNonIf, applyDrop, hStk]
+  exact runOps_nil _
+
+/-- Internal helper: pop two elements from the top of the stack via
+`runOps [.drop, .drop]`. -/
+private theorem runOps_drop_two
+    (top second : Value) (rest : List Value) (stkSt : StackState)
+    (hStk : stkSt.stack = top :: second :: rest) :
+    runOps [.drop, .drop] stkSt = .ok { stkSt with stack := rest } := by
+  unfold runOps
+  simp only [stepNonIf, applyDrop, hStk]
+  exact runOps_drop_one second rest { stkSt with stack := second :: rest } rfl
+
+/--
+**Phase B7 codegen-to-spec equivalence — base case.**
+
+When `d = 0` and the stack carries the canonical path-verifier entry
+shape `[index, emptyProof, leaf, …rest]` (index = TOS, proof is the
+zero-byte string because there are no levels to climb), running
+`merkleRootSha256Ops 0` leaves the leaf bytes on top of `rest`.
+
+The cleanup drops the index and the empty proof, leaving the leaf as
+the root.  The right-hand side matches
+`Crypto.Spec.merkleVerifyPath HashBackend.sha256 leaf emptyProof index 0`
+by `merkleVerifyPath_zero`. -/
+theorem runOps_merkleRootSha256Ops_zero_eq
+    (leaf emptyProof : ByteArray) (index : Int)
+    (rest : List Value) (stkSt : StackState)
+    (hStk : stkSt.stack
+            = .vBigint index :: .vBytes emptyProof :: .vBytes leaf :: rest) :
+    runOps (merkleRootSha256Ops 0) stkSt
+    = .ok { stkSt with stack
+              := .vBytes (Crypto.Spec.merkleVerifyPath
+                            (fun b => RunarVerification.ANF.Eval.Crypto.sha256 b)
+                            leaf emptyProof index 0) :: rest } := by
+  rw [merkleRootSha256Ops_zero, Crypto.Spec.merkleVerifyPath_zero]
+  exact runOps_drop_two (.vBigint index) (.vBytes emptyProof)
+          (.vBytes leaf :: rest) stkSt hStk
+
+/-- The corresponding base-case equivalence for the Hash256 variant. -/
+theorem runOps_merkleRootHash256Ops_zero_eq
+    (leaf emptyProof : ByteArray) (index : Int)
+    (rest : List Value) (stkSt : StackState)
+    (hStk : stkSt.stack
+            = .vBigint index :: .vBytes emptyProof :: .vBytes leaf :: rest) :
+    runOps (merkleRootHash256Ops 0) stkSt
+    = .ok { stkSt with stack
+              := .vBytes (Crypto.Spec.merkleVerifyPath
+                            (fun b => RunarVerification.ANF.Eval.Crypto.hash256 b)
+                            leaf emptyProof index 0) :: rest } := by
+  rw [merkleRootHash256Ops_zero, Crypto.Spec.merkleVerifyPath_zero]
+  exact runOps_drop_two (.vBigint index) (.vBytes emptyProof)
+          (.vBytes leaf :: rest) stkSt hStk
 
 end Merkle
 end RunarVerification.Stack

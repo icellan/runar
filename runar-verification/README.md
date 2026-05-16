@@ -12,18 +12,22 @@ pipeline. The package is useful in two roles:
 
 | Area | Status |
 |---|---:|
-| Conformance fixtures discovered (Lean-recognised) | 49/50 |
-| ANF parse + well-formedness | 49/50 |
-| ANF JSON round-trip | 49/50 |
+| Conformance fixtures discovered (Lean-recognised) | 56/56 |
+| ANF parse + well-formedness | 56/56 |
+| ANF JSON round-trip | 56/56 |
 | Default byte-exact gate (`pipelineGolden`) | 49/49 byte-exact |
+| Formal-evidence gate (`pipelineConformance`) | **0/56 VERIFIED** (deferral breakdown: 23 not-single-public-method, 6 checkPreimage, 26 terminalAssert, 1 structuralRefBody) |
 | Crypto-heavy fixtures | 15/49 stored Lean-produced constants; explicit pending-assumption bucket |
 | Full/sharded byte-exact target | live `cryptoAxiomPending` bucket regeneration |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
-| Project axioms | 71 |
+| Project axioms | 124 (see `TRUST_MANIFEST.md` for per-axiom breakdown) |
 | Opaque executable defaults | 0 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
-| End-to-end capstone (structural-const fragment) | `Pipeline.compileSafe_single_public_observational_correct_unconditional` |
+| End-to-end capstone — structural-const fragment | `Pipeline.compileSafe_single_public_observational_correct_unconditional` (M5) |
+| End-to-end capstone — ref-loads fragment (single-method) | `Pipeline.compileSafe_single_public_observational_correct_unconditional_ref` (A15) |
+| End-to-end capstone — multi-method dispatch | `Pipeline.compileSafe_multi_public_observational_correct` (Phase D) |
+| Crypto codegen-to-spec links | 13 primitive families (SHA-256 / RIPEMD-160 / hash160 / hash256 / BLAKE3 / secp256k1 / P-256 / P-384 / ECDSA / BabyBear / Merkle / WOTS+ / SLH-DSA × 6 / Rabin) |
 
 Default `pipelineGolden` is the fast gate and currently reports 49/49
 fixtures byte-exact (34 baseline + 15 stored crypto-pending constants).
@@ -33,16 +37,32 @@ itself. They remain visible as the `cryptoAxiomPending` bucket because
 their semantic proof obligations still depend on the crypto assumptions
 listed in `TRUST_MANIFEST.md`.
 
-`conformance/tests/` currently contains 50 fixtures rather than 49
-because of an unrelated concurrent fixture
-(`conformance/tests/asm-raw-script/`) added outside this verification
-directory; it uses a new `raw_script` ANF kind that the Lean ANF loader
-does not yet recognise. `goldenLoad` and `roundtrip` therefore report
-49/50 today (1 parse failure on `asm-raw-script`). `pipelineGolden`
-silently drops the unparseable fixture from its discovery loop and
-still reports 49/49 byte-exact for the 49 fixtures the Lean loader does
-recognise. The Lean proof gate (`scripts/lean-verify.sh` +
-`scripts/check-tcb-drift.sh`) is unaffected by this concurrent change.
+`pipelineConformance` is the formal-evidence gate. It reports **0/56
+VERIFIED** today with a precise per-fixture deferral breakdown:
+- 23 fixtures classified `DEFERRED-not-single-public-method` (Phase D
+  multi-method-dispatch capstone applies but per-fixture instantiation
+  is not yet wired into the harness),
+- 6 fixtures classified `DEFERRED-checkPreimage` (Phase D stateful
+  continuation),
+- 26 fixtures classified `DEFERRED-terminalAssert` (Phase D terminal-
+  assert elision),
+- 1 fixture classified `DEFERRED-structuralRefBody` (`asm-raw-script` —
+  uses an ANF `raw_script` value that is recognised by the loader but
+  emits a sentinel `OP_RUNAR_RAWSCRIPT_UNSUPPORTED` opcode in the
+  current Stack-IR; the dedicated `raw_bytes` StackOp + per-arm
+  simulation discharge is the remaining A14 follow-up).
+
+This is an accurate, honest measurement — not a test failure. The
+count will rise as the Phase D harness wiring lands and as the
+A3–A14 runtime-discharge work composes.
+
+`conformance/tests/` contains 56 fixtures, all of which `goldenLoad`
+and `roundtrip` recognise (the `asm-raw-script` fixture parses cleanly
+after the `raw_script` ANF kind landed; only its codegen-to-Stack-IR
+simulation discharge is deferred). `pipelineGolden` remains at 49/49
+byte-exact across the Lean-recognised emit set; the 7 stored-constant
+fixtures whose emit hex is regenerated rather than compared live in
+the `cryptoAxiomPending` bucket.
 
 ## Commands
 
@@ -92,44 +112,153 @@ skip. For BSV-backed checks, `--reference bsv-command` runs
 argument, and `--reference bsv-json` copies `RUNAR_BSV_REFERENCE_JSON`
 into place.
 
+### Differential Validation
+
+Path 3 of the verification roadmap is *differential validation* —
+treating cross-implementation byte-level agreement as an empirical
+anchor that the Lean verification layers proofs on top of. It has two
+CI integration points:
+
+**1. Seven-tier cross-compiler conformance (empirical anchor).** The
+project ships seven independent compiler implementations (TypeScript,
+Go, Rust, Python, Zig, Ruby, Java). For every fixture in
+`conformance/tests/` without a `"compilers"` allowlist in its
+`source.json`, all seven must produce byte-identical Stack IR and
+byte-identical Bitcoin Script hex. Frontend parity (parse-only) holds
+across all nine surface formats with no per-fixture opt-out. This is
+enforced in repository CI by `conformance/runner/runner.ts`
+(`runAllParserOnlyChecks` plus the Stack-IR / hex parity matrix) and is
+the empirical source of the codegen-soundness assumption that
+`TRUST_MANIFEST.md` records as an axiom inventory. The seven-way
+agreement on the entire corpus is what makes those axioms credible;
+formal discharge of those axioms (Path 2) would replace this anchor with
+a proof.
+
+**2. Lean-side conformance + external BSV diff (CI wiring).**
+
+* `scripts/run-pipeline-conformance.sh` is the CI-ready wrapper around
+  the `pipelineConformance` Lean binary. It resolves
+  `runar-verification/` from its own location (so the matrix step does
+  not need a working-directory `cd`), raises the main-thread stack to
+  `unlimited` (with a `65520 KiB` fallback for hosts that reject
+  `unlimited`), builds the binary on demand, and exits non-zero **only**
+  when at least one fixture lands in a hard-failure bucket
+  (`DEFERRED-parse-failure`, `DEFERRED-not-well-formed`). The soft
+  buckets (`DEFERRED-compile-safe-error`, `DEFERRED-no-public-method`)
+  are documented `compileSafe` rejection paths and do not gate CI on
+  their own; they are reported in the summary instead. No external BSV
+  producer is required, so this step is unconditionally wireable in the
+  matrix.
+* `scripts/differential.sh` extends Path 3 to a true byte-level diff
+  against an external Bitcoin Script reference. It requires a BSV
+  reference producer: in CI, wire one through `--reference bsv-command`
+  (the script invokes `RUNAR_BSV_REFERENCE_CMD` with the external JSON
+  report path as its only argument) or `--reference bsv-json` (the
+  script copies a prebuilt `RUNAR_BSV_REFERENCE_JSON` into place). The
+  `ulimit -s unlimited` requirement for the recursive Lean parser is
+  handled by the wrapper above, and `differential.sh` raises its own
+  stack limit on the same parser path.
+
 ## Proof Status
 
-The citable end-to-end theorem
-`Pipeline.compileSafe_single_public_observational_correct_unconditional`
-is complete for the **structural-const fragment** of
-single-public-method programs. It composes:
+Two end-to-end capstones are complete for single-public-method
+`compileSafe` programs. Neither covers a real Rúnar conformance
+fixture from the 56-fixture corpus today — that gap is the primary
+active work item. The capstones compose:
 
-* **M2** (`Pipeline.lower_observational_correct`) — `successAgrees`
-  between the ANF evaluator and `runMethod (Lower.lower p)` for bodies
-  where every binding is a literal load
-  (`Agrees.structuralConstBody m.body`), under genuine domain
-  predicates only.
+* **M5** (`Pipeline.compileSafe_single_public_observational_correct_unconditional`)
+  — `successAgrees` proved for bodies where every binding is a literal
+  load (`Agrees.structuralConstBody`). Fragment: literal-load-only
+  methods. Hypotheses: genuine domain and structural predicates only.
+* **A15** (`Pipeline.compileSafe_single_public_observational_correct_unconditional_ref`)
+  — widens M5 to `Agrees.structuralRefBody`: literal loads plus
+  copied-mode and consume-mode reference loads (`loadParam`,
+  stack-backed `loadProp`, `loadConst .refAlias`). This is the current
+  outer capstone. Hypotheses remain genuine domain/structural
+  predicates; none restate the conclusion.
+
+No real Rúnar contract in the 56-fixture corpus satisfies
+`structuralRefBody`. Every fixture body contains at least one
+`binOp`, `call`, `assert`, `update_prop`, `if_val`, `loop`, or
+`method_call` binding. The `tests/PipelineConformance.lean` harness
+measures this: **0/56 VERIFIED**. The 0/56 measurement is correct
+and honest, not a defect in the harness.
+
+Building block sub-theorems that feed both capstones:
+
+* **M2** (`Pipeline.lower_observational_correct`) — `successAgrees` for
+  `structuralConstBody`, both `.isSome` directions proved.
+* **M2 extended** (`Pipeline.lower_observational_correct_copy`,
+  `Agrees.evalBindings_structuralCopyBody_isSome`,
+  `Agrees.runMethod_lower_public_unique_no_post_structuralCopy_isSome`,
+  `Agrees.evalBindings_structuralConsumeBody_isSome`,
+  `Agrees.runMethod_lower_public_unique_no_post_structuralConsume_isSome`) —
+  both directions proved for copy- and consume-mode reference loads.
 * **M3** (`Pipeline.peephole_observational_correct_modulo_runMethod_eq`)
   — the full `peepholeProgram` pipeline is `runMethod`-preserving from
-  `Peephole.noIfOp` / `peepholePassAllFlat_preconditions` /
-  `wellTypedRun` / `rollPickDepthOK`; the caller no longer supplies any
-  "fold preserves runOps" hypothesis.
-* **M4** (`Pipeline.compileSafe_single_public_runOps_eq` and the
-  patched-emit round-trip
-  `Pipeline.patched_bytes_sound_with_if`) — the slot-aware deployed
-  bytes round-trip through `Parse.parseScript` to `runOps stackM.ops`
-  from `Parse.AreRunarEmittableWithIf stackM.ops` alone.
+  genuine structural preconditions only.
+* **M4** (`Pipeline.compileSafe_single_public_runOps_eq` and
+  `Pipeline.patched_bytes_sound_with_if`) — slot-aware deployed bytes
+  round-trip from `Parse.AreRunarEmittableWithIf` alone.
 
-The capstone's hypotheses are all genuine domain or structural
-predicates — `WF.ANF`, the single-public-method shape, fragment
-membership (`structuralConstBody`), the M3 structural preconditions,
-and `Parse.AreRunarEmittable stackM.ops`. None restate the conclusion.
-The fragment boundary is the literal-load substrate: `binOp`,
-`unaryOp`, `assert`, reference loads, `methodCall`, crypto, `ifVal`,
-`loop`, and output-construction bodies lie outside it. Widening the
-fragment to `structuralCopyBody` (copied-reference loads) is the next
-step and currently requires lifting the Stage C `agreesTagged` /
-`ChainRel` witnesses to unconditional `successAgrees`.
+Substrate in tree but not yet wired into a capstone (A3–A8):
+`Agrees.structuralArithBody`, `structuralCallBody`,
+`structuralUpdatePropBody`, `structuralIfValBody`,
+`structuralLoopBody`, `structuralMethodCallBody` each have a
+structural predicate, ANF-side `evalBindings_*_isSome` theorem, and
+Decidable instance. Their runtime-side
+`runMethod_lower_public_unique_no_post_structural*_isSome` theorems are
+not proved — that requires per-opcode Stage C composition with concrete
+value tracking.
 
-The deprecated skeletons `compile_observational_correct_skeleton` and
-`compile_observational_correct_bytes_skeleton` remain as
-`@[deprecated]` aliases re-exporting the capstone for backwards
-compatibility.
+Phase C partial: `Script.Parse.AreRunarEmittableWithIfAndPatches`
+predicate and Decidable instance are in tree; monotonicity from
+`AreRunarEmittableWithIf` is proved; byte-equality parity corollary
+`compileSafe_bytes_eq_compileSafeWithCodeSepPatches_of_AreRunarEmittableWithIf`
+is proved. C2 (multi-method dispatch joins) is not closed.
+
+Phase E complete: `Stack/TxContext.lean` carries `ValidTxContext`
+predicate + Decidable (E1), `extractVersion_buildPreimage_eq` and
+`decodeLE32_encodeUInt32LE` (E2), and
+`runOpcode_CHECKSIG_ValidTxContext` /
+`runOpcode_CHECKSIGVERIFY_ValidTxContext` (E3).
+
+Phase F complete: `tests/PipelineConformance.lean` harness runs all
+56 fixtures; current report is 0/56 VERIFIED (all deferred). Every
+domain predicate the harness checks (`structuralConstBody`,
+`structuralRefBody`, `AreRunarEmittable`, `AreRunarEmittableWithIf`,
+`noIfOp`, `wellTypedRun`, `rollPickDepthOK`,
+`peepholePassAllFlat_preconditions`, `ValidTxContext`) is `Decidable`
+in the canonical Boolean-checker style — fixture instantiation runs
+through `native_decide` without kernel timeouts.
+
+Phase B complete (codegen-to-spec for crypto primitives, axiom-shim
+path): 13 primitive families now have spec links. The B1+B2 hash
+opcodes (`OP_SHA256`, `OP_RIPEMD160`, `OP_HASH160`, `OP_HASH256`) are
+proved directly against existing backend symbols (zero new axioms).
+B3 BLAKE3 single-block + compress, B4 secp256k1 EC (10 emit
+functions), B5 NIST P-256 / P-384 (14 emit functions + 12 group-law
+axioms), B6 BabyBear base field + degree-4 extension (concrete spec
+defs + 4 functional-correctness axioms), B7 Merkle root spec + base
+case proof (d = 0), B8 WOTS+ concrete spec + codegen axiom, B9 SLH-DSA
+covering all 6 FIPS 205 SHA-2 parameter sets, B10 Rabin concrete spec
++ codegen axiom each ship axiomatized codegen-to-spec equivalence
+where direct opcode-by-opcode reduction is impractical (the project
+gates byte-level correctness via the 7-tier cross-compiler conformance
+suite). B11 compound builtins (`extractOutputHash`, `buildChangeOutput`,
+`computeStateOutput`, `super`) and 11 math/byte builtins (`safediv`,
+`safemod`, `divmod`, `clamp`, `sign`, `mulDiv`, `percentOf`, `pow`,
+`sqrt`, `gcd`, `log2`) ship as concrete `def`s.
+
+Phase D capstone landed: `compileSafe_multi_public_observational_correct`
+drops the `hPublicSingleton` premise and quantifies over any public
+method in `publicMethodsOf`. The 5 Phase D codegen-soundness axioms in
+`Pipeline.lean` link Merkle-dispatch selection, auto-injected
+`checkPreimage` at method entry, auto-injected state output at method
+exit, terminal-assert elision residue, and trailing-NIP cleanup
+residue to the existing concrete `Stack.Lower` implementation. The
+runtime instantiation of this capstone for each conformance fixture
+remains the next active milestone.
 
 The current proof surface is deliberately split:
 

@@ -264,6 +264,15 @@ private def fromJsonANFValueAux? (fuel : Nat) (j : Json) : Except String ANFValu
       let elemsJ ← j.getObjVal? "elements"
       let elements ← parseTempRefList? elemsJ
       return .arrayLiteral elements
+  | "raw_script" =>
+      let bytesHex ← j.getObjValAs? String "bytes"
+      let bytes ←
+        match parseHex? bytesHex with
+        | some b => .ok b
+        | none   => .error s!"raw_script: malformed bytes hex {bytesHex}"
+      let inArity ← j.getObjValAs? Nat "in_arity"
+      let outArity ← j.getObjValAs? Nat "out_arity"
+      return .rawScript bytes inArity outArity
   | other => .error s!"unknown ANFValue kind: {other}"
 
 private def fromJsonANFBindingAux? (fuel : Nat) (j : Json) : Except String ANFBinding := do
@@ -345,6 +354,11 @@ private def toJsonANFValue : ANFValue → Json
       mkObj [("kind", .str "add_data_output"), ("satoshis", .str sats), ("scriptBytes", .str sb)]
   | .arrayLiteral elems =>
       mkObj [("kind", .str "array_literal"), ("elements", refList elems)]
+  | .rawScript bytes inArity outArity =>
+      mkObj [("kind", .str "raw_script"),
+             ("bytes", .str (toHex bytes)),
+             ("in_arity", .num ⟨inArity, 0⟩),
+             ("out_arity", .num ⟨outArity, 0⟩)]
 
 private def toJsonANFBinding : ANFBinding → Json
   | .mk name value sourceLoc =>

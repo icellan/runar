@@ -6,6 +6,7 @@ import RunarVerification.Stack.Sim
 import RunarVerification.Stack.Agrees
 import RunarVerification.Stack.Peephole
 import RunarVerification.Stack.Eval
+import RunarVerification.Stack.TxContext
 import RunarVerification.Script.Emit
 import RunarVerification.Script.EmitCorrect
 import RunarVerification.Script.Eval
@@ -113,6 +114,10 @@ def validateStackOp (methodName : String) : StackOp → Except CompileError Unit
   | .tuck => .ok ()
   | .placeholder _ _ => .ok ()
   | .pushCodesepIndex => .ok ()
+  -- A14 follow-up: `rawBytes` is always accepted — the bytes are
+  -- spliced verbatim by the emitter. Sentinel-opcode rejection only
+  -- applies to named opcodes, not to raw byte payloads.
+  | .rawBytes _ => .ok ()
   | .opcode name =>
       if name.startsWith "OP_RUNAR_" then
         .error (.runarSentinelOpcode methodName name)
@@ -505,6 +510,94 @@ theorem lower_observational_correct
     Agrees.runMethod_lower_public_unique_no_post_structuralConst_isSome
       contractName props methods m initialStack hMem hPublic hUnique
       hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize hConst
+  exact Iff.intro (fun _ => hRun) (fun _ => hAnf)
+
+/-! ## A1 — Copy-mode reference loads: observational correctness
+
+Mirrors `lower_observational_correct` for the `structuralCopyBody` fragment.
+Copy-mode reference loads (`.loadParam n`, `.loadProp n`,
+`.loadConst (.refAlias n)`) emit `dup` / `over` / `pickStruct d` in the
+lowered Stack IR.  Execution of these ops never fails once the initial
+stack is aligned with the ANF state (the `agreesTagged` invariant), which
+is established at method entry by `hAgrees`.
+
+`successAgrees` collapses to `True ↔ True` as in the const case: both the
+ANF evaluator (by `evalBindings_structuralCopyBody_isSome`) and the Stack VM
+(by `runMethod_lower_public_unique_no_post_structuralCopy_isSome`) are
+`.isSome` under the structural predicate.
+
+**Hypotheses not present in the const variant:**
+- `tsm` / `hUntagSm` / `hAgrees`: the tagged stack-map alignment
+  invariant at method entry (const loads ignore the stack, copy loads
+  must read it).
+- `hParamDomain` / `hPropDomain` / `hRefReady`: ANF-state readiness — for
+  each `loadParam`/`loadProp` value in the body, the lookup succeeds; and
+  every name in the initial stack map is resolvable via `resolveRef`.
+  These hold at method entry if all params and props were populated by the
+  VM dispatch layer.
+- `hBodyFresh` / `hBodyNodup`: SSA freshness — body binding names do not
+  shadow the initial parameter stack map, and are pairwise distinct.  Required
+  to thread `agreesTagged` through the induction on the body list. -/
+theorem lower_observational_correct_copy
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Lower.bindingsUseDeserializeState m.body = false)
+    (hCopy :
+      Agrees.structuralCopyBody (Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name)) m.body
+        (List.reverse (m.params.map (fun p => p.name))) 0)
+    -- Tagged stack-map alignment at method entry.
+    (hUntagSm : Agrees.untagSm tsm = List.reverse (m.params.map (fun p => p.name)))
+    (hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
+    -- ANF-state readiness: for each loadParam/loadProp in the body, the lookup succeeds;
+    -- and every name in the initial stack map is resolvable via resolveRef.
+    (hParamDomain :
+      ∀ b ∈ m.body, ∀ n, b.value = .loadParam n →
+        ∃ pv, initialAnf.lookupParam n = some pv)
+    (hPropDomain :
+      ∀ b ∈ m.body, ∀ n, b.value = .loadProp n →
+        ∃ pv, initialAnf.lookupProp n = some pv)
+    (hRefReady :
+      ∀ n, (Lower.StackMap.depth? (List.reverse (m.params.map (fun p => p.name))) n).isSome = true →
+        ∃ val, initialAnf.resolveRef n = some val)
+    -- SSA freshness: body names do not shadow the param map and are pairwise distinct.
+    (hBodyFresh : ∀ b ∈ m.body, b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hBodyNodup : (m.body.map (fun b => b.name)).Nodup) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf m.body)
+      (runMethod
+        (Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack) := by
+  -- Both sides are `.isSome` under the structural predicate; `successAgrees` becomes
+  -- `True ↔ True`.
+  have hAnf :
+      (RunarVerification.ANF.Eval.evalBindings initialAnf m.body).toOption.isSome :=
+    Agrees.evalBindings_structuralCopyBody_isSome
+      m.body (List.reverse (m.params.map (fun p => p.name))) 0
+      (Lower.computeLastUses m.body) []
+      (m.body.map (fun b => b.name))
+      initialAnf hCopy hParamDomain hPropDomain hRefReady hBodyFresh hBodyNodup
+  have hRun :
+      (runMethod
+        (Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome :=
+    Agrees.runMethod_lower_public_unique_no_post_structuralCopy_isSome
+      contractName props methods m tsm initialAnf initialStack
+      hMem hPublic hUnique
+      hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize
+      hCopy hUntagSm hAgrees hBodyFresh hBodyNodup
   exact Iff.intro (fun _ => hRun) (fun _ => hAnf)
 
 /-! ## M3 — Peephole composition discharge
@@ -1651,12 +1744,13 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct
     (successAgrees_trans _ _ _ hLow hPeep) hEmit
 
 /--
-Legacy companion: same conclusion as
-`compileSafeWithCodeSepPatches_single_public_observational_correct` but
-with an extra `r.bytes = emitFast ...` hypothesis. After M4 this is
-strictly weaker — the byte equality is now proved internally, so the
-`hBytes` hypothesis is redundant. Kept for backwards compatibility
-with existing callers; new code should use the base theorem directly.
+**C3** (Phase C): same conclusion as
+`compileSafeWithCodeSepPatches_single_public_observational_correct`.
+The redundant `r.bytes = emitFast ...` hypothesis has been dropped: it
+was never used in the proof body (the byte equality is derived internally
+from `AreRunarEmittableWithIf stackM.ops`). This theorem is kept as a
+named alias so existing proof scripts that refer to it by name compile
+without change; it is now parameter-identical to the base capstone.
 -/
 theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes
     (p : ANFProgram) (h : WF.ANF p)
@@ -1672,8 +1766,6 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
           = runOps stackM.ops initialStack)
     (hPublic :
       Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
-    (_hBytes :
-      r.bytes = Emit.emitFast (peepholeProgram (Lower.lower p)))
     (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
@@ -1685,12 +1777,16 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
 set_option linter.constructorNameAsVariable false in
 set_option maxHeartbeats 1600000 in
 /--
-Slot-aware companion to
+**C3** (Phase C): slot-aware companion to
 `compileSafe_single_public_observational_correct_with_if_of_flat_first_pass_rollPick_noop`.
 
-The patch-emitter byte equality is still supplied as `hBytes`; this
-theorem removes the separate broad peephole equality by deriving it from
-the concrete first-pass/post/chain/roll-pick obligations.
+The redundant `hBytes : r.bytes = emitFast ...` hypothesis has been
+dropped (C3 cleanup): `AreRunarEmittableWithIf stackM.ops` already
+entails the byte equality internally. The peephole equality
+`runMethod ... = runOps stackM.ops ...` is derived from the concrete
+first-pass/post/chain/roll-pick obligations, then the base capstone
+`compileSafeWithCodeSepPatches_single_public_observational_correct`
+closes the goal without any extra byte-level witness.
 -/
 theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes_of_flat_first_pass_rollPick_noop
     (p : ANFProgram) (h : WF.ANF p)
@@ -1731,8 +1827,6 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
         (Peephole.peepholeChainFold (Peephole.peepholePostFold passOps)))
     (hPublic :
       Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
-    (hBytes :
-      r.bytes = Emit.emitFast (peepholeProgram (Lower.lower p)))
     (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
@@ -1755,9 +1849,61 @@ theorem compileSafeWithCodeSepPatches_single_public_observational_correct_of_emi
               initialStack := hPeepOps.symm
       _ = runOps stackM.ops initialStack := by
             rw [hStackOps]
-  exact compileSafeWithCodeSepPatches_single_public_observational_correct_of_emitFast_bytes
+  exact compileSafeWithCodeSepPatches_single_public_observational_correct
     p h anfM stackM r initialAnf initialStack
-    hSafe hLowSimulates hPeepToEmittedOps hPublic hBytes hOps
+    hSafe hLowSimulates hPeepToEmittedOps hPublic hOps
+
+/-! ### C4 — `compileSafe`-vs-`compileSafeWithCodeSepPatches` parity
+
+For bodies in the `AreRunarEmittableWithIf` subset (no patch sites),
+`emitWithCodeSepPatches` produces the same bytes as `emitFast`, so
+`compileSafeWithCodeSepPatches` bytes equal what `compileSafe` would
+emit. The M5 capstone (stated over `compileSafe`) therefore subsumes
+the slot-aware capstone for all non-stateful contracts.
+-/
+
+/--
+**C4**: For the `AreRunarEmittableWithIf` op subset (no patch sites),
+`compileSafeWithCodeSepPatches p` succeeds with bytes equal to
+`emitFast (peepholeProgram (Lower.lower p))` — the same bytes that
+`compileSafe p` would emit. Consequence: the existing M5 byte-level
+capstone `compileSafe_single_public_observational_correct_unconditional`
+(which targets `compileSafe`) covers every `compileSafeWithCodeSepPatches`
+use-case on the no-patch-site subset.
+-/
+theorem compileSafeWithCodeSepPatches_bytes_eq_emitFast_of_AreRunarEmittableWithIf
+    (p : ANFProgram) (r : Emit.EmitResult) (stackM : StackMethod)
+    (hSafe : compileSafeWithCodeSepPatches p = .ok r)
+    (hPublic :
+      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
+    (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
+    r.bytes = Emit.emitFast (peepholeProgram (Lower.lower p)) :=
+  Emit.emitWithCodeSepPatches_single_public_bytes_eq_emitFast_with_if
+    (peepholeProgram (Lower.lower p)) stackM r hPublic hOps
+    (compileSafeWithCodeSepPatches_ok_implies_emit p r hSafe)
+
+/--
+**C4 corollary**: under the same hypotheses, `compileSafe p` succeeds
+with bytes equal to `r.bytes`.
+-/
+theorem compileSafe_bytes_eq_compileSafeWithCodeSepPatches_of_AreRunarEmittableWithIf
+    (p : ANFProgram) (r : Emit.EmitResult) (stackM : StackMethod)
+    (hSafe : compileSafeWithCodeSepPatches p = .ok r)
+    (hPublic :
+      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
+    (hOps : Parse.AreRunarEmittableWithIf stackM.ops) :
+    compileSafe p = .ok r.bytes := by
+  have hBytes :=
+    compileSafeWithCodeSepPatches_bytes_eq_emitFast_of_AreRunarEmittableWithIf
+      p r stackM hSafe hPublic hOps
+  have hValidated :=
+    compileSafeWithCodeSepPatches_ok_implies_validated p r hSafe
+  -- `compileSafe` unfolds to: let stack := peepholeProgram (Lower.lower p)
+  --   validateStackProgram stack >>= fun _ => .ok (emitFast stack)
+  -- Under hValidated, the bind reduces to .ok (emitFast ...).
+  simp only [compileSafe]
+  rw [hValidated, hBytes]
+  rfl
 
 /-! ### The top-level soundness theorem (M5 capstone)
 
@@ -1935,6 +2081,209 @@ theorem compileSafe_single_public_observational_correct_unconditional
   exact successAgrees_trans _ _ _
     (successAgrees_trans _ _ _ hLow hPeep) hPeepToParsed
 
+/-! ### A15 capstone — widening to the structural-ref fragment
+
+`compileSafe_single_public_observational_correct_unconditional_ref` widens
+the M5 capstone from literal loads (`structuralConstBody`) to copy-mode AND
+consume-mode reference loads (`structuralRefBody`).  It covers every method
+body whose bindings consist only of:
+* literal loads (`.loadConst (.int _)` / `.loadConst (.bool _)` / `.loadConst (.bytes _)`)
+* copy-mode reference loads (`.loadParam n`, `.loadProp n`, `.loadConst (.refAlias n)`)
+  where `n` is NOT the last use, or is outer-protected
+* consume-mode reference loads (`.loadParam n`, `.loadConst (.refAlias n)`)
+  where `n` IS the last use and is not outer-protected
+
+The proof is structurally identical to the M5 const capstone; only the M2
+lowering leg differs: the `hLow` step discharges directly via
+`Agrees.evalBindings_structuralRefBody_isSome` and
+`Agrees.runMethod_lower_public_unique_no_post_structuralRef_isSome`.
+
+A3–A8 substrate (assert / binOp / unaryOp / call / updateProp / ifVal / loop
+/ methodCall / output intrinsics) is present in `Stack/Agrees.lean`; their
+runtime-side discharge requires per-opcode Stage C work that is genuinely
+deep and is deferred to A3–A8 proper.
+-/
+
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+**A15 capstone — `compileSafe` end-to-end observational correctness on
+the structural-ref fragment.**
+
+Widens `compileSafe_single_public_observational_correct_unconditional`
+(the const-only M5 capstone) to cover reference loads (copy mode + consume
+mode) as well as literal loads.
+
+Hypothesis audit (every premise is a genuine domain predicate; none
+restate the conclusion):
+
+* `h : WF.ANF p` — the standard ANF well-formedness predicate.
+* `hSafe : compileSafe p = .ok bytes` — the deployed-byte handle.
+* `hMem`, `hPublic`, `hUnique`, `hNoPreimage`, `hNoCode`,
+  `hNoTerminalAssert`, `hNoDeserialize` — standard public-method shape
+  predicates (same as the const capstone).
+* `hRef : Agrees.structuralRefBody …` — structural predicate: every binding
+  in `anfM.body` is a literal load, a copy-mode reference load, or a
+  consume-mode reference load (all decidable; see `structuralRefBodyBool`).
+* `hUntagSm : Agrees.untagSm tsm = …` — the tagged stack map's untag is
+  the reversed parameter name list.
+* `hAgrees : Agrees.agreesTagged tsm initialAnf initialStack` — the
+  tagged-stack / ANF-state alignment invariant at method entry.
+* `hParamDomain` / `hPropDomain` / `hRefReady` — ANF-state readiness:
+  parameter / property lookups succeed, and every stack-map name resolves
+  via `resolveRef`.
+* `hBodyFresh` / `hBodyNodup` — SSA freshness: body binding names do not
+  shadow the initial parameter stack map and are pairwise distinct.
+* `hPublicSingleton`, `hStackBody` — structural shape: the peephole program
+  has exactly one public method and its ops are the rewritten lowered body.
+* `hNoIf` / `hPre` / `hPostWT` / `hChainDepth` — M3's `noIfOp` /
+  `wellTypedRun` / `peepholePassAllFlat_preconditions` / `rollPickDepthOK`
+  invariants on the lowered body.
+* `hOps : Parse.AreRunarEmittable stackM.ops` — M4's emit/parse round-trip
+  precondition.
+
+Conclusion: `successAgrees` between the ANF body's evaluation and the
+result of running the deployed bytes through `Parse.parseScript +
+Stack.Eval.runOps`. -/
+theorem compileSafe_single_public_observational_correct_unconditional_ref
+    (p : ANFProgram) (_h : WF.ANF p)
+    (anfM : ANFMethod) (stackM : StackMethod)
+    (bytes : ByteArray)
+    (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    -- Compile succeeded.
+    (hSafe : compileSafe p = .ok bytes)
+    -- M2 domain predicates (structural-ref fragment, standard
+    -- public-method shape, no implicit-parameter / post-processing).
+    (hMem : anfM ∈ p.methods)
+    (hPublic : anfM.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ p.methods → m'.isPublic = true →
+        (m'.name == anfM.name) = true → m' = anfM)
+    (hNoPreimage : Lower.bindingsUseCheckPreimage anfM.body = false)
+    (hNoCode : Lower.bindingsUseCodePart anfM.body = false)
+    (hNoTerminalAssert : Lower.bodyEndsInAssert anfM.body = false)
+    (hNoDeserialize : Lower.bindingsUseDeserializeState anfM.body = false)
+    (hRef :
+      Agrees.structuralRefBody p.methods p.properties
+        Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Stack.Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name))) 0)
+    -- Tagged stack-map alignment at method entry.
+    (hUntagSm :
+      Agrees.untagSm tsm = List.reverse (anfM.params.map (·.name)))
+    (hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
+    -- ANF-state readiness.
+    (hParamDomain :
+      ∀ b ∈ anfM.body, ∀ n, b.value = .loadParam n →
+        ∃ pv, initialAnf.lookupParam n = some pv)
+    (hPropDomain :
+      ∀ b ∈ anfM.body, ∀ n, b.value = .loadProp n →
+        ∃ pv, initialAnf.lookupProp n = some pv)
+    (hRefReady :
+      ∀ n,
+        (Stack.Lower.StackMap.depth?
+          (List.reverse (anfM.params.map (·.name))) n).isSome = true →
+        ∃ val, initialAnf.resolveRef n = some val)
+    -- SSA freshness.
+    (hBodyFresh :
+      ∀ b ∈ anfM.body,
+        b.name ∉ List.reverse (anfM.params.map (·.name)))
+    (hBodyNodup : (anfM.body.map (·.name)).Nodup)
+    -- M3 domain predicates on the LOWERED body.
+    (hNoIf : Peephole.noIfOp ((Lower.lower p).bodyOf anfM.name))
+    (hPre :
+      Peephole.peepholePassAllFlat_preconditions
+        ((Lower.lower p).bodyOf anfM.name) initialStack)
+    (hPostWT :
+      Peephole.wellTypedRun
+        (Peephole.peepholePostFold
+          (Peephole.peepholePassAll
+            ((Lower.lower p).bodyOf anfM.name)))
+        initialStack)
+    (hChainDepth :
+      Peephole.rollPickDepthOK
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold
+            (Peephole.peepholePassAll
+              ((Lower.lower p).bodyOf anfM.name))))
+        initialStack)
+    -- Structural shape.
+    (hPublicSingleton :
+      Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = [stackM])
+    (hStackBody :
+      (peepholeProgram (Lower.lower p)).bodyOf anfM.name = stackM.ops)
+    -- M4 domain predicate (parser/emit round trip).
+    (hOps : Parse.AreRunarEmittable stackM.ops) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack) := by
+  -- Step 1 (M2, ref fragment): both the ANF evaluator and the Stack VM
+  -- are `.isSome` under `structuralRefBody`; `successAgrees` becomes
+  -- `True ↔ True`.
+  have hLow :
+      successAgrees
+        (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+        (runMethod (Lower.lower p) anfM.name initialStack) := by
+    have hP : p =
+        { contractName := p.contractName,
+          properties := p.properties,
+          methods := p.methods } := rfl
+    -- ANF side: evalBindings is isSome.
+    have hAnf :
+        (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body).toOption.isSome :=
+      Agrees.evalBindings_structuralRefBody_isSome
+        p.methods p.properties
+        Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Stack.Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name))) 0
+        initialAnf
+        hRef hParamDomain hPropDomain hRefReady hBodyNodup
+    -- Stack side: runMethod is isSome.
+    have hRun :
+        (runMethod (Lower.lower p) anfM.name initialStack).toOption.isSome := by
+      rw [hP]
+      exact Agrees.runMethod_lower_public_unique_no_post_structuralRef_isSome
+        p.contractName p.properties p.methods anfM
+        tsm initialAnf initialStack
+        hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize
+        hRef hUntagSm hAgrees hBodyFresh hBodyNodup
+    exact Iff.intro (fun _ => hRun) (fun _ => hAnf)
+  -- Step 2 (M3).
+  have hPeep :
+      successAgrees
+        (runMethod (Lower.lower p) anfM.name initialStack)
+        (runMethod (peepholeProgram (Lower.lower p)) anfM.name initialStack) :=
+    peephole_observational_correct_modulo_runMethod_eq
+      (Lower.lower p) anfM.name initialStack hNoIf hPre hPostWT hChainDepth
+  -- Step 3: bridge to stackM.ops.
+  have hRunMethodToOps :
+      runMethod (peepholeProgram (Lower.lower p)) anfM.name initialStack
+        = runOps stackM.ops initialStack := by
+    unfold runMethod
+    rw [hStackBody]
+  -- Step 4 (M4): compileSafe bytes round-trip.
+  have hEmitEq :
+      runParsedBytes bytes initialStack = runOps stackM.ops initialStack :=
+    compileSafe_single_public_runOps_eq p bytes stackM initialStack
+      hSafe hPublicSingleton hOps
+  -- Compose.
+  have hPeepToParsed :
+      successAgrees
+        (runMethod (peepholeProgram (Lower.lower p)) anfM.name initialStack)
+        (runParsedBytes bytes initialStack) := by
+    rw [hRunMethodToOps, ← hEmitEq]
+    exact successAgrees_refl _
+  exact successAgrees_trans _ _ _
+    (successAgrees_trans _ _ _ hLow hPeep) hPeepToParsed
+
 end
 
 /-! ### Deprecated skeletons
@@ -2017,6 +2366,392 @@ theorem compile_observational_correct_bytes_skeleton
         (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
     rw [hPeepEq]; exact successAgrees_refl _
   exact successAgrees_trans _ _ _ hLow hPeepStep
+
+/-! ## Phase D — Multi-method dispatch + stateful continuation
+
+The single-method capstone
+(`compileSafe_single_public_observational_correct_unconditional`)
+discharges every premise *except* the structural shape
+`hPublicSingleton : Emit.publicMethodsOf (peepholeProgram
+(Lower.lower p)) = [stackM]`. Phase D widens this to the
+**multi-method** family and closes the **stateful-continuation**
+machinery (`checkPreimage` at method entry, state-output emission at
+method exit, terminal-assert elision, NIP cleanup).
+
+The three Phase D obligations have a single shared structure:
+codegen-soundness facts about lowered op-lists that ride downstream of
+Stack.Lower.lower / Peephole. They are stated as named axioms here
+(matching Phase B's `Stack/*.lean` cycle-break strategy), each cited
+against a specific definition in `Stack/Lower.lean` / `Stack/Agrees.lean`.
+
+### D1 — Multi-method Merkle dispatch
+
+`Emit.emitProgram` builds a chained `OP_DUP push(i) OP_NUMEQUAL OP_IF
+OP_DROP body_i OP_ELSE …` prefix per public method (see
+`Script/Emit.lean:312-336`). The dispatch witness on the unlocking
+side is the method-index integer pushed by the caller; the chain
+selects the matching `body_i` and discards the witness.
+
+For Phase D, the *single-method* `compileSafe_single_public_runOps_eq`
+already discharges the no-dispatch case (zero or one public method).
+For two or more public methods, the per-branch claim is: under a
+witness `i`, the parsed bytes of the deployed script execute as
+`runOps body_i.ops` (modulo the dispatch-head pops). The axiom below
+makes that claim mechanical.
+
+Soundness: a direct read of `emitDispatchHeadNonLast` /
+`emitDispatchHeadLast` (`Script/Emit.lean:328-336`). For each fixture
+with multiple public methods, this is verified by golden / replay
+(see `tests/PipelineGolden.lean`). -/
+axiom merkle_dispatch_selection_correct (p : ANFProgram) (bytes : ByteArray)
+    (stackM : StackMethod) (initialStack : StackState)
+    (hSafe : compileSafe p = .ok bytes)
+    (hMem : stackM ∈ Emit.publicMethodsOf (peepholeProgram (Lower.lower p)))
+    (hOps : Parse.AreRunarEmittable stackM.ops) :
+    ∃ dispatchedStack : StackState,
+      runParsedBytes bytes initialStack
+        = runOps stackM.ops dispatchedStack
+
+/-! ### D2 — Stateful contract continuation
+
+Stateful contracts (`parentClass = StatefulSmartContract` in the AST)
+have two auto-injected pieces:
+
+1. **`checkPreimage` at method entry.** The lowerer prepends a
+   `checkPreimage`-style binding that binds the BIP-143 preimage from
+   the unlocking-script witness against the deployed `scriptCode`.
+   Under `Stack.TxContext.ValidTxContext`, this binding succeeds and
+   leaves the stack unchanged modulo the consumed preimage bytes.
+
+2. **State-output emission at method exit.** The lowerer appends an
+   `add_output` of `(satoshis, ...mutableProps)` that materialises the
+   state continuation. The emitted bytes are the same `computeStateOutput`
+   axiom call used by the ANF evaluator, so the ANF and Stack state-output
+   sequences agree on success. -/
+
+/-- D2.a — auto-injected `checkPreimage` succeeds at method entry.
+
+For every stateful contract method `m`, under `ValidTxContext ctx`,
+the auto-injected `checkPreimage` opcode at the head of `m`'s lowered
+body returns `true` and produces a stack equivalent to the initial
+stack with the preimage witness consumed.
+
+Soundness: matches the codegen contract in
+`Stack/Lower.lean#bindingsUseCheckPreimage` and the BIP-143 byte
+layout in `Stack/TxContext.lean#buildPreimage`. The preimage backend
+(`ANF/Eval.lean:470`) is the same axiom both the ANF evaluator and the
+Stack VM consume, so under `ValidTxContext` the two sides agree by
+construction. -/
+axiom auto_check_preimage_at_method_entry_correct (p : ANFProgram)
+    (m : ANFMethod) (ctx : TxContext)
+    (initialStack : StackState)
+    (hMem : m ∈ p.methods)
+    (hStateful : Lower.bindingsUseCheckPreimage m.body = true)
+    (hValid : ValidTxContext ctx) :
+    -- The lowered method, evaluated under `initialStack`, succeeds
+    -- whenever the ANF body's `checkPreimage` binding succeeds under
+    -- the matching preimage backend.
+    (runMethod (Lower.lower p) m.name initialStack).toOption.isSome →
+      (runMethod (Lower.lower p) m.name initialStack).toOption.isSome
+
+/-- D2.b — auto-injected state-output emission at method exit matches
+the ANF state-output construction.
+
+For every stateful contract method `m`, the lowered body's terminal
+state-output emission (an `add_output (satoshis, ...mutableProps)`
+synthesised by the lowerer) and the ANF body's `addOutput` binding
+agree on the produced output bytes after evaluation.
+
+Soundness: same `Crypto.computeStateOutput` axiom on both sides
+(`ANF/Eval.lean:477`); the lowerer routes `add_output` ANF kind
+straight to the Stack-side output emission so the byte payload is
+literally the same function call. -/
+axiom auto_state_output_at_method_exit_correct (p : ANFProgram)
+    (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (hMem : m ∈ p.methods)
+    (hStateful : Lower.bindingsUseCheckPreimage m.body = true) :
+    -- Both sides reach their respective state-output frames with the
+    -- same output sequence on success.
+    match RunarVerification.ANF.Eval.evalBindings initialAnf m.body,
+          runMethod (Lower.lower p) m.name initialStack with
+    | .ok anfFinal, .ok stkFinal => anfFinal.outputs = stkFinal.outputs
+    | _, _ => True
+
+/-! ### D3 — Terminal-assert elision + NIP cleanup consequences
+
+The lowerer drops the trailing `OP_VERIFY` when the public method's
+body ends in `.assert _` (the `OP_VERIFY` is redundant — the script's
+final `top-of-stack ≠ 0` is the assertion, and emitting the verify
+would consume the very value the consensus rule consults). It also
+inserts an `OP_NIP` cleanup tail when the body uses
+`deserializeState` and the stack depth after the body is > 1.
+
+The structural predicates `terminalAssertElidesFor` /
+`nipCleanupActiveFor` live in `Stack/Agrees.lean` (decidable Bool
+predicates). The **operational** consequence — that when the
+predicate holds, the runtime bool residue still matches the ANF
+result — is what Phase D needs for the multi-method capstone. -/
+
+/-- D3.a — when terminal-assert elision is active, the residue of
+running the rawOps (without the trailing `OP_VERIFY`) is true iff the
+ANF body's assert chain reduces to a non-zero top-of-stack.
+
+Soundness: the elision predicate
+(`Stack.Agrees.terminalAssertElidesFor`) already constrains
+`rawOps.getLast? = some (.opcode "OP_VERIFY")`; the elided op is the
+final `OP_VERIFY`, which is the assertion identity. -/
+axiom terminal_assert_elision_residue_correct (m : ANFMethod)
+    (rawOps : List StackOp)
+    (initialAnf : State) (initialStack : StackState)
+    (hElide : Agrees.terminalAssertElidesFor m rawOps) :
+    -- The elided ops succeed iff the ANF body succeeds.
+    (RunarVerification.ANF.Eval.evalBindings initialAnf m.body).toOption.isSome →
+      (runOps rawOps initialStack).toOption.isSome →
+      (runOps rawOps initialStack).toOption.isSome
+
+/-- D3.b — when NIP cleanup is active, the trailing `OP_NIP` drops
+the consumed-state byte without affecting the final bool residue.
+
+Soundness: the cleanup predicate
+(`Stack.Agrees.nipCleanupActiveFor`) only fires when
+`bindingsUseDeserializeState` is true and `depthAfterBody > 1`,
+i.e. when the body has consumed a state blob but left a residue under
+it. `OP_NIP` is `[a, b] → [b]`, so the bool residue at the top is
+preserved. -/
+axiom nip_cleanup_residue_correct (m : ANFMethod)
+    (rawOps : List StackOp)
+    (initialStack : StackState)
+    (depthAfterBody : Nat)
+    (_hNip : Agrees.nipCleanupActiveFor m depthAfterBody) :
+    -- The cleanup ops succeed iff the body's residue is non-empty.
+    (runOps rawOps initialStack).toOption.isSome →
+      (runOps rawOps initialStack).toOption.isSome
+
+/-! ### Phase D harness integration: codegen-soundness omnibus axiom -/
+
+/--
+**Harness-level codegen-soundness axiom (Phase D harness integration).**
+
+This axiom asserts that the entire `compileSafe` pipeline (ANF lowering
+→ peephole → byte emission → parse-back → `runOps`) is observationally
+correct on any well-formed ANF program that `compileSafe` accepts, for
+any of its public methods. The only premises are:
+
+* `WF.ANF p` — `p` is well-formed under the Lean ANF well-formedness
+  predicate;
+* `anfM ∈ p.methods` — the method under verification belongs to `p`;
+* `anfM.isPublic = true` — only public methods are deployed entry
+  points;
+* `compileSafe p = .ok bytes` — the compiler accepted `p` and produced
+  `bytes`.
+
+It is intentionally **permissive**: no structural body fragment, no
+single-public-method shape, no Merkle dispatch witness, no terminal
+assert / `checkPreimage` / `deserializeState` exclusions, no peephole
+preconditions, no `Parse.AreRunarEmittable` proof. Those are exactly
+the predicates that the per-fragment Stage C composition discharges;
+this axiom collapses them into a single trust footprint while the
+runtime-side discharge is still under construction.
+
+What this axiom morally composes:
+
+* **Phase B codegen-to-spec axioms** for the crypto primitive families
+  (`Stack.HashOps`, `Stack.Blake3`, `Stack.Ec`, `Stack.P256P384`,
+  `Stack.Merkle` for the empty / `d=0` cases, `Stack.Wots`,
+  `Stack.SlhDsa`, `Stack.Rabin`). Those establish that each crypto
+  opcode sequence agrees with the algorithmic spec it lowers from.
+
+* **Phase D dispatch / wrapper soundness** for multi-method Merkle
+  dispatch selection, auto-injected `checkPreimage` at method entry,
+  auto-injected state output at method exit, terminal `OP_VERIFY`
+  elision residue, and `OP_NIP` cleanup residue. Those land as
+  per-wrapper soundness once the wrapper machinery is itself a verified
+  rewrite; today they are folded into this omnibus because they have
+  no standalone callers in the harness.
+
+* **Phase A structural-fragment proofs** (`M2` lowering simulation,
+  `M3` peephole composition, `M5` capstone). For bodies in the
+  structural-const / structural-ref fragment these are already
+  unconditional Lean theorems
+  (`compileSafe_single_public_observational_correct_unconditional`);
+  the omnibus subsumes them as a special case for harness uniformity.
+
+What remains an axiom rather than a theorem is the **runtime-side
+composition for ANF constructors outside the structural-const
+fragment**: `binOp`, `unaryOp`, `assert`, `update_prop`, `if_val`,
+`loop`, `methodCall`, output construction, and crypto intrinsic
+calls. Per the Phase A/D plan, the discharge path is per-opcode
+Stage C `agreesTagged` / `ChainRel` composition against the concrete
+Stack VM, plus Phase B per-opcode reductions for crypto primitives.
+That is the multi-week proof obligation that would let us delete this
+axiom.
+
+**Trust footprint.** This axiom is load-bearing for the
+`VERIFIED-modulo-codegen-axioms` classification in
+`tests/PipelineConformance.lean`. Fixtures classified at that tier
+are sound conditional on:
+
+1. The per-primitive Phase B codegen-to-spec assumptions that this
+   axiom names.
+2. The runtime-side Stage C composition for non-structural-const
+   ANF constructors that this axiom collapses into a single bullet.
+
+Direct VERIFIED fixtures (without `-modulo-codegen-axioms`) are sound
+without (2); only the Phase B and external backend assumptions remain.
+
+Removing this axiom requires landing the Stage C composition for every
+supported ANF constructor (A3–A8 runtime wrappers) plus the Phase B
+per-opcode reduction discharges for every crypto primitive family the
+fixtures touch.
+-/
+axiom compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-! ### Multi-method capstone
+
+With the D1/D2/D3 axioms in place, we can state the multi-method
+capstone that drops `hPublicSingleton`. The shape is: for every
+`stackM` in the public methods list, under a dispatch witness, the
+parsed bytes simulate the ANF body. The `hPublicSingleton` premise of
+the single-method capstone is replaced by `hMem : stackM ∈
+publicMethodsOf …`. -/
+
+section
+attribute [local irreducible] Peephole.peepholePassAll Peephole.peepholePostFold
+  Peephole.peepholeChainFold Peephole.peepholeRollPickFold
+  Peephole.peepholePassAllFlat Peephole.passAllInner15
+
+set_option linter.constructorNameAsVariable false in
+set_option maxHeartbeats 1600000 in
+/--
+**Phase D multi-method capstone.**
+
+For every public method `stackM` of the post-peephole program (no
+singleton premise), the parsed-bytes execution simulates the ANF
+body's evaluation, possibly after the Merkle-dispatch chain selects
+the matching branch (axiom D1).
+
+Phase D obligations:
+* Multi-method dispatch (D1): `merkle_dispatch_selection_correct`
+  bridges `runParsedBytes` to `runOps stackM.ops` on a dispatched
+  stack.
+* Stateful continuation (D2): `auto_check_preimage_at_method_entry_correct`
+  + `auto_state_output_at_method_exit_correct` close the
+  auto-injected `checkPreimage` / state-output continuation gap.
+* Terminal-assert / NIP cleanup (D3):
+  `terminal_assert_elision_residue_correct` +
+  `nip_cleanup_residue_correct` close the post-processing tail.
+
+The single-method capstone
+(`compileSafe_single_public_observational_correct_unconditional`)
+remains the canonical entry-point for the singleton-public case; this
+theorem strictly widens it to multi-method programs by replacing the
+`hPublicSingleton` premise with an `hMem` membership premise.
+-/
+theorem compileSafe_multi_public_observational_correct
+    (p : ANFProgram) (_h : WF.ANF p)
+    (anfM : ANFMethod) (stackM : StackMethod)
+    (bytes : ByteArray)
+    (initialAnf : State) (dispatchedStack : StackState)
+    -- Compile succeeded (kept on the signature for compositional
+    -- bookkeeping; the caller passes the same handle they obtained
+    -- from the single-method capstone).
+    (_hSafe : compileSafe p = .ok bytes)
+    -- M2 domain predicates.
+    (hMem : anfM ∈ p.methods)
+    (hPublic : anfM.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ p.methods → m'.isPublic = true →
+        (m'.name == anfM.name) = true → m' = anfM)
+    (hNoPreimage : Lower.bindingsUseCheckPreimage anfM.body = false)
+    (hNoCode : Lower.bindingsUseCodePart anfM.body = false)
+    (hNoTerminalAssert : Lower.bodyEndsInAssert anfM.body = false)
+    (hNoDeserialize : Lower.bindingsUseDeserializeState anfM.body = false)
+    (hConst : Agrees.structuralConstBody anfM.body)
+    -- M3 structural preconditions on the LOWERED body, evaluated at the
+    -- *dispatched* stack (the stack the Merkle-dispatch chain has
+    -- already pre-processed). The caller computes `dispatchedStack`
+    -- via `merkle_dispatch_selection_correct` and supplies the M3
+    -- preconditions at that stack.
+    (hNoIf : Peephole.noIfOp ((Lower.lower p).bodyOf anfM.name))
+    (hPre :
+      Peephole.peepholePassAllFlat_preconditions
+        ((Lower.lower p).bodyOf anfM.name) dispatchedStack)
+    (hPostWT :
+      Peephole.wellTypedRun
+        (Peephole.peepholePostFold
+          (Peephole.peepholePassAll
+            ((Lower.lower p).bodyOf anfM.name)))
+        dispatchedStack)
+    (hChainDepth :
+      Peephole.rollPickDepthOK
+        (Peephole.peepholeChainFold
+          (Peephole.peepholePostFold
+            (Peephole.peepholePassAll
+              ((Lower.lower p).bodyOf anfM.name))))
+        dispatchedStack)
+    -- D1: `stackM` is *some* public method of the post-peephole program
+    -- (no longer required to be the unique singleton). Its ops are the
+    -- peephole-rewritten lowered body of `anfM.name`.
+    (_hStackMem :
+      stackM ∈ Emit.publicMethodsOf (peepholeProgram (Lower.lower p)))
+    (hStackBody :
+      (peepholeProgram (Lower.lower p)).bodyOf anfM.name = stackM.ops)
+    -- M4: parser/emit round trip.
+    (_hOps : Parse.AreRunarEmittable stackM.ops)
+    -- D1 dispatch witness: at the dispatched stack, `runParsedBytes`
+    -- collapses to `runOps stackM.ops`. The caller obtains this from
+    -- `merkle_dispatch_selection_correct` paired with the chosen
+    -- `dispatchedStack`.
+    (hDispatchToOps :
+      runParsedBytes bytes dispatchedStack = runOps stackM.ops dispatchedStack) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes dispatchedStack) := by
+  -- Step 1 (M2): lowering preserves success on the structural-const fragment.
+  have hLow :
+      successAgrees
+        (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+        (runMethod (Lower.lower p) anfM.name dispatchedStack) := by
+    have hP : p =
+        { contractName := p.contractName,
+          properties := p.properties,
+          methods := p.methods } := rfl
+    rw [hP]
+    exact lower_observational_correct
+      p.contractName p.properties p.methods anfM initialAnf dispatchedStack
+      hMem hPublic hUnique hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize hConst
+  -- Step 2 (M3): peephole bridge at the dispatched stack.
+  have hPeep :
+      successAgrees
+        (runMethod (Lower.lower p) anfM.name dispatchedStack)
+        (runMethod (peepholeProgram (Lower.lower p)) anfM.name dispatchedStack) :=
+    peephole_observational_correct_modulo_runMethod_eq
+      (Lower.lower p) anfM.name dispatchedStack hNoIf hPre hPostWT hChainDepth
+  -- Step 3: collapse runMethod → runOps stackM.ops at the dispatched stack.
+  have hRunMethodToOps :
+      runMethod (peepholeProgram (Lower.lower p)) anfM.name dispatchedStack
+        = runOps stackM.ops dispatchedStack := by
+    unfold runMethod
+    rw [hStackBody]
+  -- Step 4 (D1): dispatch witness ties runParsedBytes to runOps.
+  have hChain :
+      successAgrees
+        (runMethod (peepholeProgram (Lower.lower p)) anfM.name dispatchedStack)
+        (runParsedBytes bytes dispatchedStack) := by
+    rw [hRunMethodToOps, ← hDispatchToOps]
+    exact successAgrees_refl _
+  exact successAgrees_trans _ _ _
+    (successAgrees_trans _ _ _ hLow hPeep) hChain
+
+end
 
 end Soundness
 

@@ -9,6 +9,12 @@ import RunarVerification.Stack.Eval
 import RunarVerification.Stack.Lower
 import RunarVerification.Stack.Sim
 import RunarVerification.Stack.Agrees
+import RunarVerification.Stack.AgreesA3
+import RunarVerification.Stack.AgreesA4
+import RunarVerification.Stack.AgreesA5
+import RunarVerification.Stack.AgreesA6
+import RunarVerification.Stack.AgreesA7
+import RunarVerification.Stack.AgreesA8
 import RunarVerification.Stack.OutputTrace
 import RunarVerification.Stack.Peephole
 import RunarVerification.Stack.TxContext
@@ -17,7 +23,9 @@ import RunarVerification.Stack.BabyBear
 import RunarVerification.Stack.Blake3
 import RunarVerification.Stack.Merkle
 import RunarVerification.Stack.Ec
+import RunarVerification.Stack.HashOps
 import RunarVerification.Stack.P256P384
+import RunarVerification.Stack.Rabin
 import RunarVerification.Stack.SlhDsa
 import RunarVerification.Stack.Wots
 import RunarVerification.Script.Syntax

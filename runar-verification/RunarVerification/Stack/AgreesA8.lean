@@ -1,0 +1,370 @@
+import RunarVerification.Stack.Agrees
+
+/-!
+# `AgreesA8` — runtime-side method-level wrapper for `method_call`
+
+This module discharges the A8 runtime-side wrapper from the Phase A
+sub-milestones (see `.claude/plans/work-only-in-the-cheerful-toast.md`):
+a `runMethod_lower_public_unique_no_post_<X>_isSome` analogue that
+admits an ANF body whose only binding is a `method_call` value-kind.
+
+## Narrow predicate
+
+`Stack/Agrees.lean` already carries the bridges that lift a body-level
+"`runOps` succeeds" lemma through the named-public-method runtime
+wrapper:
+
+* `runMethod_lower_public_unique_no_post_eq_userRaw` rewrites
+  `runMethod (Lower.lower …) m.name initialStack` to
+  `runOps (lowerMethodUserRawOps methods props m) initialStack` under
+  the no-implicit / no-postprocessing premises.
+* `lowerMethodUserRawOps` is defined as
+  `(Stack.Lower.lowerBindingsP … (m.params.map …).reverse m.body).1`.
+
+The A8 sub-milestone has to widen the body-level `.isSome` half so
+that bodies carrying a `method_call` binding are admissible. The full
+inlining-and-recursion story (the plan's "the inlined body is itself
+in `SupportedANFBody`" claim) is intractable inside one file — the
+methodCall arm of `lowerValueP` calls back into `lowerBindingsP` on
+the *callee* body, so an `.isSome` proof has to cover not only the
+caller's own `.methodCall` shape but every constructor the callee
+might use.
+
+We therefore commit to the **leafiest** narrowing the plan permits:
+
+  *the outer body is a single `method_call` binding whose called
+  method has empty params, no arguments, an object reference NOT
+  present in the outer stack map, and an EMPTY callee body.*
+
+This is the degenerate-but-non-trivial case the plan explicitly
+allows ("If even leaf-narrow is intractable: require the called
+method to be specifically named in a small fixed allowlist
+(degenerate but compiles)."). The shape exercises:
+
+* the program-aware `lowerValueP` dispatch — the `lookupMethod`
+  branch fires (not the budget-exhausted fallback);
+* the `obj`/args/body decomposition — all three sub-segments
+  collapse to `[]` ops;
+* the inlining recursion — `lowerBindingsP` is invoked on the
+  callee body (which is `[]`) at the decremented budget.
+
+The discharged wrapper is then composed with the existing
+`runMethod_lower_public_unique_no_post_eq_userRaw` bridge to obtain
+the runtime success claim under the public-unique-named selection.
+
+Wider methodCall fragments (non-empty callee body, non-empty params,
+object reference on stack, multiple bindings) remain as honest
+deferrals — the file's docstring above each predicate calls them out
+explicitly so the next slice can pick them up without re-deriving
+the leaf case.
+
+## What this does NOT cover
+
+* `agreesTagged` simulation: this wrapper is the runtime-side
+  `.isSome` half. The corresponding `agreesTagged`-side preservation
+  for `simpleStepRel`'s methodCall arm (the plan's
+  `simpleStepRel_methodCall_preserves`) is OUT OF SCOPE here and
+  remains as a separate Stage-C obligation. The A8 task as scoped
+  in the plan is specifically the runtime wrapper.
+* Non-empty callee bodies — discharging these requires either an
+  inductive predicate on the callee body matching every constructor
+  the callee uses (effectively the A15 capstone), or a new
+  `lowerBindingsP_isSome_structuralConst`-style program-aware
+  analogue of `runOps_lowerBindings_structuralConstBody_isSome`.
+  Both are larger pieces of work.
+
+## Hard rules satisfied
+
+* No `sorry`, no `admit`, no `partial def`, no new `axiom`.
+* No `hRunOk`/conclusion-restating hypothesis: success is computed
+  structurally from the predicate.
+* New file `RunarVerification/Stack/AgreesA8.lean`; `Stack/Agrees.lean`
+  is not modified; the import is added to `RunarVerification.lean`.
+-/
+
+namespace RunarVerification.Stack
+namespace Agrees
+
+open RunarVerification.ANF
+open RunarVerification.Stack.Eval (runOps)
+open RunarVerification.Stack.Lower (StackMap)
+
+/-! ## Leaf-empty methodCall predicate
+
+A `.methodCall obj method args` value is "leaf-empty" against a
+program method table `progMethods` and an initial stack map `sm`
+when:
+
+* the object reference is NOT present in `sm` — so the `objDropOps`
+  branch of `lowerValueP`'s methodCall arm reduces to `[]`;
+* `args = []` — so `loadAndBindArgsLive` returns `[]`;
+* `lookupMethod progMethods method` yields a method with empty
+  params and EMPTY body — so the inlined `lowerBindingsP` returns
+  `[]` and the post-body stack-map rename is a no-op.
+
+All three conditions are checkable in `Bool`, so the predicate has a
+`Decidable` instance (`Decidable (… = true)`) suitable for fixture
+instantiation by `decide` / `native_decide`. -/
+def leafEmptyMethodCallValueB
+    (progMethods : List ANFMethod) (sm : StackMap) (v : ANFValue) : Bool :=
+  match v with
+  | .methodCall obj _method args =>
+      (sm.depth? obj == none) &&
+      args.isEmpty &&
+      (match Stack.Lower.lookupMethod progMethods _method with
+        | none => false
+        | some m => m.params.isEmpty && m.body.isEmpty)
+  | _ => false
+
+/-- Prop form. -/
+def leafEmptyMethodCallValue
+    (progMethods : List ANFMethod) (sm : StackMap) (v : ANFValue) : Prop :=
+  leafEmptyMethodCallValueB progMethods sm v = true
+
+instance : ∀ progMethods sm v,
+    Decidable (leafEmptyMethodCallValue progMethods sm v) := by
+  intro progMethods sm v
+  unfold leafEmptyMethodCallValue
+  exact inferInstanceAs (Decidable (_ = true))
+
+/-! ## Singleton body shape
+
+The wrapper's body is required to be exactly one binding whose value
+is a leaf-empty `method_call`. We keep this body-shape predicate
+separate from the value-level one above so the operational reduction
+proof can be written linearly. -/
+def singletonLeafEmptyMethodCallBodyB
+    (progMethods : List ANFMethod) (sm : StackMap) : List ANFBinding → Bool
+  | [b] => leafEmptyMethodCallValueB progMethods sm b.value
+  | _   => false
+
+/-- Prop form. -/
+def singletonLeafEmptyMethodCallBody
+    (progMethods : List ANFMethod) (sm : StackMap)
+    (body : List ANFBinding) : Prop :=
+  singletonLeafEmptyMethodCallBodyB progMethods sm body = true
+
+instance : ∀ progMethods sm body,
+    Decidable (singletonLeafEmptyMethodCallBody progMethods sm body) := by
+  intro progMethods sm body
+  unfold singletonLeafEmptyMethodCallBody
+  exact inferInstanceAs (Decidable (_ = true))
+
+/-! ## Body-shape predicates on a method's body
+
+The runtime wrapper consumes a single `ANFMethod`. We bundle the
+leaf-empty body shape against the method's *initial* stack map, which
+for a no-implicit method body is `m.params.map (·.name) |>.reverse`. -/
+def methodLeafEmptyMethodCallBody
+    (progMethods : List ANFMethod) (m : ANFMethod) : Prop :=
+  singletonLeafEmptyMethodCallBody progMethods
+    (m.params.map (fun p => p.name) |>.reverse) m.body
+
+instance : ∀ progMethods m,
+    Decidable (methodLeafEmptyMethodCallBody progMethods m) := by
+  intro progMethods m
+  unfold methodLeafEmptyMethodCallBody
+  exact inferInstanceAs (Decidable _)
+
+/-! ## Operational reduction — `lowerValueP` on leaf-empty `method_call`
+
+Under the leaf-empty predicate, `lowerValueP`'s methodCall arm reduces
+to producing the empty op list. This is the load-bearing structural
+lemma: with the ops list `[]`, `runOps [] s = .ok s` is immediate. -/
+theorem lowerValueP_methodCall_leafEmpty_ops
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn obj method : String) (args : List String)
+    (h : leafEmptyMethodCallValue progMethods sm
+            (.methodCall obj method args)) :
+    (Stack.Lower.lowerValueP progMethods props (budget' + 1) currentIndex
+        lastUses outerProtected localBindings constInts sm bn
+        (.methodCall obj method args)).1
+      = [] := by
+  -- Unpack the boolean predicate into its three constituent
+  -- conditions (obj absent, args empty, callee leaf-empty).
+  unfold leafEmptyMethodCallValue leafEmptyMethodCallValueB at h
+  simp only [Bool.and_eq_true, beq_iff_eq] at h
+  obtain ⟨⟨hObj, hArgsEmpty⟩, hCallee⟩ := h
+  -- Split on `lookupMethod` to expose `m` for the dispatch arm.
+  match hMatch : Stack.Lower.lookupMethod progMethods method with
+  | none =>
+      rw [hMatch] at hCallee
+      exact absurd hCallee (by simp)
+  | some m =>
+      rw [hMatch] at hCallee
+      simp only [Bool.and_eq_true] at hCallee
+      obtain ⟨hParamsEmpty, hBodyEmpty⟩ := hCallee
+      have hArgs : args = [] := List.isEmpty_iff.mp hArgsEmpty
+      have hParams : m.params = [] := List.isEmpty_iff.mp hParamsEmpty
+      have hBody : m.body = [] := List.isEmpty_iff.mp hBodyEmpty
+      subst hArgs
+      -- Unfold `lowerValueP` and dispatch through the methodCall arm.
+      -- The budget = budget' + 1 cleanup avoids the budget-exhausted
+      -- fallback. With `obj` absent from `sm`, the objDropOps branch
+      -- yields `([], sm)`. With `args = []`, `loadAndBindArgsLive`
+      -- terminates immediately at the empty-args base case. With
+      -- `m.body = []`, the inlined `lowerBindingsP` reduces to its
+      -- own empty-list base case, yielding `([], smArgs)`. The final
+      -- assembled tuple's first projection is `[] ++ [] ++ [] = []`.
+      unfold Stack.Lower.lowerValueP
+      simp only [hMatch, hObj, hBody,
+                 Stack.Lower.loadAndBindArgsLive,
+                 Stack.Lower.lowerBindingsP,
+                 List.map_nil, List.append_nil]
+
+/-! ## Body-level reduction
+
+When the outer body is a singleton leaf-empty methodCall, the
+`lowerBindingsP` result is also the empty op list. We work directly
+with the `ANFBinding.mk` shape so the head's value position is
+syntactically a `.methodCall`. -/
+theorem lowerBindingsP_singleton_leafEmpty_methodCall_ops
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (body : List ANFBinding)
+    (h : singletonLeafEmptyMethodCallBody progMethods sm body) :
+    (Stack.Lower.lowerBindingsP progMethods props (budget' + 1) currentIndex
+        lastUses outerProtected localBindings constInts sm body).1
+      = [] := by
+  unfold singletonLeafEmptyMethodCallBody singletonLeafEmptyMethodCallBodyB at h
+  -- Force `body` into the singleton shape; reject `[]` and `_ :: _ :: _`.
+  match hBody : body with
+  | [] => simp at h
+  | _ :: _ :: _ => simp at h
+  | [b] =>
+      -- Reduce the singleton match in `h` to expose the bare
+      -- `leafEmptyMethodCallValueB progMethods sm b.value = true` claim.
+      simp only at h
+      -- Destruct the singleton binding into its `mk` shape so we can
+      -- match on its value-position constructor directly.
+      match hBmk : b with
+      | .mk bn bv src =>
+          -- After `hBmk` rewrites `b`, `h` becomes a statement about
+          -- `(ANFBinding.mk bn bv src).value`, which is `bv` definitionally.
+          have hVal : leafEmptyMethodCallValueB progMethods sm bv = true := by
+            simp only [ANFBinding.value] at h
+            exact h
+          -- The predicate definitionally forces `bv = .methodCall _ _ _`.
+          -- Reject all non-methodCall cases via `simp` on the Boolean
+          -- definition, and extract the payload from the methodCall arm.
+          match hVc : bv with
+          | .methodCall obj method args =>
+              -- After the `match` binds `bv = .methodCall …` the hypothesis
+              -- `hVal` is already in the methodCall-payload form. Promote
+              -- it to the value-level Prop predicate.
+              have hLeaf :
+                  leafEmptyMethodCallValue progMethods sm
+                    (.methodCall obj method args) := hVal
+              -- The head's op list reduces to `[]` by the value-level
+              -- lemma. We use it as a `show` rewrite in the cons-arm
+              -- unfolding below.
+              have hHead :=
+                lowerValueP_methodCall_leafEmpty_ops
+                  progMethods props budget' currentIndex lastUses
+                  outerProtected localBindings constInts sm bn obj method args
+                  hLeaf
+              -- Unfold `lowerBindingsP` on the singleton `[mk bn (.methodCall …) src]`.
+              -- The cons arm produces `(headOps ++ tailOps, smTail)`; with
+              -- `tailOps = []` (empty body) and `headOps = []` (by `hHead`),
+              -- the result is `[]`.
+              show (Stack.Lower.lowerBindingsP progMethods props (budget' + 1)
+                      currentIndex lastUses outerProtected localBindings
+                      constInts sm
+                      [ANFBinding.mk bn
+                        (ANFValue.methodCall obj method args) src]).1 = []
+              unfold Stack.Lower.lowerBindingsP
+              -- The `let` bindings inside `lowerBindingsP`'s cons arm
+              -- expose the head's `lowerValueP` triple and the tail's
+              -- `lowerBindingsP` on `[]`. Reduce by `simp` and rewrite
+              -- the head's op-list projection to `[]`.
+              simp only [Stack.Lower.lowerBindingsP]
+              -- After `simp only` the goal carries
+              -- `(lowerValueP … (.methodCall ...)).1 ++ [] = []`.
+              -- Rewrite the head's `.1` projection via `hHead`.
+              rw [show
+                  (Stack.Lower.lowerValueP progMethods props (budget' + 1)
+                    currentIndex lastUses outerProtected localBindings
+                    constInts sm bn (ANFValue.methodCall obj method args)).1
+                  = [] from hHead]
+              simp
+          | .loadParam _ => simp [leafEmptyMethodCallValueB] at hVal
+          | .loadProp _  => simp [leafEmptyMethodCallValueB] at hVal
+          | .loadConst c =>
+              cases c <;> simp [leafEmptyMethodCallValueB] at hVal
+          | .binOp _ _ _ _    => simp [leafEmptyMethodCallValueB] at hVal
+          | .unaryOp _ _ _    => simp [leafEmptyMethodCallValueB] at hVal
+          | .call _ _         => simp [leafEmptyMethodCallValueB] at hVal
+          | .ifVal _ _ _      => simp [leafEmptyMethodCallValueB] at hVal
+          | .loop _ _ _       => simp [leafEmptyMethodCallValueB] at hVal
+          | .assert _         => simp [leafEmptyMethodCallValueB] at hVal
+          | .updateProp _ _   => simp [leafEmptyMethodCallValueB] at hVal
+          | .getStateScript   => simp [leafEmptyMethodCallValueB] at hVal
+          | .checkPreimage _  => simp [leafEmptyMethodCallValueB] at hVal
+          | .deserializeState _ => simp [leafEmptyMethodCallValueB] at hVal
+          | .addOutput _ _ _    => simp [leafEmptyMethodCallValueB] at hVal
+          | .addRawOutput _ _   => simp [leafEmptyMethodCallValueB] at hVal
+          | .addDataOutput _ _  => simp [leafEmptyMethodCallValueB] at hVal
+          | .arrayLiteral _     => simp [leafEmptyMethodCallValueB] at hVal
+
+/-! ## Method-shaped raw-body reduction
+
+`lowerMethodUserRawOps` applied to a method whose body satisfies
+`methodLeafEmptyMethodCallBody` yields the empty op list. The budget
+is `defaultInlineBudget = 8 = 7 + 1`, so the value-level reduction
+fires. -/
+theorem lowerMethodUserRawOps_methodCall_leafEmpty
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (h : methodLeafEmptyMethodCallBody progMethods m) :
+    lowerMethodUserRawOps progMethods props m = [] := by
+  unfold lowerMethodUserRawOps
+  unfold methodLeafEmptyMethodCallBody at h
+  -- `defaultInlineBudget = 8 = 7 + 1` definitionally.
+  have hBudget : Stack.Lower.defaultInlineBudget = 7 + 1 := rfl
+  rw [hBudget]
+  exact lowerBindingsP_singleton_leafEmpty_methodCall_ops
+    progMethods props 7 0 (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name)) (Stack.Lower.collectConstInts m.body)
+    (m.params.map (fun p => p.name) |>.reverse) m.body h
+
+/-! ## Runtime-side method-level wrapper
+
+The promised A8 wrapper: for the leaf-empty methodCall fragment,
+`runMethod (Lower.lower …) m.name initialStack` succeeds. The proof
+composes the named-public-method bridge with the body-level reduction
+to the empty op list.
+
+`runOps [] s = .ok s`, so `.toOption.isSome` is immediate. -/
+theorem runMethod_lower_public_unique_no_post_methodCall_leafEmpty_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : RunarVerification.Stack.Eval.StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false)
+    (hLeaf : methodLeafEmptyMethodCallBody methods m) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [lowerMethodUserRawOps_methodCall_leafEmpty methods props m hLeaf]
+  -- `runOps [] _ = .ok _`, so `.toOption.isSome = true`.
+  simp [runOps, Except.toOption]
+
+end Agrees
+end RunarVerification.Stack

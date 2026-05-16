@@ -1,4 +1,6 @@
 import RunarVerification.Stack.Syntax
+import RunarVerification.Stack.Eval
+import RunarVerification.Crypto.Spec
 
 /-!
 # WOTS+ codegen — Phase 4 (port of `lowerVerifyWOTS` /
@@ -267,6 +269,80 @@ def wotsBodyOps : List StackOp :=
      , .swap, .drop
      -- main: bool
      ]
+
+/-! ## Codegen-to-spec equivalence
+
+`runOps_wotsBodyOps_eq` claims that running the emitted `wotsBodyOps`
+on a stack carrying `[..., msg, sig, pubkey]` (pubkey at TOS)
+produces a stack `[..., bool]` whose top is
+`.vBool (Crypto.Spec.verifyWOTS msg sig pubkey)`.
+
+## Why this is an axiom
+
+WOTS+ is the largest single-primitive codegen in the repo
+(~10 KB of script per verifier — 67 chains × ~150 ops per chain plus
+~200 ops of message-byte / checksum decomposition). A direct
+operational proof would require:
+
+* The full SHA-256 codegen equivalence (B1 — also not yet discharged
+  as a `runOps` theorem; SHA-256 is currently axiomatized end-to-end
+  via `Crypto.HashBackend.sha256`).
+* A chain-by-chain stack-state invariant carrying the partial sum
+  `csum` and accumulated endpoint bytes through 64 + 3 chain
+  iterations, each of which contains a 15-step IF/ELSE loop.
+* Byte-level reasoning about `OP_NUM2BIN` / `OP_BIN2NUM` / `OP_SPLIT`
+  to discharge the nibble decomposition.
+
+Each of these is independently bounded by months of proof effort.
+B8's pragmatic stance (per `.claude/plans/work-only-in-the-cheerful-toast.md`):
+**land the concrete spec** so downstream theorems quoting WOTS+ are
+no longer quoting an opaque assumption, and **axiomatize the
+codegen-to-spec equivalence** until the prerequisite SHA-256 / chain
+infrastructure exists.
+
+The concrete spec `Crypto.Spec.verifyWOTS` is closed-form over
+`Crypto.HashBackend.sha256` — it does not introduce its own
+assumption — so the only new trust footprint is this single
+codegen-to-spec axiom.
+
+## Soundness story
+
+Validating the axiom externally is straightforward: the conformance
+suite (`conformance/runtime-vectors`) exercises `verifyWOTS` against
+fixed message/signature/key triples produced by an independent
+reference implementation. Cross-tier hex parity is enforced for
+seven independent compilers. Any divergence between the emitted
+ops, the spec, and the on-chain Bitcoin Script interpreter would be
+caught by those gates.
+
+## Trust footprint
+
+Adds **1 axiom** to the TCB (`runOps_wotsBodyOps_eq`). See
+TRUST_MANIFEST.md §B8 for the canonical inventory entry. -/
+
+open RunarVerification.ANF.Eval (Value)
+open RunarVerification.Stack.Eval (runOps StackState)
+
+/-- Codegen-to-spec equivalence for the WOTS+ verifier body.
+
+Given a stack `s` whose top three values are
+`[pubkey, sig, msg]` (pubkey at TOS), running `wotsBodyOps` produces
+a stack with the same tail and a single boolean on top equal to
+`Crypto.Spec.verifyWOTS msg sig pubkey`.
+
+Axiomatized per the trust manifest §B8 — see the docstring above
+for the soundness story. -/
+axiom runOps_wotsBodyOps_eq (msg sig pubkey : ByteArray)
+    (tail : List Value) :
+    runOps wotsBodyOps
+        { stack := .vBytes pubkey :: .vBytes sig :: .vBytes msg :: tail
+        , altstack := [] : StackState }
+      =
+    Except.ok
+      { stack :=
+          .vBool (RunarVerification.Crypto.Spec.verifyWOTS msg sig pubkey)
+            :: tail
+      , altstack := [] : StackState }
 
 end Wots
 end RunarVerification.Stack

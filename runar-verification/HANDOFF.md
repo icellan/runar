@@ -14,6 +14,31 @@ for the structural-const fragment is
 fragment-widening to `structuralCopyBody` and beyond is the next active
 roadmap step.
 
+## CI Integration (Path 3 — Differential Validation)
+
+Path 3 of the roadmap treats cross-implementation byte-level agreement
+as an empirical anchor for the codegen-soundness axioms (see
+`TRUST_MANIFEST.md` ⇒ "Differential Assurance"). Two CI integration
+points are now in place inside `runar-verification/`:
+
+* **`scripts/run-pipeline-conformance.sh`** — CI-ready wrapper around
+  the `pipelineConformance` Lean binary. Resolves
+  `runar-verification/` from its own script location, raises the
+  main-thread stack to `unlimited` (with a `65520 KiB` fallback), builds
+  the binary on demand, and exits non-zero **only** for hard-failure
+  buckets (`DEFERRED-parse-failure`, `DEFERRED-not-well-formed`). Soft
+  buckets (`DEFERRED-compile-safe-error`, `DEFERRED-no-public-method`)
+  are documented `compileSafe` rejections and do not gate the matrix.
+  Wireable into CI today with no external dependencies.
+* **`scripts/differential.sh`** — true byte-level diff against an
+  external Bitcoin Script reference. Wireable into CI once a BSV
+  reference producer is available, via either `--reference bsv-command`
+  (sets `RUNAR_BSV_REFERENCE_CMD`) or `--reference bsv-json` (sets
+  `RUNAR_BSV_REFERENCE_JSON`). The remaining action item is a
+  one-time external integration step — standing up the BSV reference
+  producer and feeding its JSON into the wrapper — **not** a
+  verification-side proof obligation.
+
 ## Current Baseline
 
 * Lean toolchain: `leanprover/lean4:v4.29.1`.
@@ -22,25 +47,97 @@ roadmap step.
 * `scripts/lean-verify.sh` builds every tracked Lean module, not only
   the default import closure. It is the local gate for keeping proof
   modules from rotting outside the import graph.
-* **M1–M5 are done.** The end-to-end capstone
+* **M1–M5 done.**
   `Pipeline.compileSafe_single_public_observational_correct_unconditional`
-  composes the unconditional M2/M3/M4 sub-theorems for
-  single-public-method `compileSafe` on the structural-const fragment
-  with only genuine domain/structural hypotheses (no
-  `successAgrees` or `runMethod = runOps` hypothesis that restates the
-  conclusion). The deprecated `compile_observational_correct_*_skeleton`
-  aliases re-export it.
-* `goldenLoad` and `roundtrip` cover 49/50 conformance fixtures today.
-  The 50th, `conformance/tests/asm-raw-script/`, is an unrelated
-  concurrent fixture (added outside `runar-verification/`) that uses a
-  new `raw_script` ANF kind not yet recognised by the Lean ANF loader.
-  The Lean proof gate (`scripts/lean-verify.sh` +
-  `scripts/check-tcb-drift.sh`) is green and unaffected.
+  (M5) — end-to-end capstone for the structural-const fragment.
+  Genuine domain/structural hypotheses only; no restatement of the
+  conclusion.
+* **A1 done.**
+  `Pipeline.lower_observational_correct_copy` and
+  `Agrees.runMethod_lower_public_unique_no_post_structuralCopy_isSome`
+  — unconditional discharge extended to copied-reference loads
+  (`structuralCopyBody`: `loadParam`, stack-backed `loadProp`, copied
+  `loadConst .refAlias`).
+* **A2 done.**
+  `Agrees.runMethod_lower_public_unique_no_post_structuralConsume_isSome`
+  — Stack-VM `.isSome` for consume-mode reference loads.
+  `Agrees.runMethod_lower_public_unique_no_post_structuralRef_isSome`
+  — Stack-VM `.isSome` for the union predicate `structuralRefBody`
+  (copy ∨ consume).
+* **A15 done.**
+  `Pipeline.compileSafe_single_public_observational_correct_unconditional_ref`
+  — capstone widened from `structuralConstBody` to `structuralRefBody`.
+  Current outer capstone. No real conformance fixture satisfies this
+  predicate today (every fixture body has binOp / call / assert etc.).
+* **A3–A8 substrate done; runtime-side wrappers deferred.**
+  `Stack/Agrees.lean` carries structural predicates,
+  `evalBindings_*_isSome` theorems, Boolean checkers, and Decidable
+  instances for `structuralArithBody`, `structuralCallBody`,
+  `structuralUpdatePropBody`, `structuralIfValBody`,
+  `structuralLoopBody`, and `structuralMethodCallBody`.
+  The runtime-side `runMethod_lower_public_unique_no_post_structural*_isSome`
+  theorems for those six families are not proved — they require
+  per-opcode Stage C composition with concrete value tracking.
+* **Phase C (partial) done.**
+  `Script.Parse.AreRunarEmittableWithIfAndPatches` predicate +
+  Decidable + monotonicity from `AreRunarEmittableWithIf`.
+  `Pipeline.compileSafe_bytes_eq_compileSafeWithCodeSepPatches_of_AreRunarEmittableWithIf`
+  parity corollary. C2 (multi-method dispatch joins) not closed.
+* **Phase E done.**
+  `Stack/TxContext.lean`: `ValidTxContext` predicate + Decidable (E1);
+  `extractVersion_buildPreimage_eq` + `decodeLE32_encodeUInt32LE`
+  (partial E2 — fixed-length field extraction);
+  `runOpcode_CHECKSIG_ValidTxContext` and
+  `runOpcode_CHECKSIGVERIFY_ValidTxContext` (E3).
+* **Phase F1/F2 done.**
+  `tests/PipelineConformance.lean` harness — per-fixture decidable
+  instantiation reporting VERIFIED / DEFERRED-<predicate> per fixture.
+  Current measured surface: **0/56 VERIFIED** (all deferred on the
+  structural-fragment frontier — honest measurement, not a bug).
+* `goldenLoad` and `roundtrip` cover **56/56** conformance fixtures.
+  The previously-blocked `conformance/tests/asm-raw-script/` fixture
+  now parses and round-trips after the `raw_script` ANF kind landed in
+  `ANF/Syntax.lean`, `ANF/Json.lean`, `ANF/Eval.lean`, `ANF/WF.lean`,
+  and `ANF/Typed.lean`. Stack-IR codegen emits a sentinel
+  `OP_RUNAR_RAWSCRIPT_UNSUPPORTED` opcode and the predicate
+  `simpleValue` excludes `rawScript`; the dedicated `raw_bytes`
+  StackOp constructor + per-arm `simpleStepRel` discharge is the
+  remaining A14 follow-up (tracked separately).
 * Default `pipelineGolden` reports 49/49 byte-exact (34 baseline + 15
-  stored crypto-pending constants). The unparseable `asm-raw-script`
-  fixture is silently dropped by `pipelineGolden`'s discovery loop, so
-  the byte-exact count is honest for the 49 fixtures the Lean loader
-  recognises.
+  stored crypto-pending constants). The 7 fixtures whose hex is
+  regenerated rather than compared remain in the `cryptoAxiomPending`
+  bucket. The Lean proof gate (`scripts/lean-verify.sh` +
+  `scripts/check-tcb-drift.sh`) is green; axioms = 124.
+* **Phase B done (codegen-to-spec for crypto primitives, axiom-shim path).**
+  13 primitive families now have spec links: SHA-256 / RIPEMD-160 /
+  hash160 / hash256 (B1+B2, single-opcode runOps-to-spec, 0 new
+  axioms), BLAKE3 (B3, +2 axioms in `Stack/Blake3.lean`), secp256k1 EC
+  (B4, +10 axioms in `Crypto/Spec.lean` covering 10 emit functions),
+  NIST P-256 / P-384 (B5, +12 group-law axioms in `Crypto/Spec.lean`
+  §2.5 plus +14 codegen-to-spec axioms in `Stack/P256P384.lean`),
+  BabyBear (B6, concrete spec defs for base field + degree-4
+  extension plus +4 functional-correctness axioms in `Crypto/Spec.lean`),
+  Merkle root (B7, concrete `Crypto.Spec.merkleRoot` +
+  `merkleVerifyPath` defs + `runOps_merkleRootSha256Ops_zero_eq`
+  proof at d = 0 in `Stack/Merkle.lean`, +0 axioms), WOTS+ (B8,
+  concrete `Crypto.Spec.verifyWOTS` + +1 axiom in `Stack/Wots.lean`),
+  SLH-DSA (B9, +6 axioms in `Stack/SlhDsa.lean` covering all 6
+  FIPS 205 SHA-2 parameter sets), Rabin (B10, concrete
+  `Crypto.Spec.verifyRabinSig_spec` + +1 axiom in `Stack/Rabin.lean`),
+  compound builtins (B11 — `extractOutputHash`, `buildChangeOutput`,
+  `computeStateOutput`, `super`) concrete with 2 prior axioms
+  removed, and 11 math/byte builtins (`safediv`, `safemod`, `divmod`,
+  `clamp`, `sign`, `mulDiv`, `percentOf`, `pow`, `sqrt`, `gcd`,
+  `log2`) concrete in `ANF/Eval.lean`. Net TCB delta: 71 → 119 by
+  end of Phase B integration.
+* **Phase D done (substrate path).**
+  `Pipeline.compileSafe_multi_public_observational_correct` drops
+  `hPublicSingleton`. 5 Phase D codegen-soundness axioms in
+  `Pipeline.lean`: `merkle_dispatch_selection_correct`,
+  `auto_check_preimage_at_method_entry_correct`,
+  `auto_state_output_at_method_exit_correct`,
+  `terminal_assert_elision_residue_correct`, `nip_cleanup_residue_correct`.
+  TCB delta: 119 → 124.
 * The 15 crypto-heavy fixtures remain in the explicit
   `cryptoAxiomPending` bucket, but now count in default CI through
   stored Lean-produced constants generated by regen/full mode.
@@ -53,7 +150,7 @@ roadmap step.
   semantics for `OP_BIN2NUM`, `OP_NUM2BIN`, `OP_SPLIT`, `OP_INVERT`,
   `OP_AND`, `OP_OR`, and `OP_XOR`, with executable sample coverage for
   representative success/error paths.
-* `Stack.Agrees` now has method-level bridge lemmas from binding-list
+* `Stack.Agrees` has method-level bridge lemmas from binding-list
   execution witnesses to any unique public method selected by public
   method name, not only the public head method, for the
   no-implicit/no-postprocessing fragments proved so far.
@@ -307,41 +404,80 @@ roadmap step.
 
 ## Acceptance Criteria
 
-The structural-const fragment milestone is **met**:
+The structural-const, ref-loads, and multi-method-dispatch fragment
+milestones are **met**:
 
-* The public end-to-end theorem
-  `Pipeline.compileSafe_single_public_observational_correct_unconditional`
-  no longer relies on hypotheses that restate its conclusion.
+* Three public end-to-end theorems exist:
+  `compileSafe_single_public_observational_correct_unconditional` (M5,
+  `structuralConstBody`),
+  `compileSafe_single_public_observational_correct_unconditional_ref`
+  (A15, `structuralRefBody`), and
+  `compileSafe_multi_public_observational_correct` (Phase D,
+  multi-method dispatch). None relies on hypotheses that restate the
+  conclusion.
 * Every remaining assumption is listed in `TRUST_MANIFEST.md` and
-  counted by `check-tcb-drift.sh` (71 axioms, 0 opaques, 0 opaque
-  stubs, 0 `partial def`s).
+  counted by `check-tcb-drift.sh` (**124 axioms**, 0 opaques, 0
+  opaque stubs, 0 `partial def`s).
 * No active code path silently emits empty bytes for unknown opcodes
   (rejected by `compileSafe` before emission).
+* Conformance harness (`tests/PipelineConformance.lean`) runs all 56
+  fixtures and reports honestly. Current result: 0/56 VERIFIED with
+  a precise per-fixture deferral classification.
+* `goldenLoad` / `roundtrip` are 56/56 (the `raw_script` ANF kind
+  now parses and round-trips after A14 landed).
+* 13 crypto primitive families have spec-link theorems (`Stack/HashOps.lean`,
+  `Stack/Blake3.lean`, `Stack/Ec.lean`, `Stack/P256P384.lean`,
+  `Stack/BabyBear.lean`, `Stack/Merkle.lean`, `Stack/Wots.lean`,
+  `Stack/SlhDsa.lean`, `Stack/Rabin.lean`).
 * Obsolete analysis documents and references to them remain absent.
 
 The wider compiler-correctness program is **not yet** finished. The
-active fragment-widening roadmap is:
+active roadmap, in priority order:
 
-1. **Lift M2 to `structuralCopyBody`** (copied-reference loads).
-   `Stack.Agrees` already carries the Stage C `agreesTagged` /
-   `ChainRel` witnesses and
-   `stageD_public_unique_no_post_structuralCopy_bridge`; the work is
-   discharging the ANF `evalBindings` `.isSome` side without a
-   `simulates`-shaped hypothesis the way M2 does for literal loads.
-2. **Widen further** through bodies that use `binOp` / `unaryOp` /
-   `assert` (Stage C `agreesTagged` witnesses already cover the proved
-   depth tuples — `simpleStepRel` shape needs hoisting), then
-   `methodCall` / crypto / `ifVal` / `loop` / output construction.
-3. **Live or stored-Lean-constant verification** for the 15
-   crypto-heavy fixtures still in `cryptoAxiomPending`. Regen mode
-   produces ready-to-paste constants today; running it under
-   scheduled/manual CI is the next operational step.
-4. **Differential assurance.** Wire a real BSV reference producer into
+1. **A3–A14 runtime-side discharge** (highest priority — this is the
+   gate for 0/56 rising above zero). Each of the six deferred
+   families (`structuralArithBody`, `structuralCallBody`,
+   `structuralUpdatePropBody`, `structuralIfValBody`,
+   `structuralLoopBody`, `structuralMethodCallBody`) needs a
+   `runMethod_lower_public_unique_no_post_structural*_isSome` theorem.
+   That requires per-opcode Stage C composition with concrete value
+   tracking — the `agreesTagged`-based stage-C witness infrastructure
+   extended to arith / call / update-prop / if-val / loop /
+   method-call opcodes. Start with `structuralArithBody` (binOp /
+   unaryOp / assert), as the depth-pair witnesses for common
+   integer/arithmetic opcodes are already landed in `Stack/Agrees.lean`.
+2. **Per-fixture instantiation of `compileSafe_multi_public_observational_correct`.**
+   The Phase D capstone is stated; the harness in
+   `tests/PipelineConformance.lean` needs to instantiate it against
+   each of the 23 currently-`DEFERRED-not-single-public-method`
+   fixtures, the 6 `DEFERRED-checkPreimage` fixtures, and the 26
+   `DEFERRED-terminalAssert` fixtures. The Phase D axioms supply the
+   semantic content; the harness work is mechanical decidable
+   instantiation.
+3. **Phase B follow-up — discharge the 48 codegen-to-spec axioms
+   with direct proofs.** Most Phase B codegen axioms axiomatize the
+   runOps→spec equivalence rather than reduce it opcode-by-opcode.
+   Direct discharge is bounded by the existing 7-tier cross-compiler
+   conformance suite but would shrink the TCB if individually proved.
+4. **Phase C2 — multi-method dispatch joins.** Prove unambiguous-join
+   `pushCodesepIndex` patch sites agree across the runtime-selected
+   branch. Blocked on the byte-offset vs. op-index semantic gap.
+5. **A14 follow-up — dedicated `raw_bytes` StackOp.** `Stack/Syntax.lean`
+   does not yet model a dedicated `raw_bytes` StackOp; the Stack-IR
+   for `rawScript` is currently the sentinel
+   `OP_RUNAR_RAWSCRIPT_UNSUPPORTED`. Adding the dedicated constructor
+   plus `runOps` / peephole / emit / simpleStepRel discharge would
+   raise the pipelineConformance deferral set by 1.
+6. **B1 follow-up — SHA-256 compress/finalize.** `sha256Compress`
+   and `sha256Finalize` partial-state builtins need their Merkle–
+   Damgård composition link (likely 1 axiom per FIPS 180-4 §6.2 plus
+   per-emit-sequence `runOps_*_eq`).
+7. **B7 inductive step.** The Merkle-root codegen-to-spec lemma is
+   proved at `d = 0`; the inductive step needs the ~15-op `mLevel`
+   stack-shape invariant threaded through.
+8. **Differential assurance.** Wire a real BSV reference producer into
    `scripts/differential.sh` (`--reference bsv-command` /
    `--reference bsv-json` are already supported).
 
 Default CI, full/manual CI, and the README status table continue to
-agree exactly. The `asm-raw-script` discrepancy (50 fixtures on disk
-vs. 49 the Lean ANF loader recognises) is documented honestly in all
-three docs and is not a verification-side action item until the
-`raw_script` ANF kind lands in `RunarVerification/ANF/`.
+agree exactly.
