@@ -334,10 +334,76 @@ and proof scaffolding code. The end-to-end capstone
 `Pipeline.compileSafe_single_public_observational_correct_unconditional`
 is stated over `compileSafe` bytes for the structural-const fragment.
 
+## What This Verification Delivers
+
+For every fixture in `conformance/tests/`, the Lean 4 kernel
+mechanically derives observational correctness between the ANF
+interpreter and parsed-byte execution of the emitted Bitcoin Script —
+modulo a small set of documented codegen-soundness axioms backed by
+the project's 7-tier cross-compiler conformance suite. The result is
+56/56 fixtures classified `VERIFIED-modulo-codegen-axioms` by
+`tests/PipelineConformance.lean`, gated in CI on every PR.
+
+Concretely:
+
+* **Three end-to-end capstone theorems** in `Pipeline.lean` —
+  unconditional Lean theorems with no `sorry` / `admit` / `partial
+  def`:
+  * `compileSafe_single_public_observational_correct_unconditional`
+    (literal-load fragment, M5)
+  * `compileSafe_single_public_observational_correct_unconditional_ref`
+    (literal + reference-load fragment, A15)
+  * `compileSafe_multi_public_observational_correct` (multi-method
+    dispatch, Phase D)
+* **13 crypto primitive families** with spec links: SHA-256,
+  RIPEMD-160, hash160, hash256 (proved directly, zero new axioms),
+  BLAKE3, secp256k1, NIST P-256 / P-384 / ECDSA, BabyBear field +
+  degree-4 extension, Merkle root, WOTS+, SLH-DSA (all 6 FIPS 205
+  SHA-2 parameter sets), and Rabin.
+* **Mechanically checked, citable trust footprint.** The 125 axioms
+  in `TRUST_MANIFEST.md` each carry a literature citation (FIPS,
+  SEC, RFC, Plonky3) or a 7-tier-conformance backing reference.
+  Trust assumptions are explicit, not implicit.
+* **Concrete spec coverage in `ANF/Eval.lean`** for compound
+  builtins (`extractOutputHash`, `buildChangeOutput`,
+  `computeStateOutput`) and 11 math/byte builtins (`safediv`,
+  `safemod`, `divmod`, `clamp`, `sign`, `mulDiv`, `percentOf`,
+  `pow`, `sqrt`, `gcd`, `log2`) — concrete definitions, no axioms.
+* **Decidable structural predicates and a per-fixture decidable
+  harness** (`tests/PipelineConformance.lean`) that classifies every
+  fixture in the corpus through `native_decide`.
+* **CI integration** — the conformance gate runs on every PR via
+  `scripts/run-pipeline-conformance.sh` (wired into
+  `.github/workflows/ci.yml`). Regressions in `compileSafe`,
+  parser, well-formedness, or structural fragments fail the build.
+* **Differential validation hooks** — `scripts/differential.sh`
+  supports `--reference bsv-command` / `--reference bsv-json` for
+  byte-level diff against an external Bitcoin SV reference once
+  one is wired into CI (one-time external integration).
+
+Together with the 7-tier cross-compiler byte-identity gate, this
+gives Rúnar a documented mechanised verification story: a precise,
+inspectable claim with a named trust footprint, backed by an
+empirical anchor on the compiler side.
+
+### Caveat — Path 2 is future work
+
+The 22 codegen-soundness axioms (16 Phase B + 5 Phase D + 1 omnibus)
+remain in the trusted computing base. Discharging them with direct
+Lean proofs — Path 2 — is multi-month specialist work tracked in
+`TODO.md`. Without Path 2, the conformance claim is "verified modulo
+the 22 documented axioms"; with Path 2 complete it becomes the
+unconditional "verified". Either form is strictly stronger than the
+typical "we have tests" baseline, and the structural-fragment
+capstones (M5, A15) and per-primitive crypto `runOps`-to-spec proofs
+(B1+B2) are already unconditional Lean theorems today.
+
 ## Active References
 
 * `TRUST_MANIFEST.md` is the authoritative trusted-computing-base and
   assumption inventory.
 * `HANDOFF.md` is the active implementation roadmap.
+* `TODO.md` enumerates Path 2 — axiom discharge work — remaining for
+  the unconditional verification claim.
 * Historical exploration and audit files were removed after their live
   findings were folded into these active references.
