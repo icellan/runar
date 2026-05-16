@@ -24,6 +24,10 @@ pub struct CallTxOptions {
     pub contract_outputs: Option<Vec<ContractOutput>>,
     /// Additional contract inputs with their own unlocking scripts (for merge).
     pub additional_contract_inputs: Option<Vec<AdditionalContractInput>>,
+    /// Override the call tx's nLockTime. `None` → defaults to `0` (legacy).
+    /// `Some(N)` writes `N` as little-endian `u32` in the locktime field.
+    /// Required for contracts that assert `extractLocktime(preimage) >= deadline`.
+    pub locktime: Option<u32>,
 }
 
 /// Build a raw transaction that spends a contract UTXO (method call).
@@ -191,8 +195,13 @@ pub fn build_call_transaction_ext(
         tx.push_str(&actual_change_script);
     }
 
-    // Locktime
-    tx.push_str(&to_little_endian_32(0));
+    // Locktime: default `0` (legacy behavior); overridable via
+    // `CallTxOptions.locktime`. Contracts asserting
+    // `extractLocktime(preimage) >= deadline` (e.g. auction `close`/`claim`)
+    // require this override; the previously hardcoded `0` caused NULLFAIL
+    // on every terminal call with a non-zero deadline.
+    let locktime_value = options.and_then(|o| o.locktime).unwrap_or(0);
+    tx.push_str(&to_little_endian_32(locktime_value));
 
     let change_amount = if change > 0 { change } else { 0 };
     (tx, all_utxos.len(), change_amount)

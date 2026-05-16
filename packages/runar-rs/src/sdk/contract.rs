@@ -618,6 +618,10 @@ impl RunarContract {
                     }
                 }).collect())
             },
+            // Thread `CallOptions.locktime` through to the tx builder so contracts
+            // asserting `extractLocktime(preimage)` can succeed. Default `None` → `0`
+            // (legacy behavior preserved).
+            locktime: options.and_then(|o| o.locktime),
         };
 
         let (tx_hex, input_count, mut change_amount) = build_call_transaction_ext(
@@ -768,6 +772,10 @@ impl RunarContract {
                         }
                     }).collect())
                 },
+                // Rebuild path must also honor the override: a preimage computed
+                // on a rebuilt tx with `locktime = 0` would mismatch what
+                // `extractLocktime` sees in the final on-chain tx.
+                locktime: options.and_then(|o| o.locktime),
             };
 
             let (rebuilt_tx, _, rebuilt_change) = build_call_transaction_ext(
@@ -1014,7 +1022,7 @@ impl RunarContract {
         method_name: &str,
         resolved_args: &mut Vec<SdkValue>,
         _signer: &dyn Signer,
-        _options: Option<&CallOptions>,
+        options: Option<&CallOptions>,
         terminal_outputs: &[TerminalOutput],
         current_utxo: &Utxo,
         is_stateful: bool,
@@ -1027,6 +1035,13 @@ impl RunarContract {
         change_pkh_hex: &str,
     ) -> Result<PreparedCall, String> {
         let term_code_sep_idx = self.get_code_sep_index(self.find_method_index(method_name));
+
+        // Terminal calls (auction `close`, `claim`, `withdraw`) typically assert
+        // `extractLocktime(preimage) >= deadline`. Without an override the SDK
+        // previously hardcoded `0` → every such call NULLFAILed. Default `None`
+        // preserves existing terminal-call behavior for contracts that don't
+        // check locktime.
+        let terminal_locktime = options.and_then(|o| o.locktime).unwrap_or(0);
 
         // Build placeholder unlocking script
         // Terminal never needs code part (needsCodePart = false)
@@ -1056,7 +1071,7 @@ impl RunarContract {
                 tx.push_str(&encode_varint((out.script_hex.len() / 2) as u64));
                 tx.push_str(&out.script_hex);
             }
-            tx.push_str(&to_little_endian_32(0)); // locktime
+            tx.push_str(&to_little_endian_32(terminal_locktime)); // locktime
             tx
         };
 

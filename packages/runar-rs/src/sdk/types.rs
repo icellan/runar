@@ -86,6 +86,13 @@ pub struct CallOptions {
     /// The fee comes from the contract balance. The contract is considered
     /// fully spent after this call (currentUtxo becomes None).
     pub terminal_outputs: Option<Vec<TerminalOutput>>,
+    /// Override the call tx's nLockTime field. Defaults to `None` → SDK uses
+    /// `0` (legacy behavior, preserves existing contracts). Set to `Some(height)`
+    /// for contracts that assert `extractLocktime(preimage) >= deadline`
+    /// (e.g., auction `close`/`claim` methods). Threaded through to both the
+    /// non-terminal (`build_call_transaction_ext`) and terminal call-tx
+    /// build sites.
+    pub locktime: Option<u32>,
 }
 
 /// Specification for an exact output in a terminal method call.
