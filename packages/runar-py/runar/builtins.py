@@ -583,6 +583,34 @@ def extract_outpoint(preimage: bytes) -> bytes:
     return b'\x00' * 36
 
 
+# -- Intent sub-covenant intrinsics (BSVM Phase 13) --------------------------
+# Test-mode stubs for the cross-covenant witness-bridge intrinsics. The
+# compiler emits hash256(witness) == expectedScriptHash on-chain; off-chain
+# Python tests have no other inputs / no real outputs to inspect, so these
+# are essentially no-ops. See docs/cross-covenant-pattern.md.
+
+def extract_prev_output_script(input_index: int, expected_script_hash, prefix_len: int | None = None) -> bytes:
+    """Test-mode stub for the cross-input previous-output script
+    witness-bridge intrinsic. Returns an empty ByteString.
+
+    The optional 3rd arg `prefix_len` (when supplied, must be a positive
+    integer at compile-time) selects the prefix-hash form on-chain:
+    hash256(substr(witness, 0, prefix_len)) === expected_script_hash. The
+    off-chain stub treats it as a no-op since there is no real witness."""
+    return b""
+
+
+def require_output_p2pkh(output_index: int, pubkey_hash, amount: int) -> None:
+    """Test-mode stub for the P2PKH-output-binding intrinsic. No-op."""
+    return None
+
+
+def current_block_height() -> int:
+    """Test-mode stub for the locktime-as-height shorthand. On-chain the
+    compiler desugars to extract_locktime(tx_preimage)."""
+    return 0
+
+
 # -- Math Utilities ----------------------------------------------------------
 
 def safediv(a: int, b: int) -> int:

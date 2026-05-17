@@ -159,6 +159,15 @@ module RunarCompiler
       "extractSigHashType"    => FuncSig.new(params: ["SigHashPreimage"], return_type: "bigint"),
       "buildChangeOutput"     => FuncSig.new(params: ["ByteString", "bigint"], return_type: "ByteString"),
       "computeStateOutput"    => FuncSig.new(params: ["ByteString", "bigint"], return_type: "ByteString"),
+      # Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
+      # that compile down to standard primitives + auto-injected method params.
+      # See docs/cross-covenant-pattern.md.
+      #
+      # First arg of extractPrevOutputScript / requireOutputP2PKH MUST be an
+      # integer literal -- enforced as a special case in check_call_args.
+      "extractPrevOutputScript" => FuncSig.new(params: ["bigint", "ByteString"], return_type: "ByteString"),
+      "requireOutputP2PKH"      => FuncSig.new(params: ["bigint", "ByteString", "bigint"], return_type: "void"),
+      "currentBlockHeight"      => FuncSig.new(params: [], return_type: "bigint"),
     }.freeze
 
     # -------------------------------------------------------------------
@@ -330,6 +339,139 @@ module RunarCompiler
         end
 
         check_statements(method.body, env)
+
+        # Crit-3 -- reject mixing requireOutputP2PKH with addDataOutput in the
+        # same method body. The intrinsic's compile-time output-offset
+        # computation assumes a fixed 34-byte stride per output, which is
+        # silently wrong when an OP_RETURN output (variable length) precedes
+        # the indexed P2PKH output. v1 forbids the mix; v2 may relax with a
+        # variable-stride decoder.
+        has_require_p2pkh = TypeChecker.body_calls_builtin?(method.body, "requireOutputP2PKH")
+        has_add_data_output = TypeChecker.body_calls_add_data_output?(method.body)
+        if has_require_p2pkh && has_add_data_output
+          add_error(
+            "method '#{method.name}' mixes requireOutputP2PKH() with addDataOutput() -- " \
+            "v1 of the intrinsic assumes a fixed 34-byte output stride and " \
+            "variable-length OP_RETURN outputs break the offset computation; " \
+            "split the addDataOutput call into a separate method"
+          )
+        end
+      end
+
+      # -------------------------------------------------------------------
+      # Crit-3 body walkers -- recursive scan for builtin calls and
+      # addDataOutput calls inside a method body. Mirrors the Go
+      # bodyCallsBuiltin / bodyCallsAddDataOutput helpers in
+      # compilers/go/frontend/typecheck.go.
+      # -------------------------------------------------------------------
+
+      def self.body_calls_builtin?(body, name)
+        body.any? { |stmt| stmt_contains_call_to?(stmt, name) }
+      end
+
+      def self.body_calls_add_data_output?(body)
+        body.any? { |stmt| stmt_contains_add_data_output?(stmt) }
+      end
+
+      def self.stmt_contains_call_to?(stmt, name)
+        case stmt
+        when ExpressionStmt
+          expr_contains_call_to?(stmt.expr, name)
+        when VariableDeclStmt
+          expr_contains_call_to?(stmt.init, name)
+        when AssignmentStmt
+          expr_contains_call_to?(stmt.value, name) ||
+            expr_contains_call_to?(stmt.target, name)
+        when IfStmt
+          return true if expr_contains_call_to?(stmt.condition, name)
+          return true if stmt.then.any? { |t| stmt_contains_call_to?(t, name) }
+          return true if !stmt.else_.empty? && stmt.else_.any? { |e| stmt_contains_call_to?(e, name) }
+          false
+        when ForStmt
+          stmt.body.any? { |t| stmt_contains_call_to?(t, name) }
+        when ReturnStmt
+          stmt.value.nil? ? false : expr_contains_call_to?(stmt.value, name)
+        else
+          false
+        end
+      end
+
+      def self.expr_contains_call_to?(expr, name)
+        return false if expr.nil?
+
+        case expr
+        when CallExpr
+          if expr.callee.is_a?(Identifier) && expr.callee.name == name
+            return true
+          end
+          expr.args.any? { |a| expr_contains_call_to?(a, name) }
+        when BinaryExpr
+          expr_contains_call_to?(expr.left, name) || expr_contains_call_to?(expr.right, name)
+        when UnaryExpr
+          expr_contains_call_to?(expr.operand, name)
+        when TernaryExpr
+          expr_contains_call_to?(expr.condition, name) ||
+            expr_contains_call_to?(expr.consequent, name) ||
+            expr_contains_call_to?(expr.alternate, name)
+        when IndexAccessExpr
+          expr_contains_call_to?(expr.object, name) || expr_contains_call_to?(expr.index, name)
+        when ArrayLiteralExpr
+          expr.elements.any? { |el| expr_contains_call_to?(el, name) }
+        else
+          false
+        end
+      end
+
+      def self.stmt_contains_add_data_output?(stmt)
+        case stmt
+        when ExpressionStmt
+          expr_contains_add_data_output?(stmt.expr)
+        when VariableDeclStmt
+          expr_contains_add_data_output?(stmt.init)
+        when AssignmentStmt
+          expr_contains_add_data_output?(stmt.value) ||
+            expr_contains_add_data_output?(stmt.target)
+        when IfStmt
+          return true if expr_contains_add_data_output?(stmt.condition)
+          return true if stmt.then.any? { |t| stmt_contains_add_data_output?(t) }
+          return true if !stmt.else_.empty? && stmt.else_.any? { |e| stmt_contains_add_data_output?(e) }
+          false
+        when ForStmt
+          stmt.body.any? { |t| stmt_contains_add_data_output?(t) }
+        when ReturnStmt
+          stmt.value.nil? ? false : expr_contains_add_data_output?(stmt.value)
+        else
+          false
+        end
+      end
+
+      def self.expr_contains_add_data_output?(expr)
+        return false if expr.nil?
+
+        case expr
+        when CallExpr
+          if expr.callee.is_a?(PropertyAccessExpr) && expr.callee.property == "addDataOutput"
+            return true
+          end
+          if expr.callee.is_a?(MemberExpr) && expr.callee.property == "addDataOutput"
+            return true
+          end
+          expr.args.any? { |a| expr_contains_add_data_output?(a) }
+        when BinaryExpr
+          expr_contains_add_data_output?(expr.left) || expr_contains_add_data_output?(expr.right)
+        when UnaryExpr
+          expr_contains_add_data_output?(expr.operand)
+        when TernaryExpr
+          expr_contains_add_data_output?(expr.condition) ||
+            expr_contains_add_data_output?(expr.consequent) ||
+            expr_contains_add_data_output?(expr.alternate)
+        when IndexAccessExpr
+          expr_contains_add_data_output?(expr.object) || expr_contains_add_data_output?(expr.index)
+        when ArrayLiteralExpr
+          expr.elements.any? { |el| expr_contains_add_data_output?(el) }
+        else
+          false
+        end
       end
 
       # -------------------------------------------------------------------
@@ -869,6 +1011,51 @@ module RunarCompiler
       # -------------------------------------------------------------------
 
       def check_call_args(func_name, sig, args, env)
+        # extractPrevOutputScript / requireOutputP2PKH -- the index arg MUST
+        # be a compile-time integer literal so the ANF lowering can derive a
+        # stable auto-injected witness-param name (extractPrevOutputScript) or
+        # a constant byte offset (requireOutputP2PKH).
+        if func_name == "extractPrevOutputScript" || func_name == "requireOutputP2PKH"
+          if !args.empty? && !args[0].is_a?(BigIntLiteral)
+            add_error("#{func_name}() argument 1 (index) must be an integer literal")
+          end
+        end
+
+        # extractPrevOutputScript variable-arity special case (2-arg full-hash
+        # or 3-arg prefix-hash form, BSVM Crit-2). Validates types + literal-only
+        # on the optional prefixLen, then returns the signature's return type to
+        # bypass the standard arg-count check below (which would reject the
+        # 3-arg form against the 2-arg sig table entry).
+        if func_name == "extractPrevOutputScript"
+          if args.length != 2 && args.length != 3
+            add_error("extractPrevOutputScript() expects 2 or 3 arguments, got #{args.length}")
+          end
+          if args.length >= 1
+            infer_expr_type(args[0], env) # already validated as literal above
+          end
+          if args.length >= 2
+            arg_type = infer_expr_type(args[1], env)
+            if !Frontend.subtype?(arg_type, "ByteString") && arg_type != "<unknown>"
+              add_error("argument 2 of extractPrevOutputScript(): expected 'ByteString', got '#{arg_type}'")
+            end
+          end
+          if args.length == 3
+            if !args[2].is_a?(BigIntLiteral)
+              add_error("extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied")
+            end
+            infer_expr_type(args[2], env)
+          end
+          return sig.return_type
+        end
+
+        # requireOutputP2PKH and currentBlockHeight need the auto-injected
+        # txPreimage -- only available in StatefulSmartContract methods.
+        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight"
+          if !@contract.nil? && @contract.parent_class != "StatefulSmartContract"
+            add_error("#{func_name}() is only available in StatefulSmartContract methods")
+          end
+        end
+
         # assert special case
         if func_name == "assert"
           if args.length < 1 || args.length > 2

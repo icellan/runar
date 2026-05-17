@@ -552,6 +552,53 @@ pub fn get_state_script<T>(_contract: &T) -> ByteString {
 }
 
 // ---------------------------------------------------------------------------
+// Intent sub-covenant intrinsics (BSVM Phase 13)
+//
+// Witness-bridge wrappers that compile down to standard primitives +
+// auto-injected method params on-chain. The runtime stubs here exist only so
+// native `cargo test` compilation of contract source succeeds — they have no
+// real behaviour off-chain. See docs/cross-covenant-pattern.md.
+// ---------------------------------------------------------------------------
+
+/// Test-mode stub for the cross-input previous-output script witness-bridge
+/// intrinsic (2-arg full-hash form). The compiler emits
+/// `hash256(witness) == expected_script_hash` on-chain; the Rust mock cannot
+/// see other inputs, so this returns an empty ByteString. `input_index` MUST
+/// be an integer literal in source — the Rúnar typechecker rejects non-literal
+/// indices.
+pub fn extract_prev_output_script(_input_index: i64, _expected_script_hash: ByteString) -> ByteString {
+    Vec::new()
+}
+
+/// Test-mode stub for the 3-arg prefix-hash form of
+/// `extract_prev_output_script`. The compiler emits
+/// `hash256(substr(witness, 0, prefix_len)) == expected_script_prefix_hash`
+/// on-chain. Both `input_index` and `prefix_len` MUST be integer literals
+/// in source — the Rúnar typechecker rejects non-literal values. Used for
+/// intent-template matching where each successor UTXO has a unique pushdata
+/// tail (BSVM Mode 3 permissionless step-in). Returns an empty ByteString
+/// off-chain.
+pub fn extract_prev_output_script_prefix(
+    _input_index: i64,
+    _expected_script_prefix_hash: ByteString,
+    _prefix_len: i64,
+) -> ByteString {
+    Vec::new()
+}
+
+/// Test-mode stub for the P2PKH-output-binding intrinsic. The compiler emits
+/// a hashOutputs reconstruction plus a substring assertion on-chain; the
+/// Rust mock has no real outputs to inspect, so this is a no-op.
+/// `output_index` MUST be an integer literal in source.
+pub fn require_output_p2pkh(_output_index: i64, _pubkey_hash: ByteString, _amount: i64) {}
+
+/// Test-mode stub for the locktime-as-height shorthand. On-chain the
+/// compiler desugars to `extract_locktime(tx_preimage)`. Returns 0 off-chain.
+pub fn current_block_height() -> i64 {
+    0
+}
+
+// ---------------------------------------------------------------------------
 // asm — the raw-script escape hatch (UnsafeSmartContract only)
 // ---------------------------------------------------------------------------
 

@@ -742,6 +742,32 @@ func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest { return Hash256(ByteSt
 // ExtractOutpoint returns 36 zero bytes in test mode.
 func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
 
+// ExtractPrevOutputScript is the test-mode stub for the cross-input
+// previous-output script witness-bridge intrinsic. The compiler emits
+// hash256(witness) == expectedScriptHash on-chain (2-arg form), or
+// hash256(substr(witness, 0, prefixLen)) == expectedScriptPrefixHash
+// (3-arg prefix-binding form, BSVM Phase 13 Crit-2). The Go-mock cannot
+// see other inputs, so this returns an empty ByteString. Tests that need
+// to drive the intrinsic should set the witness via the SDK's
+// PrevOutScripts map (keyed by inputIndex) before calling.
+//
+// Variadic 3rd arg accepts the optional prefixLen so BSVM contracts can
+// be invoked under `go test` against either form without breaking native
+// Go compilation.
+func ExtractPrevOutputScript(inputIndex int64, expectedScriptHash ByteString, prefixLen ...int64) ByteString {
+	return ByteString("")
+}
+
+// RequireOutputP2PKH is the test-mode stub for the P2PKH-output-binding
+// intrinsic. The compiler emits a hashOutputs reconstruction +
+// substring assertion on-chain; the Go-mock has no real outputs to
+// inspect, so this is a no-op.
+func RequireOutputP2PKH(outputIndex int64, pubkeyHash ByteString, amount int64) {}
+
+// CurrentBlockHeight is the test-mode stub for the locktime-as-height
+// shorthand. On-chain the compiler desugars to ExtractLocktime(txPreimage).
+func CurrentBlockHeight() int64 { return 0 }
+
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------

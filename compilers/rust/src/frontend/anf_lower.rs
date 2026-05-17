@@ -19,7 +19,9 @@
 //! - Local variables are tracked via localNames set
 //! - Properties are checked against the contract
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use super::ast::*;
 use super::side_effect_summary::{
@@ -357,6 +359,19 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 param_type: "SigHashPreimage".to_string(),
             });
 
+            // Intent-covenant intrinsic auto-injected witness params:
+            // extractPrevOutputScript adds `_prevOutScript_<inputIndex>`
+            // (one per distinct literal index referenced in the method);
+            // requireOutputP2PKH adds a single `_serialisedOutputs`. Order
+            // follows insertion order via method_scope.auto_injected_params.
+            // Appended AFTER txPreimage so unlocking scripts push them
+            // adjacent to the preimage (matches existing _changePKH /
+            // _changeAmount / _newAmount convention of trailing the user
+            // args before the preimage anchor).
+            for p in method_ctx.method_scope.borrow().auto_injected_params.iter() {
+                augmented_params.push(p.clone());
+            }
+
             result.push(ANFMethod {
                 name: method.name.clone(),
                 params: augmented_params,
@@ -365,9 +380,19 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             });
         } else {
             lower_statements(&method.body, &mut method_ctx);
+            // Private methods can also call the intent intrinsics; surface
+            // their auto-injected witness params on the private method's
+            // own ABI. (Private methods are typically inlined into public
+            // bodies via inline_private_method_call — that path reuses the
+            // public's method_scope, so the auto-injection registers at
+            // the public method's ABI augmentation step above.)
+            let mut augmented = lower_params(&method.params);
+            for p in method_ctx.method_scope.borrow().auto_injected_params.iter() {
+                augmented.push(p.clone());
+            }
             result.push(ANFMethod {
                 name: method.name.clone(),
-                params: lower_params(&method.params),
+                params: augmented,
                 body: method_ctx.bindings,
                 is_public: method.visibility == Visibility::Public,
             });
@@ -396,6 +421,41 @@ fn lower_params(params: &[ParamNode]) -> Vec<ANFParam> {
 // - Local variables are tracked via localNames set
 // - Properties are checked against the contract
 // ---------------------------------------------------------------------------
+
+/// Per-method bookkeeping shared by the parent lowering context and any
+/// sub-contexts spawned for nested blocks (if/else, ternary). The ABI
+/// augmentation pass — after lowering a method body — reads
+/// `auto_injected_params` to append witness params to the final ABI list.
+///
+/// Mirrors Go's `methodScopeT` (compilers/go/frontend/anf_lower.go). Used by
+/// the intent-covenant intrinsics extractPrevOutputScript and
+/// requireOutputP2PKH; currentBlockHeight is a pure desugar with no
+/// auto-injected param.
+#[derive(Default)]
+struct MethodScope {
+    /// Append-only, insertion-order list of auto-injected witness params.
+    auto_injected_params: Vec<ANFParam>,
+    /// Dedup set for `auto_injected_params`.
+    auto_injected_set: HashSet<String>,
+    /// requireOutputP2PKH emits its `hash256(serialisedOutputs) ==
+    /// extractOutputHash(txPreimage)` check at most once per method body.
+    did_emit_hash_outputs_check: bool,
+}
+
+impl MethodScope {
+    /// Record a witness param needed by an intrinsic call. Idempotent —
+    /// the second call with the same name is a no-op.
+    fn record_auto_injected_param(&mut self, name: &str, ty: &str) {
+        if self.auto_injected_set.contains(name) {
+            return;
+        }
+        self.auto_injected_set.insert(name.to_string());
+        self.auto_injected_params.push(ANFParam {
+            name: name.to_string(),
+            param_type: ty.to_string(),
+        });
+    }
+}
 
 struct LoweringContext<'a> {
     bindings: Vec<ANFBinding>,
@@ -430,6 +490,13 @@ struct LoweringContext<'a> {
     /// nodes register on the caller's continuation hash) or remain a
     /// method_call for stack lowering to inline later.
     side_effects: Option<SideEffectSummary>,
+    /// Per-method state shared with all sub-contexts. Tracks auto-injected
+    /// witness parameters needed by intent-covenant intrinsics
+    /// (extractPrevOutputScript, requireOutputP2PKH) regardless of whether
+    /// the intrinsic is called from the method's top-level body or from
+    /// inside a nested block (if/else, ternary). Shared via Rc<RefCell<>>
+    /// so sub-contexts mutate the same scope the parent reads from.
+    method_scope: Rc<RefCell<MethodScope>>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -451,6 +518,7 @@ impl<'a> LoweringContext<'a> {
             current_source_loc: None,
             param_alias_stack: HashMap::new(),
             side_effects,
+            method_scope: Rc::new(RefCell::new(MethodScope::default())),
         }
     }
 
@@ -597,6 +665,10 @@ impl<'a> LoweringContext<'a> {
         sub.local_byte_vars = self.local_byte_vars.clone();
         sub.current_source_loc = self.current_source_loc.clone();
         sub.param_alias_stack = self.param_alias_stack.clone();
+        // Share the per-method scope so intrinsic auto-injection from
+        // inside a nested block (if/else, ternary) registers on the
+        // parent method's ABI augmentation pass.
+        sub.method_scope = Rc::clone(&self.method_scope);
         // Note: add_output_refs is NOT propagated to sub-contexts
         // because addOutput calls in sub-blocks should flow up to
         // the parent context via explicit tracking.
@@ -1228,6 +1300,228 @@ fn lower_call_expr(
                     preimage: preimage_ref,
                 });
             }
+        }
+    }
+
+    // extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString
+    // extractPrevOutputScript(inputIndex_literal, expectedScriptPrefixHash, prefixLen_literal) -> ByteString
+    //
+    // Witness-bridge sugar (BSVM Phase 13). Auto-injects a hidden method
+    // parameter named `_prevOutScript_<inputIndex>` (one per distinct index
+    // in the method body), emits a hash assertion, and returns the witness
+    // ref for caller substring extraction.
+    //
+    // 2-arg form: hash256(witness) === expectedScriptHash. Pins the full
+    //   prev-output script byte-for-byte.
+    // 3-arg form: hash256(substr(witness, 0, prefixLen)) ===
+    //   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
+    //   pushdata tail free to vary. Required for intent-template matching
+    //   (BSVM Mode 3 permissionless step-in).
+    if let Expression::Identifier { name } = callee {
+        if name == "extractPrevOutputScript" {
+            if args.len() != 2 && args.len() != 3 {
+                return ctx.emit(ANFValue::LoadConst {
+                    value: serde_json::Value::String(String::new()),
+                });
+            }
+            let idx = match &args[0] {
+                Expression::BigIntLiteral { value } => *value,
+                _ => {
+                    return ctx.emit(ANFValue::LoadConst {
+                        value: serde_json::Value::String(String::new()),
+                    });
+                }
+            };
+            let param_name = format!("_prevOutScript_{}", idx);
+            ctx.method_scope
+                .borrow_mut()
+                .record_auto_injected_param(&param_name, "ByteString");
+            ctx.add_param(&param_name);
+            let witness_ref = ctx.emit(ANFValue::LoadParam {
+                name: param_name.clone(),
+            });
+            let expected_hash_ref = lower_expr_to_ref(&args[1], ctx);
+
+            // Determine which bytes to hash: full witness (2-arg) or prefix
+            // (3-arg). The substr happens at script-execution time; the
+            // literal prefixLen is baked into the emitted Stack-IR.
+            let bytes_to_hash_ref = if args.len() == 3 {
+                let prefix_len = match &args[2] {
+                    Expression::BigIntLiteral { value } => *value,
+                    _ => {
+                        return ctx.emit(ANFValue::LoadConst {
+                            value: serde_json::Value::String(String::new()),
+                        });
+                    }
+                };
+                let zero_ref = ctx.emit(ANFValue::LoadConst {
+                    value: serde_json::Value::Number(serde_json::Number::from(0i64)),
+                });
+                let prefix_len_ref = ctx.emit(ANFValue::LoadConst {
+                    value: serde_json::Value::Number(
+                        serde_json::Number::from(prefix_len as i64),
+                    ),
+                });
+                ctx.emit(ANFValue::Call {
+                    func: "substr".to_string(),
+                    args: vec![witness_ref.clone(), zero_ref, prefix_len_ref],
+                })
+            } else {
+                witness_ref.clone()
+            };
+
+            let actual_hash_ref = ctx.emit(ANFValue::Call {
+                func: "hash256".to_string(),
+                args: vec![bytes_to_hash_ref],
+            });
+            let eq_ref = ctx.emit(ANFValue::BinOp {
+                op: "===".to_string(),
+                left: actual_hash_ref,
+                right: expected_hash_ref,
+                result_type: Some("bytes".to_string()),
+            });
+            ctx.emit(ANFValue::Assert { value: eq_ref });
+            return witness_ref;
+        }
+    }
+
+    // requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount) -> void.
+    // Asserts that the tx's output at outputIndex is a standard P2PKH paying
+    // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
+    // (once per method) and emits hash256(serialisedOutputs) ==
+    // extractOutputHash(txPreimage) the first time the intrinsic is called
+    // in a method body. Subsequent calls in the same method skip the
+    // hashOutputs check (already established) and emit only the per-output
+    // substring assertion.
+    //
+    // v1 assumes all outputs in the serialised set are exactly 34 bytes
+    // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
+    // of output i is i*34.
+    if let Expression::Identifier { name } = callee {
+        if name == "requireOutputP2PKH" {
+            if args.len() != 3 {
+                return ctx.emit(ANFValue::LoadConst {
+                    value: serde_json::Value::String(String::new()),
+                });
+            }
+            let idx = match &args[0] {
+                Expression::BigIntLiteral { value } => *value,
+                _ => {
+                    return ctx.emit(ANFValue::LoadConst {
+                        value: serde_json::Value::String(String::new()),
+                    });
+                }
+            };
+
+            ctx.method_scope
+                .borrow_mut()
+                .record_auto_injected_param("_serialisedOutputs", "ByteString");
+            ctx.add_param("_serialisedOutputs");
+
+            // Emit the hashOutputs(preimage) check exactly once per method.
+            let need_hash_check = {
+                let mut scope = ctx.method_scope.borrow_mut();
+                if !scope.did_emit_hash_outputs_check {
+                    scope.did_emit_hash_outputs_check = true;
+                    true
+                } else {
+                    false
+                }
+            };
+            if need_hash_check {
+                let serialised_ref = ctx.emit(ANFValue::LoadParam {
+                    name: "_serialisedOutputs".to_string(),
+                });
+                let actual_out_hash_ref = ctx.emit(ANFValue::Call {
+                    func: "hash256".to_string(),
+                    args: vec![serialised_ref],
+                });
+                let preimage_ref = ctx.emit(ANFValue::LoadParam {
+                    name: "txPreimage".to_string(),
+                });
+                let expected_out_hash_ref = ctx.emit(ANFValue::Call {
+                    func: "extractOutputHash".to_string(),
+                    args: vec![preimage_ref],
+                });
+                let hash_eq_ref = ctx.emit(ANFValue::BinOp {
+                    op: "===".to_string(),
+                    left: actual_out_hash_ref,
+                    right: expected_out_hash_ref,
+                    result_type: Some("bytes".to_string()),
+                });
+                ctx.emit(ANFValue::Assert { value: hash_eq_ref });
+            }
+
+            // Lower the user-supplied args (pubkeyHash, amount).
+            let pubkey_hash_ref = lower_expr_to_ref(&args[1], ctx);
+            let amount_ref = lower_expr_to_ref(&args[2], ctx);
+
+            // Construct expected P2PKH output bytes:
+            //   <amount: 8-byte LE> ‖ 0x19 0x76 0xa9 0x14 ‖ <pubkeyHash: 20 bytes> ‖ 0x88 0xac
+            let eight_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::Number(serde_json::Number::from(8i64)),
+            });
+            let amount_bytes_ref = ctx.emit(ANFValue::Call {
+                func: "num2bin".to_string(),
+                args: vec![amount_ref, eight_ref],
+            });
+            // 0x19 0x76 0xa9 0x14 — script length byte + OP_DUP OP_HASH160 OP_PUSH20
+            let prefix_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::String("1976a914".to_string()),
+            });
+            // 0x88 0xac — OP_EQUALVERIFY OP_CHECKSIG
+            let suffix_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::String("88ac".to_string()),
+            });
+            let cat1_ref = ctx.emit(ANFValue::Call {
+                func: "cat".to_string(),
+                args: vec![amount_bytes_ref, prefix_ref],
+            });
+            let cat2_ref = ctx.emit(ANFValue::Call {
+                func: "cat".to_string(),
+                args: vec![cat1_ref, pubkey_hash_ref],
+            });
+            let expected_output_ref = ctx.emit(ANFValue::Call {
+                func: "cat".to_string(),
+                args: vec![cat2_ref, suffix_ref],
+            });
+
+            // Substring extract at idx*34 length 34, assert equal.
+            let serialised_ref = ctx.emit(ANFValue::LoadParam {
+                name: "_serialisedOutputs".to_string(),
+            });
+            let offset_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::Number(serde_json::Number::from((idx as i64) * 34)),
+            });
+            let length_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::Number(serde_json::Number::from(34i64)),
+            });
+            let extracted_ref = ctx.emit(ANFValue::Call {
+                func: "substr".to_string(),
+                args: vec![serialised_ref, offset_ref, length_ref],
+            });
+            let out_eq_ref = ctx.emit(ANFValue::BinOp {
+                op: "===".to_string(),
+                left: extracted_ref,
+                right: expected_output_ref,
+                result_type: Some("bytes".to_string()),
+            });
+            return ctx.emit(ANFValue::Assert { value: out_eq_ref });
+        }
+    }
+
+    // currentBlockHeight() -> bigint. Pure source-level desugar to
+    // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
+    // methods (typecheck enforces). No new ANF kind or stack codegen needed.
+    if let Expression::Identifier { name } = callee {
+        if name == "currentBlockHeight" {
+            let preimage_ref = ctx.emit(ANFValue::LoadParam {
+                name: "txPreimage".to_string(),
+            });
+            return ctx.emit(ANFValue::Call {
+                func: "extractLocktime".to_string(),
+                args: vec![preimage_ref],
+            });
         }
     }
 

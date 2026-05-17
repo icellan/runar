@@ -464,6 +464,69 @@ public final class Builtins {
     public static BigInteger extractSigHashType(Preimage p) { return Preimage.extractSigHashType(p); }
 
     // ===================================================================
+    // Intent sub-covenant intrinsics (BSVM Phase 13). Test-mode runtime
+    // stubs — the compiler desugars these to standard primitives +
+    // auto-injected witness params, so on-chain enforcement happens via
+    // the lowered ANF, not these JVM shims. Mirrors the Go runtime stubs
+    // in packages/runar-go/runar.go. See docs/cross-covenant-pattern.md.
+    // ===================================================================
+
+    /**
+     * Cross-input previous-output script witness-bridge intrinsic. On-chain
+     * the compiler emits {@code hash256(witness) === expectedScriptHash};
+     * the Java mock cannot see other inputs, so this returns an empty
+     * {@link ByteString}.
+     */
+    public static ByteString extractPrevOutputScript(long inputIndex, ByteString expectedScriptHash) {
+        return new ByteString(new byte[0]);
+    }
+
+    public static ByteString extractPrevOutputScript(BigInteger inputIndex, ByteString expectedScriptHash) {
+        return new ByteString(new byte[0]);
+    }
+
+    /**
+     * Crit-2 prefix-hash 3-arg form. On-chain the compiler emits
+     * {@code hash256(substr(witness, 0, prefixLen)) === expectedScriptPrefixHash}.
+     * The Java mock cannot see other inputs, so this returns an empty
+     * {@link ByteString}.
+     */
+    public static ByteString extractPrevOutputScript(
+        long inputIndex, ByteString expectedScriptPrefixHash, long prefixLen
+    ) {
+        return new ByteString(new byte[0]);
+    }
+
+    public static ByteString extractPrevOutputScript(
+        BigInteger inputIndex, ByteString expectedScriptPrefixHash, BigInteger prefixLen
+    ) {
+        return new ByteString(new byte[0]);
+    }
+
+    /**
+     * P2PKH-output-binding intrinsic. On-chain the compiler emits a
+     * hashOutputs reconstruction + substring assertion; the Java mock has
+     * no real outputs to inspect, so this is a no-op.
+     */
+    public static void requireOutputP2PKH(long outputIndex, ByteString pubkeyHash, long amount) {
+        // no-op (off-chain stub)
+    }
+
+    public static void requireOutputP2PKH(BigInteger outputIndex, ByteString pubkeyHash, BigInteger amount) {
+        // no-op (off-chain stub)
+    }
+
+    /**
+     * Locktime-as-height shorthand. On-chain the compiler desugars to
+     * {@code extractLocktime(txPreimage)}. Returns {@code BigInteger.ZERO}
+     * off-chain so contracts comparing the height to a {@link BigInteger}
+     * deadline still type-check at JVM level.
+     */
+    public static BigInteger currentBlockHeight() {
+        return BigInteger.ZERO;
+    }
+
+    // ===================================================================
     // Rabin-typed overloads. Rabin signatures / pub keys are plain big
     // integers on-chain; the wrapper types carry semantic intent.
     // ===================================================================

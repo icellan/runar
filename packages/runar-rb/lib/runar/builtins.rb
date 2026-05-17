@@ -455,6 +455,32 @@ module Runar
       '00' * 36
     end
 
+    # -- Intent sub-covenant intrinsics (BSVM Phase 13) ------------------------
+    # Test-mode stubs. On-chain the Ruby compiler desugars these into standard
+    # primitives + auto-injected witness params; the Ruby runtime mock can't
+    # see other inputs/outputs so the returns are no-ops/zeros. See
+    # docs/cross-covenant-pattern.md.
+
+    # extract_prev_output_script: compiler emits hash256(witness) ==
+    # expectedScriptHash on-chain (2-arg form), or
+    # hash256(substr(witness, 0, prefix_len)) == expectedScriptPrefixHash
+    # (3-arg form, BSVM Crit-2). Mock returns an empty ByteString.
+    def extract_prev_output_script(_input_index, _expected_script_hash, _prefix_len = nil)
+      ''
+    end
+
+    # require_output_p2pkh: compiler emits a hashOutputs reconstruction +
+    # substring assertion on-chain. Mock is a no-op.
+    def require_output_p2pkh(_output_index, _pubkey_hash, _amount)
+      nil
+    end
+
+    # current_block_height: on-chain the compiler desugars to
+    # extract_locktime(tx_preimage). Mock returns 0.
+    def current_block_height
+      0
+    end
+
     # -- Math Utilities --------------------------------------------------------
 
     def safediv(a, b)

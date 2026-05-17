@@ -199,6 +199,10 @@ export {
   extractOutputs,
   extractLocktime,
   extractSigHashType,
+  // Intent sub-covenant intrinsics (BSVM Phase 13)
+  extractPrevOutputScript,
+  requireOutputP2PKH,
+  currentBlockHeight,
 } from './preimage.js';
 
 // ---------------------------------------------------------------------------

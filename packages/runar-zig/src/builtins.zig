@@ -302,6 +302,42 @@ pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
     return extracted;
 }
 
+// ============================================================================
+// Intent sub-covenant intrinsics (BSVM Phase 13)
+//
+// Test-mode stubs for the witness-bridge intrinsics. The compiler frontend
+// desugars these into on-chain assertions (hash256 / extractOutputHash /
+// substr / extractLocktime) plus auto-injected witness params, so these
+// runtime stubs only need to satisfy the off-chain native build of Zig
+// contracts. See docs/cross-covenant-pattern.md.
+// ============================================================================
+
+/// extractPrevOutputScript is the test-mode stub for the cross-input
+/// previous-output script witness-bridge intrinsic. The compiler emits
+/// hash256(witness) == expectedScriptHash on-chain; the off-chain mock
+/// cannot see other inputs, so this returns an empty ByteString.
+pub fn extractPrevOutputScript(input_index: base.Bigint, expected_script_hash: base.ByteString) base.ByteString {
+    _ = input_index;
+    _ = expected_script_hash;
+    return &[_]u8{};
+}
+
+/// requireOutputP2PKH is the test-mode stub for the P2PKH-output-binding
+/// intrinsic. The compiler emits a hashOutputs reconstruction + substring
+/// assertion on-chain; the off-chain mock has no real outputs to inspect,
+/// so this is a no-op.
+pub fn requireOutputP2PKH(output_index: base.Bigint, pubkey_hash: base.ByteString, amount: base.Bigint) void {
+    _ = output_index;
+    _ = pubkey_hash;
+    _ = amount;
+}
+
+/// currentBlockHeight is the test-mode stub for the locktime-as-height
+/// shorthand. On-chain the compiler desugars to extractLocktime(txPreimage).
+pub fn currentBlockHeight() base.Bigint {
+    return 0;
+}
+
 pub const BuildChangeOutputError = error{
     OutOfMemory,
     InvalidPubKeyHashLength,

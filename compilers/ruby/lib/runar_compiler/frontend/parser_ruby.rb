@@ -186,6 +186,10 @@ module RunarCompiler
       "extract_input_index"        => "extractInputIndex",
       "extract_sig_hash_type"      => "extractSigHashType",
       "extract_outputs"            => "extractOutputs",
+      # Intent sub-covenant intrinsics (BSVM Phase 13)
+      "extract_prev_output_script" => "extractPrevOutputScript",
+      "require_output_p2pkh"       => "requireOutputP2PKH",
+      "current_block_height"       => "currentBlockHeight",
       "mul_div"                    => "mulDiv",
       "percent_of"                 => "percentOf",
       "reverse_bytes"              => "reverseBytes",

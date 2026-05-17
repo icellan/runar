@@ -337,6 +337,17 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 				Type: "SigHashPreimage",
 			})
 
+			// Intent-covenant intrinsic auto-injected witness params:
+			// extractPrevOutputScript adds `_prevOutScript_<inputIndex>`
+			// (one per distinct literal index referenced in the method);
+			// requireOutputP2PKH adds a single `_serialisedOutputs`. Order
+			// follows insertion order via methodScope.autoInjectedParams.
+			// Appended AFTER txPreimage so unlocking scripts push them
+			// adjacent to the preimage (matches existing _changePKH /
+			// _changeAmount / _newAmount convention of trailing the user
+			// args before the preimage anchor).
+			augmentedParams = append(augmentedParams, methodCtx.methodScope.autoInjectedParams...)
+
 			result = append(result, ir.ANFMethod{
 				Name:     method.Name,
 				Params:   augmentedParams,
@@ -345,9 +356,19 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			})
 		} else {
 			methodCtx.lowerStatements(method.Body)
+			augmented := lowerParams(method.Params)
+			// Private methods can also call the intent intrinsics; capture
+			// their auto-injected witness params so a public method that
+			// inlines this private picks them up via the shared methodScope.
+			// (Private methods are inlined into public bodies via
+			// inlinePrivateMethodCall — that path reuses the public's
+			// methodScope, so the auto-injection registers at the public
+			// method's ABI augmentation step above. The private's own ABI
+			// is still informative for non-inlined callees.)
+			augmented = append(augmented, methodCtx.methodScope.autoInjectedParams...)
 			result = append(result, ir.ANFMethod{
 				Name:     method.Name,
-				Params:   lowerParams(method.Params),
+				Params:   augmented,
 				Body:     methodCtx.bindings,
 				IsPublic: method.Visibility == "public",
 			})
@@ -401,6 +422,36 @@ type lowerCtx struct {
 	// on the caller's continuation hash) or remain a method_call for
 	// stack lowering to inline later.
 	sideEffects SideEffectSummary
+	// methodScope is per-method state shared with all sub-contexts. Tracks
+	// auto-injected witness parameters needed by intent-covenant intrinsics
+	// (extractPrevOutputScript, requireOutputP2PKH) regardless of whether
+	// the intrinsic is called from the method's top-level body or from
+	// inside a nested block (if/else, ternary). See methodScopeT.
+	methodScope *methodScopeT
+}
+
+// methodScopeT holds per-method bookkeeping shared by parent and
+// sub-contexts. The ABI augmentation pass (after method body lowering)
+// reads autoInjectedParams to append witness params to the final method
+// param list.
+type methodScopeT struct {
+	autoInjectedParams      []ir.ANFParam   // append-only, insertion order
+	autoInjectedSet         map[string]bool // dedup
+	didEmitHashOutputsCheck bool            // requireOutputP2PKH emits its hashOutputs(preimage) check at most once per method
+}
+
+func newMethodScope() *methodScopeT {
+	return &methodScopeT{autoInjectedSet: make(map[string]bool)}
+}
+
+// recordAutoInjectedParam adds a witness param to the method's ABI
+// augmentation list (idempotent — second call with same name is a no-op).
+func (ms *methodScopeT) recordAutoInjectedParam(name, typ string) {
+	if ms.autoInjectedSet[name] {
+		return
+	}
+	ms.autoInjectedSet[name] = true
+	ms.autoInjectedParams = append(ms.autoInjectedParams, ir.ANFParam{Name: name, Type: typ})
 }
 
 func newLowerCtx(contract *ContractNode) *lowerCtx {
@@ -416,6 +467,7 @@ func newLowerCtxWithEffects(contract *ContractNode, summary SideEffectSummary) *
 		localByteVars:   make(map[string]bool),
 		paramAliasStack: make(map[string][]string),
 		sideEffects:     summary,
+		methodScope:     newMethodScope(),
 	}
 }
 
@@ -622,6 +674,7 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		paramNames:    make(map[string]bool),
 		localAliases:  make(map[string]string),
 		localByteVars: make(map[string]bool),
+		methodScope:   ctx.methodScope, // shared pointer — auto-injection registers propagate up
 	}
 	// Share local name set
 	for k := range ctx.localNames {
@@ -1151,6 +1204,142 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			preimageRef := ctx.lowerExprToRef(e.Args[0])
 			return ctx.emit(ir.ANFValue{Kind: "check_preimage", Preimage: preimageRef})
 		}
+	}
+
+	// extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString
+	// extractPrevOutputScript(inputIndex_literal, expectedScriptPrefixHash, prefixLen_literal) -> ByteString
+	//
+	// Witness-bridge sugar (BSVM Phase 13). Auto-injects a hidden method
+	// parameter named `_prevOutScript_<inputIndex>` (one per distinct index
+	// in the method body), emits a hash assertion, and returns the witness
+	// ref for caller substring extraction.
+	//
+	// 2-arg form: hash256(witness) === expectedScriptHash. Pins the full
+	//   prev-output script byte-for-byte. Use when the prev-output is a
+	//   single fixed-shape contract (e.g. bridge.runar.go pattern).
+	// 3-arg form: hash256(substr(witness, 0, prefixLen)) ===
+	//   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
+	//   pushdata tail free to vary. Required for the intent-template
+	//   matching use case where each successor intent UTXO has a unique
+	//   tail (BSVM Mode 3 permissionless step-in).
+	if id, ok := callee.(Identifier); ok && id.Name == "extractPrevOutputScript" {
+		if len(e.Args) != 2 && len(e.Args) != 3 {
+			return ctx.emit(makeLoadConstString(""))
+		}
+		idxLit, ok := e.Args[0].(BigIntLiteral)
+		if !ok || idxLit.Value == nil {
+			return ctx.emit(makeLoadConstString(""))
+		}
+		idx := idxLit.Value.Int64()
+		paramName := fmt.Sprintf("_prevOutScript_%d", idx)
+		ctx.methodScope.recordAutoInjectedParam(paramName, "ByteString")
+		ctx.addParam(paramName)
+		witnessRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: paramName})
+		expectedHashRef := ctx.lowerExprToRef(e.Args[1])
+
+		// Determine which bytes to hash: full witness (2-arg) or
+		// prefix (3-arg). The substr happens at script-execution time;
+		// the literal prefixLen is baked into the emitted Stack-IR.
+		var bytesToHashRef string
+		if len(e.Args) == 3 {
+			prefixLenLit, ok := e.Args[2].(BigIntLiteral)
+			if !ok || prefixLenLit.Value == nil {
+				return ctx.emit(makeLoadConstString(""))
+			}
+			zeroRef := ctx.emit(makeLoadConstInt(big.NewInt(0)))
+			prefixLenRef := ctx.emit(makeLoadConstInt(new(big.Int).Set(prefixLenLit.Value)))
+			bytesToHashRef = ctx.emit(makeCall("substr", []string{witnessRef, zeroRef, prefixLenRef}))
+		} else {
+			bytesToHashRef = witnessRef
+		}
+
+		actualHashRef := ctx.emit(makeCall("hash256", []string{bytesToHashRef}))
+		eqRef := ctx.emit(ir.ANFValue{
+			Kind: "bin_op", Op: "===",
+			Left: actualHashRef, Right: expectedHashRef,
+			ResultType: "bytes",
+		})
+		ctx.emit(makeAssert(eqRef))
+		return witnessRef
+	}
+
+	// requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount) -> void.
+	// Asserts that the tx's output at outputIndex is a standard P2PKH paying
+	// `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
+	// (once per method) and emits hash256(serialisedOutputs) ==
+	// extractOutputHash(txPreimage) the first time the intrinsic is called
+	// in a method body. Subsequent calls in the same method skip the
+	// hashOutputs check (already established) and emit only the per-output
+	// substring assertion.
+	//
+	// v1 assumes all outputs in the serialised set are exactly 34 bytes
+	// (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
+	// of output i is i*34. If the method also calls c.AddDataOutput(...)
+	// the assumption breaks (variable-length OP_RETURN) — typecheck
+	// rejects that mix; see checkMethod in typecheck.go (Crit-3).
+	if id, ok := callee.(Identifier); ok && id.Name == "requireOutputP2PKH" {
+		if len(e.Args) != 3 {
+			return ctx.emit(makeLoadConstString(""))
+		}
+		idxLit, ok := e.Args[0].(BigIntLiteral)
+		if !ok || idxLit.Value == nil {
+			return ctx.emit(makeLoadConstString(""))
+		}
+		idx := idxLit.Value.Int64()
+
+		ctx.methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString")
+		ctx.addParam("_serialisedOutputs")
+
+		// Emit the hashOutputs(preimage) check exactly once per method.
+		if !ctx.methodScope.didEmitHashOutputsCheck {
+			ctx.methodScope.didEmitHashOutputsCheck = true
+			serialisedRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_serialisedOutputs"})
+			actualOutHashRef := ctx.emit(makeCall("hash256", []string{serialisedRef}))
+			preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+			expectedOutHashRef := ctx.emit(makeCall("extractOutputHash", []string{preimageRef}))
+			hashEqRef := ctx.emit(ir.ANFValue{
+				Kind: "bin_op", Op: "===",
+				Left: actualOutHashRef, Right: expectedOutHashRef,
+				ResultType: "bytes",
+			})
+			ctx.emit(makeAssert(hashEqRef))
+		}
+
+		// Lower the user-supplied args (pubkeyHash, amount).
+		pubkeyHashRef := ctx.lowerExprToRef(e.Args[1])
+		amountRef := ctx.lowerExprToRef(e.Args[2])
+
+		// Construct expected P2PKH output bytes:
+		//   <amount: 8-byte LE> ‖ 0x19 0x76 0xa9 0x14 ‖ <pubkeyHash: 20 bytes> ‖ 0x88 0xac
+		eightRef := ctx.emit(makeLoadConstInt(big.NewInt(8)))
+		amountBytesRef := ctx.emit(makeCall("num2bin", []string{amountRef, eightRef}))
+		// 0x19 0x76 0xa9 0x14 — script length byte + OP_DUP OP_HASH160 OP_PUSH20
+		prefixRef := ctx.emit(makeLoadConstString("1976a914"))
+		// 0x88 0xac — OP_EQUALVERIFY OP_CHECKSIG
+		suffixRef := ctx.emit(makeLoadConstString("88ac"))
+		cat1Ref := ctx.emit(makeCall("cat", []string{amountBytesRef, prefixRef}))
+		cat2Ref := ctx.emit(makeCall("cat", []string{cat1Ref, pubkeyHashRef}))
+		expectedOutputRef := ctx.emit(makeCall("cat", []string{cat2Ref, suffixRef}))
+
+		// Substring extract at idx*34 length 34, assert equal.
+		serialisedRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_serialisedOutputs"})
+		offsetRef := ctx.emit(makeLoadConstInt(big.NewInt(idx * 34)))
+		lengthRef := ctx.emit(makeLoadConstInt(big.NewInt(34)))
+		extractedRef := ctx.emit(makeCall("substr", []string{serialisedRef, offsetRef, lengthRef}))
+		outEqRef := ctx.emit(ir.ANFValue{
+			Kind: "bin_op", Op: "===",
+			Left: extractedRef, Right: expectedOutputRef,
+			ResultType: "bytes",
+		})
+		return ctx.emit(makeAssert(outEqRef))
+	}
+
+	// currentBlockHeight() -> bigint. Pure source-level desugar to
+	// extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
+	// methods (typecheck enforces). No new ANF kind or stack codegen needed.
+	if id, ok := callee.(Identifier); ok && id.Name == "currentBlockHeight" {
+		preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+		return ctx.emit(makeCall("extractLocktime", []string{preimageRef}))
 	}
 
 	// this.addOutput(satoshis, val1, val2, ...) -> special node.

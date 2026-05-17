@@ -149,6 +149,10 @@ module RunarCompiler
       "ExtractOutputHash" => "extractOutputHash",
       "ExtractAmount" => "extractAmount",
       "ExtractLocktime" => "extractLocktime",
+      # Intent sub-covenant intrinsics (BSVM Phase 13)
+      "ExtractPrevOutputScript" => "extractPrevOutputScript",
+      "RequireOutputP2PKH" => "requireOutputP2PKH",
+      "CurrentBlockHeight" => "currentBlockHeight",
       # Output construction
       "AddOutput" => "addOutput", "AddRawOutput" => "addRawOutput",
       "AddDataOutput" => "addDataOutput",

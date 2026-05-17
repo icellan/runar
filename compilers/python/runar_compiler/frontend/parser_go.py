@@ -160,6 +160,10 @@ _GO_BUILTIN_MAP: dict[str, str] = {
     "ExtractInputIndex": "extractInputIndex",
     "ExtractSigHashType": "extractSigHashType",
     "ExtractOutputs": "extractOutputs",
+    # Intent sub-covenant intrinsics (BSVM Phase 13).
+    "ExtractPrevOutputScript": "extractPrevOutputScript",
+    "RequireOutputP2PKH":      "requireOutputP2PKH",
+    "CurrentBlockHeight":      "currentBlockHeight",
     "AddOutput": "addOutput",
     "AddRawOutput": "addRawOutput",
     "AddDataOutput": "addDataOutput",

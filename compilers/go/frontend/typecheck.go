@@ -204,6 +204,15 @@ var builtinFunctions = map[string]funcSig{
 	"extractOutputs":       {params: []string{"SigHashPreimage"}, returnType: "Sha256"},
 	"extractLocktime":      {params: []string{"SigHashPreimage"}, returnType: "bigint"},
 	"extractSigHashType":   {params: []string{"SigHashPreimage"}, returnType: "bigint"},
+	// Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
+	// that compile down to standard primitives + auto-injected method params.
+	// See docs/cross-covenant-pattern.md.
+	//
+	// First arg of extractPrevOutputScript / requireOutputP2PKH MUST be an
+	// integer literal — enforced as a special case in checkCallArgs.
+	"extractPrevOutputScript": {params: []string{"bigint", "ByteString"}, returnType: "ByteString"},
+	"requireOutputP2PKH":      {params: []string{"bigint", "ByteString", "bigint"}, returnType: "void"},
+	"currentBlockHeight":      {params: []string{}, returnType: "bigint"},
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +422,194 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 	}
 
 	tc.checkStatements(method.Body, env)
+
+	// Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in the
+	// same method body. The intrinsic's compile-time output-offset
+	// computation assumes a fixed 34-byte stride per output, which is
+	// silently wrong when an OP_RETURN output (variable length) precedes
+	// the indexed P2PKH output. Caller would get a runtime
+	// OP_EQUALVERIFY failure only if the specific output index is
+	// exercised — attackers could route the bond P2PKH through an
+	// unmatched index. v1 forbids the mix; v2 may relax with a
+	// variable-stride decoder.
+	hasRequireP2PKH := bodyCallsBuiltin(method.Body, "requireOutputP2PKH")
+	hasAddDataOutput := bodyCallsAddDataOutput(method.Body)
+	if hasRequireP2PKH && hasAddDataOutput {
+		tc.addError(fmt.Sprintf(
+			"method '%s' mixes requireOutputP2PKH() with addDataOutput() — "+
+				"v1 of the intrinsic assumes a fixed 34-byte output stride and "+
+				"variable-length OP_RETURN outputs break the offset computation; "+
+				"split the addDataOutput call into a separate method", method.Name))
+	}
+}
+
+// bodyCallsBuiltin reports whether any statement in `body` (recursively)
+// contains a top-level call expression to a builtin function named `name`.
+// Used by the Crit-3 typecheck rejection for requireOutputP2PKH +
+// addDataOutput mixing.
+func bodyCallsBuiltin(body []Statement, name string) bool {
+	for _, stmt := range body {
+		if stmtContainsCallTo(stmt, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyCallsAddDataOutput reports whether any statement in `body`
+// (recursively) contains a call to `this.addDataOutput(...)` or
+// `c.addDataOutput(...)` — matched by the Property name "addDataOutput"
+// on a PropertyAccessExpr or MemberExpr callee.
+func bodyCallsAddDataOutput(body []Statement) bool {
+	for _, stmt := range body {
+		if stmtContainsAddDataOutput(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtContainsCallTo(stmt Statement, name string) bool {
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		return exprContainsCallTo(s.Expr, name)
+	case VariableDeclStmt:
+		return exprContainsCallTo(s.Init, name)
+	case AssignmentStmt:
+		return exprContainsCallTo(s.Value, name) || exprContainsCallTo(s.Target, name)
+	case IfStmt:
+		if exprContainsCallTo(s.Condition, name) {
+			return true
+		}
+		for _, t := range s.Then {
+			if stmtContainsCallTo(t, name) {
+				return true
+			}
+		}
+		for _, e := range s.Else {
+			if stmtContainsCallTo(e, name) {
+				return true
+			}
+		}
+	case ForStmt:
+		for _, t := range s.Body {
+			if stmtContainsCallTo(t, name) {
+				return true
+			}
+		}
+	case ReturnStmt:
+		if s.Value != nil {
+			return exprContainsCallTo(s.Value, name)
+		}
+	}
+	return false
+}
+
+func exprContainsCallTo(expr Expression, name string) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case CallExpr:
+		if id, ok := e.Callee.(Identifier); ok && id.Name == name {
+			return true
+		}
+		for _, a := range e.Args {
+			if exprContainsCallTo(a, name) {
+				return true
+			}
+		}
+	case BinaryExpr:
+		return exprContainsCallTo(e.Left, name) || exprContainsCallTo(e.Right, name)
+	case UnaryExpr:
+		return exprContainsCallTo(e.Operand, name)
+	case TernaryExpr:
+		return exprContainsCallTo(e.Condition, name) ||
+			exprContainsCallTo(e.Consequent, name) ||
+			exprContainsCallTo(e.Alternate, name)
+	case IndexAccessExpr:
+		return exprContainsCallTo(e.Object, name) || exprContainsCallTo(e.Index, name)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			if exprContainsCallTo(el, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stmtContainsAddDataOutput(stmt Statement) bool {
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		return exprContainsAddDataOutput(s.Expr)
+	case VariableDeclStmt:
+		return exprContainsAddDataOutput(s.Init)
+	case AssignmentStmt:
+		return exprContainsAddDataOutput(s.Value) || exprContainsAddDataOutput(s.Target)
+	case IfStmt:
+		if exprContainsAddDataOutput(s.Condition) {
+			return true
+		}
+		for _, t := range s.Then {
+			if stmtContainsAddDataOutput(t) {
+				return true
+			}
+		}
+		for _, e := range s.Else {
+			if stmtContainsAddDataOutput(e) {
+				return true
+			}
+		}
+	case ForStmt:
+		for _, t := range s.Body {
+			if stmtContainsAddDataOutput(t) {
+				return true
+			}
+		}
+	case ReturnStmt:
+		if s.Value != nil {
+			return exprContainsAddDataOutput(s.Value)
+		}
+	}
+	return false
+}
+
+func exprContainsAddDataOutput(expr Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case CallExpr:
+		if pa, ok := e.Callee.(PropertyAccessExpr); ok && pa.Property == "addDataOutput" {
+			return true
+		}
+		if me, ok := e.Callee.(MemberExpr); ok && me.Property == "addDataOutput" {
+			return true
+		}
+		for _, a := range e.Args {
+			if exprContainsAddDataOutput(a) {
+				return true
+			}
+		}
+	case BinaryExpr:
+		return exprContainsAddDataOutput(e.Left) || exprContainsAddDataOutput(e.Right)
+	case UnaryExpr:
+		return exprContainsAddDataOutput(e.Operand)
+	case TernaryExpr:
+		return exprContainsAddDataOutput(e.Condition) ||
+			exprContainsAddDataOutput(e.Consequent) ||
+			exprContainsAddDataOutput(e.Alternate)
+	case IndexAccessExpr:
+		return exprContainsAddDataOutput(e.Object) || exprContainsAddDataOutput(e.Index)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			if exprContainsAddDataOutput(el) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (tc *typeChecker) checkStatements(stmts []Statement, env *typeEnv) {
@@ -903,6 +1100,53 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 			return sig.returnType
 		}
 		// Fall through to the standard subtype check below.
+	}
+
+	// extractPrevOutputScript / requireOutputP2PKH — the index arg MUST
+	// be a compile-time integer literal so the ANF lowering can derive a
+	// stable auto-injected witness-param name (extractPrevOutputScript) or
+	// a constant byte offset (requireOutputP2PKH).
+	if funcName == "extractPrevOutputScript" || funcName == "requireOutputP2PKH" {
+		if len(args) >= 1 {
+			if _, ok := args[0].(BigIntLiteral); !ok {
+				tc.addError(fmt.Sprintf("%s() argument 1 (index) must be an integer literal", funcName))
+			}
+		}
+	}
+
+	// extractPrevOutputScript variable-arity special case (2-arg full-hash
+	// or 3-arg prefix-hash form). Validates types + literal-only on the
+	// optional prefixLen, then returns the signature's return type to
+	// bypass the standard arg-count check below (which would reject the
+	// 3-arg form against the 2-arg sig table entry).
+	if funcName == "extractPrevOutputScript" {
+		if len(args) != 2 && len(args) != 3 {
+			tc.addError(fmt.Sprintf("extractPrevOutputScript() expects 2 or 3 arguments, got %d", len(args)))
+		}
+		if len(args) >= 1 {
+			tc.inferExprType(args[0], env) // already validated as literal above
+		}
+		if len(args) >= 2 {
+			argType := tc.inferExprType(args[1], env)
+			if !isSubtype(argType, "ByteString") && argType != "<unknown>" {
+				tc.addError(fmt.Sprintf("argument 2 of extractPrevOutputScript(): expected 'ByteString', got '%s'", argType))
+			}
+		}
+		if len(args) == 3 {
+			if _, ok := args[2].(BigIntLiteral); !ok {
+				tc.addError("extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied")
+			}
+			tc.inferExprType(args[2], env)
+		}
+		return sig.returnType
+	}
+
+	// requireOutputP2PKH and currentBlockHeight need the auto-injected
+	// txPreimage — only available in StatefulSmartContract methods.
+	if funcName == "requireOutputP2PKH" || funcName == "currentBlockHeight" {
+		if tc.contract != nil && tc.contract.ParentClass != "StatefulSmartContract" {
+			tc.addError(fmt.Sprintf("%s() is only available in StatefulSmartContract methods", funcName))
+		}
 	}
 
 	// merkleRootPoseidon2KB special case — variable arity:

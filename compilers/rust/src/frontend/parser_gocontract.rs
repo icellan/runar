@@ -132,6 +132,10 @@ fn map_go_builtin(name: &str) -> String {
         "ReverseBytes" => "reverseBytes".to_string(),
         "ExtractLocktime" => "extractLocktime".to_string(),
         "ExtractOutputHash" => "extractOutputHash".to_string(),
+        // Intent sub-covenant intrinsics (BSVM Phase 13).
+        "ExtractPrevOutputScript" => "extractPrevOutputScript".to_string(),
+        "RequireOutputP2PKH" => "requireOutputP2PKH".to_string(),
+        "CurrentBlockHeight" => "currentBlockHeight".to_string(),
         "AddOutput" => "addOutput".to_string(),
         "AddRawOutput" => "addRawOutput".to_string(),
         "AddDataOutput" => "addDataOutput".to_string(),

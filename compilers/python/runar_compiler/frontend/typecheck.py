@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from runar_compiler.frontend.ast_nodes import (
+    ArrayLiteralExpr,
     AssignmentStmt,
     BigIntLiteral,
     BinaryExpr,
@@ -209,6 +210,15 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "extractSigHashType":   FuncSig(params=["SigHashPreimage"], return_type="bigint"),
     "split":                FuncSig(params=["ByteString", "bigint"], return_type="ByteString"),
     "buildChangeOutput":    FuncSig(params=["ByteString", "bigint"], return_type="ByteString"),
+    # Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
+    # that compile down to standard primitives + auto-injected method params.
+    # See docs/cross-covenant-pattern.md.
+    #
+    # First arg of extractPrevOutputScript / requireOutputP2PKH MUST be an
+    # integer literal — enforced as a special case in _check_call_args.
+    "extractPrevOutputScript": FuncSig(params=["bigint", "ByteString"], return_type="ByteString"),
+    "requireOutputP2PKH":      FuncSig(params=["bigint", "ByteString", "bigint"], return_type="void"),
+    "currentBlockHeight":      FuncSig(params=[], return_type="bigint"),
 }
 
 
@@ -374,6 +384,25 @@ class _TypeChecker:
             env.define(param.name, _type_node_to_string(param.type))
 
         self._check_statements(method.body, env)
+
+        # Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in the
+        # same method body. The intrinsic's compile-time output-offset
+        # computation assumes a fixed 34-byte stride per output, which is
+        # silently wrong when an OP_RETURN output (variable length) precedes
+        # the indexed P2PKH output. Caller would get a runtime
+        # OP_EQUALVERIFY failure only if the specific output index is
+        # exercised — attackers could route the bond P2PKH through an
+        # unmatched index. v1 forbids the mix; v2 may relax with a
+        # variable-stride decoder.
+        has_require_p2pkh = _body_calls_builtin(method.body, "requireOutputP2PKH")
+        has_add_data_output = _body_calls_add_data_output(method.body)
+        if has_require_p2pkh and has_add_data_output:
+            self._add_error(
+                f"method '{method.name}' mixes requireOutputP2PKH() with addDataOutput() — "
+                "v1 of the intrinsic assumes a fixed 34-byte output stride and "
+                "variable-length OP_RETURN outputs break the offset computation; "
+                "split the addDataOutput call into a separate method"
+            )
 
     def _check_statements(self, stmts: list[Statement], env: _TypeEnv) -> None:
         for stmt in stmts:
@@ -826,6 +855,50 @@ class _TypeChecker:
                 return sig.return_type
             # Fall through to the standard subtype check below.
 
+        # extractPrevOutputScript / requireOutputP2PKH — the index arg MUST
+        # be a compile-time integer literal so the ANF lowering can derive a
+        # stable auto-injected witness-param name (extractPrevOutputScript) or
+        # a constant byte offset (requireOutputP2PKH).
+        if func_name in ("extractPrevOutputScript", "requireOutputP2PKH"):
+            if len(args) >= 1 and not isinstance(args[0], BigIntLiteral):
+                self._add_error(
+                    f"{func_name}() argument 1 (index) must be an integer literal"
+                )
+
+        # extractPrevOutputScript variable-arity special case (2-arg full-hash
+        # or 3-arg prefix-hash form). Validates types + literal-only on the
+        # optional prefixLen, then returns the signature's return type to
+        # bypass the standard arg-count check below (which would reject the
+        # 3-arg form against the 2-arg sig table entry).
+        if func_name == "extractPrevOutputScript":
+            if len(args) != 2 and len(args) != 3:
+                self._add_error(
+                    f"extractPrevOutputScript() expects 2 or 3 arguments, got {len(args)}"
+                )
+            if len(args) >= 1:
+                self._infer_expr_type(args[0], env)  # already validated as literal above
+            if len(args) >= 2:
+                arg_type = self._infer_expr_type(args[1], env)
+                if not is_subtype(arg_type, "ByteString") and arg_type != "<unknown>":
+                    self._add_error(
+                        f"argument 2 of extractPrevOutputScript(): expected 'ByteString', got '{arg_type}'"
+                    )
+            if len(args) == 3:
+                if not isinstance(args[2], BigIntLiteral):
+                    self._add_error(
+                        "extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied"
+                    )
+                self._infer_expr_type(args[2], env)
+            return sig.return_type
+
+        # requireOutputP2PKH and currentBlockHeight need the auto-injected
+        # txPreimage -- only available in StatefulSmartContract methods.
+        if func_name in ("requireOutputP2PKH", "currentBlockHeight"):
+            if self.contract is not None and self.contract.parent_class != "StatefulSmartContract":
+                self._add_error(
+                    f"{func_name}() is only available in StatefulSmartContract methods"
+                )
+
         # Standard arg count check
         if len(args) != len(sig.params):
             self._add_error(
@@ -1043,3 +1116,162 @@ def _stmt_source_location(stmt: Statement) -> SourceLocation | None:
     if loc is not None and (loc.file or loc.line > 0):
         return loc
     return None
+
+
+# ---------------------------------------------------------------------------
+# Recursive call-site walkers (Crit-3: requireOutputP2PKH + addDataOutput mix)
+# ---------------------------------------------------------------------------
+
+def _body_calls_builtin(body: list[Statement], name: str) -> bool:
+    """Return True if any statement in *body* (recursively) contains a
+    top-level call expression to a builtin identifier named *name*."""
+    for stmt in body:
+        if _stmt_contains_call_to(stmt, name):
+            return True
+    return False
+
+
+def _body_calls_add_data_output(body: list[Statement]) -> bool:
+    """Return True if any statement in *body* (recursively) contains a call
+    to ``this.addDataOutput(...)`` or ``c.addDataOutput(...)`` — matched by
+    the ``addDataOutput`` property on a PropertyAccessExpr or MemberExpr
+    callee."""
+    for stmt in body:
+        if _stmt_contains_add_data_output(stmt):
+            return True
+    return False
+
+
+def _stmt_contains_call_to(stmt: Statement, name: str) -> bool:
+    if isinstance(stmt, ExpressionStmt):
+        return _expr_contains_call_to(stmt.expr, name)
+    if isinstance(stmt, VariableDeclStmt):
+        return _expr_contains_call_to(stmt.init, name)
+    if isinstance(stmt, AssignmentStmt):
+        return (
+            _expr_contains_call_to(stmt.value, name)
+            or _expr_contains_call_to(stmt.target, name)
+        )
+    if isinstance(stmt, IfStmt):
+        if _expr_contains_call_to(stmt.condition, name):
+            return True
+        for t in stmt.then:
+            if _stmt_contains_call_to(t, name):
+                return True
+        for e in stmt.else_:
+            if _stmt_contains_call_to(e, name):
+                return True
+        return False
+    if isinstance(stmt, ForStmt):
+        for t in stmt.body:
+            if _stmt_contains_call_to(t, name):
+                return True
+        return False
+    if isinstance(stmt, ReturnStmt):
+        if stmt.value is not None:
+            return _expr_contains_call_to(stmt.value, name)
+    return False
+
+
+def _expr_contains_call_to(expr: Expression | None, name: str) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, CallExpr):
+        if isinstance(expr.callee, Identifier) and expr.callee.name == name:
+            return True
+        for a in expr.args:
+            if _expr_contains_call_to(a, name):
+                return True
+        return False
+    if isinstance(expr, BinaryExpr):
+        return (
+            _expr_contains_call_to(expr.left, name)
+            or _expr_contains_call_to(expr.right, name)
+        )
+    if isinstance(expr, UnaryExpr):
+        return _expr_contains_call_to(expr.operand, name)
+    if isinstance(expr, TernaryExpr):
+        return (
+            _expr_contains_call_to(expr.condition, name)
+            or _expr_contains_call_to(expr.consequent, name)
+            or _expr_contains_call_to(expr.alternate, name)
+        )
+    if isinstance(expr, IndexAccessExpr):
+        return (
+            _expr_contains_call_to(expr.object, name)
+            or _expr_contains_call_to(expr.index, name)
+        )
+    if isinstance(expr, ArrayLiteralExpr):
+        for el in expr.elements:
+            if _expr_contains_call_to(el, name):
+                return True
+    return False
+
+
+def _stmt_contains_add_data_output(stmt: Statement) -> bool:
+    if isinstance(stmt, ExpressionStmt):
+        return _expr_contains_add_data_output(stmt.expr)
+    if isinstance(stmt, VariableDeclStmt):
+        return _expr_contains_add_data_output(stmt.init)
+    if isinstance(stmt, AssignmentStmt):
+        return (
+            _expr_contains_add_data_output(stmt.value)
+            or _expr_contains_add_data_output(stmt.target)
+        )
+    if isinstance(stmt, IfStmt):
+        if _expr_contains_add_data_output(stmt.condition):
+            return True
+        for t in stmt.then:
+            if _stmt_contains_add_data_output(t):
+                return True
+        for e in stmt.else_:
+            if _stmt_contains_add_data_output(e):
+                return True
+        return False
+    if isinstance(stmt, ForStmt):
+        for t in stmt.body:
+            if _stmt_contains_add_data_output(t):
+                return True
+        return False
+    if isinstance(stmt, ReturnStmt):
+        if stmt.value is not None:
+            return _expr_contains_add_data_output(stmt.value)
+    return False
+
+
+def _expr_contains_add_data_output(expr: Expression | None) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, CallExpr):
+        callee = expr.callee
+        if isinstance(callee, PropertyAccessExpr) and callee.property == "addDataOutput":
+            return True
+        if isinstance(callee, MemberExpr) and callee.property == "addDataOutput":
+            return True
+        for a in expr.args:
+            if _expr_contains_add_data_output(a):
+                return True
+        return False
+    if isinstance(expr, BinaryExpr):
+        return (
+            _expr_contains_add_data_output(expr.left)
+            or _expr_contains_add_data_output(expr.right)
+        )
+    if isinstance(expr, UnaryExpr):
+        return _expr_contains_add_data_output(expr.operand)
+    if isinstance(expr, TernaryExpr):
+        return (
+            _expr_contains_add_data_output(expr.condition)
+            or _expr_contains_add_data_output(expr.consequent)
+            or _expr_contains_add_data_output(expr.alternate)
+        )
+    if isinstance(expr, IndexAccessExpr):
+        return (
+            _expr_contains_add_data_output(expr.object)
+            or _expr_contains_add_data_output(expr.index)
+        )
+    if isinstance(expr, ArrayLiteralExpr):
+        for el in expr.elements:
+            if _expr_contains_add_data_output(el):
+                return True
+    return False

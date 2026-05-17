@@ -266,17 +266,40 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
         { kind: 'param', name: 'txPreimage', type: { kind: 'primitive_type', name: 'SigHashPreimage' } },
       );
 
+      // Intent-covenant intrinsic auto-injected witness params:
+      // extractPrevOutputScript adds `_prevOutScript_<inputIndex>` (one per
+      // distinct literal index referenced in the method); requireOutputP2PKH
+      // adds a single `_serialisedOutputs`. Order follows insertion order
+      // via methodScope.autoInjectedParams. Appended AFTER txPreimage so
+      // unlocking scripts push them adjacent to the preimage (matches the
+      // existing _changePKH / _changeAmount / _newAmount convention of
+      // trailing the user args before the preimage anchor).
+      const finalParams = lowerParams(augmentedParams);
+      for (const p of methodCtx.methodScope.autoInjectedParams) {
+        finalParams.push(p);
+      }
+
       result.push({
         name: method.name,
-        params: lowerParams(augmentedParams),
+        params: finalParams,
         body: methodCtx.bindings,
         isPublic: true,
       });
     } else {
       lowerStatements(method.body, methodCtx);
+      // Private methods can also call the intent intrinsics; capture
+      // their auto-injected witness params. Public callers that inline
+      // this private pick them up via the shared methodScope (see
+      // inlinePrivateMethodCall), so the auto-injection registers at
+      // the public method's ABI augmentation step above. The private's
+      // own ABI is still informative for non-inlined callees.
+      const params = lowerParams(method.params);
+      for (const p of methodCtx.methodScope.autoInjectedParams) {
+        params.push(p);
+      }
       result.push({
         name: method.name,
-        params: lowerParams(method.params),
+        params,
         body: methodCtx.bindings,
         isPublic: method.visibility === 'public',
       });
@@ -297,6 +320,35 @@ function lowerParams(params: ParamNode[]): ANFParam[] {
 // Lowering context: manages temp variable generation
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-method bookkeeping shared by a public method's top-level
+ * LoweringContext and every sub-context it spawns (if/else, ternary,
+ * inlined private bodies). Tracks the witness parameters that the
+ * intent-covenant intrinsics (extractPrevOutputScript,
+ * requireOutputP2PKH) auto-inject into the method's ABI regardless of
+ * which nested scope the intrinsic call lives in. Mirrors Go's
+ * methodScopeT.
+ */
+class MethodScope {
+  /** Append-only, insertion order. */
+  readonly autoInjectedParams: ANFParam[] = [];
+  /** Dedup set keyed by param name. */
+  private readonly autoInjectedSet: Set<string> = new Set();
+  /**
+   * Idempotency flag: requireOutputP2PKH emits its
+   * `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
+   * check at most once per method body, even if called multiple times.
+   */
+  didEmitHashOutputsCheck = false;
+
+  /** Idempotent — second call with the same name is a no-op. */
+  recordAutoInjectedParam(name: string, type: string): void {
+    if (this.autoInjectedSet.has(name)) return;
+    this.autoInjectedSet.add(name);
+    this.autoInjectedParams.push({ name, type });
+  }
+}
+
 class LoweringContext {
   bindings: ANFBinding[] = [];
   private counter = 0;
@@ -306,6 +358,12 @@ class LoweringContext {
   private readonly localByteVars: Set<string> = new Set();
   private readonly _addOutputRefs: string[] = [];
   private readonly _addDataOutputRefs: string[] = [];
+  /**
+   * Per-method state shared with all sub-contexts via the same object
+   * reference, so an auto-injection that fires inside an if-branch
+   * still registers on the parent method's ABI augmentation list.
+   */
+  methodScope: MethodScope = new MethodScope();
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
@@ -516,6 +574,9 @@ class LoweringContext {
     for (const l of this.localNames) sub.localNames.add(l);
     for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
+    // Share the method scope so auto-injection from intrinsics called
+    // inside the nested block bubbles up to the parent's ABI list.
+    sub.methodScope = this.methodScope;
     return sub;
   }
 
@@ -1067,6 +1128,147 @@ function lowerCallExpr(
       const preimageRef = lowerExprToRef(expr.args[0]!, ctx);
       return ctx.emit({ kind: 'check_preimage', preimage: preimageRef });
     }
+  }
+
+  // extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString.
+  // extractPrevOutputScript(inputIndex_literal, expectedScriptPrefixHash, prefixLen_literal) -> ByteString.
+  //
+  // Witness-bridge sugar (BSVM Phase 13). Auto-injects a hidden method
+  // parameter named `_prevOutScript_<inputIndex>` (one per distinct index
+  // in the method body), emits a hash assertion, and returns the witness
+  // ref for caller substring extraction.
+  //
+  // 2-arg form: hash256(witness) === expectedScriptHash. Pins the full
+  //   prev-output script byte-for-byte.
+  // 3-arg form (Crit-2): hash256(substr(witness, 0, prefixLen)) ===
+  //   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
+  //   pushdata tail free to vary. Required for the intent-template
+  //   matching use case where each successor intent UTXO has a unique
+  //   tail (BSVM Mode 3 permissionless step-in).
+  if (callee.kind === 'identifier' && callee.name === 'extractPrevOutputScript') {
+    if (expr.args.length !== 2 && expr.args.length !== 3) {
+      return ctx.emit({ kind: 'load_const', value: '' });
+    }
+    const idxArg = expr.args[0]!;
+    if (idxArg.kind !== 'bigint_literal') {
+      // typecheck has already emitted the diagnostic; emit a placeholder
+      // so lowering doesn't crash.
+      return ctx.emit({ kind: 'load_const', value: '' });
+    }
+    const idx = idxArg.value;
+    const paramName = `_prevOutScript_${idx.toString()}`;
+    ctx.methodScope.recordAutoInjectedParam(paramName, 'ByteString');
+    ctx.addParam(paramName);
+    const witnessRef = ctx.emit({ kind: 'load_param', name: paramName });
+    const expectedHashRef = lowerExprToRef(expr.args[1]!, ctx);
+
+    // Determine which bytes to hash: full witness (2-arg) or
+    // prefix (3-arg). The substr happens at script-execution time;
+    // the literal prefixLen is baked into the emitted Stack-IR.
+    let bytesToHashRef: string;
+    if (expr.args.length === 3) {
+      const prefixLenArg = expr.args[2]!;
+      if (prefixLenArg.kind !== 'bigint_literal') {
+        // typecheck has already emitted the diagnostic; emit a placeholder.
+        return ctx.emit({ kind: 'load_const', value: '' });
+      }
+      const zeroRef = ctx.emit({ kind: 'load_const', value: 0n });
+      const prefixLenRef = ctx.emit({ kind: 'load_const', value: prefixLenArg.value });
+      bytesToHashRef = ctx.emit({
+        kind: 'call', func: 'substr',
+        args: [witnessRef, zeroRef, prefixLenRef],
+      });
+    } else {
+      bytesToHashRef = witnessRef;
+    }
+
+    const actualHashRef = ctx.emit({ kind: 'call', func: 'hash256', args: [bytesToHashRef] });
+    const eqRef = ctx.emit({
+      kind: 'bin_op', op: '===',
+      left: actualHashRef, right: expectedHashRef,
+      result_type: 'bytes',
+    });
+    ctx.emit({ kind: 'assert', value: eqRef });
+    return witnessRef;
+  }
+
+  // requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount) -> void.
+  // Asserts that the tx's output at outputIndex is a standard P2PKH paying
+  // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
+  // (once per method) and emits hash256(serialisedOutputs) ==
+  // extractOutputHash(txPreimage) the first time the intrinsic is called
+  // in a method body. Subsequent calls in the same method skip the
+  // hashOutputs check (already established) and emit only the per-output
+  // substring assertion.
+  //
+  // v1 assumes all outputs in the serialised set are exactly 34 bytes
+  // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
+  // of output i is i*34. If the method also calls this.addDataOutput(...)
+  // the assumption breaks (variable-length OP_RETURN) — typecheck
+  // rejects that mix; see checkMethod in 03-typecheck.ts (Crit-3).
+  if (callee.kind === 'identifier' && callee.name === 'requireOutputP2PKH') {
+    if (expr.args.length !== 3) {
+      return ctx.emit({ kind: 'load_const', value: '' });
+    }
+    const idxArg = expr.args[0]!;
+    if (idxArg.kind !== 'bigint_literal') {
+      return ctx.emit({ kind: 'load_const', value: '' });
+    }
+    const idx = idxArg.value;
+
+    ctx.methodScope.recordAutoInjectedParam('_serialisedOutputs', 'ByteString');
+    ctx.addParam('_serialisedOutputs');
+
+    // Emit the hashOutputs(preimage) check exactly once per method.
+    if (!ctx.methodScope.didEmitHashOutputsCheck) {
+      ctx.methodScope.didEmitHashOutputsCheck = true;
+      const serialisedRef = ctx.emit({ kind: 'load_param', name: '_serialisedOutputs' });
+      const actualOutHashRef = ctx.emit({ kind: 'call', func: 'hash256', args: [serialisedRef] });
+      const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
+      const expectedOutHashRef = ctx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef] });
+      const hashEqRef = ctx.emit({
+        kind: 'bin_op', op: '===',
+        left: actualOutHashRef, right: expectedOutHashRef,
+        result_type: 'bytes',
+      });
+      ctx.emit({ kind: 'assert', value: hashEqRef });
+    }
+
+    // Lower the user-supplied args (pubkeyHash, amount).
+    const pubkeyHashRef = lowerExprToRef(expr.args[1]!, ctx);
+    const amountRef = lowerExprToRef(expr.args[2]!, ctx);
+
+    // Construct expected P2PKH output bytes:
+    //   <amount: 8-byte LE> ‖ 0x19 0x76 0xa9 0x14 ‖ <pubkeyHash: 20 bytes> ‖ 0x88 0xac
+    const eightRef = ctx.emit({ kind: 'load_const', value: 8n });
+    const amountBytesRef = ctx.emit({ kind: 'call', func: 'num2bin', args: [amountRef, eightRef] });
+    // 0x19 0x76 0xa9 0x14 — script length byte + OP_DUP OP_HASH160 OP_PUSH20
+    const prefixRef = ctx.emit({ kind: 'load_const', value: '1976a914' });
+    // 0x88 0xac — OP_EQUALVERIFY OP_CHECKSIG
+    const suffixRef = ctx.emit({ kind: 'load_const', value: '88ac' });
+    const cat1Ref = ctx.emit({ kind: 'call', func: 'cat', args: [amountBytesRef, prefixRef] });
+    const cat2Ref = ctx.emit({ kind: 'call', func: 'cat', args: [cat1Ref, pubkeyHashRef] });
+    const expectedOutputRef = ctx.emit({ kind: 'call', func: 'cat', args: [cat2Ref, suffixRef] });
+
+    // Substring extract at idx*34 length 34, assert equal.
+    const serialisedRef2 = ctx.emit({ kind: 'load_param', name: '_serialisedOutputs' });
+    const offsetRef = ctx.emit({ kind: 'load_const', value: idx * 34n });
+    const lengthRef = ctx.emit({ kind: 'load_const', value: 34n });
+    const extractedRef = ctx.emit({ kind: 'call', func: 'substr', args: [serialisedRef2, offsetRef, lengthRef] });
+    const outEqRef = ctx.emit({
+      kind: 'bin_op', op: '===',
+      left: extractedRef, right: expectedOutputRef,
+      result_type: 'bytes',
+    });
+    return ctx.emit({ kind: 'assert', value: outEqRef });
+  }
+
+  // currentBlockHeight() -> bigint. Pure source-level desugar to
+  // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
+  // methods (typecheck enforces). No new ANF kind or stack codegen needed.
+  if (callee.kind === 'identifier' && callee.name === 'currentBlockHeight') {
+    const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
+    return ctx.emit({ kind: 'call', func: 'extractLocktime', args: [preimageRef] });
   }
 
   // asm({ body, in_arity?, out_arity? }) — parser has already normalised
