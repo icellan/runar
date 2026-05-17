@@ -318,7 +318,7 @@ group-law audit) appear as explicit nodes.
         │   Phase D wrappers:                                      │
         │     D1 Merkle dispatch       (depends on A3)             │
         │     D2.a auto check_preimage (depends on Phase E — done) │
-        │     D2.b auto state_output   (depends on A5 Tier 2 — done)│
+        │     D2.b auto state_output   [BLOCKED — model gap]      │
         └──────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -550,7 +550,7 @@ and B7-prep infrastructure. The remaining Tier 1 work:
   `runOpcode_CHECKSIG_ValidTxContext` (already proved) with
   `Stack/TxContext.lean` preimage construction (already concrete).
   See §5.18.
-* **D2.b auto state_output** (1.5 wk) — Discharge
+* **D2.b auto state_output** [BLOCKED — Tier 2, model widening prerequisite] — Wave-3 finding: structurally undischargeable as stated. ANF `evalValue` on `.addOutput` / `.addRawOutput` / `.addDataOutput` APPENDS to `s.outputs`; Stack `runOps` / `runOpcode` deliberately preserve `StackState.outputs` (intentional design per `Stack/OutputTrace.lean` opening comment). For a stateful method the conclusion `anfFinal.outputs = stkFinal.outputs` requires substrate widening — either extend `Stack.Eval.runOps` to thread output records through the BIP-143 emission ops, or replace the axiom's conclusion with an `OutputTrace.applyTrace`-mediated statement. Moves to Tier 2 with the model-extension prerequisite. ~1.5 wk (Discharge
   `auto_state_output_at_method_exit_correct`. Depends on A5 Tier 2
   (landed wave 1). See §5.18.
 

@@ -120,7 +120,7 @@ requires:
   `auto_check_preimage_at_method_entry_correct`. Composes
   `runOpcode_CHECKSIG_ValidTxContext` (already proved). See §5.18.
 
-* [ ] **D2.b auto state_output** (~1.5 wk). Discharge
+* [ ] **D2.b auto state_output** [BLOCKED — moved to Tier 2]. Wave-3 finding: structurally undischargeable as stated (ANF `addOutput` appends to `outputs`; Stack `runOps` preserves it by design). Needs substrate widening — either extend `Stack.Eval.runOps` to thread output records or replace axiom conclusion with `OutputTrace.applyTrace`-mediated statement. ~1.5 wk (Discharge
   `auto_state_output_at_method_exit_correct`. Depends on A5
   Tier 2 (landed wave 1). See §5.18.
 

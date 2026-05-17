@@ -1350,5 +1350,625 @@ theorem runMethod_lower_public_unique_no_post_singletonUnaryNot_isSome
   exact runOps_not_pushTrue_of_agreesTagged n tsm_rest anfSt initialStack b
     hAgrees hLookup
 
+/-! ## A3 — Tier-2 wave 3: singleton `binOp` at depth pair (1, 0) with sentinel cap
+
+This block widens the Tier-2 unary wrappers to cover singleton `binOp`
+bindings at the depth pair `(1, 0)`: the bottom operand at depth 1, the
+top operand at depth 0. Both operands are at last-use, so consume-mode
+fires for both; the program-aware lowerer emits
+`[.swap, .swap, .opcode (binopOpcode op rt)]` as the head binding's ops,
+followed by the cap binding's `[.push (.bool true)]`.
+
+Runtime success of the two-swap composition is delivered by the wave-3
+substrate `Stack.Agrees.stageC_simpleStep_binOp_d1d0_consume_core`
+(in `Stack/Agrees.lean`), which takes `hAgrees + hOpcode` and proves the
+3-op sequence post-state directly. We rebuild `hOpcode` from the
+input-side `lookupAnfByKind` lookups for the two operands, then chain
+the result with the cap binding's unconditional push.
+
+### Body shape
+
+`singletonBinOpWithCap m opName n1 n2 bn bcap tail rt src srcCap` means:
+
+* `m.body = [⟨bn, .binOp opName n1 n2 rt, src⟩,
+             ⟨bcap, .loadConst (.bool true), srcCap⟩]` — a binOp followed
+   by the sentinel-true cap (keeping `bodyEndsInAssert = false`).
+* `(m.params.map (·.name)).reverse = n2 :: n1 :: tail` — `n2` is on top
+  of the runtime stack at depth 0, `n1` sits at depth 1.
+* Distinct names: `n1 ≠ n2`, `bn ≠ bcap`, `bcap ≠ n1`, `bcap ≠ n2`.
+
+The `opName` parameter is generic; each integer-arithmetic kind below
+(`+`, `-`, `*`) instantiates it via a tier-local body-shape predicate
+and discharges runtime success against the matching `runOpcode_*_intInt`
+simulation lemma. -/
+
+/-! ### Generic body shape and shared lowering reductions -/
+
+/-- Generic composite body shape for a single `binOp opName n1 n2 rt`
+binding at depth pair (1, 0) followed by the sentinel-true cap. The
+`opName` parameter is the surface arithmetic operator (`"+"`, `"-"`,
+`"*"`, …) that the lowerer translates via `binopOpcode`. -/
+def singletonBinOpWithCap (m : ANFMethod)
+    (opName : String) (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc) : Prop :=
+  m.body = [⟨bn, .binOp opName n1 n2 rt, src⟩,
+            ⟨bcap, .loadConst (.bool true), srcCap⟩] ∧
+  (m.params.map (fun p => p.name)).reverse = n2 :: n1 :: tail ∧
+  n1 ≠ n2 ∧ bn ≠ bcap ∧ bcap ≠ n1 ∧ bcap ≠ n2
+
+/-- `collectRefs (.binOp opName n1 n2 rt) = [n1, n2]`. -/
+private theorem collectRefs_binOp (opName n1 n2 : String) (rt : Option String) :
+    Stack.Lower.collectRefs (.binOp opName n1 n2 rt) = [n1, n2] := by
+  unfold Stack.Lower.collectRefs
+  rfl
+
+/-- `lastUsesUpdate (lastUsesUpdate [] n1 0) n2 0 = [(n2, 0), (n1, 0)]`
+when `n1 ≠ n2`. -/
+private theorem lastUsesUpdate_two_distinct
+    (n1 n2 : String) (hne : n1 ≠ n2) :
+    Stack.Lower.lastUsesUpdate (Stack.Lower.lastUsesUpdate [] n1 0) n2 0
+      = [(n2, 0), (n1, 0)] := by
+  unfold Stack.Lower.lastUsesUpdate
+  -- First: lastUsesUpdate [] n1 0 = [(n1, 0)] (filtered list is empty).
+  -- Second: prepend (n2, 0) to filter [(n1, 0)] keeping entries where
+  -- p.1 != n2; (n1, 0)'s first component is n1 ≠ n2, so the filter keeps it.
+  have hbne : (n1 != n2) = true := by
+    simp [bne_iff_ne, hne]
+  simp [List.filter, hbne]
+
+/-- `computeLastUses` on `[binOpBinding, capBinding]` records
+`[(n2, 0), (n1, 0)]` when `n1 ≠ n2`. -/
+private theorem computeLastUses_singletonBinOpWithCap
+    (opName : String) (bn bcap n1 n2 : String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (hne : n1 ≠ n2) :
+    Stack.Lower.computeLastUses
+        [⟨bn, .binOp opName n1 n2 rt, src⟩,
+         ⟨bcap, .loadConst (.bool true), srcCap⟩]
+      = [(n2, 0), (n1, 0)] := by
+  unfold Stack.Lower.computeLastUses
+  -- collectRefs of .binOp returns [n1, n2]; collectRefs of loadConst is [].
+  -- foldl over [n1, n2] from [] gives lastUsesUpdate (lastUsesUpdate [] n1 0) n2 0.
+  simp [Stack.Lower.computeLastUses.go, collectRefs_binOp opName n1 n2 rt,
+        collectRefs_loadConst_bool_true,
+        lastUsesUpdate_two_distinct n1 n2 hne]
+
+/-- `collectConstInts` on `[binOpBinding, capBinding]` is `[]` (no
+`.loadConst (.int _)` bindings). -/
+private theorem collectConstInts_singletonBinOpWithCap
+    (opName : String) (bn bcap n1 n2 : String)
+    (rt : Option String) (src srcCap : Option SourceLoc) :
+    Stack.Lower.collectConstInts
+        [⟨bn, .binOp opName n1 n2 rt, src⟩,
+         ⟨bcap, .loadConst (.bool true), srcCap⟩]
+      = [] := by
+  unfold Stack.Lower.collectConstInts
+  simp [Stack.Lower.collectConstInts]
+
+/-- The four flag-free side conditions on a `singletonBinOpWithCap` body. -/
+private theorem bindingsUseCheckPreimage_singletonBinOpWithCap
+    (opName : String) (bn bcap n1 n2 : String)
+    (rt : Option String) (src srcCap : Option SourceLoc) :
+    Stack.Lower.bindingsUseCheckPreimage
+        [⟨bn, .binOp opName n1 n2 rt, src⟩,
+         ⟨bcap, .loadConst (.bool true), srcCap⟩]
+      = false := by
+  unfold Stack.Lower.bindingsUseCheckPreimage
+  simp [Stack.Lower.bindingsUseCheckPreimage]
+
+private theorem bindingsUseCodePart_singletonBinOpWithCap
+    (opName : String) (bn bcap n1 n2 : String)
+    (rt : Option String) (src srcCap : Option SourceLoc) :
+    Stack.Lower.bindingsUseCodePart
+        [⟨bn, .binOp opName n1 n2 rt, src⟩,
+         ⟨bcap, .loadConst (.bool true), srcCap⟩]
+      = false := by
+  unfold Stack.Lower.bindingsUseCodePart
+  simp [Stack.Lower.bindingsUseCodePart]
+
+private theorem bindingsUseDeserializeState_singletonBinOpWithCap
+    (opName : String) (bn bcap n1 n2 : String)
+    (rt : Option String) (src srcCap : Option SourceLoc) :
+    Stack.Lower.bindingsUseDeserializeState
+        [⟨bn, .binOp opName n1 n2 rt, src⟩,
+         ⟨bcap, .loadConst (.bool true), srcCap⟩]
+      = false := by
+  unfold Stack.Lower.bindingsUseDeserializeState
+  simp [Stack.Lower.bindingsUseDeserializeState]
+
+private theorem bodyEndsInAssert_singletonBinOpWithCap
+    (opName : String) (bn bcap n1 n2 : String)
+    (rt : Option String) (src srcCap : Option SourceLoc) :
+    Stack.Lower.bodyEndsInAssert
+        [⟨bn, .binOp opName n1 n2 rt, src⟩,
+         ⟨bcap, .loadConst (.bool true), srcCap⟩]
+      = false := by
+  rfl
+
+/-! ### `lastUsesLookup` / `isLastUse` reductions on `[(n2, 0), (n1, 0)]` -/
+
+/-- `lastUsesLookup [(n2, 0), (n1, 0)] n1 = some 0` when `n1 ≠ n2`. -/
+private theorem lastUsesLookup_two_first
+    (n1 n2 : String) (hne : n1 ≠ n2) :
+    Stack.Lower.lastUsesLookup [(n2, 0), (n1, 0)] n1 = some 0 := by
+  unfold Stack.Lower.lastUsesLookup
+  have hne2 : (n2 == n1) = false := by
+    have : n2 ≠ n1 := fun h => hne h.symm
+    simp [this]
+  simp [hne2]
+
+/-- `lastUsesLookup [(n2, 0), (n1, 0)] n2 = some 0`. -/
+private theorem lastUsesLookup_two_second
+    (n2 _n1 : String) :
+    Stack.Lower.lastUsesLookup [(n2, 0), (_n1, 0)] n2 = some 0 := by
+  unfold Stack.Lower.lastUsesLookup
+  simp
+
+/-- `isLastUse [(n2, 0), (n1, 0)] n1 0 = true`. -/
+private theorem isLastUse_two_first
+    (n1 n2 : String) (hne : n1 ≠ n2) :
+    Stack.Lower.isLastUse [(n2, 0), (n1, 0)] n1 0 = true := by
+  unfold Stack.Lower.isLastUse
+  rw [lastUsesLookup_two_first n1 n2 hne]
+  simp
+
+/-- `isLastUse [(n2, 0), (n1, 0)] n2 0 = true`. -/
+private theorem isLastUse_two_second
+    (n1 n2 : String) :
+    Stack.Lower.isLastUse [(n2, 0), (n1, 0)] n2 0 = true := by
+  unfold Stack.Lower.isLastUse
+  rw [lastUsesLookup_two_second n2 n1]
+  simp
+
+/-! ### Lowering of `singletonBinOpWithCap`:
+   `[.swap, .swap, .opcode (binopOpcode opName rt), .push (.bool true)]`
+
+For `opName ∈ {"+", "-", "*", "/", "%"}` and any `rt`, the
+`binopOpcode opName rt` reduction is closed (the `!==` rebound only
+fires on `opName = "!=="`). The wrapper below leaves the opcode in
+`binopOpcode` form; per-kind callers rewrite it to `OP_ADD`/`OP_SUB`/
+`OP_MUL`/etc. with a `decide`/`rfl` step.
+
+Note: the body-shape predicate excludes `n1 = n2` (otherwise the depth
+lookups would collide); the `n1 ≠ n2` hypothesis is part of `hCap`. -/
+
+set_option maxHeartbeats 4000000 in
+set_option linter.unusedSimpArgs false in
+private theorem lowerMethodUserRawOps_singletonBinOpWithCap
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) (opName : String)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (hCap : singletonBinOpWithCap m opName n1 n2 bn bcap tail rt src srcCap)
+    (hNotNeqBytes : (opName == "!==" && rt == some "bytes") = false) :
+    lowerMethodUserRawOps progMethods props m
+      = [.swap, .swap, .opcode (Stack.Lower.binopOpcode opName rt),
+         .push (.bool true)] := by
+  obtain ⟨hBody, hRev, hne, _hBnCap, _hBcapN1, _hBcapN2⟩ := hCap
+  unfold lowerMethodUserRawOps
+  rw [hBody, hRev]
+  rw [computeLastUses_singletonBinOpWithCap opName bn bcap n1 n2 rt src srcCap hne]
+  rw [collectConstInts_singletonBinOpWithCap opName bn bcap n1 n2 rt src srcCap]
+  -- Depth-1 lookup of n1 in [n2, n1, ...tail] is some 1.
+  have hFind1 : (n2 :: n1 :: tail).findIdx? (· == n1) = some 1 := by
+    have hne2 : (n2 == n1) = false := by
+      have h : n2 ≠ n1 := fun h => hne h.symm
+      simp [beq_iff_eq, h]
+    unfold List.findIdx?
+    simp [List.findIdx?.go, hne2]
+  -- Depth-1 lookup of n2 in [n1, n2, ...tail] (after the first swap) is some 1.
+  have hFind2 : (n1 :: n2 :: tail).findIdx? (· == n2) = some 1 := by
+    have hne1 : (n1 == n2) = false := by
+      have h : n1 ≠ n2 := hne
+      simp [beq_iff_eq, h]
+    unfold List.findIdx?
+    simp [List.findIdx?.go, hne1]
+  -- Build a `loadRefLive`-result lemma for n1 at depth 1, consume-mode.
+  have hLoadN1 :
+      Stack.Lower.loadRefLive (n2 :: n1 :: tail) n1 0 [(n2, 0), (n1, 0)] []
+        = ([.swap], n1 :: n2 :: tail) := by
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop
+    rw [listContains_nil_local n1, isLastUse_two_first n1 n2 hne]
+    simp only [Bool.not_false, Bool.true_and]
+    unfold Stack.Lower.StackMap.depth?
+    rw [hFind1]
+    simp
+  -- Same for n2 at depth 1 of the swapped sm.
+  have hLoadN2 :
+      Stack.Lower.loadRefLive (n1 :: n2 :: tail) n2 0 [(n2, 0), (n1, 0)] []
+        = ([.swap], n2 :: n1 :: tail) := by
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop
+    rw [listContains_nil_local n2, isLastUse_two_second n1 n2]
+    simp only [Bool.not_false, Bool.true_and]
+    unfold Stack.Lower.StackMap.depth?
+    rw [hFind2]
+    simp
+  -- Step 1: unfold lowerBindingsP cons on the binOp head.
+  unfold Stack.Lower.lowerBindingsP
+  -- Step 2: reduce the binOp arm of lowerValueP. Use the two precomputed
+  -- loadRefLive equalities to discharge both operand loads in one go.
+  unfold Stack.Lower.lowerValueP
+  rw [hLoadN1]
+  simp only [hLoadN2]
+  -- Discharge the `op == "!==" && rt == some "bytes"` guard.
+  rw [hNotNeqBytes]
+  -- After `rw [hNotNeqBytes]`, the if-guard is `false = true`. Reduce.
+  simp only [Bool.false_eq_true, if_false, reduceIte]
+  unfold Stack.Lower.StackMap.popN
+  -- Continue with the cap binding.
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+  -- Tail of lowerBindingsP on [] reduces to ([], _).
+  simp [Stack.Lower.lowerBindingsP, Stack.Lower.StackMap.push]
+
+/-! ### Two-value top-of-stack extraction
+
+For binOp at depth pair (1, 0) we need both operand values as `.vBigint`
+on top of the runtime stack. The lookups `(n1, .param) ↦ some (.vBigint a)`
+and `(n2, .param) ↦ some (.vBigint b)` plus `agreesTagged` over the
+prefix `[(n2, .param), (n1, .param)]` give us the two-value shape
+`.vBigint b :: .vBigint a :: rest`. -/
+
+private theorem initialStack_top_two_vBigint_of_agreesTagged
+    (n1 n2 : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    ∃ rest, initialStack.stack = .vBigint b :: .vBigint a :: rest := by
+  have hAlign :
+      taggedStackAligned ((n2, .param) :: (n1, .param) :: tsm_rest)
+                         anfSt initialStack.stack := hAgrees.1
+  match hCases : initialStack.stack with
+  | [] =>
+      rw [hCases] at hAlign
+      simp [taggedStackAligned] at hAlign
+  | [_] =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      simp [taggedStackAligned] at hTail
+  | topV :: midV :: rest =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨hHeadTop, hRestAlign⟩ := hAlign
+      unfold taggedStackAligned at hRestAlign
+      obtain ⟨hHeadMid, _⟩ := hRestAlign
+      have hHeadTop' : anfSt.lookupParam n2 = some topV := hHeadTop
+      have hHeadMid' : anfSt.lookupParam n1 = some midV := hHeadMid
+      have hTopEq : topV = .vBigint b := by
+        have hCombined : some topV = some (.vBigint b) := hHeadTop'.symm.trans hLookupR
+        exact Option.some.inj hCombined
+      have hMidEq : midV = .vBigint a := by
+        have hCombined : some midV = some (.vBigint a) := hHeadMid'.symm.trans hLookupL
+        exact Option.some.inj hCombined
+      exact ⟨rest, by rw [hTopEq, hMidEq]⟩
+
+/-! ### Per-kind method-level wrappers
+
+Each per-kind wrapper instantiates `singletonBinOpWithCap` with a
+specific `opName`, derives `hOpcode` for the matching `runOpcode_*_intInt`
+simulation lemma, and composes against
+`stageC_simpleStep_binOp_d1d0_consume_core` to discharge the runtime
+success of `[.swap, .swap, .opcode]`. The cap binding's `.push` succeeds
+unconditionally; the four-op sequence's success follows by
+`runOps_append`. -/
+
+/-- Singleton `+` body shape (alias of `singletonBinOpWithCap` with
+`opName := "+"`). -/
+def singletonBinAddWithCap (m : ANFMethod)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc) : Prop :=
+  singletonBinOpWithCap m "+" n1 n2 bn bcap tail rt src srcCap
+
+/-- Singleton `-` body shape. -/
+def singletonBinSubWithCap (m : ANFMethod)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc) : Prop :=
+  singletonBinOpWithCap m "-" n1 n2 bn bcap tail rt src srcCap
+
+/-- Singleton `*` body shape. -/
+def singletonBinMulWithCap (m : ANFMethod)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc) : Prop :=
+  singletonBinOpWithCap m "*" n1 n2 bn bcap tail rt src srcCap
+
+/-! ### Runtime success for the four-op sequences
+
+For each integer-arithmetic opcode `O ∈ {OP_ADD, OP_SUB, OP_MUL}`, the
+sequence `[.swap, .swap, .opcode O, .push (.bool true)]` succeeds on a
+stack whose top two values are `.vBigint b :: .vBigint a :: rest`.
+
+The wave-3 substrate handles the `[.swap, .swap, .opcode]` prefix; the
+trailing `.push` succeeds unconditionally on any stack via `runOps`'s
+push semantics. -/
+
+/-- Runtime success of `[.swap, .swap, .opcode "OP_ADD", .push (.bool true)]`
+under `agreesTagged + two-int lookups`. -/
+private theorem runOps_swap_swap_add_pushTrue_of_agreesTagged
+    (n1 n2 : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    (Stack.Eval.runOps
+        [.swap, .swap, .opcode "OP_ADD", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨rest, hStk⟩ :=
+    initialStack_top_two_vBigint_of_agreesTagged n1 n2 tsm_rest anfSt
+      initialStack a b hAgrees hLookupL hLookupR
+  -- Build hOpcode for OP_ADD from the stack shape.
+  have hAdd :
+      Stack.Eval.runOpcode "OP_ADD" initialStack
+        = .ok ({initialStack with stack := rest}.push (.vBigint (a + b))) :=
+    Stack.Sim.runOpcode_ADD_intInt initialStack a b rest hStk
+  -- Rewrite `{... with stack := rest}` as `{... with stack := initialStack.stack.tail.tail}`.
+  have hTailTail : initialStack.stack.tail.tail = rest := by
+    rw [hStk]; rfl
+  have hAdd' :
+      Stack.Eval.runOpcode "OP_ADD" initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push
+                 (.vBigint (a + b))) := by
+    rw [hAdd, hTailTail]
+  -- Apply the wave-3 substrate.
+  have hSubstrate :
+      Stack.Eval.runOps [.swap, .swap, .opcode "OP_ADD"] initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push
+                 (.vBigint (a + b))) :=
+    stageC_simpleStep_binOp_d1d0_consume_core
+      n2 n1 .param .param tsm_rest anfSt initialStack a b
+      "OP_ADD" (.vBigint (a + b))
+      [.swap, .swap, .opcode "OP_ADD"]
+      hAgrees hLookupL hLookupR rfl hAdd'
+  -- Append the unconditional `.push`.
+  show (Stack.Eval.runOps
+          ([.swap, .swap, .opcode "OP_ADD"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hSubstrate]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.swap, .swap, .opcode "OP_SUB", .push (.bool true)]`
+under `agreesTagged + two-int lookups`. -/
+private theorem runOps_swap_swap_sub_pushTrue_of_agreesTagged
+    (n1 n2 : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    (Stack.Eval.runOps
+        [.swap, .swap, .opcode "OP_SUB", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨rest, hStk⟩ :=
+    initialStack_top_two_vBigint_of_agreesTagged n1 n2 tsm_rest anfSt
+      initialStack a b hAgrees hLookupL hLookupR
+  have hSub :
+      Stack.Eval.runOpcode "OP_SUB" initialStack
+        = .ok ({initialStack with stack := rest}.push (.vBigint (a - b))) :=
+    Stack.Sim.runOpcode_SUB_intInt initialStack a b rest hStk
+  have hTailTail : initialStack.stack.tail.tail = rest := by
+    rw [hStk]; rfl
+  have hSub' :
+      Stack.Eval.runOpcode "OP_SUB" initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push
+                 (.vBigint (a - b))) := by
+    rw [hSub, hTailTail]
+  have hSubstrate :
+      Stack.Eval.runOps [.swap, .swap, .opcode "OP_SUB"] initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push
+                 (.vBigint (a - b))) :=
+    stageC_simpleStep_binOp_d1d0_consume_core
+      n2 n1 .param .param tsm_rest anfSt initialStack a b
+      "OP_SUB" (.vBigint (a - b))
+      [.swap, .swap, .opcode "OP_SUB"]
+      hAgrees hLookupL hLookupR rfl hSub'
+  show (Stack.Eval.runOps
+          ([.swap, .swap, .opcode "OP_SUB"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hSubstrate]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.swap, .swap, .opcode "OP_MUL", .push (.bool true)]`
+under `agreesTagged + two-int lookups`. -/
+private theorem runOps_swap_swap_mul_pushTrue_of_agreesTagged
+    (n1 n2 : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    (Stack.Eval.runOps
+        [.swap, .swap, .opcode "OP_MUL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨rest, hStk⟩ :=
+    initialStack_top_two_vBigint_of_agreesTagged n1 n2 tsm_rest anfSt
+      initialStack a b hAgrees hLookupL hLookupR
+  have hMul :
+      Stack.Eval.runOpcode "OP_MUL" initialStack
+        = .ok ({initialStack with stack := rest}.push (.vBigint (a * b))) :=
+    Stack.Sim.runOpcode_MUL_intInt initialStack a b rest hStk
+  have hTailTail : initialStack.stack.tail.tail = rest := by
+    rw [hStk]; rfl
+  have hMul' :
+      Stack.Eval.runOpcode "OP_MUL" initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push
+                 (.vBigint (a * b))) := by
+    rw [hMul, hTailTail]
+  have hSubstrate :
+      Stack.Eval.runOps [.swap, .swap, .opcode "OP_MUL"] initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push
+                 (.vBigint (a * b))) :=
+    stageC_simpleStep_binOp_d1d0_consume_core
+      n2 n1 .param .param tsm_rest anfSt initialStack a b
+      "OP_MUL" (.vBigint (a * b))
+      [.swap, .swap, .opcode "OP_MUL"]
+      hAgrees hLookupL hLookupR rfl hMul'
+  show (Stack.Eval.runOps
+          ([.swap, .swap, .opcode "OP_MUL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hSubstrate]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-! ### Method-level wrappers for `+`, `-`, `*` at depth pair (1, 0) -/
+
+/-- **Method-level runtime-success wrapper for `singletonBinAddWithCap`.**
+
+Real-arith body (binOp `+` at depth pair (1, 0)) whose runtime success is
+proved structurally — no `hRunOk` / `hSimulates`. The two operand lookups
+plus `agreesTagged` deliver the runtime stack shape; the wave-3 substrate
+discharges the two-swap-plus-opcode prefix; the cap binding's `.push`
+succeeds unconditionally. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinAdd_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinAddWithCap m n1 n2 bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "+" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("+" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap
+        methods props m "+" n1 n2 bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  -- `binopOpcode "+" rt = "OP_ADD"` by definitional reduction.
+  show (Stack.Eval.runOps
+          [.swap, .swap, .opcode "OP_ADD", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_swap_swap_add_pushTrue_of_agreesTagged n1 n2 tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `singletonBinSubWithCap`.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinSub_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinSubWithCap m n1 n2 bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "-" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("-" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap
+        methods props m "-" n1 n2 bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.swap, .swap, .opcode "OP_SUB", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_swap_swap_sub_pushTrue_of_agreesTagged n1 n2 tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `singletonBinMulWithCap`.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinMul_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinMulWithCap m n1 n2 bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "*" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("*" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap
+        methods props m "*" n1 n2 bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.swap, .swap, .opcode "OP_MUL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_swap_swap_mul_pushTrue_of_agreesTagged n1 n2 tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
 end Agrees
 end RunarVerification.Stack
