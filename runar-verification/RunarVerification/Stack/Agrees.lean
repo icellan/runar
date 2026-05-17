@@ -19734,5 +19734,879 @@ theorem stackEquivModuloIntermediates_trans
    h12.2.2.1.trans h23.2.2.1, h12.2.2.2.1.trans h23.2.2.2.1,
    h12.2.2.2.2.trans h23.2.2.2.2⟩
 
+/-! ## §5.21 — `SupportedANFBody` predicate
+
+The inductive **shape** predicate that unifies the per-family
+structural fragments landed in waves 1–5 (A3 arith, A4 calls, A5
+update-prop, A6 if_val, A7 loop, A8 method_call) plus the const /
+ref base. It is the predicate the widened single- and multi-method
+capstones in `Pipeline.lean` (deferred follow-up) will consume in
+place of the narrower `structuralRefBody` premise.
+
+### Design
+
+`SupportedANFBody` is a *parameter-free* predicate on
+`List ANFBinding` — it depends only on the AST shape, not on the
+lowering state (`StackMap`, `lastUses`, `outerProtected`, etc.).
+This is critical for two reasons:
+
+1. The per-fixture instantiation harness can discharge
+   `SupportedANFBody anfM.body` mechanically via `native_decide`.
+2. The lowering-state threading is internal to each per-family
+   body predicate (`structuralRefBody`, `structuralArithBody`, …).
+   The capstone widening (deferred to a follow-up agent) takes
+   `SupportedANFBody` as a hypothesis and reconstructs the
+   threading-aware predicates on demand.
+
+The per-value **shape** predicates below name the constructor
+families recognised at each tier. They are intentionally simple
+matches on the `ANFValue` head — every `lastUses` / `outerProtected`
+/ `localBindings` / `sm` / `currentIndex` side-condition from the
+threaded variants is dropped here; the capstone reconstructs the
+side-conditions internally using the lowering pipeline. -/
+
+/-- Const-shape: `loadConst` of a literal (int, bool, bytes). The
+parameter-free analogue of `structuralConstValue`. -/
+def supportedConstShape : ANFValue → Bool
+  | .loadConst (.int _)   => true
+  | .loadConst (.bool _)  => true
+  | .loadConst (.bytes _) => true
+  | _                     => false
+
+/-- Ref-shape: `loadParam`, `loadProp`, or `loadConst (.refAlias …)` /
+`loadConst .thisRef`. These are the values handled by the union of
+copy-mode and consume-mode in `structuralRefValue`. -/
+def supportedRefShape : ANFValue → Bool
+  | .loadParam _              => true
+  | .loadProp _               => true
+  | .loadConst (.refAlias _)  => true
+  | .loadConst .thisRef       => true
+  | _                         => false
+
+/-- Arith-shape: `binOp` / `unaryOp` / `assert`. Extends
+`structuralArithValue` minus the proved-opcode side-condition (the
+capstone re-checks via `isProvedBinOpKind` / `isProvedUnaryOpKind`). -/
+def supportedArithShape : ANFValue → Bool
+  | .binOp _ _ _ _    => true
+  | .unaryOp _ _ _    => true
+  | .assert _         => true
+  | _                 => false
+
+/-- Call-shape: built-in / framework `call`. -/
+def supportedCallShape : ANFValue → Bool
+  | .call _ _ => true
+  | _         => false
+
+/-- UpdateProp-shape: writes to a (mutable) property slot. -/
+def supportedUpdatePropShape : ANFValue → Bool
+  | .updateProp _ _ => true
+  | _               => false
+
+/-- IfVal-shape: `ifVal cond thn els` head. The sub-bodies'
+recursive support is recorded by the inductive constructor below
+(`SupportedANFBody.ifVal`), not by this Bool checker. -/
+def supportedIfValShape : ANFValue → Bool
+  | .ifVal _ _ _ => true
+  | _            => false
+
+/-- Loop-shape: any `loop count body iterVar` head. As with
+`ifVal`, the body's recursive support is recorded by the inductive
+constructor. -/
+def supportedLoopShape : ANFValue → Bool
+  | .loop _ _ _ => true
+  | _           => false
+
+/-- MethodCall-shape: any `methodCall obj method args` head. -/
+def supportedMethodCallShape : ANFValue → Bool
+  | .methodCall _ _ _ => true
+  | _                 => false
+
+/-- The inductive `SupportedANFBody` predicate. Each constructor
+corresponds to a Stage C family discharged in waves 1–5 (or the
+const / ref base that was already in `Path 1`). The `ifVal` and
+`loop` constructors recursively require their sub-bodies to be in
+`SupportedANFBody` — strict positivity is satisfied because
+`SupportedANFBody` appears only in positive-recursive hypothesis
+positions of the constructors. -/
+inductive SupportedANFBody : List ANFBinding → Prop where
+  | nil :
+      SupportedANFBody []
+  | refValue (name : String) (v : ANFValue) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hShape : supportedRefShape v = true)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name v src :: rest)
+  | constValue (name : String) (v : ANFValue) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hShape : supportedConstShape v = true)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name v src :: rest)
+  | arithValue (name : String) (v : ANFValue) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hShape : supportedArithShape v = true)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name v src :: rest)
+  | callValue (name : String) (v : ANFValue) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hShape : supportedCallShape v = true)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name v src :: rest)
+  | updatePropValue (name : String) (v : ANFValue) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hShape : supportedUpdatePropShape v = true)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name v src :: rest)
+  | ifValValue (name : String) (cond : TempRef)
+      (thn els : List ANFBinding) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hThen : SupportedANFBody thn)
+      (hElse : SupportedANFBody els)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name (.ifVal cond thn els) src :: rest)
+  | loopValue (name : String) (count : Nat) (loopBody : List ANFBinding)
+      (iterVar : String) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hBody : SupportedANFBody loopBody)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name (.loop count loopBody iterVar) src :: rest)
+  | methodCallValue (name : String) (v : ANFValue) (src : Option SourceLoc)
+      (rest : List ANFBinding)
+      (hShape : supportedMethodCallShape v = true)
+      (hRest : SupportedANFBody rest) :
+      SupportedANFBody (.mk name v src :: rest)
+
+/-! ### Bool checker for `SupportedANFBody`
+
+The Bool checker `supportedANFBodyB` is a single recursive function
+on the body list (with structural recursion through `ifVal` /
+`loop` sub-bodies via `sizeOf` decreases). It returns `true` iff
+each binding's head matches one of the family shapes AND the
+recursive sub-bodies (where applicable) are themselves supported.
+
+We use `decide` on a binding-counting auxiliary to convince Lean
+of termination on the recursive sub-bodies (`thn` / `els` /
+`loopBody` are strict sub-trees of the current head's value, so
+`sizeOf` strictly decreases). -/
+
+/-- Head-shape Bool checker on a single `ANFValue`: dispatches by
+constructor head into the per-family `supported*Shape` Bool checkers
+**without** recursing into `ifVal` / `loop` sub-bodies. The recursive
+case for sub-bodies is handled by `supportedANFBodyB` below in
+combination with `supportedANFHead`. Splitting the head-shape from the
+body recursion lets the iff lemma case-split via `cases v` cleanly,
+matching the pattern in `Stack/AgreesA6.lean`'s
+`structuralConstBodyB_iff`. -/
+def supportedANFHead : ANFValue → Bool
+  | v =>
+      supportedConstShape v ||
+      supportedRefShape v ||
+      supportedArithShape v ||
+      supportedCallShape v ||
+      supportedUpdatePropShape v ||
+      supportedMethodCallShape v
+
+/-- Recursive Bool checker on `List ANFBinding`: each binding's value
+either matches a non-recursive head (via `supportedANFHead`), or its
+`ifVal` / `loop` sub-bodies are themselves supported. Termination
+uses the AST's built-in `sizeOf` measure (sub-bodies are strictly
+smaller than the enclosing binding list). -/
+def supportedANFBodyB : List ANFBinding → Bool
+  | [] => true
+  | (.mk _ (.ifVal _ thn els) _) :: rest =>
+      supportedANFBodyB thn && supportedANFBodyB els && supportedANFBodyB rest
+  | (.mk _ (.loop _ loopBody _) _) :: rest =>
+      supportedANFBodyB loopBody && supportedANFBodyB rest
+  | (.mk _ v _) :: rest =>
+      supportedANFHead v && supportedANFBodyB rest
+termination_by xs => sizeOf xs
+
+/-- Helper: inversion when the head is `.ifVal cond thn els`. -/
+private theorem SupportedANFBody_ifVal_inv
+    (name : String) (cond : TempRef)
+    (thn els : List ANFBinding) (src : Option SourceLoc)
+    (rest : List ANFBinding)
+    (h : SupportedANFBody (.mk name (.ifVal cond thn els) src :: rest)) :
+    SupportedANFBody thn ∧ SupportedANFBody els ∧ SupportedANFBody rest := by
+  cases h with
+  | refValue _ _ _ _ hShape _ => simp [supportedRefShape] at hShape
+  | constValue _ _ _ _ hShape _ => simp [supportedConstShape] at hShape
+  | arithValue _ _ _ _ hShape _ => simp [supportedArithShape] at hShape
+  | callValue _ _ _ _ hShape _ => simp [supportedCallShape] at hShape
+  | updatePropValue _ _ _ _ hShape _ => simp [supportedUpdatePropShape] at hShape
+  | ifValValue _ _ _ _ _ _ hThn hEls hRest => exact ⟨hThn, hEls, hRest⟩
+  | methodCallValue _ _ _ _ hShape _ => simp [supportedMethodCallShape] at hShape
+
+/-- Helper: inversion when the head is `.loop count body iterVar`. -/
+private theorem SupportedANFBody_loop_inv
+    (name : String) (count : Nat) (loopBody : List ANFBinding)
+    (iterVar : String) (src : Option SourceLoc)
+    (rest : List ANFBinding)
+    (h : SupportedANFBody (.mk name (.loop count loopBody iterVar) src :: rest)) :
+    SupportedANFBody loopBody ∧ SupportedANFBody rest := by
+  cases h with
+  | refValue _ _ _ _ hShape _ => simp [supportedRefShape] at hShape
+  | constValue _ _ _ _ hShape _ => simp [supportedConstShape] at hShape
+  | arithValue _ _ _ _ hShape _ => simp [supportedArithShape] at hShape
+  | callValue _ _ _ _ hShape _ => simp [supportedCallShape] at hShape
+  | updatePropValue _ _ _ _ hShape _ => simp [supportedUpdatePropShape] at hShape
+  | loopValue _ _ _ _ _ _ hBody hRest => exact ⟨hBody, hRest⟩
+  | methodCallValue _ _ _ _ hShape _ => simp [supportedMethodCallShape] at hShape
+
+/-- Helper: inversion when the head is non-recursive (anything but `ifVal`
+or `loop`). Yields the per-family shape witness and a recursive support
+witness for the tail. -/
+private theorem SupportedANFBody_nonrec_inv
+    (name : String) (v : ANFValue) (src : Option SourceLoc)
+    (rest : List ANFBinding)
+    (h : SupportedANFBody (.mk name v src :: rest))
+    (hNotIfVal : ∀ cond thn els, v ≠ .ifVal cond thn els)
+    (hNotLoop : ∀ count body iterVar, v ≠ .loop count body iterVar) :
+    supportedANFHead v = true ∧ SupportedANFBody rest := by
+  cases h with
+  | refValue _ _ _ _ hShape hRest =>
+      refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
+  | constValue _ _ _ _ hShape hRest =>
+      refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
+  | arithValue _ _ _ _ hShape hRest =>
+      refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
+  | callValue _ _ _ _ hShape hRest =>
+      refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
+  | updatePropValue _ _ _ _ hShape hRest =>
+      refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
+  | ifValValue _ cond thn els _ _ _ _ _ =>
+      exact absurd rfl (hNotIfVal cond thn els)
+  | loopValue _ count loopBody iterVar _ _ _ _ =>
+      exact absurd rfl (hNotLoop count loopBody iterVar)
+  | methodCallValue _ _ _ _ hShape hRest =>
+      refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
+
+/-- `supportedANFBodyB` reflects `SupportedANFBody`. -/
+theorem supportedANFBodyB_iff :
+    ∀ (body : List ANFBinding),
+      supportedANFBodyB body = true ↔ SupportedANFBody body
+  | [] => by
+      constructor
+      · intro _; exact SupportedANFBody.nil
+      · intro _
+        show supportedANFBodyB [] = true
+        unfold supportedANFBodyB
+        rfl
+  | (.mk name v src) :: rest => by
+      -- Dispatch on v's constructor head. We rely on `supportedANFBodyB`'s
+      -- pattern-matching equations: the ifVal / loop arms unfold to the
+      -- recursive form, every other arm unfolds via the catch-all to
+      -- `supportedANFHead v && supportedANFBodyB rest`.
+      cases v with
+      | ifVal cond thn els =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          constructor
+          · rintro ⟨⟨hThn, hEls⟩, hRest⟩
+            exact SupportedANFBody.ifValValue name cond thn els src rest
+                    ((supportedANFBodyB_iff thn).mp hThn)
+                    ((supportedANFBodyB_iff els).mp hEls)
+                    ((supportedANFBodyB_iff rest).mp hRest)
+          · intro h
+            obtain ⟨hThn, hEls, hRest⟩ :=
+              SupportedANFBody_ifVal_inv name cond thn els src rest h
+            exact ⟨⟨(supportedANFBodyB_iff _).mpr hThn,
+                    (supportedANFBodyB_iff _).mpr hEls⟩,
+                   (supportedANFBodyB_iff _).mpr hRest⟩
+      | loop count loopBody iterVar =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          constructor
+          · rintro ⟨hBody, hRest⟩
+            exact SupportedANFBody.loopValue name count loopBody iterVar src
+                    rest
+                    ((supportedANFBodyB_iff loopBody).mp hBody)
+                    ((supportedANFBodyB_iff rest).mp hRest)
+          · intro h
+            obtain ⟨hBody, hRest⟩ :=
+              SupportedANFBody_loop_inv name count loopBody iterVar src rest h
+            exact ⟨(supportedANFBodyB_iff _).mpr hBody,
+                   (supportedANFBodyB_iff _).mpr hRest⟩
+      | loadParam n =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.refValue name _ src rest
+                    (by simp [supportedANFHead, supportedRefShape] at hH; simp [supportedRefShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | refValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | loadProp n =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.refValue name _ src rest
+                    (by simp [supportedRefShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | refValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | loadConst c =>
+          cases c with
+          | int n =>
+              simp only [supportedANFBodyB, Bool.and_eq_true]
+              refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+              · exact SupportedANFBody.constValue name _ src rest
+                        (by simp [supportedConstShape])
+                        ((supportedANFBodyB_iff rest).mp hR)
+              · cases h with
+                | constValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | refValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | arithValue _ _ _ _ hShape _ =>
+                    simp [supportedArithShape] at hShape
+                | callValue _ _ _ _ hShape _ =>
+                    simp [supportedCallShape] at hShape
+                | updatePropValue _ _ _ _ hShape _ =>
+                    simp [supportedUpdatePropShape] at hShape
+                | methodCallValue _ _ _ _ hShape _ =>
+                    simp [supportedMethodCallShape] at hShape
+          | bool b =>
+              simp only [supportedANFBodyB, Bool.and_eq_true]
+              refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+              · exact SupportedANFBody.constValue name _ src rest
+                        (by simp [supportedConstShape])
+                        ((supportedANFBodyB_iff rest).mp hR)
+              · cases h with
+                | constValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | refValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | arithValue _ _ _ _ hShape _ =>
+                    simp [supportedArithShape] at hShape
+                | callValue _ _ _ _ hShape _ =>
+                    simp [supportedCallShape] at hShape
+                | updatePropValue _ _ _ _ hShape _ =>
+                    simp [supportedUpdatePropShape] at hShape
+                | methodCallValue _ _ _ _ hShape _ =>
+                    simp [supportedMethodCallShape] at hShape
+          | bytes bs =>
+              simp only [supportedANFBodyB, Bool.and_eq_true]
+              refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+              · exact SupportedANFBody.constValue name _ src rest
+                        (by simp [supportedConstShape])
+                        ((supportedANFBodyB_iff rest).mp hR)
+              · cases h with
+                | constValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | refValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | arithValue _ _ _ _ hShape _ =>
+                    simp [supportedArithShape] at hShape
+                | callValue _ _ _ _ hShape _ =>
+                    simp [supportedCallShape] at hShape
+                | updatePropValue _ _ _ _ hShape _ =>
+                    simp [supportedUpdatePropShape] at hShape
+                | methodCallValue _ _ _ _ hShape _ =>
+                    simp [supportedMethodCallShape] at hShape
+          | refAlias _ =>
+              simp only [supportedANFBodyB, Bool.and_eq_true]
+              refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+              · exact SupportedANFBody.refValue name _ src rest
+                        (by simp [supportedRefShape])
+                        ((supportedANFBodyB_iff rest).mp hR)
+              · cases h with
+                | constValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | refValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | arithValue _ _ _ _ hShape _ =>
+                    simp [supportedArithShape] at hShape
+                | callValue _ _ _ _ hShape _ =>
+                    simp [supportedCallShape] at hShape
+                | updatePropValue _ _ _ _ hShape _ =>
+                    simp [supportedUpdatePropShape] at hShape
+                | methodCallValue _ _ _ _ hShape _ =>
+                    simp [supportedMethodCallShape] at hShape
+          | thisRef =>
+              simp only [supportedANFBodyB, Bool.and_eq_true]
+              refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+              · exact SupportedANFBody.refValue name _ src rest
+                        (by simp [supportedRefShape])
+                        ((supportedANFBodyB_iff rest).mp hR)
+              · cases h with
+                | constValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | refValue _ _ _ _ hShape hRest =>
+                    refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                    simp [supportedANFHead, hShape]
+                | arithValue _ _ _ _ hShape _ =>
+                    simp [supportedArithShape] at hShape
+                | callValue _ _ _ _ hShape _ =>
+                    simp [supportedCallShape] at hShape
+                | updatePropValue _ _ _ _ hShape _ =>
+                    simp [supportedUpdatePropShape] at hShape
+                | methodCallValue _ _ _ _ hShape _ =>
+                    simp [supportedMethodCallShape] at hShape
+      | binOp op l r rt =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.arithValue name _ src rest
+                    (by simp [supportedArithShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | arithValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | unaryOp op operand rt =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.arithValue name _ src rest
+                    (by simp [supportedArithShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | arithValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | assert operand =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.arithValue name _ src rest
+                    (by simp [supportedArithShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | arithValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | call func args =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.callValue name _ src rest
+                    (by simp [supportedCallShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | callValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | methodCall obj method args =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.methodCallValue name _ src rest
+                    (by simp [supportedMethodCallShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | methodCallValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+      | updateProp p ref =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
+          · exact SupportedANFBody.updatePropValue name _ src rest
+                    (by simp [supportedUpdatePropShape])
+                    ((supportedANFBodyB_iff rest).mp hR)
+          · cases h with
+            | updatePropValue _ _ _ _ hShape hRest =>
+                refine ⟨?_, (supportedANFBodyB_iff rest).mpr hRest⟩
+                simp [supportedANFHead, hShape]
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | getStateScript =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | checkPreimage _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | deserializeState _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | addOutput _ _ _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | addRawOutput _ _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | addDataOutput _ _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | arrayLiteral _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+      | rawScript _ _ _ =>
+          simp only [supportedANFBodyB, Bool.and_eq_true]
+          refine ⟨fun ⟨hH, _⟩ => ?_, fun h => ?_⟩
+          · simp [supportedANFHead, supportedConstShape, supportedRefShape,
+                  supportedArithShape, supportedCallShape,
+                  supportedUpdatePropShape, supportedMethodCallShape] at hH
+          · cases h with
+            | refValue _ _ _ _ hShape _ =>
+                simp [supportedRefShape] at hShape
+            | constValue _ _ _ _ hShape _ =>
+                simp [supportedConstShape] at hShape
+            | arithValue _ _ _ _ hShape _ =>
+                simp [supportedArithShape] at hShape
+            | callValue _ _ _ _ hShape _ =>
+                simp [supportedCallShape] at hShape
+            | updatePropValue _ _ _ _ hShape _ =>
+                simp [supportedUpdatePropShape] at hShape
+            | methodCallValue _ _ _ _ hShape _ =>
+                simp [supportedMethodCallShape] at hShape
+termination_by body => sizeOf body
+
+/-- `SupportedANFBody` is decidable: the Bool checker decides. -/
+instance instDecidableSupportedANFBody (body : List ANFBinding) :
+    Decidable (SupportedANFBody body) :=
+  if h : supportedANFBodyB body = true then
+    isTrue ((supportedANFBodyB_iff body).mp h)
+  else
+    isFalse (fun hP => h ((supportedANFBodyB_iff body).mpr hP))
+
+/-! ### Family-inclusion lemmas
+
+For each per-family body predicate already landed in waves 1–5,
+show the fragment it recognises is contained in `SupportedANFBody`.
+These bridges let the deferred capstone widening route a fixture
+classified as in family `X` into the unified `SupportedANFBody`
+premise.
+
+The proofs go by induction on the body list. Each existing
+per-family `Body` predicate has the shape
+`(.mk name v _) :: rest ↦ familyValue v ∧ familyBody rest …`, so
+the induction step needs only to show (a) the head's shape is in
+the corresponding `supported*Shape`, and (b) the tail satisfies
+`SupportedANFBody` by IH. -/
+
+/-- The `structuralConstBody` fragment is contained in
+`SupportedANFBody`. -/
+theorem SupportedANFBody_of_structuralConstBody :
+    ∀ (body : List ANFBinding),
+      structuralConstBody body → SupportedANFBody body
+  | [], _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, h => by
+      simp only [structuralConstBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralConstBody rest hRest
+      -- `hHead : structuralConstValue v`; pull out the literal-load shape.
+      have hShape : supportedConstShape v = true := by
+        cases v with
+        | loadConst c =>
+            cases c with
+            | int _ => simp [supportedConstShape]
+            | bool _ => simp [supportedConstShape]
+            | bytes _ => simp [supportedConstShape]
+            | refAlias _ => simp [structuralConstValue] at hHead
+            | thisRef => simp [structuralConstValue] at hHead
+        | loadParam _ => simp [structuralConstValue] at hHead
+        | loadProp _ => simp [structuralConstValue] at hHead
+        | binOp _ _ _ _ => simp [structuralConstValue] at hHead
+        | unaryOp _ _ _ => simp [structuralConstValue] at hHead
+        | call _ _ => simp [structuralConstValue] at hHead
+        | methodCall _ _ _ => simp [structuralConstValue] at hHead
+        | ifVal _ _ _ => simp [structuralConstValue] at hHead
+        | loop _ _ _ => simp [structuralConstValue] at hHead
+        | assert _ => simp [structuralConstValue] at hHead
+        | updateProp _ _ => simp [structuralConstValue] at hHead
+        | getStateScript => simp [structuralConstValue] at hHead
+        | checkPreimage _ => simp [structuralConstValue] at hHead
+        | deserializeState _ => simp [structuralConstValue] at hHead
+        | addOutput _ _ _ => simp [structuralConstValue] at hHead
+        | addRawOutput _ _ => simp [structuralConstValue] at hHead
+        | addDataOutput _ _ => simp [structuralConstValue] at hHead
+        | arrayLiteral _ => simp [structuralConstValue] at hHead
+        | rawScript _ _ _ => simp [structuralConstValue] at hHead
+      exact SupportedANFBody.constValue name v src rest hShape hRestS
+
+/-- The `structuralRefBody` fragment is contained in
+`SupportedANFBody`. The proof inspects each head value's
+`structuralRefValue` witness and chooses the matching constructor
+(`refValue` for `loadParam` / `loadProp` / ref-alias / thisRef,
+`constValue` for literal loads — both shapes are admissible by
+`structuralCopyValue`). -/
+theorem SupportedANFBody_of_structuralRefBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralRefBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp only [structuralRefBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralRefBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1) hRest
+      -- structuralRefValue = structuralCopyValue ∨ structuralConsumeValue.
+      -- Both fragments classify v as one of: literal load (const), loadParam,
+      -- loadProp, loadConst .refAlias, loadConst .thisRef. We dispatch on v.
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          -- structuralRefValue rejects binOp: only copy / consume of load*.
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | unaryOp _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | call _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | methodCall _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | ifVal _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | loop _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | assert _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | updateProp _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
+
 end Agrees
 end RunarVerification.Stack

@@ -2402,15 +2402,53 @@ makes that claim mechanical.
 Soundness: a direct read of `emitDispatchHeadNonLast` /
 `emitDispatchHeadLast` (`Script/Emit.lean:328-336`). For each fixture
 with multiple public methods, this is verified by golden / replay
-(see `tests/PipelineGolden.lean`). -/
+(see `tests/PipelineGolden.lean`).
+
+**Wave 5 audit (2026-05-17) — soundness restatement.** The previous
+existential form
+
+```
+∃ dispatchedStack : StackState,
+  runParsedBytes bytes initialStack = runOps stackM.ops dispatchedStack
+```
+
+is *structurally unsound*. It admits the case where `stackM` is the
+*wrong* public method: the existential lets the user pick an arbitrary
+`dispatchedStack` independent of the witness on `initialStack.stack`,
+so the equation does not constrain `stackM` to be the method the
+dispatch chain actually selects. A formally sound restatement pins the
+witness:
+
+1. `hWitness : initialStack.stack = .vBigint (Int.ofNat i) :: rest`
+   — the unlocking caller pushed dispatch index `i`.
+2. `hIdx : (publicMethodsOf …)[i]? = some stackM`
+   — `stackM` is the public method at position `i` in the list (the
+   index the chain matches).
+
+The conclusion is then a concrete equation with `rest` as the
+post-dispatch stack: `runParsedBytes bytes initialStack = runOps
+stackM.ops { initialStack with stack := rest }`. Consumers obtain
+`hDispatchToOps` (in
+`compileSafe_multi_public_observational_correct`) by instantiating
+this axiom with `dispatchedStack := { initialStack with stack := rest }`.
+
+This axiom remains stated (rather than discharged) pending the
+multi-thousand-line byte-level proof composing `parseDispatchN_emit_round_trip`
+with the `OP_DUP / OP_NUMEQUAL / OP_IF` runtime cascade. See
+`PATH2_PLAN.md` §5.17. -/
 axiom merkle_dispatch_selection_correct (p : ANFProgram) (bytes : ByteArray)
     (stackM : StackMethod) (initialStack : StackState)
+    (i : Nat) (rest : List RunarVerification.ANF.Eval.Value)
     (hSafe : compileSafe p = .ok bytes)
-    (hMem : stackM ∈ Emit.publicMethodsOf (peepholeProgram (Lower.lower p)))
+    (hIdx :
+      (Emit.publicMethodsOf (peepholeProgram (Lower.lower p)))[i]?
+        = some stackM)
+    (hWitness :
+      initialStack.stack
+        = RunarVerification.ANF.Eval.Value.vBigint (Int.ofNat i) :: rest)
     (hOps : Parse.AreRunarEmittable stackM.ops) :
-    ∃ dispatchedStack : StackState,
-      runParsedBytes bytes initialStack
-        = runOps stackM.ops dispatchedStack
+    runParsedBytes bytes initialStack
+      = runOps stackM.ops { initialStack with stack := rest }
 
 /-! ### D2 — Stateful contract continuation
 
@@ -3070,9 +3108,11 @@ theorem compileSafe_multi_public_observational_correct
     (hConst : Agrees.structuralConstBody anfM.body)
     -- M3 structural preconditions on the LOWERED body, evaluated at the
     -- *dispatched* stack (the stack the Merkle-dispatch chain has
-    -- already pre-processed). The caller computes `dispatchedStack`
-    -- via `merkle_dispatch_selection_correct` and supplies the M3
-    -- preconditions at that stack.
+    -- already pre-processed, i.e. after `OP_DROP` consumed the dispatch
+    -- witness). The caller chooses `dispatchedStack := { initialStack
+    -- with stack := rest }` for the `rest` they obtain by inverting the
+    -- unlocking witness; `merkle_dispatch_selection_correct` then
+    -- produces `hDispatchToOps` directly at that stack.
     (hNoIf : Peephole.noIfOp ((Lower.lower p).bodyOf anfM.name))
     (hPre :
       Peephole.peepholePassAllFlat_preconditions
@@ -3101,8 +3141,11 @@ theorem compileSafe_multi_public_observational_correct
     (_hOps : Parse.AreRunarEmittable stackM.ops)
     -- D1 dispatch witness: at the dispatched stack, `runParsedBytes`
     -- collapses to `runOps stackM.ops`. The caller obtains this from
-    -- `merkle_dispatch_selection_correct` paired with the chosen
-    -- `dispatchedStack`.
+    -- `merkle_dispatch_selection_correct` by instantiating it with the
+    -- index `i` of `stackM` in `publicMethodsOf …`, the rest of the
+    -- initial stack after the witness, the `hIdx` / `hWitness` premises
+    -- pinning `i`, and `dispatchedStack := { initialStack with stack :=
+    -- rest }`.
     (hDispatchToOps :
       runParsedBytes bytes dispatchedStack = runOps stackM.ops dispatchedStack) :
     successAgrees
