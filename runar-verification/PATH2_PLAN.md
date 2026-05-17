@@ -316,7 +316,7 @@ group-law audit) appear as explicit nodes.
         │     A6 Tier 2 (any branches in SupportedANFBody)         │
         │                                                          │
         │   Phase D wrappers:                                      │
-        │     D1 Merkle dispatch       (depends on A3)             │
+        │     D1 Merkle dispatch       [BLOCKED — axiom unsound]   │
         │     D2.a auto check_preimage (depends on Phase E — done) │
         │     D2.b auto state_output   [BLOCKED — model gap]      │
         └──────────────────────────────────────────────────────────┘
@@ -542,9 +542,24 @@ and B7-prep infrastructure. The remaining Tier 1 work:
 
 **Phase D wrapper soundness:**
 
-* **D1 Merkle dispatch** (3 wk) — Discharge
-  `merkle_dispatch_selection_correct`. Depends on A3 (arith Tier 2)
-  for the binop / equality cascade. See §5.17.
+* **D1 Merkle dispatch** [BLOCKED — axiom-signature fix required] —
+  Wave-5 finding: the axiom `merkle_dispatch_selection_correct` is
+  structurally unsound as currently stated. The existential
+  `∃ dispatchedStack, runParsedBytes bytes initialStack = runOps stackM.ops dispatchedStack`
+  is unsatisfiable for any `stackM` whose body's top-of-stack output
+  differs from the body the dispatch chain *actually* selects given
+  `initialStack`'s witness. Counterexample: pick a 2-method program
+  where `m₀.ops = [.push 100]`, `m₁.ops = [.push 200]`, set
+  `stackM := m₀` and `initialStack := { stack := [.vBigint 1] }`
+  (witness `1` selects `m₁`); the LHS pushes `200` while the RHS
+  pushes `100`, regardless of `dispatchedStack`. Fix: restate the
+  axiom with `(hWitness : initialStack.stack = .vBigint i :: rest)`
+  pinning the dispatch witness, conclude
+  `runParsedBytes bytes initialStack = runOps stackM.ops { initialStack with stack := rest }`
+  (no existential, no stack mismatch). The consumer
+  `compileSafe_multi_public_observational_correct` already expects
+  this shape per its `hDispatchToOps` premise. ~3 wk discharge work
+  remains after the axiom-signature fix. See §5.17.
 * **D2.a auto check_preimage** (1.5 wk) — Discharge
   `auto_check_preimage_at_method_entry_correct`. Composes
   `runOpcode_CHECKSIG_ValidTxContext` (already proved) with

@@ -19676,5 +19676,63 @@ theorem taggedStackAlignedAt_value
     rw [hStk]
     exact hStkAt stkPre d v stkSuf hLenEq
 
+/-! ### Helper 3 — `stackEquivModuloIntermediates`: stack equivalence at the
+top of stack only, modulo intermediate stack values
+
+This predicate captures stack-state equivalence at the `bn`-binding's
+top-of-stack slot while ignoring intermediate stack values stacked
+beneath it. It is the substrate that unblocks `Stack/AgreesA6.lean`'s
+multi-binding-chain widening for `if_val`: when both `then` and `else`
+branches are `structuralConstBody` chains ending in the **same**
+terminal `.loadConst c` binding, the chosen branch pushes
+`constToValue c` on top regardless of which branch ran, but the
+intermediate (non-terminal) const bindings push additional values
+that have no slot in the outer `tsm` (cf. the wave 2 obstacle report
+in `Stack/AgreesA6.lean` Tier 2).
+
+Definition shape (head + all non-stack metadata fields):
+
+* `s1.stack.head? = s2.stack.head?` — the outer `bn`-binding's value
+  agrees.
+* `s1.altstack = s2.altstack` — the auxiliary stack is untouched by
+  const bodies.
+* `s1.outputs = s2.outputs` — no `addOutput`/`addRawOutput` in const
+  bodies.
+* `s1.props = s2.props` — no `update_prop` in const bodies.
+* `s1.preimage = s2.preimage` — the BIP-143 preimage is opaque/threaded.
+
+This is intentionally weaker than literal `StackState` equality (the
+two states may have arbitrarily different stack tails / lengths) but
+strong enough to power the A6 multi-binding-chain widening: downstream
+callers establish `stackEquivModuloIntermediates stk' (stkSt.push v)`
+where `v = constToValue (last branch binding's const)`. -/
+def stackEquivModuloIntermediates (s1 s2 : StackState) : Prop :=
+  s1.stack.head? = s2.stack.head? ∧
+  s1.altstack = s2.altstack ∧
+  s1.outputs = s2.outputs ∧
+  s1.props = s2.props ∧
+  s1.preimage = s2.preimage
+
+/-- Reflexivity: any state is equivalent to itself modulo intermediates. -/
+@[simp] theorem stackEquivModuloIntermediates_refl (s : StackState) :
+    stackEquivModuloIntermediates s s :=
+  ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Symmetry: the equivalence relation is symmetric. -/
+theorem stackEquivModuloIntermediates_symm
+    {s1 s2 : StackState} (h : stackEquivModuloIntermediates s1 s2) :
+    stackEquivModuloIntermediates s2 s1 :=
+  ⟨h.1.symm, h.2.1.symm, h.2.2.1.symm, h.2.2.2.1.symm, h.2.2.2.2.symm⟩
+
+/-- Transitivity. -/
+theorem stackEquivModuloIntermediates_trans
+    {s1 s2 s3 : StackState}
+    (h12 : stackEquivModuloIntermediates s1 s2)
+    (h23 : stackEquivModuloIntermediates s2 s3) :
+    stackEquivModuloIntermediates s1 s3 :=
+  ⟨h12.1.trans h23.1, h12.2.1.trans h23.2.1,
+   h12.2.2.1.trans h23.2.2.1, h12.2.2.2.1.trans h23.2.2.2.1,
+   h12.2.2.2.2.trans h23.2.2.2.2⟩
+
 end Agrees
 end RunarVerification.Stack

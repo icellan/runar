@@ -112,8 +112,13 @@ requires:
   Tier 1 milestones land.** Short-term axiom count +8; reverses
   as each sub-omnibus retires. See `PATH2_PLAN.md` §5.23.
 
-* [ ] **D1 Merkle dispatch** (~3 wk). Discharge
-  `merkle_dispatch_selection_correct`. Depends on A3 (binop /
+* [ ] **D1 Merkle dispatch** [BLOCKED — axiom-signature fix needed]
+  (~3 wk after fix). Wave-5 finding: the existing axiom is
+  structurally unsound (unsatisfiable existential for some inputs).
+  Restate with `hWitness : initialStack.stack = .vBigint i :: rest`
+  pinning the dispatch witness; consumer
+  `compileSafe_multi_public_observational_correct` already expects
+  this shape. Discharge then composes A3 binop /
   equality cascade). See §5.17.
 
 * [ ] **D2.a auto check_preimage** (~1.5 wk). Discharge

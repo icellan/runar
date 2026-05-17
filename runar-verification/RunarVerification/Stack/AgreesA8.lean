@@ -366,5 +366,264 @@ theorem runMethod_lower_public_unique_no_post_methodCall_leafEmpty_isSome
   -- `runOps [] _ = .ok _`, so `.toOption.isSome = true`.
   simp [runOps, Except.toOption]
 
+/-! ## Tier 1 widening — singleton method_call with a leaf callee
+
+This widens the leaf-empty wrapper above to admit a **non-empty** callee
+body, as long as the callee body is structurally constant (literal int /
+bool / bytes loads only — no further `methodCall`, no references, no
+properties, no operators). This is the plan's Tier 1 target ("singleton
+method_call bindings whose callee is a leaf method (no further
+recursion)"):
+
+* outer body is still a single binding whose value is `.methodCall obj
+  method args`;
+* the object reference is NOT in `sm` (so `objDropOps = []`);
+* `args = []` (so `argLoads = []`);
+* `lookupMethod progMethods method` yields a method `m` with `m.params
+  = []` AND `structuralConstBody m.body` — the callee's body is a flat
+  sequence of literal pushes.
+
+Because the callee body is structurally-constant, the program-aware
+inliner reduces to the structural lowerer via
+`lowerBindingsP_eq_lowerBindings_structuralConst`, and the resulting
+op list runs successfully from ANY initial stack by
+`runOps_lowerBindings_structuralConstBody_isSome`.
+
+The "leaf" name reflects the recursion shape: the callee's body is
+**flat** — it cannot itself contain a `methodCall`, so the inline
+budget is irrelevant (any `budget ≥ 1` suffices).
+
+Higher tiers (allowing non-empty params with args, copy-mode reference
+loads in the callee body, 1-level-deep recursive method calls) remain
+deferred — they need to compose against the structuralRefBody / per-
+family wrappers, which in turn would need a stronger
+`runOps_lowerBindingsP_*_isSome` analogue keyed on the specific
+constructor families the callee may use. -/
+
+/-- Tier 1 widening: predicate on a `.methodCall` value where the
+callee is a leaf method with a structurally-constant body. -/
+def singletonMethodCallLeafValue
+    (progMethods : List ANFMethod) (sm : StackMap) (v : ANFValue) : Prop :=
+  match v with
+  | .methodCall obj _method args =>
+      sm.depth? obj = none ∧
+      args = [] ∧
+      (∃ m, Stack.Lower.lookupMethod progMethods _method = some m ∧
+            m.params = [] ∧
+            structuralConstBody m.body)
+  | _ => False
+
+/-- Singleton-body shape for the Tier 1 widening: the body is exactly
+one binding whose value is a `singletonMethodCallLeafValue`. -/
+def singletonMethodCallLeafBody
+    (progMethods : List ANFMethod) (sm : StackMap)
+    (body : List ANFBinding) : Prop :=
+  match body with
+  | [b] => singletonMethodCallLeafValue progMethods sm b.value
+  | _   => False
+
+/-- Method-shaped Tier 1 predicate: the method's body is a singleton
+`methodCall` against the method's initial stack map (reversed param
+names). -/
+def methodSingletonMethodCallLeafBody
+    (progMethods : List ANFMethod) (m : ANFMethod) : Prop :=
+  singletonMethodCallLeafBody progMethods
+    (m.params.map (fun p => p.name) |>.reverse) m.body
+
+/-- Value-level reduction for the Tier 1 widening: at the methodCall
+arm, with `obj` absent from `sm`, `args = []`, callee `m` with empty
+params and structurally-constant body, the op list is exactly the
+structural lowerer's output on the callee body. The witness method
+`m` is taken from `lookupMethod` and supplied as an explicit argument
+to avoid `Option.get`-rewriting in the conclusion. -/
+theorem lowerValueP_methodCall_singletonLeaf_ops
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn obj method : String) (args : List String)
+    (m : ANFMethod)
+    (hLookup : Stack.Lower.lookupMethod progMethods method = some m)
+    (hObj : sm.depth? obj = none)
+    (hArgs : args = [])
+    (_hParams : m.params = [])
+    (hConst : structuralConstBody m.body) :
+    (Stack.Lower.lowerValueP progMethods props (budget' + 1) currentIndex
+        lastUses outerProtected localBindings constInts sm bn
+        (.methodCall obj method args)).1
+      = (Stack.Lower.lowerBindings sm m.body).1 := by
+  subst hArgs
+  -- Unfold lowerValueP to reach the methodCall arm. Dispatch:
+  -- budget = budget' + 1 avoids the budget-exhausted fallback.
+  -- `lookupMethod` yields `m`. `obj` not in `sm` makes
+  -- `objDropOps = []`. `args = []` makes `argLoads = []` (the
+  -- empty-args base case of `loadAndBindArgsLive` returns `([], sm)`
+  -- regardless of `m.params`; we still require `m.params = []` in
+  -- the predicate to keep the wrapper degenerate — Tier 2 widening
+  -- with non-empty params + matching args remains deferred). The
+  -- callee body is structurally constant, so `lowerBindingsP`
+  -- agrees with `lowerBindings`.
+  have hBindings :=
+    lowerBindingsP_eq_lowerBindings_structuralConst
+      progMethods props budget' (Stack.Lower.computeLastUses m.body)
+      outerProtected (m.body.map (fun b => b.name))
+      (constInts ++ Stack.Lower.collectConstInts m.body)
+      m.body sm 0 hConst
+  unfold Stack.Lower.lowerValueP
+  simp only [hLookup, hObj,
+             Stack.Lower.loadAndBindArgsLive,
+             List.append_nil, List.nil_append,
+             hBindings]
+
+/-- Success of `runOps` on the Tier 1 widening's singleton methodCall
+body, from ANY initial stack. The proof composes:
+* `lowerValueP_methodCall_singletonLeaf_ops` — the op list is exactly
+  `(lowerBindings sm m.body).1`;
+* `runOps_lowerBindings_structuralConstBody_isSome` — that op list
+  succeeds on any starting stack.
+-/
+theorem runOps_lowerBindingsP_singleton_methodCallLeaf_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (body : List ANFBinding)
+    (stk : Stack.Eval.StackState)
+    (h : singletonMethodCallLeafBody progMethods sm body) :
+    (runOps (Stack.Lower.lowerBindingsP progMethods props (budget' + 1)
+              currentIndex lastUses outerProtected localBindings
+              constInts sm body).1 stk).toOption.isSome := by
+  -- Force `body` to the singleton shape.
+  unfold singletonMethodCallLeafBody at h
+  match hBody : body with
+  | [] => simp at h
+  | _ :: _ :: _ => simp at h
+  | [b] =>
+      -- Reduce the singleton match in `h` to expose
+      -- `singletonMethodCallLeafValue progMethods sm b.value`.
+      simp only at h
+      -- Destruct the singleton binding into its `mk` shape.
+      match hBmk : b with
+      | .mk bn bv src =>
+          have hVal : singletonMethodCallLeafValue progMethods sm bv := by
+            simp only [ANFBinding.value] at h
+            exact h
+          -- The predicate forces `bv = .methodCall _ _ _`. Eliminate
+          -- the impossible constructors via `simp [singletonMethodCallLeafValue]`.
+          match hBv : bv with
+          | .methodCall obj method args =>
+              -- After the `match` binds `bv = .methodCall …` the
+              -- hypothesis `hVal` is already in methodCall payload form.
+              have hValMC : singletonMethodCallLeafValue progMethods sm
+                  (ANFValue.methodCall obj method args) := hVal
+              -- Extract callee `m` and the constancy of its body.
+              have hValExpand := hValMC
+              unfold singletonMethodCallLeafValue at hValExpand
+              obtain ⟨hObj, hArgs, m, hLookup, hParams, hConst⟩ := hValExpand
+              subst hArgs
+              -- The head's op list reduces to `(lowerBindings sm m.body).1`.
+              have hHead :=
+                lowerValueP_methodCall_singletonLeaf_ops
+                  progMethods props budget' currentIndex lastUses
+                  outerProtected localBindings constInts sm bn obj method
+                  [] m hLookup hObj rfl hParams hConst
+              -- Unfold `lowerBindingsP` on the singleton cons. The cons
+              -- arm produces `(headOps ++ tailOps)` with `tailOps = []`
+              -- (empty rest body).
+              show (runOps
+                      (Stack.Lower.lowerBindingsP progMethods props
+                          (budget' + 1) currentIndex lastUses outerProtected
+                          localBindings constInts sm
+                          [ANFBinding.mk bn
+                            (ANFValue.methodCall obj method []) src]).1
+                      stk).toOption.isSome
+              -- The full singleton-body op list equals headOps (since
+              -- the tail recursion bottoms out at `[]`).
+              have hUnfold :
+                  (Stack.Lower.lowerBindingsP progMethods props (budget' + 1)
+                      currentIndex lastUses outerProtected localBindings
+                      constInts sm
+                      [ANFBinding.mk bn (ANFValue.methodCall obj method [])
+                        src]).1
+                    = (Stack.Lower.lowerValueP progMethods props (budget' + 1)
+                          currentIndex lastUses outerProtected localBindings
+                          constInts sm bn (ANFValue.methodCall obj method
+                            [])).1 := by
+                -- `lowerBindingsP` on `[head]` unfolds to
+                -- `headOps ++ (lowerBindingsP ... [] ).1 = headOps ++ []`.
+                with_unfolding_all
+                  simp [Stack.Lower.lowerBindingsP]
+              rw [hUnfold, hHead]
+              -- The remaining goal: runOps on `(lowerBindings sm m.body).1`
+              -- succeeds from any starting stack.
+              exact runOps_lowerBindings_structuralConstBody_isSome
+                m.body sm stk hConst
+          | .loadParam _ => simp [singletonMethodCallLeafValue] at hVal
+          | .loadProp _  => simp [singletonMethodCallLeafValue] at hVal
+          | .loadConst c =>
+              cases c <;> simp [singletonMethodCallLeafValue] at hVal
+          | .binOp _ _ _ _    => simp [singletonMethodCallLeafValue] at hVal
+          | .unaryOp _ _ _    => simp [singletonMethodCallLeafValue] at hVal
+          | .call _ _         => simp [singletonMethodCallLeafValue] at hVal
+          | .ifVal _ _ _      => simp [singletonMethodCallLeafValue] at hVal
+          | .loop _ _ _       => simp [singletonMethodCallLeafValue] at hVal
+          | .assert _         => simp [singletonMethodCallLeafValue] at hVal
+          | .updateProp _ _   => simp [singletonMethodCallLeafValue] at hVal
+          | .getStateScript   => simp [singletonMethodCallLeafValue] at hVal
+          | .checkPreimage _  => simp [singletonMethodCallLeafValue] at hVal
+          | .deserializeState _ => simp [singletonMethodCallLeafValue] at hVal
+          | .addOutput _ _ _    => simp [singletonMethodCallLeafValue] at hVal
+          | .addRawOutput _ _   => simp [singletonMethodCallLeafValue] at hVal
+          | .addDataOutput _ _  => simp [singletonMethodCallLeafValue] at hVal
+          | .arrayLiteral _     => simp [singletonMethodCallLeafValue] at hVal
+          | .rawScript _ _ _    => simp [singletonMethodCallLeafValue] at hVal
+
+/-- Method-shaped raw-body success for the Tier 1 widening. Composes
+the per-binding success lemma with the `lowerMethodUserRawOps`
+unfolding. -/
+theorem runOps_lowerMethodUserRawOps_singletonMethodCallLeaf_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (stk : Stack.Eval.StackState)
+    (h : methodSingletonMethodCallLeafBody progMethods m) :
+    (runOps (lowerMethodUserRawOps progMethods props m) stk).toOption.isSome := by
+  unfold lowerMethodUserRawOps
+  unfold methodSingletonMethodCallLeafBody at h
+  -- `defaultInlineBudget = 8 = 7 + 1`.
+  have hBudget : Stack.Lower.defaultInlineBudget = 7 + 1 := rfl
+  rw [hBudget]
+  exact runOps_lowerBindingsP_singleton_methodCallLeaf_isSome
+    progMethods props 7 0 (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name)) (Stack.Lower.collectConstInts m.body)
+    (m.params.map (fun p => p.name) |>.reverse) m.body stk h
+
+/-- Runtime-side method-level wrapper for the Tier 1 widening:
+`runMethod` succeeds for a method whose body is a singleton methodCall
+against a leaf-callee with structurally-constant body. -/
+theorem runMethod_lower_public_unique_no_post_singletonMethodCallLeaf_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : RunarVerification.Stack.Eval.StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false)
+    (hLeaf : methodSingletonMethodCallLeafBody methods m) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  exact runOps_lowerMethodUserRawOps_singletonMethodCallLeaf_isSome
+    methods props m initialStack hLeaf
+
 end Agrees
 end RunarVerification.Stack
