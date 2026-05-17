@@ -1428,6 +1428,297 @@ theorem runMethod_lower_public_unique_no_post_ifValAnyConstChain_preserves
   rw [hRun]
   simp [Except.toOption]
 
+/-! ## Tier 4 — Predicate-side widening for **heterogeneous-const-chain** branches
+
+Tier 3 (above) handled multi-binding `structuralConstBody` chains whose two
+branches share the **same** terminal `.loadConst c` binding — the joint
+post-state has the same top-of-stack value `constToValue c` regardless of
+which branch fires. Tier 4 widens to branches with potentially **different**
+terminal consts: `thn` ends with `.mk vnThn (.loadConst cThn) srcThn` and
+`els` ends with `.mk vnEls (.loadConst cEls) srcEls`, with no requirement
+that `(vnThn, cThn, srcThn) = (vnEls, cEls, srcEls)`.
+
+The post-state is no longer a single `stackEquivModuloIntermediates` witness:
+the top-of-stack value depends on the cond bool. The conclusion uses a
+case-split:
+
+* `b = true` (cond fires `thn`): post-state `stackEquivModuloIntermediates`-
+  equivalent to `stkSt.push (constToValue cThn)`.
+* `b = false` (cond fires `els`): post-state `stackEquivModuloIntermediates`-
+  equivalent to `stkSt.push (constToValue cEls)`.
+
+In both cases the non-stack metadata fields (`altstack`, `outputs`, `props`,
+`preimage`) are preserved against `stkSt` — that arm is cond-independent and
+follows from `stackEquivModuloIntermediates`'s metadata arms (transitively,
+since `(stk.push v).altstack = stk.altstack`, etc.).
+
+This is the natural Tier 3 widening for heterogeneous-const branches. It
+captures every const-only branch pair (different literals across kinds,
+different chain lengths, etc.) without requiring any new substrate beyond
+the existing `runOps_lowerBindings_structuralConstBodyEndsWithConst_stackEquiv`
+helper. Branches with **non-const** sub-bindings (e.g. `loadParam`,
+`loadProp`) are out of scope here — they would require an analogous
+metadata-preservation result for `structuralRefBody`, which the current
+Stack/Agrees.lean substrate does not provide. See the BLOCKED note in the
+discovery report for the substrate gap.
+
+Forbidden patterns explicitly avoided. The cond-load witness is the same
+input-side shape as Tier 1/2/3 (talks ONLY about the `loadRef sm cond`
+prefix and the pushed cond value's bool coercion); no conclusion-restating
+premise. -/
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 4 predicate-side preservation** for the **heterogeneous**-const-
+chain both-branches `if_val` fragment. Each branch is an arbitrary
+`structuralConstBody` chain of length ≥ 1 ending in its **own** terminal
+`.mk vn? (.loadConst c?) src?` binding (which may differ across branches).
+
+The conclusion is a case-split on the cond bool `b`:
+
+* `b = true` ⇒ `stackEquivModuloIntermediates stk' (stkSt.push (constToValue cThn))`;
+* `b = false` ⇒ `stackEquivModuloIntermediates stk' (stkSt.push (constToValue cEls))`.
+
+The cond-load witness has the same input-side shape as Tier 1/2/3 (talks
+only about the `loadRef sm cond` prefix and the pushed cond value's bool
+coercion), with the metadata-preservation arms that let us prove the
+residual record after popping cond from stk1 equals stkSt. -/
+theorem simpleStepRel_ifVal_heteroConstChains_preserves
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (vnThn vnEls : String) (srcThn srcEls : Option SourceLoc)
+    (cThn cEls : ConstValue)
+    (thn els : List ANFBinding)
+    (hThn : structuralConstBodyEndsWithConst vnThn cThn srcThn thn)
+    (hEls : structuralConstBodyEndsWithConst vnEls cEls srcEls els)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk' b,
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ (∃ condV stk1,
+            runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+            ∧ stk1.stack = condV :: stkSt.stack
+            ∧ asBool? condV = some b)
+      ∧ (b = true →
+            stackEquivModuloIntermediates stk' (stkSt.push (constToValue cThn)))
+      ∧ (b = false →
+            stackEquivModuloIntermediates stk' (stkSt.push (constToValue cEls))) := by
+  obtain ⟨condV, stk1, hLoad, hStk, hAlt, hOut, hProps, hPre, b, hBool⟩ :=
+    hCondLoad
+  -- Unfold the if_val lowering: `loadRef sm cond ++ [.ifOp thnOps (some elsOps)]`.
+  have hLowerEq :
+      (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1
+        = Stack.Lower.loadRef sm cond
+          ++ [.ifOp (Stack.Lower.lowerBindings sm thn).1
+                    (some (Stack.Lower.lowerBindings sm els).1)] := by
+    simp [Stack.Lower.lowerValue]
+  -- Pop equation for stk1.
+  have hPop : stk1.pop? = some (condV, { stk1 with stack := stkSt.stack }) := by
+    show (match stk1.stack with
+          | [] => none
+          | v :: vs => some (v, { stk1 with stack := vs })) = _
+    rw [hStk]
+  -- The residual record after popping cond from stk1 equals stkSt by metadata
+  -- preservation.
+  have hStkEq : ({ stk1 with stack := stkSt.stack } : StackState) = stkSt := by
+    cases stk1
+    cases stkSt
+    simp_all
+  -- Run each branch from `stkSt` (after popping cond), exposing the
+  -- `stackEquivModuloIntermediates` witness against the branch's own terminal const.
+  obtain ⟨stkT, hRunT, hEquivT⟩ :=
+    runOps_lowerBindings_structuralConstBodyEndsWithConst_stackEquiv
+      vnThn cThn srcThn thn sm stkSt hThn
+  obtain ⟨stkE, hRunE, hEquivE⟩ :=
+    runOps_lowerBindings_structuralConstBodyEndsWithConst_stackEquiv
+      vnEls cEls srcEls els sm stkSt hEls
+  -- Drive runOps through the if_val lowered ops; case-split on `b`.
+  cases b with
+  | true =>
+      refine ⟨stkT, true, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩, ?_, ?_⟩
+      · rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+        simp only []
+        rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+              (some (Stack.Lower.lowerBindings sm els).1) []]
+        rw [hPop]
+        simp only []
+        rw [hBool]
+        simp only []
+        rw [hStkEq, hRunT]
+        simp [runOps]
+      · intro _; exact hEquivT
+      · intro hF; cases hF
+  | false =>
+      refine ⟨stkE, false, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩, ?_, ?_⟩
+      · rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+        simp only []
+        rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+              (some (Stack.Lower.lowerBindings sm els).1) []]
+        rw [hPop]
+        simp only []
+        rw [hBool]
+        simp only []
+        rw [hStkEq, hRunE]
+        simp [runOps]
+      · intro hT; cases hT
+      · intro _; exact hEquivE
+
+/-- **Tier 4 cond-independent metadata-preservation corollary**. The Tier 4
+preservation lemma above produces a cond-dependent `stackEquivModuloIntermediates`
+witness, with the two case arms naming different reference states
+(`stkSt.push (constToValue cThn)` vs. `stkSt.push (constToValue cEls)`). For
+downstream consumers that only need cond-independent metadata preservation
+(i.e. `altstack`, `outputs`, `props`, `preimage` all match `stkSt`'s), this
+corollary specialises the disjunction: it discards the head? equality (which
+depends on the cond) and exports only the cond-uniform metadata-preservation
+arms. -/
+theorem simpleStepRel_ifVal_heteroConstChains_preserves_metadata
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (vnThn vnEls : String) (srcThn srcEls : Option SourceLoc)
+    (cThn cEls : ConstValue)
+    (thn els : List ANFBinding)
+    (hThn : structuralConstBodyEndsWithConst vnThn cThn srcThn thn)
+    (hEls : structuralConstBodyEndsWithConst vnEls cEls srcEls els)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk',
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ stk'.altstack = stkSt.altstack
+      ∧ stk'.outputs = stkSt.outputs
+      ∧ stk'.props = stkSt.props
+      ∧ stk'.preimage = stkSt.preimage := by
+  obtain ⟨stk', b, hRun, _hWit, hEquivT, hEquivE⟩ :=
+    simpleStepRel_ifVal_heteroConstChains_preserves
+      sm stkSt bn cond vnThn vnEls srcThn srcEls cThn cEls thn els hThn hEls hCondLoad
+  cases b with
+  | true =>
+      have hEquiv := hEquivT rfl
+      obtain ⟨_hHead, hAlt, hOut, hProps, hPre⟩ := hEquiv
+      refine ⟨stk', hRun, ?_, ?_, ?_, ?_⟩
+      · rw [hAlt]; unfold StackState.push; rfl
+      · rw [hOut]; unfold StackState.push; rfl
+      · rw [hProps]; unfold StackState.push; rfl
+      · rw [hPre]; unfold StackState.push; rfl
+  | false =>
+      have hEquiv := hEquivE rfl
+      obtain ⟨_hHead, hAlt, hOut, hProps, hPre⟩ := hEquiv
+      refine ⟨stk', hRun, ?_, ?_, ?_, ?_⟩
+      · rw [hAlt]; unfold StackState.push; rfl
+      · rw [hOut]; unfold StackState.push; rfl
+      · rw [hProps]; unfold StackState.push; rfl
+      · rw [hPre]; unfold StackState.push; rfl
+
+/-! ### Tier 4 method-level wrapper
+
+Method-level companion of `simpleStepRel_ifVal_heteroConstChains_preserves`,
+mirroring the Tier 1/Tier 2/Tier 3 wrappers. Composes:
+
+* the runtime-success arm via `runMethod_lower_public_unique_no_post_eq_userRaw`
+  + the direct construction of the `runOps` post-state from the Tier 4
+  preservation lemma above (which yields `.toOption.isSome` definitionally);
+* the cond-dependent `stackEquivModuloIntermediates`-equivalence to either
+  `initialStack.push (constToValue cThn)` (cond = true) or
+  `initialStack.push (constToValue cEls)` (cond = false).
+
+No conclusion-restating premise (per PATH2_PLAN §2.1). The only runtime-side
+input is the prefix-only cond-load witness about `loadRef _ cond`. -/
+set_option maxHeartbeats 1600000 in
+theorem runMethod_lower_public_unique_no_post_ifValHeteroConstChain_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : StackState) (initialAnf : State)
+    (bn cond : String)
+    (vnThn vnEls : String) (srcThn srcEls : Option SourceLoc)
+    (cThn cEls : ConstValue)
+    (thn els : List ANFBinding) (src : Option SourceLoc)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [.mk bn (.ifVal cond thn els) src])
+    (hThn : structuralConstBodyEndsWithConst vnThn cThn srcThn thn)
+    (hEls : structuralConstBodyEndsWithConst vnEls cEls srcEls els)
+    (hRawEqStructural :
+      lowerMethodUserRawOps methods props m =
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps
+          (Stack.Lower.loadRef
+            (m.params.map (fun p => p.name) |>.reverse) cond) initialStack
+          = .ok stk1
+        ∧ stk1.stack = condV :: initialStack.stack
+        ∧ stk1.altstack = initialStack.altstack
+        ∧ stk1.outputs = initialStack.outputs
+        ∧ stk1.props = initialStack.props
+        ∧ stk1.preimage = initialStack.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome
+    ∧ ∃ stk' b,
+        (b = true →
+          stackEquivModuloIntermediates stk' (initialStack.push (constToValue cThn)))
+        ∧ (b = false →
+          stackEquivModuloIntermediates stk' (initialStack.push (constToValue cEls)))
+        ∧ (initialAnf.addBinding bn
+              (if b then constToValue cThn else constToValue cEls)).lookupBinding bn
+            = some (if b then constToValue cThn else constToValue cEls) := by
+  -- The Tier 4 predicate-side lemma produces the cond-dependent post-state plus
+  -- a runtime-success witness.
+  let smArg := (m.params.map (fun p => p.name) |>.reverse)
+  obtain ⟨stk', b, hRun, _hWit, hEquivT, hEquivE⟩ :=
+    simpleStepRel_ifVal_heteroConstChains_preserves
+      smArg initialStack bn cond vnThn vnEls srcThn srcEls cThn cEls thn els
+      hThn hEls hCondLoad
+  refine ⟨?_, stk', b, hEquivT, hEquivE, ?_⟩
+  · -- Runtime-success arm: route through `runMethod_lower_public_unique_no_post_eq_userRaw`
+    -- → `hRawEqStructural` → the directly-constructed runOps post-state.
+    rw [runMethod_lower_public_unique_no_post_eq_userRaw
+          contractName props methods m initialStack hMem hPublic hUnique
+          hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+    rw [hRawEqStructural]
+    -- m.body = [.mk bn (.ifVal cond thn els) src], so
+    -- `lowerBindings smArg m.body` = `lowerValue smArg bn (.ifVal cond thn els)` ++ [].
+    rw [hBodyShape]
+    have hUnfold :
+        (Stack.Lower.lowerBindings smArg
+            [.mk bn (.ifVal cond thn els) src]).1
+          = (Stack.Lower.lowerValue smArg bn (.ifVal cond thn els)).1 := by
+      simp [Stack.Lower.lowerBindings]
+    rw [hUnfold]
+    rw [hRun]
+    simp [Except.toOption]
+  · -- The ANF-side lookup of `bn` after `addBinding bn …` always returns the
+    -- bound value. The `if b` expression on both sides matches structurally.
+    cases b <;> simp [State.lookupBinding, State.addBinding]
+
 end -- attribute [local irreducible] section
 
 end Agrees

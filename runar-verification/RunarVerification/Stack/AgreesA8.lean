@@ -625,5 +625,314 @@ theorem runMethod_lower_public_unique_no_post_singletonMethodCallLeaf_isSome
   exact runOps_lowerMethodUserRawOps_singletonMethodCallLeaf_isSome
     methods props m initialStack hLeaf
 
+/-! ## Tier 4a widening — caller-level multi-binding: leaf-empty
+methodCall head + structurally-constant tail
+
+This widens the wave-5 wrappers to admit a **multi-binding** caller
+body whose HEAD is a leaf-empty `method_call` (callee has empty params
+AND empty body — so the head emits `[]` ops and leaves the stack
+map unchanged) followed by an arbitrary `structuralConstBody` tail.
+
+Operational shape:
+* The leaf-empty methodCall head's op contribution is `[]` (proved by
+  `lowerValueP_methodCall_leafEmpty_ops`).
+* The leaf-empty methodCall head's stackmap contribution is identity:
+  `(lowerValueP ...).2.1 = sm` (proved below by
+  `lowerValueP_methodCall_leafEmpty_sm_eq`).
+* The leaf-empty methodCall head's localBindings contribution is `[]`
+  (the empty callee body's `m.body.map (·.name) = []`; proved below by
+  `lowerValueP_methodCall_leafEmpty_localBindings_eq`).
+* The tail is `structuralConstBody`, so its lowering is independent of
+  the program-aware parameters (`lowerBindingsP_eq_lowerBindings_
+  structuralConst`) and its execution succeeds from ANY initial stack
+  (`runOps_lowerBindings_structuralConstBody_isSome`).
+
+These four facts compose without needing any `agreesTagged` /
+freshness / Nodup premises — the leaf-empty methodCall head is fully
+stack-uniform and the const tail is stack-uniform too. -/
+
+/-- The leaf-empty methodCall arm of `lowerValueP` leaves the stack
+map unchanged: the post-call `.2.1` equals the pre-call `sm`. -/
+theorem lowerValueP_methodCall_leafEmpty_sm_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn obj method : String) (args : List String)
+    (h : leafEmptyMethodCallValue progMethods sm
+            (.methodCall obj method args)) :
+    (Stack.Lower.lowerValueP progMethods props (budget' + 1) currentIndex
+        lastUses outerProtected localBindings constInts sm bn
+        (.methodCall obj method args)).2.1
+      = sm := by
+  unfold leafEmptyMethodCallValue leafEmptyMethodCallValueB at h
+  simp only [Bool.and_eq_true, beq_iff_eq] at h
+  obtain ⟨⟨hObj, hArgsEmpty⟩, hCallee⟩ := h
+  match hMatch : Stack.Lower.lookupMethod progMethods method with
+  | none =>
+      rw [hMatch] at hCallee
+      exact absurd hCallee (by simp)
+  | some m =>
+      rw [hMatch] at hCallee
+      simp only [Bool.and_eq_true] at hCallee
+      obtain ⟨_hParamsEmpty, hBodyEmpty⟩ := hCallee
+      have hArgs : args = [] := List.isEmpty_iff.mp hArgsEmpty
+      have hBody : m.body = [] := List.isEmpty_iff.mp hBodyEmpty
+      subst hArgs
+      -- Dispatch through methodCall arm:
+      --   objDropOps with obj not in sm: ([], sm)
+      --   loadAndBindArgsLive with args = []: ([], smPostObj) = ([], sm)
+      --   lowerBindingsP on m.body = []: ([], smArgs) = ([], sm)
+      --   smFinal: m.body.reverse = [] → smAfterBody = sm.
+      unfold Stack.Lower.lowerValueP
+      simp only [hMatch, hObj, hBody,
+                 Stack.Lower.loadAndBindArgsLive,
+                 Stack.Lower.lowerBindingsP,
+                 List.map_nil, List.reverse_nil]
+
+/-- The leaf-empty methodCall arm of `lowerValueP` returns
+`innerLocalBindings = m.body.map (·.name) = []` as its `.2.2`
+component. -/
+theorem lowerValueP_methodCall_leafEmpty_localBindings_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn obj method : String) (args : List String)
+    (h : leafEmptyMethodCallValue progMethods sm
+            (.methodCall obj method args)) :
+    (Stack.Lower.lowerValueP progMethods props (budget' + 1) currentIndex
+        lastUses outerProtected localBindings constInts sm bn
+        (.methodCall obj method args)).2.2
+      = [] := by
+  unfold leafEmptyMethodCallValue leafEmptyMethodCallValueB at h
+  simp only [Bool.and_eq_true, beq_iff_eq] at h
+  obtain ⟨⟨hObj, hArgsEmpty⟩, hCallee⟩ := h
+  match hMatch : Stack.Lower.lookupMethod progMethods method with
+  | none =>
+      rw [hMatch] at hCallee
+      exact absurd hCallee (by simp)
+  | some m =>
+      rw [hMatch] at hCallee
+      simp only [Bool.and_eq_true] at hCallee
+      obtain ⟨_hParamsEmpty, hBodyEmpty⟩ := hCallee
+      have hArgs : args = [] := List.isEmpty_iff.mp hArgsEmpty
+      have hBody : m.body = [] := List.isEmpty_iff.mp hBodyEmpty
+      subst hArgs
+      unfold Stack.Lower.lowerValueP
+      simp only [hMatch, hObj, hBody,
+                 Stack.Lower.loadAndBindArgsLive,
+                 Stack.Lower.lowerBindingsP,
+                 List.map_nil]
+
+/-- Tier 4a body-shape predicate: the head is a leaf-empty methodCall,
+the rest is a structuralConstBody. -/
+def leafEmptyMethodCallThenConstBody
+    (progMethods : List ANFMethod) (sm : StackMap)
+    (body : List ANFBinding) : Prop :=
+  match body with
+  | [] => False
+  | b :: rest =>
+      leafEmptyMethodCallValue progMethods sm b.value ∧
+      structuralConstBody rest
+
+/-- Method-shaped Tier 4a predicate. -/
+def methodLeafEmptyMethodCallThenConstBody
+    (progMethods : List ANFMethod) (m : ANFMethod) : Prop :=
+  leafEmptyMethodCallThenConstBody progMethods
+    (m.params.map (fun p => p.name) |>.reverse) m.body
+
+/-- Tier 4a runtime success: a body shaped as a leaf-empty methodCall
+head followed by a `structuralConstBody` tail runs successfully through
+the program-aware lowerer from ANY initial stack. -/
+theorem runOps_lowerBindingsP_leafEmptyMethodCall_then_const_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (body : List ANFBinding)
+    (stk : Stack.Eval.StackState)
+    (h : leafEmptyMethodCallThenConstBody progMethods sm body) :
+    (runOps (Stack.Lower.lowerBindingsP progMethods props (budget' + 1)
+              currentIndex lastUses outerProtected localBindings
+              constInts sm body).1 stk).toOption.isSome := by
+  unfold leafEmptyMethodCallThenConstBody at h
+  match hBody : body with
+  | [] => exact absurd h (by simp)
+  | b :: rest =>
+      simp only at h
+      obtain ⟨hHead, hRest⟩ := h
+      -- Destruct the head binding into its `mk` shape so we can match
+      -- on its value-position constructor directly.
+      match hBmk : b with
+      | .mk bn bv src =>
+          have hVal : leafEmptyMethodCallValue progMethods sm bv := by
+            simp only [ANFBinding.value] at hHead
+            exact hHead
+          -- The predicate definitionally forces `bv = .methodCall _ _ _`.
+          match hVc : bv with
+          | .methodCall obj method args =>
+              have hLeaf :
+                  leafEmptyMethodCallValue progMethods sm
+                    (.methodCall obj method args) := hVal
+              -- Head's op list is `[]`; head's SM is unchanged.
+              have hHeadOps :=
+                lowerValueP_methodCall_leafEmpty_ops
+                  progMethods props budget' currentIndex lastUses
+                  outerProtected localBindings constInts sm bn obj method args
+                  hLeaf
+              have hHeadSm :=
+                lowerValueP_methodCall_leafEmpty_sm_eq
+                  progMethods props budget' currentIndex lastUses
+                  outerProtected localBindings constInts sm bn obj method args
+                  hLeaf
+              have hHeadLB :=
+                lowerValueP_methodCall_leafEmpty_localBindings_eq
+                  progMethods props budget' currentIndex lastUses
+                  outerProtected localBindings constInts sm bn obj method args
+                  hLeaf
+              -- Tail's `lowerBindingsP` equals `lowerBindings` via the
+              -- const-only equality. Threaded parameters change (the
+              -- new `localBindings'` is `[]`, the index is bumped to
+              -- `currentIndex + 1`), but the const-only equality is
+              -- parametric in all of those.
+              have hTailEq :=
+                lowerBindingsP_eq_lowerBindings_structuralConst
+                  progMethods props (budget' + 1) lastUses outerProtected
+                  [] constInts rest sm (currentIndex + 1) hRest
+              -- Unfold the caller's cons.
+              show (runOps (Stack.Lower.lowerBindingsP progMethods props
+                              (budget' + 1) currentIndex lastUses outerProtected
+                              localBindings constInts sm
+                              (ANFBinding.mk bn
+                                (ANFValue.methodCall obj method args) src
+                                :: rest)).1 stk).toOption.isSome
+              -- `lowerBindingsP` on a cons: head's ops ++ tail's ops on
+              -- `(sm', localBindings')`.
+              have hUnfold :
+                  (Stack.Lower.lowerBindingsP progMethods props (budget' + 1)
+                      currentIndex lastUses outerProtected localBindings
+                      constInts sm
+                      (ANFBinding.mk bn
+                        (ANFValue.methodCall obj method args) src
+                        :: rest)).1
+                    = (Stack.Lower.lowerValueP progMethods props (budget' + 1)
+                          currentIndex lastUses outerProtected localBindings
+                          constInts sm bn
+                          (ANFValue.methodCall obj method args)).1
+                      ++ (Stack.Lower.lowerBindingsP progMethods props
+                              (budget' + 1) (currentIndex + 1) lastUses
+                              outerProtected
+                              (Stack.Lower.lowerValueP progMethods props
+                                  (budget' + 1) currentIndex lastUses
+                                  outerProtected localBindings constInts sm bn
+                                  (ANFValue.methodCall obj method args)).2.2
+                              constInts
+                              (Stack.Lower.lowerValueP progMethods props
+                                  (budget' + 1) currentIndex lastUses
+                                  outerProtected localBindings constInts sm bn
+                                  (ANFValue.methodCall obj method args)).2.1
+                              rest).1 := by
+                simp [Stack.Lower.lowerBindingsP]
+              rw [hUnfold, hHeadOps, hHeadSm, hHeadLB,
+                  Stack.Sim.runOps_append]
+              -- After rewriting, head's ops are `[]`, so runOps on `[]`
+              -- yields `.ok stk`. The tail is then a structuralConstBody
+              -- lowering on `sm` from `stk` at index `currentIndex + 1`
+              -- with the empty localBindings. Use `hTailEq` to swap
+              -- `lowerBindingsP` for `lowerBindings`, then the const
+              -- isSome lemma.
+              simp only [runOps, hTailEq]
+              -- Reduce `Except.bind (.ok stk) (·)` to obtain runOps on
+              -- the tail's ops list applied to `stk`.
+              show (runOps
+                      (Stack.Lower.lowerBindings sm rest).1
+                      stk).toOption.isSome
+              exact runOps_lowerBindings_structuralConstBody_isSome
+                rest sm stk hRest
+          | .loadParam _ => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .loadProp _  => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .loadConst c =>
+              cases c <;>
+                simp [leafEmptyMethodCallValueB,
+                      leafEmptyMethodCallValue] at hVal
+          | .binOp _ _ _ _    => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .unaryOp _ _ _    => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .call _ _         => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .ifVal _ _ _      => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .loop _ _ _       => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .assert _         => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .updateProp _ _   => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .getStateScript   => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .checkPreimage _  => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .deserializeState _ => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .addOutput _ _ _    => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .addRawOutput _ _   => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .addDataOutput _ _  => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .arrayLiteral _     => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+          | .rawScript _ _ _    => simp [leafEmptyMethodCallValueB,
+              leafEmptyMethodCallValue] at hVal
+
+/-- Method-shaped raw-body success for the Tier 4a widening. -/
+theorem runOps_lowerMethodUserRawOps_leafEmptyMethodCall_then_const_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (stk : Stack.Eval.StackState)
+    (h : methodLeafEmptyMethodCallThenConstBody progMethods m) :
+    (runOps (lowerMethodUserRawOps progMethods props m) stk).toOption.isSome := by
+  unfold lowerMethodUserRawOps
+  unfold methodLeafEmptyMethodCallThenConstBody at h
+  have hBudget : Stack.Lower.defaultInlineBudget = 7 + 1 := rfl
+  rw [hBudget]
+  exact runOps_lowerBindingsP_leafEmptyMethodCall_then_const_isSome
+    progMethods props 7 0 (Stack.Lower.computeLastUses m.body) []
+    (m.body.map (fun b => b.name)) (Stack.Lower.collectConstInts m.body)
+    (m.params.map (fun p => p.name) |>.reverse) m.body stk h
+
+/-- Runtime-side method-level wrapper for the Tier 4a widening:
+`runMethod` succeeds for a method whose body is a leaf-empty methodCall
+head followed by a `structuralConstBody` tail. -/
+theorem runMethod_lower_public_unique_no_post_leafEmptyMethodCall_then_const_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : RunarVerification.Stack.Eval.StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false)
+    (hLeaf : methodLeafEmptyMethodCallThenConstBody methods m) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  exact runOps_lowerMethodUserRawOps_leafEmptyMethodCall_then_const_isSome
+    methods props m initialStack hLeaf
+
 end Agrees
 end RunarVerification.Stack

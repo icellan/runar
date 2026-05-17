@@ -3017,5 +3017,428 @@ theorem runMethod_num2bin_singleton_d1d0_isSome
 
 end MathByteSingleArgWrappers
 
+/-! ## A4 math/byte single-builtin wrappers (wave 8)
+
+Wave 8 closes the **landable** depth-variant gap for every math/byte
+builtin already admitted by `Stack.Agrees.structuralCallValue` (the
+global call-arm predicate in `Stack/Agrees.lean`). The admitted set is
+exactly the ten builtins
+`abs, len, bin2num, toByteString, cat, num2bin, min, max, split, within`.
+
+Coverage matrix vs. `Stack/Agrees.lean` substrate exposure:
+
+* Arity-1 (`abs`, `len`, `bin2num`, `toByteString`):
+  - `_d0` (wave 5) — operand at depth 0. LANDED.
+  - `_d1` (wave 8) — operand at depth 1, top placeholder above it.
+    LANDED here (`len_d1` / `bin2num_d1` / `toByteString_d1`; `abs_d1`
+    was already in wave 5).
+  - `_dge2` — operand at arbitrary depth `d`, witnessed by
+    `nthOpt d tsm = some (n, k)`. **BLOCKED on substrate:** the
+    substrate lemma `stageC_simpleStep_call_*_dge2` in `Stack/Agrees.lean`
+    takes an `hAtDepth` argument typed via the *private* helper
+    `RunarVerification.Stack.Agrees.nthOpt`, which is unreachable from
+    this file. A caller in `AgreesA4` cannot write the
+    `runMethod_*_dge2_isSome` hypothesis without a public alias /
+    `de-private`-ing of `nthOpt`, which lives outside `AgreesA4.lean`
+    and is therefore intentionally out of scope for this wave (per the
+    Path 2 §2.4 per-family file isolation rule).
+* Arity-2 (`cat`, `num2bin`, `min`, `max`):
+  - `_d1d0` (wave 2 / 5) — left at depth 1, right at depth 0. LANDED.
+  - `_d0d1` (wave 8) — left at depth 0, right at depth 1. LANDED here.
+  - `_dge2_d0` and `_d0_dge2` — one operand at arbitrary depth `d`.
+    **BLOCKED on substrate** (same `nthOpt` privacy issue as the
+    arity-1 `_dge2` arm).
+* Arity-3 (`within`): `_d2d1d0` (wave 2) covers the only substrate
+  variant exposed today. LANDED.
+* `split`: deliberately not yet a `simpleStepRel` witness in
+  `Stack/Agrees.lean` (it retains an unnamed prefix item — see
+  `stageC_run_call_split_d1d0_stack_shape`). Out of scope for Stage C
+  wrapping until that substrate gap is closed.
+
+Same shape as wave 2 / 5:
+* hypothesis set is **input-side only** (`agreesTagged`, concrete
+  lookups, freshness, `loadRef` shape),
+* `hLowering` is a per-fixture structural fact (`rfl` / `native_decide`),
+* the stage-C arm is referenced from `RunarVerification.Stack.Agrees`,
+* no shared helper edits, no new axioms, no `sorry`.
+-/
+
+section MathByteWaveEightWrappers
+
+attribute [local irreducible]
+  RunarVerification.Stack.Peephole.peepholePassAll
+  RunarVerification.Stack.Peephole.peepholePostFold
+  RunarVerification.Stack.Peephole.peepholeChainFold
+  RunarVerification.Stack.Peephole.peepholeRollPickFold
+  RunarVerification.Stack.Peephole.peepholePassAllFlat
+  RunarVerification.Stack.Peephole.passAllInner15
+
+/-! ### Wave 8 — arity-1 builtins at depth 1 -/
+
+/-- Method-level wrapper for a single-binding `len(n)` body when the
+operand sits at depth 1.  Composes `stageC_simpleStep_call_len_d1`. -/
+theorem runMethod_len_singleton_d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName n : String) (k_top k : SlotKind)
+    (tsm_rest : TaggedStackMap) (b : ByteArray)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookup : lookupAnfByKind initialAnf (n, k) = some (.vBytes b))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+            bn (.call "len" [n])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_len_d1
+      bn topName n k_top k tsm_rest initialAnf initialStack b
+      hAgrees hLookup hFresh hLoadRefShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+/-- Method-level wrapper for a single-binding `bin2num(n)` body when the
+operand sits at depth 1.  Composes `stageC_simpleStep_call_bin2num_d1`. -/
+theorem runMethod_bin2num_singleton_d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName n : String) (k_top k : SlotKind)
+    (tsm_rest : TaggedStackMap) (b : ByteArray)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookup : lookupAnfByKind initialAnf (n, k) = some (.vBytes b))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+            bn (.call "bin2num" [n])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_bin2num_d1
+      bn topName n k_top k tsm_rest initialAnf initialStack b
+      hAgrees hLookup hFresh hLoadRefShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+/-- Method-level wrapper for a single-binding `toByteString(n)` body
+when the operand sits at depth 1.  Composes
+`stageC_simpleStep_call_toByteString_d1`. -/
+theorem runMethod_toByteString_singleton_d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName n : String) (k_top k : SlotKind)
+    (tsm_rest : TaggedStackMap) (b : ByteArray)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookup : lookupAnfByKind initialAnf (n, k) = some (.vBytes b))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+            bn (.call "toByteString" [n])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_toByteString_d1
+      bn topName n k_top k tsm_rest initialAnf initialStack b
+      hAgrees hLookup hFresh hLoadRefShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+/-! ### Wave 8 — arity-1 / arity-2 builtins at depth ≥ 2 — substrate gap
+
+`stageC_simpleStep_call_{abs,len,bin2num,toByteString}_dge2`,
+`stageC_simpleStep_call_{min,max,cat,num2bin}_dge2_d0`, and
+`stageC_simpleStep_call_{min,max,cat,num2bin}_d0_dge2` in
+`Stack/Agrees.lean` are all gated by an `hAtDepth : nthOpt d ... = some
+(_, _)` premise whose type mentions
+`RunarVerification.Stack.Agrees.nthOpt`. That helper is declared
+`private` in `Stack/Agrees.lean` and is therefore not nameable from
+this file. A wrapper signature that includes this hypothesis cannot be
+expressed inside `AgreesA4.lean` without first publicising `nthOpt` (or
+adding a public alias). Per the Path 2 §2.4 per-family file isolation
+rule, that edit lives in `Stack/Agrees.lean` and is intentionally not
+performed by this wave. -/
+
+/-! ### Wave 8 — arity-2 builtins at depth pair (0, 1)
+
+The operand naming convention follows the substrate signatures in
+`Stack/Agrees.lean`: the left argument is at the top of the structural
+stack map (`topName`), the right argument is one slot below
+(`botName`).  This is the swap of the wave-2 d1d0 wrappers. -/
+
+/-- Method-level wrapper for a single-binding `min(top, bot)` body at
+depth pair (0, 1).  Composes `stageC_simpleStep_call_min_d0d1`. -/
+theorem runMethod_min_singleton_d0d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookupL : lookupAnfByKind initialAnf (topName, k_top) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind initialAnf (botName, k_bot) = some (.vBigint b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest))
+    (hLoadLeftShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) topName
+        = [.dup])
+    (hLoadRightShape :
+      Stack.Lower.loadRef
+        ((untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)).push topName)
+          botName
+        = [.pickStruct 2])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest))
+            bn (.call "min" [topName, botName])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_min_d0d1
+      bn topName botName k_top k_bot tsm_rest initialAnf initialStack a b
+      hAgrees hLookupL hLookupR hFresh hLoadLeftShape hLoadRightShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+/-- Method-level wrapper for a single-binding `max(top, bot)` body at
+depth pair (0, 1).  Composes `stageC_simpleStep_call_max_d0d1`. -/
+theorem runMethod_max_singleton_d0d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookupL : lookupAnfByKind initialAnf (topName, k_top) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind initialAnf (botName, k_bot) = some (.vBigint b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest))
+    (hLoadLeftShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) topName
+        = [.dup])
+    (hLoadRightShape :
+      Stack.Lower.loadRef
+        ((untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)).push topName)
+          botName
+        = [.pickStruct 2])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest))
+            bn (.call "max" [topName, botName])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_max_d0d1
+      bn topName botName k_top k_bot tsm_rest initialAnf initialStack a b
+      hAgrees hLookupL hLookupR hFresh hLoadLeftShape hLoadRightShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+/-- Method-level wrapper for a single-binding `cat(top, bot)` body at
+depth pair (0, 1).  Composes `stageC_simpleStep_call_cat_d0d1`. -/
+theorem runMethod_cat_singleton_d0d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (a b : ByteArray)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookupL : lookupAnfByKind initialAnf (topName, k_top) = some (.vBytes a))
+    (hLookupR : lookupAnfByKind initialAnf (botName, k_bot) = some (.vBytes b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest))
+    (hLoadLeftShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) topName
+        = [.dup])
+    (hLoadRightShape :
+      Stack.Lower.loadRef
+        ((untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)).push topName)
+          botName
+        = [.pickStruct 2])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest))
+            bn (.call "cat" [topName, botName])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_cat_d0d1
+      bn topName botName k_top k_bot tsm_rest initialAnf initialStack a b
+      hAgrees hLookupL hLookupR hFresh hLoadLeftShape hLoadRightShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+/-- Method-level wrapper for a single-binding `num2bin(value, size)`
+body at depth pair (0, 1): `value` at depth 0, `size` at depth 1.
+Composes `stageC_simpleStep_call_num2bin_d0d1`. -/
+theorem runMethod_num2bin_singleton_d0d1_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (n : Int) (size : Nat) (encoded : ByteArray)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             initialAnf initialStack)
+    (hLookupN : lookupAnfByKind initialAnf (topName, k_top) = some (.vBigint n))
+    (hLookupSize : lookupAnfByKind initialAnf (botName, k_bot) =
+      some (.vBigint (Int.ofNat size)))
+    (hEnc : num2binEncode? n size = some encoded)
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest))
+    (hLoadValueShape :
+      Stack.Lower.loadRef
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) topName
+        = [.dup])
+    (hLoadSizeShape :
+      Stack.Lower.loadRef
+        ((untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)).push topName)
+          botName
+        = [.pickStruct 2])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = (Stack.Lower.lowerValue
+            (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest))
+            bn (.call "num2bin" [topName, botName])).1) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  have hStageC :=
+    RunarVerification.Stack.Agrees.stageC_simpleStep_call_num2bin_d0d1
+      bn topName botName k_top k_bot tsm_rest initialAnf initialStack
+      n size encoded hAgrees hLookupN hLookupSize hEnc hFresh
+      hLoadValueShape hLoadSizeShape
+  rw [hStageC.1]
+  simp [Except.toOption]
+
+end MathByteWaveEightWrappers
+
 end AgreesA4
 end RunarVerification.Stack
