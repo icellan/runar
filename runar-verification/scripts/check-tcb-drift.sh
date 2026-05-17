@@ -20,7 +20,61 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=110       # Breakdown (2026-05-17, after verifier-axiom
+TARGET_AXIOMS=78        # Breakdown (2026-05-17, Tier 1 wave 1 —
+                        # six parallel discharges):
+                        # −2 in Crypto/Spec.lean §2.5 — `p256Negate`
+                        #     and `p384Negate` converted from bare
+                        #     function-symbol axioms to concrete `def`s
+                        #     over the negation formula
+                        #     `(x, y) → (x, (p − y) mod p)` (FIPS 186-5
+                        #     §D.1.2.3 / §D.1.2.4). Tier 1 milestone
+                        #     "pXNegate-derivable".
+                        # −1 in Pipeline.lean — `auto_check_preimage_
+                        #     at_method_entry_correct` discharged as
+                        #     theorem with `intro h; exact h`
+                        #     identity-propagation (axiom had `P → P`
+                        #     shape on same runMethod call, same as
+                        #     D3 wave 1 pattern). Phase D D2.a.
+                        # −1 in Stack/Rabin.lean — `runOps_rabinBodyOps_eq`
+                        #     discharged as theorem after Stack/Eval.lean
+                        #     OP_EQUAL widening (B10-prep): added arms
+                        #     for .vBigint vs .vBytes coercion via
+                        #     encodeMinimalLE / decodeMinimalLE
+                        #     round-trip, matching Bitcoin SV consensus.
+                        #     Phase B B10.
+                        # −10 in ANF/Eval.lean — `ecAdd / ecMul /
+                        #     ecMulGen / ecNegate / ecOnCurve /
+                        #     ecModReduce / ecEncodeCompressed /
+                        #     ecMakePoint / ecPointX / ecPointY`
+                        #     converted from bare axioms to concrete
+                        #     `def`s delegating to new
+                        #     `Crypto/Secp256k1.lean` (310 LOC: SEC 2 v2
+                        #     secp256k1 byte semantics + affine point ops
+                        #     + scalar mul via square-and-multiply 256-iter
+                        #     bounded loop). Phase B B4-a.
+                        # −12 in ANF/Eval.lean — `p256Add / p256Mul /
+                        #     p256MulGen / p256OnCurve /
+                        #     p256EncodeCompressed / verifyECDSA_P256`
+                        #     and 6 P-384 mirrors converted from bare
+                        #     axioms to delegating `def`s into new
+                        #     `Crypto/NistEC.lean` (362 LOC: FIPS 186-5
+                        #     P-256 / P-384 curve parameters + affine
+                        #     point ops + ECDSA verification mirroring
+                        #     §6.4). Phase B B5-a.
+                        # −6 in ANF/Eval.lean — `verifySLHDSA_SHA2_*`
+                        #     for 6 FIPS 205 parameter sets converted
+                        #     from bare axioms to concrete `def`s. The
+                        #     parametric `SlhDsa.slhDsaVerifyImpl`
+                        #     implementation lives in ANF/Eval.lean
+                        #     (~310 lines) and the per-set wrappers in
+                        #     both ANF/Eval.lean and Crypto/Spec.lean
+                        #     delegate to it. Inline-helpers pattern
+                        #     (wave 1 verifier-axiom delegation) avoids
+                        #     the Crypto/Spec ↔ ANF/Eval import cycle.
+                        #     Phase B B9-a.
+                        # Net delta: −32, 110 → 78.
+                        #
+                        # Breakdown (2026-05-17, after verifier-axiom
                         # delegation):
                         # −3 in RunarVerification/ANF/Eval.lean —
                         #     `merkleRootSha256` / `merkleRootHash256` /

@@ -3,6 +3,8 @@ import RunarVerification.ANF.WF
 import RunarVerification.ANF.Typed
 import RunarVerification.Stack.NumEncoding
 import RunarVerification.Crypto.HashBackend
+import RunarVerification.Crypto.Secp256k1
+import RunarVerification.Crypto.NistEC
 
 /-!
 # ANF IR — Big-step evaluation (skeleton)
@@ -285,33 +287,106 @@ BLAKE3 IV as chaining value and flags `CHUNK_START | CHUNK_END | ROOT`. -/
 def blake3Hash (msg : ByteArray) : ByteArray :=
   RunarVerification.Crypto.HashBackend.Blake3.blake3Hash msg
 
--- secp256k1 EC primitives (operands are 64-byte uncompressed points)
-axiom ecAdd               : ByteArray → ByteArray → ByteArray
-axiom ecMul               : ByteArray → Int → ByteArray
-axiom ecMulGen            : Int → ByteArray
-axiom ecNegate            : ByteArray → ByteArray
-axiom ecOnCurve           : ByteArray → Bool
-axiom ecModReduce         : Int → Int → Int
-axiom ecEncodeCompressed  : ByteArray → ByteArray
-axiom ecMakePoint         : Int → Int → ByteArray
-axiom ecPointX            : ByteArray → Int
-axiom ecPointY            : ByteArray → Int
+-- secp256k1 EC primitives (operands are 64-byte uncompressed points,
+-- byte layout `x[32] || y[32]` big-endian unsigned per
+-- `packages/runar-lang/src/ec.ts`).
+--
+-- Phase B4-a (2026-05-17): the 10 bare `ec*` axioms have been replaced
+-- by concrete `def`s delegating to
+-- `RunarVerification.Crypto.Secp256k1`, the closed-form spec mirroring
+-- SEC 2 v2 secp256k1 parameters and
+-- `packages/runar-compiler/src/passes/ec-codegen.ts`. This unblocks
+-- the §5.29 group-law audit (the 10 group-law axioms in
+-- `Crypto/Spec.lean §1` become derivable once these defs land).
+/-- secp256k1 point addition (concrete `def`, Tier B4-a, 2026-05-17). -/
+def ecAdd (p q : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.Secp256k1.ecAdd p q
+/-- secp256k1 scalar multiplication `k · P` (concrete `def`, Tier B4-a). -/
+def ecMul (p : ByteArray) (k : Int) : ByteArray :=
+  RunarVerification.Crypto.Secp256k1.ecMul p k
+/-- secp256k1 scalar multiplication of the generator `G` by `k`
+(concrete `def`, Tier B4-a). -/
+def ecMulGen (k : Int) : ByteArray :=
+  RunarVerification.Crypto.Secp256k1.ecMulGen k
+/-- secp256k1 point negation `(x, p − y mod p)` (concrete `def`, Tier B4-a). -/
+def ecNegate (p : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.Secp256k1.ecNegate p
+/-- secp256k1 on-curve check `y² ≡ x³ + 7 (mod p)` (concrete `def`, Tier B4-a). -/
+def ecOnCurve (p : ByteArray) : Bool :=
+  RunarVerification.Crypto.Secp256k1.ecOnCurve p
+/-- Signed-aware modular reduction `((a mod m) + m) mod m` (concrete `def`,
+Tier B4-a). -/
+def ecModReduce (a m : Int) : Int :=
+  RunarVerification.Crypto.Secp256k1.ecModReduce a m
+/-- secp256k1 SEC-compressed encoding (33-byte `parity ++ x_be32`)
+(concrete `def`, Tier B4-a). -/
+def ecEncodeCompressed (p : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.Secp256k1.ecEncodeCompressed p
+/-- Pack `(x, y)` integers as a 64-byte big-endian point
+(concrete `def`, Tier B4-a). -/
+def ecMakePoint (x y : Int) : ByteArray :=
+  RunarVerification.Crypto.Secp256k1.ecMakePoint x y
+/-- Extract x-coordinate from a 64-byte point (concrete `def`, Tier B4-a). -/
+def ecPointX (p : ByteArray) : Int :=
+  RunarVerification.Crypto.Secp256k1.ecPointX p
+/-- Extract y-coordinate from a 64-byte point (concrete `def`, Tier B4-a). -/
+def ecPointY (p : ByteArray) : Int :=
+  RunarVerification.Crypto.Secp256k1.ecPointY p
+
+/-! ### NIST P-256 / P-384 (concrete `def`s, Tier B5-a, 2026-05-17)
+
+The twelve P-256 / P-384 primitives — point addition, scalar
+multiplication, generator multiplication, curve-membership test,
+compressed encoding, and ECDSA verification — are concrete `def`s
+delegating to `RunarVerification.Crypto.NistEC.{cAdd, cMul, cMulGen,
+cOnCurve, cEncodeCompressed, cVerifyECDSA}`. The spec there mirrors
+FIPS 186-5 §6.4 (ECDSA) and Appendix D.1.2.3 / D.1.2.4 (curve
+parameters), composed against the SHA-256 backend defined just
+above for `verifyECDSA_*`. The codegen-to-spec linking theorems
+`emitP256*_runOps_eq` / `emitP384*_runOps_eq` in
+`Stack/P256P384.lean` remain axioms at the B5-a tier; B5 (Phase 3
+post-Tier 1) discharges them against the concrete spec defs landed
+here. -/
 
 -- NIST P-256
-axiom p256Add               : ByteArray → ByteArray → ByteArray
-axiom p256Mul               : ByteArray → Int → ByteArray
-axiom p256MulGen            : Int → ByteArray
-axiom p256OnCurve           : ByteArray → Bool
-axiom p256EncodeCompressed  : ByteArray → ByteArray
-axiom verifyECDSA_P256      : ByteArray → ByteArray → ByteArray → Bool
+def p256Add (a b : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cAdd
+    RunarVerification.Crypto.NistEC.p256Params a b
+def p256Mul (a : ByteArray) (k : Int) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cMul
+    RunarVerification.Crypto.NistEC.p256Params a k
+def p256MulGen (k : Int) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cMulGen
+    RunarVerification.Crypto.NistEC.p256Params k
+def p256OnCurve (a : ByteArray) : Bool :=
+  RunarVerification.Crypto.NistEC.cOnCurve
+    RunarVerification.Crypto.NistEC.p256Params a
+def p256EncodeCompressed (a : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cEncodeCompressed
+    RunarVerification.Crypto.NistEC.p256Params a
+def verifyECDSA_P256 (sig pubkey preimage : ByteArray) : Bool :=
+  RunarVerification.Crypto.NistEC.cVerifyECDSA
+    RunarVerification.Crypto.NistEC.p256Params sha256 sig pubkey preimage
 
 -- NIST P-384
-axiom p384Add               : ByteArray → ByteArray → ByteArray
-axiom p384Mul               : ByteArray → Int → ByteArray
-axiom p384MulGen            : Int → ByteArray
-axiom p384OnCurve           : ByteArray → Bool
-axiom p384EncodeCompressed  : ByteArray → ByteArray
-axiom verifyECDSA_P384      : ByteArray → ByteArray → ByteArray → Bool
+def p384Add (a b : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cAdd
+    RunarVerification.Crypto.NistEC.p384Params a b
+def p384Mul (a : ByteArray) (k : Int) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cMul
+    RunarVerification.Crypto.NistEC.p384Params a k
+def p384MulGen (k : Int) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cMulGen
+    RunarVerification.Crypto.NistEC.p384Params k
+def p384OnCurve (a : ByteArray) : Bool :=
+  RunarVerification.Crypto.NistEC.cOnCurve
+    RunarVerification.Crypto.NistEC.p384Params a
+def p384EncodeCompressed (a : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.NistEC.cEncodeCompressed
+    RunarVerification.Crypto.NistEC.p384Params a
+def verifyECDSA_P384 (sig pubkey preimage : ByteArray) : Bool :=
+  RunarVerification.Crypto.NistEC.cVerifyECDSA
+    RunarVerification.Crypto.NistEC.p384Params sha256 sig pubkey preimage
 
 -- BabyBear / KoalaBear field arithmetic.
 --
@@ -428,12 +503,463 @@ def verifyRabinSig (msg sig padding pubKey : ByteArray) : Bool :=
   let lhs      := (sigI * sigI + padI) % pubI
   decide ((RunarVerification.Stack.encodeMinimalLE lhs).toList = (sha256 msg).toList)
 axiom verifyWOTS              : ByteArray → ByteArray → ByteArray → Bool
-axiom verifySLHDSA_SHA2_128s  : ByteArray → ByteArray → ByteArray → Bool
-axiom verifySLHDSA_SHA2_128f  : ByteArray → ByteArray → ByteArray → Bool
-axiom verifySLHDSA_SHA2_192s  : ByteArray → ByteArray → ByteArray → Bool
-axiom verifySLHDSA_SHA2_192f  : ByteArray → ByteArray → ByteArray → Bool
-axiom verifySLHDSA_SHA2_256s  : ByteArray → ByteArray → ByteArray → Bool
-axiom verifySLHDSA_SHA2_256f  : ByteArray → ByteArray → ByteArray → Bool
+
+/-! ### SLH-DSA-SHA2 verifier — concrete `def`s (Path 2 B9-a, 2026-05-17)
+
+`verifySLHDSA_SHA2_<param>` for the 6 FIPS 205 SHA-2 parameter sets
+(`128s`, `128f`, `192s`, `192f`, `256s`, `256f`) are converted from
+bare 3-`ByteArray` axioms to concrete `def`s that compose SHA-256
+(`Crypto.sha256`), an MGF1-style counter expansion (FIPS 205 §11.2.1),
+the WOTS+ chain function, the FORS leaf-and-auth-path walk, and the
+hypertree's `d` XMSS layers, exactly per FIPS 205 §10.2 `slh_verify`.
+
+The algorithm is parametric in a `SlhDsaParams` record carrying the
+8 FIPS 205 SHA-2 parameters (`n, h, d, hp, a, k, len`); each of the 6
+top-level wrappers fixes its own parameter record and delegates to
+the parametric implementation `slhDsaVerifyImpl`. Companion specs in
+`Crypto/Spec.lean` §11 (`verifySlhDsa_SHA2_*`) are byte-identical and
+contribute zero additional axioms.
+
+The verifier is total: malformed inputs (short signatures, wrong
+pubkey length) yield a `false` result via empty / zero defaults from
+`ByteArray.extract` / `byteAt`, mirroring the on-chain behaviour of
+the codegen, which would simply fail the final `OP_EQUAL` comparison.
+
+Mirrors `EmitVerifySLHDSA` /  `emitSLHFors` / `emitSLHWotsAll` /
+`emitSLHMerkle` /  `emitSLHHmsg` in
+`compilers/go/codegen/slh_dsa.go` (the Go reference) and
+`packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (the TS
+reference). The codegen-to-spec equivalence theorem
+`runOps_slhDsaBodyOps_eq` is deferred to a future `Stack/SlhDsa.lean`
+patch (currently this `def` grounds the meaning of "SLH-DSA verifies"
+in closed-form computation; the on-chain Stack-IR equivalence is the
+remaining Tier 3 obligation).
+-/
+
+/-- FIPS 205 SHA-2 SLH-DSA parameter record. -/
+structure SlhDsaParams where
+  /-- Security parameter (hash output bytes): 16, 24, or 32. -/
+  n : Nat
+  /-- Total hypertree height. -/
+  h : Nat
+  /-- Hypertree layer count. -/
+  d : Nat
+  /-- Single-XMSS subtree height (`h / d`). -/
+  hp : Nat
+  /-- FORS tree height. -/
+  a : Nat
+  /-- FORS tree count. -/
+  k : Nat
+  /-- WOTS+ chain count (`len1 + len2`). -/
+  len : Nat
+  /-- WOTS+ message-chain count (`2*n`). -/
+  len1 : Nat
+  /-- WOTS+ checksum-chain count (3 for all SHA-2 sets). -/
+  len2 : Nat
+  deriving Repr
+
+namespace SlhDsa
+
+/-- Build a `SlhDsaParams` record from the 5 free FIPS 205 SHA-2
+parameters. `len1 = 2*n`, `len2 = 3` (for all six SHA-2 sets — the
+Winternitz `w = 16` choice gives `len2 = ⌊log_16(len1 · 15)⌋ + 1 = 3`
+for every `n ∈ {16, 24, 32}`), `hp = h / d`, `len = len1 + len2`. -/
+def mkParams (n h d a k : Nat) : SlhDsaParams :=
+  let len1 := 2 * n
+  { n := n, h := h, d := d, hp := h / d, a := a, k := k,
+    len := len1 + 3, len1 := len1, len2 := 3 }
+
+/-- FIPS 205 Table 2 SHA-2 parameter sets. -/
+def params128s : SlhDsaParams := mkParams 16 63 7  12 14
+def params128f : SlhDsaParams := mkParams 16 66 22 6  33
+def params192s : SlhDsaParams := mkParams 24 63 7  14 17
+def params192f : SlhDsaParams := mkParams 24 66 22 8  33
+def params256s : SlhDsaParams := mkParams 32 64 8  14 22
+def params256f : SlhDsaParams := mkParams 32 68 17 8  35
+
+/-- Read byte `i` of `b`, or `0` if out of bounds. -/
+@[inline] def byteAt (b : ByteArray) (i : Nat) : Nat :=
+  if i < b.size then (b.get! i).toNat else 0
+
+/-- Extract `len` bytes from `b` starting at offset `off`. Returns
+empty / zero-padded if out of range. -/
+@[inline] def slice (b : ByteArray) (off len : Nat) : ByteArray :=
+  b.extract off (off + len)
+
+/-- A `Nat` written big-endian into `width` bytes. Excess high bits are
+truncated. -/
+def natToBE (v width : Nat) : ByteArray :=
+  let rec go (acc : ByteArray) (v : Nat) : Nat → ByteArray
+    | 0     => acc
+    | k + 1 =>
+        let b   : UInt8 := (v % 256).toUInt8
+        let acc := ByteArray.mk #[b] ++ acc
+        go acc (v / 256) k
+  termination_by k => k
+  go ByteArray.empty v width
+
+/-- Decode a big-endian byte string into a `Nat`. -/
+def beToNat (b : ByteArray) : Nat :=
+  let rec go (i acc : Nat) : Nat :=
+    if i ≥ b.size then acc
+    else go (i + 1) (acc * 256 + (b.get! i).toNat)
+  termination_by b.size - i
+  go 0 0
+
+/-- Modulus over `2 ^ k`. Used by digest splits (`treeIdx` /
+`leafIdx`) and by `idx mod 2^a` in the FORS tree walk. -/
+@[inline] def modPow2 (v k : Nat) : Nat := v % (Nat.pow 2 k)
+
+/-- Integer division by `2 ^ k`. -/
+@[inline] def divPow2 (v k : Nat) : Nat := v / (Nat.pow 2 k)
+
+/-- 22-byte FIPS 205 compressed ADRS. Layout (per
+`compilers/go/codegen/slh_dsa.go:slhADRS`):
+
+  [0]     layer (1 byte)
+  [1..8]  tree (8 bytes big-endian)
+  [9]     type (1 byte)
+  [10..13] keypair (4 bytes big-endian)
+  [14..17] chain   (4 bytes big-endian, or treeHeight for tree types)
+  [18..21] hash    (4 bytes big-endian, or treeIndex for tree types)
+
+`tree` is a `Nat` (large-tree-index); the other fields are `Nat` ≤ 2³².
+-/
+def buildAdrs (layer : Nat) (tree : Nat) (adrsTyp : Nat)
+    (keypair : Nat) (chain : Nat) (hash : Nat) : ByteArray :=
+  let layerB := natToBE layer 1
+  let treeB  := natToBE tree 8
+  let typB   := natToBE adrsTyp 1
+  let kpB    := natToBE keypair 4
+  let chB    := natToBE chain 4
+  let hsB    := natToBE hash 4
+  layerB ++ treeB ++ typB ++ kpB ++ chB ++ hsB
+
+/-- ADRS type constants (FIPS 205 §4). -/
+def adrsWotsHash  : Nat := 0
+def adrsWotsPk    : Nat := 1
+def adrsTree      : Nat := 2
+def adrsForsTree  : Nat := 3
+def adrsForsRoots : Nat := 4
+
+/-- `pkSeedPad pkSeed` = `pkSeed` right-padded to 64 bytes with zeros.
+This is the SHA-2 ADRS-compression padding used by the tweakable hash
+`T_ℓ`. -/
+def pkSeedPad (pkSeed : ByteArray) (n : Nat) : ByteArray :=
+  if n ≥ 64 then pkSeed.extract 0 64
+  else pkSeed ++ ByteArray.mk (Array.replicate (64 - n) (0 : UInt8))
+
+/-- FIPS 205 SHA-2 tweakable hash `T_ℓ(pkSeed, ADRS, M) = SHA-256(pkSeedPad
+‖ ADRS_compressed ‖ M)` truncated to `n` bytes. The 22-byte
+compressed ADRS is used (FIPS 205 §11.2.2). -/
+def tHash (pkSeed adrs msg : ByteArray) (n : Nat) : ByteArray :=
+  let psp := pkSeedPad pkSeed n
+  (sha256 (psp ++ adrs ++ msg)).extract 0 n
+
+/-- FIPS 205 SHA-2 chain function `F = T_1`. Same as `tHash` with the
+chain-step's hashAddress-specific ADRS. -/
+@[inline] def fHash (pkSeed adrs msg : ByteArray) (n : Nat) : ByteArray :=
+  tHash pkSeed adrs msg n
+
+/-- MGF1-SHA-256 counter-mode expansion of `seed` to `outLen` bytes
+(FIPS 205 §11.2.1: `Hmsg` block-style expansion). Concatenates
+`SHA-256(seed ‖ ctr)` for `ctr = 0, 1, ...` until `outLen` bytes are
+produced, then truncates. -/
+def mgf1Sha256 (seed : ByteArray) (outLen : Nat) : ByteArray :=
+  let rec go (ctr : Nat) (acc : ByteArray) : Nat → ByteArray
+    | 0     => acc
+    | k + 1 =>
+        let ctrBE := natToBE ctr 4
+        let block := sha256 (seed ++ ctrBE)
+        go (ctr + 1) (acc ++ block) k
+  termination_by k => k
+  let blocks := (outLen + 31) / 32
+  (go 0 ByteArray.empty blocks).extract 0 outLen
+
+/-- `Hmsg(R, pkSeed, pkRoot, msg)` for FIPS 205 SHA-2. The "seed" of
+the MGF1 expansion is `SHA-256(R ‖ pkSeed ‖ pkRoot ‖ msg)`. Returns
+exactly `outLen` bytes. -/
+def hMsg (R pkSeed pkRoot msg : ByteArray) (outLen : Nat) : ByteArray :=
+  let seed := sha256 (R ++ pkSeed ++ pkRoot ++ msg)
+  mgf1Sha256 seed outLen
+
+/-- WOTS+ chain step: `s` consecutive applications of the chain
+function starting from chain index `startJ`. Each step uses
+`adrs(chainIdx, j)` with `j` ranging over `[startJ, startJ + s)`. -/
+def runChainFrom (pkSeed : ByteArray) (n layer chainIdx : Nat)
+    (tree : Nat) (keypair : Nat) :
+    (startJ : Nat) → (s : Nat) → (x : ByteArray) → ByteArray
+  | _, 0,     x => x
+  | startJ, s + 1, x =>
+      let adrs := buildAdrs layer tree adrsWotsHash keypair chainIdx startJ
+      let x'   := fHash pkSeed adrs x n
+      runChainFrom pkSeed n layer chainIdx tree keypair (startJ + 1) s x'
+
+/-- Decompose the i'th WOTS+ message digit from a length-`n` `msgHash`
+(`len1 = 2*n` nibble digits). Index `i` is byte `i / 2`'s high nibble
+if `i` is even, low nibble if `i` is odd. -/
+@[inline] def wotsMsgNibble (msgHash : ByteArray) (i : Nat) : Nat :=
+  let b := byteAt msgHash (i / 2)
+  if i % 2 = 0 then b / 16 else b % 16
+
+/-- Sum of `(15 - d_i)` over the `len1 = 2*n` message nibbles. -/
+def wotsCsum (msgHash : ByteArray) (len1 : Nat) : Nat :=
+  let rec go (i acc : Nat) : Nat :=
+    if i ≥ len1 then acc
+    else go (i + 1) (acc + (15 - wotsMsgNibble msgHash i))
+  termination_by len1 - i
+  go 0 0
+
+/-- The full 67-or-equivalent WOTS+ digit sequence: `len1` message
+nibbles followed by `len2 = 3` checksum digits (high-to-low base-16
+digits of `csum`). -/
+def wotsDigit (msgHash : ByteArray) (i len1 : Nat) : Nat :=
+  if i < len1 then wotsMsgNibble msgHash i
+  else
+    let csum := wotsCsum msgHash len1
+    match i - len1 with
+    | 0 => (csum / 256) % 16
+    | 1 => (csum / 16) % 16
+    | _ => csum % 16
+
+/-- Compute one WOTS+ chain endpoint at chain index `i`, taking
+`sigChunk = sig[i·n .. (i+1)·n]` and running the chain function
+through steps `[d_i, 15)`. -/
+def wotsChainEndpoint (pkSeed sig msgHash : ByteArray)
+    (n layer i len1 tree keypair : Nat) : ByteArray :=
+  let sigChunk := slice sig (i * n) n
+  let d := wotsDigit msgHash i len1
+  runChainFrom pkSeed n layer i tree keypair d (15 - d) sigChunk
+
+/-- Concatenate all `len` chain endpoints in order. -/
+def wotsConcatEndpoints (pkSeed sig msgHash : ByteArray)
+    (n layer len len1 tree keypair : Nat) : ByteArray :=
+  let rec go (i : Nat) (acc : ByteArray) : ByteArray :=
+    if i ≥ len then acc
+    else go (i + 1) (acc ++ wotsChainEndpoint pkSeed sig msgHash
+                              n layer i len1 tree keypair)
+  termination_by len - i
+  go 0 ByteArray.empty
+
+/-- WOTS+ public-key-from-signature: recover the WOTS+ public key by
+running each chain to its endpoint then compressing with `T_len`. -/
+def wotsPkFromSig (pkSeed wotsSig msgHash : ByteArray)
+    (n layer len len1 tree keypair : Nat) : ByteArray :=
+  let endpts := wotsConcatEndpoints pkSeed wotsSig msgHash
+                  n layer len len1 tree keypair
+  let adrs   := buildAdrs layer tree adrsWotsPk keypair 0 0
+  tHash pkSeed adrs endpts n
+
+/-- One Merkle authentication-path level. Given the running `node`,
+the remaining `auth` bytes, the leaf direction `leafIdx` shifted to
+level `j`, the current `tree` index, and per-tree ADRS data, extract
+the next `n`-byte sibling, decide left/right via `(leafIdx >> j) % 2`,
+concatenate in the right order and tweakable-hash with the
+appropriate tree-level ADRS. -/
+def xmssAuthStep (pkSeed : ByteArray)
+    (n layer : Nat) (tree : Nat) (leafIdx : Nat) (j : Nat)
+    (node auth : ByteArray) : ByteArray × ByteArray :=
+  let sibling := slice auth 0 n
+  let rest    := auth.extract n auth.size
+  let bit     : Nat := (leafIdx / (Nat.pow 2 j)) % 2
+  let combined := if bit = 0 then node ++ sibling else sibling ++ node
+  let hashIdx  := leafIdx / (Nat.pow 2 (j + 1))
+  let adrs     := buildAdrs layer tree adrsTree 0 (j + 1) hashIdx
+  (tHash pkSeed adrs combined n, rest)
+
+/-- Climb the XMSS Merkle tree for `hp` levels. -/
+def xmssAuthClimb (pkSeed : ByteArray)
+    (n layer : Nat) (tree : Nat) (leafIdx : Nat) :
+    (j : Nat) → (steps : Nat) → (node : ByteArray) → (auth : ByteArray) →
+    ByteArray
+  | _, 0,         node, _ => node
+  | j, steps + 1, node, auth =>
+      let (node', auth') := xmssAuthStep pkSeed n layer tree leafIdx j node auth
+      xmssAuthClimb pkSeed n layer tree leafIdx (j + 1) steps node' auth'
+
+/-- XMSS public-key-from-signature: recover the XMSS root by computing
+the WOTS+ public key (the leaf), then climbing `hp` Merkle auth-path
+levels. -/
+def xmssPkFromSig (pkSeed wotsSig auth msgHash : ByteArray)
+    (n layer hp len len1 tree leafIdx : Nat) : ByteArray :=
+  let wpk := wotsPkFromSig pkSeed wotsSig msgHash n layer len len1 tree leafIdx
+  xmssAuthClimb pkSeed n layer tree leafIdx 0 hp wpk auth
+
+/-- Extract the i'th FORS index — `a` bits at bit-offset `i*a` from
+`md` (big-endian). -/
+def forsIndex (md : ByteArray) (i a : Nat) : Nat :=
+  let bitStart  := i * a
+  let bitsTotal := 8 * md.size
+  -- Treat md as a big-endian Nat, shift right to align the requested
+  -- `a` bits at the LSB position, then mask.
+  let mdNat := beToNat md
+  let rightShift := bitsTotal - bitStart - a
+  (mdNat / Nat.pow 2 rightShift) % Nat.pow 2 a
+
+/-- One FORS auth-path level. The combiner is structurally identical
+to `xmssAuthStep`, but the ADRS uses `adrsForsTree` and the hash
+index is `i · 2^(a - j - 1) + (idx >> (j + 1))`. -/
+def forsAuthStep (pkSeed : ByteArray)
+    (n : Nat) (tree keypair : Nat)
+    (i idx j a : Nat)
+    (node auth : ByteArray) : ByteArray × ByteArray :=
+  let sibling := slice auth 0 n
+  let rest    := auth.extract n auth.size
+  let bit     : Nat := (idx / Nat.pow 2 j) % 2
+  let combined := if bit = 0 then node ++ sibling else sibling ++ node
+  let hashIdx  := i * Nat.pow 2 (a - j - 1) + (idx / Nat.pow 2 (j + 1))
+  let adrs     := buildAdrs 0 tree adrsForsTree keypair (j + 1) hashIdx
+  (tHash pkSeed adrs combined n, rest)
+
+/-- Climb the FORS Merkle subtree for `steps` levels. -/
+def forsAuthClimb (pkSeed : ByteArray)
+    (n : Nat) (tree keypair : Nat)
+    (i idx a : Nat) :
+    (j : Nat) → (steps : Nat) → (node : ByteArray) → (auth : ByteArray) →
+    ByteArray
+  | _, 0,         node, _ => node
+  | j, steps + 1, node, auth =>
+      let (node', auth') :=
+        forsAuthStep pkSeed n tree keypair i idx j a node auth
+      forsAuthClimb pkSeed n tree keypair i idx a (j + 1) steps node' auth'
+
+/-- Recover one FORS tree's root from its sub-signature `(sk, auth)`.
+The FORS tree's leaf at position `idx` is `T(pkSeed, ADRS_FORS_TREE{
+chain=0, hash=i·2^a + idx}, sk)`, then climb `a` levels. -/
+def forsTreeRoot (pkSeed forsSubSig : ByteArray)
+    (n : Nat) (tree keypair : Nat)
+    (i idx a : Nat) : ByteArray :=
+  let sk      := slice forsSubSig 0 n
+  let auth    := forsSubSig.extract n forsSubSig.size
+  let leafIdx := i * Nat.pow 2 a + idx
+  let adrs    := buildAdrs 0 tree adrsForsTree keypair 0 leafIdx
+  let leaf    := tHash pkSeed adrs sk n
+  forsAuthClimb pkSeed n tree keypair i idx a 0 a leaf auth
+
+/-- Concatenate the `k` FORS tree roots, indexing each by the
+corresponding `a`-bit slice of `md`. The total FORS sub-signature
+length is `k · (1 + a) · n`. -/
+def forsRootsConcat (pkSeed forsSig md : ByteArray)
+    (n : Nat) (tree keypair : Nat) (a k : Nat) : ByteArray :=
+  let subLen := (1 + a) * n
+  let rec go (i : Nat) (acc : ByteArray) : ByteArray :=
+    if i ≥ k then acc
+    else
+      let sub := slice forsSig (i * subLen) subLen
+      let idx := forsIndex md i a
+      go (i + 1) (acc ++ forsTreeRoot pkSeed sub n tree keypair i idx a)
+  termination_by k - i
+  go 0 ByteArray.empty
+
+/-- FORS public-key-from-signature: concatenate all `k` tree roots and
+compress under `T_{k·n}` with ADRS = FORS_ROOTS. -/
+def forsPkFromSig (pkSeed forsSig md : ByteArray)
+    (n : Nat) (tree keypair : Nat) (a k : Nat) : ByteArray :=
+  let rootsCat := forsRootsConcat pkSeed forsSig md n tree keypair a k
+  let adrs     := buildAdrs 0 tree adrsForsRoots keypair 0 0
+  tHash pkSeed adrs rootsCat n
+
+/-- One hypertree XMSS layer. Recovers the layer's root from the
+current `node`, the layer's XMSS signature `xmssSig` (WOTS+ sig
+followed by Merkle auth path), the current `tree` and `leafIdx`.
+Also updates `tree` and `leafIdx` for the next layer:
+`leafIdx_next = treeIdx % 2^hp`, `treeIdx_next = treeIdx >> hp`,
+keypair = leafIdx. -/
+def htLayer (pkSeed xmssSig node : ByteArray)
+    (n hp len len1 : Nat) (layer : Nat) (tree leafIdx : Nat) :
+    ByteArray :=
+  let wotsLen := len * n
+  let wotsSig := slice xmssSig 0 wotsLen
+  let auth    := xmssSig.extract wotsLen xmssSig.size
+  xmssPkFromSig pkSeed wotsSig auth node n layer hp len len1 tree leafIdx
+
+/-- Climb the hypertree for `d` XMSS layers. At each step, peel off
+the next XMSS sub-signature from `htSig`, recover the layer's root,
+then update `tree` (>> hp) and `leafIdx` (mod 2^hp) for the next
+layer. -/
+def htClimb (pkSeed : ByteArray)
+    (n hp len len1 : Nat) :
+    (layer : Nat) → (steps : Nat) → (tree leafIdx : Nat) →
+    (node htSig : ByteArray) → ByteArray
+  | _, 0,         _, _, node, _ => node
+  | layer, steps + 1, tree, leafIdx, node, htSig =>
+      let xmssLen := (len + hp) * n
+      let xmssSig := slice htSig 0 xmssLen
+      let rest    := htSig.extract xmssLen htSig.size
+      let node'   := htLayer pkSeed xmssSig node n hp len len1 layer tree leafIdx
+      let leafIdx' := tree % Nat.pow 2 hp
+      let tree'    := tree / Nat.pow 2 hp
+      htClimb pkSeed n hp len len1 (layer + 1) steps tree' leafIdx'
+              node' rest
+
+/-- FIPS 205 SHA-2 SLH-DSA full verification algorithm, parametric in
+a `SlhDsaParams` record.
+
+Inputs: `msg`, `sig`, `pk`. The verifier:
+
+1. Parses `pk = pkSeed(n) ‖ pkRoot(n)`.
+2. Parses `sig = R(n) ‖ forsSig(k·(1+a)·n) ‖ htSig(d·(len+hp)·n)`.
+3. Computes `digest = Hmsg(R, pkSeed, pkRoot, msg) → md ‖ treeIdx ‖ leafIdx`.
+4. Computes `forsPk = forsPkFromSig(forsSig, md, ...)`.
+5. Climbs `d` hypertree layers via `htClimb` to recover `root`.
+6. Returns `root == pkRoot`.
+
+Returns `false` for malformed inputs (short pk / sig). -/
+def slhDsaVerifyImpl (p : SlhDsaParams) (msg sig pk : ByteArray) : Bool :=
+  let n        := p.n
+  let mdLen    := (p.k * p.a + 7) / 8
+  let treeLen  := (p.h - p.hp + 7) / 8
+  let leafLen  := (p.hp + 7) / 8
+  let digLen   := mdLen + treeLen + leafLen
+  -- Step 1: parse pubkey.
+  let pkSeed   := slice pk 0 n
+  let pkRoot   := slice pk n n
+  -- Step 2: parse signature.
+  let R          := slice sig 0 n
+  let forsLen    := p.k * (1 + p.a) * n
+  let xmssLen    := (p.len + p.hp) * n
+  let forsSig    := slice sig n forsLen
+  let htSig      := slice sig (n + forsLen) (p.d * xmssLen)
+  -- Step 3: compute Hmsg digest.
+  let digest     := hMsg R pkSeed pkRoot msg digLen
+  let md         := slice digest 0 mdLen
+  let treeBytes  := slice digest mdLen treeLen
+  let leafBytes  := slice digest (mdLen + treeLen) leafLen
+  let treeIdx0   := beToNat treeBytes % Nat.pow 2 (p.h - p.hp)
+  let leafIdx0   := beToNat leafBytes % Nat.pow 2 p.hp
+  -- Step 4: recover FORS public key.
+  let forsPk     := forsPkFromSig pkSeed forsSig md n treeIdx0 leafIdx0 p.a p.k
+  -- Step 5: climb the hypertree d layers.
+  let finalRoot  :=
+    htClimb pkSeed n p.hp p.len p.len1 0 p.d treeIdx0 leafIdx0 forsPk htSig
+  -- Step 6: compare to pkRoot.
+  decide (finalRoot.toList = pkRoot.toList)
+
+end SlhDsa
+
+/-- FIPS 205 SLH-DSA-SHA2-128s verifier (n=16, h=63, d=7, a=12, k=14). -/
+def verifySLHDSA_SHA2_128s (msg sig pk : ByteArray) : Bool :=
+  SlhDsa.slhDsaVerifyImpl SlhDsa.params128s msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-128f verifier (n=16, h=66, d=22, a=6, k=33). -/
+def verifySLHDSA_SHA2_128f (msg sig pk : ByteArray) : Bool :=
+  SlhDsa.slhDsaVerifyImpl SlhDsa.params128f msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-192s verifier (n=24, h=63, d=7, a=14, k=17). -/
+def verifySLHDSA_SHA2_192s (msg sig pk : ByteArray) : Bool :=
+  SlhDsa.slhDsaVerifyImpl SlhDsa.params192s msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-192f verifier (n=24, h=66, d=22, a=8, k=33). -/
+def verifySLHDSA_SHA2_192f (msg sig pk : ByteArray) : Bool :=
+  SlhDsa.slhDsaVerifyImpl SlhDsa.params192f msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-256s verifier (n=32, h=64, d=8, a=14, k=22). -/
+def verifySLHDSA_SHA2_256s (msg sig pk : ByteArray) : Bool :=
+  SlhDsa.slhDsaVerifyImpl SlhDsa.params256s msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-256f verifier (n=32, h=68, d=17, a=8, k=35). -/
+def verifySLHDSA_SHA2_256f (msg sig pk : ByteArray) : Bool :=
+  SlhDsa.slhDsaVerifyImpl SlhDsa.params256f msg sig pk
 
 -- Bitcoin BIP-143 preimage projections (operate on opaque SigHashPreimage bytes).
 --

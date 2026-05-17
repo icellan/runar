@@ -227,19 +227,83 @@ prime field, with cofactor 1 and explicit base point `G`. The group
 laws below are the standard abelian-group identities for the
 `E(Fp)`-rational points of those curves.
 
-To express negation without introducing a `MakePoint` analogue we
-axiomatize a bare `pXNegate : ByteArray → ByteArray` function symbol
-(no body) — the codegen-to-spec layer in `Stack/P256P384.lean` then
-ties `emitPXNegate` to this symbol.
+Negation is implemented concretely below as `(x, y) → (x, p − y mod p)`
+over the uncompressed 64-byte (P-256) / 96-byte (P-384) coordinate
+encoding used by `Stack.P256P384`: the input is `x_be ‖ y_be` with each
+coordinate a fixed-width big-endian unsigned integer (32 bytes for
+P-256, 48 bytes for P-384). The codegen-to-spec layer in
+`Stack/P256P384.lean` ties `emitPXNegate` to these defs.
 -/
 
-/-- Abstract P-256 negation symbol (no body). Used by the codegen-to-spec
-axiom for `Stack.P256P384.emitP256Negate`. -/
-axiom p256Negate : ByteArray → ByteArray
+/-! ### P-256 / P-384 negation: byte-level uncompressed encoding helpers
 
-/-- Abstract P-384 negation symbol (no body). Used by the codegen-to-spec
-axiom for `Stack.P256P384.emitP384Negate`. -/
-axiom p384Negate : ByteArray → ByteArray
+The `Stack.P256P384` codegen emits negation over the uncompressed
+`x ‖ y` layout: two fixed-width big-endian unsigned coordinates, no
+parity prefix (mirroring the `Point` convention from
+`runar-lang/src/ec.ts`). The helpers below are local to negation; the
+broader B5-a milestone (PATH2_PLAN §5.26) will reuse the same encoding
+for the remaining P-256 / P-384 primitives. -/
+
+/-- P-256 field prime (FIPS 186-5 §D.1.2.3 / FIPS 186-4 §D.1.2.3):
+`p = 2^256 − 2^224 + 2^192 + 2^96 − 1`. -/
+def p256FieldP : Int :=
+  0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+
+/-- P-384 field prime (FIPS 186-5 §D.1.2.4 / FIPS 186-4 §D.1.2.4):
+`p = 2^384 − 2^128 − 2^96 + 2^32 − 1`. -/
+def p384FieldP : Int :=
+  0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff
+
+/-- Decode `n` big-endian bytes of `b` starting at offset `start` as a
+non-negative `Int`. Out-of-bounds bytes read as zero (total function). -/
+def bytesToIntBE (b : ByteArray) (start n : Nat) : Int := Id.run do
+  let mut acc : Int := 0
+  for i in [0:n] do
+    let idx := start + i
+    let byte : Nat := if idx < b.size then (b.get! idx).toNat else 0
+    acc := acc * 256 + Int.ofNat byte
+  pure acc
+
+/-- Encode a non-negative `Int` as `n` big-endian bytes (low-order byte
+last; negative inputs wrap mod 256 per byte, matching the canonical
+two's-complement big-endian truncation). Mirrors
+`Stack.P256P384.bigintToBytes`. -/
+def intToBytesBE (v : Int) (n : Nat) : ByteArray := Id.run do
+  let mut bytes : Array UInt8 := Array.replicate n 0
+  let mut x : Int := v
+  let mut i : Nat := n
+  while i > 0 do
+    i := i - 1
+    let lo : Nat := (x % 256).toNat
+    bytes := bytes.set! i (UInt8.ofNat lo)
+    x := x / 256
+  pure (ByteArray.mk bytes)
+
+/-- Concrete point negation `(x, y) → (x, (p − y) mod p)` over the
+uncompressed `x_be ‖ y_be` encoding with `coordBytes`-wide coordinates.
+
+If `b.size < 2 * coordBytes` the function is still total: out-of-bounds
+byte reads default to zero (matching `byteAt`), and the function
+returns a `coordBytes*2`-byte encoding of `(x_recovered, p − y_recovered
+mod p)`. On well-formed inputs (`b.size = 2 * coordBytes`) this is the
+exact byte image of the algebraic negation. -/
+def pXNegateImpl (coordBytes : Nat) (fieldP : Int) (b : ByteArray) : ByteArray :=
+  let x := bytesToIntBE b 0 coordBytes
+  let y := bytesToIntBE b coordBytes coordBytes
+  let yNeg := ((fieldP - y) % fieldP + fieldP) % fieldP
+  intToBytesBE x coordBytes ++ intToBytesBE yNeg coordBytes
+
+/-- P-256 negation: `(x, y) → (x, (p256FieldP − y) mod p256FieldP)` over
+the 64-byte uncompressed encoding (`x[32] ‖ y[32]`, big-endian unsigned,
+no prefix byte). Used by `Stack.P256P384.emitP256Negate_runOps_eq`. -/
+def p256Negate (b : ByteArray) : ByteArray :=
+  pXNegateImpl 32 p256FieldP b
+
+/-- P-384 negation: `(x, y) → (x, (p384FieldP − y) mod p384FieldP)` over
+the 96-byte uncompressed encoding (`x[48] ‖ y[48]`, big-endian unsigned,
+no prefix byte). Used by `Stack.P256P384.emitP384Negate_runOps_eq`. -/
+def p384Negate (b : ByteArray) : ByteArray :=
+  pXNegateImpl 48 p384FieldP b
 
 /-- P-256 point addition is associative (FIPS 186-4 §D.1.2.3). -/
 axiom p256Add_assoc (a b c : ByteArray) :
@@ -1264,5 +1328,83 @@ implicit Script-number ↔ bytes coercion made explicit. -/
 def verifyRabinSig_spec (msg : ByteArray) (sig padding pubKey : Int) : Bool :=
   let lhs := (sig * sig + padding) % pubKey
   decide ((RunarVerification.Stack.encodeMinimalLE lhs).toList = (Crypto.sha256 msg).toList)
+
+/-! ## 11. SLH-DSA-SHA2 verification — concrete specs (Phase B9-a)
+
+The six SHA-2 SLH-DSA verifiers (`verifySlhDsa_SHA2_<param>`) are
+concrete `def`s that mirror the per-parameter wrappers in
+`ANF/Eval.lean` (`Crypto.verifySLHDSA_SHA2_<param>` — also concrete
+`def`s as of Path 2 B9-a, 2026-05-17). Each delegates to
+`Crypto.SlhDsa.slhDsaVerifyImpl` with the matching `SlhDsaParams`
+record, so the spec form and the ANF/Eval form are propositionally
+(and `rfl`-) equal.
+
+Trust footprint: **zero** axioms added to this module (both sides are
+purely concrete `def`s over `Crypto.HashBackend.sha256`). The existing
+`verifySLHDSA_SHA2_*_correct` EUF-CMA companions (§3) continue to
+quote the ANF/Eval form; no change to their statements is needed.
+
+The codegen-to-spec equivalence theorem `runOps_slhDsaBodyOps_eq`
+(linking the emitted Stack-IR body to this spec) is deferred to a
+future `Stack/SlhDsa.lean` patch (the Stack-IR side is currently
+discharged in `Stack/SlhDsa.lean` via per-parameter scaffolding that
+predates the concrete spec — re-targeting it onto these defs is the
+remaining Tier 3 obligation).
+
+Mirrors `EmitVerifySLHDSA` in `compilers/go/codegen/slh_dsa.go` and
+`packages/runar-compiler/src/passes/slh-dsa-codegen.ts` via
+`ANF/Eval.lean#SlhDsa.slhDsaVerifyImpl`. -/
+
+/-- FIPS 205 SLH-DSA-SHA2-128s spec (n=16, h=63, d=7, a=12, k=14). -/
+def verifySlhDsa_SHA2_128s (msg sig pk : ByteArray) : Bool :=
+  RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_128s msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-128f spec (n=16, h=66, d=22, a=6, k=33). -/
+def verifySlhDsa_SHA2_128f (msg sig pk : ByteArray) : Bool :=
+  RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_128f msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-192s spec (n=24, h=63, d=7, a=14, k=17). -/
+def verifySlhDsa_SHA2_192s (msg sig pk : ByteArray) : Bool :=
+  RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_192s msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-192f spec (n=24, h=66, d=22, a=8, k=33). -/
+def verifySlhDsa_SHA2_192f (msg sig pk : ByteArray) : Bool :=
+  RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_192f msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-256s spec (n=32, h=64, d=8, a=14, k=22). -/
+def verifySlhDsa_SHA2_256s (msg sig pk : ByteArray) : Bool :=
+  RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256s msg sig pk
+
+/-- FIPS 205 SLH-DSA-SHA2-256f spec (n=32, h=68, d=17, a=8, k=35). -/
+def verifySlhDsa_SHA2_256f (msg sig pk : ByteArray) : Bool :=
+  RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256f msg sig pk
+
+/-- Equivalence between the `Crypto.Spec.verifySlhDsa_SHA2_*` specs and
+the `Crypto.verifySLHDSA_SHA2_*` ANF/Eval forms. Both delegate to the
+same `Crypto.SlhDsa.slhDsaVerifyImpl` implementation, so all six
+identities reduce to `rfl`. -/
+theorem verifySlhDsa_SHA2_128s_eq (msg sig pk : ByteArray) :
+    verifySlhDsa_SHA2_128s msg sig pk
+      = RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_128s msg sig pk := rfl
+
+theorem verifySlhDsa_SHA2_128f_eq (msg sig pk : ByteArray) :
+    verifySlhDsa_SHA2_128f msg sig pk
+      = RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_128f msg sig pk := rfl
+
+theorem verifySlhDsa_SHA2_192s_eq (msg sig pk : ByteArray) :
+    verifySlhDsa_SHA2_192s msg sig pk
+      = RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_192s msg sig pk := rfl
+
+theorem verifySlhDsa_SHA2_192f_eq (msg sig pk : ByteArray) :
+    verifySlhDsa_SHA2_192f msg sig pk
+      = RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_192f msg sig pk := rfl
+
+theorem verifySlhDsa_SHA2_256s_eq (msg sig pk : ByteArray) :
+    verifySlhDsa_SHA2_256s msg sig pk
+      = RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256s msg sig pk := rfl
+
+theorem verifySlhDsa_SHA2_256f_eq (msg sig pk : ByteArray) :
+    verifySlhDsa_SHA2_256f msg sig pk
+      = RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256f msg sig pk := rfl
 
 end RunarVerification.Crypto.Spec

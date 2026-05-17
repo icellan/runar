@@ -631,7 +631,15 @@ theorem runOpcode_EQUAL_def (s : StackState) :
                  | _, _ =>
                      match asInt? a, asInt? b with
                      | some ai, some bi => decide (ai = bi)
-                     | _, _ => false
+                     | _, _ =>
+                         match asInt? a, asBytes? b with
+                         | some ai, some bb =>
+                             decide ((encodeMinimalLE ai).toList = bb.toList)
+                         | _, _ =>
+                             match asBytes? a, asInt? b with
+                             | some ab, some bi =>
+                                 decide (ab.toList = (encodeMinimalLE bi).toList)
+                             | _, _ => false
                .ok (s'.push (.vBool eq))
            | _ => .error (.unsupported "OP_EQUAL popN bug")) := rfl
 

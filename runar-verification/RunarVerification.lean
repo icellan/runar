@@ -3,6 +3,8 @@ import RunarVerification.ANF.Json
 import RunarVerification.ANF.WF
 import RunarVerification.ANF.Typed
 import RunarVerification.ANF.Eval
+import RunarVerification.Crypto.Secp256k1
+import RunarVerification.Crypto.NistEC
 import RunarVerification.Crypto.Spec
 import RunarVerification.Stack.Syntax
 import RunarVerification.Stack.Eval

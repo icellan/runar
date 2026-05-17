@@ -514,7 +514,23 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
                 | _, _ =>
                     match asInt? a, asInt? b with
                     | some ai, some bi => decide (ai = bi)
-                    | _, _ => false
+                    | _, _ =>
+                        -- BSV consensus int↔bytes coercion (Phase B10-prep).
+                        -- When the two operands carry a mixed numeric / bytes
+                        -- representation, real Bitcoin Script compares them
+                        -- after coercing the integer side to its canonical
+                        -- minimal-LE Script-number byte encoding. See
+                        -- `Stack.NumEncoding.encodeMinimalLE` and
+                        -- `Script.Emit.encodeScriptNumber` — the two are
+                        -- pinned byte-identical.
+                        match asInt? a, asBytes? b with
+                        | some ai, some bb =>
+                            decide ((encodeMinimalLE ai).toList = bb.toList)
+                        | _, _ =>
+                            match asBytes? a, asInt? b with
+                            | some ab, some bi =>
+                                decide (ab.toList = (encodeMinimalLE bi).toList)
+                            | _, _ => false
               .ok (s'.push (.vBool eq))
           | _ => .error (.unsupported "OP_EQUAL popN bug")
   -- ---------------------------------------------------------------- bytes
@@ -613,7 +629,17 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
                 | _, _ =>
                     match asInt? a, asInt? b with
                     | some ai, some bi => decide (ai = bi)
-                    | _, _ => false
+                    | _, _ =>
+                        -- BSV consensus int↔bytes coercion (Phase B10-prep);
+                        -- mirrors the `OP_EQUAL` arm above.
+                        match asInt? a, asBytes? b with
+                        | some ai, some bb =>
+                            decide ((encodeMinimalLE ai).toList = bb.toList)
+                        | _, _ =>
+                            match asBytes? a, asInt? b with
+                            | some ab, some bi =>
+                                decide (ab.toList = (encodeMinimalLE bi).toList)
+                            | _, _ => false
               if eq then .ok s' else .error .assertFailed
           | _ => .error (.unsupported "OP_EQUALVERIFY popN bug")
   | "OP_NUMEQUALVERIFY" =>

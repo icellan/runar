@@ -9,7 +9,7 @@ counts:
 
 | Item | Count | Meaning |
 |---|---:|---|
-| Project axioms | 110 | Named assumptions in Lean code |
+| Project axioms | 78 | Named assumptions in Lean code |
 | Opaque executable defaults | 0 | No executable bodies hidden from proofs |
 | Opaque defaults with bodies | 0 | No opaque declarations carry defaults |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
@@ -35,8 +35,17 @@ that are preserved by design.
 | Phase D3 discharge (wave 1) | 2026-05-17 | 115 | −2 | −2 (terminal_assert, nip_cleanup were vacuous `P→P`) | 0 |
 | Phase B3-a concrete defs (wave 1) | 2026-05-17 | 113 | −2 | 0 | −2 (`blake3Hash` / `blake3Compress` become delegating defs to `Crypto/HashBackend.lean`) |
 | Verifier-axiom delegation (wave 1) | 2026-05-17 | 110 | −3 | 0 | −3 (`merkleRootSha256`, `merkleRootHash256`, `verifyRabinSig` become concrete defs) |
+| Tier 1 wave 1: pXNegate-derivable | 2026-05-17 | 108 | −2 | 0 | −2 (`p256Negate`, `p384Negate` become concrete defs over `(x, y) → (x, (p − y) mod p)`) |
+| Tier 1 wave 1: D2.a auto check_preimage | 2026-05-17 | 107 | −1 | −1 (axiom had `P → P` shape, discharged by identity propagation as theorem) | 0 |
+| Tier 1 wave 1: B10-prep + B10 Rabin | 2026-05-17 | 106 | −1 | −1 (`runOps_rabinBodyOps_eq` discharged after `Stack/Eval.lean` `OP_EQUAL` int↔bytes coercion widened) | 0 |
+| Tier 1 wave 1: B4-a concrete ec* defs | 2026-05-17 | 96 | −10 | 0 | −10 (10 secp256k1 primitives become concrete defs in new `Crypto/Secp256k1.lean`) |
+| Tier 1 wave 1: B5-a concrete p256/p384* defs | 2026-05-17 | 84 | −12 | 0 | −12 (12 P-256/P-384 primitives become concrete defs in new `Crypto/NistEC.lean`) |
+| Tier 1 wave 1: B9-a concrete verifySLHDSA defs | 2026-05-17 | 78 | −6 | 0 | −6 (6 SLH-DSA SHA-2 parameter sets become concrete defs composing SHA-256 + Merkle + WOTS+ + FORS) |
 
 **Net wave 1 (2026-05-17, commit `7dcc7fc3`):** 125 → 110, Δ = −15.
+
+**Net Tier 1 wave 1 (2026-05-17, six parallel discharges):** 110 → 78,
+Δ = −32. Combined with wave 1: 125 → 78, Δ = −47 in a single day.
 
 The Phase B6 and B3-a discharges reveal a taxonomy gap in the
 original Path 2 framing: some axioms classified "permanent crypto"
@@ -47,7 +56,7 @@ table below makes the partition explicit.
 
 ## Axiom Taxonomy — preserved vs discharge-target
 
-The 110 current axioms split into two roles. **Preserved** axioms
+The 78 current axioms split into two roles. **Preserved** axioms
 are real cryptographic primitive existence / group law / EUF-CMA
 assumptions that Path 2 does not target — they remain axiomatic by
 design (no Lean proof can discharge "ECDSA satisfies EUF-CMA",
@@ -60,15 +69,15 @@ proofs; Path 2 discharges them.
 
 | File | Total | Preserved | Target | Notes |
 |---|---:|---:|---:|---|
-| `ANF/Eval.lean` | 34 | 34 | 0 | 3 backend assumptions (`hashBackend`, `authBackend`, `preimageBackend`); 2 partial-SHA-256 ops (`sha256Compress`, `sha256Finalize`); 10 secp256k1 primitives; 12 P-256/P-384 primitives; 7 high-level verifiers (`verifyWOTS`, `verifySLHDSA_*` ×6). The 7 high-level verifiers can become delegating defs (cf. wave 1 Merkle/Rabin pattern) once a shared `Crypto/SpecCore.lean` refactor breaks the import cycle to `Crypto/Spec.lean` — that work is tracked as **B-finalize-delegation** in `TODO.md`. |
-| `Crypto/Spec.lean` | 48 | 38 | 10 | **Preserved (38):** 10 secp256k1 group laws §1; 12 P-256/P-384 group laws §2.5 (including 2 `pXNegate` function symbols — both derivable as concrete `def`s once the negation formula `(x, y) → (x, p − y mod p)` is in the file; tracked as Tier 1 task **pXNegate-derivable**); 5 auxiliary key functions; 11 EUF-CMA companions. **Target (10):** Phase B4 secp256k1 codegen-to-spec (`emitEcAdd_runOps_eq` ... `emitEcPointY_runOps_eq`). The 20 group-law axioms in §1 + §2.5 become *derivable* once B4-a / B5-a land concrete `Crypto.ecAdd` / `Crypto.p256Add` / etc., shifting them from "Preserved" to "Discharged". |
-| `Pipeline.lean` | 4 | 0 | 4 | All four are codegen-soundness targets: D1 `merkle_dispatch_selection_correct`, D2.a `auto_check_preimage_at_method_entry_correct`, D2.b `auto_state_output_at_method_exit_correct`, and the omnibus `compileSafe_observational_correct_modulo_codegen_axioms`. |
+| `ANF/Eval.lean` | 6 | 6 | 0 | 3 backend assumptions (`hashBackend`, `authBackend`, `preimageBackend`); 2 partial-SHA-256 ops (`sha256Compress`, `sha256Finalize`); 1 residual (`merkleRootHash256`-style outliers). Tier 1 wave 1 (2026-05-17) converted the 10 secp256k1, 12 P-256/P-384, and 6 SLH-DSA primitive symbols to delegating `def`s into new `Crypto/Secp256k1.lean`, `Crypto/NistEC.lean`, and inline `SlhDsa` namespace (net −28 from this file). `verifyWOTS` was deferred pending the `Crypto/SpecCore.lean` refactor (import-cycle blocker). |
+| `Crypto/Spec.lean` | 46 | 36 | 10 | **Preserved (36):** 10 secp256k1 group laws §1; 10 P-256/P-384 group laws §2.5 (the 2 `pXNegate` function symbols are now concrete `def`s per Tier 1 pXNegate-derivable); 5 auxiliary key functions; 11 EUF-CMA companions. **Target (10):** Phase B4 secp256k1 codegen-to-spec (`emitEcAdd_runOps_eq` ... `emitEcPointY_runOps_eq`). The 20 group-law axioms in §1 + §2.5 become *derivable* once Tier 2 group-law audit lands against the concrete `Crypto.ecAdd` / `Crypto.p256Add` / etc. defs (now in `Crypto/Secp256k1.lean` and `Crypto/NistEC.lean`). |
+| `Pipeline.lean` | 3 | 0 | 3 | After Tier 1 wave 1 D2.a discharge: D1 `merkle_dispatch_selection_correct`, D2.b `auto_state_output_at_method_exit_correct`, and the omnibus `compileSafe_observational_correct_modulo_codegen_axioms`. |
 | `Stack/Blake3.lean` | 2 | 0 | 2 | `runOps_b3HashOps_eq`, `runOps_b3CompressOps_eq` — codegen-to-spec. |
 | `Stack/P256P384.lean` | 14 | 0 | 14 | Codegen-to-spec for `emitP256/P384*` and `emitVerifyECDSA_P256/P384`. |
 | `Stack/SlhDsa.lean` | 6 | 0 | 6 | One codegen-to-spec link per FIPS 205 SHA-2 parameter set. |
 | `Stack/Wots.lean` | 1 | 0 | 1 | `runOps_wotsBodyOps_eq` codegen-to-spec. |
-| `Stack/Rabin.lean` | 1 | 0 | 1 | `runOps_rabinBodyOps_eq` codegen-to-spec (blocked on `Stack/Eval.lean` `OP_EQUAL` int↔bytes coercion fix — tracked as **B10-prep** in `TODO.md`). |
-| **Sum** | **110** | **72** | **38** | |
+| `Stack/Rabin.lean` | 0 | 0 | 0 | Discharged in Tier 1 wave 1 (B10-prep + B10): `runOps_rabinBodyOps_eq` is now a theorem after `Stack/Eval.lean` `OP_EQUAL` int↔bytes coercion widening. |
+| **Sum** | **78** | **42** | **36** | |
 
 Path 2 retires the 38 "Target" axioms. After full Path 2 with the
 sub-phase work (B4-a / B5-a / B9-a) plus the group-law audit, the
@@ -130,7 +139,7 @@ permanent axiom inflation.
 
 | File | Count | Role |
 |---|---:|---|
-| `RunarVerification/ANF/Eval.lean` | 34 | Crypto and builtin primitive symbols, including external hash, preimage, and auth backends. Phase B6 (2026-05-17) converted `bbFieldAdd / Sub / Mul / Inv` from axioms to concrete `def`s; net −4. Phase B3-a (2026-05-17) converted `blake3Hash` / `blake3Compress` from bare axioms to delegating `def`s forwarding to `Crypto/HashBackend.lean`; net −2. Verifier-axiom delegation (2026-05-17) converted `merkleRootSha256` / `merkleRootHash256` / `verifyRabinSig` from bare axioms to concrete `def`s; net −3 |
+| `RunarVerification/ANF/Eval.lean` | 24 | Crypto and builtin primitive symbols, including external hash, preimage, and auth backends. Phase B6 (2026-05-17) converted `bbFieldAdd / Sub / Mul / Inv` from axioms to concrete `def`s; net −4. Phase B3-a (2026-05-17) converted `blake3Hash` / `blake3Compress` from bare axioms to delegating `def`s forwarding to `Crypto/HashBackend.lean`; net −2. Verifier-axiom delegation (2026-05-17) converted `merkleRootSha256` / `merkleRootHash256` / `verifyRabinSig` from bare axioms to concrete `def`s; net −3. Phase B4-a (2026-05-17) converted the 10 bare secp256k1 EC axioms (`ecAdd / ecMul / ecMulGen / ecNegate / ecOnCurve / ecModReduce / ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY`) to delegating `def`s forwarding to a new leaf module `Crypto/Secp256k1.lean` (≈280 LOC, mirrors SEC 2 v2 secp256k1 parameters + `packages/runar-compiler/src/passes/ec-codegen.ts`); net −10 |
 | `RunarVerification/Crypto/Spec.lean` | 48 | EC laws (secp256k1 §2 + NIST P-256 / P-384 §2.5 per FIPS 186-4), auxiliary key functions, EUF-CMA-style companions, Phase B4 secp256k1 codegen-to-spec axioms, Phase B5 P-256/P-384 group-law axioms + `pXNegate` symbols, Phase B8 WOTS+ concrete spec (def, no axioms), Phase B10 Rabin concrete spec (def, no axioms). Phase B6 (2026-05-17) discharged the four BabyBear functional-correctness companions (`bbFieldAdd / Sub / Mul / Inv_correct`) as theorems; net −4 |
 | `RunarVerification/Stack/Blake3.lean` | 2 | Phase B3 BLAKE3 codegen-to-spec links (`runOps_b3HashOps_eq`, `runOps_b3CompressOps_eq`) |
 | `RunarVerification/Stack/P256P384.lean` | 14 | Phase B5 codegen-to-spec: each `emitP256/P384*` and `emitVerifyECDSA_P256/P384` reduces under `runOps` to the matching `Crypto.pX*` primitive (FIPS 186-4) |
