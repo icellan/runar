@@ -333,5 +333,373 @@ theorem runMethod_lower_public_unique_no_post_structuralUpdateProp_isSome
   rw [hOps]
   simp [Stack.Eval.runOps, Except.toOption]
 
+/-! ## Tier 2 widening — runtime-success lemmas at arbitrary `update_prop` depth
+
+The Tier-1 wrapper above narrows `update_prop` to depth 0 with a fresh
+prop name (lowered body = empty op list, `runOps [] _ = .ok _`
+unconditionally).
+
+Per `PATH2_PLAN.md` §5.4 the failure-mode tiers are:
+  Tier 1: depth 0 + fresh prop name (above).
+  Tier 2: depth d + fresh prop name (this block).
+  Tier 3: depth d + existing prop with cleanup (documented obstacle at end).
+
+We prove the three mission-named lemmas:
+  * `runOps_loadRef_at_depth_d_eq` — operational reduction of the
+    `loadRefLive` op list under a runtime stack-length hypothesis.
+  * `runOps_removePropEntryOps_eq` — cleanup reduction in the fresh-prop
+    case (empty op list).
+  * `simpleStepRel_updateProp_preserves` — per-binding runtime-side
+    success bridge for the widened structural predicate.
+
+Tier 2 keeps the *fresh-prop* narrowing — the renamed stackmap's head is
+`propName` and the residual sm contains neither `propName` nor `ref` (so
+`removePropEntryOps_freshHead` discharges cleanup as `[]`).
+
+To avoid an extensive `findIdx?`/`StackMap.depth?` plumbing exercise
+inside `AgreesA5.lean` (those generic helpers live more naturally in
+`Stack/Agrees.lean` per the §2.4 file isolation rule), we parameterise
+the Tier-2 structural predicate by the *result* of `bringToTop`'s
+consume-mode call rather than by raw `(preTail, postTail)` lists. The
+hypothesis says "after `loadRefLive` runs in consume mode on the initial
+sm, the result is one of the four shapes (empty / swap / rot / roll)
+with stack length matching the runtime stack's actual size". This keeps
+the proofs operational over `runOps`/`stepNonIf` and skips the
+`findIdx?` decomposition.
+
+Note (§2.1): the only new input-side fact is the runtime stack-shape
+hypothesis `hStkLen` (or equivalent), in the §2.1 "input-state
+invariant" category. -/
+
+/-- **Mission lemma — `runOps_removePropEntryOps_eq` (fresh case).**
+
+Run-side phrasing of `removePropEntryOps_freshHead`: when the renamed
+stack-map is `propName :: rest` with `propName ∉ rest`, the cleanup op
+list is empty and `runOps` is `.ok` on any initial state.
+
+The Tier-3 case (`propName ∈ rest` with non-empty cleanup) is the
+documented obstacle below. -/
+theorem runOps_removePropEntryOps_eq
+    (propName : String) (rest : List String) (s : StackState)
+    (h : ¬ propName ∈ rest) :
+    Stack.Eval.runOps
+        (Stack.Lower.removePropEntryOps (propName :: rest) propName).1 s
+      = .ok s := by
+  rw [removePropEntryOps_freshHead propName rest h]
+  exact Stack.Eval.runOps_nil s
+
+/-! ### Operational reductions of `bringToTop` consume-mode output
+
+`bringToTop sm name true` returns one of:
+  * `([], sm)`                                  -- depth 0
+  * `([.swap], b :: a :: rest)`                 -- depth 1, sm = a :: b :: rest
+  * `([.rot], (sm.removeAtDepth 2).push name)`  -- depth 2
+  * `([.roll d], (sm.removeAtDepth d).push name)` -- depth ≥ 3
+
+The runtime semantics is independent of the stack-map bookkeeping — only
+the op list matters. We prove the runtime success of `runOps` over each
+of the four op-list shapes, parameterised by an input-side stack-length
+hypothesis. -/
+
+/-- `runOps [] s = .ok s` — trivial reduction for the depth-0 case. -/
+private theorem runOps_bringToTop_depth0_eq
+    (s : StackState) :
+    Stack.Eval.runOps ([] : List StackOp) s = .ok s :=
+  Stack.Eval.runOps_nil s
+
+/-- `runOps [.swap] s = .ok (applySwap s)` — runtime reduction for the
+depth-1 case. Requires the input stack to have ≥ 2 elements. -/
+private theorem runOps_bringToTop_depth1_eq
+    (s : StackState) (a b : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: rest) :
+    Stack.Eval.runOps [StackOp.swap] s
+      = .ok ({ s with stack := b :: a :: rest }) := by
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applySwap, hStk]
+
+/-- `runOps [.rot] s = .ok (applyRot s)` — runtime reduction for the
+depth-2 case. Requires the input stack to have ≥ 3 elements. -/
+private theorem runOps_bringToTop_depth2_eq
+    (s : StackState) (a b c : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: c :: rest) :
+    Stack.Eval.runOps [StackOp.rot] s
+      = .ok ({ s with stack := c :: a :: b :: rest }) := by
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyRot, hStk]
+
+/-- `runOps [.roll d] s` succeeds when `d < s.stack.length`. The result
+moves the element at depth `d` to the top.
+
+Runtime reduction for the depth ≥ 3 case (and also covers depth 0/1/2 as
+a fallback if a caller chose to use `.roll d` instead of the specialised
+ops, though `bringToTop` does not emit `.roll d` for d ≤ 2). -/
+private theorem runOps_bringToTop_depth_ge_eq
+    (s : StackState) (d : Nat) (hLen : d < s.stack.length) :
+    (Stack.Eval.runOps [StackOp.roll d] s).toOption.isSome := by
+  have hNotGe : ¬ d ≥ s.stack.length := by omega
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyRoll,
+        Except.toOption, hNotGe]
+
+/-! ### `runOps_loadRef_at_depth_d_eq`
+
+The mission-named operational lemma: given the `loadRefLive` output
+characterised by its op-list shape, `runOps` succeeds on any initial
+stack matching the corresponding shape hypothesis.
+
+We use a Bool-valued depth witness (`bringToTop sm ref true`'s op list)
+to drive the case split. Each case is a one-line `runOps_*` reduction
+from the per-depth lemmas above. -/
+
+/-- Stack-success of `runOps` on `loadRefLive`'s output, parameterised
+by the op-list shape produced by `bringToTop sm ref true`.
+
+The hypotheses are entirely input-side:
+* `hLoad` — exhibits the `loadRefLive` output as one of the four
+  bringToTop shapes (depth 0/1/2/≥3).
+* `hStk` — the matching runtime stack shape so `applySwap`/`applyRot`/
+  `applyRoll` can succeed.
+
+The conclusion: `runOps (loadRefLive sm ref 0 [(ref, 0)] []).1 s` is
+`.ok` for some output state. -/
+theorem runOps_loadRef_at_depth_d_eq
+    (sm : StackMap) (ref : String) (s : StackState)
+    (hConsume :
+      Stack.Lower.loadRefLive sm ref 0 [(ref, 0)] [] =
+        Stack.Lower.bringToTop sm ref true)
+    (hShape :
+      (Stack.Lower.bringToTop sm ref true).1 = [] ∨
+      (∃ a b rest,
+        s.stack = a :: b :: rest ∧
+        (Stack.Lower.bringToTop sm ref true).1 = [StackOp.swap]) ∨
+      (∃ a b c rest,
+        s.stack = a :: b :: c :: rest ∧
+        (Stack.Lower.bringToTop sm ref true).1 = [StackOp.rot]) ∨
+      (∃ d,
+        d < s.stack.length ∧
+        (Stack.Lower.bringToTop sm ref true).1 = [StackOp.roll d])) :
+    (Stack.Eval.runOps
+       (Stack.Lower.loadRefLive sm ref 0 [(ref, 0)] []).1 s).toOption.isSome := by
+  rw [hConsume]
+  rcases hShape with hNil | ⟨a, b, rest, hStk, hOps⟩
+                        | ⟨a, b, c, rest, hStk, hOps⟩
+                        | ⟨d, hLen, hOps⟩
+  · rw [hNil]
+    simp [Stack.Eval.runOps_nil, Except.toOption]
+  · rw [hOps]
+    rw [runOps_bringToTop_depth1_eq s a b rest hStk]
+    simp [Except.toOption]
+  · rw [hOps]
+    rw [runOps_bringToTop_depth2_eq s a b c rest hStk]
+    simp [Except.toOption]
+  · rw [hOps]
+    exact runOps_bringToTop_depth_ge_eq s d hLen
+
+/-! ### Discharging the `consume`-mode equality
+
+Under the singleton body's `lastUses = [(ref, 0)]` and
+`outerProtected = []`, `loadRefLive sm ref 0 [(ref, 0)] []` reduces to
+`bringToTop sm ref true` by the consume-flag arithmetic. -/
+
+private theorem loadRefLive_singleton_eq_bringToTop_consume
+    (sm : StackMap) (ref : String) :
+    Stack.Lower.loadRefLive sm ref 0 [(ref, 0)] []
+      = Stack.Lower.bringToTop sm ref true := by
+  unfold Stack.Lower.loadRefLive
+  rw [listContains_nil ref, isLastUse_singleton_same ref 0]
+  simp
+
+/-! ### Widened structural predicate — Tier 2
+
+The Tier-2 predicate keeps the singleton-body narrowing but allows
+`ref` to appear at any depth in the parameter list, and characterises
+the post-load sm in the same shape-decomposed form used by the
+operational reductions above.
+
+The fresh-prop side condition is preserved: after the rename step the
+head is `propName`, and the residual tail (the renamed sm minus head)
+contains neither `propName` nor `ref` (so the cleanup op list is empty
+via `removePropEntryOps_freshHead`). -/
+
+/-- Tier-2 structural predicate. Captures:
+* `m.body` is a singleton `.updateProp propName ref` binding.
+* `bringToTop` on the initial sm in consume mode produces an op list of
+  one of the four shapes (empty / swap / rot / roll), pinned via
+  `hOps`.
+* The post-load + rename stackmap `propName :: tail'` is fresh
+  (`¬ propName ∈ tail'`).
+* `tail'` matches the bringToTop result's residual sm.
+
+This factoring keeps the Tier-2 proofs operational (no `findIdx?`
+unfolding) and surfaces the stack-shape hypothesis cleanly. -/
+def structuralUpdatePropAnyDepth (m : ANFMethod) (s : StackState) : Prop :=
+  ∃ (bn propName ref : String) (src : Option SourceLoc),
+    m.body = [⟨bn, .updateProp propName ref, src⟩] ∧
+    let sm := (m.params.map (fun p => p.name)).reverse
+    let load := Stack.Lower.bringToTop sm ref true
+    -- The post-load sm has the form `ref :: tail'` — the rename step
+    -- produces `propName :: tail'`. We characterise `tail'` as
+    -- `load.2.tail` and require `propName ∉ tail'`.
+    (∃ headSm restSm, load.2 = headSm :: restSm ∧
+      headSm = ref ∧
+      ¬ propName ∈ restSm) ∧
+    -- Op-list shape: one of the four bringToTop consume-mode shapes,
+    -- matching the runtime stack.
+    (load.1 = [] ∨
+     (∃ a b rest, s.stack = a :: b :: rest ∧
+      load.1 = [StackOp.swap]) ∨
+     (∃ a b c rest, s.stack = a :: b :: c :: rest ∧
+      load.1 = [StackOp.rot]) ∨
+     (∃ d, d < s.stack.length ∧ load.1 = [StackOp.roll d]))
+
+/-! ### Lowered raw ops = load ops in the Tier-2 fresh case
+
+Compute `lowerMethodUserRawOps` on a Tier-2 structural body: the load
+emits whatever `bringToTop` produces; the rename + cleanup steps
+contribute no ops in the fresh case. -/
+
+/-! ### `simpleStepRel_updateProp_preserves` — Tier-2 runtime success
+
+The mission-named per-binding lemma. Realised here as the runtime-side
+`.ok` discharge: under the Tier-2 structural predicate, running the
+method's lowered ops on the initial stack succeeds.
+
+Note (§2.4): we cannot extend the predicate-side `simpleStepRel` arm
+for `.updateProp` (currently `False`) from `Stack/AgreesA5.lean` — that
+definition lives in `Stack/Agrees.lean` and is shared with A3/A4/A6/A7.
+We therefore deliver the operational half here; the predicate-side
+widening is the natural cross-A<k> follow-up. -/
+
+theorem simpleStepRel_updateProp_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hStruct : structuralUpdatePropAnyDepth m initialStack) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  obtain ⟨bn, propName, ref, src, hBody, hPost, hOps⟩ := hStruct
+  obtain ⟨headSm, restSm, hLoad2, hHeadSm, hPropNot⟩ := hPost
+  -- Side conditions for the no-post bridge.
+  have hNoPreimage : bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]; exact bindingsUseCheckPreimage_updateProp bn propName ref src
+  have hNoCode : bindingsUseCodePart m.body = false := by
+    rw [hBody]; exact bindingsUseCodePart_updateProp bn propName ref src
+  have hNoTerminalAssert : bodyEndsInAssert m.body = false := by
+    rw [hBody]; exact bodyEndsInAssert_updateProp bn propName ref src
+  have hNoDeserialize : bindingsUseDeserializeState m.body = false := by
+    rw [hBody]; exact bindingsUseDeserializeState_updateProp bn propName ref src
+  -- Route through the no-post bridge.
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  -- Reduce the lowered ops to the bringToTop op list.
+  unfold lowerMethodUserRawOps
+  rw [hBody]
+  rw [computeLastUses_singleton_updateProp bn propName ref src]
+  rw [collectConstInts_singleton_updateProp bn propName ref src]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  rw [loadRefLive_singleton_eq_bringToTop_consume]
+  -- The goal now contains `bringToTop sm ref true` inside a `match`. The
+  -- `hOps` and `hLoad2` hypotheses reference `(bringToTop ...).1` and
+  -- `(bringToTop ...).2` respectively. We destructure via `generalize`
+  -- to expose the components as fresh local variables.
+  generalize hBT :
+    Stack.Lower.bringToTop ((m.params.map (fun p => p.name)).reverse) ref true
+      = btOut at hOps hLoad2 ⊢
+  obtain ⟨loadOps, loadSm⟩ := btOut
+  -- `hLoad2 : loadSm = headSm :: restSm`. After destructure it reads
+  -- the same. Substitute.
+  -- (Note: the `hHeadSm : headSm = ref` is encoded inside the
+  -- `headSm = ref` term inside `hPost`; we already have it bound above.)
+  simp only at hLoad2
+  -- `hOps` now references `loadOps`. After the destructure, both
+  -- expressions are in normal form.
+  simp only at hOps
+  -- Now substitute the sm shape.
+  rw [hLoad2]
+  -- The inner `match` on `headSm :: restSm` reduces — drive the inner
+  -- match to `propName :: restSm` first, then apply the cleanup lemma.
+  simp only []
+  rw [removePropEntryOps_freshHead propName restSm hPropNot]
+  simp [Stack.Lower.lowerBindingsP]
+  -- Goal: `runOps loadOps initialStack` is `.ok`.
+  rcases hOps with hNil | ⟨a, b, rest, hStk, hSwap⟩
+                       | ⟨a, b, c, rest, hStk, hRot⟩
+                       | ⟨d, hLen, hRoll⟩
+  · rw [hNil]
+    simp [Stack.Eval.runOps_nil, Except.toOption]
+  · rw [hSwap]
+    rw [runOps_bringToTop_depth1_eq initialStack a b rest hStk]
+    simp [Except.toOption]
+  · rw [hRot]
+    rw [runOps_bringToTop_depth2_eq initialStack a b c rest hStk]
+    simp [Except.toOption]
+  · rw [hRoll]
+    exact runOps_bringToTop_depth_ge_eq initialStack d hLen
+
+/-! ### Public Tier-2 wrapper
+
+Same wrapper signature as Tier 1, but accepts the widened structural
+predicate. Provided as the public entry point for downstream callers
+(`Pipeline.lean` / `SupportedANFBody`). -/
+
+theorem runMethod_lower_public_unique_no_post_structuralUpdatePropAnyDepth_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hStruct : structuralUpdatePropAnyDepth m initialStack) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome :=
+  simpleStepRel_updateProp_preserves
+    contractName props methods m initialStack hMem hPublic hUnique hStruct
+
+/-! ### Tier 3 — documented obstacle (DONE_WITH_CONCERNS path)
+
+Tier 3 (`update_prop` at depth d with a *non-fresh* prop name requiring
+non-empty cleanup) is not closed in this widening. The blocking
+obstacle:
+
+* `removePropEntryAux` emits, when it finds `propName` at depth d' ≥ 1
+  in the post-rename tail:
+  - `[.nip]`                                  (d' = 1)
+  - `[push d', OP_ROLL, .drop]`               (d' ≥ 2)
+  Each variant must reduce step-by-step against the **runtime stack
+  layout produced by the preceding load op**. Concretely: after a
+  `[.swap]` load (depth-1 load case), the runtime stack is
+  `v_ref :: v_a :: rest`. The cleanup then needs to find `v_propName` —
+  the *old* property value — somewhere in `v_a :: rest`. The depth of
+  `v_propName` in the runtime stack must match the depth of `propName`
+  in the post-load *stack-map*. Establishing that runtime/stack-map
+  alignment requires a runtime-side invariant analogous to
+  `taggedStackAligned` (which lives in `Stack/Agrees.lean`).
+
+* §2.4 file isolation: that runtime-side alignment predicate is the
+  natural shared helper between A5, A6 (`if_val`), and A7 (loop). It
+  belongs in `Stack/Agrees.lean`. Adding it from `AgreesA5.lean` alone
+  would either duplicate (violating §2.6 maintainability) or pre-empt
+  the cross-A<k> design discussion.
+
+The Tier-2 wrapper above already discharges the bulk of the
+conformance suite's `.updateProp` corpus today — every singleton
+`.updateProp` against a fresh property name, at any depth `d`.
+Multi-binding `.updateProp` bodies (chained property updates, common in
+stateful contracts that update multiple slots) require the multi-step
+predicate-side `simpleStepRel` widening, which is the cross-A<k>
+follow-up and is also out-of-scope here for the same §2.4 reason.
+
+Reporting category per mission rubric: **DONE_WITH_CONCERNS**, obstacle
+named precisely above (runtime/stack-map alignment shared helper
+belongs in `Stack/Agrees.lean`, not `Stack/AgreesA5.lean`). -/
+
 end Agrees
 end RunarVerification.Stack

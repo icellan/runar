@@ -9,7 +9,7 @@ counts:
 
 | Item | Count | Meaning |
 |---|---:|---|
-| Project axioms | 125 | Named assumptions in Lean code |
+| Project axioms | 110 | Named assumptions in Lean code |
 | Opaque executable defaults | 0 | No executable bodies hidden from proofs |
 | Opaque defaults with bodies | 0 | No opaque declarations carry defaults |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
@@ -18,15 +18,15 @@ counts:
 
 | File | Count | Role |
 |---|---:|---|
-| `RunarVerification/ANF/Eval.lean` | 43 | Crypto and builtin primitive symbols, including external hash, preimage, and auth backends |
-| `RunarVerification/Crypto/Spec.lean` | 52 | EC laws (secp256k1 §2 + NIST P-256 / P-384 §2.5 per FIPS 186-4), auxiliary key functions, EUF-CMA-style companions, Phase B4 secp256k1 codegen-to-spec axioms, Phase B5 P-256/P-384 group-law axioms + `pXNegate` symbols, Phase B6 BabyBear functional-correctness companions, Phase B8 WOTS+ concrete spec (def, no axioms), Phase B10 Rabin concrete spec (def, no axioms) |
+| `RunarVerification/ANF/Eval.lean` | 34 | Crypto and builtin primitive symbols, including external hash, preimage, and auth backends. Phase B6 (2026-05-17) converted `bbFieldAdd / Sub / Mul / Inv` from axioms to concrete `def`s; net −4. Phase B3-a (2026-05-17) converted `blake3Hash` / `blake3Compress` from bare axioms to delegating `def`s forwarding to `Crypto/HashBackend.lean`; net −2. Verifier-axiom delegation (2026-05-17) converted `merkleRootSha256` / `merkleRootHash256` / `verifyRabinSig` from bare axioms to concrete `def`s; net −3 |
+| `RunarVerification/Crypto/Spec.lean` | 48 | EC laws (secp256k1 §2 + NIST P-256 / P-384 §2.5 per FIPS 186-4), auxiliary key functions, EUF-CMA-style companions, Phase B4 secp256k1 codegen-to-spec axioms, Phase B5 P-256/P-384 group-law axioms + `pXNegate` symbols, Phase B8 WOTS+ concrete spec (def, no axioms), Phase B10 Rabin concrete spec (def, no axioms). Phase B6 (2026-05-17) discharged the four BabyBear functional-correctness companions (`bbFieldAdd / Sub / Mul / Inv_correct`) as theorems; net −4 |
 | `RunarVerification/Stack/Blake3.lean` | 2 | Phase B3 BLAKE3 codegen-to-spec links (`runOps_b3HashOps_eq`, `runOps_b3CompressOps_eq`) |
 | `RunarVerification/Stack/P256P384.lean` | 14 | Phase B5 codegen-to-spec: each `emitP256/P384*` and `emitVerifyECDSA_P256/P384` reduces under `runOps` to the matching `Crypto.pX*` primitive (FIPS 186-4) |
 | `RunarVerification/Stack/SlhDsa.lean` | 6 | Phase B9 codegen-to-spec linking axioms for the six FIPS 205 SHA-2 SLH-DSA parameter sets |
 | `RunarVerification/Stack/Wots.lean` | 1 | Phase B8 codegen-to-spec axiom (`runOps_wotsBodyOps_eq`) |
 | `RunarVerification/Stack/Rabin.lean` | 1 | Phase B10 codegen-to-spec axiom (`runOps_rabinBodyOps_eq`) |
 | `RunarVerification/Stack/TxContext.lean` | 0 | Concrete BIP-143 context/preimage model; no companion assumptions |
-| `RunarVerification/Pipeline.lean` | 6 | Phase D codegen-soundness axioms (multi-method dispatch, stateful continuation, terminal-assert / NIP cleanup) + Phase D harness integration omnibus (`compileSafe_observational_correct_modulo_codegen_axioms`) |
+| `RunarVerification/Pipeline.lean` | 4 | Phase D codegen-soundness axioms (multi-method dispatch, stateful continuation) + Phase D harness integration omnibus (`compileSafe_observational_correct_modulo_codegen_axioms`). Phase D3 (2026-05-17) discharged `terminal_assert_elision_residue_correct` and `nip_cleanup_residue_correct` as theorems (both had `P → P` shape; structural witnesses live in `Stack/Agrees.lean`); net −2 |
 
 Tier B11 (2026-05-16) replaced the `buildChangeOutput` and
 `computeStateOutput` axioms with concrete `def`s and exposed them —
@@ -79,6 +79,76 @@ one trust footprint so the conformance harness
 living inside the discharged structural fragment. Net delta: +1,
 total 124 → 125. See "Phase D Harness Integration Omnibus Axiom"
 below for the full rationale and discharge path.
+
+Verifier-axiom delegation (2026-05-17) — converted three bare crypto
+verifier axioms in `ANF/Eval.lean` to concrete `def`s:
+* `merkleRootSha256 (leaf proof : ByteArray) (index depth : Int)` —
+  delegates to local `merkleVerifyPath sha256 leaf proof index depth.toNat`.
+* `merkleRootHash256` — same pattern with `hash256`.
+* `verifyRabinSig (msg sig padding pubKey : ByteArray)` — decodes
+  Script-number operands via `Stack.decodeMinimalLE` and applies the
+  modular identity `(sig² + padding) mod pubKey == decodeMinimalLE (sha256 msg)`,
+  byte-identical to `Crypto.Spec.verifyRabinSig_spec`'s body.
+Merkle helpers (`merkleVerifyStep` / `merkleVerifyPathFrom` /
+`merkleVerifyPath`) are duplicated inline in `ANF/Eval.lean` rather
+than imported from `Crypto/Spec.lean` because `Crypto/Spec.lean`
+already imports `ANF/Eval.lean` — the reverse dependency would cycle.
+Net delta: −3, total 113 → 110.
+
+Deferred from this delegation pass: `verifyWOTS` (blocked on the same
+import cycle; would need a shared `Crypto/SpecCore.lean` refactor)
+and 6 `verifySLHDSA_SHA2_*` (no concrete `Crypto.Spec.verifySlhDsa_*`
+defs exist yet — that's B9 work per PATH2_PLAN.md §5.15).
+
+Phase B3-a BLAKE3 concrete defs (2026-05-17) — converted bare axioms
+`blake3Hash : ByteArray → ByteArray` and
+`blake3Compress : ByteArray → ByteArray → ByteArray` in `ANF/Eval.lean`
+to delegating `def`s forwarding to a new
+`Crypto/HashBackend.lean` (291 LOC). The implementation mirrors the
+BLAKE3 spec §2.1 and the TS reference
+`packages/runar-compiler/src/passes/blake3-codegen.ts`: `UInt32`
+word-level mixing, 16-word state, 7-round compression function,
+single-block hash entry. `runRounds` terminates via `7 - r` measure.
+This is the prerequisite for B3-b (helper-level reductions in
+`Stack/Blake3.lean`) and B3-c (final codegen-to-spec composition),
+which together discharge the 2 axioms still in `Stack/Blake3.lean`.
+Net delta: −2, total 115 → 113. See `PATH2_PLAN.md` §5.9.
+
+Phase D3 terminal-assert / NIP-cleanup (2026-05-17) — discharged
+`terminal_assert_elision_residue_correct` and
+`nip_cleanup_residue_correct` in `Pipeline.lean` as direct theorems.
+Both axioms had `(runOps rawOps initialStack).toOption.isSome →
+(runOps rawOps initialStack).toOption.isSome` shape — the hypothesis
+and conclusion are the same `runOps rawOps initialStack` statement
+on identical ops and state. The discharge is `intro h; exact h`
+identity propagation: success of `rawOps` already implies success of
+`rawOps` regardless of which structural elision predicate
+(`terminalAssertElidesFor` / `nipCleanupActiveFor`) holds. The
+structural witnesses themselves are decidable Bool predicates in
+`Stack/Agrees.lean` (already proved upstream of every caller); the
+"residue" claim only propagates the success bit on the same op-list.
+Net delta: −2, total 117 → 115. See `PATH2_PLAN.md` §5.19.
+
+Phase B6 BabyBear functional-correctness (2026-05-17) — discharged
+the four `_correct` companion axioms in `Crypto/Spec.lean` §8.3
+(`bbFieldAdd_correct`, `bbFieldSub_correct`, `bbFieldMul_correct`,
+`bbFieldInv_correct`) by converting the four bare
+`axiom bbField{Add,Sub,Mul,Inv}` declarations in `ANF/Eval.lean`
+into concrete `def`s mirroring the spec functions `bbAdd / Sub / Mul / Inv`
+one-for-one (canonical reduction `((a % p) + p) % p` with
+`p = 2^31 - 2^27 + 1 = 2013265921`; `bbFieldInv` is Fermat-little-
+theorem closed-form `a^(p-2) mod p`). The four companion lemmas
+now reduce to `rfl`-style proofs after unfolding both the bare-side
+def and the spec-side def to the same underlying canonical reducer
+(internal lemma `bbMod_eq_bbFieldMod`). Net delta: −8 (−4 bare
+axioms in `ANF/Eval.lean` going from 43 → 39, −4 `_correct` axioms
+in `Crypto/Spec.lean` going from 52 → 48). Total 125 → 117. See
+`PATH2_PLAN.md` §5.12 and the §B6 entry below for the technique
+and rationale. The Phase B6 discharge is strictly stronger than
+the original §5.12 plan envisioned (the plan budgeted −4 from the
+`_correct` axioms only; the additional −4 from the bare-side
+conversion is a bonus made possible by importing the spec
+formulas into `ANF/Eval.lean` directly).
 
 These axioms are permitted by the current policy, but every theorem or
 status claim that depends on them must say so. They are not hidden by
@@ -581,14 +651,14 @@ expands to ~50k ops via a 257-iteration double-and-add); the
 axioms are the codegen-correctness contracts the TS reference
 codegen + 7-tier conformance gate enforce in CI.
 
-### §B6 — BabyBear field functional-correctness
+### §B6 — BabyBear field functional-correctness (DISCHARGED 2026-05-17)
 
 `Crypto/Spec.lean` §8 introduces concrete `def`s for the canonical
 BabyBear prime field (`p = 2^31 - 2^27 + 1`) and the degree-4
-extension `F[X]/(X^4 - 11)`, then adds 4 functional-correctness
-companions tying the bare `Crypto.bbField{Add,Sub,Mul,Inv}` axioms
-in `ANF/Eval.lean` to the concrete spec defs on canonical inputs
-in `[0, p-1]`:
+extension `F[X]/(X^4 - 11)`. As of Phase B6 (2026-05-17) the four
+functional-correctness companions tying the (formerly bare)
+`Crypto.bbField{Add,Sub,Mul,Inv}` symbols in `ANF/Eval.lean` to the
+concrete spec defs are now **theorems**, not axioms:
 
 * `bbFieldAdd_correct`, `bbFieldSub_correct`,
   `bbFieldMul_correct`, `bbFieldInv_correct`.
@@ -599,8 +669,26 @@ extension defs (`bbExt4Mul0..3`, `bbExt4Inv0..3`, plus the shared
 `bbExt4Norm0/1`, `bbExt4Det`, `bbExt4Scalar`, `bbExt4InvN0/1`
 helpers) are pure `def`s and contribute zero axioms. Per project
 policy (CLAUDE.md "EVM/STARK proof-system primitives are Go-only")
-BabyBear codegen ships in the Go tier only; the Lean specs still
-ground the bare ANF axioms in a stable mathematical meaning.
+BabyBear codegen ships in the Go tier only.
+
+**Discharge technique (2026-05-17).** The four bare
+`axiom bbFieldAdd / Sub / Mul / Inv` declarations in `ANF/Eval.lean`
+have been converted to concrete `def`s using a tier-local copy of the
+canonical-reduction helper (`bbFieldMod a := ((a % bbFieldPrime) +
+bbFieldPrime) % bbFieldPrime` with `bbFieldPrime = 2013265921`). The
+formulas mirror `Crypto/Spec.lean` §8.1 (`bbMod / Add / Sub / Mul`)
+one-for-one; `bbFieldInv` uses the Fermat-little-theorem closed-form
+`a^(p-2) mod p` via `bbFieldPowNat`. The four companion theorems
+discharge via `unfold` on both sides plus a single internal lemma
+`bbMod_eq_bbFieldMod : bbMod a = Crypto.bbFieldMod a` (provable by
+`rfl` after unfolding both reducers — both share the same formula
+and the same numeric modulus). `bbFieldInv_correct` additionally
+performs structural induction on the exponent to align the recursive
+shapes of `bbPowNat` and `Crypto.bbFieldPowNat`. No new axioms;
+side-conditions `0 ≤ a < BabyBearPrime` are preserved in the
+theorem signatures for ABI compatibility but are unused in the
+proofs (the identity holds unconditionally because both sides apply
+the same canonical reducer).
 
 ### §B8 — WOTS+ codegen-to-spec
 

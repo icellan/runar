@@ -16426,7 +16426,7 @@ private theorem lowerValueP_loadConst_bytes_sm2
 
 /-- When both operands of a `binOp` are in copy-mode, `lowerValueP`
 agrees with `lowerValue` on ops and output stack map. -/
-private theorem lowerValueP_binOp_copy_eq_lowerValue
+theorem lowerValueP_binOp_copy_eq_lowerValue
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget currentIndex : Nat)
     (lastUses : List (String × Nat))
@@ -16465,7 +16465,7 @@ private theorem lowerValueP_binOp_copy_eq_lowerValue
   rfl
 
 /-- Same bridge for `unaryOp` in copy-mode. -/
-private theorem lowerValueP_unaryOp_copy_eq_lowerValue
+theorem lowerValueP_unaryOp_copy_eq_lowerValue
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget currentIndex : Nat)
     (lastUses : List (String × Nat))
@@ -16488,7 +16488,7 @@ private theorem lowerValueP_unaryOp_copy_eq_lowerValue
   rfl
 
 /-- Same bridge for `assert` in copy-mode. -/
-private theorem lowerValueP_assert_copy_eq_lowerValue
+theorem lowerValueP_assert_copy_eq_lowerValue
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget currentIndex : Nat)
     (lastUses : List (String × Nat))

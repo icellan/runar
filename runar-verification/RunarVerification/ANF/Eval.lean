@@ -2,6 +2,7 @@ import RunarVerification.ANF.Syntax
 import RunarVerification.ANF.WF
 import RunarVerification.ANF.Typed
 import RunarVerification.Stack.NumEncoding
+import RunarVerification.Crypto.HashBackend
 
 /-!
 # ANF IR — Big-step evaluation (skeleton)
@@ -271,8 +272,18 @@ with itself. The linking lemma `hash256_eq_double_sha256` in
 def hash256 (b : ByteArray) : ByteArray := sha256 (sha256 b)
 axiom sha256Compress  : ByteArray → ByteArray → ByteArray
 axiom sha256Finalize  : ByteArray → ByteArray → Int → ByteArray
-axiom blake3Compress  : ByteArray → ByteArray → ByteArray
-axiom blake3Hash      : ByteArray → ByteArray
+/-- BLAKE3 single-block compression (concrete `def`, Tier B3-a, 2026-05-17).
+Delegates to `RunarVerification.Crypto.HashBackend.Blake3.blake3Compress`,
+the closed-form spec mirroring BLAKE3 §2.1 and
+`packages/runar-compiler/src/passes/blake3-codegen.ts`. -/
+def blake3Compress (cv : ByteArray) (block : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.HashBackend.Blake3.blake3Compress cv block
+/-- BLAKE3 single-block hash entry (concrete `def`, Tier B3-a, 2026-05-17).
+Delegates to `RunarVerification.Crypto.HashBackend.Blake3.blake3Hash`,
+which zero-pads the input to 64 bytes and runs the compression with the
+BLAKE3 IV as chaining value and flags `CHUNK_START | CHUNK_END | ROOT`. -/
+def blake3Hash (msg : ByteArray) : ByteArray :=
+  RunarVerification.Crypto.HashBackend.Blake3.blake3Hash msg
 
 -- secp256k1 EC primitives (operands are 64-byte uncompressed points)
 axiom ecAdd               : ByteArray → ByteArray → ByteArray
@@ -302,16 +313,120 @@ axiom p384OnCurve           : ByteArray → Bool
 axiom p384EncodeCompressed  : ByteArray → ByteArray
 axiom verifyECDSA_P384      : ByteArray → ByteArray → ByteArray → Bool
 
--- BabyBear / KoalaBear field arithmetic (placeholder — small fields are implementable)
-axiom bbFieldAdd       : Int → Int → Int
-axiom bbFieldSub       : Int → Int → Int
-axiom bbFieldMul       : Int → Int → Int
-axiom bbFieldInv       : Int → Int
+-- BabyBear / KoalaBear field arithmetic.
+--
+-- Phase B6 (2026-05-17): the four bare axioms `bbFieldAdd / Sub / Mul / Inv`
+-- have been replaced by concrete `def`s over the canonical BabyBear modulus
+-- `p = 2^31 - 2^27 + 1 = 2013265921`. Per project policy (CLAUDE.md
+-- "EVM/STARK proof-system primitives are Go-only"), BabyBear codegen ships
+-- in the Go tier only, but the Lean ANF evaluator still needs a meaning for
+-- these symbols so that downstream theorems quoting them ground in
+-- closed-form computation rather than opaque assumptions.
+--
+-- The formulas mirror `Crypto/Spec.lean` §8 (`bbAdd / Sub / Mul / Inv`) and
+-- the TS / Go reference (`compilers/go/codegen/babybear.go` →
+-- `packages/runar-compiler/src/passes/babybear-codegen.ts`). The companion
+-- theorems `bbFieldAdd_correct / Sub_correct / Mul_correct / Inv_correct`
+-- in `Crypto/Spec.lean` §8.3 are now provable by reduction (was: axioms).
+def bbFieldPrime : Int := 2013265921
+
+def bbFieldMod (a : Int) : Int :=
+  ((a % bbFieldPrime) + bbFieldPrime) % bbFieldPrime
+
+def bbFieldAdd (a b : Int) : Int := bbFieldMod (a + b)
+def bbFieldSub (a b : Int) : Int := bbFieldMod (a - b)
+def bbFieldMul (a b : Int) : Int := bbFieldMod (a * b)
+
+/-- Modular exponentiation by a non-negative `Nat` exponent. Used by the
+Fermat-little-theorem inverse below. Recursive on the exponent. -/
+def bbFieldPowNat (a : Int) : Nat → Int
+  | 0     => 1
+  | n + 1 => bbFieldMul a (bbFieldPowNat a n)
+
+/-- `bbFieldInv a = a^(p-2) mod p`. Closed-form Fermat-little-theorem
+expression. Note: `bbFieldInv 0 = 0^(p-2) = 0`, which matches the codegen
+behaviour (`Stack/BabyBear.lean#fieldInv` does not special-case `a = 0`). -/
+def bbFieldInv (a : Int) : Int :=
+  bbFieldPowNat (bbFieldMod a) (bbFieldPrime - 2).toNat
 
 -- Merkle / Rabin / Post-quantum
-axiom merkleRootSha256        : ByteArray → ByteArray → Int → Int → ByteArray
-axiom merkleRootHash256       : ByteArray → ByteArray → Int → Int → ByteArray
-axiom verifyRabinSig          : ByteArray → ByteArray → ByteArray → ByteArray → Bool
+
+/-! ### Merkle path verifier — concrete helpers (Path 2, 2026-05-17)
+
+`merkleRootSha256` / `merkleRootHash256` are now concrete `def`s
+delegating to the path-verifier kernel `merkleVerifyPath` defined
+just below. The kernel is duplicated here (rather than imported
+from `Crypto/Spec.lean`) because `Crypto/Spec.lean` already imports
+`ANF/Eval.lean` — taking the opposite dependency would cycle. The
+definitions are byte-identical to `Crypto.Spec.merkleVerifyStep` /
+`Crypto.Spec.merkleVerifyPathFrom` / `Crypto.Spec.merkleVerifyPath`
+(see `Crypto/Spec.lean` §7). -/
+
+/-- One level of the Merkle path verifier. Given the running
+`current` hash, the remaining `proof` bytes, the `index`, and the
+current `level`, extract the next 32-byte sibling, compute the
+direction bit `(index >> level) & 1`, concatenate sibling and
+running hash in the right order, and hash via `h`. Returns the new
+`current` and the rest of the proof. -/
+def merkleVerifyStep (h : ByteArray → ByteArray)
+    (current : ByteArray) (proof : ByteArray) (index : Int) (level : Nat) :
+    ByteArray × ByteArray :=
+  let sibling := proof.extract 0 32
+  let rest    := proof.extract 32 proof.size
+  let shifted : Nat := index.natAbs / (2 ^ level)
+  let dir     : Nat := shifted % 2
+  let combined : ByteArray :=
+    if dir = 0 then current ++ sibling
+              else sibling ++ current
+  (h combined, rest)
+
+/-- Climb `d` levels from `leaf` starting at `startLevel`, using
+`proof` for sibling hashes and `index` for direction bits. -/
+def merkleVerifyPathFrom (h : ByteArray → ByteArray)
+    (leaf : ByteArray) (proof : ByteArray) (index : Int)
+    (startLevel : Nat) : Nat → ByteArray
+  | 0     => leaf
+  | d + 1 =>
+      let (current', proof') := merkleVerifyStep h leaf proof index startLevel
+      merkleVerifyPathFrom h current' proof' index (startLevel + 1) d
+
+/-- Top-level entry: climb the full `d`-level path starting from level 0. -/
+def merkleVerifyPath (h : ByteArray → ByteArray)
+    (leaf : ByteArray) (proof : ByteArray) (index : Int) (d : Nat) : ByteArray :=
+  merkleVerifyPathFrom h leaf proof index 0 d
+
+/-- `merkleRootSha256(leaf, proof, index, depth)` — Merkle root via
+single-SHA-256 hash function, depth supplied as `Int` from the
+compile-time integer literal. Negative depth is treated as zero
+via `Int.toNat`. -/
+def merkleRootSha256 (leaf proof : ByteArray) (index depth : Int) : ByteArray :=
+  merkleVerifyPath sha256 leaf proof index depth.toNat
+
+/-- `merkleRootHash256(leaf, proof, index, depth)` — same as
+`merkleRootSha256` but with the double-SHA-256 (HASH256) hash
+function. -/
+def merkleRootHash256 (leaf proof : ByteArray) (index depth : Int) : ByteArray :=
+  merkleVerifyPath hash256 leaf proof index depth.toNat
+
+/-! ### Rabin signature verifier — concrete `def` (Path 2, 2026-05-17)
+
+`verifyRabinSig` is converted from a bare 4-`ByteArray` axiom to a
+concrete `def` that decodes the script-number operands (`sig`,
+`padding`, `pubKey`) via `Stack.decodeMinimalLE` and forwards to
+the closed-form modular identity used by `Crypto.Spec.verifyRabinSig_spec`:
+
+  `(sig * sig + padding) mod pubKey  ==  decodeMinimalLE (sha256 msg)`
+
+The same modular-identity body is duplicated here (instead of
+imported from `Crypto/Spec.lean`) for the same reason as the
+merkle helpers above. The two functions agree pointwise; codegen
+soundness is proved via the Spec form in `Stack/Rabin.lean`. -/
+def verifyRabinSig (msg sig padding pubKey : ByteArray) : Bool :=
+  let sigI     := RunarVerification.Stack.decodeMinimalLE sig
+  let padI     := RunarVerification.Stack.decodeMinimalLE padding
+  let pubI     := RunarVerification.Stack.decodeMinimalLE pubKey
+  let lhs      := (sigI * sigI + padI) % pubI
+  decide ((RunarVerification.Stack.encodeMinimalLE lhs).toList = (sha256 msg).toList)
 axiom verifyWOTS              : ByteArray → ByteArray → ByteArray → Bool
 axiom verifySLHDSA_SHA2_128s  : ByteArray → ByteArray → ByteArray → Bool
 axiom verifySLHDSA_SHA2_128f  : ByteArray → ByteArray → ByteArray → Bool

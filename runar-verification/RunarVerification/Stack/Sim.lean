@@ -466,211 +466,39 @@ theorem run_pickStruct_at_depth (s : StackState) (d : Nat) (v : Value)
 The fundamental compositional property: running concatenated
 op-lists is the same as running the first then sequencing the
 result through the second. This is the key prerequisite for the
-per-binding induction in `Stack.Agrees` (Stage C). -/
+per-binding induction in `Stack.Agrees` (Stage C).
 
-/-- Local copy of the non-`.ifOp` cons reduction (`runOps.eq_3`).
-Importing the equivalent lemma from `Stack.Peephole` would be circular,
-so we re-derive it here using the auto-generated `runOps.eq_3` plus
-`StackOp.noConfusion` on the side condition. -/
-private theorem runOps_cons_nonIf_eq
+**Hoist note (2026-05-17).** The proofs were originally implemented
+in this file because `Stack.Sim` was the only consumer. Phase B7
+(Merkle inductive step) needs the same compositional fact in
+`Stack.Merkle`, which is *upstream* of `Stack.Sim` in the import
+graph (`Sim` imports `Lower`, which imports `Merkle`). To avoid an
+import cycle, both `runOps_append` and the helper
+`runOps_cons_nonIf_eq` now live in `Stack.Eval` (next to the other
+`runOps_*` reduction lemmas). The names below are re-exports that
+preserve every existing call site (`Stack.Sim.runOps_append`,
+`Stack.Sim.runOps_cons_nonIf_eq`).
+-/
+
+/-- Re-export of `Stack.Eval.runOps_cons_nonIf_eq` to keep
+historical `Stack.Sim.runOps_cons_nonIf_eq` references working. -/
+theorem runOps_cons_nonIf_eq
     (op : StackOp) (rest : List StackOp) (s : StackState)
     (hNotIf : ∀ thn els, op ≠ .ifOp thn els) :
     runOps (op :: rest) s
     = match stepNonIf op s with
       | .error e => .error e
-      | .ok s'   => runOps rest s' := by
-  apply runOps.eq_3
-  intro thn els h
-  exact (hNotIf thn els h).elim
+      | .ok s'   => runOps rest s' :=
+  Eval.runOps_cons_nonIf_eq op rest s hNotIf
 
-/-- `runOps` distributes over list append. -/
+/-- Re-export of `Stack.Eval.runOps_append` to keep historical
+`Stack.Sim.runOps_append` references working. -/
 theorem runOps_append : ∀ (ops1 ops2 : List StackOp) (s : StackState),
     runOps (ops1 ++ ops2) s
     = match runOps ops1 s with
       | .error e => .error e
-      | .ok s'   => runOps ops2 s' := by
-  intro ops1
-  induction ops1 with
-  | nil =>
-      intro ops2 s
-      show runOps ops2 s = _
-      rw [run_empty]
-  | cons op rest ih =>
-      intro ops2 s
-      -- Split on whether `op` is `.ifOp`.
-      cases op with
-      | ifOp thn els =>
-          -- runOps (.ifOp thn els :: rest ++ ops2) s — branches on top-of-stack bool.
-          show runOps (.ifOp thn els :: (rest ++ ops2)) s
-              = match runOps (.ifOp thn els :: rest) s with
-                | Except.error e => Except.error e
-                | Except.ok s' => runOps ops2 s'
-          rw [runOps.eq_2 s thn els (rest ++ ops2),
-              runOps.eq_2 s thn els rest]
-          cases hPop : s.pop? with
-          | none => rfl
-          | some popResult =>
-              obtain ⟨v, s'⟩ := popResult
-              simp only []
-              cases hBool : asBool? v with
-              | none => rfl
-              | some condV =>
-                  cases condV with
-                  | true =>
-                      simp only []
-                      cases hThn : runOps thn s' with
-                      | error e => rfl
-                      | ok s'' =>
-                          simp only []
-                          exact ih ops2 s''
-                  | false =>
-                      simp only []
-                      cases els with
-                      | none =>
-                          simp only []
-                          exact ih ops2 s'
-                      | some elsB =>
-                          simp only []
-                          cases hEls : runOps elsB s' with
-                          | error e => rfl
-                          | ok s'' =>
-                              simp only []
-                              exact ih ops2 s''
-      | push v =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.push v) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.push v) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.push v) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | dup =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .dup (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .dup rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .dup s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | swap =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .swap (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .swap rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .swap s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | roll d =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.roll d) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.roll d) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.roll d) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | pick d =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.pick d) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.pick d) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.pick d) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | pickStruct d =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.pickStruct d) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.pickStruct d) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.pickStruct d) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | drop =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .drop (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .drop rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .drop s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | nip =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .nip (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .nip rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .nip s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | over =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .over (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .over rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .over s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | rot =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .rot (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .rot rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .rot s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | tuck =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .tuck (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .tuck rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .tuck s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | opcode code =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.opcode code) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.opcode code) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.opcode code) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | placeholder i n =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.placeholder i n) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.placeholder i n) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.placeholder i n) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | pushCodesepIndex =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq .pushCodesepIndex (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq .pushCodesepIndex rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf .pushCodesepIndex s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
-      | rawBytes b =>
-          rw [List.cons_append,
-              runOps_cons_nonIf_eq (.rawBytes b) (rest ++ ops2) s
-                (fun _ _ h => StackOp.noConfusion h),
-              runOps_cons_nonIf_eq (.rawBytes b) rest s
-                (fun _ _ h => StackOp.noConfusion h)]
-          cases stepNonIf (.rawBytes b) s with
-          | error e => rfl
-          | ok s' => exact ih ops2 s'
+      | .ok s'   => runOps ops2 s' :=
+  Eval.runOps_append
 
 /-! ### Phase 6 Step 4 tail — Per-opcode operational reduction
 

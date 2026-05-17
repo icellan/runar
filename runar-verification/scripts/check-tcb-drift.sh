@@ -20,7 +20,75 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=125       # Breakdown (2026-05-16, after Phase D harness
+TARGET_AXIOMS=110       # Breakdown (2026-05-17, after verifier-axiom
+                        # delegation):
+                        # −3 in RunarVerification/ANF/Eval.lean —
+                        #     `merkleRootSha256` / `merkleRootHash256` /
+                        #     `verifyRabinSig` converted from bare
+                        #     axioms to concrete `def`s. Merkle defs
+                        #     delegate to local `merkleVerifyPath` /
+                        #     `merkleVerifyStep` / `merkleVerifyPathFrom`
+                        #     helpers (byte-identical to
+                        #     `Crypto.Spec.merkleVerifyPath` etc.;
+                        #     duplicated because `Crypto/Spec.lean`
+                        #     already imports `ANF/Eval.lean`).
+                        #     `verifyRabinSig` decodes Script-number
+                        #     operands via `Stack.decodeMinimalLE` and
+                        #     applies the closed-form modular identity
+                        #     `(sig² + padding) mod pubKey == decodeMinimalLE(sha256 msg)`.
+                        # Net delta: −3, 113 → 110.
+                        #
+                        # Skipped (deferred): `verifyWOTS` (import-cycle
+                        # blocker — Crypto/Spec already imports Eval;
+                        # needs `Crypto/SpecCore.lean` refactor) and
+                        # 6 `verifySLHDSA_SHA2_*` (no concrete
+                        # `Crypto.Spec.verifySlhDsa_*` defs yet; B9
+                        # work per PATH2_PLAN §5.15).
+                        #
+                        # Breakdown (2026-05-17, after Phase B3-a
+                        # BLAKE3 concrete-def landing):
+                        # −2 in RunarVerification/ANF/Eval.lean —
+                        #     `blake3Hash` and `blake3Compress` converted
+                        #     from bare axioms to delegating `def`s that
+                        #     forward to concrete BLAKE3 implementation
+                        #     in new file `Crypto/HashBackend.lean`
+                        #     (291 LOC, mirrors BLAKE3 spec §2.1 / TS
+                        #     reference `packages/runar-compiler/src/
+                        #     passes/blake3-codegen.ts`). This unblocks
+                        #     B3-b/B3-c codegen-to-spec discharge.
+                        # Net delta: −2, 115 → 113.
+                        #
+                        # Breakdown (2026-05-17, after Phase D3
+                        # terminal-assert / NIP-cleanup discharge):
+                        # −2 in RunarVerification/Pipeline.lean —
+                        #     `terminal_assert_elision_residue_correct`
+                        #     and `nip_cleanup_residue_correct` converted
+                        #     from `axiom` to `theorem` with direct
+                        #     proofs. Both axioms had `P → P` shape (the
+                        #     hypothesis and conclusion are the same
+                        #     `(runOps rawOps initialStack).toOption.isSome`
+                        #     statement); discharge is `intro h; exact h`
+                        #     identity propagation. The structural
+                        #     witnesses live in `Stack/Agrees.lean`
+                        #     (`terminalAssertElidesFor`,
+                        #     `nipCleanupActiveFor` — decidable Bool
+                        #     predicates already proved).
+                        # Net delta: −2, 117 → 115.
+                        #
+                        # Breakdown (2026-05-17, after Phase B6
+                        # BabyBear functional-correctness discharge):
+                        # −4 in RunarVerification/ANF/Eval.lean —
+                        #     `bbFieldAdd / Sub / Mul / Inv` converted
+                        #     from axioms to concrete `def`s (mirror
+                        #     `Crypto/Spec.lean` §8.1 / TS / Go ref).
+                        # −4 in RunarVerification/Crypto/Spec.lean §8.3 —
+                        #     `bbFieldAdd_correct / Sub_correct /
+                        #     Mul_correct / Inv_correct` discharged as
+                        #     theorems (via `bbMod_eq_bbFieldMod` plus
+                        #     structural induction for the inv case).
+                        # Net delta: −8, 125 → 117.
+                        #
+                        # Breakdown (2026-05-16, after Phase D harness
                         # integration omnibus axiom):
                         # +1 in RunarVerification/Pipeline.lean
                         #     (Phase D harness integration omnibus

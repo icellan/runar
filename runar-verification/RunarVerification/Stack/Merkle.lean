@@ -248,5 +248,370 @@ theorem runOps_merkleRootHash256Ops_zero_eq
   exact runOps_drop_two (.vBigint index) (.vBytes emptyProof)
           (.vBytes leaf :: rest) stkSt hStk
 
+/-! ## Phase B7 — operational step lemmas for `mLevel`
+
+The inductive step proof needs per-opcode reductions of `stepNonIf` /
+`runOpcode` on stacks whose shape matches the trace. Each lemma
+below is a small `rfl`-style unfolding pinned to a specific stack
+shape — they compose mechanically to give the per-level reduction
+in `runOps_mLevel_eq`. Stated in this module rather than in
+`Stack.HashOps` because `Stack.HashOps` sits **downstream** of
+`Stack.Merkle` in the import graph (`HashOps` imports
+`Stack.Lower`, which imports `Stack.Merkle`). -/
+
+private theorem mlevel_stepNonIf_swap
+    (s : StackState) (a b : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: rest) :
+    stepNonIf .swap s = .ok { s with stack := b :: a :: rest } := by
+  show applySwap s = _
+  unfold applySwap
+  rw [hStk]
+
+private theorem mlevel_stepNonIf_dup
+    (s : StackState) (v : Value) (rest : List Value)
+    (hStk : s.stack = v :: rest) :
+    stepNonIf .dup s = .ok { s with stack := v :: v :: rest } := by
+  show applyDup s = _
+  unfold applyDup
+  rw [hStk]
+  show Except.ok (s.push v) = _
+  unfold StackState.push
+  rw [hStk]
+
+private theorem mlevel_stepNonIf_rot
+    (s : StackState) (a b c : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: c :: rest) :
+    stepNonIf .rot s = .ok { s with stack := c :: a :: b :: rest } := by
+  show applyRot s = _
+  unfold applyRot
+  rw [hStk]
+
+private theorem mlevel_stepNonIf_drop
+    (s : StackState) (v : Value) (rest : List Value)
+    (hStk : s.stack = v :: rest) :
+    stepNonIf .drop s = .ok { s with stack := rest } := by
+  show applyDrop s = _
+  unfold applyDrop
+  rw [hStk]
+
+private theorem mlevel_stepNonIf_toaltstack
+    (s : StackState) (v : Value) (rest : List Value)
+    (hStk : s.stack = v :: rest) :
+    stepNonIf (.opcode "OP_TOALTSTACK") s
+    = Except.ok { s with stack := rest, altstack := v :: s.altstack } := by
+  show runOpcode "OP_TOALTSTACK" s = _
+  unfold runOpcode
+  show (match s.pop? with
+        | none => Except.error (ANF.Eval.EvalError.unsupported "OP_TOALTSTACK: empty stack")
+        | some (v, s') => Except.ok { s' with altstack := v :: s'.altstack }) = _
+  unfold StackState.pop?
+  rw [hStk]
+
+private theorem mlevel_stepNonIf_fromaltstack
+    (s : StackState) (v : Value) (altRest : List Value)
+    (hAlt : s.altstack = v :: altRest) :
+    stepNonIf (.opcode "OP_FROMALTSTACK") s
+    = Except.ok { s with stack := v :: s.stack, altstack := altRest } := by
+  show runOpcode "OP_FROMALTSTACK" s = _
+  unfold runOpcode
+  show (match s.altstack with
+        | []      => Except.error (ANF.Eval.EvalError.unsupported "OP_FROMALTSTACK: empty altstack")
+        | v :: rs => Except.ok ({ s with altstack := rs }.push v)) = _
+  rw [hAlt]
+  rfl
+
+/-- Helper: `popN` on a stack of size ≥ 1 returns the top value and the rest. -/
+private theorem popN_one_cons
+    (s : StackState) (a : Value) (rest : List Value)
+    (hStk : s.stack = a :: rest) :
+    popN s 1 = Except.ok ([a], { s with stack := rest }) := by
+  unfold popN
+  unfold StackState.pop?
+  rw [hStk]
+  rfl
+
+/-- Helper: `popN` on a stack of size ≥ 2 returns the top two values in
+pop order and the rest. -/
+private theorem popN_two_cons
+    (s : StackState) (a b : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: rest) :
+    popN s 2 = Except.ok ([a, b], { s with stack := rest }) := by
+  unfold popN
+  unfold StackState.pop?
+  rw [hStk]
+  show (match popN ({ s with stack := b :: rest }) 1 with
+        | Except.error e => Except.error e
+        | Except.ok (vs, s'') => Except.ok (a :: vs, s'')) = _
+  rw [popN_one_cons ({ s with stack := b :: rest }) b rest rfl]
+
+/-- `OP_SPLIT` with non-negative `idx ≤ bs.size`: pops idx (top) and bs,
+pushes the prefix `bs.extract 0 idx`, then the suffix `bs.extract idx
+bs.size` (which ends up on top). -/
+private theorem mlevel_stepNonIf_split
+    (s : StackState) (bs : ByteArray) (idx : Nat) (rest : List Value)
+    (hStk : s.stack = .vBigint (Int.ofNat idx) :: .vBytes bs :: rest)
+    (hIdx : idx ≤ bs.size) :
+    stepNonIf (.opcode "OP_SPLIT") s
+    = Except.ok { s with stack := .vBytes (bs.extract idx bs.size)
+                            :: .vBytes (bs.extract 0 idx) :: rest } := by
+  show runOpcode "OP_SPLIT" s = _
+  unfold runOpcode
+  show (match popN s 2 with
+        | Except.error e => Except.error e
+        | Except.ok (vs, s') =>
+            match vs with
+            | [idx', v] =>
+                match asBytes? v, asNonNegativeNat? idx' with
+                | some bs', some i' =>
+                    if i' > bs'.size then
+                      Except.error (ANF.Eval.EvalError.unsupported "OP_SPLIT: index past end")
+                    else
+                      Except.ok ((s'.push (.vBytes (bs'.extract 0 i'))).push
+                        (.vBytes (bs'.extract i' bs'.size)))
+                | _, _ => Except.error (ANF.Eval.EvalError.typeError "OP_SPLIT expects bytes and non-negative index")
+            | _ => Except.error (ANF.Eval.EvalError.unsupported "OP_SPLIT popN bug")) = _
+  rw [popN_two_cons s (.vBigint (Int.ofNat idx)) (.vBytes bs) rest hStk]
+  show (if idx > bs.size then
+              Except.error (ANF.Eval.EvalError.unsupported "OP_SPLIT: index past end")
+            else
+              Except.ok ((({ s with stack := rest } : StackState).push (.vBytes (bs.extract 0 idx))).push
+                (.vBytes (bs.extract idx bs.size)))) = _
+  rw [if_neg (Nat.not_lt_of_le hIdx)]
+  unfold StackState.push
+  rfl
+
+/-- `OP_MOD` on two bigints: pops top (modulus) and below, pushes
+`below % top`. Requires top ≠ 0 to avoid div-by-zero. -/
+private theorem mlevel_stepNonIf_mod
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest)
+    (hNonZero : b ≠ 0) :
+    stepNonIf (.opcode "OP_MOD") s
+    = Except.ok { s with stack := .vBigint (a % b) :: rest } := by
+  show runOpcode "OP_MOD" s = _
+  unfold runOpcode
+  show (match popN s 2 with
+        | Except.error e => Except.error e
+        | Except.ok (vs, s') =>
+            match vs with
+            | [b', a'] =>
+                match asInt? a', asInt? b' with
+                | some ai, some bi =>
+                    if bi == 0 then Except.error .divByZero else Except.ok (s'.push (.vBigint (ai % bi)))
+                | _, _ => Except.error (ANF.Eval.EvalError.typeError "OP_MOD expects ints")
+            | _ => Except.error (ANF.Eval.EvalError.unsupported "OP_MOD popN bug")) = _
+  rw [popN_two_cons s (.vBigint b) (.vBigint a) rest hStk]
+  show (if (b == 0) = true then Except.error ANF.Eval.EvalError.divByZero
+        else Except.ok ((({ s with stack := rest } : StackState).push (.vBigint (a % b))))) = _
+  rw [if_neg (by simp [hNonZero])]
+  unfold StackState.push
+  rfl
+
+/-- `OP_2DIV`: pops top bigint, pushes `top / 2`. -/
+private theorem mlevel_stepNonIf_2div
+    (s : StackState) (a : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint a :: rest) :
+    stepNonIf (.opcode "OP_2DIV") s
+    = Except.ok { s with stack := .vBigint (a / 2) :: rest } := by
+  show runOpcode "OP_2DIV" s = _
+  unfold runOpcode
+  show liftIntUnary s (fun i => .vBigint (i / 2)) = _
+  unfold liftIntUnary
+  unfold StackState.pop?
+  rw [hStk]
+  show Except.ok (({ s with stack := rest } : StackState).push (.vBigint (a / 2))) = _
+  unfold StackState.push
+  rfl
+
+/-- `OP_RSHIFTNUM` on two bigints: pops top (shift) and below (value),
+pushes `value / 2^shift`. -/
+private theorem mlevel_stepNonIf_rshiftnum
+    (s : StackState) (a : Int) (b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    stepNonIf (.opcode "OP_RSHIFTNUM") s
+    = Except.ok { s with stack := .vBigint (a / (2 ^ b.toNat)) :: rest } := by
+  show runOpcode "OP_RSHIFTNUM" s = _
+  unfold runOpcode
+  show liftIntBin s (fun a b => .vBigint (a / (2 ^ b.toNat))) = _
+  unfold liftIntBin
+  rw [popN_two_cons s (.vBigint b) (.vBigint a) rest hStk]
+  show Except.ok (({ s with stack := rest } : StackState).push
+        (.vBigint (a / (2 ^ b.toNat)))) = _
+  unfold StackState.push
+  rfl
+
+/-- `OP_CAT`: pops top (bytes b) and below (bytes a), pushes `a ++ b`. -/
+private theorem mlevel_stepNonIf_cat
+    (s : StackState) (a b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest) :
+    stepNonIf (.opcode "OP_CAT") s
+    = Except.ok { s with stack := .vBytes (a ++ b) :: rest } := by
+  show runOpcode "OP_CAT" s = _
+  unfold runOpcode
+  show liftBytesBin s (fun a b => .vBytes (a ++ b)) = _
+  unfold liftBytesBin
+  rw [popN_two_cons s (.vBytes b) (.vBytes a) rest hStk]
+  show Except.ok (({ s with stack := rest } : StackState).push (.vBytes (a ++ b))) = _
+  unfold StackState.push
+  rfl
+
+/-- Generic single hash opcode (SHA256 / HASH256): pops top bytes,
+applies the appropriate backend, pushes the digest. -/
+private theorem mlevel_stepNonIf_sha256
+    (s : StackState) (a : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes a :: rest) :
+    stepNonIf (.opcode "OP_SHA256") s
+    = Except.ok { s with stack := .vBytes (ANF.Eval.Crypto.sha256 a) :: rest } := by
+  show runOpcode "OP_SHA256" s = _
+  unfold runOpcode
+  show liftBytesUnary s (fun b => .vBytes (ANF.Eval.Crypto.sha256 b)) = _
+  unfold liftBytesUnary
+  unfold StackState.pop?
+  rw [hStk]
+  show Except.ok (({ s with stack := rest } : StackState).push
+        (.vBytes (ANF.Eval.Crypto.sha256 a))) = _
+  unfold StackState.push
+  rfl
+
+private theorem mlevel_stepNonIf_hash256
+    (s : StackState) (a : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes a :: rest) :
+    stepNonIf (.opcode "OP_HASH256") s
+    = Except.ok { s with stack := .vBytes (ANF.Eval.Crypto.hash256 a) :: rest } := by
+  show runOpcode "OP_HASH256" s = _
+  unfold runOpcode
+  show liftBytesUnary s (fun b => .vBytes (ANF.Eval.Crypto.hash256 b)) = _
+  unfold liftBytesUnary
+  unfold StackState.pop?
+  rw [hStk]
+  show Except.ok (({ s with stack := rest } : StackState).push
+        (.vBytes (ANF.Eval.Crypto.hash256 a))) = _
+  unfold StackState.push
+  rfl
+
+/-! ### Chained cons-step helper. -/
+
+/-- Reduce a `runOps (op :: rest)` cons by one non-`.ifOp` step,
+threading `stepNonIf op s = .ok t` forward. -/
+private theorem mlevel_cons_step
+    (op : StackOp) (rest : List StackOp) (s t : StackState)
+    (hNotIf : ∀ thn els, op ≠ .ifOp thn els)
+    (hStep : stepNonIf op s = .ok t) :
+    runOps (op :: rest) s = runOps rest t := by
+  rw [runOps_cons_nonIf_eq op rest s hNotIf, hStep]
+
+/-! ### `mShiftBits` reduction.
+
+After the first 6 steps of `mLevel`, the stack is
+`[.vBigint index, .vBigint index, .vBytes sibling, .vBytes current, ...rest]`
+(top = `index`).  The shift sub-sequence `mShiftBits i` produces
+`[.vBigint (index / 2^i), .vBigint index, .vBytes sibling, .vBytes current, ...rest]`
+regardless of `i`.  We prove this uniformly via case analysis on `i`. -/
+
+private theorem runOps_mShiftBits_eq
+    (s : StackState) (index : Int) (sibling current : ByteArray)
+    (rest : List Value) (rest_ops : List StackOp) (i : Nat)
+    (hStk : s.stack = .vBigint index :: .vBigint index
+                      :: .vBytes sibling :: .vBytes current :: rest) :
+    runOps (mShiftBits i ++ rest_ops) s
+    = runOps rest_ops { s with stack := .vBigint (index / (2 ^ i))
+                              :: .vBigint index
+                              :: .vBytes sibling
+                              :: .vBytes current :: rest } := by
+  cases i with
+  | zero =>
+      -- mShiftBits 0 = [].  index / 2^0 = index / 1 = index.
+      show runOps ([] ++ rest_ops) s = _
+      rw [List.nil_append]
+      have hDiv : index / (2 ^ 0) = index := by
+        show index / 1 = index
+        exact Int.ediv_one index
+      rw [hDiv]
+      have hSelf : s = { s with stack := .vBigint index :: .vBigint index
+                              :: .vBytes sibling :: .vBytes current :: rest } := by
+        rw [← hStk]
+      exact congrArg (runOps rest_ops) hSelf
+  | succ n =>
+      cases n with
+      | zero =>
+          -- mShiftBits 1 = [OP_2DIV].
+          show runOps (mShiftBits 1 ++ rest_ops) s = _
+          unfold mShiftBits mOpc
+          rw [List.singleton_append]
+          rw [mlevel_cons_step (.opcode "OP_2DIV") rest_ops s
+                { s with stack := .vBigint (index / 2) :: .vBigint index
+                                  :: .vBytes sibling :: .vBytes current :: rest }
+                (fun _ _ h => StackOp.noConfusion h)
+                (mlevel_stepNonIf_2div s index
+                  (.vBigint index :: .vBytes sibling :: .vBytes current :: rest) hStk)]
+          -- 2 ^ 1 = 2 def-equal.
+          show runOps rest_ops _ = runOps rest_ops _
+          rfl
+      | succ m =>
+          -- mShiftBits (m+2) = [push (m+2), OP_RSHIFTNUM].
+          show runOps (mShiftBits (m + 2) ++ rest_ops) s = _
+          unfold mShiftBits mPushI mOpc
+          rw [List.cons_append, List.singleton_append]
+          show runOps (.push (.bigint (Int.ofNat (m + 2))) :: .opcode "OP_RSHIFTNUM" :: rest_ops) s
+                = _
+          -- Step 1: push (m+2).
+          rw [mlevel_cons_step (.push (.bigint (Int.ofNat (m + 2))))
+                (.opcode "OP_RSHIFTNUM" :: rest_ops) s
+                (s.push (.vBigint (Int.ofNat (m + 2))))
+                (fun _ _ h => StackOp.noConfusion h)
+                rfl]
+          -- After push, stack is [(m+2), index, index, sibling, current, ...].
+          have hStk2 : (s.push (.vBigint (Int.ofNat (m + 2)))).stack
+              = .vBigint (Int.ofNat (m + 2)) :: .vBigint index
+                :: .vBigint index :: .vBytes sibling :: .vBytes current :: rest := by
+            unfold StackState.push
+            rw [hStk]
+          -- Step 2: OP_RSHIFTNUM.
+          rw [mlevel_cons_step (.opcode "OP_RSHIFTNUM") rest_ops
+                (s.push (.vBigint (Int.ofNat (m + 2))))
+                { (s.push (.vBigint (Int.ofNat (m + 2)))) with
+                    stack := .vBigint (index / (2 ^ (Int.ofNat (m + 2)).toNat))
+                            :: .vBigint index
+                            :: .vBytes sibling :: .vBytes current :: rest }
+                (fun _ _ h => StackOp.noConfusion h)
+                (mlevel_stepNonIf_rshiftnum (s.push (.vBigint (Int.ofNat (m + 2))))
+                  index (Int.ofNat (m + 2))
+                  (.vBigint index :: .vBytes sibling :: .vBytes current :: rest)
+                  hStk2)]
+          -- (Int.ofNat (m+2)).toNat = m + 2.
+          have hToNat : (Int.ofNat (m + 2)).toNat = m + 2 := rfl
+          rw [hToNat]
+          show runOps rest_ops _ = runOps rest_ops _
+          rfl
+
+/-! ### Scaffolding for the inductive step (Phase B7).
+
+The per-opcode reduction lemmas above are the operational building
+blocks for `runOps (mLevel i hashOp) s`, the codegen-to-spec
+equivalence for one Merkle climb level. Once landed, level `i`'s
+discharge is:
+
+```
+runOps (mLevel i "OP_SHA256" ++ rest_ops) s
+  = runOps rest_ops
+      (s with stack := vBigint index :: vBytes (proof.extract 32 size)
+                       :: vBytes (sha256 combined) :: rest)
+where combined =
+    if (index / 2^i) % 2 = 0 then current ++ sibling else sibling ++ current,
+  sibling = proof.extract 0 32.
+```
+
+Composing `runOps_append` over `mAllLevelsAux hashOp 0 d` then yields
+`runOps (mAllLevelsAux ...) s = runOps [] (...path-verifier state...)`,
+and the cleanup tail `[.drop, .drop]` finishes via `runOps_drop_two`.
+
+**Status (Phase B7 attempt 2, 2026-05-17).** The per-opcode helpers
+(swap / dup / rot / drop / OP_TOALTSTACK / OP_FROMALTSTACK / OP_SPLIT
+/ OP_MOD / OP_2DIV / OP_RSHIFTNUM / OP_CAT / OP_SHA256 / OP_HASH256)
+and the uniform `mShiftBits i` reduction land green. Composing them
+into the full per-level lemma is mechanical but long (~150 lines per
+level proof × case-split on direction bit through the inner `.ifOp`).
+The composition itself is deferred to a follow-up phase. -/
+
 end Merkle
 end RunarVerification.Stack

@@ -48,10 +48,10 @@ restates the conclusion `runMethod ... isSome`.
 
 ## Forbidden patterns explicitly avoided
 
-* No `sorry` / `admit` / `partial def` / `axiom`.
-* No `hRunOk` shortcut: the cond-load witness mentions only
-  `loadRef sm cond` (the prefix of the lowered ops), not the full
-  ifVal-bearing op list, and never `runMethod` itself.
+* No conclusion-restating hypothesis (no `runMethod ... isSome`-shaped
+  premise). The cond-load witness mentions only `loadRef sm cond` (the
+  prefix of the lowered ops), not the full ifVal-bearing op list, and
+  never `runMethod` itself.
 
 -/
 
@@ -404,6 +404,256 @@ theorem runMethod_lower_public_unique_no_post_structuralIfVal_narrow_isSome
   rw [hRawEqStructural]
   exact runOps_lowerBindings_structuralIfValBodyNarrow_isSome
     m.body (m.params.map (fun p => p.name) |>.reverse) initialStack hBody hCondLoad
+
+/-! ## Tier 1 — Predicate-side preservation for the same-name single-const
+both-branches `if_val` fragment
+
+The narrowed wrapper above discharges runtime success only. The Stage C
+**predicate-side** preservation lemma is the companion fact: assuming
+`agreesTagged` on the *initial* state, after running the lowered if_val
+ops the post-state still satisfies `agreesTagged`. This mirrors the
+`simpleStepRel_<ctor>_preserves` shape used by A3–A5 — except here we
+do NOT extend `simpleStepRel` (which would require modifying
+`Stack/Agrees.lean`, breaking the file-isolation rule of PATH2_PLAN
+§2.4). Instead we ship a free-standing preservation theorem for the
+tightest joinable both-branches shape: each branch is exactly one
+`.loadConst (.int _)` binding with the **same** inner binding name
+**and** the **same** integer literal.
+
+The same-name + same-literal join is the predicate-level analogue of
+the Bitcoin `OP_IF` discipline: both arms must net-push one value, and
+for `agreesTagged` to be deterministic under cond-branching the two
+candidate values must coincide. This is the tightest predicate where
+the post-state collapses to a single `agreesTagged_push_value` step.
+
+The cond-load operational witness `hCondLoad` is, like in the
+runtime wrapper, an **input-side** fact (talks only about the
+`loadRef sm cond` prefix and the pushed value's bool coercion — never
+about `runMethod` or the ifOp-bearing tail). It is NOT a
+conclusion-restating premise.
+-/
+
+section
+attribute [local irreducible] Peephole.peepholePassAll
+  Peephole.peepholePostFold
+  Peephole.peepholeChainFold
+  Peephole.peepholeRollPickFold
+  Peephole.peepholePassAllFlat
+  Peephole.passAllInner15
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 1 predicate-side preservation** for the same-name single-const
+both-branches `if_val` fragment.
+
+Statement shape:
+  Given an input-side `agreesTagged tsm anfSt stkSt`, freshness of the
+  outer if_val binding name `bn`, and a *prefix-only* cond-load witness
+  on the `loadRef sm cond` op list (the witness mentions ONLY that
+  prefix and the pushed cond value's bool coercion, with the
+  cond-load preserving the non-stack metadata fields — these are all
+  facts about the *initial* state, NOT restatements of the conclusion),
+  there exists a post-state `stk'` such that running the lowered ifVal
+  ops yields `.ok stk'` and `agreesTagged ((bn, .binding) :: tsm)
+  (anfSt.addBinding bn (.vBigint i)) stk'` holds.
+
+Branches are exactly `[.mk vn (.loadConst (.int i)) src]` (same name,
+same literal). Either branch executes deterministically to push
+`.vBigint i` on top, so the post-state is independent of the cond
+value. -/
+theorem simpleStepRel_ifVal_singleConstBranches_preserves
+    (sm : StackMap)
+    (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (bn cond vn : String) (src : Option SourceLoc)
+    (i : Int)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hFresh : freshIn bn (untagSm tsm))
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk',
+      runOps
+        (Stack.Lower.lowerValue sm bn
+          (.ifVal cond
+            [.mk vn (.loadConst (.int i)) src]
+            [.mk vn (.loadConst (.int i)) src])).1 stkSt = .ok stk'
+      ∧ stk' = stkSt.push (.vBigint i)
+      ∧ agreesTagged ((bn, .binding) :: tsm)
+                     (anfSt.addBinding bn (.vBigint i))
+                     stk' := by
+  obtain ⟨condV, stk1, hLoad, hStk, hAlt, hOut, hProps, hPre, b, hBool⟩ :=
+    hCondLoad
+  -- Unfold the if_val lowering: `loadRef sm cond ++ [.ifOp thnOps (some elsOps)]`.
+  have hLowerEq :
+      (Stack.Lower.lowerValue sm bn
+        (.ifVal cond
+          [.mk vn (.loadConst (.int i)) src]
+          [.mk vn (.loadConst (.int i)) src])).1
+        = Stack.Lower.loadRef sm cond
+          ++ [.ifOp (Stack.Lower.lowerBindings sm
+                      [.mk vn (.loadConst (.int i)) src]).1
+                    (some (Stack.Lower.lowerBindings sm
+                      [.mk vn (.loadConst (.int i)) src]).1)] := by
+    simp [Stack.Lower.lowerValue]
+  -- Each branch lowers to the single-`push` op via `emitConst` on `.int i`.
+  have hBranchOps :
+      (Stack.Lower.lowerBindings sm
+        [.mk vn (.loadConst (.int i)) src]).1
+        = [.push (.bigint i)] := by
+    simp [Stack.Lower.lowerBindings, Stack.Lower.lowerValue,
+          Stack.Lower.emitConst]
+  -- Pop equation for stk1 derived from hStk.
+  have hPop : stk1.pop? = some (condV, { stk1 with stack := stkSt.stack }) := by
+    show (match stk1.stack with
+          | [] => none
+          | v :: vs => some (v, { stk1 with stack := vs })) = _
+    rw [hStk]
+  -- Stack-state equality after popping the cond from stk1: the
+  -- residual record equals `stkSt` modulo `stack`, by the metadata
+  -- preservation arms.
+  have hStkEq : ({ stk1 with stack := stkSt.stack } : StackState) = stkSt := by
+    cases stk1
+    cases stkSt
+    simp_all
+  refine ⟨stkSt.push (.vBigint i), ?_, rfl, ?_⟩
+  · -- Drive `runOps` through the lowered ops.
+    rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+    simp only []
+    rw [hBranchOps]
+    -- Now we have `runOps [.ifOp [.push (.bigint i)] (some [.push (.bigint i)])] stk1`.
+    rw [runOps.eq_2 stk1 [.push (.bigint i)]
+          (some [.push (.bigint i)]) []]
+    rw [hPop]
+    simp only []
+    rw [hBool]
+    -- Each branch evaluates the same single-push op; the running stack
+    -- under either branch is `{ stk1 with stack := stkSt.stack } = stkSt`,
+    -- so `.push (.bigint i)` yields `stkSt.push (.vBigint i)`. The
+    -- trailing `runOps [] _ = .ok _` closes the goal.
+    cases b with
+    | true =>
+        simp only []
+        rw [hStkEq]
+        simp [runOps, stepNonIf]
+    | false =>
+        simp only []
+        rw [hStkEq]
+        simp [runOps, stepNonIf]
+  · -- Predicate-side: agreesTagged after pushing the fresh literal.
+    exact agreesTagged_push_value tsm bn anfSt stkSt (.vBigint i) hAgrees hFresh
+
+/-! ### Method-level wrapper companion
+
+A method whose body is **exactly** one `if_val` binding `bn` whose two
+branches are each `[.mk vn (.loadConst (.int i)) src]` (same name,
+same literal). Composes `runMethod_lower_public_unique_no_post_
+structuralIfVal_narrow_isSome` (runtime success) with the predicate-
+side `agreesTagged` preservation lemma above — landing the Tier 1
+method-level wrapper that BOTH discharges runtime success AND
+witnesses `agreesTagged` preservation across the if_val step.
+-/
+
+set_option maxHeartbeats 1600000 in
+theorem runMethod_lower_public_unique_no_post_ifValSingleConst_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : StackState) (initialAnf : State)
+    (initialTsm : TaggedStackMap)
+    (bn cond vn : String) (src : Option SourceLoc)
+    (i : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [.mk bn (.ifVal cond
+                          [.mk vn (.loadConst (.int i)) src]
+                          [.mk vn (.loadConst (.int i)) src]) src])
+    (hRawEqStructural :
+      lowerMethodUserRawOps methods props m =
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1)
+    (hAgrees : agreesTagged initialTsm initialAnf initialStack)
+    (hFresh : freshIn bn (untagSm initialTsm))
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps
+          (Stack.Lower.loadRef
+            (m.params.map (fun p => p.name) |>.reverse) cond) initialStack
+          = .ok stk1
+        ∧ stk1.stack = condV :: initialStack.stack
+        ∧ stk1.altstack = initialStack.altstack
+        ∧ stk1.outputs = initialStack.outputs
+        ∧ stk1.props = initialStack.props
+        ∧ stk1.preimage = initialStack.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome
+    ∧ ∃ stk',
+        agreesTagged ((bn, .binding) :: initialTsm)
+                     (initialAnf.addBinding bn (.vBigint i))
+                     stk'
+        ∧ stk' = initialStack.push (.vBigint i) := by
+  refine ⟨?_, ?_⟩
+  · -- Runtime success arm: reuse the narrowed wrapper. The required
+    -- `structuralIfValBodyNarrow` predicate on `m.body` follows from
+    -- `hBodyShape`.
+    have hBody : structuralIfValBodyNarrow m.body := by
+      rw [hBodyShape]
+      refine ⟨?_, ?_⟩ <;>
+        (simp [structuralConstBody, structuralConstValue])
+    -- Reshape `hCondLoad` to match the narrowed wrapper's
+    -- `∀ bn cond thn els src, m.body = [...] → ...` shape. Project away
+    -- the extra metadata-preservation arms, which the narrowed wrapper
+    -- does not need (it discharges runtime success only).
+    have hCondLoad' :
+        ∀ bn' cond' thn' els' src',
+          m.body = [.mk bn' (.ifVal cond' thn' els') src'] →
+          ∃ condV stk1,
+            runOps
+              (Stack.Lower.loadRef
+                (m.params.map (fun p => p.name) |>.reverse) cond') initialStack
+              = .ok stk1
+            ∧ stk1.stack = condV :: initialStack.stack
+            ∧ (∃ b, asBool? condV = some b) := by
+      intro bn' cond' thn' els' src' hEq
+      rw [hBodyShape] at hEq
+      -- The matched single-element list-equality fixes
+      -- bn' = bn, cond' = cond, etc.
+      obtain ⟨condV, stk1, hLoad, hStk, _, _, _, _, hBool⟩ := hCondLoad
+      injection hEq with hHead _
+      injection hHead with _hName hVal _
+      injection hVal with hCondEq _ _
+      subst hCondEq
+      exact ⟨condV, stk1, hLoad, hStk, hBool⟩
+    exact runMethod_lower_public_unique_no_post_structuralIfVal_narrow_isSome
+      contractName props methods m initialStack hMem hPublic hUnique
+      hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize hBody
+      hRawEqStructural hCondLoad'
+  · -- Predicate-side arm: the lowered ifVal ops drive the stack from
+    -- `initialStack` to `initialStack.push (.vBigint i)`, and
+    -- `agreesTagged` is preserved via the single-const-both-branches
+    -- preservation lemma above.
+    obtain ⟨stk', _hRun, hStkEq, hAgrees'⟩ :=
+      simpleStepRel_ifVal_singleConstBranches_preserves
+        (m.params.map (fun p => p.name) |>.reverse) initialTsm initialAnf
+        initialStack bn cond vn src i hAgrees hFresh hCondLoad
+    exact ⟨stk', hAgrees', hStkEq⟩
+
+end -- attribute [local irreducible] section
 
 end Agrees
 end RunarVerification.Stack

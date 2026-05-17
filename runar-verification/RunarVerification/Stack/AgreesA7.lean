@@ -10,47 +10,56 @@ import RunarVerification.Stack.Agrees
 /-!
 # Stack IR — A7 runtime-side method-level wrapper (`structuralLoop`)
 
-This module discharges the **A7 runtime wrapper** from the
-`work-only-in-the-cheerful-toast` plan: it lands the Stack-VM half of
-`successAgrees` for the structural-loop fragment — methods whose body
-consists of `.loop` value kinds — as a NEW file alongside
+This module discharges the **A7 runtime wrapper** from the Path 2 plan:
+it lands the Stack-VM half of `successAgrees` for the structural-loop
+fragment — methods whose body consists of `.loop` value kinds at a
+small bounded iteration count — as a NEW file alongside
 `Stack/Agrees.lean` (which is left untouched per the hard rules).
 
-## Pragmatic narrowing
+## Tier 1 widening — `count ≤ 1`
 
-The plan's recommended `n = 0` narrowing (no-op loop) is the case
-landed here. Define
+This file lands the A7 Tier 1 widening (Path 2 §5.6): extending the
+earlier `count = 0` narrowing by one inductive step.
 
-* `structuralLoopValue v` — `v` is `.loop 0 body iterVar` for some
-  `body` / `iterVar`. The iteration count is structurally zero.
+* `structuralLoopValue v` — `v` is either
+    * `.loop 0 body iterVar` (any body / iterVar), OR
+    * `.loop 1 [] iterVar`  (one iteration over an *empty* body).
 * `structuralLoopBody bs` — every binding in `bs` is in
   `structuralLoopValue`.
 
-Both `Stack.Lower.lowerValueP` (the program-aware lowerer wired
-through `lowerMethodUserRawOps`) and `Stack.Lower.lowerValue` (the
-unparameterized lowerer) emit `assemble 0 = []` / `unrollIter _ 0 = []`
-for `count = 0`. Concatenating empty op-lists through `lowerBindingsP`
-leaves the user-raw method ops empty as well, so `runOps` succeeds on
-any starting stack by `Stack.Sim.runOps_nil`.
+Both lowering arms produce op-lists that act as a no-op on the starting
+stack:
 
-This is the **runtime-side `.isSome`** half of the method-level
-simulation: paired with the existing
+* `.loop 0 _ _` lowers to `[]` — `assemble 0 = []` /
+  `unrollIter _ 0 = []`. `runOps [] s = .ok s` by `runOps_nil`.
+* `.loop 1 [] iv` lowers to `[push (.bigint 0), .drop]`. The inner
+  body is empty so `bodyOpsF = []`; `iv` survives the (empty) body so
+  `consumedF = false`, hence `dropF = [.drop]`. `assemble 1 = mkIter
+  0 true = [push 0] ++ [] ++ [.drop]`. Stepping this op-list:
+  `runOps [push 0, drop] s` pushes `vBigint 0` then drops it,
+  returning `.ok s`.
+
+So both arms are **identity on the stack state**, and concatenating
+them at the binding level preserves that property by `runOps_append`.
+This is exactly what the runtime-side `.isSome` half of
+`successAgrees` needs at the method level: paired with the existing
 `runMethod_lower_public_unique_no_post_eq_userRaw` bridge, it gives a
 hypothesis-free `(runMethod ...).toOption.isSome` for the
-structural-loop fragment with `count = 0`.
+structural-loop fragment with `count ≤ 1`.
 
 ## Honest deferrals (NOT discharged here)
 
-* `count > 0` — discharging the inductive step of the loop unroll
-  requires a per-body operational simulation hypothesis, which is the
-  job of Stage C / A15. The plan explicitly authorises narrowing to
-  `count = 0` if the inductive path is intractable, and that is the
-  branch landed here.
-* `.ifVal` / nested non-trivial bodies that the loop count-0 form does
-  not exercise — out of scope for A7.
+* `count ≥ 2` and non-empty inner bodies — the inductive step beyond
+  one no-op iteration requires per-body operational simulation that
+  composes with the body's own `simpleStepRel` arms. Path 2 §5.6
+  explicitly authorises tiered narrowing; this Tier 1 extension is
+  the first inductive step beyond the original `count = 0` narrowing.
+* `.ifVal` / nested non-empty bodies that the empty-body Tier 1 form
+  does not exercise — out of scope for this widening.
 * ANF-side `evalBindings` success (the `Prop` half of `successAgrees`)
-  for arbitrary nested loop bodies — `count = 0` makes `runLoop` reduce
-  to `.ok s` trivially, so it is not load-bearing here.
+  for arbitrary nested loop bodies — `count ≤ 1` over an empty body
+  makes `runLoop` reduce in at most one no-op step, so it is not
+  load-bearing here.
 
 ## Hard-rule compliance
 
@@ -65,27 +74,31 @@ namespace A7
 
 open RunarVerification.ANF
 open RunarVerification.ANF.Eval (Value State EvalResult)
-open RunarVerification.Stack.Eval (StackState runOps)
+open RunarVerification.Stack.Eval (StackState runOps stepNonIf applyDrop)
 open RunarVerification.Stack.Lower
   (StackMap lowerBindingsP lowerValueP
     bindingsUseCheckPreimage bindingsUseCodePart
     bindingsUseDeserializeState bodyEndsInAssert)
 
-/-! ## Structural predicate for the `count = 0` loop fragment -/
+/-! ## Structural predicate for the `count ≤ 1` loop fragment -/
 
-/-- Loop value kinds with iteration count `0`. The body and iterVar are
-left existentially open — `count = 0` means the unrolled stack ops are
-`[]` regardless of the body's content, so we do not constrain it here.
--/
+/-- Loop value kinds with iteration count `0`, or iteration count `1`
+over an empty body. The `count = 0` arm leaves body / iterVar free
+because the lowered op-list is `[]` regardless. The `count = 1` arm
+requires `body = []` because an empty body is the only shape whose
+lowered ops are a no-op on the stack independent of any per-body
+operational hypotheses. -/
 def structuralLoopValue : ANFValue → Prop
-  | .loop count _ _ => count = 0
-  | _               => False
+  | .loop 0 _ _      => True
+  | .loop 1 body _   => body = []
+  | _                => False
 
 /-- Bool checker counterpart for `structuralLoopValue`, used to derive a
 `Decidable` instance via `inferInstanceAs`. -/
 def structuralLoopValueB : ANFValue → Bool
-  | .loop 0 _ _ => true
-  | _           => false
+  | .loop 0 _ _        => true
+  | .loop 1 [] _       => true
+  | _                  => false
 
 theorem structuralLoopValue_iff_B (v : ANFValue) :
     structuralLoopValue v ↔ structuralLoopValueB v = true := by
@@ -98,10 +111,16 @@ theorem structuralLoopValue_iff_B (v : ANFValue) :
   | call _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | methodCall _ _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | ifVal _ _ _ => simp [structuralLoopValue, structuralLoopValueB]
-  | loop count _ _ =>
+  | loop count body _ =>
       cases count with
       | zero => simp [structuralLoopValue, structuralLoopValueB]
-      | succ _ => simp [structuralLoopValue, structuralLoopValueB]
+      | succ k =>
+          cases k with
+          | zero =>
+              cases body with
+              | nil => simp [structuralLoopValue, structuralLoopValueB]
+              | cons _ _ => simp [structuralLoopValue, structuralLoopValueB]
+          | succ _ => simp [structuralLoopValue, structuralLoopValueB]
   | assert _ => simp [structuralLoopValue, structuralLoopValueB]
   | updateProp _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | getStateScript => simp [structuralLoopValue, structuralLoopValueB]
@@ -117,7 +136,8 @@ instance : DecidablePred structuralLoopValue := fun v =>
   decidable_of_iff (structuralLoopValueB v = true)
     (structuralLoopValue_iff_B v).symm
 
-/-- Every binding in the body is a count-`0` loop. -/
+/-- Every binding in the body is a `count ≤ 1` loop in the supported
+shape. -/
 def structuralLoopBody : List ANFBinding → Prop
   | []                  => True
   | (.mk _ v _) :: rest => structuralLoopValue v ∧ structuralLoopBody rest
@@ -155,99 +175,201 @@ theorem lowerValueP_loop_zero_ops_nil
     (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
         outerProtected localBindings constInts sm bindingName
         (.loop 0 body iterVar)).1 = [] := by
-  -- The `.loop` arm of `lowerValueP` returns `(assemble count, _, _)`; the
-  -- `let rec assemble` reduces to `[]` on count 0.
   unfold Stack.Lower.lowerValueP
   simp [Stack.Lower.lowerValueP.assemble]
 
-/-- `lowerBindingsP` of an all-`.loop 0` body produces an empty op-list.
-The induction generalises on every parameter that `lowerBindingsP`
-threads (`sm`, `localBindings`, `currentIndex`) because the recursive
-call passes the head's post-state. -/
-theorem lowerBindingsP_structuralLoopBody_ops_nil
+/-! ## Stack-side: lowering a `count = 1` empty-body loop emits `[push 0, drop]` -/
+
+/-- `lowerValueP` of `.loop 1 [] iv` produces `[push (.bigint 0), .drop]`.
+
+Trace through the `loop` arm at `Stack/Lower.lean:3534-3598` for
+`count = 1, body = []`:
+
+* `smInner = sm.push iv = iv :: sm`.
+* `bodyOpsF = (lowerBindingsP _ _ _ 0 _ _ _ _ smInner []).1 = []` —
+  `lowerBindingsP` of `[]` is `([], smInner)`.
+* `smF = smInner = iv :: sm`.
+* `consumedF = !listContains (iv :: sm) iv = !true = false`.
+* `dropF = [.drop]`.
+* `mkIter 0 true = [.push (.bigint 0)] ++ bodyOpsF ++ dropF
+                = [.push (.bigint 0), .drop]`.
+* `assemble 1 = mkIter (1 - 1) true ++ assemble 0
+              = [.push (.bigint 0), .drop] ++ [] = [.push (.bigint 0), .drop]`.
+
+The decidable equality `decide (0 = 0) = true` flips the `final`
+flag for the only iteration. -/
+theorem lowerValueP_loop_one_empty_ops
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName iterVar : String) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loop 1 [] iterVar)).1
+      = [.push (.bigint 0), .drop] := by
+  unfold Stack.Lower.lowerValueP
+  simp [Stack.Lower.lowerValueP.assemble, Stack.Lower.lowerBindingsP,
+        Stack.Lower.computeLastUses, Stack.Lower.StackMap.push,
+        Stack.Lower.listContains]
+
+/-! ## `runOps` is identity on the supported loop value's lowered ops -/
+
+/-- `runOps [.push (.bigint 0), .drop] s = .ok s` for any `s`. The
+push deposits a `vBigint 0` on top of `s.stack`; the drop pops it
+off, returning the original state.
+
+This is the operational core of the Tier 1 widening: the `count = 1`
+empty-body loop lowers to this exact two-op no-op sequence. -/
+theorem runOps_push_zero_drop_id (s : StackState) :
+    runOps [.push (.bigint 0), .drop] s = .ok s := by
+  -- Unfold one cons step: push reduces to `.ok (s.push (vBigint 0))`.
+  show runOps (.push (.bigint 0) :: .drop :: []) s = .ok s
+  unfold runOps
+  -- Reduce the push step using its rfl-level lemma.
+  rw [show stepNonIf (.push (.bigint 0)) s = .ok (s.push (.vBigint 0)) from rfl]
+  -- Now we have `runOps (.drop :: []) (s.push (.vBigint 0))`.
+  show runOps (.drop :: []) (s.push (.vBigint 0)) = .ok s
+  unfold runOps
+  -- Reduce the drop step. `s.push (.vBigint 0)` has stack `vBigint 0 :: s.stack`,
+  -- so `applyDrop` returns `.ok { s with stack := s.stack } = .ok s`.
+  rw [show stepNonIf .drop (s.push (.vBigint 0))
+        = .ok s from by
+      show applyDrop (s.push (.vBigint 0)) = .ok s
+      unfold applyDrop StackState.push
+      simp]
+  -- `runOps [] s = .ok s` by `runOps_nil`.
+  exact Stack.Eval.runOps_nil s
+
+/-- For any `v` satisfying `structuralLoopValue`, the lowered op-list
+runs as the identity on the starting stack state. -/
+theorem runOps_lowerValueP_structuralLoopValue_id
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName : String)
+    (v : ANFValue) (hSupp : structuralLoopValue v) (s : StackState) :
+    runOps
+      (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName v).1 s
+      = .ok s := by
+  cases v with
+  | loadParam _ => exact (hSupp).elim
+  | loadProp _ => exact (hSupp).elim
+  | loadConst _ => exact (hSupp).elim
+  | binOp _ _ _ _ => exact (hSupp).elim
+  | unaryOp _ _ _ => exact (hSupp).elim
+  | call _ _ => exact (hSupp).elim
+  | methodCall _ _ _ => exact (hSupp).elim
+  | ifVal _ _ _ => exact (hSupp).elim
+  | loop count body iv =>
+      cases count with
+      | zero =>
+          rw [lowerValueP_loop_zero_ops_nil progMethods props budget
+                currentIndex lastUses outerProtected localBindings
+                constInts sm bindingName iv body]
+          exact Stack.Eval.runOps_nil s
+      | succ k =>
+          cases k with
+          | zero =>
+              -- count = 1: structuralLoopValue forces body = [].
+              have hBody : body = [] := by
+                simpa [structuralLoopValue] using hSupp
+              subst hBody
+              rw [lowerValueP_loop_one_empty_ops progMethods props budget
+                    currentIndex lastUses outerProtected localBindings
+                    constInts sm bindingName iv]
+              exact runOps_push_zero_drop_id s
+          | succ _ =>
+              -- count ≥ 2 is not in the predicate.
+              exact absurd hSupp (by simp [structuralLoopValue])
+  | assert _ => exact (hSupp).elim
+  | updateProp _ _ => exact (hSupp).elim
+  | getStateScript => exact (hSupp).elim
+  | checkPreimage _ => exact (hSupp).elim
+  | deserializeState _ => exact (hSupp).elim
+  | addOutput _ _ _ => exact (hSupp).elim
+  | addRawOutput _ _ => exact (hSupp).elim
+  | addDataOutput _ _ => exact (hSupp).elim
+  | arrayLiteral _ => exact (hSupp).elim
+  | rawScript _ _ _ => exact (hSupp).elim
+
+/-! ## Binding-level: `runOps` on the body's lowered ops is identity
+
+`lowerBindingsP` concatenates each binding's lowered op-list and
+threads the stack map through. Every binding in a `structuralLoopBody`
+contributes ops that act as identity on the stack state (proved above)
+and leave the stack map unchanged (also proved above). So by induction
+on the body, the full op-list is identity on the starting stack state.
+-/
+
+theorem runOps_lowerBindingsP_structuralLoopBody_id
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat) (lastUses : List (String × Nat))
     (outerProtected : List String)
     (constInts : List (String × Int)) :
     ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
-      (localBindings : List String),
+      (localBindings : List String) (s : StackState),
       structuralLoopBody body →
-      (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
-        outerProtected localBindings constInts sm body).1 = []
-  | [], _sm, _currentIndex, _localBindings, _h => by
+      runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex
+        lastUses outerProtected localBindings constInts sm body).1 s
+      = .ok s
+  | [], _sm, _currentIndex, _localBindings, s, _h => by
       simp [Stack.Lower.lowerBindingsP]
-  | (.mk name v src) :: rest, sm, currentIndex, localBindings, h => by
+      exact Stack.Eval.runOps_nil s
+  | (.mk name v _) :: rest, sm, currentIndex, localBindings, s, h => by
       simp only [structuralLoopBody] at h
       obtain ⟨hHead, hRest⟩ := h
-      -- Reduce the head: `v` must be `.loop 0 body iv`.
-      cases v with
-      | loadParam _ => exact (hHead).elim
-      | loadProp _ => exact (hHead).elim
-      | loadConst _ => exact (hHead).elim
-      | binOp _ _ _ _ => exact (hHead).elim
-      | unaryOp _ _ _ => exact (hHead).elim
-      | call _ _ => exact (hHead).elim
-      | methodCall _ _ _ => exact (hHead).elim
-      | ifVal _ _ _ => exact (hHead).elim
-      | loop count loopBody iv =>
-          -- `structuralLoopValue` forces `count = 0`.
-          have hcount : count = 0 := by
-            simpa [structuralLoopValue] using hHead
-          subst hcount
-          -- Head op-list is `[]`; tail recursion gives `[]` by IH on the
-          -- post-head stack-map / localBindings.
-          have hHeadOps :=
-            lowerValueP_loop_zero_ops_nil progMethods props budget
-              currentIndex lastUses outerProtected localBindings
-              constInts sm name iv loopBody
-          -- Unfold one step of `lowerBindingsP`; the head ops are `[]` so
-          -- the cons reduces to `[] ++ tailOps = tailOps`. The IH says
-          -- tailOps is `[]`.
-          have hTail :=
-            lowerBindingsP_structuralLoopBody_ops_nil
-              progMethods props budget lastUses outerProtected
-              constInts rest
-              (Stack.Lower.lowerValueP progMethods props budget currentIndex
-                lastUses outerProtected localBindings constInts sm name
-                (.loop 0 loopBody iv)).2.1
-              (currentIndex + 1)
-              (Stack.Lower.lowerValueP progMethods props budget currentIndex
-                lastUses outerProtected localBindings constInts sm name
-                (.loop 0 loopBody iv)).2.2
-              hRest
-          unfold Stack.Lower.lowerBindingsP
-          simp [hHeadOps, hTail]
-      | assert _ => exact (hHead).elim
-      | updateProp _ _ => exact (hHead).elim
-      | getStateScript => exact (hHead).elim
-      | checkPreimage _ => exact (hHead).elim
-      | deserializeState _ => exact (hHead).elim
-      | addOutput _ _ _ => exact (hHead).elim
-      | addRawOutput _ _ => exact (hHead).elim
-      | addDataOutput _ _ => exact (hHead).elim
-      | arrayLiteral _ => exact (hHead).elim
-      | rawScript _ _ _ => exact (hHead).elim
+      -- The head's lowered ops are an identity on `s` (proved above).
+      have hHeadOps :=
+        runOps_lowerValueP_structuralLoopValue_id progMethods props budget
+          currentIndex lastUses outerProtected localBindings constInts sm
+          name v hHead s
+      -- Unfold one step of `lowerBindingsP`, then split the concatenated
+      -- op-list via `runOps_append` and apply the head/tail facts.
+      unfold Stack.Lower.lowerBindingsP
+      simp only []
+      rw [Stack.Sim.runOps_append]
+      rw [hHeadOps]
+      simp only []
+      -- The tail recursion uses the head's `(sm', localBindings')` outputs.
+      -- The IH is universal over `sm`, `currentIndex`, `localBindings`, so
+      -- we instantiate it with the head's actual projections.
+      exact
+        runOps_lowerBindingsP_structuralLoopBody_id
+          progMethods props budget lastUses outerProtected constInts rest
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex
+            lastUses outerProtected localBindings constInts sm name v).2.1
+          (currentIndex + 1)
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex
+            lastUses outerProtected localBindings constInts sm name v).2.2
+          s hRest
 
-/-- Method-shaped specialization: an all-`.loop 0` body has empty raw ops. -/
-theorem lowerMethodUserRawOps_structuralLoopBody_ops_nil
+/-- Method-shaped specialization: `runOps` of an all-supported-loop body's
+raw method op-list is identity on the starting stack. -/
+theorem runOps_lowerMethodUserRawOps_structuralLoopBody_id
     (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
-    (hLoop : structuralLoopBody m.body) :
-    lowerMethodUserRawOps progMethods props m = [] := by
+    (hLoop : structuralLoopBody m.body) (s : StackState) :
+    runOps (lowerMethodUserRawOps progMethods props m) s = .ok s := by
   unfold lowerMethodUserRawOps
-  exact lowerBindingsP_structuralLoopBody_ops_nil progMethods props
+  exact runOps_lowerBindingsP_structuralLoopBody_id progMethods props
     Stack.Lower.defaultInlineBudget (Stack.Lower.computeLastUses m.body) []
     (Stack.Lower.collectConstInts m.body)
     m.body
     (m.params.map (fun p => p.name) |>.reverse) 0
-    (m.body.map (fun b => b.name)) hLoop
+    (m.body.map (fun b => b.name)) s hLoop
 
 /-! ## Runtime-side `.isSome` for the structural-loop fragment -/
 
-/-- Named-method runtime-success theorem for the structural-loop
-fragment (`count = 0`). The lowered method's user-raw op-list is empty,
-so `runOps` returns `.ok` on any starting stack via
-`Stack.Sim.runOps_nil`. This is the Stack-VM `.isSome` half of
-`successAgrees` for the count-0 loop fragment. -/
+/-- Named-method runtime-success theorem for the Tier 1-widened
+structural-loop fragment (`count ≤ 1`). The lowered method's user-raw
+op-list runs as an identity on the starting stack, so `runMethod`
+returns `.ok` — its `.toOption.isSome` is therefore `true`. This is
+the Stack-VM `.isSome` half of `successAgrees` for the supported
+loop fragment. -/
 theorem runMethod_lower_public_unique_no_post_structuralLoop_isSome
     (contractName : String) (props : List ANFProperty)
     (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
@@ -268,8 +390,8 @@ theorem runMethod_lower_public_unique_no_post_structuralLoop_isSome
   rw [runMethod_lower_public_unique_no_post_eq_userRaw
         contractName props methods m initialStack hMem hPublic hUnique
         hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
-  rw [lowerMethodUserRawOps_structuralLoopBody_ops_nil methods props m hLoop]
-  rw [Stack.Eval.runOps_nil]
+  rw [runOps_lowerMethodUserRawOps_structuralLoopBody_id methods props m hLoop
+      initialStack]
   simp [Except.toOption]
 
 end A7

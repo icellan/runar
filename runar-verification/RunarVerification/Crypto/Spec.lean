@@ -956,55 +956,104 @@ def bbExt4Inv3 (a0 a1 a2 a3 : Int) : Int :=
   let odd1 := bbAdd p0 p1
   bbSub 0 odd1
 
-/-! ### 8.3. Functional-correctness companions for the base-field axioms
+/-! ### 8.3. Functional-correctness companions for the base-field symbols
 
-The bare `Crypto.bbFieldAdd / Sub / Mul / Inv` symbols (declared in
-`ANF/Eval.lean`) are unconstrained `Int → Int → Int` / `Int → Int`.
-Without further constraint, a hostile specialization could choose
-e.g. `bbFieldAdd a b ≡ 0` and break any future "BabyBear arithmetic
-in Rúnar contracts is consistent with the field structure"
-theorem.
+The `Crypto.bbFieldAdd / Sub / Mul / Inv` symbols (declared in
+`ANF/Eval.lean`) were bare `axiom`s in Tier 5.1; in Phase B6
+(2026-05-17) they were converted to concrete `def`s that mirror the
+specs in §8.1 one-for-one. The four companion lemmas below are
+therefore *theorems* (was: axioms): each is discharged by
+`rfl`-style reduction after unfolding both the bare-side def
+(`bbFieldAdd` etc.) and the spec-side def (`bbAdd` etc.) to the same
+underlying `bbMod`/`bbFieldMod` canonical reduction.
 
-Each axiom below ties the bare symbol to its concrete spec when the
-inputs are canonical representatives in `[0, p-1]`. The
-side-condition is necessary because the bare evaluator may pass
-arbitrary `Int`s through the ANF interpreter; the canonical form is
-what the Stack-IR codegen consumes / produces. Future tightening
-(removing the side-condition) is possible once `ANF/Eval.lean`
-exposes a backend split analogous to `HashBackend` / `AuthBackend`.
+The side-conditions `0 ≤ a < BabyBearPrime` (and likewise for `b`)
+are retained for backward compatibility with downstream code that
+quotes the original axiom signature, but they are not used in the
+proofs — both sides reduce to the same canonical representative
+regardless of the input range. Downstream callers requiring
+inputs already in `[0, p-1]` are unaffected.
 
 **Citation.** The semantics of BabyBear prime-field arithmetic is
 standard (see e.g. Plonky3 `koala-bear/src/baby_bear.rs` and the
 SP1 v6.0.2 specification, which the Go reference compiler
-implements byte-for-byte). The Lean specs here mirror those
-formulas one-for-one.
+implements byte-for-byte). The Lean specs and the `ANF/Eval`
+companion `def`s mirror those formulas one-for-one.
 -/
 
-/-- Bare `Crypto.bbFieldAdd` is `bbAdd` on canonical inputs. -/
-axiom bbFieldAdd_correct (a b : Int)
+/-- Internal: the spec-side `bbMod` and the ANF-side `Crypto.bbFieldMod`
+both reduce a (possibly-negative) `Int` to its canonical representative
+in `[0, p-1]`. They share the same `((a % p) + p) % p` formula with the
+same modulus (`BabyBearPrime = bbFieldPrime = 2013265921`), so equality
+holds by reduction. -/
+private theorem bbMod_eq_bbFieldMod (a : Int) :
+    bbMod a = Crypto.bbFieldMod a := by
+  unfold bbMod Crypto.bbFieldMod
+  rfl
+
+/-- `Crypto.bbFieldAdd` is `bbAdd` on every input (the side-conditions
+are vacuous — both sides apply the same canonical reduction). -/
+theorem bbFieldAdd_correct (a b : Int)
     (ha : 0 ≤ a) (ha' : a < BabyBearPrime)
     (hb : 0 ≤ b) (hb' : b < BabyBearPrime) :
-    Crypto.bbFieldAdd a b = bbAdd a b
+    Crypto.bbFieldAdd a b = bbAdd a b := by
+  -- Suppress unused-hypothesis lints; the args are kept for signature
+  -- compatibility with the previous axiom declaration.
+  let _ := ha; let _ := ha'; let _ := hb; let _ := hb'
+  unfold bbAdd Crypto.bbFieldAdd
+  exact (bbMod_eq_bbFieldMod (a + b)).symm
 
-/-- Bare `Crypto.bbFieldSub` is `bbSub` on canonical inputs. -/
-axiom bbFieldSub_correct (a b : Int)
+/-- `Crypto.bbFieldSub` is `bbSub` on every input. -/
+theorem bbFieldSub_correct (a b : Int)
     (ha : 0 ≤ a) (ha' : a < BabyBearPrime)
     (hb : 0 ≤ b) (hb' : b < BabyBearPrime) :
-    Crypto.bbFieldSub a b = bbSub a b
+    Crypto.bbFieldSub a b = bbSub a b := by
+  let _ := ha; let _ := ha'; let _ := hb; let _ := hb'
+  unfold bbSub Crypto.bbFieldSub
+  exact (bbMod_eq_bbFieldMod (a - b)).symm
 
-/-- Bare `Crypto.bbFieldMul` is `bbMul` on canonical inputs. -/
-axiom bbFieldMul_correct (a b : Int)
+/-- `Crypto.bbFieldMul` is `bbMul` on every input. -/
+theorem bbFieldMul_correct (a b : Int)
     (ha : 0 ≤ a) (ha' : a < BabyBearPrime)
     (hb : 0 ≤ b) (hb' : b < BabyBearPrime) :
-    Crypto.bbFieldMul a b = bbMul a b
+    Crypto.bbFieldMul a b = bbMul a b := by
+  let _ := ha; let _ := ha'; let _ := hb; let _ := hb'
+  unfold bbMul Crypto.bbFieldMul
+  exact (bbMod_eq_bbFieldMod (a * b)).symm
 
-/-- Bare `Crypto.bbFieldInv` is `bbInv` on canonical inputs.
-Note: `bbInv 0 = 0` by the Fermat-little-theorem definition, which
-matches the codegen behaviour. Callers requiring a true field
-inverse must additionally ensure `a ≠ 0`. -/
-axiom bbFieldInv_correct (a : Int)
+/-- `Crypto.bbFieldInv` is `bbInv` on every input.
+`bbInv 0 = 0^(p-2) = 0` by the Fermat-little-theorem definition;
+this matches the codegen behaviour (`Stack/BabyBear.lean#fieldInv`
+does not special-case `a = 0`). -/
+theorem bbFieldInv_correct (a : Int)
     (ha : 0 ≤ a) (ha' : a < BabyBearPrime) :
-    Crypto.bbFieldInv a = bbInv a
+    Crypto.bbFieldInv a = bbInv a := by
+  let _ := ha; let _ := ha'
+  unfold bbInv Crypto.bbFieldInv
+  -- Both sides apply `bbFieldPowNat`/`bbPowNat` to the canonical
+  -- reduction of `a` raised to `p - 2`. Reduce the two recursive
+  -- definitions and the two `bbMod`/`bbFieldMod` canonical reducers
+  -- to the same underlying computation.
+  have hMod : Crypto.bbFieldMod a = bbMod a := (bbMod_eq_bbFieldMod a).symm
+  rw [hMod]
+  -- Reduce `Crypto.bbFieldPowNat` to `bbPowNat` pointwise. The two
+  -- helpers share the same recursion shape; the only difference is
+  -- the multiplication backend (`Crypto.bbFieldMul` vs `bbMul`),
+  -- which are pointwise equal by `bbMod_eq_bbFieldMod` on the
+  -- product. Discharge via induction on the exponent.
+  have hPow : ∀ (x : Int) (n : Nat),
+      Crypto.bbFieldPowNat x n = bbPowNat x n := by
+    intro x n
+    induction n with
+    | zero => rfl
+    | succ k ih =>
+      unfold Crypto.bbFieldPowNat bbPowNat
+      rw [ih]
+      unfold Crypto.bbFieldMul bbMul
+      exact bbMod_eq_bbFieldMod _
+  -- `Crypto.bbFieldPrime - 2 = BabyBearPrime - 2 = 2013265919` by
+  -- definitional unfolding of both constants.
+  exact hPow _ _
 
 /-! ### 8.4. Sanity lemmas for the spec layer (provable, no axioms)
 
