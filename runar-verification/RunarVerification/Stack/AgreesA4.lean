@@ -1197,5 +1197,583 @@ theorem runMethod_within_singleton_d2d1d0_isSome
 
 end MathByteWrappers
 
+/-! ## A4 math/byte bounded-loop builtin — `sqrt`
+
+Per PATH2_PLAN §5.2 ("Failure modes"), bounded-loop builtins (`sqrt`,
+`gcd`, `log2`) emit fuel-bounded loop shapes in the codegen but the
+ANF spec is a closed-form `def`. Reconciling fuel-sufficiency at each
+call site is the obligation singled out by the plan.
+
+`lowerValueP`'s `.call "sqrt"` arm (`Stack/Lower.lean:3002-3030`)
+emits, for a single arg `n`:
+
+```
+  <loadN>
+  OP_DUP                                          -- guard on `n != 0`
+  OP_IF
+    OP_DUP                                        -- n  n  (= initial guess x₀ = n)
+    16 × [OP_OVER OP_OVER OP_DIV OP_ADD <2> OP_DIV]
+    OP_NIP                                        -- pop original n; result on top
+  OP_ENDIF
+```
+
+The ANF spec (`ANF/Eval.lean#sqrtNat`) allocates fuel `Nat.log2 n + 32`
+which generously dominates the codegen's fixed 16 iterations for any
+`n` that fits in 16 bits; for an `.isSome`-only obligation, we
+sidestep the convergence proof entirely and prove only that **every
+intermediate Newton iterate stays ≥ 1 when `n ≥ 1`**. This is the
+exact fuel-sufficiency obligation the plan flags: each `OP_DIV`'s
+divisor is either a positive intermediate guess `x_k ≥ 1` or the
+literal `2`, so no `divByZero` ever fires and `runOps` returns `.ok`.
+
+The arithmetic core is the invariant
+  `x ≥ 1 ∧ n ≥ 1 → (x + n / x) / 2 ≥ 1`
+proved below via `Int.ediv` reasoning. Inductive composition over
+`(List.range 16)` lifts the single-step invariant to the full
+unrolled body. The `n = 0` branch is handled by the surrounding
+`OP_DUP OP_IF` guard (the `else` arm is `none`, so the original
+zero remains on the stack and the result is just `0`).
+
+Per PATH2_PLAN §2.1, the only hypotheses used are input-side:
+* `agreesTagged` on the initial state;
+* a concrete operand lookup giving `n`'s value;
+* `n ≥ 0` (the same non-negativity invariant ANF's `sqrt` arm
+  enforces with `.error (.typeError "sqrt expects non-negative input")`);
+* a `loadRef` shape fact for depth 0;
+* freshness of the binding name.
+
+No conclusion-restating hypothesis. No new axioms.
+-/
+
+open RunarVerification.Stack.Sim
+  (run_dup_nonEmpty runOpcode_DIV_intInt_nonzero runOpcode_ADD_intInt
+   runOpcode_NIP_deep)
+open RunarVerification.Stack.Eval
+  (stepNonIf_opcode stepNonIf_push_bigint stepNonIf_dup
+   stepNonIf applyDup applyOver applyNip runOpcode)
+
+section SqrtWrappers
+
+attribute [local irreducible]
+  RunarVerification.Stack.Peephole.peepholePassAll
+  RunarVerification.Stack.Peephole.peepholePostFold
+  RunarVerification.Stack.Peephole.peepholeChainFold
+  RunarVerification.Stack.Peephole.peepholeRollPickFold
+  RunarVerification.Stack.Peephole.peepholePassAllFlat
+  RunarVerification.Stack.Peephole.passAllInner15
+
+/-- A single Newton iteration of integer `sqrt`, exactly as emitted by
+`lowerValueP`'s `.call "sqrt"` arm: copies the (n, x) pair underneath,
+divides `n / x`, adds the previous guess, then halves. -/
+private def sqrtIterOps : List StackOp :=
+  [ StackOp.over, StackOp.over
+  , StackOp.opcode "OP_DIV"
+  , StackOp.opcode "OP_ADD"
+  , StackOp.push (.bigint 2)
+  , StackOp.opcode "OP_DIV" ]
+
+/-- The Newton iteration's arithmetic core preserves the positivity
+invariant: `x ≥ 1 ∧ n ≥ 1 → (x + n / x) / 2 ≥ 1`.
+
+Proof sketch (Int division floors toward `-∞` but for non-negative
+operands floors toward 0). With `x ≥ 1, n ≥ 1`:
+* `n / x ≥ 0` (non-negative quotient of non-negatives);
+* `x + n / x ≥ x ≥ 1`;
+* if `x + n / x = 1` then `n / x = 0` (i.e., `n < x`); combined with
+  `x ≥ 1` and `n ≥ 1` this forces `x ≥ 2`, contradicting `x + 0 = 1`;
+* so `x + n / x ≥ 2`, hence `(x + n / x) / 2 ≥ 1`. -/
+private theorem sqrt_step_preserves_pos (x n : Int)
+    (hX : x ≥ 1) (hN : n ≥ 1) :
+    (x + n / x) / 2 ≥ 1 := by
+  -- `n / x ≥ 0` since both are non-negative and `x > 0`.
+  have hXpos : (0 : Int) < x := by omega
+  have hNnn : (0 : Int) ≤ n := by omega
+  have hDivNN : 0 ≤ n / x := Int.ediv_nonneg hNnn (by omega)
+  -- Show `x + n / x ≥ 2`.
+  have hSumGe2 : x + n / x ≥ 2 := by
+    by_cases hXeq1 : x = 1
+    · -- `x = 1`: then `n / 1 = n ≥ 1`, so `1 + n ≥ 2`.
+      subst hXeq1
+      have hNdiv : n / (1 : Int) = n := Int.ediv_one n
+      rw [hNdiv]; omega
+    · -- `x ≥ 2`: then `x + n / x ≥ x ≥ 2`.
+      have hXge2 : x ≥ 2 := by omega
+      omega
+  -- Then `(x + n / x) / 2 ≥ 2 / 2 = 1`. Use `Int.le_ediv_iff_mul_le`:
+  -- `1 ≤ q / 2 ↔ 1 * 2 ≤ q` (since `2 > 0`).
+  have h2pos : (0 : Int) < 2 := by decide
+  have h1mul2 : (1 : Int) * 2 = 2 := by decide
+  show (1 : Int) ≤ (x + n / x) / 2
+  have hLeIff := Int.le_ediv_iff_mul_le (a := 1) (b := x + n / x) (c := 2) h2pos
+  rw [hLeIff, h1mul2]
+  exact hSumGe2
+
+/-- Single-iteration `runOps` reduction for `sqrtIterOps` on a stack
+whose top two slots are `[x, n, rest]` with `x ≠ 0`. The iteration
+peels into six step-wise reductions, threading the bigint values
+through each opcode. -/
+private theorem runOps_sqrtIter_eq (s : StackState) (x n : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint x :: .vBigint n :: rest)
+    (hXnz : x ≠ 0) :
+    runOps sqrtIterOps s
+      = .ok ({ s with stack := rest }.push (.vBigint n)
+                                     |>.push (.vBigint ((x + n / x) / 2))) := by
+  -- State after first OP_OVER (= .over): copies `n` on top of original stack.
+  -- stack: [x, n, rest] → [n, x, n, rest]; new state = s.push (.vBigint n).
+  have hOver1 : runOps [StackOp.over] s = .ok (s.push (.vBigint n)) :=
+    run_over_deep s (.vBigint x) (.vBigint n) rest hStk
+  let s1 : StackState := s.push (.vBigint n)
+  have hs1def : s1 = s.push (.vBigint n) := rfl
+  have hS1stk : s1.stack = .vBigint n :: .vBigint x :: .vBigint n :: rest := by
+    show (s.push (.vBigint n)).stack = _
+    unfold StackState.push; rw [hStk]
+  -- State after second .over: copies `x` on top → stack [x, n, x, n, rest].
+  have hOver2 : runOps [StackOp.over] s1 = .ok (s1.push (.vBigint x)) :=
+    run_over_deep s1 (.vBigint n) (.vBigint x) (.vBigint n :: rest) hS1stk
+  let s2 : StackState := s1.push (.vBigint x)
+  have hs2def : s2 = s1.push (.vBigint x) := rfl
+  have hS2stk : s2.stack
+      = .vBigint x :: .vBigint n :: .vBigint x :: .vBigint n :: rest := by
+    show (s1.push (.vBigint x)).stack = _
+    unfold StackState.push; rw [hS1stk]
+  -- State after OP_DIV: pops top two with top=x, below=n → pushes n/x.
+  have hDiv1 :
+      runOpcode "OP_DIV" s2 =
+        .ok ({ s2 with stack := .vBigint x :: .vBigint n :: rest }.push
+              (.vBigint (n / x))) := by
+    have hS2viewed : s2.stack
+        = .vBigint x :: .vBigint n :: (.vBigint x :: .vBigint n :: rest) := hS2stk
+    exact runOpcode_DIV_intInt_nonzero s2 n x
+      (.vBigint x :: .vBigint n :: rest) hS2viewed hXnz
+  let s3 : StackState :=
+    ({ s2 with stack := .vBigint x :: .vBigint n :: rest }.push (.vBigint (n / x)))
+  have hs3def : s3 = ({ s2 with stack := .vBigint x :: .vBigint n :: rest }.push
+                        (.vBigint (n / x))) := rfl
+  have hS3stk : s3.stack
+      = .vBigint (n / x) :: .vBigint x :: .vBigint n :: rest := by
+    show (({ s2 with stack := .vBigint x :: .vBigint n :: rest }.push
+              (.vBigint (n / x))).stack) = _
+    unfold StackState.push; rfl
+  -- State after OP_ADD: pops top two with top=n/x, below=x → pushes x + n/x.
+  have hAdd :
+      runOpcode "OP_ADD" s3 =
+        .ok ({ s3 with stack := .vBigint n :: rest }.push (.vBigint (x + n / x))) := by
+    have hS3viewed : s3.stack
+        = .vBigint (n / x) :: .vBigint x :: (.vBigint n :: rest) := hS3stk
+    exact runOpcode_ADD_intInt s3 x (n / x) (.vBigint n :: rest) hS3viewed
+  let s4 : StackState :=
+    ({ s3 with stack := .vBigint n :: rest }.push (.vBigint (x + n / x)))
+  have hs4def : s4 = ({ s3 with stack := .vBigint n :: rest }.push
+                        (.vBigint (x + n / x))) := rfl
+  have hS4stk : s4.stack = .vBigint (x + n / x) :: .vBigint n :: rest := by
+    show (({ s3 with stack := .vBigint n :: rest }.push (.vBigint (x + n / x))).stack) = _
+    unfold StackState.push; rfl
+  -- State after push 2: [2, x + n/x, n, rest]
+  let s5 : StackState := s4.push (.vBigint 2)
+  have hs5def : s5 = s4.push (.vBigint 2) := rfl
+  have hS5stk : s5.stack
+      = .vBigint 2 :: .vBigint (x + n / x) :: .vBigint n :: rest := by
+    show (s4.push (.vBigint 2)).stack = _
+    unfold StackState.push; rw [hS4stk]
+  -- State after OP_DIV: pops top=2, below=(x + n/x) → pushes (x + n/x) / 2.
+  have h2nz : (2 : Int) ≠ 0 := by decide
+  have hDiv2 :
+      runOpcode "OP_DIV" s5 =
+        .ok ({ s5 with stack := .vBigint n :: rest }.push
+              (.vBigint ((x + n / x) / 2))) := by
+    have hS5viewed : s5.stack
+        = .vBigint 2 :: .vBigint (x + n / x) :: (.vBigint n :: rest) := hS5stk
+    exact runOpcode_DIV_intInt_nonzero s5 (x + n / x) 2
+      (.vBigint n :: rest) hS5viewed h2nz
+  -- Splice all six steps via the divmod-style append pattern:
+  -- decompose `[a,b,c,d,e,f]` as `([a] ++ [b]) ++ ([c] ++ [d] ++ [e] ++ [f])` and chain.
+  show runOps
+        (StackOp.over :: StackOp.over :: StackOp.opcode "OP_DIV"
+          :: StackOp.opcode "OP_ADD" :: StackOp.push (.bigint 2)
+          :: StackOp.opcode "OP_DIV" :: []) s = _
+  -- Build 2-step `.over;.over` lemma:
+  have hOverOver : runOps ([StackOp.over] ++ [StackOp.over]) s = .ok s2 := by
+    rw [runOps_append, hOver1]; exact hOver2
+  -- Build tail reduction: OP_DIV ++ OP_ADD ++ push 2 ++ OP_DIV from s2 → final.
+  have hTail : runOps ([.opcode "OP_DIV", .opcode "OP_ADD",
+                          .push (.bigint 2), .opcode "OP_DIV"]) s2
+      = .ok (({ s with stack := rest }.push (.vBigint n)).push
+              (.vBigint ((x + n / x) / 2))) := by
+    -- Six-op-tail step-by-step.
+    show runOps (.opcode "OP_DIV" :: .opcode "OP_ADD"
+          :: .push (.bigint 2) :: .opcode "OP_DIV" :: []) s2 = _
+    unfold runOps
+    rw [stepNonIf_opcode, hDiv1]
+    show runOps (.opcode "OP_ADD" :: .push (.bigint 2)
+          :: .opcode "OP_DIV" :: []) s3 = _
+    unfold runOps
+    rw [stepNonIf_opcode, hAdd]
+    show runOps (.push (.bigint 2) :: .opcode "OP_DIV" :: []) s4 = _
+    unfold runOps
+    rw [stepNonIf_push_bigint]
+    show runOps (.opcode "OP_DIV" :: []) s5 = _
+    unfold runOps
+    rw [stepNonIf_opcode, hDiv2]
+    show runOps [] _ = _
+    unfold runOps
+    -- All `sN` share `s`'s non-stack fields by definitional reduction of `push`.
+    rfl
+  -- Splice: `[.over, .over] ++ tail`.
+  have hRewrite : (StackOp.over :: StackOp.over :: StackOp.opcode "OP_DIV"
+        :: StackOp.opcode "OP_ADD" :: StackOp.push (.bigint 2)
+        :: StackOp.opcode "OP_DIV" :: [] : List StackOp)
+      = ([StackOp.over] ++ [StackOp.over]) ++ [StackOp.opcode "OP_DIV"
+        , StackOp.opcode "OP_ADD", StackOp.push (.bigint 2)
+        , StackOp.opcode "OP_DIV"] := rfl
+  rw [hRewrite, runOps_append, hOverOver]
+  exact hTail
+
+/-- Inductive composition: after `k` Newton iterations starting from a
+positive guess `x` and positive constant `n`, the stack carries some
+positive guess `x'` on top of the preserved `n` and tail. The
+existential is what discharges the post-state without committing to
+the precise (and irrelevant for `.isSome`) value of `x_k`. -/
+private theorem runOps_sqrtIters_isOk
+    (k : Nat) (s : StackState) (x n : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint x :: .vBigint n :: rest)
+    (hX : x ≥ 1) (hN : n ≥ 1) :
+    ∃ x' : Int, x' ≥ 1 ∧
+      runOps ((List.range k).flatMap (fun _ => sqrtIterOps)) s
+        = .ok (({ s with stack := rest }.push (.vBigint n)).push (.vBigint x')) := by
+  induction k generalizing s x with
+  | zero =>
+      refine ⟨x, hX, ?_⟩
+      -- `(List.range 0).flatMap _ = []`, so `runOps [] s = .ok s`.
+      simp [List.range_zero, List.flatMap_nil, runOps]
+      -- Show `s = ({s with stack := rest}.push n).push x` (using hStk).
+      cases s with
+      | mk stack altstack outputs props preimage =>
+          unfold StackState.push
+          simp at hStk
+          simp [hStk]
+  | succ k ih =>
+      -- One iteration: stack `[x, n, rest]` → `[x', n, rest]` with `x' = (x + n/x)/2 ≥ 1`.
+      have hXnz : x ≠ 0 := by omega
+      have hIter := runOps_sqrtIter_eq s x n rest hStk hXnz
+      -- The intermediate state.
+      let sMid : StackState :=
+        ({ s with stack := rest }.push (.vBigint n)).push (.vBigint ((x + n / x) / 2))
+      have hsMid : sMid = ({ s with stack := rest }.push (.vBigint n)).push
+                            (.vBigint ((x + n / x) / 2)) := rfl
+      have hSMidStk :
+          sMid.stack = .vBigint ((x + n / x) / 2) :: .vBigint n :: rest := by
+        show ((({ s with stack := rest }.push (.vBigint n)).push
+                  (.vBigint ((x + n / x) / 2))).stack) = _
+        unfold StackState.push; rfl
+      have hX' : (x + n / x) / 2 ≥ 1 := sqrt_step_preserves_pos x n hX hN
+      obtain ⟨x_final, hXfinal, hRest⟩ := ih sMid ((x + n / x) / 2) hSMidStk hX'
+      refine ⟨x_final, hXfinal, ?_⟩
+      -- Compose: `(range (k+1)).flatMap f = sqrtIterOps ++ (range k).flatMap f` (up to renaming).
+      have hRange :
+          ((List.range (k + 1)).flatMap (fun _ => sqrtIterOps))
+            = sqrtIterOps ++ ((List.range k).flatMap (fun _ => sqrtIterOps)) := by
+        rw [List.range_succ_eq_map, List.flatMap_cons]
+        congr 1
+        rw [List.flatMap_map]
+      rw [hRange, runOps_append, hIter]
+      -- Bridge: post-state from `hRest` matches.
+      have hBridge :
+          (({ sMid with stack := rest }.push (.vBigint n)).push (.vBigint x_final)
+            : StackState)
+            = (({ s with stack := rest }.push (.vBigint n)).push (.vBigint x_final)) := by
+        -- `sMid` is defeq to `({s with stack := rest}.push n).push ...`, so its
+        -- non-stack fields are the same as `s`'s. Hence `{sMid with stack := rest}`
+        -- and `{s with stack := rest}` are defeq.
+        rfl
+      rw [← hBridge]
+      exact hRest
+
+/-- The full sqrt "newton body" emitted by the `OP_IF` arm of
+`lowerValueP`'s `.call "sqrt"` lowering: `OP_DUP` + 16 Newton
+iterations + `OP_NIP`. Applied to a stack `[n, rest]` with `n ≥ 1`,
+it succeeds and pushes some positive `x_final` (the precise value
+depends on Newton's convergence — for `.isSome` we only need
+existence). -/
+private theorem runOps_sqrtNewtonBody_isOk
+    (s : StackState) (n : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint n :: rest)
+    (hN : n ≥ 1) :
+    ∃ x_final : Int,
+      runOps (StackOp.opcode "OP_DUP"
+                :: ((List.range 16).flatMap (fun _ => sqrtIterOps))
+                ++ [StackOp.nip]) s
+        = .ok (({ s with stack := rest }).push (.vBigint x_final)) := by
+  -- OP_DUP: stack [n, rest] → [n, n, rest]. The duplicated top is x₀ = n.
+  let s1 : StackState := s.push (.vBigint n)
+  have hs1def : s1 = s.push (.vBigint n) := rfl
+  have hS1stk : s1.stack = .vBigint n :: .vBigint n :: rest := by
+    show (s.push (.vBigint n)).stack = _
+    unfold StackState.push; rw [hStk]
+  have hDup : runOpcode "OP_DUP" s = .ok s1 := by
+    show RunarVerification.Stack.Eval.applyDup s = .ok s1
+    unfold RunarVerification.Stack.Eval.applyDup
+    rw [hStk]
+  -- 16 iterations: by `runOps_sqrtIters_isOk` with initial guess x₀ = n ≥ 1.
+  -- s1's "rest" (everything except top n) is `.vBigint n :: rest`.
+  obtain ⟨x_k, _hXk, hRunIters⟩ :=
+    runOps_sqrtIters_isOk 16 s1 n n rest hS1stk hN hN
+  -- After 16 iterations, stack = [x_k, n, rest]; state = ({s1 with stack := rest}.push n).push x_k.
+  -- But we want to feed this through OP_NIP. Compute the post-iter state explicitly.
+  let sIter : StackState :=
+    ({ s1 with stack := rest }.push (.vBigint n)).push (.vBigint x_k)
+  have hsIterDef : sIter = ({ s1 with stack := rest }.push (.vBigint n)).push
+                            (.vBigint x_k) := rfl
+  have hSIterStk : sIter.stack = .vBigint x_k :: .vBigint n :: rest := by
+    show ((({ s1 with stack := rest }.push (.vBigint n)).push (.vBigint x_k)).stack) = _
+    unfold StackState.push; rfl
+  -- OP_NIP: stack [x_k, n, rest] → [x_k, rest]; new state = `{sIter with stack := .vBigint x_k :: rest}`.
+  have hNip :
+      runOpcode "OP_NIP" sIter =
+        .ok { sIter with stack := .vBigint x_k :: rest } :=
+    runOpcode_NIP_deep sIter (.vBigint x_k) (.vBigint n) rest hSIterStk
+  refine ⟨x_k, ?_⟩
+  -- Splice: OP_DUP :: iters ++ [OP_NIP] = OP_DUP :: (iters ++ [OP_NIP])
+  show runOps (StackOp.opcode "OP_DUP"
+                :: (((List.range 16).flatMap (fun _ => sqrtIterOps))
+                  ++ [StackOp.nip])) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, hDup]
+  show runOps (((List.range 16).flatMap (fun _ => sqrtIterOps)) ++ [StackOp.nip]) s1 = _
+  rw [runOps_append, hRunIters]
+  -- `hRunIters` produced `({s1 with stack := rest}.push n).push x_k = sIter`.
+  show runOps [StackOp.nip] sIter = _
+  unfold runOps
+  have hStepNip : RunarVerification.Stack.Eval.stepNonIf StackOp.nip sIter
+                    = RunarVerification.Stack.Eval.applyNip sIter := rfl
+  rw [hStepNip]
+  unfold RunarVerification.Stack.Eval.applyNip
+  rw [hSIterStk]
+  show runOps [] _ = _
+  unfold runOps
+  -- Final state matches `{ s with stack := rest }.push (.vBigint x_k)`.
+  show (Except.ok ({ sIter with stack := .vBigint x_k :: rest })
+            : RunarVerification.ANF.Eval.EvalResult StackState)
+      = .ok ({ s with stack := rest }.push (.vBigint x_k))
+  rfl
+
+/-- Aggregate `.isSome` for the full sqrt-emit op sequence (post-load)
+for any nonneg operand `n`. The `OP_IF` branches on `n != 0`:
+* `n = 0`: the else arm is `none` so OP_IF just continues; the
+  original `0` remains on the stack.
+* `n ≥ 1`: the if arm runs OP_DUP + 16 Newton iterations + OP_NIP,
+  yielding some positive `x_final` by `runOps_sqrtNewtonBody_isOk`.
+
+In either case `runOps` returns `.ok` with a single bigint on top of
+`rest`. -/
+private theorem runOps_sqrtBody_isOk
+    (s : StackState) (n : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint n :: rest)
+    (hNonneg : n ≥ 0) :
+    ∃ result : Int,
+      runOps
+        ([StackOp.opcode "OP_DUP",
+          StackOp.ifOp
+            (StackOp.opcode "OP_DUP"
+              :: ((List.range 16).flatMap (fun _ => sqrtIterOps))
+              ++ [StackOp.nip])
+            none]) s
+        = .ok (({ s with stack := rest }).push (.vBigint result)) := by
+  -- OP_DUP duplicates n on top.
+  let s1 : StackState := s.push (.vBigint n)
+  have hs1def : s1 = s.push (.vBigint n) := rfl
+  have hS1stk : s1.stack = .vBigint n :: .vBigint n :: rest := by
+    show (s.push (.vBigint n)).stack = _
+    unfold StackState.push; rw [hStk]
+  have hDup : runOpcode "OP_DUP" s = .ok s1 := by
+    show RunarVerification.Stack.Eval.applyDup s = .ok s1
+    unfold RunarVerification.Stack.Eval.applyDup
+    rw [hStk]
+  -- Branch on n = 0 vs n ≥ 1.
+  by_cases hZero : n = 0
+  · -- n = 0 path: OP_IF pops top (0 → false via asBool?), takes the
+    -- `else = none` branch (no-op), result remains [n=0, rest].
+    refine ⟨0, ?_⟩
+    show runOps
+          (StackOp.opcode "OP_DUP" ::
+            StackOp.ifOp _ none :: []) s = _
+    unfold runOps
+    rw [stepNonIf_opcode, hDup]
+    show runOps (StackOp.ifOp _ none :: []) s1 = _
+    unfold runOps
+    -- s1.pop? = some (.vBigint n, popped) where popped.stack = .vBigint n :: rest.
+    let sPop : StackState := { s1 with stack := .vBigint n :: rest }
+    have hsPopDef : sPop = { s1 with stack := .vBigint n :: rest } := rfl
+    have hPop : s1.pop? = some (.vBigint n, sPop) := by
+      unfold StackState.pop?; rw [hS1stk]
+    rw [hPop]
+    -- Reduce the outer `match some (..., sPop) with | some ... => ...` to its body.
+    show (match RunarVerification.Stack.Eval.asBool? (.vBigint n) with
+          | some true =>
+              match runOps _ sPop with
+              | .error e => Except.error e
+              | .ok s'' => runOps [] s''
+          | some false => runOps [] sPop
+          | none => Except.error _) = _
+    have hBool : RunarVerification.Stack.Eval.asBool? (.vBigint n) = some false := by
+      unfold RunarVerification.Stack.Eval.asBool?
+      simp [hZero]
+    rw [hBool]
+    show runOps [] _ = _
+    unfold runOps
+    -- Final: sPop has stack [n, rest] with n = 0, equals ({s with stack := rest}.push 0).
+    show (Except.ok sPop : RunarVerification.ANF.Eval.EvalResult StackState)
+        = .ok ({ s with stack := rest }.push (.vBigint 0))
+    subst hZero
+    -- `sPop` is `{ s1 with stack := .vBigint 0 :: rest }` with s1 = s.push 0; so its
+    -- non-stack fields equal s's, and its stack is `.vBigint 0 :: rest`. The RHS is
+    -- `{s with stack := rest}.push 0 = {s with stack := .vBigint 0 :: rest}`. Equal.
+    rfl
+  · -- n ≥ 1 path: OP_IF pops top (n ≠ 0 → true via asBool?), runs Newton body.
+    have hNpos : n ≥ 1 := by omega
+    let sPop : StackState := { s1 with stack := .vBigint n :: rest }
+    have hsPopDef : sPop = { s1 with stack := .vBigint n :: rest } := rfl
+    have hSPopStk : sPop.stack = .vBigint n :: rest := rfl
+    obtain ⟨x_final, hRunBody⟩ :=
+      runOps_sqrtNewtonBody_isOk sPop n rest hSPopStk hNpos
+    refine ⟨x_final, ?_⟩
+    show runOps
+          (StackOp.opcode "OP_DUP" ::
+            StackOp.ifOp _ none :: []) s = _
+    unfold runOps
+    rw [stepNonIf_opcode, hDup]
+    show runOps (StackOp.ifOp _ none :: []) s1 = _
+    unfold runOps
+    have hPop : s1.pop? = some (.vBigint n, sPop) := by
+      unfold StackState.pop?; rw [hS1stk]
+    rw [hPop]
+    show (match RunarVerification.Stack.Eval.asBool? (.vBigint n) with
+          | some true =>
+              match runOps _ sPop with
+              | .error e => Except.error e
+              | .ok s'' => runOps [] s''
+          | some false => runOps [] sPop
+          | none => Except.error _) = _
+    have hBool : RunarVerification.Stack.Eval.asBool? (.vBigint n) = some true := by
+      unfold RunarVerification.Stack.Eval.asBool?
+      simp [hZero]
+    rw [hBool]
+    show (match runOps
+            (StackOp.opcode "OP_DUP"
+              :: ((List.range 16).flatMap (fun _ => sqrtIterOps))
+              ++ [StackOp.nip]) sPop with
+          | .error e => Except.error e
+          | .ok s''  => runOps [] s'')
+        = _
+    rw [hRunBody]
+    show runOps [] _ = _
+    unfold runOps
+    -- `runOps_sqrtNewtonBody_isOk` produced `({sPop with stack := rest}.push x_final)`.
+    -- Bridge to `({s with stack := rest}.push x_final)`.
+    show (Except.ok (({ sPop with stack := rest }).push (.vBigint x_final))
+              : RunarVerification.ANF.Eval.EvalResult StackState)
+        = .ok ({ s with stack := rest }.push (.vBigint x_final))
+    -- `sPop` is `{s1 with stack := ...}` with `s1 = s.push n`; their non-stack
+    -- fields all equal `s`'s, so `{sPop with stack := rest}` = `{s with stack := rest}`.
+    rfl
+
+/-- Method-level wrapper for a single-binding `sqrt(n)` body at depth 0
+in copy mode (`loadRef` emits `[.dup]`). Discharges `runMethod ... .isSome`
+via the bounded-Newton fuel-sufficiency proof above.
+
+`hLowering` is an input-side structural fact: the raw body ops emitted
+by `lowerMethodUserRawOps` for this single-`sqrt(n)`-binding shape are
+exactly `[.dup, OP_DUP, ifOp newtonBody none]`. Per-fixture this
+discharges by `rfl` / `native_decide`. -/
+theorem runMethod_sqrt_singleton_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (bn n : String) (k_n : SlotKind)
+    (tsm_rest : TaggedStackMap) (nVal : Int)
+    (hAgrees : agreesTagged ((n, k_n) :: tsm_rest) initialAnf initialStack)
+    (hLookupN : lookupAnfByKind initialAnf (n, k_n) = some (.vBigint nVal))
+    (hNonneg : nVal ≥ 0)
+    (_hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hLowering :
+      lowerMethodUserRawOps methods props m
+        = StackOp.dup
+          :: [StackOp.opcode "OP_DUP",
+              StackOp.ifOp
+                (StackOp.opcode "OP_DUP"
+                  :: ((List.range 16).flatMap (fun _ => sqrtIterOps))
+                  ++ [StackOp.nip])
+                none]) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [RunarVerification.Stack.Agrees.runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hLowering]
+  -- Recover stack shape: initialStack.stack = .vBigint nVal :: rest.
+  have hAlign : taggedStackAligned ((n, k_n) :: tsm_rest) initialAnf initialStack.stack :=
+    hAgrees.1
+  have hStkShape : ∃ rest, initialStack.stack = .vBigint nVal :: rest := by
+    match hCases : initialStack.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | topV :: rest =>
+        have hAt0 : lookupAnfByKind initialAnf (n, k_n) = some topV := by
+          rw [hCases] at hAlign
+          unfold taggedStackAligned at hAlign
+          exact hAlign.1
+        have hVeq : topV = .vBigint nVal := by
+          rw [hLookupN] at hAt0
+          exact (Option.some.inj hAt0).symm
+        exact ⟨rest, by rw [hVeq]⟩
+  obtain ⟨rest, hStk⟩ := hStkShape
+  -- First op: `.dup` (= loadRef at depth 0) duplicates nVal on top.
+  let s1 : StackState := initialStack.push (.vBigint nVal)
+  have hs1def : s1 = initialStack.push (.vBigint nVal) := rfl
+  have hS1stk : s1.stack = .vBigint nVal :: .vBigint nVal :: rest := by
+    show (initialStack.push (.vBigint nVal)).stack = _
+    unfold StackState.push; rw [hStk]
+  have hDup : runOps [StackOp.dup] initialStack = .ok s1 :=
+    run_dup_nonEmpty initialStack (.vBigint nVal) rest hStk
+  -- Then the sqrt body fires on the duplicated state.
+  -- The body lemma takes the stack `[nVal, .vBigint nVal :: rest]` and produces
+  -- `({s1 with stack := .vBigint nVal :: rest}.push result)`.
+  obtain ⟨result, hRunBody⟩ :=
+    runOps_sqrtBody_isOk s1 nVal (.vBigint nVal :: rest) hS1stk hNonneg
+  -- Compose: dup ++ sqrtBody.
+  have hRunAll :
+      runOps (StackOp.dup
+        :: [StackOp.opcode "OP_DUP",
+            StackOp.ifOp
+              (StackOp.opcode "OP_DUP"
+                :: ((List.range 16).flatMap (fun _ => sqrtIterOps))
+                ++ [StackOp.nip])
+              none]) initialStack
+        = .ok (({ s1 with stack := .vBigint nVal :: rest }).push (.vBigint result)) := by
+    show runOps ([StackOp.dup] ++ [StackOp.opcode "OP_DUP",
+            StackOp.ifOp
+              (StackOp.opcode "OP_DUP"
+                :: ((List.range 16).flatMap (fun _ => sqrtIterOps))
+                ++ [StackOp.nip])
+              none]) initialStack = _
+    rw [runOps_append, hDup]
+    exact hRunBody
+  rw [hRunAll]
+  simp [Except.toOption]
+
+end SqrtWrappers
+
 end AgreesA4
 end RunarVerification.Stack

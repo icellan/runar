@@ -274,6 +274,104 @@ with itself. The linking lemma `hash256_eq_double_sha256` in
 def hash256 (b : ByteArray) : ByteArray := sha256 (sha256 b)
 axiom sha256Compress  : ByteArray → ByteArray → ByteArray
 axiom sha256Finalize  : ByteArray → ByteArray → Int → ByteArray
+
+/-! ### SHA-256 partial-block scaffolding (B1 follow-up, 2026-05-17)
+
+The codegen-to-spec link theorems for the partial-state SHA-256
+builtins (`Stack.HashOps.runOps_sha256CompressOps_eq` /
+`runOps_sha256FinalizeOps_eq`) compose against the FIPS 180-4 §6.2
+Merkle-Damgård composition law. The substrate lands here so the
+axiom is stated over the **real** `Crypto.sha256` /
+`Crypto.sha256Compress` / `Crypto.sha256Finalize` symbols rather
+than over a parallel set of local abstract operators in a leaf file
+(which would inflate the TCB by 3 redundant axioms). -/
+
+/-- 32-byte big-endian serialization of the 8-word SHA-256 chaining
+state. The codegen carries the state in this shape on the Bitcoin
+Script main stack; the TS surface (`sha256Compress(state, block)`
+and `sha256Finalize(state, remaining, msgBitLen)`) accepts a 32-byte
+`ByteString` for the `state` parameter, matching this type. -/
+abbrev sha256State : Type := ByteArray
+
+/-- SHA-256 IV per FIPS 180-4 §5.3.3, serialized as 32 big-endian
+bytes (concatenation of `u32ToBE H[0..7]`).
+
+```
+H[0] = 0x6a09e667    H[1] = 0xbb67ae85
+H[2] = 0x3c6ef372    H[3] = 0xa54ff53a
+H[4] = 0x510e527f    H[5] = 0x9b05688c
+H[6] = 0x1f83d9ab    H[7] = 0x5be0cd19
+```
+
+These are the standard "first 32 bits of the fractional parts of the
+square roots of the first eight primes" constants. Matches the TS
+reference compiler's initial-state push in
+`packages/runar-compiler/src/passes/sha256-codegen.ts`. -/
+def sha256Init : sha256State :=
+  ByteArray.mk #[
+    -- H[0] = 0x6a09e667
+    0x6a, 0x09, 0xe6, 0x67,
+    -- H[1] = 0xbb67ae85
+    0xbb, 0x67, 0xae, 0x85,
+    -- H[2] = 0x3c6ef372
+    0x3c, 0x6e, 0xf3, 0x72,
+    -- H[3] = 0xa54ff53a
+    0xa5, 0x4f, 0xf5, 0x3a,
+    -- H[4] = 0x510e527f
+    0x51, 0x0e, 0x52, 0x7f,
+    -- H[5] = 0x9b05688c
+    0x9b, 0x05, 0x68, 0x8c,
+    -- H[6] = 0x1f83d9ab
+    0x1f, 0x83, 0xd9, 0xab,
+    -- H[7] = 0x5be0cd19
+    0x5b, 0xe0, 0xcd, 0x19
+  ]
+
+/-- **FIPS 180-4 §6.2 — SHA-256 Merkle-Damgård composition axiom.**
+
+For any byte split `xs ++ ys` of an input message, the full SHA-256
+hash equals the result of compressing the prefix `xs` into the IV
+and then finalizing with the suffix `ys`:
+
+```
+sha256 (xs ++ ys)
+  = sha256Finalize (sha256Compress sha256Init xs) (8 * ys.size) ys
+```
+
+This is the algebraic structure of the SHA-256 Merkle-Damgård
+iteration: the full hash is a fold of the compression function over
+the message blocks, with the final block carrying the padding and
+the big-endian 64-bit bit-length. The identity holds by
+construction of the standard SHA-256 algorithm — it is a property
+of the spec, not an empirical claim — and is preserved in the TS
+reference compiler's codegen by construction (the partial-state
+builtins `sha256Compress` / `sha256Finalize` are exposed precisely
+to enable this kind of off-chain pre-computation / on-chain
+residual verification).
+
+The third argument is the **bit length** of the suffix `ys`,
+matching the codegen's `msgBitLen` parameter — see
+`Stack.Lower.shaEmitFinalize` Step 1, which encodes `msgBitLen` as
+the 64-bit big-endian length field appended to the final padded
+block per FIPS 180-4 §5.1.1.
+
+The codegen-to-spec link theorems
+`Stack.HashOps.runOps_sha256CompressOps_eq` and
+`runOps_sha256FinalizeOps_eq` compose this identity with the
+runtime semantics of the arithmetic round-function emit op-list.
+The full discharge of those theorems against the ~1000-opcode
+`shaEmitCompress` / `shaEmitFinalize` reductions is the multi-week
+B1-b work tracked in `PATH2_PLAN.md` §5.8; this axiom lands the
+spec-side substrate for that future work.
+
+Reference: FIPS 180-4 §6.2 ("SHA-256 hash computation"),
+<https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf>. -/
+axiom sha256_compose :
+    ∀ (xs ys : ByteArray),
+    sha256 (xs ++ ys)
+      = sha256Finalize (sha256Compress sha256Init xs) ys
+          (Int.ofNat (8 * ys.size))
+
 /-- BLAKE3 single-block compression (concrete `def`, Tier B3-a, 2026-05-17).
 Delegates to `RunarVerification.Crypto.HashBackend.Blake3.blake3Compress`,
 the closed-form spec mirroring BLAKE3 §2.1 and

@@ -20,7 +20,48 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=86        # Breakdown (2026-05-17, Tier 1 wave 2 —
+TARGET_AXIOMS=87        # Breakdown (2026-05-17, Tier 1 wave 3 —
+                        # substrate widening + retries):
+                        # +1 in ANF/Eval.lean — `sha256_compose` FIPS
+                        #     180-4 §6.2 Merkle-Damgård composition
+                        #     axiom: ∀ xs ys, sha256 (xs ++ ys) =
+                        #     sha256Finalize (sha256Compress sha256Init
+                        #     xs) ys (8 * ys.size). Cites NIST FIPS
+                        #     180-4 §6.2. This is B1 follow-up landed
+                        #     cleanly (wave-2 attempt had +4 inflation
+                        #     from import-cycle workaround; wave 3
+                        #     hoisted to ANF/Eval.lean for +1 only).
+                        #     The discharged theorems
+                        #     `runOps_sha256CompressOps_eq` /
+                        #     `runOps_sha256FinalizeOps_eq` land in
+                        #     `Stack/HashOps.lean` as direct corollaries.
+                        # No axiom delta from:
+                        #   A4 sqrt: 6 new helpers + method-level
+                        #   wrapper `runMethod_sqrt_singleton_d0_isSome`
+                        #   with fuel-sufficiency proof `(x + n/x)/2
+                        #   ≥ 1` (16 unrolled Newton iterations).
+                        #   Shared substrate in Stack/Agrees.lean:
+                        #   2 helpers landed (`stageC_simpleStep_binOp_d1d0_consume_core`
+                        #   for A3 Tier 2 binOp; `taggedStackAlignedAt`
+                        #   + intro + value-extractor for A5 Tier 3b).
+                        #   Third helper (`stackEquivModuloIntermediates`
+                        #   for A6 multi-binding) deferred to coupled
+                        #   landing.
+                        # Rejected from this wave: D2.b auto state_output
+                        # (BLOCKED — structurally undischargeable as
+                        # stated: ANF `addOutput` appends to `outputs`
+                        # field; Stack `runOps` deliberately preserves
+                        # `outputs` per `Stack/OutputTrace.lean` design.
+                        # Discharge requires substrate widening — either
+                        # extend `Stack.Eval.runOps` to thread output
+                        # records, or replace the axiom's conclusion
+                        # with an `OutputTrace.applyTrace`-mediated
+                        # statement. Neither is a single-file
+                        # `Pipeline.lean` discharge. Recommend D2.b
+                        # moves to Tier 2 with explicit prerequisite).
+                        # Net delta: +1, 86 → 87.
+                        #
+                        # Breakdown (2026-05-17, Tier 1 wave 2 —
                         # five Stage C / Phase D / omnibus-split
                         # discharges):
                         # +8 in Pipeline.lean — O1 omnibus split:

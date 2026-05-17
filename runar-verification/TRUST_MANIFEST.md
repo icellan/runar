@@ -9,7 +9,7 @@ counts:
 
 | Item | Count | Meaning |
 |---|---:|---|
-| Project axioms | 86 | Named assumptions in Lean code |
+| Project axioms | 87 | Named assumptions in Lean code |
 | Opaque executable defaults | 0 | No executable bodies hidden from proofs |
 | Opaque defaults with bodies | 0 | No opaque declarations carry defaults |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
@@ -48,6 +48,7 @@ that are preserved by design.
 Δ = −32. Combined with wave 1: 125 → 78, Δ = −47 in a single day.
 
 | Tier 1 wave 2: O1 omnibus split | 2026-05-17 | 86 | +8 | +8 (9 sub-omnibus axioms +1 omnibus theorem) | 0 |
+| Tier 1 wave 3: B1 follow-up FIPS axiom | 2026-05-17 | 87 | +1 | 0 | +1 (FIPS 180-4 §6.2 composition axiom; `runOps_sha256CompressOps_eq` / `_FinalizeOps_eq` land in Stack/HashOps.lean as theorems via the composition) |
 
 **Net Tier 1 wave 2 (2026-05-17, omnibus-split inflation + Stage C widenings):** 78 → 86,
 Δ = +8 (intentional). The 9 per-family sub-omnibuses replace the single omnibus

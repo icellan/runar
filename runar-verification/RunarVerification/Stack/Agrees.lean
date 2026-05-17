@@ -19372,5 +19372,309 @@ further method calls.  This requires the full recursive-body witness
 infrastructure planned for A8.  The structural predicate, Decidable
 instance, and substrate are preserved as scaffolding. -/
 
+/-! ## Path 2 Tier 1 wave 3 — shared substrate widening
+
+This section adds helpers that unblock follow-up Stage C wrappers
+(`Stack/AgreesA3.lean` Tier 2 binOp, `Stack/AgreesA5.lean` Tier 3b,
+`Stack/AgreesA6.lean` multi-binding chains). The helpers are
+input-side per §2.1 and are proved against the existing `agreesTagged`
+state invariant — no `hRunOk` / `hSimulates` hypotheses are used.
+
+### Helper 1 — `runOps_two_swap_intOpcode_d1d0_consume`
+
+When a `binOp op botName topName rt` lowers under consume-mode for
+*both* operands at the depth pair `(1, 0)` (i.e. `l = botName` at
+depth 1, `r = topName` at depth 0, both on last-use), the program-
+aware lowerer emits `[.swap, .swap, .opcode]`. The two `swap` ops
+cancel as a runtime no-op on any stack of length ≥ 2, so the opcode
+fires against the *original* top-two values exactly as in the
+copy-mode case. This helper is the operational analogue of
+`runOps_two_over_intOpcode_d1d0` (the copy-mode peer above) for the
+consume-mode load prefix.
+
+The proof structure is symmetric to `runOps_two_over_intOpcode_d1d0`:
+extract the two top values via `taggedStackAligned`, derive `topV =
+.vBigint b` / `botV = .vBigint a` via the lookups, run the two
+`applySwap`s sequentially to restore the original stack, then apply
+the opcode hypothesis at the (now original) stack. -/
+
+private theorem runOps_two_swap_intOpcode_d1d0_consume
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (opcode : String) (out : Value)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             anfSt stkSt)
+    (hOpcode :
+      runOpcode opcode stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out)) :
+    runOps [.swap, .swap, .opcode opcode] stkSt
+      = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out) := by
+  -- The two-swap composition is a runtime no-op on any state whose
+  -- stack has length ≥ 2. We unpack the stack shape via `taggedStackAligned`,
+  -- then run the two `.swap` ops sequentially.
+  have hAlign :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV botV rest, stkSt.stack = topV :: botV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
+  obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
+  -- Two-swap is identity on a length-≥2 stack. We use the single-step
+  -- helper `Stack.Sim.run_empty` plus direct unfolding of `runOps`.
+  have hSwap1 :
+      runOps [.swap] stkSt
+        = .ok ({ stack := botV :: topV :: rest
+                 altstack := stkSt.altstack
+                 outputs := stkSt.outputs
+                 props := stkSt.props
+                 preimage := stkSt.preimage } : StackState) := by
+    show runOps (.swap :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .swap stkSt = Stack.Eval.applySwap stkSt := rfl
+    rw [hStep]
+    unfold Stack.Eval.applySwap
+    rw [hStk]
+    simp [Stack.Sim.run_empty]
+  let mid : StackState :=
+    { stack := botV :: topV :: rest
+      altstack := stkSt.altstack
+      outputs := stkSt.outputs
+      props := stkSt.props
+      preimage := stkSt.preimage }
+  have hSwap2 : runOps [.swap] mid = .ok stkSt := by
+    show runOps (.swap :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .swap mid = Stack.Eval.applySwap mid := rfl
+    rw [hStep]
+    unfold Stack.Eval.applySwap
+    show (match Except.ok ({ mid with stack := topV :: botV :: rest } : StackState) with
+          | Except.error e => Except.error e
+          | Except.ok s' => runOps [] s') = _
+    -- Show ({ mid with stack := topV :: botV :: rest }) = stkSt.
+    have hMidEq : ({ mid with stack := topV :: botV :: rest } : StackState) = stkSt := by
+      show ({ stack := topV :: botV :: rest
+              altstack := stkSt.altstack
+              outputs := stkSt.outputs
+              props := stkSt.props
+              preimage := stkSt.preimage } : StackState) = stkSt
+      cases hcases : stkSt
+      rw [hcases] at hStk
+      simp only at hStk
+      subst hStk
+      rfl
+    rw [hMidEq]
+    simp [Stack.Sim.run_empty]
+  have hTwoSwap : runOps [.swap, .swap] stkSt = .ok stkSt := by
+    show runOps ([.swap] ++ [.swap]) stkSt = _
+    rw [runOps_append, hSwap1]
+    exact hSwap2
+  -- Append the opcode using the generic load-then-opcode lemma.
+  show runOps ([.swap, .swap] ++ [.opcode opcode]) stkSt = _
+  exact runOps_loadThenOpcode_unconditional [.swap, .swap] opcode stkSt
+          stkSt _ hTwoSwap hOpcode
+
+/-- **Stage C consume-mode binOp witness at depth pair (1, 0).**
+
+Operational runtime-success witness for a `binOp op botName topName rt`
+where both operands are consumed on their last use at depths 1 and 0
+respectively. The program-aware lowerer emits
+`[.swap, .swap, .opcode]` for this shape; the helper packages the
+runtime-success arm and the post-state equation.
+
+The helper takes `hLowerOps` as an *input-side* fact about the lowerer's
+output (callers supply it by `rfl` once the `lowerValueP` reduction is
+in scope). This avoids hard-wiring the consume bridges from
+`Stack/AgreesA3.lean`; downstream wave-3 callers compose against this
+helper by supplying the consume-mode `loadRefLive` reductions inline.
+
+**Note on `simpleStepRel`.** The `simpleStepRel.binOp` arm above
+predicts the post-state shape `stkSt' = stkSt.push v` and `tsm' =
+(bn, .binding) :: tsm` (prepended to the *input* `tsm`). The
+consume-mode load prefix drops the consumed slot from `tsm` (post-tsm
+is `(bn, .binding) :: (botName, k_bot) :: tsm_rest`) and replaces the
+top two runtime values with one (post-stack is `(stkSt with stack :=
+stkSt.stack.tail.tail).push out`). Neither shape matches
+`simpleStepRel`'s `.binOp` arm, so this helper exposes the
+**operational** witness only — Stage C composition into a chain
+witness requires a parallel predicate (deferred per the §2.4 file
+isolation guideline). -/
+theorem stageC_simpleStep_binOp_d1d0_consume_core
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (opcode : String) (out : Value)
+    (ops : List StackOp)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             anfSt stkSt)
+    (_hLookupL : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint a))
+    (_hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hLowerOps : ops = [.swap, .swap, .opcode opcode])
+    (hOpcode :
+      runOpcode opcode stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out)) :
+    runOps ops stkSt
+      = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out) := by
+  rw [hLowerOps]
+  exact runOps_two_swap_intOpcode_d1d0_consume
+    topName botName k_top k_bot tsm_rest anfSt stkSt opcode out
+    hAgrees hOpcode
+
+/-! ### Helper 2 — `taggedStackAlignedAt`: depth-d' runtime/stack-map alignment
+
+This predicate captures the runtime/stack-map alignment fact needed by
+`Stack/AgreesA5.lean` Tier 3b for the `[.push d', OP_ROLL, .drop]`
+cleanup at depth `d' ≥ 2`.
+
+Concretely: given a tagged stack-map `tsm` and a name `propName`
+appearing at *some* index `d'` in `tsm`, `taggedStackAlignedAt tsm
+anfSt stk propName d'` asserts that
+* the prefix of `tsm` before `propName` agrees with the matching
+  prefix of `stk` (kind-appropriate lookups);
+* the entry at index `d'` is `propName` and the runtime value at
+  position `d'` resolves to the same value via `lookupAnfByKind`;
+* the suffix of `tsm` past index `d'` agrees with the matching suffix
+  of `stk`.
+
+This is intentionally weaker than `taggedStackAligned tsm anfSt stk`
+applied to the entire map — it only constrains the alignment at a
+single distinguished position. The Tier 3b cleanup needs exactly this
+single-point fact to discharge the `OP_ROLL` runtime success at
+position `d'`.
+
+For now we expose only the predicate + a destructor lemma that
+extracts the runtime value at the target depth. Downstream Tier 3b
+callers can then use `applyRoll_at` / `applyDrop_at` style operational
+lemmas (which already exist in `Stack/Eval.lean`) against the
+extracted value. -/
+
+/-- Depth-`d`-pinned tagged alignment. The slot `(name, k)` sits at
+position `d` in `tsm` and a matching value sits at position `d` of the
+runtime stack. The remainder of the alignment (prefix + suffix) is
+witnessed by ordinary `taggedStackAligned` over the surrounding tsm
+slices. -/
+def taggedStackAlignedAt
+    (tsm : TaggedStackMap) (anfSt : State) (stk : List Value)
+    (name : String) (k : SlotKind) (d : Nat) : Prop :=
+  ∃ tsmPre tsmSuf stkPre stkSuf v,
+    tsm = tsmPre ++ (name, k) :: tsmSuf ∧
+    stk = stkPre ++ v :: stkSuf ∧
+    tsmPre.length = d ∧
+    stkPre.length = d ∧
+    lookupAnfByKind anfSt (name, k) = some v ∧
+    taggedStackAligned tsmPre anfSt stkPre ∧
+    taggedStackAligned tsmSuf anfSt stkSuf
+
+/-- A full `taggedStackAligned` witness specialises to
+`taggedStackAlignedAt` at every position where `tsm` carries an entry.
+
+This is the introduction direction we need to bridge from the existing
+`agreesTagged` invariant to the new single-point alignment. The proof
+proceeds by induction on the prefix list `tsmPre`. -/
+theorem taggedStackAlignedAt_of_taggedStackAligned :
+    ∀ (tsmPre : TaggedStackMap) (tsmSuf : TaggedStackMap)
+      (anfSt : State) (stk : List Value) (name : String) (k : SlotKind),
+      taggedStackAligned (tsmPre ++ (name, k) :: tsmSuf) anfSt stk →
+      taggedStackAlignedAt (tsmPre ++ (name, k) :: tsmSuf) anfSt stk
+        name k tsmPre.length
+  | [], tsmSuf, anfSt, stk, name, k, hAlign => by
+    -- Prefix empty: read off head of stk.
+    cases stk with
+    | nil =>
+      simp at hAlign
+      unfold taggedStackAligned at hAlign
+      exact absurd hAlign (by simp)
+    | cons v stkSuf =>
+      simp at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨hHead, hTail⟩ := hAlign
+      refine ⟨[], tsmSuf, [], stkSuf, v, ?_, ?_, rfl, rfl, hHead, ?_, hTail⟩
+      · simp
+      · simp
+      · unfold taggedStackAligned; trivial
+  | hd :: tl, tsmSuf, anfSt, stk, name, k, hAlign => by
+    -- Prefix non-empty: peel one and recurse.
+    cases stk with
+    | nil =>
+      simp at hAlign
+      unfold taggedStackAligned at hAlign
+      exact absurd hAlign (by simp)
+    | cons stkHd stkTl =>
+      have hAlign' : taggedStackAligned (hd :: tl ++ (name, k) :: tsmSuf)
+                                          anfSt (stkHd :: stkTl) := hAlign
+      have hAlign'' : taggedStackAligned ((hd :: (tl ++ (name, k) :: tsmSuf)))
+                                          anfSt (stkHd :: stkTl) := by
+        simp at hAlign'
+        exact hAlign'
+      unfold taggedStackAligned at hAlign''
+      obtain ⟨hHd, hTlAlign⟩ := hAlign''
+      have hIH := taggedStackAlignedAt_of_taggedStackAligned
+                    tl tsmSuf anfSt stkTl name k hTlAlign
+      obtain ⟨tsmPre', tsmSuf', stkPre', stkSuf', v, hTsm', hStk', hLen1', hLen2',
+              hLookup, hPreAlign, hSufAlign⟩ := hIH
+      refine ⟨hd :: tsmPre', tsmSuf', stkHd :: stkPre', stkSuf', v,
+              ?_, ?_, ?_, ?_, hLookup, ?_, hSufAlign⟩
+      · -- (hd :: tl) ++ (name, k) :: tsmSuf = (hd :: tsmPre') ++ (name, k) :: tsmSuf'
+        have : tl ++ (name, k) :: tsmSuf = tsmPre' ++ (name, k) :: tsmSuf' := hTsm'
+        simp [this]
+      · -- stkHd :: stkTl = (stkHd :: stkPre') ++ v :: stkSuf'
+        have : stkTl = stkPre' ++ v :: stkSuf' := hStk'
+        simp [this]
+      · simp [hLen1']
+      · simp [hLen2']
+      · unfold taggedStackAligned
+        exact ⟨hHd, hPreAlign⟩
+
+/-- Destructor: from `taggedStackAlignedAt tsm anfSt stk name k d` extract
+the runtime value sitting at runtime position `d` of `stk`, together
+with the fact that it equals `lookupAnfByKind anfSt (name, k)`.
+
+This is the form Tier 3b consumes: the `OP_ROLL` runtime-success
+discharge needs `stk.length > d` and the value at position `d`. -/
+theorem taggedStackAlignedAt_value
+    (tsm : TaggedStackMap) (anfSt : State) (stk : List Value)
+    (name : String) (k : SlotKind) (d : Nat)
+    (hAt : taggedStackAlignedAt tsm anfSt stk name k d) :
+    ∃ v, lookupAnfByKind anfSt (name, k) = some v ∧
+         d < stk.length ∧
+         stk[d]! = v := by
+  obtain ⟨tsmPre, tsmSuf, stkPre, stkSuf, v, _, hStk, _, hLenPre, hLookup,
+          _, _⟩ := hAt
+  refine ⟨v, hLookup, ?_, ?_⟩
+  · rw [hStk]
+    simp [List.length_append, hLenPre]
+  · -- stk[d]! where stk = stkPre ++ v :: stkSuf with stkPre.length = d.
+    -- Use the fact that for stkPre.length = d, (stkPre ++ v :: _)[d]! = v.
+    have hLenEq : stkPre.length = d := hLenPre
+    -- (stkPre ++ v :: stkSuf)[d]! = v when stkPre.length = d.
+    -- Prove via an auxiliary lemma form that doesn't capture outer hypotheses.
+    have hStkAt :
+        ∀ (xs : List Value) (n : Nat) (w : Value) (suf : List Value),
+          xs.length = n → (xs ++ w :: suf)[n]! = w := by
+      intro xs n w suf hLen
+      induction xs generalizing n with
+      | nil =>
+        cases hLen
+        simp
+      | cons _hd tl ih =>
+        cases n with
+        | zero => simp at hLen
+        | succ n' =>
+          have hTlLen : tl.length = n' := by simpa using hLen
+          simp only [List.cons_append, List.getElem!_cons_succ]
+          exact ih n' hTlLen
+    rw [hStk]
+    exact hStkAt stkPre d v stkSuf hLenEq
+
 end Agrees
 end RunarVerification.Stack

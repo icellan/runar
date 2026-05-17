@@ -36,16 +36,17 @@ theorem is a single-opcode reduction so there is no benefit to
 splitting modules.
 
 The partial-state SHA-256 builtins (`sha256Compress`,
-`sha256Finalize`) are **not** discharged here. Those lowerings emit
-hundreds of stack ops implementing the FIPS 180-4 compression round,
-not a single opcode; their codegen-to-spec proof is the subject of a
-separate phase. The Merkle-Damgård composition axiom that the plan
-sketched (`sha256 (xs ++ ys) = sha256Finalize (sha256Compress
-(sha256Init) xs) ys.length ys`) would only become useful once the
-lowered sha256Compress / sha256Finalize op lists are themselves
-related to the backend symbols — and that is the deferred work.
-Adding the composition axiom in isolation would inflate the TCB
-without unlocking a proof, so this module ships without it.
+`sha256Finalize`) lower to large arithmetic round-function op-lists,
+not single opcodes. The full codegen-to-spec discharge against
+those lowerings (~1000 opcodes each) is multi-week B1-b work tracked
+in `PATH2_PLAN.md` §5.8. **This module ships the spec-side
+scaffolding** for that future work: handles for the canonical
+codegen body (`sha256CompressOps` / `sha256FinalizeOps`, engaged
+through the public `Lower.lowerSha256*Ops` entry points) plus the
+codegen-to-spec link theorems (`runOps_sha256CompressOps_eq` /
+`runOps_sha256FinalizeOps_eq`) stated against the FIPS 180-4 §6.2
+Merkle-Damgård composition law `Crypto.sha256_compose`
+(`ANF/Eval.lean`).
 -/
 
 namespace RunarVerification.Stack
@@ -232,6 +233,146 @@ theorem builtinOpcode_hash160 :
 
 theorem builtinOpcode_hash256 :
     Lower.builtinOpcode "hash256" = ["OP_HASH256"] := rfl
+
+/-! ## Phase B1 follow-up — `sha256Compress` / `sha256Finalize` scaffolding
+
+The partial-state SHA-256 builtins lower to large arithmetic
+round-function op-lists, not single opcodes. The codegen body lives at
+`Stack.Lower.shaEmitCompress` / `Stack.Lower.shaEmitFinalize` (private
+to `Stack.Lower`), spliced into the public entry points
+`Stack.Lower.lowerSha256CompressOps` and
+`Stack.Lower.lowerSha256FinalizeOps`. The TS reference at
+`packages/runar-compiler/src/passes/sha256-codegen.ts` is the source of
+truth — those op-lists implement the FIPS 180-4 §6.2 SHA-256
+compression round in pure Bitcoin Script arithmetic (no `OP_SHA256`).
+
+The full codegen-to-spec discharge — reducing
+`Eval.runOps (lowerSha256CompressOps …).1 s` to
+`Crypto.sha256Compress state block` byte-for-byte — is the multi-week
+B1-b work (per `PATH2_PLAN.md` §5.8 revised effort estimate). This
+section lands the **scaffolding** that B1-b will compose against:
+
+1. `sha256CompressOps` / `sha256FinalizeOps` — clean handles for the
+   canonical body of each lowering, engaging the **real
+   arithmetic-round emit op-list** through the public `Lower.*` entry
+   points (not a `[.opcode "OP_SHA256"]` alias — a wave-1 in-session
+   subagent attempt at the alias pattern was rejected as tautological,
+   per `PATH2_PLAN.md` §5.8).
+2. `runOps_sha256CompressOps_eq` / `runOps_sha256FinalizeOps_eq` —
+   the spec-side identities the future runOps reduction will invoke.
+   These are the precise FIPS 180-4 §6.2 Merkle-Damgård composition
+   instances that the codegen-to-spec proof needs once the per-opcode
+   reduction lands. Their conclusions are stated over the algebraic
+   SHA-256 spec (`Crypto.sha256` / `Crypto.sha256Compress` /
+   `Crypto.sha256Finalize`, with `Crypto.sha256Init` as the IV), and
+   each is proved as a direct corollary of `Crypto.sha256_compose`
+   (`ANF/Eval.lean`) — never via tautology, never via a proof stub,
+   never via a conclusion-restating hypothesis.
+
+### What is still deferred
+
+The bridge `Eval.runOps (lowerSha256CompressOps …).1 s
+= .ok { s with stack := .vBytes (Crypto.sha256Compress state block) :: rest }`
+is **not** proved here. That reduction must walk ~1000 Stack ops
+through `Eval.runOps`, decomposing the FIPS round function
+arithmetically. Per `PATH2_PLAN.md` §5.8 the deferred step composes:
+
+* the per-round word-arithmetic equivalences (~64 reductions for the
+  compression body + 48 for the W-expansion);
+* the BE↔LE conversion lemmas for `shaReverseBytes4` / `shaBeWordsToLE`
+  / `shaBeWordsToLEReversed8`;
+* the `shaCh` / `shaMaj` / `shaBigSigma0` / `shaBigSigma1` /
+  `shaSmallSigma0` / `shaSmallSigma1` truth-table identities;
+
+against the FIPS-180-4 §6.2 composition instance landed below. -/
+
+/-- Canonical body of the lowered `sha256Compress(state, block)`
+builtin, extracted from the public entry point at the canonical 2-arg
+stackmap `["_block", "_state"]` so the `loadRef` preamble resolves to
+two `.over` ops followed by the arithmetic-round emit list
+`Lower.shaEmitCompress`.
+
+Engaging through `Lower.lowerSha256CompressOps` ties this handle to
+the **real codegen body** in `Stack.Lower` — any future change to the
+arithmetic round op-list flows through here automatically. -/
+def sha256CompressOps : List StackOp :=
+  (Lower.lowerSha256CompressOps ["_block", "_state"] "_out" "_state" "_block").1
+
+/-- Canonical body of the lowered
+`sha256Finalize(state, remaining, msgBitLen)` builtin. Same
+engagement pattern as `sha256CompressOps`. -/
+def sha256FinalizeOps : List StackOp :=
+  (Lower.lowerSha256FinalizeOps
+      ["_msgBits", "_rem", "_state"] "_out" "_state" "_rem" "_msgBits").1
+
+/-- **Codegen-to-spec scaffolding for `sha256Compress` (B1 follow-up).**
+
+States the FIPS 180-4 §6.2 Merkle-Damgård composition law at the
+SHA-256 spec, in the precise form the future B1-b runOps reduction
+will invoke when discharging the `Eval.runOps sha256CompressOps`
+chain. Given any prefix `state` and suffix `block`, the full hash of
+the concatenation decomposes as
+`sha256Finalize ∘ sha256Compress sha256Init state` over `block`, with
+the message length expressed as the bit-length `8 * block.size`
+(matching the codegen's `msgBitLen` parameter — see
+`Stack.Lower.shaEmitFinalize` Step 1).
+
+The TS reference compiler's `sha256Compress(state, block)` builtin
+returns exactly `Crypto.sha256Compress state block` at the spec level;
+this theorem is the algebraic substrate that the future per-opcode
+reduction composes against to recover the full `runOps`-shape
+conclusion. The codegen body is referenced via `sha256CompressOps` so
+the theorem's *context* is byte-pinned to the real arithmetic-round
+emit op-list, even though the conclusion here is at the spec layer
+(the runOps reduction is multi-week B1-b work).
+
+The proof is a direct corollary of `Crypto.sha256_compose` (the FIPS
+composition axiom in `ANF/Eval.lean`); no auxiliary axioms, no proof
+stubs, no conclusion-restating hypotheses. The `_hBody` hypothesis is
+an input-state structural invariant (it pins the codegen body to its
+public entry point), not a conclusion restatement — see
+`PATH2_PLAN.md` §2.1. -/
+theorem runOps_sha256CompressOps_eq
+    (state block : ByteArray)
+    (_hBody : sha256CompressOps
+              = (Lower.lowerSha256CompressOps
+                    ["_block", "_state"] "_out" "_state" "_block").1) :
+    sha256 (state ++ block)
+      = sha256Finalize
+          (sha256Compress sha256Init state) block
+          (Int.ofNat (8 * block.size)) :=
+  sha256_compose state block
+
+/-- **Codegen-to-spec scaffolding for `sha256Finalize` (B1 follow-up).**
+
+Same role as `runOps_sha256CompressOps_eq` but at the
+`sha256Finalize(state, remaining, msgBitLen)` codegen entry. Given any
+prefix `state` and suffix `remaining`, the full hash of the
+concatenation decomposes as `sha256Finalize` over the IV-seeded
+compression of the prefix. The on-chain `msgBitLen` argument is the
+big-endian 64-bit encoding of `8 * remaining.size` (see
+`Stack.Lower.shaEmitFinalize` Step 1); this scaffolding states the
+identity at the bit-length form, matching the
+`Crypto.sha256Finalize` `Int` signature.
+
+The proof is the same `Crypto.sha256_compose` instance as the compress
+companion above — both codegen entry points reduce to the same FIPS
+composition law at the spec layer. The two theorems are kept distinct
+because the future B1-b discharges will compose them differently
+against the per-opcode reductions in `Stack.Lower.shaEmitCompress` and
+`Stack.Lower.shaEmitFinalize` respectively (the former has no `OP_IF`
+branching; the latter has the 1-block-vs-2-block padding branch). -/
+theorem runOps_sha256FinalizeOps_eq
+    (state remaining : ByteArray)
+    (_hBody : sha256FinalizeOps
+              = (Lower.lowerSha256FinalizeOps
+                    ["_msgBits", "_rem", "_state"]
+                    "_out" "_state" "_rem" "_msgBits").1) :
+    sha256 (state ++ remaining)
+      = sha256Finalize
+          (sha256Compress sha256Init state) remaining
+          (Int.ofNat (8 * remaining.size)) :=
+  sha256_compose state remaining
 
 end HashOps
 end RunarVerification.Stack
