@@ -89,4 +89,49 @@ describe('initCommand', () => {
       consoleErrSpy.mockRestore();
     });
   }
+
+  // Structural checks specific to the TS scaffold — the documented reference
+  // layout in runar-tic-tac-toe. Any change to these expectations should be
+  // mirrored in init.ts AND in the example README.
+  it('ts: scaffolds a single root package.json with namespaced scripts', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await initCommand('ts-layout-check', { lang: 'ts' });
+    const projectDir = path.join(tmpRoot, 'ts-layout-check');
+
+    // Exactly one package.json at the root; no per-subdir installs.
+    expect(fs.existsSync(path.join(projectDir, 'package.json'))).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, 'contract', 'package.json'))).toBe(false);
+    expect(fs.existsSync(path.join(projectDir, 'contract', 'integration', 'package.json'))).toBe(false);
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf-8'));
+    expect(pkg.scripts['contract:compile']).toMatch(/runar compile P2PKH\.runar\.ts -o artifacts/);
+    expect(pkg.scripts['contract:test']).toBeDefined();
+    expect(pkg.scripts['contract:test:integration']).toBeDefined();
+    expect(pkg.scripts['contract:debug']).toMatch(/artifacts\/P2PKH\.runar\.json/);
+    expect(pkg.scripts.codegen).toMatch(/contract\/artifacts\/P2PKH\.runar\.json/);
+
+    // Dep versions bumped to current published line (^0.5.x).
+    expect(pkg.dependencies['runar-lang']).toBe('^0.5.0');
+    expect(pkg.dependencies['runar-sdk']).toBe('^0.5.0');
+    expect(pkg.devDependencies['runar-cli']).toBe('^0.5.0');
+    expect(pkg.devDependencies['runar-compiler']).toBe('^0.5.0');
+    expect(pkg.devDependencies['runar-testing']).toBe('^0.5.0');
+    expect(pkg.devDependencies['runar-ir-schema']).toBe('^0.5.0');
+
+    // fast-check was a dead dep — should not reappear.
+    expect(pkg.devDependencies['fast-check']).toBeUndefined();
+
+    consoleSpy.mockRestore();
+  });
+
+  it('ts: gitignores contract/artifacts/ and src/generated/', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await initCommand('ts-gitignore-check', { lang: 'ts' });
+    const projectDir = path.join(tmpRoot, 'ts-gitignore-check');
+    const gitignore = fs.readFileSync(path.join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('contract/artifacts/');
+    expect(gitignore).toContain('src/generated/');
+    expect(gitignore).not.toContain('contract/*.runar.json');
+    consoleSpy.mockRestore();
+  });
 });

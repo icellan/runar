@@ -51,10 +51,13 @@ export async function initCommand(name: string | undefined, options: InitOptions
     return;
   }
 
-  // Create directory structure
+  // Create directory structure. Matches the documented reference layout
+  // in `runar-tic-tac-toe` (single root package.json, namespaced scripts,
+  // artifact output under `contract/artifacts/`).
   const dirs = [
     projectDir,
     path.join(projectDir, 'contract'),
+    path.join(projectDir, 'contract', 'artifacts'),
     path.join(projectDir, 'contract', 'integration'),
     path.join(projectDir, 'src'),
     path.join(projectDir, 'src', 'generated'),
@@ -63,36 +66,6 @@ export async function initCommand(name: string | undefined, options: InitOptions
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true });
   }
-
-  // -------------------------------------------------------------------------
-  // contract/package.json
-  // -------------------------------------------------------------------------
-  const contractPackageJson = {
-    name: `${projectName}-contract`,
-    version: '0.1.0',
-    private: true,
-    type: 'module',
-    scripts: {
-      compile: 'runar compile P2PKH.runar.ts -o .',
-      test: 'vitest run',
-      'test:watch': 'vitest',
-      typecheck: 'tsc --noEmit',
-      debug: 'runar debug P2PKH.runar.json',
-    },
-    devDependencies: {
-      'fast-check': '^3.22.0',
-      'runar-cli': '^0.3.0',
-      'runar-compiler': '^0.3.0',
-      'runar-lang': '^0.3.0',
-      'runar-testing': '^0.3.0',
-      typescript: '^5.6.0',
-      vitest: '^2.1.0',
-    },
-  };
-  fs.writeFileSync(
-    path.join(projectDir, 'contract', 'package.json'),
-    JSON.stringify(contractPackageJson, null, 2) + '\n',
-  );
 
   // -------------------------------------------------------------------------
   // contract/tsconfig.json
@@ -123,6 +96,21 @@ export async function initCommand(name: string | undefined, options: InitOptions
     `import { defineConfig } from 'vitest/config';
 
 export default defineConfig({});
+`,
+  );
+
+  // -------------------------------------------------------------------------
+  // contract/integration/vitest.config.ts
+  // -------------------------------------------------------------------------
+  fs.writeFileSync(
+    path.join(projectDir, 'contract', 'integration', 'vitest.config.ts'),
+    `import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    testTimeout: 60_000,
+  },
+});
 `,
   );
 
@@ -206,34 +194,10 @@ describe('P2PKH', () => {
   );
 
   // -------------------------------------------------------------------------
-  // contract/integration/package.json
-  // -------------------------------------------------------------------------
-  const integrationPackageJson = {
-    name: `${projectName}-integration`,
-    version: '0.1.0',
-    private: true,
-    type: 'module',
-    scripts: {
-      test: 'vitest run',
-    },
-    dependencies: {
-      'runar-compiler': '^0.3.0',
-      'runar-sdk': '^0.3.0',
-      'runar-lang': '^0.3.0',
-      'runar-ir-schema': '^0.3.0',
-      '@bsv/sdk': '^2.0.7',
-    },
-    devDependencies: {
-      vitest: '^2.1.0',
-    },
-  };
-  fs.writeFileSync(
-    path.join(projectDir, 'contract', 'integration', 'package.json'),
-    JSON.stringify(integrationPackageJson, null, 2) + '\n',
-  );
-
-  // -------------------------------------------------------------------------
-  // Root package.json
+  // Single root package.json. Namespaced scripts (`contract:test`,
+  // `contract:compile`, `codegen`, etc.) keep the project to one
+  // `npm install`, one `node_modules`, one lockfile. Matches the
+  // documented reference layout in `runar-tic-tac-toe`.
   // -------------------------------------------------------------------------
   const rootPackageJson = {
     name: projectName,
@@ -242,19 +206,29 @@ describe('P2PKH', () => {
     private: true,
     type: 'module',
     scripts: {
-      compile: 'cd contract && npm run compile',
-      codegen: 'runar codegen contract/*.runar.json -o src/generated/ --lang ts',
-      build: 'npm run compile && npm run codegen',
-      test: 'cd contract && npm test',
-      'test:integration': 'cd contract/integration && npm test',
+      'contract:compile': 'cd contract && runar compile P2PKH.runar.ts -o artifacts',
+      'contract:test': 'cd contract && vitest run',
+      'contract:test:watch': 'cd contract && vitest',
+      'contract:test:integration': 'cd contract/integration && vitest run',
+      'contract:typecheck': 'cd contract && tsc --noEmit',
+      'contract:debug': 'cd contract && runar debug artifacts/P2PKH.runar.json',
+      codegen:
+        'npm run contract:compile && runar codegen contract/artifacts/P2PKH.runar.json -o src/generated/ --lang ts',
+      build: 'npm run codegen',
+      test: 'npm run contract:test',
     },
     dependencies: {
-      'runar-lang': '^0.3.0',
-      'runar-sdk': '^0.3.0',
+      '@bsv/sdk': '^2.0.7',
+      'runar-lang': '^0.5.0',
+      'runar-sdk': '^0.5.0',
     },
     devDependencies: {
-      'runar-cli': '^0.3.0',
+      'runar-cli': '^0.5.0',
+      'runar-compiler': '^0.5.0',
+      'runar-ir-schema': '^0.5.0',
+      'runar-testing': '^0.5.0',
       typescript: '^5.6.0',
+      vitest: '^2.1.0',
     },
   };
   fs.writeFileSync(
@@ -291,7 +265,7 @@ describe('P2PKH', () => {
   const gitignore = `node_modules/
 dist/
 src/generated/
-contract/*.runar.json
+contract/artifacts/
 .env
 `;
   fs.writeFileSync(path.join(projectDir, '.gitignore'), gitignore);
@@ -306,110 +280,106 @@ A [Rúnar](https://github.com/icellan/runar) smart contract project.
 ## Project Structure
 
 \`\`\`
-contract/           Smart contract source, unit tests, and integration tests
-src/generated/      Compiled artifacts and generated typed wrappers (auto-generated)
-src/                Application source code
+package.json            Single root install — namespaced scripts (no per-subdir npm install)
+contract/
+  P2PKH.runar.ts        Smart contract source
+  P2PKH.test.ts         Unit tests (vitest + TestContract)
+  artifacts/            Compiled artifact JSON (gitignored, produced by \`contract:compile\`)
+  integration/          On-chain regtest tests
+src/
+  generated/            Codegen output (typed wrapper) — gitignored
 \`\`\`
 
 ## Getting Started
 
-### 1. Install dependencies
+### 1. Install
 
 \`\`\`bash
-cd contract
-npm install
-cd ..
 npm install
 \`\`\`
+
+One install at the root covers contract, tests, codegen, and integration tests.
 
 ### 2. Run contract unit tests
 
 \`\`\`bash
-cd contract
-npm test
+npm run contract:test
 \`\`\`
 
-This runs the contract through the TestContract interpreter with mocked crypto.
+Runs the contract through the \`TestContract\` interpreter with mocked crypto.
 No blockchain needed — fast feedback during development.
 
 ### 3. Compile the contract
 
 \`\`\`bash
-cd contract
-npm run compile
+npm run contract:compile
 \`\`\`
 
-This produces \`P2PKH.runar.json\` — the compiled artifact containing the
-Bitcoin Script, ABI, state fields, and constructor slots.
+Produces \`contract/artifacts/P2PKH.runar.json\` — the compiled artifact
+containing the Bitcoin Script, ABI, state fields, and constructor slots.
 
-### 4. Debug contract execution (optional)
+### 4. Generate the typed wrapper
 
 \`\`\`bash
-cd contract
-npm run debug
+npm run codegen
+\`\`\`
+
+Compiles the contract and regenerates \`src/generated/P2PKHContract.ts\` — the
+typed client wrapper your application code imports.
+
+### 5. Debug contract execution (optional)
+
+\`\`\`bash
+npm run contract:debug
 \`\`\`
 
 Step through the compiled Bitcoin Script opcode-by-opcode with source mapping.
 
 ## Workflow
 
-### Phase 1: Develop the contract
-
-Work entirely in \`contract/\`. Write your contract logic, run unit tests,
-and iterate until the contract behaves correctly.
+### Develop the contract
 
 \`\`\`bash
-cd contract
-npm test              # run unit tests
-npm run test:watch    # re-run on file changes
-npm run typecheck     # verify types
-npm run compile       # compile to artifact
-npm run debug         # step through Bitcoin Script
+npm run contract:test          # run unit tests
+npm run contract:test:watch    # watch mode
+npm run contract:typecheck     # type-check contract + tests
+npm run contract:compile       # compile to artifact
+npm run contract:debug         # step through Bitcoin Script
 \`\`\`
 
-### Phase 2: Integration test against regtest (optional)
+### Integration test against regtest (optional)
 
 Once unit tests pass, test on-chain behavior against a local regtest node.
 
 \`\`\`bash
-cd contract/integration
-npm install
-npm test
+npm run contract:test:integration
 \`\`\`
 
-This deploys the contract to regtest, calls methods, and verifies
-on-chain state. Requires a running BSV regtest node.
+Deploys the contract to regtest, calls methods, and verifies on-chain state.
+Requires a running BSV regtest node.
 
-### Phase 3: Generate the typed wrapper
-
-From the project root:
+### Build the typed wrapper
 
 \`\`\`bash
 npm run build
 \`\`\`
 
-This runs \`compile\` then \`codegen\`, producing:
-- \`src/generated/P2PKH.runar.json\` — compiled artifact
+Runs \`contract:compile\` then \`codegen\`, producing:
+- \`contract/artifacts/P2PKH.runar.json\` — compiled artifact
 - \`src/generated/P2PKHContract.ts\` — typed wrapper class
 
-### Phase 4: Build your application
-
-Import the generated wrapper in your application code:
+### Use the wrapper in your application
 
 \`\`\`typescript
 import { P2PKHContract } from './generated/P2PKHContract.js';
-import artifact from './generated/P2PKH.runar.json';
+import artifact from '../contract/artifacts/P2PKH.runar.json' with { type: 'json' };
 
 const contract = new P2PKHContract(artifact, { pubKeyHash: '...' });
 contract.connect(provider, signer);
 await contract.deploy({ satoshis: 1000 });
 \`\`\`
 
-The wrapper provides type-safe method stubs matching your contract's ABI.
-
-### Phase 5: Deploy to mainnet
-
-Configure a mainnet provider and signer, then deploy:
+### Deploy to mainnet
 
 \`\`\`typescript
 import { WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
@@ -421,25 +391,17 @@ contract.connect(provider, signer);
 
 ## Available Scripts
 
-### In \`contract/\`
-
-| Script              | Description                              |
-|---------------------|------------------------------------------|
-| \`npm test\`          | Run unit tests                           |
-| \`npm run test:watch\`| Run tests in watch mode                  |
-| \`npm run compile\`   | Compile contract to artifact (.json)     |
-| \`npm run typecheck\` | Type-check contract and tests            |
-| \`npm run debug\`     | Debug compiled script step-by-step       |
-
-### In project root
-
-| Script                    | Description                            |
-|---------------------------|----------------------------------------|
-| \`npm run compile\`         | Compile contract (delegates to contract/) |
-| \`npm run codegen\`         | Generate typed wrapper from artifact   |
-| \`npm run build\`           | Compile + codegen                      |
-| \`npm test\`                | Run contract unit tests                |
-| \`npm run test:integration\`| Run integration tests (regtest)        |
+| Script                            | Description                                |
+|-----------------------------------|--------------------------------------------|
+| \`npm run contract:compile\`         | Compile contract → \`contract/artifacts/\`     |
+| \`npm run contract:test\`            | Run unit tests (interpreter, no chain)     |
+| \`npm run contract:test:watch\`      | Unit tests in watch mode                   |
+| \`npm run contract:test:integration\`| Integration tests (regtest, requires node) |
+| \`npm run contract:typecheck\`       | Type-check contract and tests              |
+| \`npm run contract:debug\`           | Step through compiled Bitcoin Script       |
+| \`npm run codegen\`                  | Compile + generate typed wrapper           |
+| \`npm run build\`                    | Alias for \`codegen\`                         |
+| \`npm test\`                         | Alias for \`contract:test\`                   |
 `;
   fs.writeFileSync(path.join(projectDir, 'README.md'), readme);
 
@@ -449,15 +411,10 @@ contract.connect(provider, signer);
   console.log(`Project created at: ${projectDir}`);
   console.log('');
   console.log('Next steps:');
-  console.log(`  cd ${projectName}/contract`);
-  console.log('  npm install');
-  console.log('  npm test                    # run contract unit tests');
-  console.log('  npm run compile             # compile to artifact');
-  console.log('');
-  console.log('Then from the project root:');
   console.log(`  cd ${projectName}`);
   console.log('  npm install');
-  console.log('  npm run build               # compile + codegen');
+  console.log('  npm run contract:test       # run contract unit tests');
+  console.log('  npm run build               # compile + generate typed wrapper');
 }
 
 // ---------------------------------------------------------------------------
