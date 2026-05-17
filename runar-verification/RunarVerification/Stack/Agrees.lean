@@ -20608,5 +20608,714 @@ theorem SupportedANFBody_of_structuralRefBody
           exact absurd hHead (by
             simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
 
+/-- The `structuralArithBody` fragment is contained in `SupportedANFBody`.
+The proof dispatches on the head value's constructor: ref-shape heads
+(literal loads, `loadParam`, `loadProp`, ref-aliases) land on
+`SupportedANFBody.constValue` / `refValue`; `binOp` / `unaryOp` /
+`assert` heads land on `SupportedANFBody.arithValue`. All other
+constructors are vacuously rejected by `structuralArithValue`. -/
+theorem SupportedANFBody_of_structuralArithBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralArithBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp only [structuralArithBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralArithBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1) hRest
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | unaryOp _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | assert _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | call _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | methodCall _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | ifVal _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | loop _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | updateProp _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+
+/-- The `structuralCallBody` fragment is contained in `SupportedANFBody`.
+Adds the `call` head to the arith dispatch (`callValue` constructor);
+all other shapes follow the same per-shape pattern as the arith lemma. -/
+theorem SupportedANFBody_of_structuralCallBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralCallBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp only [structuralCallBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralCallBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1) hRest
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | unaryOp _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | assert _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | call _ _ =>
+          exact SupportedANFBody.callValue name _ src rest
+                  (by simp [supportedCallShape]) hRestS
+      | methodCall _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | ifVal _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | loop _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | updateProp _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+
+/-- The `structuralUpdatePropBody` fragment is contained in
+`SupportedANFBody`. Extends the call dispatch with the `updateProp`
+head (→ `updatePropValue` constructor). -/
+theorem SupportedANFBody_of_structuralUpdatePropBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralUpdatePropBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp only [structuralUpdatePropBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralUpdatePropBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1) hRest
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | unaryOp _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | assert _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | call _ _ =>
+          exact SupportedANFBody.callValue name _ src rest
+                  (by simp [supportedCallShape]) hRestS
+      | updateProp _ _ =>
+          exact SupportedANFBody.updatePropValue name _ src rest
+                  (by simp [supportedUpdatePropShape]) hRestS
+      | methodCall _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | ifVal _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | loop _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+
+/-- The `structuralIfValBody` fragment is contained in `SupportedANFBody`,
+provided the caller discharges `SupportedANFBody` on each `ifVal`
+binding's sub-bodies (`thn` / `els`). The `structuralIfValBody` predicate
+itself does NOT recursively claim sub-body support — only the head's
+copy-of-cond shape — so the lemma takes that recursion as an explicit
+hypothesis `hSubBodies`. Typical callers discharge `hSubBodies` via
+`supportedANFBodyB_iff` + `native_decide` on each sub-body. -/
+theorem SupportedANFBody_of_structuralIfValBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (_hSubBodies :
+        ∀ name cond thn els src,
+          ANFBinding.mk name (.ifVal cond thn els) src ∈ body →
+            SupportedANFBody thn ∧ SupportedANFBody els),
+      structuralIfValBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _hSub, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, hSub, h => by
+      simp only [structuralIfValBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hSubRest :
+          ∀ n c t e s, ANFBinding.mk n (.ifVal c t e) s ∈ rest →
+            SupportedANFBody t ∧ SupportedANFBody e := by
+        intro n c t e s hMem
+        exact hSub n c t e s (List.mem_cons_of_mem _ hMem)
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralIfValBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1) hSubRest hRest
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | unaryOp _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | assert _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | call _ _ =>
+          exact SupportedANFBody.callValue name _ src rest
+                  (by simp [supportedCallShape]) hRestS
+      | updateProp _ _ =>
+          exact SupportedANFBody.updatePropValue name _ src rest
+                  (by simp [supportedUpdatePropShape]) hRestS
+      | ifVal cond thn els =>
+          have hHere : SupportedANFBody thn ∧ SupportedANFBody els :=
+            hSub name cond thn els src List.mem_cons_self
+          exact SupportedANFBody.ifValValue name cond thn els src rest
+                  hHere.1 hHere.2 hRestS
+      | methodCall _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | loop _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
+                  structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+
+/-- The `structuralLoopBody` fragment is contained in `SupportedANFBody`,
+provided the caller discharges `SupportedANFBody` on each `ifVal` /
+`loop` binding's sub-bodies. As with `structuralIfValBody`, the
+predicate carries no sub-body claim by itself, so both recursive
+families are taken as explicit hypotheses. -/
+theorem SupportedANFBody_of_structuralLoopBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (_hSubIf :
+        ∀ name cond thn els src,
+          ANFBinding.mk name (.ifVal cond thn els) src ∈ body →
+            SupportedANFBody thn ∧ SupportedANFBody els)
+      (_hSubLoop :
+        ∀ name count loopBody iterVar src,
+          ANFBinding.mk name (.loop count loopBody iterVar) src ∈ body →
+            SupportedANFBody loopBody),
+      structuralLoopBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _hIf, _hLoop, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, hIf, hLoop, h => by
+      simp only [structuralLoopBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hIfRest :
+          ∀ n c t e s, ANFBinding.mk n (.ifVal c t e) s ∈ rest →
+            SupportedANFBody t ∧ SupportedANFBody e := by
+        intro n c t e s hMem
+        exact hIf n c t e s (List.mem_cons_of_mem _ hMem)
+      have hLoopRest :
+          ∀ n cnt lb iv s, ANFBinding.mk n (.loop cnt lb iv) s ∈ rest →
+            SupportedANFBody lb := by
+        intro n cnt lb iv s hMem
+        exact hLoop n cnt lb iv s (List.mem_cons_of_mem _ hMem)
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralLoopBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1)
+          hIfRest hLoopRest hRest
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | unaryOp _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | assert _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | call _ _ =>
+          exact SupportedANFBody.callValue name _ src rest
+                  (by simp [supportedCallShape]) hRestS
+      | updateProp _ _ =>
+          exact SupportedANFBody.updatePropValue name _ src rest
+                  (by simp [supportedUpdatePropShape]) hRestS
+      | ifVal cond thn els =>
+          have hHere : SupportedANFBody thn ∧ SupportedANFBody els :=
+            hIf name cond thn els src List.mem_cons_self
+          exact SupportedANFBody.ifValValue name cond thn els src rest
+                  hHere.1 hHere.2 hRestS
+      | loop count loopBody iterVar =>
+          have hHere : SupportedANFBody loopBody :=
+            hLoop name count loopBody iterVar src List.mem_cons_self
+          exact SupportedANFBody.loopValue name count loopBody iterVar src rest
+                  hHere hRestS
+      | methodCall _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
+                  structuralCallValue, structuralArithValue, structuralRefValue,
+                  structuralCopyValue, structuralConsumeValue])
+
+/-- The `structuralMethodCallBody` fragment is contained in
+`SupportedANFBody`, provided the caller discharges `SupportedANFBody`
+on each `ifVal` / `loop` binding's sub-bodies. Adds the `methodCall`
+head to the loop dispatch (→ `methodCallValue` constructor). -/
+theorem SupportedANFBody_of_structuralMethodCallBody
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (_hSubIf :
+        ∀ name cond thn els src,
+          ANFBinding.mk name (.ifVal cond thn els) src ∈ body →
+            SupportedANFBody thn ∧ SupportedANFBody els)
+      (_hSubLoop :
+        ∀ name count loopBody iterVar src,
+          ANFBinding.mk name (.loop count loopBody iterVar) src ∈ body →
+            SupportedANFBody loopBody),
+      structuralMethodCallBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      SupportedANFBody body
+  | [], _sm, _idx, _hIf, _hLoop, _h => SupportedANFBody.nil
+  | (.mk name v src) :: rest, sm, currentIndex, hIf, hLoop, h => by
+      simp only [structuralMethodCallBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hIfRest :
+          ∀ n c t e s, ANFBinding.mk n (.ifVal c t e) s ∈ rest →
+            SupportedANFBody t ∧ SupportedANFBody e := by
+        intro n c t e s hMem
+        exact hIf n c t e s (List.mem_cons_of_mem _ hMem)
+      have hLoopRest :
+          ∀ n cnt lb iv s, ANFBinding.mk n (.loop cnt lb iv) s ∈ rest →
+            SupportedANFBody lb := by
+        intro n cnt lb iv s hMem
+        exact hLoop n cnt lb iv s (List.mem_cons_of_mem _ hMem)
+      have hRestS : SupportedANFBody rest :=
+        SupportedANFBody_of_structuralMethodCallBody progMethods props budget lastUses
+          outerProtected localBindings constInts rest _ (currentIndex + 1)
+          hIfRest hLoopRest hRest
+      cases v with
+      | loadConst c =>
+          cases c with
+          | int _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bool _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | bytes _ =>
+              exact SupportedANFBody.constValue name _ src rest
+                      (by simp [supportedConstShape]) hRestS
+          | refAlias _ =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+          | thisRef =>
+              exact SupportedANFBody.refValue name _ src rest
+                      (by simp [supportedRefShape]) hRestS
+      | loadParam _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | loadProp _ =>
+          exact SupportedANFBody.refValue name _ src rest
+                  (by simp [supportedRefShape]) hRestS
+      | binOp _ _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | unaryOp _ _ _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | assert _ =>
+          exact SupportedANFBody.arithValue name _ src rest
+                  (by simp [supportedArithShape]) hRestS
+      | call _ _ =>
+          exact SupportedANFBody.callValue name _ src rest
+                  (by simp [supportedCallShape]) hRestS
+      | updateProp _ _ =>
+          exact SupportedANFBody.updatePropValue name _ src rest
+                  (by simp [supportedUpdatePropShape]) hRestS
+      | ifVal cond thn els =>
+          have hHere : SupportedANFBody thn ∧ SupportedANFBody els :=
+            hIf name cond thn els src List.mem_cons_self
+          exact SupportedANFBody.ifValValue name cond thn els src rest
+                  hHere.1 hHere.2 hRestS
+      | loop count loopBody iterVar =>
+          have hHere : SupportedANFBody loopBody :=
+            hLoop name count loopBody iterVar src List.mem_cons_self
+          exact SupportedANFBody.loopValue name count loopBody iterVar src rest
+                  hHere hRestS
+      | methodCall _ _ _ =>
+          exact SupportedANFBody.methodCallValue name _ src rest
+                  (by simp [supportedMethodCallShape]) hRestS
+      | getStateScript =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | checkPreimage _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | deserializeState _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addOutput _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addRawOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | addDataOutput _ _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | arrayLiteral _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+      | rawScript _ _ _ =>
+          exact absurd hHead (by
+            simp [structuralMethodCallValue, structuralLoopValue, structuralIfValValue,
+                  structuralUpdatePropValue, structuralCallValue, structuralArithValue,
+                  structuralRefValue, structuralCopyValue, structuralConsumeValue])
+
 end Agrees
 end RunarVerification.Stack

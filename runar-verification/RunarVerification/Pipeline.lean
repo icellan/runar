@@ -3045,6 +3045,35 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                   exact compileSafe_observational_correct_modulo_crypto_call_codegen
                     p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack trivial
 
+/--
+**Capstone variant consuming `SupportedANFBody`.**
+
+Identical conclusion to
+`compileSafe_observational_correct_modulo_codegen_axioms`, but takes an
+additional `_hSupported : SupportedANFBody anfM.body` hypothesis. The
+unified `SupportedANFBody` premise is `native_decide`-able from the
+Bool checker `supportedANFBodyB` via `supportedANFBodyB_iff`, so the
+per-fixture conformance harness can discharge it mechanically without
+needing to inspect the per-family classifier outputs.
+
+The proof simply forwards to the omnibus theorem above: the support
+witness is harness-side bookkeeping and does not refine the conclusion.
+This is parameter-free (no `progMethods` / `lastUses` / `sm` plumbing
+on the support witness) and adds zero axioms — it is a derived
+re-statement only. -/
+theorem compileSafe_observational_correct_modulo_codegen_axioms_via_support
+    (p : ANFProgram)
+    (hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (hMem : anfM ∈ p.methods) (hPublic : anfM.isPublic = true)
+    (hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hSupported : RunarVerification.Stack.Agrees.SupportedANFBody anfM.body) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack) :=
+  compileSafe_observational_correct_modulo_codegen_axioms
+    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack
+
 /-! ### Multi-method capstone
 
 With the D1/D2/D3 axioms in place, we can state the multi-method
