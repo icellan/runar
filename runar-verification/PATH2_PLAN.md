@@ -1,26 +1,41 @@
 # Rúnar Verification — Path 2 Execution Plan
 
 This is the authoritative execution document for Path 2 — discharging
-the 22 codegen-soundness axioms in `TRUST_MANIFEST.md` with direct
-Lean proofs, removing them from the trusted computing base. When an
-agent (Sonnet, Opus, or specialist) picks up Path 2 work cold, this
-is the document they read first.
+the **38 codegen-to-spec axioms** in `TRUST_MANIFEST.md` with direct
+Lean proofs, tier-prioritized per §0 (wave-1 completion notice) and
+§1.2 (tier-based acceptance criteria). When an agent (Sonnet, Opus,
+or specialist) picks up Path 2 work cold, this is the document they
+read first.
 
 Strategic choices fixed at plan time (2026-05-17):
 
-* **Sequencing: Parallel-friendly.** Phase B (per-primitive crypto
-  codegen-to-spec) and Stage C (A3–A8 runtime wrappers) run
-  concurrently. Phase B is naturally parallel across primitives;
-  Stage C stays in per-family `Stack/AgreesA<k>.lean` files to avoid
-  merge conflicts on `Stack/Agrees.lean`.
-* **Scope: Full unconditional.** Goal is 0 codegen-soundness axioms
-  remaining. The 26 cryptographic / primitive-existence / group-law /
-  EUF-CMA axioms in `Crypto/Spec.lean` are explicitly preserved by
-  design. Final acceptance: 56/56 VERIFIED-direct; omnibus axiom
-  deleted.
+* **Sequencing: Parallel-friendly, tier-based.** §4 below gives the
+  tiered ordering (Tier 1 / Tier 2 / Tier 3) that replaces the
+  original two-track flat sequencing (preserved in §4-historical).
+  Within each tier, Phase B (per-primitive crypto codegen-to-spec)
+  and Stage C (A3–A8 runtime wrappers) run concurrently. Stage C
+  stays in per-family `Stack/AgreesA<k>.lean` files to avoid merge
+  conflicts on `Stack/Agrees.lean`.
+* **Scope: Tier 1 + Tier 2 unconditional; Tier 3 deferred.** Path 2
+  targets 38 codegen-to-spec axioms. The remaining **72 preserved
+  axioms** at wave-1 completion (cryptographic primitives, group
+  laws, EUF-CMA companions, backend assumptions — see
+  `TRUST_MANIFEST.md` §"Axiom Taxonomy") split as follows after the
+  full tier plan: ~26 real cryptographic preserved (kept by design)
+  plus ~14 still-axiomatic codegen-to-spec residue if Tier 3 is
+  deferred. Per-tier acceptance criteria are in §1.2; the
+  56/56 VERIFIED-direct + omnibus-deleted finish line is the *Tier
+  3 ceiling*, not the Tier 1 / Tier 2 target.
 
-Estimated calendar time: 3–4 months with 2–3 parallel specialists,
-6 months solo.
+Estimated calendar time (revised per the 2026-05-17 reprioritization
+review and the §1.2 acceptance criteria):
+
+* **Tier 1:** ≈ 8–10 weeks with 2–3 parallel specialists; 18–22
+  weeks solo.
+* **Tier 2:** decision point; ≈ 12–15 weeks parallel if undertaken.
+* **Tier 3:** deferred indefinitely; multi-month specialist work
+  (B4 6–8 wk + B5 6–8 wk + B9 6 wk) if a specific value case
+  emerges later.
 
 ---
 
@@ -44,6 +59,50 @@ Estimated calendar time: 3–4 months with 2–3 parallel specialists,
 
 ---
 
+## 0. Wave 1 completion notice (2026-05-17)
+
+The Path 2 *wave 1* commit `7dcc7fc3` (2026-05-17) landed the first
+batch of discharges. Net axiom delta: 125 → 110 (−15). Wave 1 covered:
+
+* **B6 BabyBear** (−8) — converted four bare `Crypto.bbField*` axioms
+  in `ANF/Eval.lean` to concrete `def`s; discharged the four
+  `_correct` companions in `Crypto/Spec.lean` §8.3 as theorems via
+  `bbMod_eq_bbFieldMod`. See §5.12.
+* **D3 terminal-assert + NIP-cleanup** (−2) — both
+  `terminal_assert_elision_residue_correct` and
+  `nip_cleanup_residue_correct` in `Pipeline.lean` had `P → P`
+  shape; identity-propagation discharge as theorems. See §5.19.
+* **B3-a BLAKE3 concrete defs** (−2) — added concrete
+  `Crypto/HashBackend.lean` (291 LOC) implementing BLAKE3 §2.1 and
+  re-routed `Crypto.blake3Hash` / `Crypto.blake3Compress` as
+  delegating defs. Prerequisite for B3-b / B3-c. See §5.9.
+* **Verifier-axiom delegation** (−3) — converted `merkleRootSha256`,
+  `merkleRootHash256`, `verifyRabinSig` in `ANF/Eval.lean` from
+  bare axioms to concrete `def`s (delegating to inlined helpers
+  byte-identical to `Crypto.Spec.merkleVerifyPath` etc.).
+
+Stage C wrapper widenings landed at Tier 1 in the same commit
+(A3 `singletonAssertWithCap`, A4 `divmod` single builtin, A5
+depth-d fresh prop name, A6 single if_val same-const branches,
+A7 `n ≤ 1` with empty body) plus B7-prep infrastructure
+(`runOps_append` lifted from `Stack/Sim.lean` to `Stack/Eval.lean`;
+14 per-opcode helpers in `Stack/Merkle.lean`; three private bridges
+in `Stack/Agrees.lean` promoted to public).
+
+The remaining axiom count (110) splits per the §"Axiom Taxonomy"
+table in `TRUST_MANIFEST.md`:
+* **72 preserved** — backend assumptions, group laws, EUF-CMA
+  companions, primitive symbols Path 2 does not target.
+* **38 codegen-to-spec targets** — Path 2 retires these.
+
+The original Path 2 framing ("22 codegen-soundness axioms" /
+"−22 to reach 103") predates the 2026-05-16 multi-family Phase B
+integration that added Phase B3 (+2), B5 codegen (+14), and B9
+(+6) for a true codegen-soundness baseline of 38, not 22. The
+revised §1.2 below uses the corrected baseline.
+
+---
+
 ## 1. Mission, acceptance criteria, success metrics
 
 ### 1.1 Mission
@@ -52,28 +111,46 @@ Replace every codegen-soundness axiom in `TRUST_MANIFEST.md` with a
 direct Lean proof. After Path 2:
 
 * The mechanised conformance claim is unconditional on the compiler
-  side. The remaining axioms (26) are all *cryptographic* — group
-  laws, primitive existence, collision resistance, EUF-CMA — and
-  cannot be reasonably discharged in Lean (they are deep
-  cryptographic results, not compiler-correctness facts).
-* `tests/PipelineConformance.lean` reports **56/56 VERIFIED**
-  (direct), 0 VERIFIED-modulo-codegen-axioms.
+  side. The remaining axioms are real cryptographic primitive
+  existence / group law / EUF-CMA / backend assumptions, plus
+  whatever Tier 3 codegen-to-spec residue remains — see §1.2.
+* `tests/PipelineConformance.lean` reports **56/56 VERIFIED** (or
+  fine-grained per-family classifications post-O1 omnibus split),
+  0 fixtures conditional on a single omnibus axiom.
 * The omnibus axiom `compileSafe_observational_correct_modulo_
-  codegen_axioms` in `Pipeline.lean` is deleted; its conclusion is
-  a `theorem` whose body composes the Path 2 results.
+  codegen_axioms` in `Pipeline.lean` is deleted (Tier 1 splits it
+  into 9 per-family sub-omnibuses via milestone **O1**; each
+  sub-omnibus retires as the corresponding Stage C / Phase D
+  milestone lands).
 
 ### 1.2 Acceptance criteria
 
-| Gate | Target |
-|---|---|
-| `./scripts/lean-verify.sh` | green |
-| `./scripts/check-tcb-drift.sh` | `axioms = 103` (was 125; −22 codegen axioms discharged) |
-| `./scripts/run-pipeline-conformance.sh` | 56/56 VERIFIED, 0 modulo-codegen-axioms |
-| `lake env ./.lake/build/bin/goldenLoad` | 56/56 |
-| `lake env ./.lake/build/bin/roundtrip` | 56/56 |
-| `lake env ./.lake/build/bin/pipelineGolden` | 49/49 byte-exact (unchanged) |
-| `grep -rn "sorry\|admit\|partial def" RunarVerification/` | empty |
-| Omnibus axiom in `Pipeline.lean` | deleted (replaced with theorem) |
+The Path 2 finish line is split into per-tier targets. Tier 1 is
+the visible-progress milestone (omnibus split + Stage C composition
+substrate + Phase D + concrete crypto-primitive defs). Tier 2
+closes most of the remaining codegen-to-spec surface. Tier 3 is
+deferred indefinitely unless a specific value case emerges.
+
+| Gate | Tier 1 target | Tier 2 target | Tier 3 target |
+|---|---|---|---|
+| `./scripts/lean-verify.sh` | green | green | green |
+| `./scripts/check-tcb-drift.sh` | `axioms ≈ 88` (110 − 22) | `axioms ≈ 56` (88 − 32) | `axioms ≈ 40` (56 − 16) |
+| `./scripts/run-pipeline-conformance.sh` | per-family classification (no single omnibus) | 56/56 VERIFIED or VERIFIED-modulo-{B3,B8,C2,Tier3} | 56/56 VERIFIED (direct) |
+| `lake env ./.lake/build/bin/goldenLoad` | 56/56 | 56/56 | 56/56 |
+| `lake env ./.lake/build/bin/roundtrip` | 56/56 | 56/56 | 56/56 |
+| `lake env ./.lake/build/bin/pipelineGolden` | 49/49 byte-exact (unchanged) | 49/49 | 49/49 |
+| `grep -rn "sorry\|admit\|partial def" RunarVerification/` | empty | empty | empty |
+| Omnibus axiom in `Pipeline.lean` | deleted (replaced with 9 named sub-omnibuses, each with a discharge path) | each sub-omnibus retired as Stage C + Phase B/D land | all sub-omnibuses retired |
+
+The per-tier axiom-count targets are *approximate* because the
+trajectory depends on (a) whether the 20 group-law axioms in
+`Crypto/Spec.lean` §1/§2.5 become derivable theorems after the
+B4-a / B5-a sub-phases land, and (b) whether the high-level
+verifier axioms in `ANF/Eval.lean` (`verifyWOTS`, `verifySLHDSA_*`
+×6) become delegating defs after the planned `Crypto/SpecCore.lean`
+refactor. Both shifts are tracked but not in the critical-path
+gate. See `TRUST_MANIFEST.md` §"Axiom Taxonomy" for the
+preserved-vs-target partition.
 
 Calendar success metric: each milestone's acceptance gate (below)
 passes before moving to the next. Continuous integration via
@@ -206,7 +283,133 @@ Per `CLAUDE.md`:
 
 ---
 
-## 3. Dependency graph
+## 3. Dependency graph (revised post-wave-1)
+
+The dependency graph below reflects the wave 1 commit (2026-05-17,
+`7dcc7fc3`) and the 2026-05-17 reprioritization review.
+Milestones marked **[DONE]** retired in wave 1. New sub-phases
+(B4-a / B5-a / B9-a / B10-prep / O1 / pXNegate-derivable /
+group-law audit) appear as explicit nodes.
+
+```
+        ┌──────────────────────────────────────────────────────────┐
+        │ Tier 1 — composition substrate + concrete primitive defs │
+        │                                                          │
+        │   O1 omnibus split          (independent — coordinates)  │
+        │   pXNegate-derivable        (independent — 0.5 wk)       │
+        │   B10-prep (Stack/Eval.lean OP_EQUAL coercion fix)       │
+        │   B10 Rabin                 (after B10-prep)             │
+        │   B4-a concrete ec* defs    (independent — 2 wk)         │
+        │   B5-a concrete p256/p384* defs (independent — 2 wk)     │
+        │   B9-a concrete verifySLHDSA defs (3 wk)                 │
+        │   B7 Merkle inductive       (B7-prep landed wave 1)      │
+        │   B1 follow-up (FIPS axiom route)                        │
+        │   B6 BabyBear               [DONE wave 1]                │
+        │   D3 terminal-assert / NIP  [DONE wave 1]                │
+        │   B3-a BLAKE3 concrete defs [DONE wave 1]                │
+        │   verifier-axiom delegation [DONE wave 1]                │
+        │                                                          │
+        │   Stage C wrapper widening (full):                       │
+        │     A3 arith (Tier 2/3 — bridges public post wave 1)     │
+        │     A4 math/byte (beyond divmod)                         │
+        │     A5 Tier 3 (existing-prop cleanup)                    │
+        │     A6 Tier 2 (any branches in SupportedANFBody)         │
+        │                                                          │
+        │   Phase D wrappers:                                      │
+        │     D1 Merkle dispatch       (depends on A3)             │
+        │     D2.a auto check_preimage (depends on Phase E — done) │
+        │     D2.b auto state_output   (depends on A5 Tier 2 — done)│
+        └──────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │ Tier 2 — close remaining codegen-to-spec residue         │
+        │                                                          │
+        │   B3 BLAKE3 b/c            (B3-a landed; helper proofs)  │
+        │   B8 WOTS+                 (composes B1 SHA-256)         │
+        │   A7 Tier 2/3 (loop with non-empty body)                 │
+        │   A8 method_call            (recurses through A1-A7)     │
+        │   A4 crypto arm             (composes Phase B per-prim)  │
+        │   C2 multi-method dispatch joins                         │
+        │   Crypto/Spec group-law audit (20 axioms; after B4-a/B5-a)│
+        │                                                          │
+        │   ── decision point: continue to Tier 3? ──              │
+        └──────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │ Tier 3 — full codegen-to-spec discharge (deferred)       │
+        │                                                          │
+        │   B4 secp256k1 codegen-to-spec discharge (10 axioms)     │
+        │   B5 P-256/P-384 codegen-to-spec discharge (14 axioms)   │
+        │   B9 SLH-DSA codegen-to-spec discharge (6 axioms)        │
+        │                                                          │
+        │   Run only if a specific value case emerges.             │
+        └──────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                   ┌───────────────────────┐
+                   │ Final acceptance:     │
+                   │ 56/56 VERIFIED-direct │
+                   │ (or per-family tiers) │
+                   └───────────────────────┘
+```
+
+Key edges (revised):
+
+* **A4 (call) crypto arm** depends on Phase B per-primitive
+  discharge: the call arm needs the per-primitive `runOps`-to-spec
+  to compose against, otherwise the runtime-side `isSome` cannot be
+  derived for crypto-builtin calls.
+* **D1 (Merkle dispatch)** depends on A3 (arith Tier 2): the lowered
+  dispatch is a `bin_op`/equality cascade.
+* **D2 (stateful continuation)** depends on A5 (Tier 2 landed wave 1).
+* **B7 (Merkle inductive)** has B7-prep infrastructure landed wave 1;
+  the remaining step composes the per-opcode helpers via induction
+  on `d`.
+* **B10 Rabin** is BLOCKED on **B10-prep**: the `Stack/Eval.lean`
+  `OP_EQUAL` arm must be widened to model Bitcoin Script's
+  int↔bytes coercion (currently `.vBigint` vs `.vBytes` always
+  returns `.vBool false`, contradicting `verifyRabinSig_spec`).
+  A wave-1 in-session subagent attempt to discharge B10 by
+  weakening the theorem conclusion (returning `vBool false`
+  regardless of spec value) was rejected — no commit landed.
+  B10-prep is a 2–3 day surgical edit to `Stack/Eval.lean` +
+  downstream proof audit; B10 then follows.
+* **B4 / B5 / B9 codegen-to-spec discharges** are STRUCTURALLY
+  blocked until **B4-a / B5-a / B9-a** sub-phases land concrete
+  Lean defs for `Crypto.ecAdd / ecMul / etc.`, `Crypto.p256Add /
+  p384Add / etc.`, and `Crypto.Spec.verifySlhDsa_*`. The bare
+  axioms have no defining equation to rewrite against. A wave-1
+  in-session subagent attempt at B5 single-emit discharge
+  identified this structural blocker; no commit landed (the
+  attempt was correctly reported as BLOCKED, not weakened).
+* **Group-law audit** (Tier 2) depends on B4-a / B5-a landing
+  first. Once concrete `ecAdd` / `p256Add` are in `ANF/Eval.lean`,
+  the 20 group-law axioms in `Crypto/Spec.lean` §1 + §2.5 become
+  derivable theorems.
+* **O1 omnibus split** is required for any conformance fixture to
+  flip from `VERIFIED-modulo-codegen-axioms` to a finer
+  classification. Wrapper widening alone does not flip fixtures
+  because the harness in `tests/PipelineConformance.lean` checks
+  `structuralRefBodyBool`, not the per-family widened predicates.
+
+Parallel-safe (no cross-dependencies):
+
+* Tier 1: O1, pXNegate-derivable, B10-prep, B4-a, B5-a, B9-a,
+  B7 (after B7-prep wave 1), Stage C A3/A4/A5/A6 widenings.
+* Tier 2: B3 (b/c), B8, A7, A8, A4 crypto, C2 — A7/A8/A4 sequence
+  recursively on the body family.
+* Tier 3: B4, B5, B9 — all blocked until corresponding sub-phase
+  lands.
+
+---
+
+## 3-historical. Original dependency graph (pre-wave-1, superseded)
+
+The original Path 2 dependency graph from the 2026-05-17 plan
+draft is preserved below for audit purposes. It is superseded by
+§3 above.
 
 ```
                     ┌──────────────────────────────────────┐
@@ -296,9 +499,155 @@ Parallel-safe (no cross-dependencies):
 
 ---
 
-## 4. Recommended sequencing
+## 4. Recommended sequencing (revised post-wave-1)
 
-Two-track parallel execution with one specialist on each track.
+Tier-based execution. Each tier has a decision gate before committing
+to the next.
+
+### Tier 1 (target: 8–10 weeks with 3 parallel specialists; 18–22 weeks solo)
+
+Wave 1 (2026-05-17) discharged: B6, D3, B3-a, verifier-axiom delegation
+(net −15 axioms). Wave 1 also landed Stage C Tier 1 widenings in A3/A4/A5/A6/A7
+and B7-prep infrastructure. The remaining Tier 1 work:
+
+**Composition substrate (visible-progress, unblocks harness):**
+
+* **O1 omnibus split** (2.5 wk) — Split the single
+  `compileSafe_observational_correct_modulo_codegen_axioms` axiom
+  in `Pipeline.lean` into 9 per-constructor-family sub-omnibuses.
+  Re-engineer the harness in `tests/PipelineConformance.lean` to
+  dispatch fixtures into `VERIFIED-modulo-<family>-codegen-axioms`
+  tiers. **This is required for any fixture to flip from the
+  current single-bucket `VERIFIED-modulo-codegen-axioms`
+  classification as Tier 1 milestones land.** See §5.23.
+
+**Concrete primitive defs (axiom reduction without proof effort):**
+
+* **pXNegate-derivable** (0.5 wk) — Convert `Crypto.p256Negate`
+  and `Crypto.p384Negate` from function-symbol axioms to concrete
+  `def`s over the negation formula `(x, y) → (x, p − y mod p)`.
+  Net −2 axioms. See §5.24.
+* **B4-a concrete ec\* defs** (2 wk) — Add concrete `Crypto.ecAdd /
+  ecMul / ecMulGen / ecNegate / ecOnCurve / ecModReduce /
+  ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY` in
+  `ANF/Eval.lean` mirroring secp256k1 byte semantics. Net −10
+  axioms. Unblocks future B4 codegen-to-spec discharge. See §5.25.
+* **B5-a concrete p256/p384\* defs** (2 wk) — 12 primitive symbols
+  following B4-a pattern. Net −12 axioms. See §5.26.
+* **B9-a concrete `verifySLHDSA_SHA2_*` defs** (3 wk) — Compose
+  SHA-256 + Merkle + WOTS+ + FORS into 6 parameter-set defs in
+  `Crypto/Spec.lean`. Re-route the bare `verifySLHDSA_SHA2_*`
+  axioms in `ANF/Eval.lean` as delegating defs. Net −6 axioms.
+  See §5.27.
+
+**Phase D wrapper soundness:**
+
+* **D1 Merkle dispatch** (3 wk) — Discharge
+  `merkle_dispatch_selection_correct`. Depends on A3 (arith Tier 2)
+  for the binop / equality cascade. See §5.17.
+* **D2.a auto check_preimage** (1.5 wk) — Discharge
+  `auto_check_preimage_at_method_entry_correct`. Composes
+  `runOpcode_CHECKSIG_ValidTxContext` (already proved) with
+  `Stack/TxContext.lean` preimage construction (already concrete).
+  See §5.18.
+* **D2.b auto state_output** (1.5 wk) — Discharge
+  `auto_state_output_at_method_exit_correct`. Depends on A5 Tier 2
+  (landed wave 1). See §5.18.
+
+**Phase B + Stage C composition:**
+
+* **B10-prep `OP_EQUAL` coercion** (0.5 wk, including 2-day audit
+  of downstream proofs that reference `Stack.Eval.runOpcode
+  "OP_EQUAL"` strict-type behavior) — Widen
+  `runOpcode "OP_EQUAL"` in `Stack/Eval.lean` to model Bitcoin
+  Script's int↔bytes coercion. Prerequisite for B10. See §5.28.
+* **B10 Rabin** (1 wk) — After B10-prep, compose a step-by-step
+  reduction over the 10-opcode Rabin body against the widened
+  `OP_EQUAL` semantics. The wave-1 in-session B10 subagent drafted
+  a ~280-line proof against the strict (un-widened) `OP_EQUAL`,
+  which required weakening the conclusion to `vBool false`; that
+  attempt was rejected and no commit landed. The corrected
+  approach reuses the same opcode-by-opcode reduction skeleton
+  but lets `OP_EQUAL` succeed via coercion. See §5.16.
+* **B7 Merkle inductive step** (1.5 wk) — B7-prep landed wave 1.
+  Remaining: compose 14 per-opcode helpers into `mLevel_step` +
+  induction on `d`. See §5.13.
+* **B1 follow-up** (3 wk) — Accept the FIPS 180-4 §6.2 composition
+  axiom `sha256_compose : sha256 (xs ++ ys) = sha256Finalize
+  (sha256Compress sha256Init xs) ys.length ys` (1 axiom, 1 day) in
+  `Crypto/HashBackend.lean`, then discharge
+  `runOps_sha256CompressOps_eq` / `runOps_sha256FinalizeOps_eq`
+  against the arithmetic round-function emit ops. See §5.8.
+* **A3 arith Tier 2/3** (2.5 wk) — Extend `structuralArithBodyReal`
+  Bool checker to binOp / unaryOp; per-arm `simpleStepRel`
+  extension. The wave 1 promotion of three bridges in
+  `Stack/Agrees.lean` unblocks this. See §5.1.
+* **A4 math/byte (beyond divmod)** (3 wk) — 21 remaining math/byte
+  builtins beyond the wave-1 `divmod`. See §5.2.
+* **A5 Tier 3** (1.5 wk) — Existing-prop cleanup arm. Depends on
+  bridges in `Stack/Agrees.lean`. See §5.4.
+* **A6 Tier 2** (2 wk) — Any branches in SupportedANFBody. Depends
+  on A3 + A5. See §5.5.
+
+### Tier 2 (target: 12–15 weeks parallel; decision point before)
+
+Decision gate: before committing to Tier 2, re-evaluate whether
+(a) the engineering capacity is better spent on other Rúnar work
+(static analyzer, property-based fuzzing) and (b) whether the
+per-family `VERIFIED-modulo-<family>-codegen-axioms` tiers from O1
+deliver sufficient auditor clarity without the additional Tier 2
+proof effort.
+
+* **B3 BLAKE3 (b/c)** (2.5 wk) — B3-a landed wave 1. Remaining:
+  ~10 named helper lemmas + composition. See §5.9.
+* **B8 WOTS+** (3 wk) — 8 named helpers composing B1 SHA-256
+  across 67 chunks × 15 chain iters. See §5.14.
+* **A7 Tier 2/3** (2 wk) — Loop with arbitrary `n` and non-empty
+  body. Body-recursive `SupportedANFBody`. See §5.6.
+* **A8 method_call** (4 wk) — Structural induction on inline
+  budget; recursive into other Stage C families. See §5.7.
+* **A4 crypto arm** (3 wk) — Per-primitive at ~1 wk each after
+  the corresponding Phase B discharge. See §5.3.
+* **C2 multi-method dispatch joins** (2–4 wk) — Byte-offset /
+  op-index semantic gap. See §5.20.
+* **Crypto/Spec group-law audit** (1.5 wk, after B4-a / B5-a) —
+  Derive `ecAdd_assoc`, `ecAdd_comm`, etc. from the concrete
+  `Crypto.ecAdd` def landed by B4-a/B5-a. Up to −20 axioms.
+  See §5.29.
+
+### Tier 3 (deferred indefinitely)
+
+Run only if a specific value case emerges (audit requirement,
+published correctness claim).
+
+* **B4 secp256k1 codegen-to-spec discharge** (6–8 wk) — Discharge
+  all 10 `emitEc*_runOps_eq` axioms against concrete `Crypto.ecAdd`
+  etc. (from B4-a). See §5.10.
+* **B5 P-256 / P-384 codegen-to-spec discharge** (6–8 wk) — 14
+  `emitP256/P384*` axioms. See §5.11.
+* **B9 SLH-DSA codegen-to-spec discharge** (6 wk) — 6 parameter
+  sets composing B1 + B7 + B8 + FORS. See §5.15.
+
+### Specialist split (recommended for 3 parallel)
+
+* **Specialist α** (Stage C composition): A3 Tier 2/3, A4
+  math/byte, A5 Tier 3, A6 Tier 2, plus Tier 2 A7/A8 and A4 crypto.
+* **Specialist β** (cryptography): B4-a, B5-a, B9-a, group-law
+  audit, plus Tier 2 B3/B8.
+* **Specialist γ** (composition + harness): O1 omnibus split,
+  D1, D2.a, D2.b, B7, B10-prep + B10, B1 follow-up, pXNegate,
+  plus Tier 2 C2.
+
+Calendar time with this split: ~8–10 weeks for Tier 1, ~12–15
+weeks for Tier 2.
+
+---
+
+## 4-historical. Original two-track sequencing (pre-wave-1, superseded)
+
+The original Track A / Track B / Convergence layout is preserved
+for audit purposes. It is superseded by the tier-based sequencing
+in §4 above.
 
 ### Track A — Stage C (runtime composition)
 
@@ -721,6 +1070,22 @@ to arbitrary inlined method calls within the inline budget.
 
 ### 5.8 Phase B — B1 follow-up: SHA-256 compress / finalize
 
+**Status (2026-05-17):** a wave-1 in-session subagent attempted
+discharge by defining `sha256CompressOps` as `[.opcode "OP_SHA256"]`
+(a trivial alias making the theorems tautological); that attempt
+was rejected and no commit landed. The accepted approach (decided
+in the 2026-05-17 reprioritization review) is: add the
+FIPS 180-4 §6.2 composition axiom
+`sha256_compose : sha256 (xs ++ ys) = sha256Finalize (sha256Compress
+sha256Init xs) ys.length ys` in `Crypto/HashBackend.lean` with
+citation, then discharge `runOps_sha256CompressOps_eq` /
+`runOps_sha256FinalizeOps_eq` against the arithmetic round-function
+emit op-list using the algebraic identity. **Revised effort: 3 weeks**
+(was 1 week — the original estimate did not budget the multi-week
+arithmetic reduction). Tier 1.
+
+
+
 **Goal.** Discharge `runOps_sha256CompressOps_eq` and
 `runOps_sha256FinalizeOps_eq` as direct theorems, not axioms.
 Currently a documented gap; the single-opcode B1+B2 proofs already
@@ -766,6 +1131,21 @@ landed for `OP_SHA256`, `OP_HASH256`, etc.
 **Dependencies.** None.
 
 ### 5.9 Phase B — B3 BLAKE3
+
+**Status (2026-05-17):** sub-phase **B3-a landed in wave 1**.
+`Crypto/HashBackend.lean` now ships concrete `def blake3Hash` /
+`def blake3Compress` (291 LOC mirroring BLAKE3 §2.1); the bare
+axioms in `ANF/Eval.lean` are delegating `def`s. Net wave-1 delta:
+−2 axioms in `ANF/Eval.lean`. The 2 codegen-to-spec axioms in
+`Stack/Blake3.lean` (`runOps_b3HashOps_eq`, `runOps_b3CompressOps_eq`)
+remain — discharged via Tier 2 sub-phases **B3-b** (per-helper
+reductions: `runOps_b3RotrLEGeneral_eq`, `b3EmitHalfG_eq`,
+`b3EmitG_eq`, `b3EmitGCall_eq`, `b3EmitRound_eq` — per wave 1
+B3 agent's plan, ~10 named helpers totalling ~1500-2000 lines)
+plus **B3-c** (composition into the two top-level theorems).
+Revised Tier 2 estimate: **2.5 weeks** with B3-a in.
+
+
 
 **Goal.** Discharge the 2 axioms in `Stack/Blake3.lean`:
 `runOps_b3HashOps_eq` and `runOps_b3CompressOps_eq`.
@@ -885,7 +1265,21 @@ P-384 differ only in modulus and field operations.
 
 **Dependencies.** None (independent of B4).
 
-### 5.12 Phase B — B6 BabyBear field + ext4
+### 5.12 Phase B — B6 BabyBear field + ext4 **[DONE wave 1, 2026-05-17]**
+
+**Discharged in commit `7dcc7fc3`.** Net delta: −8 axioms (−4 in
+`Crypto/Spec.lean` `_correct` companions become theorems; −4 in
+`ANF/Eval.lean` bare `bbField{Add,Sub,Mul,Inv}` become concrete
+`def`s mirroring `Crypto/Spec.lean` §8.1 one-for-one). Discharge
+technique: internal lemma `bbMod_eq_bbFieldMod` plus structural
+induction on the exponent for the inverse case. The discharge was
+strictly stronger than the original spec envisioned (planned −4
+from `_correct` only; the additional −4 bonus came from the
+bare-side conversion). See `TRUST_MANIFEST.md` §B6 entry.
+
+The original milestone spec is preserved below for reference.
+
+
 
 **Goal.** Discharge the 4 functional-correctness axioms in
 `Crypto/Spec.lean` linking the bare `Crypto.bbFieldMul` etc.
@@ -1034,6 +1428,17 @@ team).
 
 ### 5.16 Phase B — B10 Rabin
 
+**Status (2026-05-17):** a wave-1 in-session subagent attempted
+this milestone and discovered a structural blocker —
+`Stack.Eval.runOpcode "OP_EQUAL"` deliberately does not model
+Bitcoin Script's int↔bytes coercion (comparing `.vBigint` residue
+from `OP_MOD` with `.vBytes` SHA-256 digest always returns
+`.vBool false`, contradicting `Crypto.Spec.verifyRabinSig_spec`).
+The subagent's proposed workaround (weaken the theorem conclusion
+to `vBool false`) was rejected and no commit landed. The corrected
+prerequisite **B10-prep** (§5.28) widens `OP_EQUAL` to model the
+coercion; B10 then follows.
+
 **Goal.** Discharge the 1 axiom `runOps_rabinBodyOps_eq` in
 `Stack/Rabin.lean`.
 
@@ -1048,20 +1453,27 @@ team).
    OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL`.
 2. Reduce step-by-step against the concrete spec.
 3. The B1 `OP_SHA256` reduction handles the hash step.
+4. After B10-prep, the final `OP_EQUAL` step succeeds via the
+   widened int↔bytes coercion arm. The opcode-by-opcode reduction
+   skeleton from the wave-1 draft (rejected for weakening the
+   conclusion) is reusable; only the terminal-step composition
+   changes.
 
 **Failure modes.**
 
 * `OP_EQUAL` returns a Bool — the spec returns a Bool — they must
-  agree bit-for-bit. Confirm the encoding.
+  agree bit-for-bit. After B10-prep, the coercion path covers
+  `.vBigint x = .vBytes (encodeMinimalLE x)` modulo
+  `decodeMinimalLE / encodeMinimalLE` round-trip.
 
 **Acceptance gate.**
 
 * 1 theorem lands; 1 axiom deletes.
-* `axioms = 89`.
+* `axioms` count drops by 1 after this milestone.
 
-**Effort.** 1 week.
+**Effort.** 1 week (after B10-prep).
 
-**Dependencies.** B1.
+**Dependencies.** B1 (already proved); B10-prep (§5.28).
 
 ### 5.17 Phase D — D1 Merkle dispatch
 
@@ -1136,7 +1548,21 @@ and `auto_state_output_at_method_exit_correct`.
 
 **Dependencies.** A5, Phase E (already done).
 
-### 5.19 Phase D — D3 terminal-assert + NIP cleanup
+### 5.19 Phase D — D3 terminal-assert + NIP cleanup **[DONE wave 1, 2026-05-17]**
+
+**Discharged in commit `7dcc7fc3`.** Net delta: −2 axioms in
+`Pipeline.lean`. Both `terminal_assert_elision_residue_correct` and
+`nip_cleanup_residue_correct` had `(... isSome) → (... isSome)`
+shape — the hypothesis and conclusion were the same `runOps rawOps
+initialStack` statement on identical ops and state. The discharge
+was `intro h; exact h` identity propagation. The structural witnesses
+(`terminalAssertElidesFor` / `nipCleanupActiveFor`) live in
+`Stack/Agrees.lean` as decidable Bool predicates that were already
+proved upstream of every caller. See `TRUST_MANIFEST.md` §D3 entry.
+
+The original milestone spec is preserved below for reference.
+
+
 
 **Goal.** Discharge `terminal_assert_elision_residue_correct` and
 `nip_cleanup_residue_correct`.
@@ -1296,6 +1722,345 @@ the widened capstone with Phase D's now-proved wrapper soundness.
 **Effort.** 1 week.
 
 **Dependencies.** Everything else.
+
+### 5.23 O1 — omnibus axiom split (Tier 1, NEW)
+
+**Goal.** Split the single Phase D harness omnibus axiom
+`compileSafe_observational_correct_modulo_codegen_axioms` in
+`Pipeline.lean` into 9 per-constructor-family sub-omnibuses, and
+re-engineer `tests/PipelineConformance.lean` to dispatch fixtures
+into `VERIFIED-modulo-<family>-codegen-axioms` tiers. This is the
+coordinating milestone that lets visible harness progress track
+Tier 1 Stage C / Phase D landings.
+
+**Files.**
+
+* Primary: `Pipeline.lean`, `tests/PipelineConformance.lean`.
+* Read: `Stack/Agrees.lean` for the existing per-family structural
+  predicates (`structuralArithBody`, `structuralCallBody`, etc.).
+
+**Key elements.**
+
+* Define 9 sub-omnibus axioms (per the inventory in
+  `TRUST_MANIFEST.md` §"Phase D harness integration omnibus —
+  planned split"): one each for `_modulo_arith_codegen`,
+  `_modulo_math_byte_call_codegen`, `_modulo_crypto_call_codegen`,
+  `_modulo_update_prop_codegen`, `_modulo_if_val_codegen`,
+  `_modulo_loop_codegen`, `_modulo_method_call_codegen`,
+  `_modulo_dispatch_codegen`, `_modulo_stateful_codegen`.
+* Each sub-omnibus carries the corresponding structural-predicate
+  hypothesis from `Stack/Agrees.lean`, so dispatching the harness
+  on the per-family Bool checker classifies fixtures into the
+  right tier.
+* Replace the existing single-omnibus reference in `Pipeline.lean`
+  with a `theorem` whose body case-splits on the body family and
+  applies the matching sub-omnibus.
+* Re-engineer `tests/PipelineConformance.lean` `checkFixture` to
+  return one of `Outcome.verified` (no sub-omnibus needed),
+  `Outcome.verifiedModuloArithCodegen`,
+  `Outcome.verifiedModuloMathByteCallCodegen`, etc., per the
+  per-family Bool checker dispatch.
+
+**Technique.**
+
+1. Mechanically split the omnibus into 9 sub-omnibuses by
+   restricting hypotheses to the corresponding structural predicate.
+2. Compose the per-family substrate (Stage C narrowed wrappers
+   already in tree) into the per-family discharge bridge: each
+   sub-omnibus retires as `runMethod_lower_public_unique_no_post_structural*_isSome`
+   lands at full coverage.
+3. Update the harness output to a finer per-family bucket
+   classification.
+
+**Failure modes.**
+
+* Some fixtures contain bindings from multiple families (e.g.,
+  one `binOp` + one `call`); each lands in
+  `VERIFIED-modulo-{arith,call}-codegen-axioms`, requiring
+  multiple sub-omnibuses to retire before the fixture flips
+  fully to `VERIFIED`. The harness needs to report a
+  "modulo-{family-set}" classification per fixture.
+* Short-term axiom count goes UP by ~8 (9 sub-omnibuses replace
+  1 omnibus). This is intentional and reverses as each
+  sub-omnibus retires.
+
+**Acceptance gate.**
+
+* 9 sub-omnibus axioms exist in `Pipeline.lean`.
+* `compileSafe_observational_correct_modulo_codegen_axioms` is
+  rewritten as a `theorem` whose body composes the per-family
+  sub-omnibuses (no longer an axiom).
+* `tests/PipelineConformance.lean` reports per-family
+  classification per fixture.
+* `./scripts/check-tcb-drift.sh` reports `axioms = 117` (was 110,
+  +9 sub-omnibuses, −1 retired-as-theorem-via-composition omnibus
+  = net +8). `TRUST_MANIFEST.md` per-file count for `Pipeline.lean`
+  updates to 12 (4 Phase D D1/D2.a/D2.b + 9 sub-omnibuses − 1
+  retired omnibus = 12, then drops as Tier 1 wrappers land).
+
+**Effort.** 2.5 weeks.
+
+**Dependencies.** None for the split itself; sub-omnibuses retire
+as their respective Stage C / Phase B / Phase D milestones land.
+
+### 5.24 pXNegate-derivable conversion (Tier 1, NEW)
+
+**Goal.** Convert `Crypto.p256Negate : ByteArray → ByteArray` and
+`Crypto.p384Negate : ByteArray → ByteArray` from bare function-symbol
+axioms in `Crypto/Spec.lean` to concrete `def`s.
+
+**Files.**
+
+* Primary: `Crypto/Spec.lean`.
+
+**Technique.**
+
+1. Define the standard point negation formula: given a compressed
+   point `p = parity ++ x`, decompose into `(x, y)`, return
+   `(x, p_mod − y)` re-encoded. For uncompressed-coordinate format
+   `(x, y) → (x, p_mod − y mod p_mod)`. Field modulus `p_mod` is
+   the curve modulus (FIPS 186-5 §D.1.2.3 for P-256 / §D.1.2.4
+   for P-384).
+2. Ensure the def is `decide`-checkable on small sample points
+   without timing out the elaborator.
+
+**Failure modes.**
+
+* The compressed-point encoding format used by the codegen may
+  not directly match the spec's parity-byte convention. Check
+  `Stack/P256P384.lean` for the codegen's compress / decompress
+  layout and mirror it in the def.
+
+**Acceptance gate.**
+
+* `Crypto.p256Negate` and `Crypto.p384Negate` are concrete `def`s.
+* Net axiom delta: −2 (in `Crypto/Spec.lean`).
+* `./scripts/lean-verify.sh` green.
+
+**Effort.** 0.5 weeks.
+
+**Dependencies.** None.
+
+### 5.25 B4-a concrete `Crypto.ec*` defs (Tier 1, NEW)
+
+**Goal.** Land concrete Lean `def`s for the 10 secp256k1 primitive
+symbols currently axiomatised in `ANF/Eval.lean` lines 289-298
+(`ecAdd / ecMul / ecMulGen / ecNegate / ecOnCurve / ecModReduce /
+ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY`). Prerequisite
+for any future B4 codegen-to-spec discharge (Tier 3) and unblocks
+the §5.29 group-law audit.
+
+**Files.**
+
+* Primary: `ANF/Eval.lean` (replace 10 bare axioms with defs).
+* Possibly: `Crypto/Spec.lean` (helper field-arithmetic defs if not
+  already present), or a new `Crypto/Secp256k1.lean` if the codebase
+  prefers a separate file (mirroring `Crypto/HashBackend.lean` from
+  B3-a).
+
+**Technique.**
+
+1. Mirror SEC 2 v2 secp256k1 byte-level semantics. Field modulus
+   `p = 2^256 − 2^32 − 977`; group order `n`; generator `G`.
+2. `ecMakePoint`, `ecPointX`, `ecPointY`: direct byte split / join
+   of 32-byte coordinates.
+3. `ecEncodeCompressed`: parity byte + x-coordinate. Inverse of
+   compressed-point decoding (matches the spec's compressed form).
+4. `ecOnCurve`: check `y² ≡ x³ + 7 (mod p)` byte-by-byte.
+5. `ecModReduce`: standard `((a mod p) + p) mod p` reduction.
+6. `ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`: implement group law
+   in affine coordinates over `Int` (the bare def — efficiency is
+   not a goal; correctness is).
+
+**Failure modes.**
+
+* `ecMul` involves a square-and-multiply loop; needs an explicit
+  `termination_by` (iteration count fixed at 256 — bounded).
+* Byte ordering (big-endian vs little-endian) must match the codegen
+  precisely. Cross-check against `Stack/Ec.lean` emit functions.
+
+**Acceptance gate.**
+
+* `ANF/Eval.lean` ships 10 concrete `def`s in place of the 10 bare
+  ec* axioms.
+* `./scripts/lean-verify.sh` green; `./scripts/check-tcb-drift.sh`
+  reports `axioms = 100` (was 110, −10).
+* Net delta: −10.
+
+**Effort.** 2 weeks.
+
+**Dependencies.** None (independent of B5-a / B9-a).
+
+### 5.26 B5-a concrete `Crypto.p256* / p384*` defs (Tier 1, NEW)
+
+**Goal.** Land concrete Lean `def`s for the 12 P-256 / P-384
+primitive symbols currently axiomatised in `ANF/Eval.lean` lines
+301-314 (`p256Add / p256Mul / p256MulGen / p256OnCurve /
+p256EncodeCompressed / verifyECDSA_P256` and the 6 P-384 mirrors).
+Prerequisite for any future B5 codegen-to-spec discharge (Tier 3)
+and unblocks the §5.29 group-law audit.
+
+**Files.**
+
+* Primary: `ANF/Eval.lean`.
+* Possibly: `Crypto/Spec.lean` or a new `Crypto/NistEC.lean`.
+
+**Technique.** Mirror §5.25 for FIPS 186-5 P-256 / P-384 curves.
+Different field modulus, different generator, different curve
+equation, but same code structure as secp256k1.
+
+**Failure modes.** Same as §5.25, doubled for P-256 + P-384.
+
+**Acceptance gate.**
+
+* 12 concrete defs land; 12 axioms delete.
+* `./scripts/check-tcb-drift.sh` reports `axioms = 88` (after
+  §5.25 lands; cumulative −22).
+
+**Effort.** 2 weeks.
+
+**Dependencies.** None (independent of B4-a / B9-a).
+
+### 5.27 B9-a concrete `Crypto.Spec.verifySlhDsa_*` defs (Tier 1, NEW)
+
+**Goal.** Land concrete `def`s for the 6 FIPS 205 SHA-2 SLH-DSA
+parameter sets in `Crypto/Spec.lean`. Re-route the bare
+`verifySLHDSA_SHA2_*` axioms in `ANF/Eval.lean` lines 357-362 as
+delegating `def`s (mirroring the wave-1 verifier-axiom delegation
+pattern for `merkleRootSha256` / `verifyRabinSig`). Prerequisite
+for any future B9 codegen-to-spec discharge (Tier 3).
+
+**Files.**
+
+* Primary: `Crypto/Spec.lean` (add concrete spec defs), `ANF/Eval.lean`
+  (re-route axioms as delegating defs).
+
+**Technique.**
+
+1. Compose SHA-256 + Merkle (using `Crypto.Spec.merkleRootD`) +
+   WOTS+ (using `Crypto.Spec.verifyWOTS`) + FORS tree, per FIPS 205.
+2. Six parameter sets (SHA2_128s, 128f, 192s, 192f, 256s, 256f)
+   differ in tree parameters (height, leaves, hashes per node).
+3. The import-cycle wrinkle the wave 1 delegation agent identified
+   (Crypto/Spec ↔ ANF/Eval) may resurface; resolve via the
+   inline-helpers pattern (duplicate helpers in `ANF/Eval.lean`
+   byte-identical to `Crypto/Spec.lean` definitions) or via a
+   shared `Crypto/SpecCore.lean` refactor as the wave 1 delegation
+   agent recommended.
+
+**Failure modes.**
+
+* FORS tree spec is substantial (~200 lines per parameter set).
+  Plan for ~3 weeks total, not single-week per parameter set.
+* The bare-axiom signatures use 3 `ByteArray` arguments (msg, sig,
+  pk); the delegating def must match exactly.
+
+**Acceptance gate.**
+
+* 6 concrete spec defs in `Crypto/Spec.lean`.
+* 6 delegating defs in `ANF/Eval.lean` replacing the bare axioms.
+* `./scripts/check-tcb-drift.sh` reports `axioms = 82` (cumulative
+  after §5.25 + §5.26 land).
+
+**Effort.** 3 weeks.
+
+**Dependencies.** Optional: shared `Crypto/SpecCore.lean` refactor
+(also unblocks `verifyWOTS` delegation, which was deferred in
+wave 1 for the same import-cycle reason). The refactor is ~3 days
+of mechanical file-splitting.
+
+### 5.28 B10-prep — `Stack/Eval.lean` `OP_EQUAL` coercion fix (Tier 1, NEW)
+
+**Goal.** Widen `Stack.Eval.runOpcode "OP_EQUAL"` in
+`Stack/Eval.lean` to model Bitcoin Script's int↔bytes coercion.
+Currently the implementation returns `.vBool false` when comparing
+a `.vBigint` with a `.vBytes` (or vice versa), but Bitcoin Script
+v2 coerces both to a common Script-number-bytes form before
+comparison. This blocks B10 Rabin discharge: the Rabin codegen
+produces `OP_MOD` (which leaves `.vBigint`) and then compares
+against `SHA256(msg)` (`.vBytes`); the current Lean model says
+they're never equal, contradicting `verifyRabinSig_spec`.
+
+**Files.**
+
+* Primary: `Stack/Eval.lean` (the `runOpcode "OP_EQUAL"` arm).
+* Audit: every theorem under `RunarVerification/` that references
+  the strict `OP_EQUAL` behavior to ensure no regression.
+
+**Technique.**
+
+1. In `runOpcode "OP_EQUAL"`, after extracting the two top stack
+   values, attempt both `asInt? a` and `asBytes? a` for each
+   operand. If both are `.some`, compare on the coerced form
+   (using `Stack.decodeMinimalLE` / `encodeMinimalLE` for the
+   bytes↔int direction).
+2. Preserve the existing failure paths (insufficient stack,
+   incompatible types after coercion attempt).
+3. Run `./scripts/lean-verify.sh` to catch any downstream proof
+   that depended on the strict behavior.
+
+**Failure modes.**
+
+* A downstream proof in `Stack/Peephole.lean` or `Stack/Sim.lean`
+  may rely on the strict-type behavior; the audit step is
+  non-trivial. Budget 2 days for the audit and any required
+  proof patches.
+* The coercion semantics must match Bitcoin SV consensus exactly
+  — cross-check against `bsv` reference implementations or test
+  vectors before landing.
+
+**Acceptance gate.**
+
+* `runOpcode "OP_EQUAL"` correctly compares `.vBigint pubKey` vs
+  `.vBytes (SHA256 msg)` via coercion.
+* `./scripts/lean-verify.sh` green; no proofs broken.
+* `./scripts/run-pipeline-conformance.sh` unchanged (no fixture
+  regression).
+
+**Effort.** 0.5 weeks (0.5 day implementation + 2 days audit).
+
+**Dependencies.** None.
+
+### 5.29 Crypto/Spec group-law audit (Tier 2, NEW)
+
+**Goal.** After §5.25 (B4-a) and §5.26 (B5-a) land concrete defs
+for `Crypto.ecAdd / p256Add / p384Add`, audit the 20 group-law
+axioms in `Crypto/Spec.lean` §1 (10 secp256k1) and §2.5 (10 P-256
++ P-384) and convert each to a theorem proved against the concrete
+def. Estimated removal: 15-20 axioms.
+
+**Files.**
+
+* Primary: `Crypto/Spec.lean`.
+
+**Technique.**
+
+1. Each axiom (e.g., `ecAdd_assoc`, `ecAdd_comm`, `ecAdd_zero`,
+   `ecMul_distrib_add`) becomes a `theorem` proved by `decide`
+   for small sample points or by direct algebraic manipulation
+   over the concrete `ecAdd` def.
+2. Some axioms (e.g., `ecMulGen_one_ne_zero`) require a
+   non-triviality proof: the generator `G` has non-zero image
+   under `[1]`. This is a concrete byte-level check.
+
+**Failure modes.**
+
+* `decide` over `ByteArray` for full 256-bit field operations
+  will time out the elaborator. Need `decide`-fast helpers or
+  manual proof.
+* `ecAdd_assoc` is the standard hard theorem in elliptic-curve
+  group laws — non-trivial even with a concrete `ecAdd` def.
+  Budget more time for this one specifically.
+
+**Acceptance gate.**
+
+* Up to 20 theorems land in place of axioms (target: at least 15;
+  some may remain axiomatic if the proof effort exceeds the
+  1.5-week budget).
+
+**Effort.** 1.5 weeks.
+
+**Dependencies.** B4-a (§5.25) + B5-a (§5.26).
 
 ---
 

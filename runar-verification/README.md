@@ -16,11 +16,11 @@ pipeline. The package is useful in two roles:
 | ANF parse + well-formedness | 56/56 |
 | ANF JSON round-trip | 56/56 |
 | Default byte-exact gate (`pipelineGolden`) | 49/49 byte-exact |
-| Formal-evidence gate (`pipelineConformance`) | **0/56 VERIFIED** (deferral breakdown: 23 not-single-public-method, 6 checkPreimage, 26 terminalAssert, 1 structuralRefBody) |
+| Formal-evidence gate (`pipelineConformance`) | **0/56 VERIFIED-direct**, **56/56 VERIFIED-modulo-codegen-axioms** (Phase D harness omnibus tier; soundness conditional on the codegen-soundness axioms documented in `TRUST_MANIFEST.md`) |
 | Crypto-heavy fixtures | 15/49 stored Lean-produced constants; explicit pending-assumption bucket |
 | Full/sharded byte-exact target | live `cryptoAxiomPending` bucket regeneration |
 | Tracked Lean modules | all build via `scripts/lean-verify.sh` |
-| Project axioms | 124 (see `TRUST_MANIFEST.md` for per-axiom breakdown) |
+| Project axioms | 110 (was 125; wave 1 of Path 2 discharged 15 — see `TRUST_MANIFEST.md` for per-axiom breakdown and trajectory) |
 | Opaque executable defaults | 0 |
 | `partial def` in `RunarVerification/` | 0 |
 | `sorry` / `admit` | 0 |
@@ -37,24 +37,43 @@ itself. They remain visible as the `cryptoAxiomPending` bucket because
 their semantic proof obligations still depend on the crypto assumptions
 listed in `TRUST_MANIFEST.md`.
 
-`pipelineConformance` is the formal-evidence gate. It reports **0/56
-VERIFIED** today with a precise per-fixture deferral breakdown:
-- 23 fixtures classified `DEFERRED-not-single-public-method` (Phase D
-  multi-method-dispatch capstone applies but per-fixture instantiation
-  is not yet wired into the harness),
-- 6 fixtures classified `DEFERRED-checkPreimage` (Phase D stateful
-  continuation),
-- 26 fixtures classified `DEFERRED-terminalAssert` (Phase D terminal-
-  assert elision),
-- 1 fixture classified `DEFERRED-structuralRefBody` (`asm-raw-script` —
-  uses an ANF `raw_script` value that is recognised by the loader but
-  emits a sentinel `OP_RUNAR_RAWSCRIPT_UNSUPPORTED` opcode in the
-  current Stack-IR; the dedicated `raw_bytes` StackOp + per-arm
-  simulation discharge is the remaining A14 follow-up).
+`pipelineConformance` is the formal-evidence gate. It reports
+**0/56 VERIFIED-direct** and **56/56 VERIFIED-modulo-codegen-axioms**
+today. The two-tier classification means:
+
+- **VERIFIED-direct** — the fixture lies inside the structural-ref
+  fragment for which the A15 capstone is an unconditional Lean
+  theorem (no codegen-soundness axioms). To reach this tier a fixture
+  must be well-formed, have `compileSafe = .ok _`, expose a single
+  public method, have no auto-injected `checkPreimage` / `codePart` /
+  `deserializeState` / terminal assert, satisfy `structuralRefBody`
+  on every binding, and satisfy `noIfOp` on the lowered body. Every
+  real conformance fixture uses at least one constructor outside
+  this fragment (`binOp`, `call`, `assert`, `update_prop`, `if_val`,
+  `loop`, `method_call`, crypto intrinsics, output construction), so
+  we expect 0 fixtures at this tier until Path 2's Stage C wrapper
+  widening + Phase D wrapper soundness + omnibus split (milestone O1)
+  land.
+
+- **VERIFIED-modulo-codegen-axioms** — the fixture passes the
+  permissive premises of the Phase D harness omnibus axiom
+  `compileSafe_observational_correct_modulo_codegen_axioms`:
+  well-formed, `compileSafe = .ok`, at least one public method.
+  Soundness for fixtures at this tier is conditional on the
+  codegen-soundness axioms in `TRUST_MANIFEST.md` (Phase B
+  per-primitive codegen-to-spec assumptions + the Phase D harness
+  omnibus, which collapses the runtime-side Stage C composition for
+  non-structural-const ANF constructors into one trust footprint).
+  All 56 fixtures land here today.
 
 This is an accurate, honest measurement — not a test failure. The
-count will rise as the Phase D harness wiring lands and as the
-A3–A14 runtime-discharge work composes.
+0/56 → N/56 visible flip requires either the omnibus to be split
+into per-family sub-omnibuses (Tier 1 milestone **O1** in
+`PATH2_PLAN.md` §5.23) or the harness's structural classifier to
+be widened to `SupportedANFBody`. Wrapper widening alone in
+`Stack/AgreesA<k>.lean` does not flip fixtures because the harness
+checks `structuralRefBodyBool`. See `PATH2_PLAN.md` and `TODO.md`
+for the tiered execution plan.
 
 `conformance/tests/` contains 56 fixtures, all of which `goldenLoad`
 and `roundtrip` recognise (the `asm-raw-script` fixture parses cleanly
@@ -181,8 +200,14 @@ No real Rúnar contract in the 56-fixture corpus satisfies
 `structuralRefBody`. Every fixture body contains at least one
 `binOp`, `call`, `assert`, `update_prop`, `if_val`, `loop`, or
 `method_call` binding. The `tests/PipelineConformance.lean` harness
-measures this: **0/56 VERIFIED**. The 0/56 measurement is correct
-and honest, not a defect in the harness.
+measures this with a two-tier classification:
+**0/56 VERIFIED-direct** + **56/56 VERIFIED-modulo-codegen-axioms**.
+All 56 fixtures pass the permissive premises of the Phase D harness
+omnibus (well-formed, `compileSafe = .ok`, at least one public
+method) and are sound conditional on the codegen-soundness axioms
+documented in `TRUST_MANIFEST.md`. The 0/56 VERIFIED-direct number
+is correct and honest, not a defect in the harness — it reflects
+the structural-ref fragment's intentional narrowness.
 
 Building block sub-theorems that feed both capstones:
 
@@ -224,7 +249,10 @@ predicate + Decidable (E1), `extractVersion_buildPreimage_eq` and
 `runOpcode_CHECKSIGVERIFY_ValidTxContext` (E3).
 
 Phase F complete: `tests/PipelineConformance.lean` harness runs all
-56 fixtures; current report is 0/56 VERIFIED (all deferred). Every
+56 fixtures; current report is **0/56 VERIFIED-direct** +
+**56/56 VERIFIED-modulo-codegen-axioms** (Phase D harness omnibus
+tier — sound conditional on the codegen-soundness axioms in
+`TRUST_MANIFEST.md`). Every
 domain predicate the harness checks (`structuralConstBody`,
 `structuralRefBody`, `AreRunarEmittable`, `AreRunarEmittableWithIf`,
 `noIfOp`, `wellTypedRun`, `rollPickDepthOK`,
@@ -360,10 +388,12 @@ Concretely:
   BLAKE3, secp256k1, NIST P-256 / P-384 / ECDSA, BabyBear field +
   degree-4 extension, Merkle root, WOTS+, SLH-DSA (all 6 FIPS 205
   SHA-2 parameter sets), and Rabin.
-* **Mechanically checked, citable trust footprint.** The 125 axioms
-  in `TRUST_MANIFEST.md` each carry a literature citation (FIPS,
-  SEC, RFC, Plonky3) or a 7-tier-conformance backing reference.
-  Trust assumptions are explicit, not implicit.
+* **Mechanically checked, citable trust footprint.** The 110 axioms
+  in `TRUST_MANIFEST.md` (was 125 before Path 2 wave 1 — 2026-05-17)
+  each carry a literature citation (FIPS, SEC, RFC, Plonky3) or a
+  7-tier-conformance backing reference. Trust assumptions are
+  explicit, not implicit. See `TRUST_MANIFEST.md` §"Axiom-count
+  trajectory" for the direction of travel.
 * **Concrete spec coverage in `ANF/Eval.lean`** for compound
   builtins (`extractOutputHash`, `buildChangeOutput`,
   `computeStateOutput`) and 11 math/byte builtins (`safediv`,
@@ -388,15 +418,27 @@ empirical anchor on the compiler side.
 
 ### Caveat — Path 2 is future work
 
-The 22 codegen-soundness axioms (16 Phase B + 5 Phase D + 1 omnibus)
-remain in the trusted computing base. Discharging them with direct
-Lean proofs — Path 2 — is multi-month specialist work tracked in
-`TODO.md`. Without Path 2, the conformance claim is "verified modulo
-the 22 documented axioms"; with Path 2 complete it becomes the
-unconditional "verified". Either form is strictly stronger than the
-typical "we have tests" baseline, and the structural-fragment
-capstones (M5, A15) and per-primitive crypto `runOps`-to-spec proofs
-(B1+B2) are already unconditional Lean theorems today.
+The 38 codegen-to-spec axioms in `TRUST_MANIFEST.md`'s "Axiom
+Taxonomy" §"Discharge Target" column remain in the trusted
+computing base: 4 in `Pipeline.lean` (3 per-wrapper Phase D + 1
+omnibus), 10 in `Crypto/Spec.lean` §6 (Phase B4 secp256k1
+codegen-to-spec), 14 in `Stack/P256P384.lean` (Phase B5 P-256/P-384
+codegen-to-spec), 6 in `Stack/SlhDsa.lean` (Phase B9 SLH-DSA
+codegen-to-spec), 2 in `Stack/Blake3.lean` (Phase B3 BLAKE3
+codegen-to-spec), 1 in `Stack/Wots.lean` (Phase B8 WOTS+
+codegen-to-spec), and 1 in `Stack/Rabin.lean` (Phase B10 Rabin
+codegen-to-spec). Discharging them with direct Lean proofs — Path 2 —
+is multi-month specialist work. Wave 1 (2026-05-17, commit
+`7dcc7fc3`) discharged 15 axioms (125 → 110). The remaining work is
+tier-prioritized in `TODO.md` and `PATH2_PLAN.md`: Tier 1 ≈ 8–10
+weeks parallel / 18–22 weeks solo; Tier 2 is an explicit decision
+point; Tier 3 is deferred indefinitely. Without further Path 2
+work, the conformance claim is "verified modulo the documented
+axioms"; with Path 2 complete it becomes the unconditional
+"verified". Either form is strictly stronger than the typical "we
+have tests" baseline, and the structural-fragment capstones (M5,
+A15) and per-primitive crypto `runOps`-to-spec proofs (B1+B2) are
+already unconditional Lean theorems today.
 
 ## Active References
 

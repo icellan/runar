@@ -14,6 +14,118 @@ counts:
 | Opaque defaults with bodies | 0 | No opaque declarations carry defaults |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
 
+## Axiom-count trajectory
+
+Direction of travel across recent phases. Each row records the axiom
+count after the named landing; "Δ" is the delta from the previous
+row. The "added with named discharge path" column tracks axioms that
+were added *intending* to be retired (codegen-to-spec links, harness
+omnibus bridges); the "permanent crypto assumption" column tracks
+real cryptographic primitive existence / group law / EUF-CMA axioms
+that are preserved by design.
+
+| Phase | Date | Axioms | Δ | Added-with-discharge | Added-as-crypto |
+|---|---|---:|---:|---:|---:|
+| Pre-Phase-B integration | (baseline) | 69 | — | — | — |
+| Phase B4/B6/B8/B10 integration | 2026-05-16 | 85 | +16 | +12 (B4 codegen ×10, B8 +1, B10 +1) | +4 (B6 `_correct`) |
+| Phase B3/B5/B9/B11-math integration | 2026-05-16 | 119 | +34 | +22 (B3 ×2, B5 codegen ×14, B9 ×6) | +12 (B5 group-law ×10 + `pXNegate` ×2) |
+| Phase D multi-method + stateful | 2026-05-16 | 124 | +5 | +5 (D1, D2.a, D2.b, D3.a, D3.b) | 0 |
+| Phase D harness integration omnibus | 2026-05-16 | 125 | +1 | +1 (omnibus) | 0 |
+| Phase B6 BabyBear discharge (wave 1) | 2026-05-17 | 117 | −8 | −4 (`_correct` companions become theorems) | −4 (bare `bbField*` become defs — were "preserved" by old taxonomy) |
+| Phase D3 discharge (wave 1) | 2026-05-17 | 115 | −2 | −2 (terminal_assert, nip_cleanup were vacuous `P→P`) | 0 |
+| Phase B3-a concrete defs (wave 1) | 2026-05-17 | 113 | −2 | 0 | −2 (`blake3Hash` / `blake3Compress` become delegating defs to `Crypto/HashBackend.lean`) |
+| Verifier-axiom delegation (wave 1) | 2026-05-17 | 110 | −3 | 0 | −3 (`merkleRootSha256`, `merkleRootHash256`, `verifyRabinSig` become concrete defs) |
+
+**Net wave 1 (2026-05-17, commit `7dcc7fc3`):** 125 → 110, Δ = −15.
+
+The Phase B6 and B3-a discharges reveal a taxonomy gap in the
+original Path 2 framing: some axioms classified "permanent crypto"
+were in fact small algebraic primitives that admit concrete `def`s
+(BabyBear prime-field arithmetic, BLAKE3 byte-level mixing, Merkle
+path computation, Rabin modular squaring). The §"Axiom Taxonomy"
+table below makes the partition explicit.
+
+## Axiom Taxonomy — preserved vs discharge-target
+
+The 110 current axioms split into two roles. **Preserved** axioms
+are real cryptographic primitive existence / group law / EUF-CMA
+assumptions that Path 2 does not target — they remain axiomatic by
+design (no Lean proof can discharge "ECDSA satisfies EUF-CMA",
+"SHA-256 is collision-resistant", or "secp256k1 forms a group of
+prime order" without re-doing the underlying cryptography). **Target**
+axioms are codegen-to-spec links — they assert that a particular
+emit op-list reduces under `runOps` to the corresponding spec
+function. These are concrete computations and admit direct Lean
+proofs; Path 2 discharges them.
+
+| File | Total | Preserved | Target | Notes |
+|---|---:|---:|---:|---|
+| `ANF/Eval.lean` | 34 | 34 | 0 | 3 backend assumptions (`hashBackend`, `authBackend`, `preimageBackend`); 2 partial-SHA-256 ops (`sha256Compress`, `sha256Finalize`); 10 secp256k1 primitives; 12 P-256/P-384 primitives; 7 high-level verifiers (`verifyWOTS`, `verifySLHDSA_*` ×6). The 7 high-level verifiers can become delegating defs (cf. wave 1 Merkle/Rabin pattern) once a shared `Crypto/SpecCore.lean` refactor breaks the import cycle to `Crypto/Spec.lean` — that work is tracked as **B-finalize-delegation** in `TODO.md`. |
+| `Crypto/Spec.lean` | 48 | 38 | 10 | **Preserved (38):** 10 secp256k1 group laws §1; 12 P-256/P-384 group laws §2.5 (including 2 `pXNegate` function symbols — both derivable as concrete `def`s once the negation formula `(x, y) → (x, p − y mod p)` is in the file; tracked as Tier 1 task **pXNegate-derivable**); 5 auxiliary key functions; 11 EUF-CMA companions. **Target (10):** Phase B4 secp256k1 codegen-to-spec (`emitEcAdd_runOps_eq` ... `emitEcPointY_runOps_eq`). The 20 group-law axioms in §1 + §2.5 become *derivable* once B4-a / B5-a land concrete `Crypto.ecAdd` / `Crypto.p256Add` / etc., shifting them from "Preserved" to "Discharged". |
+| `Pipeline.lean` | 4 | 0 | 4 | All four are codegen-soundness targets: D1 `merkle_dispatch_selection_correct`, D2.a `auto_check_preimage_at_method_entry_correct`, D2.b `auto_state_output_at_method_exit_correct`, and the omnibus `compileSafe_observational_correct_modulo_codegen_axioms`. |
+| `Stack/Blake3.lean` | 2 | 0 | 2 | `runOps_b3HashOps_eq`, `runOps_b3CompressOps_eq` — codegen-to-spec. |
+| `Stack/P256P384.lean` | 14 | 0 | 14 | Codegen-to-spec for `emitP256/P384*` and `emitVerifyECDSA_P256/P384`. |
+| `Stack/SlhDsa.lean` | 6 | 0 | 6 | One codegen-to-spec link per FIPS 205 SHA-2 parameter set. |
+| `Stack/Wots.lean` | 1 | 0 | 1 | `runOps_wotsBodyOps_eq` codegen-to-spec. |
+| `Stack/Rabin.lean` | 1 | 0 | 1 | `runOps_rabinBodyOps_eq` codegen-to-spec (blocked on `Stack/Eval.lean` `OP_EQUAL` int↔bytes coercion fix — tracked as **B10-prep** in `TODO.md`). |
+| **Sum** | **110** | **72** | **38** | |
+
+Path 2 retires the 38 "Target" axioms. After full Path 2 with the
+sub-phase work (B4-a / B5-a / B9-a) plus the group-law audit, the
+"Preserved" count drops further: the 20 group-law axioms in
+`Crypto/Spec.lean` become derivable, the 2 `pXNegate` become
+concrete defs (Tier 1), and the 7 high-level verifier axioms in
+`ANF/Eval.lean` become delegating defs. Projected floor after
+Path 2: roughly **40 axioms** — the 26 "real cryptographic"
+remainder (backend assumptions, EUF-CMA companions, 2 partial-SHA
+ops, 5 aux key functions) plus the still-axiomatic codegen-to-spec
+residue for primitives that resist full discharge (~14 if Tier 3
+defers indefinitely). The "26 cryptographic axioms remain" framing
+in earlier `TODO.md` revisions referred to that 26-axiom permanent
+crypto subset, not the post-Path-2 total.
+
+## Phase D harness integration omnibus — planned split
+
+The single omnibus axiom
+`compileSafe_observational_correct_modulo_codegen_axioms` will be
+split into per-constructor-family sub-omnibuses as part of Tier 1
+milestone **O1**. Each sub-omnibus carries the structural-predicate
+classifier so the conformance harness can dispatch fixtures into
+per-family `VERIFIED-modulo-<family>-codegen-axioms` tiers. The
+planned sub-omnibus inventory:
+
+* `compileSafe_observational_correct_modulo_arith_codegen` — for
+  bodies whose only non-structural-const bindings are `binOp` /
+  `unaryOp` / `assert`. Discharged once Stage C A3 widening
+  completes.
+* `compileSafe_observational_correct_modulo_math_byte_call_codegen` —
+  for bodies whose only non-structural-const bindings are `.call`
+  to math/byte builtins. Discharged once Stage C A4-math/byte
+  completes.
+* `compileSafe_observational_correct_modulo_crypto_call_codegen` —
+  for bodies whose only non-structural-const bindings are `.call`
+  to crypto builtins. Discharged after Phase B per-primitive +
+  A4-crypto.
+* `compileSafe_observational_correct_modulo_update_prop_codegen` —
+  for bodies with `update_prop`. Discharged once A5 widening
+  completes.
+* `compileSafe_observational_correct_modulo_if_val_codegen` —
+  Discharged once A6 widening completes.
+* `compileSafe_observational_correct_modulo_loop_codegen` —
+  Discharged once A7 widening completes.
+* `compileSafe_observational_correct_modulo_method_call_codegen` —
+  Discharged once A8 widening completes.
+* `compileSafe_observational_correct_modulo_dispatch_codegen` —
+  Discharged once D1 lands.
+* `compileSafe_observational_correct_modulo_stateful_codegen` —
+  Discharged once D2.a + D2.b land.
+
+The split temporarily inflates the axiom count by ~8 (9 sub-omnibuses
+replace 1 omnibus). Each sub-omnibus retires as the corresponding
+Stage C / Phase D milestone lands. Net asymptotic effect: harness
+auditor clarity improves (per-family classification) without
+permanent axiom inflation.
+
 ## Axiom Inventory
 
 | File | Count | Role |
