@@ -1156,6 +1156,11 @@ fn map_rust_builtin(name: &str) -> String {
         "to_byte_string" => return "toByteString".to_string(),
         "verify_ecdsa_p256" => return "verifyECDSA_P256".to_string(),
         "verify_ecdsa_p384" => return "verifyECDSA_P384".to_string(),
+        // Intent sub-covenant intrinsics (BSVM Phase 13). The P2PKH acronym
+        // doesn't survive snake_to_camel (it would lowercase the `P`), so map
+        // explicitly. extract_prev_output_script and current_block_height
+        // round-trip cleanly but are listed in the post-camel block below.
+        "require_output_p2pkh" => return "requireOutputP2PKH".to_string(),
         _ => {}
     }
 
@@ -1176,6 +1181,8 @@ fn map_rust_builtin(name: &str) -> String {
         "int2str" => "int2str".to_string(),
         "extractLocktime" => "extractLocktime".to_string(),
         "extractOutputHash" => "extractOutputHash".to_string(),
+        "extractPrevOutputScript" => "extractPrevOutputScript".to_string(),
+        "currentBlockHeight" => "currentBlockHeight".to_string(),
         "extractVersion" => "extractVersion".to_string(),
         "extractHashPrevouts" => "extractHashPrevouts".to_string(),
         "extractHashSequence" => "extractHashSequence".to_string(),

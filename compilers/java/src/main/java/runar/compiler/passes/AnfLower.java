@@ -264,12 +264,27 @@ public final class AnfLower {
                 }
                 augmented.add(new AnfParam("txPreimage", "SigHashPreimage"));
 
+                // Intent-covenant intrinsic auto-injected witness params:
+                // extractPrevOutputScript adds `_prevOutScript_<inputIndex>`
+                // (one per distinct literal index referenced in the method);
+                // requireOutputP2PKH adds a single `_serialisedOutputs`.
+                // Appended AFTER txPreimage so unlocking scripts push them
+                // adjacent to the preimage. Mirrors Go reference compiler.
+                augmented.addAll(ctx.methodScope.autoInjectedParams);
+
                 out.add(new AnfMethod(method.name(), augmented, ctx.bindings, true));
             } else {
                 ctx.lowerStatements(method.body());
+                List<AnfParam> privAugmented = new ArrayList<>(lowerParams(method.params()));
+                // Private methods can also call the intent intrinsics; capture
+                // their auto-injected witness params on the private's own ABI.
+                // (When the private is inlined into a public via
+                // inlinePrivateMethodCall the public reuses the same
+                // methodScope and the auto-injection is also visible there.)
+                privAugmented.addAll(ctx.methodScope.autoInjectedParams);
                 out.add(new AnfMethod(
                     method.name(),
-                    lowerParams(method.params()),
+                    privAugmented,
                     ctx.bindings,
                     method.visibility() == Visibility.PUBLIC
                 ));
@@ -291,6 +306,30 @@ public final class AnfLower {
     // Lowering context
     // ------------------------------------------------------------------
 
+    /**
+     * Per-method bookkeeping shared by a public method's top-level
+     * lowering context and all of its sub-contexts (if/else branches,
+     * ternaries, inlined privates). Tracks the auto-injected witness
+     * parameters needed by the intent-covenant intrinsics
+     * ({@code extractPrevOutputScript}, {@code requireOutputP2PKH})
+     * regardless of whether the intrinsic appears in the method's
+     * top-level body or in a nested block.
+     *
+     * <p>Mirrors {@code methodScopeT} in
+     * {@code compilers/go/frontend/anf_lower.go}.
+     */
+    private static final class MethodScope {
+        final List<AnfParam> autoInjectedParams = new ArrayList<>();
+        final Set<String> autoInjectedSet = new HashSet<>();
+        boolean didEmitHashOutputsCheck = false;
+
+        void recordAutoInjectedParam(String name, String type) {
+            if (autoInjectedSet.add(name)) {
+                autoInjectedParams.add(new AnfParam(name, type));
+            }
+        }
+    }
+
     private static final class LowerCtx {
         final List<AnfBinding> bindings = new ArrayList<>();
         int counter = 0;
@@ -307,6 +346,11 @@ public final class AnfLower {
         // emitting load_param. Stacked so nested inlines compose correctly.
         // Mirrors the TS / Go reference compilers' paramAliasStack.
         final Map<String, List<String>> paramAliasStack = new HashMap<>();
+        // Shared per-method bookkeeping for intent-covenant intrinsics; the
+        // *same* instance is reused by every sub-context so a nested
+        // {@code extractPrevOutputScript} / {@code requireOutputP2PKH} call
+        // registers its auto-injected param on the public method's ABI.
+        MethodScope methodScope = new MethodScope();
 
         LowerCtx(ContractNode contract) {
             this.contract = contract;
@@ -474,6 +518,10 @@ public final class AnfLower {
             sub.paramNames.addAll(this.paramNames);
             sub.localAliases.putAll(this.localAliases);
             sub.localByteVars.addAll(this.localByteVars);
+            // Share the methodScope so intent-covenant intrinsics emitted
+            // inside if/else branches or ternaries register their
+            // auto-injected witness params on the parent method's ABI.
+            sub.methodScope = this.methodScope;
             return sub;
         }
 
@@ -833,6 +881,128 @@ public final class AnfLower {
                     String preimageRef = lowerExprToRef(e.args().get(0));
                     return emit(new CheckPreimage(preimageRef));
                 }
+            }
+
+            // extractPrevOutputScript(inputIndex_literal, expectedScriptHash)
+            // -> ByteString. Witness-bridge sugar (BSVM Phase 13). Auto-injects
+            // a hidden method parameter `_prevOutScript_<inputIndex>` (one per
+            // distinct index in the method body), emits
+            // hash256(witness) === expectedScriptHash, and returns the witness
+            // ref for caller substring extraction.
+            //
+            // 2-arg form: hash256(witness) === expectedScriptHash. Pins the
+            //   full prev-output script byte-for-byte.
+            // 3-arg form (Crit-2): hash256(substr(witness, 0, prefixLen)) ===
+            //   expectedScriptPrefixHash. Pins the policy prefix only,
+            //   leaving the pushdata tail free to vary. Required for the
+            //   intent-template matching use case where each successor
+            //   intent UTXO has a unique tail (BSVM Mode 3 permissionless
+            //   step-in).
+            if (callee instanceof Identifier epoId
+                && "extractPrevOutputScript".equals(epoId.name())) {
+                if (e.args().size() != 2 && e.args().size() != 3) {
+                    return emit(makeLoadConstString(""));
+                }
+                if (!(e.args().get(0) instanceof BigIntLiteral idxLit)) {
+                    return emit(makeLoadConstString(""));
+                }
+                long idx = idxLit.value().longValueExact();
+                String paramName = "_prevOutScript_" + idx;
+                methodScope.recordAutoInjectedParam(paramName, "ByteString");
+                addParam(paramName);
+                String witnessRef = emit(new LoadParam(paramName));
+                String expectedHashRef = lowerExprToRef(e.args().get(1));
+
+                // Determine which bytes to hash: full witness (2-arg) or
+                // prefix (3-arg). The substr happens at script-execution
+                // time; the literal prefixLen is baked into the emitted
+                // Stack-IR.
+                String bytesToHashRef;
+                if (e.args().size() == 3) {
+                    if (!(e.args().get(2) instanceof BigIntLiteral prefixLenLit)) {
+                        return emit(makeLoadConstString(""));
+                    }
+                    String zeroRef = emit(makeLoadConstInt(BigInteger.ZERO));
+                    String prefixLenRef = emit(makeLoadConstInt(prefixLenLit.value()));
+                    bytesToHashRef = emit(new Call(
+                        "substr", List.of(witnessRef, zeroRef, prefixLenRef)));
+                } else {
+                    bytesToHashRef = witnessRef;
+                }
+
+                String actualHashRef = emit(new Call("hash256", List.of(bytesToHashRef)));
+                String eqRef = emit(new BinOp("===", actualHashRef, expectedHashRef, "bytes"));
+                emit(new Assert(eqRef));
+                return witnessRef;
+            }
+
+            // requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount)
+            // -> void. Asserts that the tx's output at outputIndex is a
+            // standard P2PKH paying `amount` satoshis to `pubkeyHash`.
+            // Auto-injects `_serialisedOutputs` (once per method) and emits
+            // hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
+            // first time the intrinsic is called; subsequent calls in the
+            // same method emit only the per-output substring assertion.
+            //
+            // v1 assumes all outputs in the serialised set are exactly 34
+            // bytes (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script).
+            if (callee instanceof Identifier ropId
+                && "requireOutputP2PKH".equals(ropId.name())) {
+                if (e.args().size() != 3) {
+                    return emit(makeLoadConstString(""));
+                }
+                if (!(e.args().get(0) instanceof BigIntLiteral idxLit)) {
+                    return emit(makeLoadConstString(""));
+                }
+                long idx = idxLit.value().longValueExact();
+
+                methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString");
+                addParam("_serialisedOutputs");
+
+                // Emit the hashOutputs(preimage) check exactly once per method.
+                if (!methodScope.didEmitHashOutputsCheck) {
+                    methodScope.didEmitHashOutputsCheck = true;
+                    String serialisedRef = emit(new LoadParam("_serialisedOutputs"));
+                    String actualOutHashRef = emit(new Call("hash256", List.of(serialisedRef)));
+                    String preimageRef = emit(new LoadParam("txPreimage"));
+                    String expectedOutHashRef = emit(new Call("extractOutputHash", List.of(preimageRef)));
+                    String hashEqRef = emit(new BinOp("===", actualOutHashRef, expectedOutHashRef, "bytes"));
+                    emit(new Assert(hashEqRef));
+                }
+
+                // Lower the user-supplied args (pubkeyHash, amount).
+                String pubkeyHashRef = lowerExprToRef(e.args().get(1));
+                String amountRef = lowerExprToRef(e.args().get(2));
+
+                // Construct expected P2PKH output bytes:
+                //   <amount: 8-byte LE> ‖ 0x19 0x76 0xa9 0x14 ‖
+                //   <pubkeyHash: 20 bytes> ‖ 0x88 0xac
+                String eightRef = emit(makeLoadConstInt(BigInteger.valueOf(8)));
+                String amountBytesRef = emit(new Call("num2bin", List.of(amountRef, eightRef)));
+                // 0x19 0x76 0xa9 0x14 — script length byte + OP_DUP OP_HASH160 OP_PUSH20
+                String prefixRef = emit(makeLoadConstString("1976a914"));
+                // 0x88 0xac — OP_EQUALVERIFY OP_CHECKSIG
+                String suffixRef = emit(makeLoadConstString("88ac"));
+                String cat1Ref = emit(new Call("cat", List.of(amountBytesRef, prefixRef)));
+                String cat2Ref = emit(new Call("cat", List.of(cat1Ref, pubkeyHashRef)));
+                String expectedOutputRef = emit(new Call("cat", List.of(cat2Ref, suffixRef)));
+
+                // Substring extract at idx*34 length 34, assert equal.
+                String serialisedRef2 = emit(new LoadParam("_serialisedOutputs"));
+                String offsetRef = emit(makeLoadConstInt(BigInteger.valueOf(idx * 34L)));
+                String lengthRef = emit(makeLoadConstInt(BigInteger.valueOf(34)));
+                String extractedRef = emit(new Call("substr", List.of(serialisedRef2, offsetRef, lengthRef)));
+                String outEqRef = emit(new BinOp("===", extractedRef, expectedOutputRef, "bytes"));
+                return emit(new Assert(outEqRef));
+            }
+
+            // currentBlockHeight() -> bigint. Pure source-level desugar to
+            // extractLocktime(txPreimage). Only valid in StatefulSmartContract
+            // methods (typecheck enforces). No new ANF kind needed.
+            if (callee instanceof Identifier cbhId
+                && "currentBlockHeight".equals(cbhId.name())) {
+                String preimageRef = emit(new LoadParam("txPreimage"));
+                return emit(new Call("extractLocktime", List.of(preimageRef)));
             }
 
             // this.addOutput(satoshis, val1, val2, ...)

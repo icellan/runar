@@ -198,6 +198,16 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("extractLocktime", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
     m.insert("extractSigHashType", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
 
+    // Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
+    // that compile down to standard primitives + auto-injected method params.
+    // See docs/cross-covenant-pattern.md.
+    //
+    // First arg of extractPrevOutputScript / requireOutputP2PKH MUST be an
+    // integer literal — enforced as a special case in check_call_args.
+    m.insert("extractPrevOutputScript", FuncSig { params: vec!["bigint", "ByteString"], return_type: "ByteString" });
+    m.insert("requireOutputP2PKH", FuncSig { params: vec!["bigint", "ByteString", "bigint"], return_type: "void" });
+    m.insert("currentBlockHeight", FuncSig { params: vec![], return_type: "bigint" });
+
     m
 }
 
@@ -425,6 +435,24 @@ impl<'a> TypeChecker<'a> {
         }
 
         self.check_statements(&method.body, &mut env);
+
+        // Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in
+        // the same method body. The intrinsic's compile-time output-offset
+        // computation assumes a fixed 34-byte stride per output, which is
+        // silently wrong when an OP_RETURN output (variable length)
+        // precedes the indexed P2PKH output. v1 forbids the mix; v2 may
+        // relax with a variable-stride decoder.
+        let has_require_p2pkh = body_calls_builtin(&method.body, "requireOutputP2PKH");
+        let has_add_data_output = body_calls_add_data_output(&method.body);
+        if has_require_p2pkh && has_add_data_output {
+            self.add_error(format!(
+                "method '{}' mixes requireOutputP2PKH() with addDataOutput() — \
+v1 of the intrinsic assumes a fixed 34-byte output stride and \
+variable-length OP_RETURN outputs break the offset computation; \
+split the addDataOutput call into a separate method",
+                method.name
+            ));
+        }
     }
 
     fn check_statements(&mut self, stmts: &[Statement], env: &mut TypeEnv) {
@@ -1119,6 +1147,72 @@ impl<'a> TypeChecker<'a> {
             return return_type.to_string();
         }
 
+        // extractPrevOutputScript / requireOutputP2PKH — the index arg
+        // MUST be a compile-time integer literal so the ANF lowering can
+        // derive a stable auto-injected witness-param name
+        // (extractPrevOutputScript) or a constant byte offset
+        // (requireOutputP2PKH).
+        if func_name == "extractPrevOutputScript" || func_name == "requireOutputP2PKH" {
+            if !args.is_empty()
+                && !matches!(&args[0], Expression::BigIntLiteral { .. })
+            {
+                self.add_error(format!(
+                    "{}() argument 1 (index) must be an integer literal",
+                    func_name
+                ));
+            }
+        }
+
+        // extractPrevOutputScript variable-arity special case (2-arg
+        // full-hash or 3-arg prefix-hash form). Validates types +
+        // literal-only on the optional prefixLen, then returns the
+        // signature's return type to bypass the standard arg-count check
+        // below (which would reject the 3-arg form against the 2-arg sig
+        // table entry).
+        if func_name == "extractPrevOutputScript" {
+            if args.len() != 2 && args.len() != 3 {
+                self.add_error(format!(
+                    "extractPrevOutputScript() expects 2 or 3 arguments, got {}",
+                    args.len()
+                ));
+            }
+            if !args.is_empty() {
+                // arg 0 already validated as a literal above
+                self.infer_expr_type(&args[0], env);
+            }
+            if args.len() >= 2 {
+                let arg_type = self.infer_expr_type(&args[1], env);
+                if !is_subtype(&arg_type, "ByteString") && arg_type != "<unknown>" {
+                    self.add_error(format!(
+                        "argument 2 of extractPrevOutputScript(): expected 'ByteString', got '{}'",
+                        arg_type
+                    ));
+                }
+            }
+            if args.len() == 3 {
+                if !matches!(&args[2], Expression::BigIntLiteral { .. }) {
+                    self.add_error(
+                        "extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied",
+                    );
+                }
+                self.infer_expr_type(&args[2], env);
+            }
+            self.check_affine_consumption(func_name, args, env);
+            return return_type.to_string();
+        }
+
+        // requireOutputP2PKH and currentBlockHeight need the
+        // auto-injected txPreimage — only available in
+        // StatefulSmartContract methods.
+        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight" {
+            if self.contract.parent_class != "StatefulSmartContract" {
+                self.add_error(format!(
+                    "{}() is only available in StatefulSmartContract methods",
+                    func_name
+                ));
+            }
+        }
+
         // Special case: checkMultiSig (Sig[] / PubKey[] arrays). Only
         // arity is special; arg-type validation falls through to the
         // standard subtype loop below so callers cannot pass
@@ -1418,6 +1512,155 @@ fn type_node_to_ttype(node: &TypeNode) -> TType {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Body-walk helpers for the Crit-3 requireOutputP2PKH / addDataOutput
+// rejection. Recursively scans every statement and expression in a method
+// body looking for a top-level builtin call by identifier name (Identifier
+// callee) or an `obj.addDataOutput(...)` / `this.addDataOutput()` call
+// (MemberExpr / PropertyAccess callee). Mirrors the Go reference impl in
+// compilers/go/frontend/typecheck.go.
+// ---------------------------------------------------------------------------
+
+fn body_calls_builtin(body: &[Statement], name: &str) -> bool {
+    body.iter().any(|s| stmt_contains_call_to(s, name))
+}
+
+fn body_calls_add_data_output(body: &[Statement]) -> bool {
+    body.iter().any(stmt_contains_add_data_output)
+}
+
+fn stmt_contains_call_to(stmt: &Statement, name: &str) -> bool {
+    match stmt {
+        Statement::ExpressionStatement { expression, .. } => {
+            expr_contains_call_to(expression, name)
+        }
+        Statement::VariableDecl { init, .. } => expr_contains_call_to(init, name),
+        Statement::Assignment { target, value, .. } => {
+            expr_contains_call_to(target, name) || expr_contains_call_to(value, name)
+        }
+        Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+            if expr_contains_call_to(condition, name) {
+                return true;
+            }
+            if then_branch.iter().any(|s| stmt_contains_call_to(s, name)) {
+                return true;
+            }
+            if let Some(else_b) = else_branch {
+                if else_b.iter().any(|s| stmt_contains_call_to(s, name)) {
+                    return true;
+                }
+            }
+            false
+        }
+        Statement::ForStatement { body, .. } => {
+            body.iter().any(|s| stmt_contains_call_to(s, name))
+        }
+        Statement::ReturnStatement { value, .. } => {
+            value.as_ref().map_or(false, |e| expr_contains_call_to(e, name))
+        }
+    }
+}
+
+fn expr_contains_call_to(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::CallExpr { callee, args, .. } => {
+            if let Expression::Identifier { name: id_name } = callee.as_ref() {
+                if id_name == name {
+                    return true;
+                }
+            }
+            args.iter().any(|a| expr_contains_call_to(a, name))
+        }
+        Expression::BinaryExpr { left, right, .. } => {
+            expr_contains_call_to(left, name) || expr_contains_call_to(right, name)
+        }
+        Expression::UnaryExpr { operand, .. } => expr_contains_call_to(operand, name),
+        Expression::TernaryExpr { condition, consequent, alternate } => {
+            expr_contains_call_to(condition, name)
+                || expr_contains_call_to(consequent, name)
+                || expr_contains_call_to(alternate, name)
+        }
+        Expression::IndexAccess { object, index } => {
+            expr_contains_call_to(object, name) || expr_contains_call_to(index, name)
+        }
+        Expression::ArrayLiteral { elements } => {
+            elements.iter().any(|e| expr_contains_call_to(e, name))
+        }
+        Expression::IncrementExpr { operand, .. }
+        | Expression::DecrementExpr { operand, .. } => expr_contains_call_to(operand, name),
+        Expression::MemberExpr { object, .. } => expr_contains_call_to(object, name),
+        _ => false,
+    }
+}
+
+fn stmt_contains_add_data_output(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::ExpressionStatement { expression, .. } => {
+            expr_contains_add_data_output(expression)
+        }
+        Statement::VariableDecl { init, .. } => expr_contains_add_data_output(init),
+        Statement::Assignment { target, value, .. } => {
+            expr_contains_add_data_output(target) || expr_contains_add_data_output(value)
+        }
+        Statement::IfStatement { condition, then_branch, else_branch, .. } => {
+            if expr_contains_add_data_output(condition) {
+                return true;
+            }
+            if then_branch.iter().any(stmt_contains_add_data_output) {
+                return true;
+            }
+            if let Some(else_b) = else_branch {
+                if else_b.iter().any(stmt_contains_add_data_output) {
+                    return true;
+                }
+            }
+            false
+        }
+        Statement::ForStatement { body, .. } => {
+            body.iter().any(stmt_contains_add_data_output)
+        }
+        Statement::ReturnStatement { value, .. } => {
+            value.as_ref().map_or(false, expr_contains_add_data_output)
+        }
+    }
+}
+
+fn expr_contains_add_data_output(expr: &Expression) -> bool {
+    match expr {
+        Expression::CallExpr { callee, args, .. } => {
+            match callee.as_ref() {
+                Expression::PropertyAccess { property } if property == "addDataOutput" => {
+                    return true;
+                }
+                Expression::MemberExpr { property, .. } if property == "addDataOutput" => {
+                    return true;
+                }
+                _ => {}
+            }
+            args.iter().any(expr_contains_add_data_output)
+        }
+        Expression::BinaryExpr { left, right, .. } => {
+            expr_contains_add_data_output(left) || expr_contains_add_data_output(right)
+        }
+        Expression::UnaryExpr { operand, .. } => expr_contains_add_data_output(operand),
+        Expression::TernaryExpr { condition, consequent, alternate } => {
+            expr_contains_add_data_output(condition)
+                || expr_contains_add_data_output(consequent)
+                || expr_contains_add_data_output(alternate)
+        }
+        Expression::IndexAccess { object, index } => {
+            expr_contains_add_data_output(object) || expr_contains_add_data_output(index)
+        }
+        Expression::ArrayLiteral { elements } => {
+            elements.iter().any(expr_contains_add_data_output)
+        }
+        Expression::IncrementExpr { operand, .. }
+        | Expression::DecrementExpr { operand, .. } => expr_contains_add_data_output(operand),
+        Expression::MemberExpr { object, .. } => expr_contains_add_data_output(object),
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {

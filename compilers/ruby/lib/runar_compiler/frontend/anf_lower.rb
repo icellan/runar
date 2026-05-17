@@ -293,6 +293,13 @@ module RunarCompiler
           end
           augmented_params << IR::ANFParam.new(name: "txPreimage", type: "SigHashPreimage")
 
+          # Intent sub-covenant intrinsic auto-injected witness params
+          # (BSVM Phase 13). Appended AFTER txPreimage so unlocking scripts
+          # push them adjacent to the preimage anchor. Mirrors Go ordering.
+          method_ctx.method_scope.auto_injected_params.each do |p|
+            augmented_params << p
+          end
+
           result << IR::ANFMethod.new(
             name: method.name,
             params: augmented_params,
@@ -301,11 +308,19 @@ module RunarCompiler
           )
         else
           method_ctx.lower_statements(method.body)
+          augmented = _lower_params(
+            method.params.reject { |p| _is_stateful_context_param(p) }
+          )
+          # Private methods can also call the intent intrinsics; capture
+          # their auto-injected witness params so a public method that
+          # inlines this private picks them up via the shared methodScope.
+          # The non-inlined ABI is still informative for callees.
+          method_ctx.method_scope.auto_injected_params.each do |p|
+            augmented << p
+          end
           result << IR::ANFMethod.new(
             name: method.name,
-            params: _lower_params(
-              method.params.reject { |p| _is_stateful_context_param(p) }
-            ),
+            params: augmented,
             body: method_ctx.bindings,
             is_public: method.visibility == "public"
           )
@@ -335,6 +350,29 @@ module RunarCompiler
     # Lowering context
     # -------------------------------------------------------------------
 
+    # Per-method bookkeeping shared between a LoweringContext and all its
+    # sub-contexts (if/else branches, ternaries). The ABI-augmentation pass
+    # in _lower_methods reads auto_injected_params after the method body is
+    # lowered to append witness params to the final ABI. Mirrors the Go
+    # reference compiler's methodScopeT struct.
+    class MethodScope
+      attr_reader :auto_injected_params
+      attr_accessor :did_emit_hash_outputs_check
+
+      def initialize
+        @auto_injected_params = []
+        @auto_injected_set = {}
+        @did_emit_hash_outputs_check = false
+      end
+
+      # Idempotent: second call with the same name is a no-op.
+      def record_auto_injected_param(name, type)
+        return if @auto_injected_set[name]
+        @auto_injected_set[name] = true
+        @auto_injected_params << IR::ANFParam.new(name: name, type: type)
+      end
+    end
+
     # Manages temp variable generation and binding emission.
     #
     # Mirrors the Go lowerCtx struct exactly.
@@ -360,7 +398,15 @@ module RunarCompiler
         # directly into this context. Mirrors TS / Go reference compilers'
         # paramAliasStack — see _inline_private_method_call below for usage.
         @param_alias_stack = {}
+        # Intent sub-covenant intrinsic bookkeeping (BSVM Phase 13). Shared
+        # with sub-contexts (if/else branches) so witness-param registrations
+        # inside a branch surface at the parent method's ABI. Mirrors the
+        # Go reference compiler's methodScopeT.
+        @method_scope = MethodScope.new
       end
+
+      # @return [MethodScope] shared per-method bookkeeping for intent intrinsics
+      attr_reader :method_scope
 
       # Push an alias for a parameter name, used while inlining the body of
       # a private method into this context: identifier references to that
@@ -586,6 +632,10 @@ module RunarCompiler
         sub.instance_variable_set(:@param_names, @param_names.dup)
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
+        # Share the per-method intent-intrinsic bookkeeping so witness-param
+        # registrations and the once-per-method hashOutputs flag propagate up
+        # from if/else branches. Mirrors Go subContext.methodScope sharing.
+        sub.instance_variable_set(:@method_scope, @method_scope)
         sub
       end
 
@@ -955,6 +1005,144 @@ module RunarCompiler
             preimage_ref = lower_expr_to_ref(e.args[0])
             return emit(IR::ANFValue.new(kind: "check_preimage").tap { |v| v.preimage = preimage_ref })
           end
+        end
+
+        # ---- Intent sub-covenant intrinsics (BSVM Phase 13) -------------
+        # See docs/cross-covenant-pattern.md. All three are pure frontend
+        # sugar that desugars to existing ANF primitives + auto-injected
+        # method params; no new ANF kinds, no Stack-IR codegen changes.
+
+        # extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString
+        # extractPrevOutputScript(inputIndex_literal, expectedScriptPrefixHash, prefixLen_literal) -> ByteString
+        #
+        # Witness-bridge sugar. Auto-injects a hidden method parameter named
+        # `_prevOutScript_<inputIndex>` (one per distinct index in the method
+        # body), emits a hash assertion, and returns the witness ref for
+        # caller substring extraction.
+        #
+        # 2-arg form: hash256(witness) === expectedScriptHash. Pins the full
+        #   prev-output script byte-for-byte.
+        # 3-arg form: hash256(substr(witness, 0, prefixLen)) ===
+        #   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
+        #   pushdata tail free to vary. Required for the intent-template
+        #   matching use case where each successor intent UTXO has a unique
+        #   tail (BSVM Mode 3 permissionless step-in, Crit-2).
+        if callee.is_a?(Identifier) && callee.name == "extractPrevOutputScript"
+          if e.args.length != 2 && e.args.length != 3
+            return emit(Frontend._make_load_const_string(""))
+          end
+          idx_lit = e.args[0]
+          unless idx_lit.is_a?(BigIntLiteral) && !idx_lit.value.nil?
+            return emit(Frontend._make_load_const_string(""))
+          end
+          idx = idx_lit.value.to_i
+          param_name = "_prevOutScript_#{idx}"
+          @method_scope.record_auto_injected_param(param_name, "ByteString")
+          add_param(param_name)
+          witness_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = param_name })
+          expected_hash_ref = lower_expr_to_ref(e.args[1])
+
+          # Determine which bytes to hash: full witness (2-arg) or prefix
+          # (3-arg). The substr happens at script-execution time; the literal
+          # prefixLen is baked into the emitted Stack-IR.
+          if e.args.length == 3
+            prefix_len_lit = e.args[2]
+            unless prefix_len_lit.is_a?(BigIntLiteral) && !prefix_len_lit.value.nil?
+              return emit(Frontend._make_load_const_string(""))
+            end
+            zero_ref = emit(Frontend._make_load_const_int(0))
+            prefix_len_ref = emit(Frontend._make_load_const_int(prefix_len_lit.value.to_i))
+            bytes_to_hash_ref = emit(Frontend._make_call("substr", [witness_ref, zero_ref, prefix_len_ref]))
+          else
+            bytes_to_hash_ref = witness_ref
+          end
+
+          actual_hash_ref = emit(Frontend._make_call("hash256", [bytes_to_hash_ref]))
+          eq_ref = emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = "==="
+            v.left = actual_hash_ref
+            v.right = expected_hash_ref
+            v.result_type = "bytes"
+          end)
+          emit(Frontend._make_assert(eq_ref))
+          return witness_ref
+        end
+
+        # requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount) -> void.
+        # Asserts that the tx's output at outputIndex is a standard P2PKH
+        # paying `amount` satoshis to `pubkeyHash`. Auto-injects
+        # `_serialisedOutputs` (once per method) and emits
+        # hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
+        # first time the intrinsic is called in a method body. Subsequent
+        # calls in the same method skip the hashOutputs check and emit only
+        # the per-output substring assertion.
+        #
+        # v1 assumes all outputs in the serialised set are exactly 34 bytes
+        # (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte
+        # offset of output i is i*34.
+        if callee.is_a?(Identifier) && callee.name == "requireOutputP2PKH"
+          return emit(Frontend._make_load_const_string("")) if e.args.length != 3
+          idx_lit = e.args[0]
+          unless idx_lit.is_a?(BigIntLiteral) && !idx_lit.value.nil?
+            return emit(Frontend._make_load_const_string(""))
+          end
+          idx = idx_lit.value.to_i
+
+          @method_scope.record_auto_injected_param("_serialisedOutputs", "ByteString")
+          add_param("_serialisedOutputs")
+
+          # Emit the hashOutputs(preimage) check exactly once per method.
+          unless @method_scope.did_emit_hash_outputs_check
+            @method_scope.did_emit_hash_outputs_check = true
+            serialised_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_serialisedOutputs" })
+            actual_out_hash_ref = emit(Frontend._make_call("hash256", [serialised_ref]))
+            preimage_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
+            expected_out_hash_ref = emit(Frontend._make_call("extractOutputHash", [preimage_ref]))
+            hash_eq_ref = emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+              v.op = "==="
+              v.left = actual_out_hash_ref
+              v.right = expected_out_hash_ref
+              v.result_type = "bytes"
+            end)
+            emit(Frontend._make_assert(hash_eq_ref))
+          end
+
+          # Lower the user-supplied args (pubkeyHash, amount).
+          pubkey_hash_ref = lower_expr_to_ref(e.args[1])
+          amount_ref = lower_expr_to_ref(e.args[2])
+
+          # Construct expected P2PKH output bytes:
+          #   <amount: 8-byte LE> ‖ 0x19 0x76 0xa9 0x14 ‖ <pubkeyHash: 20 bytes> ‖ 0x88 0xac
+          eight_ref = emit(Frontend._make_load_const_int(8))
+          amount_bytes_ref = emit(Frontend._make_call("num2bin", [amount_ref, eight_ref]))
+          # 0x19 0x76 0xa9 0x14 — script length byte + OP_DUP OP_HASH160 OP_PUSH20
+          prefix_ref = emit(Frontend._make_load_const_string("1976a914"))
+          # 0x88 0xac — OP_EQUALVERIFY OP_CHECKSIG
+          suffix_ref = emit(Frontend._make_load_const_string("88ac"))
+          cat1_ref = emit(Frontend._make_call("cat", [amount_bytes_ref, prefix_ref]))
+          cat2_ref = emit(Frontend._make_call("cat", [cat1_ref, pubkey_hash_ref]))
+          expected_output_ref = emit(Frontend._make_call("cat", [cat2_ref, suffix_ref]))
+
+          # Substring extract at idx*34 length 34, assert equal.
+          serialised_ref2 = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_serialisedOutputs" })
+          offset_ref = emit(Frontend._make_load_const_int(idx * 34))
+          length_ref = emit(Frontend._make_load_const_int(34))
+          extracted_ref = emit(Frontend._make_call("substr", [serialised_ref2, offset_ref, length_ref]))
+          out_eq_ref = emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+            v.op = "==="
+            v.left = extracted_ref
+            v.right = expected_output_ref
+            v.result_type = "bytes"
+          end)
+          return emit(Frontend._make_assert(out_eq_ref))
+        end
+
+        # currentBlockHeight() -> bigint. Pure source-level desugar to
+        # extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
+        # methods (typecheck enforces).
+        if callee.is_a?(Identifier) && callee.name == "currentBlockHeight"
+          preimage_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
+          return emit(Frontend._make_call("extractLocktime", [preimage_ref]))
         end
 
         # this.addOutput(satoshis, val1, val2, ...) via PropertyAccessExpr

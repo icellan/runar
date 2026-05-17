@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/branched-readonly-len/BranchedReadonlyLen.runar.ts",
+    ".runar.sol": "../../../examples/sol/branched-readonly-len/BranchedReadonlyLen.runar.sol",
+    ".runar.move": "../../../examples/move/branched-readonly-len/BranchedReadonlyLen.runar.move",
+    ".runar.go": "../../../examples/go/branched-readonly-len/BranchedReadonlyLen.runar.go",
+    ".runar.rs": "../../../examples/rust/branched-readonly-len/BranchedReadonlyLen.runar.rs",
+    ".runar.py": "../../../examples/python/branched-readonly-len/BranchedReadonlyLen.runar.py",
+    ".runar.zig": "../../../examples/zig/branched-readonly-len/BranchedReadonlyLen.runar.zig",
+    ".runar.rb": "../../../examples/ruby/branched-readonly-len/BranchedReadonlyLen.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/branched-readonly-len/BranchedReadonlyLen.runar.java"
+  }
+}

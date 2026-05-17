@@ -376,6 +376,17 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                 augmented_params.append(ANFParam(name="_newAmount", type="bigint"))
             augmented_params.append(ANFParam(name="txPreimage", type="SigHashPreimage"))
 
+            # Intent-covenant intrinsic auto-injected witness params:
+            # extractPrevOutputScript adds `_prevOutScript_<inputIndex>`
+            # (one per distinct literal index referenced in the method);
+            # requireOutputP2PKH adds a single `_serialisedOutputs`. Order
+            # follows insertion order via method_scope.auto_injected_params.
+            # Appended AFTER txPreimage so unlocking scripts push them
+            # adjacent to the preimage (matches existing _changePKH /
+            # _changeAmount / _newAmount convention of trailing the user
+            # args before the preimage anchor).
+            augmented_params += list(method_ctx.method_scope.auto_injected_params)
+
             result.append(ANFMethod(
                 name=method.name,
                 params=augmented_params,
@@ -384,9 +395,14 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             ))
         else:
             method_ctx.lower_statements(method.body)
+            # Private methods can also call the intent intrinsics; capture
+            # their auto-injected witness params so a public method that
+            # inlines this private picks them up via the shared method_scope.
+            augmented = _lower_params(method.params)
+            augmented += list(method_ctx.method_scope.auto_injected_params)
             result.append(ANFMethod(
                 name=method.name,
-                params=_lower_params(method.params),
+                params=augmented,
                 body=method_ctx.bindings,
                 is_public=method.visibility == "public",
             ))
@@ -405,6 +421,33 @@ def _lower_params(params: list) -> list[ANFParam]:
 # Lowering context
 # ---------------------------------------------------------------------------
 
+class _MethodScope:
+    """Per-method bookkeeping shared by parent and sub-contexts.
+
+    Tracks auto-injected witness parameters needed by intent-covenant
+    intrinsics (``extractPrevOutputScript``, ``requireOutputP2PKH``)
+    regardless of whether the intrinsic is called from the method's
+    top-level body or from inside a nested block (if/else, ternary).
+    Mirrors the Go ``methodScopeT`` struct.
+    """
+
+    def __init__(self) -> None:
+        # Append-only list of auto-injected params (insertion order).
+        self.auto_injected_params: list[ANFParam] = []
+        # Set of names already recorded (dedup).
+        self.auto_injected_set: set[str] = set()
+        # requireOutputP2PKH emits its hashOutputs(preimage) check at
+        # most ONCE per method body.
+        self.did_emit_hash_outputs_check: bool = False
+
+    def record_auto_injected_param(self, name: str, typ: str) -> None:
+        """Idempotent: second call with the same name is a no-op."""
+        if name in self.auto_injected_set:
+            return
+        self.auto_injected_set.add(name)
+        self.auto_injected_params.append(ANFParam(name=name, type=typ))
+
+
 class _LowerCtx:
     """Manages temp variable generation and binding emission.
 
@@ -415,6 +458,7 @@ class _LowerCtx:
         self,
         contract: ContractNode,
         side_effects: dict[str, MethodEffects] | None = None,
+        method_scope: _MethodScope | None = None,
     ) -> None:
         self.bindings: list[ANFBinding] = []
         self._counter: int = 0
@@ -438,6 +482,11 @@ class _LowerCtx:
         # nodes register on the caller's continuation hash) or remain a
         # method_call for stack lowering to inline later.
         self._side_effects: dict[str, MethodEffects] | None = side_effects
+        # Per-method scope shared by parent and sub-contexts. Tracks
+        # auto-injected witness params for intent-covenant intrinsics.
+        # Always non-None so sub-contexts inherit the same scope and
+        # auto-injection registers regardless of nesting depth.
+        self.method_scope: _MethodScope = method_scope if method_scope is not None else _MethodScope()
 
     def push_param_alias(self, name: str, alias_ref: str) -> None:
         self._param_alias_stack.setdefault(name, []).append(alias_ref)
@@ -570,9 +619,11 @@ class _LowerCtx:
         """Create a sub-context for nested blocks (if/else, loops).
 
         The counter continues from the parent. Local names and param names
-        are shared (copied).
+        are shared (copied). The method_scope is *shared by reference* so
+        auto-injection from intent intrinsics registers on the parent
+        method's ABI augmentation regardless of nesting depth.
         """
-        sub = _LowerCtx(self._contract)
+        sub = _LowerCtx(self._contract, side_effects=self._side_effects, method_scope=self.method_scope)
         sub._counter = self._counter
         sub._local_names = set(self._local_names)
         sub._param_names = set(self._param_names)
@@ -916,6 +967,132 @@ class _LowerCtx:
             if len(e.args) >= 1:
                 preimage_ref = self.lower_expr_to_ref(e.args[0])
                 return self.emit(ANFValue(kind="check_preimage", preimage=preimage_ref))
+
+        # extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString.
+        # extractPrevOutputScript(inputIndex_literal, expectedScriptPrefixHash, prefixLen_literal) -> ByteString.
+        #
+        # Witness-bridge sugar (BSVM Phase 13). Auto-injects a hidden method
+        # parameter named `_prevOutScript_<inputIndex>` (one per distinct index
+        # in the method body), emits a hash assertion, and returns the witness
+        # ref for caller substring extraction.
+        #
+        # 2-arg form: hash256(witness) === expectedScriptHash. Pins the full
+        #   prev-output script byte-for-byte. Use when the prev-output is a
+        #   single fixed-shape contract.
+        # 3-arg form: hash256(substr(witness, 0, prefixLen)) ===
+        #   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
+        #   pushdata tail free to vary. Required for the intent-template
+        #   matching use case where each successor intent UTXO has a unique
+        #   tail (BSVM Mode 3 permissionless step-in).
+        if isinstance(callee, Identifier) and callee.name == "extractPrevOutputScript":
+            if len(e.args) != 2 and len(e.args) != 3:
+                return self.emit(_make_load_const_string(""))
+            idx_lit = e.args[0]
+            if not isinstance(idx_lit, BigIntLiteral):
+                return self.emit(_make_load_const_string(""))
+            idx = idx_lit.value
+            param_name = f"_prevOutScript_{idx}"
+            self.method_scope.record_auto_injected_param(param_name, "ByteString")
+            self.add_param(param_name)
+            witness_ref = self.emit(ANFValue(kind="load_param", name=param_name))
+            expected_hash_ref = self.lower_expr_to_ref(e.args[1])
+
+            # Determine which bytes to hash: full witness (2-arg) or
+            # prefix (3-arg). The substr happens at script-execution time;
+            # the literal prefixLen is baked into the emitted Stack-IR.
+            if len(e.args) == 3:
+                prefix_len_lit = e.args[2]
+                if not isinstance(prefix_len_lit, BigIntLiteral):
+                    return self.emit(_make_load_const_string(""))
+                zero_ref = self.emit(_make_load_const_int(0))
+                prefix_len_ref = self.emit(_make_load_const_int(prefix_len_lit.value))
+                bytes_to_hash_ref = self.emit(
+                    _make_call("substr", [witness_ref, zero_ref, prefix_len_ref])
+                )
+            else:
+                bytes_to_hash_ref = witness_ref
+
+            actual_hash_ref = self.emit(_make_call("hash256", [bytes_to_hash_ref]))
+            eq_ref = self.emit(ANFValue(
+                kind="bin_op", op="===",
+                left=actual_hash_ref, right=expected_hash_ref,
+                result_type="bytes",
+            ))
+            self.emit(_make_assert(eq_ref))
+            return witness_ref
+
+        # requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount) -> void.
+        # Asserts that the tx's output at outputIndex is a standard P2PKH
+        # paying `amount` satoshis to `pubkeyHash`. Auto-injects
+        # `_serialisedOutputs` (once per method) and emits
+        # hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
+        # first time the intrinsic is called in a method body. Subsequent
+        # calls in the same method skip the hashOutputs check (already
+        # established) and emit only the per-output substring assertion.
+        #
+        # v1 assumes all outputs in the serialised set are exactly 34 bytes
+        # (8-byte LE amount || 0x19 length || 25-byte P2PKH script). Byte
+        # offset of output i is i*34.
+        if isinstance(callee, Identifier) and callee.name == "requireOutputP2PKH":
+            if len(e.args) != 3:
+                return self.emit(_make_load_const_string(""))
+            idx_lit = e.args[0]
+            if not isinstance(idx_lit, BigIntLiteral):
+                return self.emit(_make_load_const_string(""))
+            idx = idx_lit.value
+
+            self.method_scope.record_auto_injected_param("_serialisedOutputs", "ByteString")
+            self.add_param("_serialisedOutputs")
+
+            # Emit the hashOutputs(preimage) check exactly once per method.
+            if not self.method_scope.did_emit_hash_outputs_check:
+                self.method_scope.did_emit_hash_outputs_check = True
+                serialised_ref = self.emit(ANFValue(kind="load_param", name="_serialisedOutputs"))
+                actual_out_hash_ref = self.emit(_make_call("hash256", [serialised_ref]))
+                preimage_ref = self.emit(ANFValue(kind="load_param", name="txPreimage"))
+                expected_out_hash_ref = self.emit(_make_call("extractOutputHash", [preimage_ref]))
+                hash_eq_ref = self.emit(ANFValue(
+                    kind="bin_op", op="===",
+                    left=actual_out_hash_ref, right=expected_out_hash_ref,
+                    result_type="bytes",
+                ))
+                self.emit(_make_assert(hash_eq_ref))
+
+            # Lower the user-supplied args (pubkeyHash, amount).
+            pubkey_hash_ref = self.lower_expr_to_ref(e.args[1])
+            amount_ref = self.lower_expr_to_ref(e.args[2])
+
+            # Construct expected P2PKH output bytes:
+            #   <amount: 8-byte LE> || 0x19 0x76 0xa9 0x14
+            #     || <pubkeyHash: 20 bytes> || 0x88 0xac
+            eight_ref = self.emit(_make_load_const_int(8))
+            amount_bytes_ref = self.emit(_make_call("num2bin", [amount_ref, eight_ref]))
+            # 0x19 0x76 0xa9 0x14 -- script length byte + OP_DUP OP_HASH160 OP_PUSH20
+            prefix_ref = self.emit(_make_load_const_string("1976a914"))
+            # 0x88 0xac -- OP_EQUALVERIFY OP_CHECKSIG
+            suffix_ref = self.emit(_make_load_const_string("88ac"))
+            cat1_ref = self.emit(_make_call("cat", [amount_bytes_ref, prefix_ref]))
+            cat2_ref = self.emit(_make_call("cat", [cat1_ref, pubkey_hash_ref]))
+            expected_output_ref = self.emit(_make_call("cat", [cat2_ref, suffix_ref]))
+
+            # Substring extract at idx*34 length 34, assert equal.
+            serialised_ref2 = self.emit(ANFValue(kind="load_param", name="_serialisedOutputs"))
+            offset_ref = self.emit(_make_load_const_int(idx * 34))
+            length_ref = self.emit(_make_load_const_int(34))
+            extracted_ref = self.emit(_make_call("substr", [serialised_ref2, offset_ref, length_ref]))
+            out_eq_ref = self.emit(ANFValue(
+                kind="bin_op", op="===",
+                left=extracted_ref, right=expected_output_ref,
+                result_type="bytes",
+            ))
+            return self.emit(_make_assert(out_eq_ref))
+
+        # currentBlockHeight() -> bigint. Pure source-level desugar to
+        # extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
+        # methods (typecheck enforces). No new ANF kind or stack codegen needed.
+        if isinstance(callee, Identifier) and callee.name == "currentBlockHeight":
+            preimage_ref = self.emit(ANFValue(kind="load_param", name="txPreimage"))
+            return self.emit(_make_call("extractLocktime", [preimage_ref]))
 
         # this.addOutput(satoshis, val1, val2, ...) via PropertyAccessExpr.
         # Mirrors flattenAddOutputArgs in 04-anf-lower.ts: when addOutput is

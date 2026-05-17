@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/intent-current-block-height/IntentCurrentBlockHeight.runar.ts",
+    ".runar.sol": "../../../examples/sol/intent-current-block-height/IntentCurrentBlockHeight.runar.sol",
+    ".runar.move": "../../../examples/move/intent-current-block-height/IntentCurrentBlockHeight.runar.move",
+    ".runar.go": "../../../examples/go/intent-current-block-height/IntentCurrentBlockHeight.runar.go",
+    ".runar.rs": "../../../examples/rust/intent-current-block-height/IntentCurrentBlockHeight.runar.rs",
+    ".runar.py": "../../../examples/python/intent-current-block-height/IntentCurrentBlockHeight.runar.py",
+    ".runar.zig": "../../../examples/zig/intent-current-block-height/IntentCurrentBlockHeight.runar.zig",
+    ".runar.rb": "../../../examples/ruby/intent-current-block-height/IntentCurrentBlockHeight.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/intent-current-block-height/IntentCurrentBlockHeight.runar.java"
+  }
+}

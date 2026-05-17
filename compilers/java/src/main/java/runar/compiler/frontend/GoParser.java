@@ -184,6 +184,10 @@ public final class GoParser {
         GO_BUILTIN_MAP.put("Bin2Num", "bin2num");
         GO_BUILTIN_MAP.put("ExtractLocktime", "extractLocktime");
         GO_BUILTIN_MAP.put("ExtractOutputHash", "extractOutputHash");
+        // Intent sub-covenant intrinsics (BSVM Phase 13).
+        GO_BUILTIN_MAP.put("ExtractPrevOutputScript", "extractPrevOutputScript");
+        GO_BUILTIN_MAP.put("RequireOutputP2PKH", "requireOutputP2PKH");
+        GO_BUILTIN_MAP.put("CurrentBlockHeight", "currentBlockHeight");
         GO_BUILTIN_MAP.put("ExtractSequence", "extractSequence");
         GO_BUILTIN_MAP.put("ExtractVersion", "extractVersion");
         GO_BUILTIN_MAP.put("ExtractAmount", "extractAmount");

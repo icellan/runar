@@ -151,3 +151,64 @@ export function extractLocktime(_txPreimage: SigHashPreimage): bigint {
 export function extractSigHashType(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractSigHashType');
 }
+
+// ---------------------------------------------------------------------------
+// Intent sub-covenant intrinsics (BSVM Phase 13)
+// ---------------------------------------------------------------------------
+// These are witness-bridge wrappers — pure source-level sugar that the
+// compiler desugars into existing primitives plus auto-injected method
+// parameters. The runtime stubs throw so test harnesses that mistakenly
+// execute them off-chain surface a clear error. See
+// docs/cross-covenant-pattern.md for the on-chain semantics.
+
+/**
+ * Extract the previous-output locking script for an arbitrary input of the
+ * spending transaction. `inputIndex` MUST be a compile-time integer
+ * literal. The compiler auto-injects a hidden method parameter
+ * `_prevOutScript_<inputIndex>` (the unlocking script supplies the witness
+ * bytes) and emits a hash assertion.
+ *
+ * Two forms:
+ * - 2-arg: emits `hash256(witness) === expectedScriptHash`, pinning the
+ *   full prev-output script byte-for-byte.
+ * - 3-arg: emits `hash256(substr(witness, 0, prefixLen)) === expectedScriptPrefixHash`,
+ *   pinning only the policy prefix and leaving the pushdata tail free
+ *   to vary. `prefixLen` MUST also be a compile-time integer literal.
+ *   Required for intent-template matching where each successor UTXO has
+ *   a unique tail (BSVM Mode 3 permissionless step-in).
+ */
+export function extractPrevOutputScript(
+  _inputIndex: bigint,
+  _expectedScriptHash: ByteString,
+  _prefixLen?: bigint,
+): ByteString {
+  return compilerStub('extractPrevOutputScript');
+}
+
+/**
+ * Assert that the transaction's output at `outputIndex` is a standard
+ * 34-byte P2PKH output paying exactly `amount` satoshis to `pubkeyHash`.
+ * `outputIndex` MUST be a compile-time integer literal. Only valid in
+ * StatefulSmartContract methods (relies on the auto-injected txPreimage).
+ *
+ * The compiler auto-injects `_serialisedOutputs` once per method,
+ * emits a one-shot `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
+ * check, and per call asserts the 34-byte substring at offset
+ * `outputIndex * 34` equals the expected P2PKH bytes.
+ */
+export function requireOutputP2PKH(
+  _outputIndex: bigint,
+  _pubkeyHash: ByteString,
+  _amount: bigint,
+): void {
+  return compilerStub('requireOutputP2PKH');
+}
+
+/**
+ * Shorthand for `extractLocktime(this.txPreimage)`. Only valid in
+ * StatefulSmartContract methods. Pure source-level desugar — no new ANF
+ * kind or stack codegen.
+ */
+export function currentBlockHeight(): bigint {
+  return compilerStub('currentBlockHeight');
+}

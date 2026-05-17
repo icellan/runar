@@ -210,6 +210,15 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "extractLocktime", sig(&.{.sig_hash_preimage}, .bigint) },
     .{ "extractSigHashType", sig(&.{.sig_hash_preimage}, .bigint) },
     .{ "buildChangeOutput", sig(&.{ .byte_string, .bigint }, .byte_string) },
+    // Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
+    // that compile down to standard primitives + auto-injected method params.
+    // See docs/cross-covenant-pattern.md.
+    //
+    // First arg of extractPrevOutputScript / requireOutputP2PKH MUST be an
+    // integer literal — enforced as a special case in checkCallArgs.
+    .{ "extractPrevOutputScript", sig(&.{ .bigint, .byte_string }, .byte_string) },
+    .{ "requireOutputP2PKH", sig(&.{ .bigint, .byte_string, .bigint }, .void) },
+    .{ "currentBlockHeight", sig(&.{}, .bigint) },
 });
 
 // ============================================================================
@@ -442,6 +451,22 @@ const TypeChecker = struct {
         }
 
         self.checkStatements(method.body, &env);
+
+        // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH with
+        // addDataOutput in the same method body. v1 of the intrinsic assumes
+        // a fixed 34-byte per-output stride; a variable-length OP_RETURN
+        // output silently breaks the byte-offset computation.
+        const has_require_p2pkh = bodyCallsBuiltin(method.body, "requireOutputP2PKH");
+        const has_add_data_output = bodyCallsAddDataOutput(method.body);
+        if (has_require_p2pkh and has_add_data_output) {
+            self.addError(
+                "method '{s}' mixes requireOutputP2PKH() with addDataOutput() — " ++
+                    "v1 of the intrinsic assumes a fixed 34-byte output stride and " ++
+                    "variable-length OP_RETURN outputs break the offset computation; " ++
+                    "split the addDataOutput call into a separate method",
+                .{method.name},
+            );
+        }
     }
 
     fn checkStatements(self: *TypeChecker, stmts: []const Statement, env: *TypeEnv) void {
@@ -894,6 +919,57 @@ const TypeChecker = struct {
             return func_sig.return_type;
         }
 
+        // extractPrevOutputScript / requireOutputP2PKH — the index arg MUST
+        // be a compile-time integer literal so the ANF lowering can derive a
+        // stable auto-injected witness-param name (extractPrevOutputScript) or
+        // a constant byte offset (requireOutputP2PKH).
+        if (std.mem.eql(u8, func_name, "extractPrevOutputScript") or
+            std.mem.eql(u8, func_name, "requireOutputP2PKH"))
+        {
+            if (args.len >= 1) {
+                switch (args[0]) {
+                    .literal_int => {},
+                    else => self.addError("{s}() argument 1 (index) must be an integer literal", .{func_name}),
+                }
+            }
+        }
+
+        // extractPrevOutputScript variable-arity special case (2-arg full-hash
+        // or 3-arg prefix-hash form, BSVM Phase 13 Crit-2). Validates types +
+        // literal-only on the optional prefixLen, then returns the signature's
+        // return type to bypass the standard arg-count check below (which would
+        // reject the 3-arg form against the 2-arg sig table entry).
+        if (std.mem.eql(u8, func_name, "extractPrevOutputScript")) {
+            if (args.len != 2 and args.len != 3) {
+                self.addError("extractPrevOutputScript() expects 2 or 3 arguments, got {d}", .{args.len});
+            }
+            if (args.len >= 2) {
+                const arg_type = self.inferExprType(args[1], env);
+                if (!isSubtype(arg_type, .byte_string) and arg_type != .unknown) {
+                    self.addError("argument 2 of extractPrevOutputScript(): expected 'ByteString', got '{s}'", .{types.runarTypeToString(arg_type)});
+                }
+            }
+            if (args.len == 3) {
+                switch (args[2]) {
+                    .literal_int => {},
+                    else => self.addError("extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied", .{}),
+                }
+                _ = self.inferExprType(args[2], env);
+            }
+            self.checkAffineConsumption(func_name, args, env);
+            return func_sig.return_type;
+        }
+
+        // requireOutputP2PKH and currentBlockHeight need the auto-injected
+        // txPreimage — only available in StatefulSmartContract methods.
+        if (std.mem.eql(u8, func_name, "requireOutputP2PKH") or
+            std.mem.eql(u8, func_name, "currentBlockHeight"))
+        {
+            if (self.contract.parent_class != .stateful_smart_contract) {
+                self.addError("{s}() is only available in StatefulSmartContract methods", .{func_name});
+            }
+        }
+
         // Standard arity check
         if (args.len != func_sig.params.len) {
             self.addError("{s}() expects {d} argument(s), got {d}", .{ func_name, func_sig.params.len, args.len });
@@ -990,6 +1066,153 @@ const TypeChecker = struct {
         self.affine_aliases.put(self.allocator, name, origin) catch {};
     }
 };
+
+// ============================================================================
+// Body walkers — Crit-3 requireOutputP2PKH + addDataOutput mix detection
+// ============================================================================
+
+/// True if any statement in `body` (recursively) contains a top-level call
+/// expression to a builtin function named `name`.
+fn bodyCallsBuiltin(body: []const Statement, name: []const u8) bool {
+    for (body) |stmt| {
+        if (stmtContainsCallTo(stmt, name)) return true;
+    }
+    return false;
+}
+
+/// True if any statement in `body` (recursively) contains a call to
+/// `this.addDataOutput(...)` or `c.addDataOutput(...)` — matched by the
+/// method name on a MethodCall expression.
+fn bodyCallsAddDataOutput(body: []const Statement) bool {
+    for (body) |stmt| {
+        if (stmtContainsAddDataOutput(stmt)) return true;
+    }
+    return false;
+}
+
+fn stmtContainsCallTo(stmt: Statement, name: []const u8) bool {
+    return switch (stmt) {
+        .const_decl => |d| exprContainsCallTo(d.value, name),
+        .let_decl => |d| if (d.value) |v| exprContainsCallTo(v, name) else false,
+        .assign => |a| exprContainsCallTo(a.value, name),
+        .if_stmt => |s| blk: {
+            if (exprContainsCallTo(s.condition, name)) break :blk true;
+            for (s.then_body) |t| {
+                if (stmtContainsCallTo(t, name)) break :blk true;
+            }
+            if (s.else_body) |eb| {
+                for (eb) |t| {
+                    if (stmtContainsCallTo(t, name)) break :blk true;
+                }
+            }
+            break :blk false;
+        },
+        .for_stmt => |s| blk: {
+            for (s.body) |t| {
+                if (stmtContainsCallTo(t, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .expr_stmt => |e| exprContainsCallTo(e, name),
+        .assert_stmt => |s| exprContainsCallTo(s.condition, name),
+        .return_stmt => |rv| if (rv) |v| exprContainsCallTo(v, name) else false,
+    };
+}
+
+fn exprContainsCallTo(expr: Expression, name: []const u8) bool {
+    return switch (expr) {
+        .call => |c| blk: {
+            if (std.mem.eql(u8, c.callee, name)) break :blk true;
+            for (c.args) |a| {
+                if (exprContainsCallTo(a, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .method_call => |mc| blk: {
+            for (mc.args) |a| {
+                if (exprContainsCallTo(a, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        .binary_op => |b| exprContainsCallTo(b.left, name) or exprContainsCallTo(b.right, name),
+        .unary_op => |u| exprContainsCallTo(u.operand, name),
+        .ternary => |t| exprContainsCallTo(t.condition, name) or
+            exprContainsCallTo(t.then_expr, name) or
+            exprContainsCallTo(t.else_expr, name),
+        .index_access => |ia| exprContainsCallTo(ia.object, name) or exprContainsCallTo(ia.index, name),
+        .increment => |i| exprContainsCallTo(i.operand, name),
+        .decrement => |d| exprContainsCallTo(d.operand, name),
+        .array_literal => |elems| blk: {
+            for (elems) |el| {
+                if (exprContainsCallTo(el, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn stmtContainsAddDataOutput(stmt: Statement) bool {
+    return switch (stmt) {
+        .const_decl => |d| exprContainsAddDataOutput(d.value),
+        .let_decl => |d| if (d.value) |v| exprContainsAddDataOutput(v) else false,
+        .assign => |a| exprContainsAddDataOutput(a.value),
+        .if_stmt => |s| blk: {
+            if (exprContainsAddDataOutput(s.condition)) break :blk true;
+            for (s.then_body) |t| {
+                if (stmtContainsAddDataOutput(t)) break :blk true;
+            }
+            if (s.else_body) |eb| {
+                for (eb) |t| {
+                    if (stmtContainsAddDataOutput(t)) break :blk true;
+                }
+            }
+            break :blk false;
+        },
+        .for_stmt => |s| blk: {
+            for (s.body) |t| {
+                if (stmtContainsAddDataOutput(t)) break :blk true;
+            }
+            break :blk false;
+        },
+        .expr_stmt => |e| exprContainsAddDataOutput(e),
+        .assert_stmt => |s| exprContainsAddDataOutput(s.condition),
+        .return_stmt => |rv| if (rv) |v| exprContainsAddDataOutput(v) else false,
+    };
+}
+
+fn exprContainsAddDataOutput(expr: Expression) bool {
+    return switch (expr) {
+        .method_call => |mc| blk: {
+            if (std.mem.eql(u8, mc.method, "addDataOutput")) break :blk true;
+            for (mc.args) |a| {
+                if (exprContainsAddDataOutput(a)) break :blk true;
+            }
+            break :blk false;
+        },
+        .call => |c| blk: {
+            for (c.args) |a| {
+                if (exprContainsAddDataOutput(a)) break :blk true;
+            }
+            break :blk false;
+        },
+        .binary_op => |b| exprContainsAddDataOutput(b.left) or exprContainsAddDataOutput(b.right),
+        .unary_op => |u| exprContainsAddDataOutput(u.operand),
+        .ternary => |t| exprContainsAddDataOutput(t.condition) or
+            exprContainsAddDataOutput(t.then_expr) or
+            exprContainsAddDataOutput(t.else_expr),
+        .index_access => |ia| exprContainsAddDataOutput(ia.object) or exprContainsAddDataOutput(ia.index),
+        .increment => |i| exprContainsAddDataOutput(i.operand),
+        .decrement => |d| exprContainsAddDataOutput(d.operand),
+        .array_literal => |elems| blk: {
+            for (elems) |el| {
+                if (exprContainsAddDataOutput(el)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
 
 // ============================================================================
 // Private method return type inference (pre-pass, no type env needed)
@@ -1263,6 +1486,8 @@ test "builtin_functions: all 60+ entries present" {
         "extractOutpoint", "extractInputIndex", "extractScriptCode",
         "extractAmount",   "extractSequence",   "extractOutputHash",
         "extractOutputs",  "extractLocktime",   "extractSigHashType",
+        // Intent sub-covenant intrinsics (BSVM Phase 13)
+        "extractPrevOutputScript", "requireOutputP2PKH", "currentBlockHeight",
     };
     for (expected) |name| {
         try std.testing.expect(builtin_functions.get(name) != null);

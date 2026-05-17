@@ -228,6 +228,21 @@ public final class BuiltinRegistry {
         add(m, "extractSigHashType",   new String[][]{{"preimage", "SigHashPreimage"}}, "bigint");
         add(m, "buildChangeOutput",    new String[][]{{"pubKeyHash", "ByteString"}, {"amount", "bigint"}}, "ByteString");
 
+        // ---------------- intent sub-covenant intrinsics (BSVM Phase 13) ----
+        // Witness-bridge wrappers that compile down to standard primitives +
+        // auto-injected method params. See docs/cross-covenant-pattern.md.
+        // The first arg of extractPrevOutputScript / requireOutputP2PKH MUST
+        // be a compile-time integer literal — enforced as a special case in
+        // {@link Typecheck.Checker#checkCallArgs}.
+        // extractPrevOutputScript also supports a 3-arg prefix-hash form
+        // (Crit-2): extractPrevOutputScript(inputIndex, expectedScriptPrefixHash, prefixLen_literal).
+        // The variable arity is handled by the Typecheck special-case which
+        // short-circuits before the standard arity check; this sig entry
+        // only records the 2-arg base shape.
+        add(m, "extractPrevOutputScript", new String[][]{{"inputIndex", "bigint"}, {"expectedScriptHash", "ByteString"}}, "ByteString");
+        add(m, "requireOutputP2PKH",      new String[][]{{"outputIndex", "bigint"}, {"pubkeyHash", "ByteString"}, {"amount", "bigint"}}, "void");
+        add(m, "currentBlockHeight",      new String[0][0], "bigint");
+
         SIGNATURES = Collections.unmodifiableMap(m);
     }
 

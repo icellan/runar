@@ -270,6 +270,190 @@ public final class Typecheck {
                     }
                 });
             }
+
+            // Crit-3 — reject mixing requireOutputP2PKH with addDataOutput in
+            // the same method body. The intrinsic's compile-time output-offset
+            // computation assumes a fixed 34-byte stride per output, which is
+            // silently wrong when an OP_RETURN output (variable length)
+            // precedes the indexed P2PKH output. v1 forbids the mix; v2 may
+            // relax with a variable-stride decoder.
+            boolean hasRequireP2PKH = bodyCallsBuiltin(m.body(), "requireOutputP2PKH");
+            boolean hasAddDataOutput = bodyCallsAddDataOutput(m.body());
+            if (hasRequireP2PKH && hasAddDataOutput) {
+                errors.add(format(
+                    "method '" + m.name() + "' mixes requireOutputP2PKH() with "
+                        + "addDataOutput() — v1 of the intrinsic assumes a fixed "
+                        + "34-byte output stride and variable-length OP_RETURN "
+                        + "outputs break the offset computation; split the "
+                        + "addDataOutput call into a separate method",
+                    m.sourceLocation()
+                ));
+            }
+        }
+
+        // --------------------------------------------------------------
+        // Body-walk helpers — Crit-3 rejection (requireOutputP2PKH +
+        // addDataOutput mix). Mirrors bodyCallsBuiltin /
+        // bodyCallsAddDataOutput in compilers/go/frontend/typecheck.go.
+        // --------------------------------------------------------------
+
+        private static boolean bodyCallsBuiltin(List<Statement> body, String name) {
+            for (Statement s : body) {
+                if (stmtContainsCallTo(s, name)) return true;
+            }
+            return false;
+        }
+
+        private static boolean bodyCallsAddDataOutput(List<Statement> body) {
+            for (Statement s : body) {
+                if (stmtContainsAddDataOutput(s)) return true;
+            }
+            return false;
+        }
+
+        private static boolean stmtContainsCallTo(Statement s, String name) {
+            if (s instanceof ExpressionStatement e) {
+                return exprContainsCallTo(e.expression(), name);
+            }
+            if (s instanceof VariableDeclStatement v) {
+                return exprContainsCallTo(v.init(), name);
+            }
+            if (s instanceof AssignmentStatement a) {
+                return exprContainsCallTo(a.value(), name)
+                    || exprContainsCallTo(a.target(), name);
+            }
+            if (s instanceof IfStatement i) {
+                if (exprContainsCallTo(i.condition(), name)) return true;
+                for (Statement t : i.thenBody()) {
+                    if (stmtContainsCallTo(t, name)) return true;
+                }
+                if (i.elseBody() != null) {
+                    for (Statement t : i.elseBody()) {
+                        if (stmtContainsCallTo(t, name)) return true;
+                    }
+                }
+                return false;
+            }
+            if (s instanceof ForStatement f) {
+                for (Statement t : f.body()) {
+                    if (stmtContainsCallTo(t, name)) return true;
+                }
+                return false;
+            }
+            if (s instanceof ReturnStatement r) {
+                return r.value() != null && exprContainsCallTo(r.value(), name);
+            }
+            return false;
+        }
+
+        private static boolean exprContainsCallTo(Expression e, String name) {
+            if (e == null) return false;
+            if (e instanceof CallExpr c) {
+                if (c.callee() instanceof Identifier id && name.equals(id.name())) {
+                    return true;
+                }
+                for (Expression a : c.args()) {
+                    if (exprContainsCallTo(a, name)) return true;
+                }
+                return false;
+            }
+            if (e instanceof BinaryExpr b) {
+                return exprContainsCallTo(b.left(), name)
+                    || exprContainsCallTo(b.right(), name);
+            }
+            if (e instanceof UnaryExpr u) {
+                return exprContainsCallTo(u.operand(), name);
+            }
+            if (e instanceof TernaryExpr t) {
+                return exprContainsCallTo(t.condition(), name)
+                    || exprContainsCallTo(t.consequent(), name)
+                    || exprContainsCallTo(t.alternate(), name);
+            }
+            if (e instanceof IndexAccessExpr ia) {
+                return exprContainsCallTo(ia.object(), name)
+                    || exprContainsCallTo(ia.index(), name);
+            }
+            if (e instanceof ArrayLiteralExpr al) {
+                for (Expression el : al.elements()) {
+                    if (exprContainsCallTo(el, name)) return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean stmtContainsAddDataOutput(Statement s) {
+            if (s instanceof ExpressionStatement e) {
+                return exprContainsAddDataOutput(e.expression());
+            }
+            if (s instanceof VariableDeclStatement v) {
+                return exprContainsAddDataOutput(v.init());
+            }
+            if (s instanceof AssignmentStatement a) {
+                return exprContainsAddDataOutput(a.value())
+                    || exprContainsAddDataOutput(a.target());
+            }
+            if (s instanceof IfStatement i) {
+                if (exprContainsAddDataOutput(i.condition())) return true;
+                for (Statement t : i.thenBody()) {
+                    if (stmtContainsAddDataOutput(t)) return true;
+                }
+                if (i.elseBody() != null) {
+                    for (Statement t : i.elseBody()) {
+                        if (stmtContainsAddDataOutput(t)) return true;
+                    }
+                }
+                return false;
+            }
+            if (s instanceof ForStatement f) {
+                for (Statement t : f.body()) {
+                    if (stmtContainsAddDataOutput(t)) return true;
+                }
+                return false;
+            }
+            if (s instanceof ReturnStatement r) {
+                return r.value() != null && exprContainsAddDataOutput(r.value());
+            }
+            return false;
+        }
+
+        private static boolean exprContainsAddDataOutput(Expression e) {
+            if (e == null) return false;
+            if (e instanceof CallExpr c) {
+                if (c.callee() instanceof PropertyAccessExpr pa
+                        && "addDataOutput".equals(pa.property())) {
+                    return true;
+                }
+                if (c.callee() instanceof MemberExpr me
+                        && "addDataOutput".equals(me.property())) {
+                    return true;
+                }
+                for (Expression a : c.args()) {
+                    if (exprContainsAddDataOutput(a)) return true;
+                }
+                return false;
+            }
+            if (e instanceof BinaryExpr b) {
+                return exprContainsAddDataOutput(b.left())
+                    || exprContainsAddDataOutput(b.right());
+            }
+            if (e instanceof UnaryExpr u) {
+                return exprContainsAddDataOutput(u.operand());
+            }
+            if (e instanceof TernaryExpr t) {
+                return exprContainsAddDataOutput(t.condition())
+                    || exprContainsAddDataOutput(t.consequent())
+                    || exprContainsAddDataOutput(t.alternate());
+            }
+            if (e instanceof IndexAccessExpr ia) {
+                return exprContainsAddDataOutput(ia.object())
+                    || exprContainsAddDataOutput(ia.index());
+            }
+            if (e instanceof ArrayLiteralExpr al) {
+                for (Expression el : al.elements()) {
+                    if (exprContainsAddDataOutput(el)) return true;
+                }
+            }
+            return false;
         }
 
         private void checkStatements(List<Statement> stmts, Env env) {
@@ -743,6 +927,60 @@ public final class Typecheck {
                     return returnType;
                 }
                 // Fall through to the standard subtype check below.
+            }
+
+            // extractPrevOutputScript / requireOutputP2PKH — the index arg
+            // MUST be a compile-time integer literal so the ANF lowering
+            // can derive a stable auto-injected witness-param name
+            // (extractPrevOutputScript) or a constant byte offset
+            // (requireOutputP2PKH). Mirrors compilers/go/frontend/typecheck.go.
+            if ("extractPrevOutputScript".equals(name) || "requireOutputP2PKH".equals(name)) {
+                if (!args.isEmpty() && !(args.get(0) instanceof BigIntLiteral)) {
+                    error(name + "() argument 1 (index) must be an integer literal");
+                }
+            }
+
+            // extractPrevOutputScript variable-arity special case (2-arg
+            // full-hash or 3-arg prefix-hash form, Crit-2). Validates types
+            // + literal-only on the optional prefixLen, then returns the
+            // signature's return type to bypass the standard arg-count
+            // check below (which would reject the 3-arg form against the
+            // 2-arg sig table entry).
+            if ("extractPrevOutputScript".equals(name)) {
+                if (args.size() != 2 && args.size() != 3) {
+                    error("extractPrevOutputScript() expects 2 or 3 arguments, got "
+                        + args.size());
+                }
+                if (!args.isEmpty()) {
+                    inferExpr(args.get(0), env); // already validated as literal above
+                }
+                if (args.size() >= 2) {
+                    String argType = inferExpr(args.get(1), env);
+                    if (!isSubtype(argType, "ByteString") && !"<unknown>".equals(argType)) {
+                        error("argument 2 of extractPrevOutputScript(): expected "
+                            + "'ByteString', got '" + argType + "'");
+                    }
+                }
+                if (args.size() == 3) {
+                    if (!(args.get(2) instanceof BigIntLiteral)) {
+                        error("extractPrevOutputScript() argument 3 (prefixLen) "
+                            + "must be an integer literal when supplied");
+                    }
+                    inferExpr(args.get(2), env);
+                }
+                // Any trailing args beyond 3 still get walked for type-check
+                // side effects but the arity error above already fired.
+                for (int i = 3; i < args.size(); i++) inferExpr(args.get(i), env);
+                return returnType;
+            }
+
+            // requireOutputP2PKH and currentBlockHeight need the
+            // auto-injected txPreimage — only available in
+            // StatefulSmartContract methods.
+            if ("requireOutputP2PKH".equals(name) || "currentBlockHeight".equals(name)) {
+                if (contract != null && contract.parentClass() != ParentClass.STATEFUL_SMART_CONTRACT) {
+                    error(name + "() is only available in StatefulSmartContract methods");
+                }
             }
 
             if (args.size() != expectedParams.size()) {

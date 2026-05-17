@@ -259,10 +259,29 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMe
         } else {
             try lowerStatements(&method_ctx, method.body);
             const bindings = try method_ctx.bindings.toOwnedSlice(allocator);
+            // Private methods can also call the intent intrinsics; append
+            // any auto-injected witness params to their ABI. (Private methods
+            // are inlined into public bodies via inlinePrivateMethodCall —
+            // that path reuses the caller's context so the auto-injection
+            // registers at the public method's ABI augmentation step. The
+            // private's own ABI is still informative for non-inlined callees.)
+            // Fast path: when no intrinsics auto-injected anything, borrow
+            // the parser-owned slice unchanged to avoid an extra allocation
+            // (matches the pre-Phase-13 behaviour expected by callers that
+            // do not own the returned ANFProgram's params slice).
+            var params_out: []ParamNode = method.params;
+            if (method_ctx.auto_injected_params.items.len > 0) {
+                var nonpub_params: std.ArrayListUnmanaged(ParamNode) = .empty;
+                for (method.params) |p| try nonpub_params.append(allocator, p);
+                for (method_ctx.auto_injected_params.items) |p| {
+                    try nonpub_params.append(allocator, p);
+                }
+                params_out = try nonpub_params.toOwnedSlice(allocator);
+            }
             try result.append(allocator, ANFMethod{
                 .name = method.name,
                 .is_public = method.is_public,
-                .params = method.params,
+                .params = params_out,
                 .bindings = bindings,
                 .body = bindings,
             });
@@ -295,6 +314,19 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMe
                 try aug_params.append(allocator, .{ .name = "_newAmount", .type_info = .bigint, .type_name = "bigint" });
             }
             try aug_params.append(allocator, .{ .name = "txPreimage", .type_info = .sig_hash_preimage, .type_name = "SigHashPreimage" });
+
+            // Intent-covenant intrinsic auto-injected witness params (BSVM
+            // Phase 13). extractPrevOutputScript adds `_prevOutScript_<i>`
+            // (one per distinct literal index referenced in the method);
+            // requireOutputP2PKH adds a single `_serialisedOutputs`. Order
+            // follows insertion order via auto_injected_params. Appended
+            // AFTER txPreimage so unlocking scripts push them adjacent to
+            // the preimage (matches existing _changePKH / _changeAmount /
+            // _newAmount convention of trailing the user args before the
+            // preimage anchor).
+            for (method_ctx.auto_injected_params.items) |p| {
+                try aug_params.append(allocator, p);
+            }
 
             const bindings = try method_ctx.bindings.toOwnedSlice(allocator);
             try result.append(allocator, ANFMethod{
@@ -512,6 +544,16 @@ const LowerCtx = struct {
     param_alias_stack: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
     /// Current source location — set before lowering each statement, stamped on bindings.
     current_source_loc: ?types.SourceLocation = null,
+    /// Intent sub-covenant intrinsics (BSVM Phase 13). Auto-injected witness
+    /// params needed by extractPrevOutputScript (`_prevOutScript_<i>`) and
+    /// requireOutputP2PKH (`_serialisedOutputs`). Insertion-order list +
+    /// dedup set; appended to the method's ABI params list AFTER txPreimage.
+    /// Mirrors Go's methodScopeT (compilers/go/frontend/anf_lower.go).
+    auto_injected_params: std.ArrayListUnmanaged(ParamNode),
+    auto_injected_set: std.StringHashMapUnmanaged(void),
+    /// requireOutputP2PKH emits its hashOutputs(preimage) check at most once
+    /// per method — flipped on the first call.
+    did_emit_hash_outputs_check: bool = false,
 
     fn init(allocator: Allocator, contract: ContractNode) LowerCtx {
         return .{
@@ -526,6 +568,8 @@ const LowerCtx = struct {
             .add_output_refs = .empty,
             .add_data_output_refs = .empty,
             .param_alias_stack = .empty,
+            .auto_injected_params = .empty,
+            .auto_injected_set = .empty,
         };
     }
 
@@ -679,6 +723,21 @@ const LowerCtx = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.param_alias_stack.deinit(self.allocator);
+        self.auto_injected_params.deinit(self.allocator);
+        self.auto_injected_set.deinit(self.allocator);
+    }
+
+    /// Record an intent-intrinsic-injected witness param. Idempotent — a
+    /// repeat call with the same name is a no-op. Insertion order is
+    /// preserved so the ABI augmentation appends them in source order.
+    fn recordAutoInjectedParam(self: *LowerCtx, name: []const u8, type_info: RunarType, type_name: []const u8) void {
+        if (self.auto_injected_set.contains(name)) return;
+        self.auto_injected_set.put(self.allocator, name, {}) catch return;
+        self.auto_injected_params.append(self.allocator, .{
+            .name = name,
+            .type_info = type_info,
+            .type_name = type_name,
+        }) catch {};
     }
 
     /// Allocate a slice of string refs on the arena allocator.
@@ -1100,6 +1159,166 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
             const preimage_ref = try lowerExprToRef(ctx, c.args[0]);
             return try ctx.emit(.{ .check_preimage = .{ .preimage = preimage_ref } });
         }
+    }
+
+    // extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString.
+    // extractPrevOutputScript(inputIndex_literal, expectedScriptPrefixHash, prefixLen_literal) -> ByteString.
+    //
+    // Witness-bridge sugar (BSVM Phase 13). Auto-injects a hidden method
+    // parameter named `_prevOutScript_<inputIndex>` (one per distinct index
+    // in the method body), emits a hash assertion, and returns the witness
+    // ref for caller substring extraction.
+    //
+    // 2-arg form: hash256(witness) === expectedScriptHash. Pins the full
+    //   prev-output script byte-for-byte.
+    // 3-arg form: hash256(substr(witness, 0, prefixLen)) ===
+    //   expectedScriptPrefixHash. Pins the policy prefix only, leaving the
+    //   pushdata tail free to vary (BSVM Mode 3 step-in intent templates).
+    if (std.mem.eql(u8, c.callee, "extractPrevOutputScript")) {
+        if (c.args.len != 2 and c.args.len != 3) {
+            return try ctx.emit(makeLoadConstString(ctx.allocator, ""));
+        }
+        const idx: i64 = switch (c.args[0]) {
+            .literal_int => |v| v,
+            else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
+        };
+        const param_name = try std.fmt.allocPrint(ctx.allocator, "_prevOutScript_{d}", .{idx});
+        ctx.recordAutoInjectedParam(param_name, .byte_string, "ByteString");
+        ctx.addParam(param_name);
+        const witness_ref = try ctx.emit(.{ .load_param = .{ .name = param_name } });
+        const expected_hash_ref = try lowerExprToRef(ctx, c.args[1]);
+
+        // Determine which bytes to hash: full witness (2-arg) or prefix (3-arg).
+        // The substr happens at script-execution time; the literal prefixLen
+        // is baked into the emitted Stack-IR.
+        var bytes_to_hash_ref: []const u8 = witness_ref;
+        if (c.args.len == 3) {
+            const prefix_len: i64 = switch (c.args[2]) {
+                .literal_int => |v| v,
+                else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
+            };
+            const zero_ref = try ctx.emit(makeLoadConstInt(0));
+            const prefix_len_ref = try ctx.emit(makeLoadConstInt(prefix_len));
+            bytes_to_hash_ref = try ctx.emit(.{ .call = .{
+                .func = "substr",
+                .args = try ctx.allocSlice(&.{ witness_ref, zero_ref, prefix_len_ref }),
+            } });
+        }
+
+        const actual_hash_ref = try ctx.emit(.{ .call = .{
+            .func = "hash256",
+            .args = try ctx.allocSlice(&.{bytes_to_hash_ref}),
+        } });
+        const eq_ref = try ctx.emit(.{ .bin_op = .{
+            .op = "===",
+            .left = actual_hash_ref,
+            .right = expected_hash_ref,
+            .result_type = "bytes",
+        } });
+        _ = try ctx.emit(.{ .assert = .{ .value = eq_ref } });
+        return witness_ref;
+    }
+
+    // requireOutputP2PKH(outputIndex_literal, pubkeyHash, amount) -> void.
+    // Asserts that the tx's output at outputIndex is a standard P2PKH paying
+    // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
+    // (once per method) and emits hash256(serialisedOutputs) ==
+    // extractOutputHash(txPreimage) the first time the intrinsic is called
+    // in a method body. Subsequent calls in the same method skip the
+    // hashOutputs check (already established) and emit only the per-output
+    // substring assertion.
+    //
+    // v1 assumes all outputs in the serialised set are exactly 34 bytes
+    // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
+    // of output i is i*34.
+    if (std.mem.eql(u8, c.callee, "requireOutputP2PKH")) {
+        if (c.args.len != 3) {
+            return try ctx.emit(makeLoadConstString(ctx.allocator, ""));
+        }
+        const idx: i64 = switch (c.args[0]) {
+            .literal_int => |v| v,
+            else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
+        };
+
+        ctx.recordAutoInjectedParam("_serialisedOutputs", .byte_string, "ByteString");
+        ctx.addParam("_serialisedOutputs");
+
+        // Emit the hashOutputs(preimage) check exactly once per method.
+        if (!ctx.did_emit_hash_outputs_check) {
+            ctx.did_emit_hash_outputs_check = true;
+            const serialised_ref0 = try ctx.emit(.{ .load_param = .{ .name = "_serialisedOutputs" } });
+            const actual_out_hash_ref = try ctx.emit(.{ .call = .{
+                .func = "hash256",
+                .args = try ctx.allocSlice(&.{serialised_ref0}),
+            } });
+            const preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
+            const expected_out_hash_ref = try ctx.emit(.{ .call = .{
+                .func = "extractOutputHash",
+                .args = try ctx.allocSlice(&.{preimage_ref}),
+            } });
+            const hash_eq_ref = try ctx.emit(.{ .bin_op = .{
+                .op = "===",
+                .left = actual_out_hash_ref,
+                .right = expected_out_hash_ref,
+                .result_type = "bytes",
+            } });
+            _ = try ctx.emit(.{ .assert = .{ .value = hash_eq_ref } });
+        }
+
+        // Lower the user-supplied args (pubkeyHash, amount).
+        const pubkey_hash_ref = try lowerExprToRef(ctx, c.args[1]);
+        const amount_ref = try lowerExprToRef(ctx, c.args[2]);
+
+        // Construct expected P2PKH output bytes:
+        //   <amount: 8-byte LE> ‖ 0x19 0x76 0xa9 0x14 ‖ <pubkeyHash: 20 bytes> ‖ 0x88 0xac
+        const eight_ref = try ctx.emit(makeLoadConstInt(8));
+        const amount_bytes_ref = try ctx.emit(.{ .call = .{
+            .func = "num2bin",
+            .args = try ctx.allocSlice(&.{ amount_ref, eight_ref }),
+        } });
+        // 0x19 0x76 0xa9 0x14 — script length byte + OP_DUP OP_HASH160 OP_PUSH20
+        const prefix_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "1976a914"));
+        // 0x88 0xac — OP_EQUALVERIFY OP_CHECKSIG
+        const suffix_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "88ac"));
+        const cat1_ref = try ctx.emit(.{ .call = .{
+            .func = "cat",
+            .args = try ctx.allocSlice(&.{ amount_bytes_ref, prefix_ref }),
+        } });
+        const cat2_ref = try ctx.emit(.{ .call = .{
+            .func = "cat",
+            .args = try ctx.allocSlice(&.{ cat1_ref, pubkey_hash_ref }),
+        } });
+        const expected_output_ref = try ctx.emit(.{ .call = .{
+            .func = "cat",
+            .args = try ctx.allocSlice(&.{ cat2_ref, suffix_ref }),
+        } });
+
+        // Substring extract at idx*34 length 34, assert equal.
+        const serialised_ref = try ctx.emit(.{ .load_param = .{ .name = "_serialisedOutputs" } });
+        const offset_ref = try ctx.emit(makeLoadConstInt(idx * 34));
+        const length_ref = try ctx.emit(makeLoadConstInt(34));
+        const extracted_ref = try ctx.emit(.{ .call = .{
+            .func = "substr",
+            .args = try ctx.allocSlice(&.{ serialised_ref, offset_ref, length_ref }),
+        } });
+        const out_eq_ref = try ctx.emit(.{ .bin_op = .{
+            .op = "===",
+            .left = extracted_ref,
+            .right = expected_output_ref,
+            .result_type = "bytes",
+        } });
+        return try ctx.emit(.{ .assert = .{ .value = out_eq_ref } });
+    }
+
+    // currentBlockHeight() -> bigint. Pure source-level desugar to
+    // extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
+    // methods (typecheck enforces). No new ANF kind or stack codegen needed.
+    if (std.mem.eql(u8, c.callee, "currentBlockHeight")) {
+        const preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
+        return try ctx.emit(.{ .call = .{
+            .func = "extractLocktime",
+            .args = try ctx.allocSlice(&.{preimage_ref}),
+        } });
     }
 
     // Check if callee is a contract method (private helper) — emit method_call with @this

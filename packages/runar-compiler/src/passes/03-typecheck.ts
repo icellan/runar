@@ -209,6 +209,15 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['extractLocktime',      { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['extractSigHashType',   { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['buildChangeOutput',    { params: ['ByteString', 'bigint'], returnType: 'ByteString' }],
+  // Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
+  // that compile down to standard primitives + auto-injected method params.
+  // See docs/cross-covenant-pattern.md.
+  //
+  // First arg of extractPrevOutputScript / requireOutputP2PKH MUST be an
+  // integer literal — enforced as a special case in checkCallArgs.
+  ['extractPrevOutputScript', { params: ['bigint', 'ByteString'], returnType: 'ByteString' }],
+  ['requireOutputP2PKH',      { params: ['bigint', 'ByteString', 'bigint'], returnType: 'void' }],
+  ['currentBlockHeight',      { params: [], returnType: 'bigint' }],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -288,6 +297,147 @@ function flattenAddOutputArgs(args: Expression[]): Expression[] {
     return [args[0]!, ...args[1].elements];
   }
   return args;
+}
+
+// ---------------------------------------------------------------------------
+// Crit-3 body-walk helpers (BSVM Phase 13)
+// ---------------------------------------------------------------------------
+// Recursive AST walkers used by checkMethod to detect whether a method body
+// contains both requireOutputP2PKH() and this.addDataOutput() calls. Walk
+// covers if/else branches and for-loop bodies — anywhere a call expression
+// can syntactically appear. Mirrors compilers/go/frontend/typecheck.go.
+
+function bodyCallsBuiltin(body: Statement[], name: string): boolean {
+  for (const stmt of body) {
+    if (stmtContainsCallTo(stmt, name)) return true;
+  }
+  return false;
+}
+
+function bodyCallsAddDataOutput(body: Statement[]): boolean {
+  for (const stmt of body) {
+    if (stmtContainsAddDataOutput(stmt)) return true;
+  }
+  return false;
+}
+
+function stmtContainsCallTo(stmt: Statement, name: string): boolean {
+  switch (stmt.kind) {
+    case 'expression_statement':
+      return exprContainsCallTo(stmt.expression, name);
+    case 'variable_decl':
+      return exprContainsCallTo(stmt.init, name);
+    case 'assignment':
+      return exprContainsCallTo(stmt.value, name) || exprContainsCallTo(stmt.target, name);
+    case 'if_statement':
+      if (exprContainsCallTo(stmt.condition, name)) return true;
+      for (const t of stmt.then) if (stmtContainsCallTo(t, name)) return true;
+      if (stmt.else) {
+        for (const e of stmt.else) if (stmtContainsCallTo(e, name)) return true;
+      }
+      return false;
+    case 'for_statement':
+      if (stmtContainsCallTo(stmt.init, name)) return true;
+      if (exprContainsCallTo(stmt.condition, name)) return true;
+      if (stmtContainsCallTo(stmt.update, name)) return true;
+      for (const t of stmt.body) if (stmtContainsCallTo(t, name)) return true;
+      return false;
+    case 'return_statement':
+      return stmt.value !== undefined && exprContainsCallTo(stmt.value, name);
+  }
+  return false;
+}
+
+function exprContainsCallTo(expr: Expression, name: string): boolean {
+  if (!expr) return false;
+  switch (expr.kind) {
+    case 'call_expr':
+      if (expr.callee.kind === 'identifier' && expr.callee.name === name) return true;
+      if (exprContainsCallTo(expr.callee, name)) return true;
+      for (const a of expr.args) if (exprContainsCallTo(a, name)) return true;
+      return false;
+    case 'binary_expr':
+      return exprContainsCallTo(expr.left, name) || exprContainsCallTo(expr.right, name);
+    case 'unary_expr':
+      return exprContainsCallTo(expr.operand, name);
+    case 'ternary_expr':
+      return exprContainsCallTo(expr.condition, name) ||
+        exprContainsCallTo(expr.consequent, name) ||
+        exprContainsCallTo(expr.alternate, name);
+    case 'index_access':
+      return exprContainsCallTo(expr.object, name) || exprContainsCallTo(expr.index, name);
+    case 'member_expr':
+      return exprContainsCallTo(expr.object, name);
+    case 'array_literal':
+      for (const el of expr.elements) if (exprContainsCallTo(el, name)) return true;
+      return false;
+    case 'increment_expr':
+    case 'decrement_expr':
+      return exprContainsCallTo(expr.operand, name);
+  }
+  return false;
+}
+
+function stmtContainsAddDataOutput(stmt: Statement): boolean {
+  switch (stmt.kind) {
+    case 'expression_statement':
+      return exprContainsAddDataOutput(stmt.expression);
+    case 'variable_decl':
+      return exprContainsAddDataOutput(stmt.init);
+    case 'assignment':
+      return exprContainsAddDataOutput(stmt.value) || exprContainsAddDataOutput(stmt.target);
+    case 'if_statement':
+      if (exprContainsAddDataOutput(stmt.condition)) return true;
+      for (const t of stmt.then) if (stmtContainsAddDataOutput(t)) return true;
+      if (stmt.else) {
+        for (const e of stmt.else) if (stmtContainsAddDataOutput(e)) return true;
+      }
+      return false;
+    case 'for_statement':
+      if (stmtContainsAddDataOutput(stmt.init)) return true;
+      if (exprContainsAddDataOutput(stmt.condition)) return true;
+      if (stmtContainsAddDataOutput(stmt.update)) return true;
+      for (const t of stmt.body) if (stmtContainsAddDataOutput(t)) return true;
+      return false;
+    case 'return_statement':
+      return stmt.value !== undefined && exprContainsAddDataOutput(stmt.value);
+  }
+  return false;
+}
+
+function exprContainsAddDataOutput(expr: Expression): boolean {
+  if (!expr) return false;
+  switch (expr.kind) {
+    case 'call_expr': {
+      const callee = expr.callee;
+      // Match both `this.addDataOutput(...)` (property_access) and
+      // `c.addDataOutput(...)` (member_expr) callee shapes.
+      if (callee.kind === 'property_access' && callee.property === 'addDataOutput') return true;
+      if (callee.kind === 'member_expr' && callee.property === 'addDataOutput') return true;
+      if (exprContainsAddDataOutput(callee)) return true;
+      for (const a of expr.args) if (exprContainsAddDataOutput(a)) return true;
+      return false;
+    }
+    case 'binary_expr':
+      return exprContainsAddDataOutput(expr.left) || exprContainsAddDataOutput(expr.right);
+    case 'unary_expr':
+      return exprContainsAddDataOutput(expr.operand);
+    case 'ternary_expr':
+      return exprContainsAddDataOutput(expr.condition) ||
+        exprContainsAddDataOutput(expr.consequent) ||
+        exprContainsAddDataOutput(expr.alternate);
+    case 'index_access':
+      return exprContainsAddDataOutput(expr.object) || exprContainsAddDataOutput(expr.index);
+    case 'member_expr':
+      return exprContainsAddDataOutput(expr.object);
+    case 'array_literal':
+      for (const el of expr.elements) if (exprContainsAddDataOutput(el)) return true;
+      return false;
+    case 'increment_expr':
+    case 'decrement_expr':
+      return exprContainsAddDataOutput(expr.operand);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +577,26 @@ class TypeChecker {
     }
 
     this.checkStatements(method.body, env, method.sourceLocation);
+
+    // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH() with
+    // this.addDataOutput() in the same method body. The intrinsic's
+    // compile-time output-offset assumes a fixed 34-byte stride per output;
+    // a preceding variable-length OP_RETURN output silently shifts the
+    // OP_EQUALVERIFY target, letting the bond P2PKH route through an
+    // unmatched index. v1 forbids the mix; v2 may relax with a
+    // variable-stride decoder.
+    const hasRequireP2PKH = bodyCallsBuiltin(method.body, 'requireOutputP2PKH');
+    const hasAddDataOutput = bodyCallsAddDataOutput(method.body);
+    if (hasRequireP2PKH && hasAddDataOutput) {
+      this.errors.push(makeDiagnostic(
+        `method '${method.name}' mixes requireOutputP2PKH() with addDataOutput() — ` +
+          `v1 of the intrinsic assumes a fixed 34-byte output stride and ` +
+          `variable-length OP_RETURN outputs break the offset computation; ` +
+          `split the addDataOutput call into a separate method`,
+        'error',
+        method.sourceLocation,
+      ));
+    }
   }
 
   private checkStatements(
@@ -1464,6 +1634,75 @@ class TypeChecker {
         return sig.returnType;
       }
       // Fall through to the standard subtype check below.
+    }
+
+    // extractPrevOutputScript / requireOutputP2PKH — the index arg MUST
+    // be a compile-time integer literal so the ANF lowering can derive a
+    // stable auto-injected witness-param name (extractPrevOutputScript) or
+    // a constant byte offset (requireOutputP2PKH).
+    if (funcName === 'extractPrevOutputScript' || funcName === 'requireOutputP2PKH') {
+      if (args.length >= 1 && args[0]!.kind !== 'bigint_literal') {
+        this.errors.push(makeDiagnostic(
+          `${funcName}() argument 1 (index) must be an integer literal`,
+          'error',
+          args[0]!.sourceLocation,
+        ));
+      }
+    }
+
+    // extractPrevOutputScript variable-arity special case (2-arg full-hash
+    // or 3-arg prefix-hash form, Crit-2 BSVM Phase 13). Validates types +
+    // literal-only on the optional prefixLen, then returns the signature's
+    // return type to bypass the standard arg-count check below (which would
+    // otherwise reject the 3-arg form against the 2-arg sig table entry).
+    if (funcName === 'extractPrevOutputScript') {
+      if (args.length !== 2 && args.length !== 3) {
+        this.errors.push(makeDiagnostic(
+          `extractPrevOutputScript() expects 2 or 3 arguments, got ${args.length}`,
+          'error',
+          args[0]?.sourceLocation,
+        ));
+      }
+      if (args.length >= 1) {
+        this.inferExprType(args[0]!, env); // already validated as literal above
+      }
+      if (args.length >= 2) {
+        const argType = this.inferExprType(args[1]!, env);
+        if (!isSubtype(argType, 'ByteString') && argType !== '<unknown>') {
+          this.errors.push(makeDiagnostic(
+            `Argument 2 of extractPrevOutputScript(): expected 'ByteString', got '${argType}'`,
+            'error',
+            args[1]!.sourceLocation,
+          ));
+        }
+      }
+      if (args.length === 3) {
+        if (args[2]!.kind !== 'bigint_literal') {
+          this.errors.push(makeDiagnostic(
+            `extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied`,
+            'error',
+            args[2]!.sourceLocation,
+          ));
+        }
+        this.inferExprType(args[2]!, env);
+      }
+      // Infer trailing args for arity > 3 so subsequent expressions resolve.
+      for (let i = 3; i < args.length; i++) {
+        this.inferExprType(args[i]!, env);
+      }
+      return sig.returnType;
+    }
+
+    // requireOutputP2PKH and currentBlockHeight need the auto-injected
+    // txPreimage — only available in StatefulSmartContract methods.
+    if (funcName === 'requireOutputP2PKH' || funcName === 'currentBlockHeight') {
+      if (this.contract.parentClass !== 'StatefulSmartContract') {
+        this.errors.push(makeDiagnostic(
+          `${funcName}() is only available in StatefulSmartContract methods`,
+          'error',
+          args[0]?.sourceLocation,
+        ));
+      }
     }
 
     // Standard argument count check
