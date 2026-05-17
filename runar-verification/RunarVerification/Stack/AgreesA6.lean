@@ -653,6 +653,296 @@ theorem runMethod_lower_public_unique_no_post_ifValSingleConst_preserves
         initialStack bn cond vn src i hAgrees hFresh hCondLoad
     exact ⟨stk', hAgrees', hStkEq⟩
 
+/-! ## Tier 2 — Predicate-side preservation for the identical-single-const-binding
+both-branches `if_val` fragment, widened across all three const kinds
+
+Tier 1 (above) handled `[.mk vn (.loadConst (.int i)) src]` (integer literals only)
+in both branches with the **same** name and **same** literal. Tier 2 widens to
+**any** of the three `structuralConstValue`-compatible const kinds — `int`,
+`bool`, and `bytes` — preserving the "identical branches" closure.
+
+Tier 2 scope choice. The wave 1 obstacle report identified that the natural
+"both branches in `structuralConstBody` (any chain length, possibly differing
+between branches)" widening **cannot** preserve `agreesTagged` on the outer
+post-state: for branches of length > 1 the lowered ifVal ops push multiple
+values onto the stack, but the outer if_val binding adds only ONE name (`bn`)
+to the structural stack map (cf. `lowerValue.eq_def` for the `.ifVal` arm —
+the returned tail-map is `sm.push bindingName`, NOT
+`sm.push (last-inner-name) :: …`). The intermediate values therefore have NO
+slot in `tsm`, breaking `taggedStackAligned`'s positional alignment
+requirement (see `taggedStackAligned`'s `s :: smRest, anfSt, v :: stkRest`
+arm: every stack value must have a matching name in `tsm`).
+
+Two cleanly-closeable Tier 2 scopes remain:
+
+* **Identical-single-const, all kinds (this Tier 2).** Both branches are
+  `[.mk vn (.loadConst c) src]` with the **same** literal `c`, where
+  `structuralConstValue (.loadConst c)`. The cond-branch picks the same single
+  push regardless. This is what Tier 2 lands.
+* **Identical-multi-const-chains.** Both branches are literally the **same**
+  `structuralConstBody` list. The cond-branch picks the same chain
+  deterministically, but the resulting stack has length > 1 intermediate
+  values stacked beneath `bn`. The `agreesTagged` post-condition would have
+  to relate `((bn, .binding) :: tsm)` against a stack with intermediate
+  values not represented in `tsm`. Not closeable under the current
+  `taggedStackAligned` shape; requires a "stack-equivalence-modulo-
+  intermediates" predicate that lives outside Stack/AgreesA6.lean's scope.
+
+Tier 2 below lands the first option. The Tier 1 `simpleStepRel_ifVal_
+singleConstBranches_preserves` becomes a corollary at `c = .int i`.
+
+Forbidden patterns explicitly avoided. The cond-load witness is the same
+input-side shape as Tier 1 (talks ONLY about the `loadRef sm cond` prefix and
+the pushed cond value's bool coercion); no conclusion-restating premise of
+the kind PATH2_PLAN §2.1 enumerates. -/
+
+/-- `constToValue c` maps a `structuralConstValue`-compatible `ConstValue` to
+the `Value` that `emitConst c`'s singleton `.push` lowers to. Defined for the
+three `structuralConstValue`-admissible kinds only; the unreachable arms
+return a placeholder (the predicate-side proof discharges them via
+`structuralConstValue` contradiction). -/
+def constToValue : ConstValue → Value
+  | .int i      => .vBigint i
+  | .bool b     => .vBool b
+  | .bytes ba   => .vBytes ba
+  | .refAlias _ => .vBigint 0   -- unreachable under `structuralConstValue`
+  | .thisRef    => .vBigint 0   -- unreachable under `structuralConstValue`
+
+/-- For any `structuralConstValue`-compatible const, `emitConst c` is exactly
+the singleton `[.push p]` where `p` matches the kind of `c`, and running it
+pushes `constToValue c` on the stack. -/
+theorem emitConst_run_structuralConst (c : ConstValue)
+    (h : structuralConstValue (.loadConst c)) (stk : StackState) :
+    runOps (Stack.Lower.emitConst c) stk = .ok (stk.push (constToValue c)) := by
+  cases c with
+  | int i =>
+      simp [Stack.Lower.emitConst, constToValue, runOps, stepNonIf]
+  | bool b =>
+      simp [Stack.Lower.emitConst, constToValue, runOps, stepNonIf]
+  | bytes ba =>
+      simp [Stack.Lower.emitConst, constToValue, runOps, stepNonIf]
+  | refAlias _ => simp [structuralConstValue] at h
+  | thisRef => simp [structuralConstValue] at h
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 2 predicate-side preservation** for the identical-single-const
+both-branches `if_val` fragment, generalised across all three
+`structuralConstValue`-compatible kinds (`int`, `bool`, `bytes`).
+
+Given an input-side `agreesTagged tsm anfSt stkSt`, freshness of the outer
+if_val binding name `bn`, and a *prefix-only* cond-load witness (talks only
+about the `loadRef sm cond` prefix, the pushed cond value's bool coercion,
+and metadata-field preservation across the cond load — these are facts about
+the **initial** state, NOT restatements of the conclusion), there exists a
+post-state `stk'` such that running the lowered ifVal ops yields `.ok stk'`
+with `agreesTagged ((bn, .binding) :: tsm) (anfSt.addBinding bn (constToValue c))
+stk'`.
+
+Branches are exactly `[.mk vn (.loadConst c) src]` (same name, same literal)
+with `c` ranging over `.int _`, `.bool _`, and `.bytes _`. Either branch
+executes deterministically to push `constToValue c` on top, so the post-state
+is independent of the cond value. -/
+theorem simpleStepRel_ifVal_identicalSingleConst_preserves
+    (sm : StackMap)
+    (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (bn cond vn : String) (src : Option SourceLoc)
+    (c : ConstValue)
+    (hConst : structuralConstValue (.loadConst c))
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hFresh : freshIn bn (untagSm tsm))
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk',
+      runOps
+        (Stack.Lower.lowerValue sm bn
+          (.ifVal cond
+            [.mk vn (.loadConst c) src]
+            [.mk vn (.loadConst c) src])).1 stkSt = .ok stk'
+      ∧ stk' = stkSt.push (constToValue c)
+      ∧ agreesTagged ((bn, .binding) :: tsm)
+                     (anfSt.addBinding bn (constToValue c))
+                     stk' := by
+  obtain ⟨condV, stk1, hLoad, hStk, hAlt, hOut, hProps, hPre, b, hBool⟩ :=
+    hCondLoad
+  -- Unfold the if_val lowering: `loadRef sm cond ++ [.ifOp thnOps (some elsOps)]`.
+  have hLowerEq :
+      (Stack.Lower.lowerValue sm bn
+        (.ifVal cond
+          [.mk vn (.loadConst c) src]
+          [.mk vn (.loadConst c) src])).1
+        = Stack.Lower.loadRef sm cond
+          ++ [.ifOp (Stack.Lower.lowerBindings sm
+                      [.mk vn (.loadConst c) src]).1
+                    (some (Stack.Lower.lowerBindings sm
+                      [.mk vn (.loadConst c) src]).1)] := by
+    simp [Stack.Lower.lowerValue]
+  -- Each branch lowers to `emitConst c` (a single `.push` op). For abstract
+  -- `c`, we case-split on the `structuralConstValue`-admissible kinds; the
+  -- two unreachable arms (`refAlias`, `thisRef`) are discharged via the
+  -- `structuralConstValue` hypothesis `hConst`.
+  have hBranchOps :
+      (Stack.Lower.lowerBindings sm
+        [.mk vn (.loadConst c) src]).1
+        = Stack.Lower.emitConst c := by
+    cases c with
+    | int _ => simp [Stack.Lower.lowerBindings, Stack.Lower.lowerValue]
+    | bool _ => simp [Stack.Lower.lowerBindings, Stack.Lower.lowerValue]
+    | bytes _ => simp [Stack.Lower.lowerBindings, Stack.Lower.lowerValue]
+    | refAlias _ => simp [structuralConstValue] at hConst
+    | thisRef => simp [structuralConstValue] at hConst
+  -- Pop equation for stk1 derived from hStk.
+  have hPop : stk1.pop? = some (condV, { stk1 with stack := stkSt.stack }) := by
+    show (match stk1.stack with
+          | [] => none
+          | v :: vs => some (v, { stk1 with stack := vs })) = _
+    rw [hStk]
+  -- Stack-state equality after popping the cond from stk1: the residual
+  -- record equals `stkSt` modulo `stack`, by the metadata preservation arms.
+  have hStkEq : ({ stk1 with stack := stkSt.stack } : StackState) = stkSt := by
+    cases stk1
+    cases stkSt
+    simp_all
+  -- `emitConst c` runs to `.ok (stk.push (constToValue c))` from `stkSt`.
+  have hEmitRun := emitConst_run_structuralConst c hConst stkSt
+  refine ⟨stkSt.push (constToValue c), ?_, rfl, ?_⟩
+  · -- Drive `runOps` through the lowered ops.
+    rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+    simp only []
+    rw [hBranchOps]
+    -- Now: `runOps [.ifOp (emitConst c) (some (emitConst c))] stk1`.
+    rw [runOps.eq_2 stk1 (Stack.Lower.emitConst c)
+          (some (Stack.Lower.emitConst c)) []]
+    rw [hPop]
+    simp only []
+    rw [hBool]
+    -- Each branch evaluates the same single-push op; after pop, the running
+    -- stack is `{ stk1 with stack := stkSt.stack } = stkSt`, so emitConst
+    -- pushes `constToValue c`. The trailing `runOps [] _ = .ok _` closes.
+    cases b with
+    | true =>
+        simp only []
+        rw [hStkEq, hEmitRun]
+        simp [runOps]
+    | false =>
+        simp only []
+        rw [hStkEq, hEmitRun]
+        simp [runOps]
+  · -- Predicate-side: agreesTagged after pushing the fresh literal.
+    exact agreesTagged_push_value tsm bn anfSt stkSt (constToValue c)
+            hAgrees hFresh
+
+/-! ### Tier 2 method-level wrapper
+
+Mirrors the Tier 1 method-level wrapper but with the const literal `c` ranging
+across the three `structuralConstValue`-compatible kinds. Composes:
+
+* `runMethod_lower_public_unique_no_post_structuralIfVal_narrow_isSome` —
+  the runtime-side `isSome` (already accepts arbitrary `structuralConstBody`
+  branches, so the single-`loadConst c` branch shape is covered).
+* `simpleStepRel_ifVal_identicalSingleConst_preserves` — the Tier 2
+  predicate-side preservation lemma above.
+
+Just like Tier 1's wrapper, no conclusion-restating premise (per
+PATH2_PLAN §2.1); the only runtime-side input is the cond-load witness,
+an input-side fact about the **initial** state. -/
+set_option maxHeartbeats 1600000 in
+theorem runMethod_lower_public_unique_no_post_ifValIdenticalConst_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : StackState) (initialAnf : State)
+    (initialTsm : TaggedStackMap)
+    (bn cond vn : String) (src : Option SourceLoc)
+    (c : ConstValue)
+    (hConst : structuralConstValue (.loadConst c))
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [.mk bn (.ifVal cond
+                          [.mk vn (.loadConst c) src]
+                          [.mk vn (.loadConst c) src]) src])
+    (hRawEqStructural :
+      lowerMethodUserRawOps methods props m =
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1)
+    (hAgrees : agreesTagged initialTsm initialAnf initialStack)
+    (hFresh : freshIn bn (untagSm initialTsm))
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps
+          (Stack.Lower.loadRef
+            (m.params.map (fun p => p.name) |>.reverse) cond) initialStack
+          = .ok stk1
+        ∧ stk1.stack = condV :: initialStack.stack
+        ∧ stk1.altstack = initialStack.altstack
+        ∧ stk1.outputs = initialStack.outputs
+        ∧ stk1.props = initialStack.props
+        ∧ stk1.preimage = initialStack.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome
+    ∧ ∃ stk',
+        agreesTagged ((bn, .binding) :: initialTsm)
+                     (initialAnf.addBinding bn (constToValue c))
+                     stk'
+        ∧ stk' = initialStack.push (constToValue c) := by
+  refine ⟨?_, ?_⟩
+  · -- Runtime success arm: reuse the narrowed wrapper. The required
+    -- `structuralIfValBodyNarrow` predicate on `m.body` follows from
+    -- `hBodyShape` plus `hConst`.
+    have hBody : structuralIfValBodyNarrow m.body := by
+      rw [hBodyShape]
+      exact ⟨⟨hConst, trivial⟩, ⟨hConst, trivial⟩⟩
+    -- Reshape `hCondLoad` to match the narrowed wrapper's
+    -- `∀ bn' cond' thn' els' src', m.body = [...] → ...` shape.
+    have hCondLoad' :
+        ∀ bn' cond' thn' els' src',
+          m.body = [.mk bn' (.ifVal cond' thn' els') src'] →
+          ∃ condV stk1,
+            runOps
+              (Stack.Lower.loadRef
+                (m.params.map (fun p => p.name) |>.reverse) cond') initialStack
+              = .ok stk1
+            ∧ stk1.stack = condV :: initialStack.stack
+            ∧ (∃ b, asBool? condV = some b) := by
+      intro bn' cond' thn' els' src' hEq
+      rw [hBodyShape] at hEq
+      obtain ⟨condV, stk1, hLoad, hStk, _, _, _, _, hBool⟩ := hCondLoad
+      injection hEq with hHead _
+      injection hHead with _hName hVal _
+      injection hVal with hCondEq _ _
+      subst hCondEq
+      exact ⟨condV, stk1, hLoad, hStk, hBool⟩
+    exact runMethod_lower_public_unique_no_post_structuralIfVal_narrow_isSome
+      contractName props methods m initialStack hMem hPublic hUnique
+      hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize hBody
+      hRawEqStructural hCondLoad'
+  · -- Predicate-side arm: the lowered ifVal ops drive the stack from
+    -- `initialStack` to `initialStack.push (constToValue c)`, and
+    -- `agreesTagged` is preserved via the Tier 2 single-const-identical-
+    -- branches preservation lemma above.
+    obtain ⟨stk', _hRun, hStkEq, hAgrees'⟩ :=
+      simpleStepRel_ifVal_identicalSingleConst_preserves
+        (m.params.map (fun p => p.name) |>.reverse) initialTsm initialAnf
+        initialStack bn cond vn src c hConst hAgrees hFresh hCondLoad
+    exact ⟨stk', hAgrees', hStkEq⟩
+
 end -- attribute [local irreducible] section
 
 end Agrees

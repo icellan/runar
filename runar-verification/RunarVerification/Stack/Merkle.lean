@@ -158,15 +158,9 @@ the natural spec target is the matching path-verifier
 We prove the equivalence for the base case `d = 0`, where the codegen
 degenerates to a two-element cleanup (`drop` the index, then `drop` the
 empty proof) leaving the leaf as the root.  The general inductive case
-(`d > 0`) requires a precise stack-shape invariant linking
-`Stack.Eval.runOps` over one `mLevel` to one application of
-`merkleVerifyStep`; this is straightforward in principle but tedious in
-length (≈ 15 Stack ops per level with two alt-stack saves, a
-conditional swap on a direction bit, and a numeric shift).  Per the
-Phase B7 plan's hard rule "narrow the theorem statement rather than
-`sorry`-out", the inductive proof is deferred to a follow-up phase; the
-present base-case theorem fixes the spec target and exercises the full
-codegen-to-spec pipeline at `d = 0`. -/
+(`d > 0`) is discharged below by `runOps_merkleRootSha256Ops_eq` /
+`runOps_merkleRootHash256Ops_eq` via `runOps_mLevel_state_eq` (one
+level) and `runOps_mAllLevelsAux_eq` (`d`-iteration). -/
 
 open RunarVerification.ANF.Eval (Value EvalResult)
 open RunarVerification.Stack.Eval
@@ -610,8 +604,728 @@ and the cleanup tail `[.drop, .drop]` finishes via `runOps_drop_two`.
 / OP_MOD / OP_2DIV / OP_RSHIFTNUM / OP_CAT / OP_SHA256 / OP_HASH256)
 and the uniform `mShiftBits i` reduction land green. Composing them
 into the full per-level lemma is mechanical but long (~150 lines per
-level proof × case-split on direction bit through the inner `.ifOp`).
-The composition itself is deferred to a follow-up phase. -/
+level proof × case-split on direction bit through the inner `.ifOp`). -/
+
+/-! ## Phase B7 wave 2 — per-level + inductive composition
+
+The two key auxiliary defs `mDir` (the runtime direction bit) and
+`mCombined` (the runtime-side concatenation of the sibling and running
+hash) match `Crypto.Spec.merkleVerifyStep`'s direction-bit dispatch via
+`mCombined_eq_spec`. The composition strategy:
+
+1. Prove `runOps_mLevel_eq` for one level: input
+   `[index, proof, current, ...rest]` (TOS=index, proof.size ≥ 32) and
+   output `[index, proof.extract 32 size, h combined, ...rest]`. The
+   `.ifOp` is dispatched by case-splitting on `(index / 2^i) % 2 = 0`.
+2. Induct over `mAllLevelsAux` (`runOps_mAllLevelsAux_eq`) chaining one
+   level at a time against `Crypto.Spec.merkleVerifyPathFrom`.
+3. Stitch with the `[.drop, .drop]` cleanup tail and conclude
+   `runOps_merkleRootSha256Ops_eq` / `runOps_merkleRootHash256Ops_eq`
+   at any depth `d`.
+
+Throughout we require `0 ≤ index` so that the runtime `Int` ediv/emod
+agrees with the spec's `Nat`-side natAbs/mod.
+-/
+
+/-- Direction bit on the runtime `Int` side. -/
+@[inline] private def mDir (index : Int) (i : Nat) : Int :=
+  (index / (2 ^ i)) % 2
+
+/-- Combined hash material for level `i`. Mirrors the dispatch in
+`Crypto.Spec.merkleVerifyStep` modulo the natAbs/Int bridge. -/
+@[inline] private def mCombined (current sibling : ByteArray)
+    (index : Int) (i : Nat) : ByteArray :=
+  if mDir index i = 0 then current ++ sibling else sibling ++ current
+
+/-- Bridging lemma: for non-negative `index`, the runtime direction bit
+agrees with the spec's `(index.natAbs / 2^i) % 2`.  Both reduce to the
+same `Nat` comparison via `Int.ofNat_ediv_ofNat` / `Int.natCast_emod`. -/
+private theorem mCombined_eq_spec
+    (current sibling : ByteArray) (index : Int) (i : Nat)
+    (hNonNeg : 0 ≤ index) :
+    mCombined current sibling index i
+    = (if (index.natAbs / (2 ^ i)) % 2 = 0
+        then current ++ sibling else sibling ++ current) := by
+  unfold mCombined mDir
+  rcases Int.eq_ofNat_of_zero_le hNonNeg with ⟨n, rfl⟩
+  show (if (Int.ofNat n / (2 ^ i : Int)) % 2 = 0
+        then current ++ sibling else sibling ++ current)
+       = (if (Int.ofNat n).natAbs / (2 ^ i) % 2 = 0
+        then current ++ sibling else sibling ++ current)
+  have hRT : (Int.ofNat n / (2 ^ i : Int)) % 2
+             = Int.ofNat ((n / 2 ^ i) % 2) := by
+    show (Int.ofNat n / Int.ofNat (2 ^ i)) % Int.ofNat 2 = Int.ofNat _
+    rfl
+  rw [hRT]
+  show (if Int.ofNat ((n / 2 ^ i) % 2) = 0
+        then current ++ sibling else sibling ++ current)
+       = (if n / (2 ^ i) % 2 = 0
+        then current ++ sibling else sibling ++ current)
+  by_cases h : (n / 2 ^ i) % 2 = 0
+  · rw [h]
+    simp
+  · have hNz : Int.ofNat ((n / 2 ^ i) % 2) ≠ 0 := by
+      intro hEq
+      exact h (Int.ofNat.inj hEq)
+    rw [if_neg hNz, if_neg h]
+
+/-- Per-level lemma: running `mLevel i hashOp` on an entry stack
+`[index, proof, current, ...rest]` (TOS=index, proof.size ≥ 32)
+produces `[index, proof.extract 32 size, h combined, ...rest]` and
+restores the altstack.  Proved by a single chain of `runOps` reductions,
+case-split on the direction bit through the level's `.ifOp`. -/
+private theorem runOps_mLevel_state_eq
+    (s : StackState) (index : Int) (proof current : ByteArray)
+    (rest : List Value) (i : Nat) (hashOp : String)
+    (hHash : hashOp = "OP_SHA256" ∨ hashOp = "OP_HASH256")
+    (hStk : s.stack
+            = .vBigint index :: .vBytes proof :: .vBytes current :: rest)
+    (hSize : 32 ≤ proof.size) :
+    runOps (mLevel i hashOp) s
+    = .ok { s with stack
+            := .vBigint index
+                :: .vBytes (proof.extract 32 proof.size)
+                :: .vBytes ((if hashOp = "OP_HASH256"
+                              then ANF.Eval.Crypto.hash256
+                              else ANF.Eval.Crypto.sha256)
+                    (mCombined current (proof.extract 0 32) index i))
+                :: rest } := by
+  -- Set up working state shorthands using `let` (the proof never
+  -- re-folds them, so plain `let` suffices).
+  let s0 : StackState := s
+  let s1 : StackState := { s with
+        stack := .vBytes proof :: .vBigint index :: .vBytes current :: rest }
+  let s2 : StackState := { s with
+        stack := .vBigint 32 :: .vBytes proof :: .vBigint index
+                  :: .vBytes current :: rest }
+  let s3 : StackState := { s with
+        stack := .vBytes (proof.extract 32 proof.size)
+                  :: .vBytes (proof.extract 0 32) :: .vBigint index
+                  :: .vBytes current :: rest }
+  let s4 : StackState := { s with
+        stack := .vBytes (proof.extract 0 32) :: .vBigint index
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s5 : StackState := { s with
+        stack := .vBigint index :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s6 : StackState := { s with
+        stack := .vBigint index :: .vBigint index
+                  :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s7 : StackState := { s with
+        stack := .vBigint (index / (2 ^ i)) :: .vBigint index
+                  :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s8 : StackState := { s with
+        stack := .vBigint 2 :: .vBigint (index / (2 ^ i)) :: .vBigint index
+                  :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s9 : StackState := { s with
+        stack := .vBigint (mDir index i)
+                  :: .vBigint index
+                  :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s10 : StackState := { s with
+        stack := .vBigint index :: .vBigint (mDir index i)
+                  :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+  let s11 : StackState := { s with
+        stack := .vBigint (mDir index i)
+                  :: .vBytes (proof.extract 0 32)
+                  :: .vBytes current :: rest,
+        altstack := .vBigint index
+                    :: .vBytes (proof.extract 32 proof.size)
+                    :: s.altstack }
+  -- After three rots starting from [dir, sibling, current, ...rest],
+  -- we're back to [dir, sibling, current, ...rest] (3-cycle).
+  -- Open mLevel and use runOps_append to chunk through.
+  show runOps ([.swap, mPushI 32, mOpc "OP_SPLIT", mOpc "OP_TOALTSTACK",
+                .swap, mOpc "OP_DUP"]
+               ++ mShiftBits i
+               ++ [mPushI 2, mOpc "OP_MOD", .swap, mOpc "OP_TOALTSTACK",
+                   .rot, .rot, .rot, .ifOp [.swap] none, mOpc "OP_CAT",
+                   mOpc hashOp, mOpc "OP_FROMALTSTACK",
+                   mOpc "OP_FROMALTSTACK", .swap]) s0 = _
+  -- Pre-shift chunk: 6 ops, ending at state s6.
+  rw [runOps_append, runOps_append]
+  -- First chunk: [.swap, push 32, OP_SPLIT, OP_TOALTSTACK, .swap, OP_DUP].
+  have hPre : runOps [.swap, mPushI 32, mOpc "OP_SPLIT", mOpc "OP_TOALTSTACK",
+                      .swap, mOpc "OP_DUP"] s0 = .ok s6 := by
+    show runOps (.swap :: _) s0 = _
+    rw [mlevel_cons_step .swap _ s0 s1
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_swap s0 (.vBigint index) (.vBytes proof)
+            (.vBytes current :: rest) hStk)]
+    rw [mlevel_cons_step (mPushI 32) _ s1 s2
+          (fun _ _ h => StackOp.noConfusion h)
+          rfl]
+    rw [mlevel_cons_step (mOpc "OP_SPLIT") _ s2 s3
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_split s2 proof 32
+            (.vBigint index :: .vBytes current :: rest) rfl hSize)]
+    rw [mlevel_cons_step (mOpc "OP_TOALTSTACK") _ s3 s4
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_toaltstack s3
+            (.vBytes (proof.extract 32 proof.size))
+            (.vBytes (proof.extract 0 32) :: .vBigint index
+              :: .vBytes current :: rest) rfl)]
+    rw [mlevel_cons_step .swap _ s4 s5
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_swap s4 (.vBytes (proof.extract 0 32))
+            (.vBigint index) (.vBytes current :: rest) rfl)]
+    rw [mlevel_cons_step (mOpc "OP_DUP") _ s5 s6
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_dup s5 (.vBigint index)
+            (.vBytes (proof.extract 0 32) :: .vBytes current :: rest) rfl)]
+    rw [runOps_nil]
+  rw [hPre]
+  -- Apply the shift sub-sequence: mShiftBits i takes s6 to s7.
+  -- runOps (mShiftBits i) s6 = runOps [] s7 (via List.append_nil).
+  have hShift : runOps (mShiftBits i) s6 = .ok s7 := by
+    have := runOps_mShiftBits_eq s6 index (proof.extract 0 32) current rest []
+              i rfl
+    rw [List.append_nil] at this
+    rw [this, runOps_nil]
+  -- Use it via match-on-Except.ok reduction.
+  show (match runOps (mShiftBits i) s6 with
+        | Except.error e => Except.error e
+        | Except.ok s' => runOps _ s') = _
+  rw [hShift]
+  show runOps _ s7 = _
+  -- Step 8: push 2.
+  rw [mlevel_cons_step (mPushI 2) _ s7 s8
+        (fun _ _ h => StackOp.noConfusion h)
+        rfl]
+  -- Step 9: OP_MOD.
+  rw [mlevel_cons_step (mOpc "OP_MOD") _ s8 s9
+        (fun _ _ h => StackOp.noConfusion h)
+        (mlevel_stepNonIf_mod s8 (index / (2 ^ i)) 2
+          (.vBigint index :: .vBytes (proof.extract 0 32)
+            :: .vBytes current :: rest) rfl (by decide))]
+  -- Step 10: swap.
+  rw [mlevel_cons_step .swap _ s9 s10
+        (fun _ _ h => StackOp.noConfusion h)
+        (mlevel_stepNonIf_swap s9 (.vBigint (mDir index i))
+          (.vBigint index)
+          (.vBytes (proof.extract 0 32) :: .vBytes current :: rest) rfl)]
+  -- Step 11: OP_TOALTSTACK.
+  rw [mlevel_cons_step (mOpc "OP_TOALTSTACK") _ s10 s11
+        (fun _ _ h => StackOp.noConfusion h)
+        (mlevel_stepNonIf_toaltstack s10 (.vBigint index)
+          (.vBigint (mDir index i) :: .vBytes (proof.extract 0 32)
+            :: .vBytes current :: rest) rfl)]
+  -- Three rots: starting from s11 (dir on top), end at the same shape s11.
+  let s12 : StackState := { s with
+        stack := .vBytes current :: .vBigint (mDir index i)
+                  :: .vBytes (proof.extract 0 32) :: rest,
+        altstack := .vBigint index
+                    :: .vBytes (proof.extract 32 proof.size)
+                    :: s.altstack }
+  let s13 : StackState := { s with
+        stack := .vBytes (proof.extract 0 32) :: .vBytes current
+                  :: .vBigint (mDir index i) :: rest,
+        altstack := .vBigint index
+                    :: .vBytes (proof.extract 32 proof.size)
+                    :: s.altstack }
+  rw [mlevel_cons_step .rot _ s11 s12
+        (fun _ _ h => StackOp.noConfusion h)
+        (mlevel_stepNonIf_rot s11 (.vBigint (mDir index i))
+          (.vBytes (proof.extract 0 32)) (.vBytes current) rest rfl)]
+  rw [mlevel_cons_step .rot _ s12 s13
+        (fun _ _ h => StackOp.noConfusion h)
+        (mlevel_stepNonIf_rot s12 (.vBytes current)
+          (.vBigint (mDir index i))
+          (.vBytes (proof.extract 0 32)) rest rfl)]
+  -- After two more rots we'd return to s11 — but we only need 3 rots total,
+  -- after which the shape is back to s11.  Use s14 = s11 below.
+  rw [mlevel_cons_step .rot _ s13 s11
+        (fun _ _ h => StackOp.noConfusion h)
+        (mlevel_stepNonIf_rot s13 (.vBytes (proof.extract 0 32))
+          (.vBytes current) (.vBigint (mDir index i)) rest rfl)]
+  -- Now ifOp on dir.  s11 has dir on top.
+  rw [runOps.eq_2 s11 [.swap] none _]
+  -- s11.pop? = some (vBigint dir, popped).  Reduce explicitly.
+  have hPop : s11.pop? = some (.vBigint (mDir index i),
+        ({ s11 with stack := .vBytes (proof.extract 0 32) :: .vBytes current
+                      :: rest } : StackState)) := by
+    show (match s11.stack with
+          | [] => none
+          | v :: vs => some (v, { s11 with stack := vs })) = _
+    rfl
+  rw [hPop]
+  -- Reduce asBool? on vBigint.
+  show (match asBool? (.vBigint (mDir index i)) with
+        | some true => _
+        | some false => _
+        | none => _) = _
+  show (match (some (decide (mDir index i ≠ 0)) : Option Bool) with
+        | some true => _
+        | some false => _
+        | none => _) = _
+  -- Case-split on the direction bit.
+  by_cases hDir : mDir index i = 0
+  · -- dir = 0: skip swap; OP_CAT yields current ++ sibling.
+    have hBool : decide (mDir index i ≠ 0) = false := by simp [hDir]
+    rw [hBool]
+    let post_pop : StackState := { s11 with
+          stack := .vBytes (proof.extract 0 32) :: .vBytes current :: rest }
+    -- Reduce ifOp false-branch (els=none): stays on popped state.
+    show runOps _ post_pop = _
+    let s_cat : StackState := { post_pop with
+          stack := .vBytes (current ++ (proof.extract 0 32)) :: rest }
+    rw [mlevel_cons_step (mOpc "OP_CAT") _ post_pop s_cat
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_cat post_pop current (proof.extract 0 32) rest rfl)]
+    -- OP_<hashOp> ; case-split on hashOp.
+    rcases hHash with hSHA | hHASH256
+    · subst hSHA
+      let s_hash : StackState := { post_pop with
+            stack := .vBytes (ANF.Eval.Crypto.sha256
+                      (current ++ (proof.extract 0 32))) :: rest }
+      rw [mlevel_cons_step (mOpc "OP_SHA256") _ s_cat s_hash
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_sha256 s_cat
+              (current ++ (proof.extract 0 32)) rest rfl)]
+      -- OP_FROMALTSTACK x 2.
+      let s_fa1 : StackState := { s with
+            stack := .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.sha256
+                          (current ++ (proof.extract 0 32))) :: rest,
+            altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_hash s_fa1
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_hash (.vBigint index)
+              (.vBytes (proof.extract 32 proof.size) :: s.altstack) rfl)]
+      let s_fa2 : StackState := { s with
+            stack := .vBytes (proof.extract 32 proof.size)
+                      :: .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.sha256
+                          (current ++ (proof.extract 0 32))) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_fa1 s_fa2
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_fa1
+              (.vBytes (proof.extract 32 proof.size)) s.altstack rfl)]
+      let s_final : StackState := { s with
+            stack := .vBigint index
+                      :: .vBytes (proof.extract 32 proof.size)
+                      :: .vBytes (ANF.Eval.Crypto.sha256
+                          (current ++ (proof.extract 0 32))) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step .swap _ s_fa2 s_final
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_swap s_fa2
+              (.vBytes (proof.extract 32 proof.size)) (.vBigint index)
+              (.vBytes (ANF.Eval.Crypto.sha256
+                  (current ++ (proof.extract 0 32))) :: rest) rfl)]
+      rw [runOps_nil]
+      -- Match against the conclusion.
+      have hComb : mCombined current (proof.extract 0 32) index i
+          = current ++ (proof.extract 0 32) := by
+        unfold mCombined
+        rw [if_pos hDir]
+      rw [hComb]
+      -- The "if hashOp = OP_HASH256 then hash256 else sha256" reduces.
+      show (Except.ok s_final : Except _ _) = Except.ok _
+      simp only [if_neg (by decide : "OP_SHA256" ≠ "OP_HASH256")]
+      rfl
+    · subst hHASH256
+      let s_hash : StackState := { post_pop with
+            stack := .vBytes (ANF.Eval.Crypto.hash256
+                      (current ++ (proof.extract 0 32))) :: rest }
+      rw [mlevel_cons_step (mOpc "OP_HASH256") _ s_cat s_hash
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_hash256 s_cat
+              (current ++ (proof.extract 0 32)) rest rfl)]
+      let s_fa1 : StackState := { s with
+            stack := .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.hash256
+                          (current ++ (proof.extract 0 32))) :: rest,
+            altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_hash s_fa1
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_hash (.vBigint index)
+              (.vBytes (proof.extract 32 proof.size) :: s.altstack) rfl)]
+      let s_fa2 : StackState := { s with
+            stack := .vBytes (proof.extract 32 proof.size)
+                      :: .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.hash256
+                          (current ++ (proof.extract 0 32))) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_fa1 s_fa2
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_fa1
+              (.vBytes (proof.extract 32 proof.size)) s.altstack rfl)]
+      let s_final : StackState := { s with
+            stack := .vBigint index
+                      :: .vBytes (proof.extract 32 proof.size)
+                      :: .vBytes (ANF.Eval.Crypto.hash256
+                          (current ++ (proof.extract 0 32))) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step .swap _ s_fa2 s_final
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_swap s_fa2
+              (.vBytes (proof.extract 32 proof.size)) (.vBigint index)
+              (.vBytes (ANF.Eval.Crypto.hash256
+                  (current ++ (proof.extract 0 32))) :: rest) rfl)]
+      rw [runOps_nil]
+      have hComb : mCombined current (proof.extract 0 32) index i
+          = current ++ (proof.extract 0 32) := by
+        unfold mCombined
+        rw [if_pos hDir]
+      rw [hComb]
+      show (Except.ok s_final : Except _ _) = Except.ok _
+      rfl
+  · -- dir ≠ 0: do the swap; OP_CAT yields sibling ++ current.
+    have hBool : decide (mDir index i ≠ 0) = true := by simp [hDir]
+    rw [hBool]
+    let post_pop : StackState := { s11 with
+          stack := .vBytes (proof.extract 0 32) :: .vBytes current :: rest }
+    let post_inner_swap : StackState := { s11 with
+          stack := .vBytes current :: .vBytes (proof.extract 0 32) :: rest }
+    show (match runOps [.swap] post_pop with
+          | Except.error e => Except.error e
+          | Except.ok s'' => runOps
+              (mOpc "OP_CAT" :: mOpc hashOp :: mOpc "OP_FROMALTSTACK"
+                :: mOpc "OP_FROMALTSTACK" :: .swap :: []) s'') = _
+    rw [mlevel_cons_step .swap [] post_pop post_inner_swap
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_swap post_pop (.vBytes (proof.extract 0 32))
+            (.vBytes current) rest rfl)]
+    rw [runOps_nil]
+    -- Reduce the outer match-on-Except.ok.
+    show runOps _ post_inner_swap = _
+    let s_cat : StackState := { post_inner_swap with
+          stack := .vBytes ((proof.extract 0 32) ++ current) :: rest }
+    rw [mlevel_cons_step (mOpc "OP_CAT") _ post_inner_swap s_cat
+          (fun _ _ h => StackOp.noConfusion h)
+          (mlevel_stepNonIf_cat post_inner_swap (proof.extract 0 32) current rest rfl)]
+    rcases hHash with hSHA | hHASH256
+    · subst hSHA
+      let s_hash : StackState := { post_inner_swap with
+            stack := .vBytes (ANF.Eval.Crypto.sha256
+                      ((proof.extract 0 32) ++ current)) :: rest }
+      rw [mlevel_cons_step (mOpc "OP_SHA256") _ s_cat s_hash
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_sha256 s_cat
+              ((proof.extract 0 32) ++ current) rest rfl)]
+      let s_fa1 : StackState := { s with
+            stack := .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.sha256
+                          ((proof.extract 0 32) ++ current)) :: rest,
+            altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_hash s_fa1
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_hash (.vBigint index)
+              (.vBytes (proof.extract 32 proof.size) :: s.altstack) rfl)]
+      let s_fa2 : StackState := { s with
+            stack := .vBytes (proof.extract 32 proof.size)
+                      :: .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.sha256
+                          ((proof.extract 0 32) ++ current)) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_fa1 s_fa2
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_fa1
+              (.vBytes (proof.extract 32 proof.size)) s.altstack rfl)]
+      let s_final : StackState := { s with
+            stack := .vBigint index
+                      :: .vBytes (proof.extract 32 proof.size)
+                      :: .vBytes (ANF.Eval.Crypto.sha256
+                          ((proof.extract 0 32) ++ current)) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step .swap _ s_fa2 s_final
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_swap s_fa2
+              (.vBytes (proof.extract 32 proof.size)) (.vBigint index)
+              (.vBytes (ANF.Eval.Crypto.sha256
+                  ((proof.extract 0 32) ++ current)) :: rest) rfl)]
+      rw [runOps_nil]
+      have hComb : mCombined current (proof.extract 0 32) index i
+          = (proof.extract 0 32) ++ current := by
+        unfold mCombined
+        rw [if_neg hDir]
+      rw [hComb]
+      show (Except.ok s_final : Except _ _) = Except.ok _
+      simp only [if_neg (by decide : "OP_SHA256" ≠ "OP_HASH256")]
+      rfl
+    · subst hHASH256
+      let s_hash : StackState := { post_inner_swap with
+            stack := .vBytes (ANF.Eval.Crypto.hash256
+                      ((proof.extract 0 32) ++ current)) :: rest }
+      rw [mlevel_cons_step (mOpc "OP_HASH256") _ s_cat s_hash
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_hash256 s_cat
+              ((proof.extract 0 32) ++ current) rest rfl)]
+      let s_fa1 : StackState := { s with
+            stack := .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.hash256
+                          ((proof.extract 0 32) ++ current)) :: rest,
+            altstack := .vBytes (proof.extract 32 proof.size) :: s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_hash s_fa1
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_hash (.vBigint index)
+              (.vBytes (proof.extract 32 proof.size) :: s.altstack) rfl)]
+      let s_fa2 : StackState := { s with
+            stack := .vBytes (proof.extract 32 proof.size)
+                      :: .vBigint index ::
+                      .vBytes (ANF.Eval.Crypto.hash256
+                          ((proof.extract 0 32) ++ current)) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step (mOpc "OP_FROMALTSTACK") _ s_fa1 s_fa2
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_fromaltstack s_fa1
+              (.vBytes (proof.extract 32 proof.size)) s.altstack rfl)]
+      let s_final : StackState := { s with
+            stack := .vBigint index
+                      :: .vBytes (proof.extract 32 proof.size)
+                      :: .vBytes (ANF.Eval.Crypto.hash256
+                          ((proof.extract 0 32) ++ current)) :: rest,
+            altstack := s.altstack }
+      rw [mlevel_cons_step .swap _ s_fa2 s_final
+            (fun _ _ h => StackOp.noConfusion h)
+            (mlevel_stepNonIf_swap s_fa2
+              (.vBytes (proof.extract 32 proof.size)) (.vBigint index)
+              (.vBytes (ANF.Eval.Crypto.hash256
+                  ((proof.extract 0 32) ++ current)) :: rest) rfl)]
+      rw [runOps_nil]
+      have hComb : mCombined current (proof.extract 0 32) index i
+          = (proof.extract 0 32) ++ current := by
+        unfold mCombined
+        rw [if_neg hDir]
+      rw [hComb]
+      show (Except.ok s_final : Except _ _) = Except.ok _
+      rfl
+
+/-- Per-level lemma threaded over `runOps_append`: chains one `mLevel`
+into a following `rest_ops`. -/
+private theorem runOps_mLevel_eq
+    (s : StackState) (index : Int) (proof current : ByteArray)
+    (rest : List Value) (rest_ops : List StackOp) (i : Nat) (hashOp : String)
+    (hHash : hashOp = "OP_SHA256" ∨ hashOp = "OP_HASH256")
+    (hStk : s.stack
+            = .vBigint index :: .vBytes proof :: .vBytes current :: rest)
+    (hSize : 32 ≤ proof.size) :
+    runOps (mLevel i hashOp ++ rest_ops) s
+    = runOps rest_ops
+        { s with stack
+            := .vBigint index
+                :: .vBytes (proof.extract 32 proof.size)
+                :: .vBytes ((if hashOp = "OP_HASH256"
+                              then ANF.Eval.Crypto.hash256
+                              else ANF.Eval.Crypto.sha256)
+                    (mCombined current (proof.extract 0 32) index i))
+                :: rest } := by
+  rw [runOps_append,
+      runOps_mLevel_state_eq s index proof current rest i hashOp hHash hStk hSize]
+
+/-- Inductive lemma: chains `d` levels of `mAllLevelsAux` against
+`Crypto.Spec.merkleVerifyPathFrom`. -/
+private theorem runOps_mAllLevelsAux_eq
+    (d : Nat) (s : StackState) (index : Int)
+    (proof current : ByteArray) (rest : List Value)
+    (rest_ops : List StackOp) (base : Nat) (hashOp : String)
+    (hHash : hashOp = "OP_SHA256" ∨ hashOp = "OP_HASH256")
+    (hStk : s.stack
+            = .vBigint index :: .vBytes proof :: .vBytes current :: rest)
+    (hNonNeg : 0 ≤ index)
+    (hSize : proof.size = 32 * d) :
+    runOps (mAllLevelsAux hashOp base d ++ rest_ops) s
+    = runOps rest_ops
+        { s with stack
+            := .vBigint index
+                :: .vBytes (proof.extract (32 * d) proof.size)
+                :: .vBytes (Crypto.Spec.merkleVerifyPathFrom
+                    (if hashOp = "OP_HASH256"
+                      then (fun b => ANF.Eval.Crypto.hash256 b)
+                      else (fun b => ANF.Eval.Crypto.sha256 b))
+                    current proof index base d)
+                :: rest } := by
+  induction d generalizing s proof current base with
+  | zero =>
+      show runOps ([] ++ rest_ops) s = _
+      rw [List.nil_append]
+      have hEx : proof.extract (32 * 0) proof.size = proof := by
+        show proof.extract 0 proof.size = proof
+        exact ByteArray.extract_zero_size
+      rw [hEx]
+      have hPath := Crypto.Spec.merkleVerifyPathFrom_zero
+        (if hashOp = "OP_HASH256"
+          then (fun b => ANF.Eval.Crypto.hash256 b)
+          else (fun b => ANF.Eval.Crypto.sha256 b))
+        current proof index base
+      rw [hPath]
+      have hSelf : ({ s with
+              stack := .vBigint index :: .vBytes proof :: .vBytes current :: rest }
+            : StackState) = s := by
+        have hStkEq : s.stack
+              = .vBigint index :: .vBytes proof :: .vBytes current :: rest := hStk
+        rw [← hStkEq]
+      rw [hSelf]
+  | succ k ih =>
+      show runOps ((mLevel base hashOp ++ mAllLevelsAux hashOp (base + 1) k)
+                    ++ rest_ops) s = _
+      rw [List.append_assoc]
+      have hSize32 : 32 ≤ proof.size := by
+        rw [hSize]; omega
+      rw [runOps_mLevel_eq s index proof current rest
+            (mAllLevelsAux hashOp (base + 1) k ++ rest_ops) base hashOp hHash hStk hSize32]
+      have hSize' : (proof.extract 32 proof.size).size = 32 * k := by
+        rw [ByteArray.size_extract]
+        rw [hSize]
+        omega
+      have ihApplied := ih
+        ({ s with stack
+              := .vBigint index
+                  :: .vBytes (proof.extract 32 proof.size)
+                  :: .vBytes ((if hashOp = "OP_HASH256"
+                                then ANF.Eval.Crypto.hash256
+                                else ANF.Eval.Crypto.sha256)
+                      (mCombined current (proof.extract 0 32) index base))
+                  :: rest } : StackState)
+        (proof.extract 32 proof.size)
+        ((if hashOp = "OP_HASH256"
+          then ANF.Eval.Crypto.hash256
+          else ANF.Eval.Crypto.sha256)
+          (mCombined current (proof.extract 0 32) index base))
+        (base + 1) rfl hSize'
+      rw [ihApplied]
+      have hExNest : (proof.extract 32 proof.size).extract
+                      (32 * k) (proof.extract 32 proof.size).size
+                    = proof.extract (32 * (k + 1)) proof.size := by
+        have hL : (proof.extract 32 proof.size).extract
+                      (32 * k) (proof.extract 32 proof.size).size
+                  = ByteArray.empty := by
+          rw [ByteArray.extract_eq_empty_iff]
+          omega
+        have hR : proof.extract (32 * (k + 1)) proof.size = ByteArray.empty := by
+          rw [ByteArray.extract_eq_empty_iff]
+          rw [hSize]
+          omega
+        rw [hL, hR]
+      rw [hExNest]
+      have hStepEq : Crypto.Spec.merkleVerifyStep
+            (if hashOp = "OP_HASH256"
+              then (fun b => ANF.Eval.Crypto.hash256 b)
+              else (fun b => ANF.Eval.Crypto.sha256 b))
+            current proof index base
+          = ((if hashOp = "OP_HASH256"
+                then ANF.Eval.Crypto.hash256
+                else ANF.Eval.Crypto.sha256)
+              (mCombined current (proof.extract 0 32) index base),
+             proof.extract 32 proof.size) := by
+        unfold Crypto.Spec.merkleVerifyStep
+        rw [mCombined_eq_spec current (proof.extract 0 32) index base hNonNeg]
+      have hPathSucc :
+          Crypto.Spec.merkleVerifyPathFrom
+            (if hashOp = "OP_HASH256"
+              then (fun b => ANF.Eval.Crypto.hash256 b)
+              else (fun b => ANF.Eval.Crypto.sha256 b))
+            current proof index base (k + 1)
+          = Crypto.Spec.merkleVerifyPathFrom
+              (if hashOp = "OP_HASH256"
+                then (fun b => ANF.Eval.Crypto.hash256 b)
+                else (fun b => ANF.Eval.Crypto.sha256 b))
+              ((if hashOp = "OP_HASH256"
+                  then ANF.Eval.Crypto.hash256
+                  else ANF.Eval.Crypto.sha256)
+                (mCombined current (proof.extract 0 32) index base))
+              (proof.extract 32 proof.size) index (base + 1) k := by
+        show (let (current', proof') := Crypto.Spec.merkleVerifyStep
+                (if hashOp = "OP_HASH256"
+                  then (fun b => ANF.Eval.Crypto.hash256 b)
+                  else (fun b => ANF.Eval.Crypto.sha256 b))
+                current proof index base
+              Crypto.Spec.merkleVerifyPathFrom
+                (if hashOp = "OP_HASH256"
+                  then (fun b => ANF.Eval.Crypto.hash256 b)
+                  else (fun b => ANF.Eval.Crypto.sha256 b))
+                current' proof' index (base + 1) k) = _
+        rw [hStepEq]
+      rw [← hPathSucc]
+
+/-- General-depth Phase B7 codegen-to-spec equivalence for the SHA-256
+Merkle-root variant. -/
+theorem runOps_merkleRootSha256Ops_eq
+    (d : Nat) (leaf proof : ByteArray) (index : Int)
+    (rest : List Value) (stkSt : StackState)
+    (hStk : stkSt.stack
+            = .vBigint index :: .vBytes proof :: .vBytes leaf :: rest)
+    (hNonNeg : 0 ≤ index)
+    (hSize : proof.size = 32 * d) :
+    runOps (merkleRootSha256Ops d) stkSt
+    = .ok { stkSt with stack
+              := .vBytes (Crypto.Spec.merkleVerifyPath
+                            (fun b => ANF.Eval.Crypto.sha256 b)
+                            leaf proof index d) :: rest } := by
+  show runOps (merkleRootBody d "OP_SHA256") stkSt = _
+  unfold merkleRootBody mAllLevels
+  rw [runOps_mAllLevelsAux_eq d stkSt index proof leaf rest
+        [.drop, .drop] 0 "OP_SHA256" (Or.inl rfl) hStk hNonNeg hSize]
+  have hExEmpty : proof.extract (32 * d) proof.size = ByteArray.empty := by
+    rw [ByteArray.extract_eq_empty_iff]
+    rw [hSize]
+    omega
+  rw [hExEmpty]
+  -- "OP_SHA256" = "OP_HASH256" is false; the if reduces to else-branch.
+  show runOps [.drop, .drop] _ = .ok _
+  -- Goal currently has `if "OP_SHA256" = "OP_HASH256" then hash256 else sha256`
+  -- which reduces.  Use simp only to do that.
+  simp only [if_neg (by decide : "OP_SHA256" ≠ "OP_HASH256")]
+  unfold Crypto.Spec.merkleVerifyPath
+  exact runOps_drop_two
+    (.vBigint index) (.vBytes ByteArray.empty)
+    (.vBytes (Crypto.Spec.merkleVerifyPathFrom
+                (fun b => ANF.Eval.Crypto.sha256 b)
+                leaf proof index 0 d) :: rest)
+    { stkSt with stack
+        := .vBigint index :: .vBytes ByteArray.empty
+            :: .vBytes (Crypto.Spec.merkleVerifyPathFrom
+                          (fun b => ANF.Eval.Crypto.sha256 b)
+                          leaf proof index 0 d) :: rest } rfl
+
+/-- General-depth Phase B7 codegen-to-spec equivalence for the
+Hash256 (double-SHA-256) Merkle-root variant. -/
+theorem runOps_merkleRootHash256Ops_eq
+    (d : Nat) (leaf proof : ByteArray) (index : Int)
+    (rest : List Value) (stkSt : StackState)
+    (hStk : stkSt.stack
+            = .vBigint index :: .vBytes proof :: .vBytes leaf :: rest)
+    (hNonNeg : 0 ≤ index)
+    (hSize : proof.size = 32 * d) :
+    runOps (merkleRootHash256Ops d) stkSt
+    = .ok { stkSt with stack
+              := .vBytes (Crypto.Spec.merkleVerifyPath
+                            (fun b => ANF.Eval.Crypto.hash256 b)
+                            leaf proof index d) :: rest } := by
+  show runOps (merkleRootBody d "OP_HASH256") stkSt = _
+  unfold merkleRootBody mAllLevels
+  rw [runOps_mAllLevelsAux_eq d stkSt index proof leaf rest
+        [.drop, .drop] 0 "OP_HASH256" (Or.inr rfl) hStk hNonNeg hSize]
+  have hExEmpty : proof.extract (32 * d) proof.size = ByteArray.empty := by
+    rw [ByteArray.extract_eq_empty_iff]
+    rw [hSize]
+    omega
+  rw [hExEmpty]
+  show runOps [.drop, .drop] _ = .ok _
+  unfold Crypto.Spec.merkleVerifyPath
+  exact runOps_drop_two
+    (.vBigint index) (.vBytes ByteArray.empty)
+    (.vBytes (Crypto.Spec.merkleVerifyPathFrom
+                (fun b => ANF.Eval.Crypto.hash256 b)
+                leaf proof index 0 d) :: rest)
+    { stkSt with stack
+        := .vBigint index :: .vBytes ByteArray.empty
+            :: .vBytes (Crypto.Spec.merkleVerifyPathFrom
+                          (fun b => ANF.Eval.Crypto.hash256 b)
+                          leaf proof index 0 d) :: rest } rfl
 
 end Merkle
 end RunarVerification.Stack

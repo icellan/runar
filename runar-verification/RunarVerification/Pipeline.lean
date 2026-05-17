@@ -2576,12 +2576,325 @@ theorem nip_cleanup_residue_correct (m : ANFMethod)
   intro hRawSuccess
   exact hRawSuccess
 
-/-! ### Phase D harness integration: codegen-soundness omnibus axiom -/
+/-! ### Phase D harness integration: per-family codegen-soundness sub-omnibuses
+
+**Tier 1 milestone O1 (2026-05-17).** The single omnibus axiom
+`compileSafe_observational_correct_modulo_codegen_axioms` was split
+into 9 per-constructor-family sub-omnibus axioms. Each sub-omnibus
+carries a body-level structural-classifier hypothesis (decidable
+Bool / Prop) so the conformance harness
+(`tests/PipelineConformance.lean`) can dispatch fixtures into
+per-family `VERIFIED-modulo-<family>-codegen-axioms` tiers. The
+original omnibus is now a `theorem` that case-splits on the body's
+family using the existing Bool checkers in `Stack/Agrees.lean` and
+applies the matching sub-omnibus.
+
+The 9 sub-omnibuses (matching `TRUST_MANIFEST.md` § "Phase D harness
+integration omnibus — planned split"):
+
+* `compileSafe_observational_correct_modulo_arith_codegen` — bodies
+  whose non-structural-const bindings are `binOp` / `unaryOp` /
+  `assert`. Discharged once Stage C A3 widening completes.
+* `compileSafe_observational_correct_modulo_math_byte_call_codegen` —
+  bodies whose non-structural-const bindings are `.call` to math/byte
+  builtins (arity-fixed: `abs / len / bin2num / toByteString / cat /
+  num2bin / min / max / split / within`). Discharged once Stage C
+  A4-math/byte completes.
+* `compileSafe_observational_correct_modulo_crypto_call_codegen` —
+  bodies whose `.call` bindings target crypto builtins (sha256 /
+  ripemd160 / hash160 / hash256 / blake3 / ec* / p256* / verifyECDSA*
+  / verifyWOTS / verifySLHDSA / verifyRabin / etc.) that do not fit
+  the math/byte fragment. Discharged after Phase B per-primitive
+  codegen-to-spec + A4-crypto wrappers land.
+* `compileSafe_observational_correct_modulo_update_prop_codegen` —
+  bodies with `update_prop`. Discharged once A5 widening completes.
+* `compileSafe_observational_correct_modulo_if_val_codegen` —
+  Discharged once A6 widening completes.
+* `compileSafe_observational_correct_modulo_loop_codegen` —
+  Discharged once A7 widening completes.
+* `compileSafe_observational_correct_modulo_method_call_codegen` —
+  Discharged once A8 widening completes.
+* `compileSafe_observational_correct_modulo_dispatch_codegen` —
+  Discharged once D1 lands (multi-public-method Merkle dispatch
+  selection).
+* `compileSafe_observational_correct_modulo_stateful_codegen` —
+  Discharged once D2.a + D2.b land (auto-injected `checkPreimage` at
+  method entry + auto-injected state output at method exit).
+
+**Trust footprint.** Each sub-omnibus is load-bearing for its
+corresponding `VERIFIED-modulo-<family>-codegen-axioms` classification
+in `tests/PipelineConformance.lean`. Sub-omnibuses retire one at a
+time as their corresponding Stage C / Phase B / Phase D milestones
+land. The net axiom delta of the O1 split is +8 (9 sub-omnibuses
+replace 1 omnibus that becomes a theorem); each sub-omnibus retirement
+takes the count back down. See `PATH2_PLAN.md` §5.23 and
+`TRUST_MANIFEST.md` for the per-sub-omnibus discharge plans.
+-/
+
+/-- **O1 sub-omnibus — arith family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies whose
+non-structural-const bindings are `binOp` / `unaryOp` / `assert`.
+The hypothesis `hArith` requires the body to satisfy
+`Agrees.structuralArithBodyBool` (a decidable Bool checker reflecting
+`Agrees.structuralArithBody`). Soundness collapses the runtime-side
+Stage C `agreesTagged` / `ChainRel` composition for the arith family
+into a single trust footprint while A3 Stage C widening is still under
+construction.
+
+Discharge path: this sub-omnibus retires when Stage C A3 narrowed
+wrappers (`Stack/AgreesA3.lean`) widen to full coverage of the arith
+fragment; see `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_arith_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hArith :
+      Agrees.structuralArithBodyBool
+        p.methods p.properties
+        Lower.defaultInlineBudget
+        (Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name)))
+        0 = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — math/byte call family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies whose
+non-structural-const bindings are `.call` to math/byte builtins
+(`abs / len / bin2num / toByteString / cat / num2bin / min / max /
+split / within`). The hypothesis `hMathByteCall` requires the body
+to satisfy `Agrees.structuralCallBodyBool`, the per-builtin fragment
+predicate that captures math/byte call arms.
+
+Discharge path: this sub-omnibus retires when Stage C A4-math/byte
+narrowed wrappers widen to full coverage; see `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_math_byte_call_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hMathByteCall :
+      Agrees.structuralCallBodyBool
+        p.methods p.properties
+        Lower.defaultInlineBudget
+        (Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name)))
+        0 = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — crypto call family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies whose
+`.call` bindings target crypto builtins (sha256 / ripemd160 / hash160 /
+hash256 / blake3 / ec* / p256* / verifyECDSA* / verifyWOTS /
+verifySLHDSA / verifyRabin / ...) which do not fit the math/byte
+fragment predicate. The hypothesis `_hCryptoCall` is the trivial
+`True` because no dedicated structural Bool checker exists for the
+crypto-call family today: the substrate predicate is gated on A4-crypto
+Stage C narrowed wrappers, and the per-primitive codegen-to-spec
+discharges in Phase B (`Stack.HashOps`, `Stack.Blake3`, `Stack.Ec`,
+`Stack.P256P384`, `Stack.Wots`, `Stack.SlhDsa`, `Stack.Rabin`) supply
+the runtime-side composition once they land.
+
+Discharge path: this sub-omnibus retires after Phase B per-primitive
+codegen-to-spec discharges + A4-crypto Stage C wrappers land; the
+hypothesis tightens to a dedicated `structuralCryptoCallBody`
+predicate (mirrors `structuralCallBody`) at that point. See
+`PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_crypto_call_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hCryptoCall : True) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — update_prop family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies with
+`update_prop` bindings (mutable property writes routed through the
+stack-side `OP_TOALTSTACK` / `OP_FROMALTSTACK` cleanup tail). The
+hypothesis `hUpdateProp` requires the body to satisfy
+`Agrees.structuralUpdatePropBodyBool`.
+
+Discharge path: this sub-omnibus retires once Stage C A5 widening
+completes; see `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_update_prop_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hUpdateProp :
+      Agrees.structuralUpdatePropBodyBool
+        p.methods p.properties
+        Lower.defaultInlineBudget
+        (Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name)))
+        0 = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — if_val family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies with
+`ifVal` bindings (conditional value selection lowered to
+`OP_IF / OP_ELSE / OP_ENDIF`). The hypothesis `hIfVal` requires the
+body to satisfy `Agrees.structuralIfValBodyBool`.
+
+Discharge path: this sub-omnibus retires once Stage C A6 widening
+completes; see `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_if_val_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hIfVal :
+      Agrees.structuralIfValBodyBool
+        p.methods p.properties
+        Lower.defaultInlineBudget
+        (Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name)))
+        0 = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — loop family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies with
+`loop` bindings (bounded iteration lowered to an unrolled chain of
+`OP_DUP / OP_TOALTSTACK / body / OP_FROMALTSTACK` per iteration). The
+hypothesis `hLoop` requires the body to satisfy
+`Agrees.structuralLoopBodyBool`.
+
+Discharge path: this sub-omnibus retires once Stage C A7 widening
+completes; see `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_loop_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hLoop :
+      Agrees.structuralLoopBodyBool
+        p.methods p.properties
+        Lower.defaultInlineBudget
+        (Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name)))
+        0 = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — method_call family.**
+
+Phase D harness integration: codegen-soundness for ANF bodies with
+`methodCall` bindings (private-helper inlining or recursive method
+references). The hypothesis `hMethodCall` requires the body to satisfy
+`Agrees.structuralMethodCallBodyBool`.
+
+Discharge path: this sub-omnibus retires once Stage C A8 widening
+completes; see `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_method_call_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hMethodCall :
+      Agrees.structuralMethodCallBodyBool
+        p.methods p.properties
+        Lower.defaultInlineBudget
+        (Lower.computeLastUses anfM.body) []
+        (anfM.body.map (·.name))
+        (Lower.collectConstInts anfM.body)
+        anfM.body
+        (List.reverse (anfM.params.map (·.name)))
+        0 = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — dispatch family.**
+
+Phase D harness integration: codegen-soundness for ANF programs with
+two or more public methods, exercising the multi-method Merkle
+dispatch chain (`OP_DUP push(i) OP_NUMEQUAL OP_IF OP_DROP body_i
+OP_ELSE …` per `Script/Emit.lean:312-336`). The hypothesis
+`hDispatch` requires `p` to have ≥ 2 public methods.
+
+Discharge path: this sub-omnibus retires once D1
+(`merkle_dispatch_selection_correct`) lands as a theorem (rather than
+an axiom) — i.e. when the dispatch-head selection rewrite is itself a
+verified rewrite. See `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_dispatch_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hDispatch : (p.methods.filter (·.isPublic)).length ≥ 2) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
+
+/-- **O1 sub-omnibus — stateful family.**
+
+Phase D harness integration: codegen-soundness for ANF methods on
+stateful contracts (`parentClass = StatefulSmartContract`), which the
+lowerer threads through an auto-injected `checkPreimage` at method
+entry and an auto-injected state-output at method exit. The hypothesis
+`hStateful` requires `Lower.bindingsUseCheckPreimage anfM.body = true`.
+
+Discharge path: this sub-omnibus retires once D2.a
+(`auto_check_preimage_at_method_entry_correct`) and D2.b
+(`auto_state_output_at_method_exit_correct`) land as theorems —
+i.e. when both auto-injected wrappers are themselves verified
+rewrites. See `PATH2_PLAN.md` §5.23.
+-/
+axiom compileSafe_observational_correct_modulo_stateful_codegen (p : ANFProgram)
+    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
+    (_hSafe : compileSafe p = .ok bytes)
+    (initialAnf : State) (initialStack : StackState)
+    (_hStateful : Lower.bindingsUseCheckPreimage anfM.body = true) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
+      (runParsedBytes bytes initialStack)
 
 /--
-**Harness-level codegen-soundness axiom (Phase D harness integration).**
+**Harness-level codegen-soundness theorem (Phase D harness integration).**
 
-This axiom asserts that the entire `compileSafe` pipeline (ANF lowering
+This theorem asserts that the entire `compileSafe` pipeline (ANF lowering
 → peephole → byte emission → parse-back → `runOps`) is observationally
 correct on any well-formed ANF program that `compileSafe` accepts, for
 any of its public methods. The only premises are:
@@ -2594,73 +2907,105 @@ any of its public methods. The only premises are:
 * `compileSafe p = .ok bytes` — the compiler accepted `p` and produced
   `bytes`.
 
-It is intentionally **permissive**: no structural body fragment, no
-single-public-method shape, no Merkle dispatch witness, no terminal
-assert / `checkPreimage` / `deserializeState` exclusions, no peephole
-preconditions, no `Parse.AreRunarEmittable` proof. Those are exactly
-the predicates that the per-fragment Stage C composition discharges;
-this axiom collapses them into a single trust footprint while the
-runtime-side discharge is still under construction.
+**Tier 1 milestone O1 split (2026-05-17).** This was previously a
+single omnibus axiom. It is now a `theorem` that case-splits on the
+body's family using the existing decidable Bool checkers in
+`Stack/Agrees.lean` and applies the matching per-family sub-omnibus
+axiom (see the section above). Programs that fall outside every
+named structural family land on the `crypto_call` sub-omnibus as the
+substrate-gap fallback (its hypothesis is `True` until a dedicated
+`structuralCryptoCallBody` predicate lands with A4-crypto).
 
-What this axiom morally composes:
+The signature is preserved (no extra hypotheses): every callsite that
+previously consumed the omnibus axiom continues to typecheck. The
+per-family classification is observable in the harness output
+(`tests/PipelineConformance.lean`) where fixtures are reported under
+per-family `VERIFIED-modulo-<family>-codegen-axioms` tiers.
 
-* **Phase B codegen-to-spec axioms** for the crypto primitive families
-  (`Stack.HashOps`, `Stack.Blake3`, `Stack.Ec`, `Stack.P256P384`,
-  `Stack.Merkle` for the empty / `d=0` cases, `Stack.Wots`,
-  `Stack.SlhDsa`, `Stack.Rabin`). Those establish that each crypto
-  opcode sequence agrees with the algorithmic spec it lowers from.
-
-* **Phase D dispatch / wrapper soundness** for multi-method Merkle
-  dispatch selection, auto-injected `checkPreimage` at method entry,
-  auto-injected state output at method exit, terminal `OP_VERIFY`
-  elision residue, and `OP_NIP` cleanup residue. Those land as
-  per-wrapper soundness once the wrapper machinery is itself a verified
-  rewrite; today they are folded into this omnibus because they have
-  no standalone callers in the harness.
-
-* **Phase A structural-fragment proofs** (`M2` lowering simulation,
-  `M3` peephole composition, `M5` capstone). For bodies in the
-  structural-const / structural-ref fragment these are already
-  unconditional Lean theorems
-  (`compileSafe_single_public_observational_correct_unconditional`);
-  the omnibus subsumes them as a special case for harness uniformity.
-
-What remains an axiom rather than a theorem is the **runtime-side
-composition for ANF constructors outside the structural-const
-fragment**: `binOp`, `unaryOp`, `assert`, `update_prop`, `if_val`,
-`loop`, `methodCall`, output construction, and crypto intrinsic
-calls. Per the Phase A/D plan, the discharge path is per-opcode
-Stage C `agreesTagged` / `ChainRel` composition against the concrete
-Stack VM, plus Phase B per-opcode reductions for crypto primitives.
-That is the multi-week proof obligation that would let us delete this
-axiom.
-
-**Trust footprint.** This axiom is load-bearing for the
-`VERIFIED-modulo-codegen-axioms` classification in
-`tests/PipelineConformance.lean`. Fixtures classified at that tier
-are sound conditional on:
-
-1. The per-primitive Phase B codegen-to-spec assumptions that this
-   axiom names.
-2. The runtime-side Stage C composition for non-structural-const
-   ANF constructors that this axiom collapses into a single bullet.
-
-Direct VERIFIED fixtures (without `-modulo-codegen-axioms`) are sound
-without (2); only the Phase B and external backend assumptions remain.
-
-Removing this axiom requires landing the Stage C composition for every
-supported ANF constructor (A3–A8 runtime wrappers) plus the Phase B
-per-opcode reduction discharges for every crypto primitive family the
-fixtures touch.
+**Trust footprint.** This theorem is load-bearing for the
+`VERIFIED-modulo-*-codegen-axioms` classifications in
+`tests/PipelineConformance.lean`. Sub-omnibuses retire one at a time
+as their corresponding Stage C / Phase B / Phase D milestones land;
+see `PATH2_PLAN.md` §5.23 for the discharge plan.
 -/
-axiom compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
-    (_hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
-    (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
-    (_hSafe : compileSafe p = .ok bytes)
+theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
+    (hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
+    (hMem : anfM ∈ p.methods) (hPublic : anfM.isPublic = true)
+    (hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
-      (runParsedBytes bytes initialStack)
+      (runParsedBytes bytes initialStack) := by
+  -- Per-family classifier inputs (shared by all Bool checkers).
+  let lastUses     := Lower.computeLastUses anfM.body
+  let localBindings := anfM.body.map (·.name)
+  let constInts    := Lower.collectConstInts anfM.body
+  let initialSm : Lower.StackMap :=
+    List.reverse (anfM.params.map (·.name))
+  -- Priority-ordered case-split. Stateful and dispatch take precedence
+  -- because they reflect program-level shape obligations that override
+  -- the structural body classification.
+  by_cases hStateful : Lower.bindingsUseCheckPreimage anfM.body = true
+  · exact compileSafe_observational_correct_modulo_stateful_codegen
+      p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hStateful
+  · by_cases hDispatch : (p.methods.filter (·.isPublic)).length ≥ 2
+    · exact compileSafe_observational_correct_modulo_dispatch_codegen
+        p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hDispatch
+    · -- Body-level structural classification (decidable Bool checkers).
+      by_cases hArith :
+          Agrees.structuralArithBodyBool
+            p.methods p.properties
+            Lower.defaultInlineBudget
+            lastUses [] localBindings constInts
+            anfM.body initialSm 0 = true
+      · exact compileSafe_observational_correct_modulo_arith_codegen
+          p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hArith
+      · by_cases hMathByte :
+            Agrees.structuralCallBodyBool
+              p.methods p.properties
+              Lower.defaultInlineBudget
+              lastUses [] localBindings constInts
+              anfM.body initialSm 0 = true
+        · exact compileSafe_observational_correct_modulo_math_byte_call_codegen
+            p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hMathByte
+        · by_cases hUpdateProp :
+              Agrees.structuralUpdatePropBodyBool
+                p.methods p.properties
+                Lower.defaultInlineBudget
+                lastUses [] localBindings constInts
+                anfM.body initialSm 0 = true
+          · exact compileSafe_observational_correct_modulo_update_prop_codegen
+              p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hUpdateProp
+          · by_cases hIfVal :
+                Agrees.structuralIfValBodyBool
+                  p.methods p.properties
+                  Lower.defaultInlineBudget
+                  lastUses [] localBindings constInts
+                  anfM.body initialSm 0 = true
+            · exact compileSafe_observational_correct_modulo_if_val_codegen
+                p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hIfVal
+            · by_cases hLoop :
+                  Agrees.structuralLoopBodyBool
+                    p.methods p.properties
+                    Lower.defaultInlineBudget
+                    lastUses [] localBindings constInts
+                    anfM.body initialSm 0 = true
+              · exact compileSafe_observational_correct_modulo_loop_codegen
+                  p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hLoop
+              · by_cases hMethodCall :
+                    Agrees.structuralMethodCallBodyBool
+                      p.methods p.properties
+                      Lower.defaultInlineBudget
+                      lastUses [] localBindings constInts
+                      anfM.body initialSm 0 = true
+                · exact compileSafe_observational_correct_modulo_method_call_codegen
+                    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hMethodCall
+                · -- Substrate-gap fallback: no structural classifier fires.
+                  -- This is the crypto-call family (no dedicated Bool checker
+                  -- until A4-crypto + Phase B per-primitive land). The
+                  -- sub-omnibus hypothesis is `True`.
+                  exact compileSafe_observational_correct_modulo_crypto_call_codegen
+                    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack trivial
 
 /-! ### Multi-method capstone
 

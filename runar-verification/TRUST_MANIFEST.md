@@ -9,7 +9,7 @@ counts:
 
 | Item | Count | Meaning |
 |---|---:|---|
-| Project axioms | 78 | Named assumptions in Lean code |
+| Project axioms | 86 | Named assumptions in Lean code |
 | Opaque executable defaults | 0 | No executable bodies hidden from proofs |
 | Opaque defaults with bodies | 0 | No opaque declarations carry defaults |
 | `partial def` | 0 | No partial definitions under `RunarVerification/` |
@@ -46,6 +46,17 @@ that are preserved by design.
 
 **Net Tier 1 wave 1 (2026-05-17, six parallel discharges):** 110 → 78,
 Δ = −32. Combined with wave 1: 125 → 78, Δ = −47 in a single day.
+
+| Tier 1 wave 2: O1 omnibus split | 2026-05-17 | 86 | +8 | +8 (9 sub-omnibus axioms +1 omnibus theorem) | 0 |
+
+**Net Tier 1 wave 2 (2026-05-17, omnibus-split inflation + Stage C widenings):** 78 → 86,
+Δ = +8 (intentional). The 9 per-family sub-omnibuses replace the single omnibus
+to enable per-family fixture classification; each sub-omnibus retires as
+its corresponding Stage C / Phase B / Phase D milestone discharges.
+Wave 2 also landed (with zero axiom delta) the B7 Merkle inductive
+proof gap fill, A4 math/byte builtin expansion (min/max/cat/within),
+A5 Tier 3a (existing-prop entry depth 1 with `.nip` cleanup), and A6
+Tier 2 (identical-single-const ifVal across int/bool/bytes).
 
 The Phase B6 and B3-a discharges reveal a taxonomy gap in the
 original Path 2 framing: some axioms classified "permanent crypto"

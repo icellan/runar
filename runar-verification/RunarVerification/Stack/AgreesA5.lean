@@ -663,43 +663,267 @@ theorem runMethod_lower_public_unique_no_post_structuralUpdatePropAnyDepth_isSom
   simpleStepRel_updateProp_preserves
     contractName props methods m initialStack hMem hPublic hUnique hStruct
 
-/-! ### Tier 3 — documented obstacle (DONE_WITH_CONCERNS path)
+/-! ## Tier 3a — existing-prop entry at depth 1 (`OP_NIP` cleanup)
 
-Tier 3 (`update_prop` at depth d with a *non-fresh* prop name requiring
-non-empty cleanup) is not closed in this widening. The blocking
-obstacle:
+Tier 2 above narrows to the fresh-prop case (`propName ∉ tail'`), under
+which `removePropEntryOps` emits an empty op list. Tier 3a widens to the
+**existing-prop** case where `propName` appears at the very head of the
+post-load tail — i.e. the renamed stack-map is `propName :: propName ::
+rest2` — and the cleanup op list is the singleton `[.nip]`.
 
-* `removePropEntryAux` emits, when it finds `propName` at depth d' ≥ 1
-  in the post-rename tail:
-  - `[.nip]`                                  (d' = 1)
-  - `[push d', OP_ROLL, .drop]`               (d' ≥ 2)
-  Each variant must reduce step-by-step against the **runtime stack
-  layout produced by the preceding load op**. Concretely: after a
-  `[.swap]` load (depth-1 load case), the runtime stack is
-  `v_ref :: v_a :: rest`. The cleanup then needs to find `v_propName` —
-  the *old* property value — somewhere in `v_a :: rest`. The depth of
-  `v_propName` in the runtime stack must match the depth of `propName`
-  in the post-load *stack-map*. Establishing that runtime/stack-map
-  alignment requires a runtime-side invariant analogous to
-  `taggedStackAligned` (which lives in `Stack/Agrees.lean`).
+The wave-1 "DONE_WITH_CONCERNS" obstacle was that the cleanup needs to
+inspect the *runtime* stack layout (not just the stack-map) to know
+`applyNip` won't fault. We resolve this without introducing a shared
+runtime/stack-map alignment predicate by observing a tighter fact:
+**for every bringToTop output shape, the post-load runtime stack length
+is identical to the pre-load runtime stack length** — load ops are
+length-preserving permutations. So the runtime side condition for
+`applyNip` (`post-load stack length ≥ 2`) reduces to an input-side
+constraint on `initialStack.stack.length`.
 
-* §2.4 file isolation: that runtime-side alignment predicate is the
-  natural shared helper between A5, A6 (`if_val`), and A7 (loop). It
-  belongs in `Stack/Agrees.lean`. Adding it from `AgreesA5.lean` alone
-  would either duplicate (violating §2.6 maintainability) or pre-empt
-  the cross-A<k> design discussion.
+In Tier 2's shape disjunct, three of the four cases (swap / rot / roll)
+already imply `initialStack.stack.length ≥ 2` (in fact ≥ 2 / ≥ 3 /
+≥ d+1≥4). Only the depth-0 case (load = `[]`) needs an additional
+length-≥-2 input-side constraint, which becomes part of the Tier-3a
+structural predicate.
 
-The Tier-2 wrapper above already discharges the bulk of the
-conformance suite's `.updateProp` corpus today — every singleton
-`.updateProp` against a fresh property name, at any depth `d`.
-Multi-binding `.updateProp` bodies (chained property updates, common in
-stateful contracts that update multiple slots) require the multi-step
-predicate-side `simpleStepRel` widening, which is the cross-A<k>
-follow-up and is also out-of-scope here for the same §2.4 reason.
+No runtime/stack-map alignment predicate is introduced in
+`Stack/Agrees.lean` here. The wave-1 note over-stated the obstacle for
+the d'=1 cleanup case (the alignment fact reduces to a runtime
+stack-length fact, which is per-case input-side derivable). Tier 3b
+(`propName` at depth d' ≥ 2 in the renamed tail, cleanup = `[push d',
+OP_ROLL, .drop]`) is still under documented obstacle below — that case
+does require the **value** at runtime depth d' to coincide with the
+mapped prop slot, which is the genuine alignment fact.
+-/
 
-Reporting category per mission rubric: **DONE_WITH_CONCERNS**, obstacle
-named precisely above (runtime/stack-map alignment shared helper
-belongs in `Stack/Agrees.lean`, not `Stack/AgreesA5.lean`). -/
+/-- Auxiliary: when `removePropEntryAux propName 1 (propName :: rest2) =
+([.nip], rest2)`. Direct unfold of the `removePropEntryAux` definition
+at the `d = 1, x = propName` branch. -/
+private theorem removePropEntryAux_head_match
+    (propName : String) (rest2 : List String) :
+    Stack.Lower.removePropEntryAux propName 1 (propName :: rest2)
+      = ([StackOp.nip], rest2) := by
+  unfold Stack.Lower.removePropEntryAux
+  simp
+
+/-- Top-level cleanup helper on a renamed stack map `propName :: propName
+:: rest2`: the cleanup is `[.nip]` and the result stackmap is `propName
+:: rest2` (the bottom duplicate dropped). -/
+private theorem removePropEntryOps_headDup
+    (propName : String) (rest2 : List String) :
+    Stack.Lower.removePropEntryOps (propName :: propName :: rest2) propName
+      = ([StackOp.nip], propName :: rest2) := by
+  unfold Stack.Lower.removePropEntryOps
+  simp [removePropEntryAux_head_match propName rest2]
+
+/-! ### Runtime reduction of `applyNip` and its sequenced equivalents
+
+The four post-load runtime stack shapes (case 0/1/2/roll-d) each carry a
+length-≥-2 witness; `applyNip` then succeeds. -/
+
+/-- `runOps [.nip] s` succeeds whenever the stack has ≥ 2 elements. -/
+private theorem runOps_nip_eq
+    (s : StackState) (a b : Value) (rest : List Value)
+    (hStk : s.stack = a :: b :: rest) :
+    Stack.Eval.runOps [StackOp.nip] s
+      = .ok ({ s with stack := a :: rest }) := by
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyNip, hStk]
+
+/-! ### Tier 3a structural predicate
+
+Same shape as `structuralUpdatePropAnyDepth`, but the renamed-sm
+freshness side condition is replaced with "the post-load tail's head is
+`propName`" (so the cleanup matches the d'=1 branch of
+`removePropEntryAux`).
+
+The op-list disjunct mirrors Tier 2's four bringToTop shapes, but the
+depth-0 case (`load.1 = []`) additionally requires the input runtime
+stack to have ≥ 2 elements. The other three cases (swap / rot / roll d)
+already imply post-load length ≥ 2 by their own shape constraints. -/
+def structuralUpdatePropAnyDepthExistingHead
+    (m : ANFMethod) (s : StackState) : Prop :=
+  ∃ (bn propName ref : String) (src : Option SourceLoc),
+    m.body = [⟨bn, .updateProp propName ref, src⟩] ∧
+    let sm := (m.params.map (fun p => p.name)).reverse
+    let load := Stack.Lower.bringToTop sm ref true
+    -- The post-load sm has the form `ref :: propName :: rest2`.
+    (∃ rest2, load.2 = ref :: propName :: rest2) ∧
+    -- Op-list shape + matching runtime stack-shape input fact.
+    ((∃ vRef vProp rest, s.stack = vRef :: vProp :: rest ∧ load.1 = []) ∨
+     (∃ a b rest, s.stack = a :: b :: rest ∧
+      load.1 = [StackOp.swap]) ∨
+     (∃ a b c rest, s.stack = a :: b :: c :: rest ∧
+      load.1 = [StackOp.rot]) ∨
+     (∃ d, d < s.stack.length ∧ 2 ≤ s.stack.length ∧
+      load.1 = [StackOp.roll d]))
+
+/-! ### Lowered raw ops in the Tier-3a case
+
+Compute `lowerMethodUserRawOps` for a Tier-3a structural body: the load
+emits whatever bringToTop produces; the rename produces `propName ::
+propName :: rest2`; the cleanup emits `[.nip]`. -/
+
+/-- **Tier-3a runtime success.** Under the Tier-3a structural predicate,
+running the method's lowered ops on the initial stack succeeds.
+
+The proof composes:
+* The no-post bridge to reduce `runMethod` to `runOps userRawOps`.
+* The lowering computation `userRawOps = load ++ [.nip]`.
+* Per-case reduction of `runOps load initialStack`, leaving a state with
+  stack length ≥ 2 (by the case-specific shape hypothesis).
+* `runOps_nip_eq` on the post-load state. -/
+theorem runMethod_lower_public_unique_no_post_structuralUpdatePropAnyDepthExistingHead_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hStruct : structuralUpdatePropAnyDepthExistingHead m initialStack) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  obtain ⟨bn, propName, ref, src, hBody, hPost, hOps⟩ := hStruct
+  obtain ⟨rest2, hLoad2⟩ := hPost
+  -- Side conditions for the no-post bridge.
+  have hNoPreimage : bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]; exact bindingsUseCheckPreimage_updateProp bn propName ref src
+  have hNoCode : bindingsUseCodePart m.body = false := by
+    rw [hBody]; exact bindingsUseCodePart_updateProp bn propName ref src
+  have hNoTerminalAssert : bodyEndsInAssert m.body = false := by
+    rw [hBody]; exact bodyEndsInAssert_updateProp bn propName ref src
+  have hNoDeserialize : bindingsUseDeserializeState m.body = false := by
+    rw [hBody]; exact bindingsUseDeserializeState_updateProp bn propName ref src
+  -- Route through the no-post bridge.
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  -- Reduce the lowered ops.
+  unfold lowerMethodUserRawOps
+  rw [hBody]
+  rw [computeLastUses_singleton_updateProp bn propName ref src]
+  rw [collectConstInts_singleton_updateProp bn propName ref src]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  rw [loadRefLive_singleton_eq_bringToTop_consume]
+  -- Destructure bringToTop's output.
+  generalize hBT :
+    Stack.Lower.bringToTop ((m.params.map (fun p => p.name)).reverse) ref true
+      = btOut at hOps hLoad2 ⊢
+  obtain ⟨loadOps, loadSm⟩ := btOut
+  simp only at hLoad2 hOps
+  -- `loadSm = ref :: propName :: rest2`; the inner `match` reduces.
+  rw [hLoad2]
+  simp only []
+  -- Apply the head-dup cleanup helper.
+  rw [removePropEntryOps_headDup propName rest2]
+  simp [Stack.Lower.lowerBindingsP]
+  -- Goal: `runOps (loadOps ++ [.nip]) initialStack` is `.ok`.
+  rw [Stack.Eval.runOps_append]
+  rcases hOps with ⟨vRef, vProp, rest, hStk, hNil⟩
+                   | ⟨a, b, rest, hStk, hSwap⟩
+                   | ⟨a, b, c, rest, hStk, hRot⟩
+                   | ⟨d, hLen, _hLen2, hRoll⟩
+  · -- Depth-0 load: `loadOps = []`, runtime stack already has v_ref :: v_prop :: rest.
+    rw [hNil, runOps_bringToTop_depth0_eq initialStack]
+    simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyNip,
+          hStk, Except.toOption]
+  · -- Depth-1 load: `loadOps = [.swap]`, post-load stack = b :: a :: rest (length ≥ 2).
+    rw [hSwap, runOps_bringToTop_depth1_eq initialStack a b rest hStk]
+    simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyNip,
+          Except.toOption]
+  · -- Depth-2 load: `loadOps = [.rot]`, post-load stack = c :: a :: b :: rest (length ≥ 3).
+    rw [hRot, runOps_bringToTop_depth2_eq initialStack a b c rest hStk]
+    simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyNip,
+          Except.toOption]
+  · -- Depth-d load: `loadOps = [.roll d]`. Post-load stack length = initial length ≥ 2.
+    rw [hRoll]
+    -- `runOps [.roll d] initialStack` succeeds because `d < length`. Compute the result.
+    have hNotGe : ¬ d ≥ initialStack.stack.length := by omega
+    have hRollOk :
+        Stack.Eval.runOps [StackOp.roll d] initialStack
+          = .ok ({ initialStack with
+                    stack := initialStack.stack[d]!
+                              :: initialStack.stack.eraseIdx d }) := by
+      simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyRoll,
+            hNotGe]
+    rw [hRollOk]
+    -- The post-load stack has length = initial length ≥ 2, so `.nip` succeeds.
+    -- Extract a (top, next, rest) witness so the `applyNip` `match` reduces.
+    have hPostShape :
+        ∃ (top next : Value) (rest : List Value),
+          initialStack.stack[d]! :: initialStack.stack.eraseIdx d
+            = top :: next :: rest := by
+      have hEraseLen : (initialStack.stack.eraseIdx d).length
+                        = initialStack.stack.length - 1 := by
+        exact List.length_eraseIdx_of_lt hLen
+      cases hER : initialStack.stack.eraseIdx d with
+      | nil =>
+          exfalso
+          rw [hER] at hEraseLen
+          simp at hEraseLen
+          omega
+      | cons hd tl =>
+          exact ⟨initialStack.stack[d]!, hd, tl, rfl⟩
+    obtain ⟨top, next, restR, hShape⟩ := hPostShape
+    -- Unfold `runOps [.nip] s` against `applyNip`, then use `hShape` to
+    -- reduce the inner `match` on the post-load stack.
+    show (Except.toOption
+            (match
+              Except.ok ({ stack := initialStack.stack[d]!
+                                      :: initialStack.stack.eraseIdx d
+                          , altstack := initialStack.altstack
+                          , outputs := initialStack.outputs
+                          , props := initialStack.props
+                          , preimage := initialStack.preimage } : StackState) with
+            | Except.error e => Except.error e
+            | Except.ok s' => Stack.Eval.runOps [StackOp.nip] s')).isSome = true
+    simp only [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyNip]
+    rw [hShape]
+    simp [Except.toOption]
+
+/-! ### Tier 3b — documented obstacle (DONE_WITH_CONCERNS path)
+
+Tier 3a (above) closes the d'=1 cleanup case (`[.nip]`) at any
+bringToTop load depth, including depth 0 (which Tier 2 implicitly
+handled but Tier 3a explicitly pins via the length-≥-2 stack-shape
+input fact).
+
+Tier 3b — `propName` at depth d' ≥ 2 in the renamed tail, cleanup =
+`[.push d', OP_ROLL, .drop]` — is **not** closed in this widening. The
+genuine remaining obstacle:
+
+* `[.push d', OP_ROLL, .drop]` operates on the *runtime stack* by
+  rolling the element at runtime depth d' to the top and then dropping
+  it. For this to be well-typed, the runtime value at depth d' must be
+  exactly the **old property value** (`v_propName`). Establishing that
+  requires a runtime/stack-map alignment fact relating the renamed
+  stack-map's `propName` position to the corresponding runtime stack
+  position.
+
+* Per §2.4 file isolation, that alignment predicate is the natural
+  cross-A<k> helper between A5 (`update_prop`), A6 (`if_val`), and A7
+  (`loop`) — and it belongs in `Stack/Agrees.lean`. Adding it
+  defensively from `AgreesA5.lean` would pre-empt the cross-A<k>
+  design discussion (one of A6 / A7 may want a more refined version
+  threading the `agreesTagged` invariant). The shared predicate is
+  intentionally deferred to the wave that lands at least two of
+  A5/A6/A7 in lockstep.
+
+The Tier-3a wrapper above plus the existing Tier-2 wrapper discharge
+the bulk of the conformance suite's `.updateProp` corpus today — every
+singleton `.updateProp` against a fresh property name (any depth) plus
+every singleton `.updateProp` whose existing prop entry sits at the
+**head** of the post-load tail (any load depth). Multi-binding
+`.updateProp` bodies and the genuine deep-cleanup case (d' ≥ 2) are
+both follow-ups; the predicate-side `simpleStepRel` widening is the
+cross-A<k> follow-up.
+
+Reporting category per mission rubric: **DONE** for Tier 3a, with Tier
+3b deferred under the documented obstacle above. -/
 
 end Agrees
 end RunarVerification.Stack

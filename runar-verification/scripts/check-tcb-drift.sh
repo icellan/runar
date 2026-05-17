@@ -20,7 +20,43 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=78        # Breakdown (2026-05-17, Tier 1 wave 1 —
+TARGET_AXIOMS=86        # Breakdown (2026-05-17, Tier 1 wave 2 —
+                        # five Stage C / Phase D / omnibus-split
+                        # discharges):
+                        # +8 in Pipeline.lean — O1 omnibus split:
+                        #     9 new per-constructor-family sub-omnibus
+                        #     axioms (arith_codegen, math_byte_call_codegen,
+                        #     crypto_call_codegen, update_prop_codegen,
+                        #     if_val_codegen, loop_codegen,
+                        #     method_call_codegen, dispatch_codegen,
+                        #     stateful_codegen) and the existing single
+                        #     omnibus rewritten as a `theorem` that
+                        #     case-splits on the body's family and
+                        #     applies the matching sub-omnibus. Net
+                        #     +9 axioms − 1 retired-as-theorem = +8.
+                        #     Intentional short-term inflation;
+                        #     each sub-omnibus retires as its Stage
+                        #     C / Phase D milestone lands. The harness
+                        #     in tests/PipelineConformance.lean now
+                        #     dispatches fixtures into per-family
+                        #     `VERIFIED-modulo-<family>-codegen-axioms`
+                        #     tiers (27 crypto-call, 13 dispatch, 16
+                        #     stateful on the 56-fixture corpus).
+                        # No axiom delta from Stage C wave 2 widenings:
+                        # B7 Merkle inductive (proof gap fill in
+                        # Stack/Merkle.lean: runOps_merkleRootSha256Ops_eq
+                        # and runOps_merkleRootHash256Ops_eq land at any
+                        # depth d, composing 14 wave-1 per-opcode helpers
+                        # via unified per-level lemma + induction on d).
+                        # A4 math/byte: 4 new builtin wrappers (min,
+                        # max, cat, within at common depth pairs).
+                        # A5 Tier 3a: existing-prop entry at depth 1
+                        # with [.nip] cleanup.
+                        # A6 Tier 2: identical-single-const ifVal at
+                        # all three const kinds (int, bool, bytes).
+                        # Net delta: +8, 78 → 86.
+                        #
+                        # Breakdown (2026-05-17, Tier 1 wave 1 —
                         # six parallel discharges):
                         # −2 in Crypto/Spec.lean §2.5 — `p256Negate`
                         #     and `p384Negate` converted from bare
