@@ -4816,10 +4816,21 @@ function lowerMethod(
   // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
   ctx.lowerBindings(method.body, method.isPublic);
 
-  // Clean up excess stack items left by deserialize_state.
-  // Only needed for stateful methods that deserialize state from the preimage.
-  const hasDeserializeState = method.body.some(b => b.value.kind === 'deserialize_state');
-  if (method.isPublic && hasDeserializeState) {
+  // Clean up excess stack items below the top-of-stack boolean.
+  //
+  // Bitcoin Script's CLEANSTACK rule requires exactly one item on the stack
+  // at end-of-script. Excess items can come from `deserialize_state` (stateful
+  // methods reading mutable fields), from readonly-field-binding patterns in
+  // the method body (force-embedding readonly fields by referencing them),
+  // or from any other mid-method binding whose value isn't consumed by an
+  // assert. The previous gate of `hasDeserializeState` missed the readonly-
+  // only path, causing all-readonly terminal methods to emit a script that
+  // failed CLEANSTACK on mainnet — "Script did not clean its stack".
+  //
+  // `cleanupExcessStack()` is idempotent (no-op when `stackMap.depth === 1`),
+  // so running it unconditionally for public methods is safe — it adds
+  // appropriate `OP_NIP` opcodes only when the stack genuinely needs cleanup.
+  if (method.isPublic) {
     ctx.cleanupExcessStack();
   }
 
