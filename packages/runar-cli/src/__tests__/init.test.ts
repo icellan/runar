@@ -117,6 +117,10 @@ describe('initCommand', () => {
     expect(pkg.devDependencies['runar-compiler']).toBe('^0.5.0');
     expect(pkg.devDependencies['runar-testing']).toBe('^0.5.0');
     expect(pkg.devDependencies['runar-ir-schema']).toBe('^0.5.0');
+    // @types/node is required: the generated P2PKH.test.ts imports `node:fs`
+    // / `node:path` / `node:url` and uses `import.meta.url`, which all need
+    // the Node typings to typecheck cleanly.
+    expect(pkg.devDependencies['@types/node']).toBeDefined();
 
     // fast-check was a dead dep — should not reappear.
     expect(pkg.devDependencies['fast-check']).toBeUndefined();

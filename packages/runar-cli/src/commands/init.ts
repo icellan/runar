@@ -223,6 +223,7 @@ describe('P2PKH', () => {
       'runar-sdk': '^0.5.0',
     },
     devDependencies: {
+      '@types/node': '^20.0.0',
       'runar-cli': '^0.5.0',
       'runar-compiler': '^0.5.0',
       'runar-ir-schema': '^0.5.0',
