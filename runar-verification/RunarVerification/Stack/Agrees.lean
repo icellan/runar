@@ -824,14 +824,23 @@ index from a tagged-aligned predicate. Used by the depth-≥ 2
 discharge below.
 
 Local recursive helper `nthOpt` avoids dependence on Lean 4.29
-`List.get?` (renamed in the toolchain bump). -/
+`List.get?` (renamed in the toolchain bump).
 
-private def nthOpt {α : Type _} : Nat → List α → Option α
+`nthOpt` and its `depth?_to_nthOpt` / `nthOpt_succ_cons` accessors
+are deliberately exposed (no `private`) because Stage C `_dge2`
+theorems take `hAtDepth : nthOpt d tsm = some (n, k)` premises, and
+caller files (`Stack/AgreesA<k>.lean`) must be able to NAME `nthOpt`
+to express the wrapper signature. Wave 9 substrate widening
+(Path 2 Tier 1) — required by `AgreesA4.lean`'s depth-≥ 2 builtin
+wrappers. Do not re-`private` without first auditing every
+`Stack/AgreesA<k>.lean` caller. -/
+
+def nthOpt {α : Type _} : Nat → List α → Option α
   | _,     []      => none
   | 0,     x :: _  => some x
   | n + 1, _ :: xs => nthOpt n xs
 
-private theorem nthOpt_succ_cons {α : Type _} (x : α) (xs : List α) (n : Nat) :
+theorem nthOpt_succ_cons {α : Type _} (x : α) (xs : List α) (n : Nat) :
     nthOpt (n + 1) (x :: xs) = nthOpt n xs := by
   cases n <;> rfl
 
@@ -869,8 +878,12 @@ private theorem nthOpt_getElem!_default
           rw [show (x :: rest)[n' + 1]! = rest[n']! from rfl]
           exact ih n' h'
 
-/-- `nthOpt d xs = some a` when `d < xs.length` and `xs[d] = a`. -/
-private theorem nthOpt_of_getElem {α : Type _} (xs : List α) (d : Nat) (a : α)
+/-- `nthOpt d xs = some a` when `d < xs.length` and `xs[d] = a`.
+
+Exposed (no `private`) alongside `nthOpt` so caller files
+(`Stack/AgreesA<k>.lean`) can construct `nthOpt d _ = some _`
+witnesses when the underlying `getElem` is more convenient. -/
+theorem nthOpt_of_getElem {α : Type _} (xs : List α) (d : Nat) (a : α)
     (hLen : d < xs.length) (hAt : xs[d]'hLen = a) :
     nthOpt d xs = some a := by
   induction xs generalizing d with
@@ -882,8 +895,12 @@ private theorem nthOpt_of_getElem {α : Type _} (xs : List α) (d : Nat) (a : α
           simp only [nthOpt]
           exact ih d' (Nat.lt_of_succ_lt_succ hLen) (by simpa using hAt)
 
-/-- Convert `sm.depth? n = some d` to `nthOpt d sm = some n`. -/
-private theorem depth?_to_nthOpt (sm : StackMap) (n : String) (d : Nat)
+/-- Convert `sm.depth? n = some d` to `nthOpt d sm = some n`.
+
+Exposed (no `private`) alongside `nthOpt` so caller files
+(`Stack/AgreesA<k>.lean`) can derive `nthOpt`-keyed depth witnesses
+from the more ergonomic `sm.depth?` interface. -/
+theorem depth?_to_nthOpt (sm : StackMap) (n : String) (d : Nat)
     (h : sm.depth? n = some d) :
     nthOpt d sm = some n := by
   unfold Stack.Lower.StackMap.depth? at h
@@ -13824,8 +13841,12 @@ theorem taggedStackAligned_depth_resolves
                    simp [nthOpt]; exact hAtTsm,
                 hLook⟩
 
-/-- Helper: `untagSm` preserves `nthOpt` up to fst projection. -/
-private theorem nthOpt_untagSm_eq_fst
+/-- Helper: `untagSm` preserves `nthOpt` up to fst projection.
+
+Exposed (no `private`) alongside `nthOpt`: this is the bridge
+between depth witnesses on an untagged `StackMap` and the tagged
+`(name, kind)` witnesses that Stage C `_dge2` theorems require. -/
+theorem nthOpt_untagSm_eq_fst
     (tsm : TaggedStackMap) (d : Nat) (n : String) :
     nthOpt d (untagSm tsm) = some n ↔
     ∃ k, nthOpt d tsm = some (n, k) := by
@@ -14254,9 +14275,15 @@ at depth `d` in `untagSm tsm` (the tagged stack map guarantees `d <
 stkSt.stack.length`).
 -/
 
-/-- A `loadRef`-shape helper for depth-0: sm.depth? n = some 0 implies
-`loadRef sm n = [.dup]`. -/
-private theorem loadRef_shape_of_depth
+/-- A `loadRef`-shape helper: `sm.depth? n = some d` pins
+`loadRef sm n` to one of `[.dup]` (d = 0), `[.over]` (d = 1), or
+`[.pickStruct d]` (d ≥ 2).
+
+Wave 9 (Path 2 Tier 1 substrate widening): exposed (no `private`) so
+caller files (`Stack/AgreesA<k>.lean`) can pin the body op shape for
+depth-aware Stage C wrappers (notably A7 Tier 3b/3c loop-body
+substrate). Do not re-`private` without auditing every caller. -/
+theorem loadRef_shape_of_depth
     (sm : StackMap) (n : String) (d : Nat)
     (hDepth : sm.depth? n = some d) :
     Stack.Lower.loadRef sm n =
@@ -14272,7 +14299,16 @@ private theorem loadRef_shape_of_depth
       | zero => simp
       | succ _ => simp
 
-private theorem runOps_loadRef_at_depth
+/-- Depth-aware `loadRef` runtime success: when `n` resolves at depth
+`d` in `sm` and the runtime stack carries `v` at index `d`, running
+`loadRef sm n` yields `stkSt.push v` (copy-mode loadRef leaves the
+metadata fields untouched — `.push` only mutates `.stack`).
+
+Wave 9 (Path 2 Tier 1 substrate widening): exposed (no `private`) so
+caller files (`Stack/AgreesA<k>.lean`) can ground depth-aware loop
+body / ref-branch wrappers in the per-`loadRef` runtime witness. Do
+not re-`private` without auditing every caller. -/
+theorem runOps_loadRef_at_depth
     (sm : StackMap) (n : String) (d : Nat) (v : Value)
     (stkSt : StackState)
     (hDepth : sm.depth? n = some d)
@@ -14314,6 +14350,97 @@ private theorem runOps_loadRef_at_depth
           -- loadRef returns [.pickStruct (d''+2)]; use run_pickStruct_at_depth.
           simp only
           exact run_pickStruct_at_depth stkSt (d'' + 2) v hLen hAt
+
+/-- **Depth-aware per-iteration chunk identity** for an A7 loop body
+that copies a single outer reference.
+
+Wave 9 (Path 2 Tier 1 substrate widening): the A7 Tier 3b/3c loop
+body wrappers in `Stack/AgreesA<k>.lean` need to reduce a per-iter
+chunk of the shape `[push i] ++ loadRef sm n ++ [drop]` to identity
++ stacked iteration index. The proof composes:
+
+* `runOps [.push (.bigint i)] s = .ok (s.push (.vBigint i))` —
+  pushes the iteration index.
+* `runOps_loadRef_at_depth` — given `sm.depth? n = some d` and a
+  value `v` at depth `d` in the runtime stack-state AFTER the iter
+  push (so at depth `d` in `s.push (.vBigint i)`'s stack), running
+  `loadRef sm n` yields `.push v`.
+* `runOps [.drop] (... .push v) = .ok ...` — drops the copy back.
+
+Net effect: starting from `s`, the chunk leaves `s.push (.vBigint i)`.
+The metadata fields (`altstack`, `outputs`, `props`, `preimage`) are
+preserved by both `push` and `drop` and by the underlying `loadRef`
+ops (`dup` / `over` / `pickStruct` only mutate `.stack`).
+
+This is the depth-aware analog of Tier 3a's
+`runOps_push_i_emitConst_drop` (which lives in `Stack/AgreesA7.lean`).
+The substrate sits in `Stack/Agrees.lean` so wave-10 implementers
+in `Stack/AgreesA7.lean` can compose it with a `loopRefAssemble`
+recursor (analog of `loopConstAssemble`) to close Tier 3b. -/
+theorem runOps_push_i_loadRef_drop
+    (sm : StackMap) (n : String) (i : Nat) (d : Nat) (v : Value)
+    (s : StackState)
+    (hDepth : sm.depth? n = some d)
+    (hLen : d < (s.push (.vBigint (Int.ofNat i))).stack.length)
+    (hAt : (s.push (.vBigint (Int.ofNat i))).stack[d]! = v) :
+    runOps
+        ([.push (.bigint (Int.ofNat i))] ++ Stack.Lower.loadRef sm n ++ [.drop])
+        s
+      = .ok (s.push (.vBigint (Int.ofNat i))) := by
+  -- Outer split: prefix = `[push i] ++ loadRef`, suffix = `[drop]`.
+  rw [Stack.Sim.runOps_append]
+  -- Reduce the prefix `[push i] ++ loadRef sm n`.
+  rw [Stack.Sim.runOps_append]
+  rw [show runOps [.push (.bigint (Int.ofNat i))] s
+        = .ok (s.push (.vBigint (Int.ofNat i))) from by
+      unfold runOps
+      rw [show stepNonIf (.push (.bigint (Int.ofNat i))) s
+            = .ok (s.push (.vBigint (Int.ofNat i))) from rfl]
+      exact Stack.Eval.runOps_nil _]
+  simp only []
+  -- `loadRef sm n` on `s.push (.vBigint i)` yields `.push v` (depth-aware).
+  rw [runOps_loadRef_at_depth sm n d v (s.push (.vBigint (Int.ofNat i)))
+        hDepth hLen hAt]
+  simp only []
+  -- Final chunk: drop pops the copy `v` off the top.
+  show runOps [.drop] ((s.push (.vBigint (Int.ofNat i))).push v)
+        = .ok (s.push (.vBigint (Int.ofNat i)))
+  unfold runOps
+  rw [show stepNonIf .drop ((s.push (.vBigint (Int.ofNat i))).push v)
+        = .ok (s.push (.vBigint (Int.ofNat i))) from by
+      show Stack.Eval.applyDrop ((s.push (.vBigint (Int.ofNat i))).push v)
+            = .ok (s.push (.vBigint (Int.ofNat i)))
+      unfold Stack.Eval.applyDrop StackState.push
+      simp]
+  exact Stack.Eval.runOps_nil _
+
+/-- **Metadata-preservation corollary** for the depth-aware per-iter
+chunk identity. Strengthens `runOps_push_i_loadRef_drop` to expose
+the post-state's metadata fields equal to the input's.
+
+Wave 9 (Path 2 Tier 1 substrate widening): wave-10 ref-body / arith-
+body loop wrappers in `Stack/AgreesA7.lean` will want metadata
+preservation to thread through outer-context invariants (alt stack
+unchanged across iterations, outputs unchanged, etc.). Since the
+per-iter post-state is `s.push (.vBigint i)` and `.push` only
+mutates `.stack`, the metadata equalities are immediate. -/
+theorem runOps_push_i_loadRef_drop_preserves_metadata
+    (sm : StackMap) (n : String) (i : Nat) (d : Nat) (v : Value)
+    (s : StackState)
+    (hDepth : sm.depth? n = some d)
+    (hLen : d < (s.push (.vBigint (Int.ofNat i))).stack.length)
+    (hAt : (s.push (.vBigint (Int.ofNat i))).stack[d]! = v) :
+    ∃ s',
+      runOps
+          ([.push (.bigint (Int.ofNat i))] ++ Stack.Lower.loadRef sm n ++ [.drop])
+          s = .ok s'
+      ∧ s'.altstack = s.altstack
+      ∧ s'.outputs = s.outputs
+      ∧ s'.props = s.props
+      ∧ s'.preimage = s.preimage := by
+  refine ⟨s.push (.vBigint (Int.ofNat i)),
+          runOps_push_i_loadRef_drop sm n i d v s hDepth hLen hAt, ?_, ?_, ?_, ?_⟩
+  all_goals unfold StackState.push; rfl
 
 private theorem lowerValue_snd_structuralCopy
     (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
@@ -14518,6 +14645,96 @@ theorem runOps_lowerBindings_structuralCopyBody_isSome :
         hRest
         hFreshInSm'
         hRestNodup
+
+/-- Metadata-preservation strengthening of
+`runOps_lowerBindings_structuralCopyBody_isSome`.
+
+Wave 9 (Path 2 Tier 1 substrate widening): for any `structuralCopyBody`,
+running its `lowerBindings`-emitted op list from a state `stkSt` yields a
+post-state `stkSt'` whose four metadata fields (`altstack`, `outputs`,
+`props`, `preimage`) equal `stkSt`'s. The structural-copy fragment only
+emits `push` / `dup` / `pick`-style copy ops which by definition leave
+the alt-stack / outputs / props / preimage untouched (only `.stack`
+changes), so the preservation follows by induction over the body using
+`runOps_lowerValue_structuralCopyValue_ok`'s `stkSt' = stkSt.push v`
+conclusion (and `.push` only mutates `.stack`).
+
+Required by `Stack/AgreesA6.lean` Tier 4 ref-branch widening (the
+`if_val` heterogeneous-ref-chains analogue of the existing
+`simpleStepRel_ifVal_heteroConstChains_preserves_metadata`). -/
+theorem runOps_lowerBindings_structuralCopyBody_preserves_metadata :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+      (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState),
+      untagSm tsm = sm →
+      agreesTagged tsm anfSt stkSt →
+      structuralCopyBody lastUses outerProtected localBindings body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      ∃ stkSt',
+        runOps (Stack.Lower.lowerBindings sm body).1 stkSt = .ok stkSt'
+        ∧ stkSt'.altstack = stkSt.altstack
+        ∧ stkSt'.outputs = stkSt.outputs
+        ∧ stkSt'.props = stkSt.props
+        ∧ stkSt'.preimage = stkSt.preimage
+  | [], _sm, _idx, _lu, _op, _lb, _tsm, _anfSt, _stkSt, _h1, _h2, _h3, _h4, _h5 => by
+      refine ⟨_stkSt, ?_, rfl, rfl, rfl, rfl⟩
+      simp [Stack.Lower.lowerBindings, runOps]
+  | (.mk name v _src) :: rest, sm, currentIndex, lastUses, outerProtected, localBindings,
+      tsm, anfSt, stkSt, hUntagSm, hAgrees, h, hFreshInSm, hBodyNodup => by
+      simp only [structuralCopyBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hFreshHead : name ∉ sm :=
+        hFreshInSm (.mk name v _) List.mem_cons_self
+      have hFresh : freshIn name (untagSm tsm) := by
+        rw [hUntagSm]; exact hFreshHead
+      obtain ⟨stkSt', loadedVal, hHeadRun, hStkEq, hAgreesNew⟩ :=
+        runOps_lowerValue_structuralCopyValue_ok
+          lastUses outerProtected localBindings sm currentIndex
+          tsm anfSt stkSt hUntagSm hAgrees name v hHead hFresh
+      have hUnfold :
+          (Stack.Lower.lowerBindings sm ((ANFBinding.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValue sm name v).1
+              ++ (Stack.Lower.lowerBindings (Stack.Lower.lowerValue sm name v).2 rest).1 := by
+        simp [Stack.Lower.lowerBindings]
+      have hLowerSnd : (Stack.Lower.lowerValue sm name v).2 = sm.push name :=
+        lowerValue_snd_structuralCopy lastUses outerProtected localBindings sm currentIndex name v hHead
+      have hUntagNew : untagSm ((name, .binding) :: tsm) =
+          (Stack.Lower.lowerValue sm name v).2 := by
+        rw [hLowerSnd]
+        simp [untagSm, Stack.Lower.StackMap.push, hUntagSm]
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉ (Stack.Lower.lowerValue sm name v).2 := by
+        intro b hbMem
+        rw [hLowerSnd, Stack.Lower.StackMap.push]
+        intro hMem
+        simp [List.mem_cons] at hMem
+        cases hMem with
+        | inl hEq =>
+          apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hEq⟩
+        | inr hInSm =>
+          exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) hInSm
+      obtain ⟨stkSt'', hRunTail, hAlt, hOut, hProps, hPre⟩ :=
+        runOps_lowerBindings_structuralCopyBody_preserves_metadata
+          rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)
+          lastUses outerProtected localBindings
+          ((name, .binding) :: tsm) (anfSt.addBinding name loadedVal) stkSt'
+          (by rw [← hUntagNew])
+          hAgreesNew hRest hFreshInSm' hRestNodup
+      refine ⟨stkSt'', ?_, ?_, ?_, ?_, ?_⟩
+      · rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+        simp only [runOps]
+        exact hRunTail
+      -- The head step yields `stkSt' = stkSt.push loadedVal` (metadata
+      -- of `.push` equals input). The tail step preserves metadata
+      -- against `stkSt'`. Chain.
+      · rw [hAlt, hStkEq]; rfl
+      · rw [hOut, hStkEq]; rfl
+      · rw [hProps, hStkEq]; rfl
+      · rw [hPre, hStkEq]; rfl
 
 /-- Named-method runtime-success theorem for the structural-copy fragment.
 Unlike the bridge theorems, this needs no externally supplied `ChainRel`
@@ -16714,7 +16931,13 @@ theorem evalBindings_structuralArithBody_isSome
 -- (per-binOp/unaryOp/assert operational discharge lemmas) will be added in a
 -- follow-up sub-milestone.  For now the structural predicate and the ANF-side
 -- theorem (`evalBindings_structuralArithBody_isSome`) cover the A3 deliverable.
-private theorem runOps_lowerBindingsP_structuralArithBody_isSome
+--
+-- Wave 9 (Path 2 Tier 1 substrate widening): exposed (no `private`) so
+-- `Stack/AgreesA8.lean` Tier-2 widenings can compose against the arith
+-- runtime-success witness when their callee body inhabits
+-- `structuralArithBody`. Do not re-`private` without auditing every
+-- `Stack/AgreesA<k>.lean` caller.
+theorem runOps_lowerBindingsP_structuralArithBody_isSome
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat)
     (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
@@ -18001,7 +18224,15 @@ theorem evalBindings_structuralCallBody_isSome
 
 /-! #### Runtime success for the call fragment -/
 
-private theorem runOps_lowerBindingsP_structuralCallBody_isSome
+/-- Runtime success witness for `structuralCallBody` lowered through the
+program-aware lowerer.
+
+Wave 9 (Path 2 Tier 1 substrate widening): exposed (no `private`) so
+`Stack/AgreesA8.lean` Tier-2 widenings can compose against the
+call-fragment runtime-success witness when their callee body inhabits
+`structuralCallBody`. Do not re-`private` without auditing every
+`Stack/AgreesA<k>.lean` caller. -/
+theorem runOps_lowerBindingsP_structuralCallBody_isSome
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat)
     (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
