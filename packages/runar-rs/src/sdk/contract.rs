@@ -317,10 +317,16 @@ impl RunarContract {
         let mut signatures = HashMap::new();
         let contract_utxo = prepared.contract_utxo.clone();
         for &idx in &prepared.sig_indices {
-            // Stateful: user checkSig is AFTER OP_CODESEPARATOR — trim subscript.
-            // Stateless: user checkSig is BEFORE — use full script.
+            // Per BIP-143 / BSV consensus: if the script contains an
+            // OP_CODESEPARATOR before the OP_CHECKSIG, the sighash is computed
+            // over the subscript AFTER that separator — regardless of whether
+            // the contract has state fields. Trimming was previously gated on
+            // `is_stateful`, which produced wrong sighashes for terminal methods
+            // (e.g. `Auction.close`) whose `is_stateful` flag was false on the
+            // call path despite the locking script containing an
+            // OP_CODESEPARATOR — failing with NULLFAIL on mainnet.
             let mut subscript = contract_utxo.script.clone();
-            if prepared.is_stateful && prepared.code_sep_idx >= 0 {
+            if prepared.code_sep_idx >= 0 {
                 let trim_pos = ((prepared.code_sep_idx as usize) + 1) * 2;
                 if trim_pos <= subscript.len() {
                     subscript = subscript[trim_pos..].to_string();
@@ -1603,8 +1609,37 @@ impl RunarContract {
         result
     }
 
-    /// Get the adjusted code separator index for a method.
+    /// Get the byte offset of an `OP_CODESEPARATOR` for a given method index.
+    ///
+    /// When `code_script` is set (i.e., the contract is loaded from chain, OR
+    /// the deploy script has already been built from real constructor args),
+    /// we walk the actual script and return the true on-chain byte position.
+    /// This is required because `from_txid` populates `constructor_args` with
+    /// dummy `SdkValue::Int(0)` placeholders — the real arg bytes are already
+    /// baked into the on-chain locking script — so `adjust_code_sep_offset()`
+    /// computes a shift of zero and returns the wrong offset whenever the
+    /// `OP_CODESEPARATOR` sits after constructor slots that expand at deploy
+    /// time (e.g. PubKey args = 1 → 34 bytes). The symptom of using the wrong
+    /// offset is NULLFAIL at `OP_CHECKSIG` for terminal methods.
+    ///
+    /// Falls back to the legacy template-adjusted offset for synthetic /
+    /// unit-test paths that have no `code_script` available.
     fn get_code_sep_index(&self, method_index: usize) -> i64 {
+        if let Some(ref code_script) = self.code_script {
+            if let Some(ref indices) = self.artifact.code_separator_indices {
+                let real_offsets = find_codesep_offsets(code_script);
+                if method_index < indices.len() && method_index < real_offsets.len() {
+                    return real_offsets[method_index] as i64;
+                }
+            }
+            if self.artifact.code_separator_index.is_some() {
+                let real_offsets = find_codesep_offsets(code_script);
+                if let Some(&off) = real_offsets.first() {
+                    return off as i64;
+                }
+            }
+        }
+
         if let Some(ref indices) = self.artifact.code_separator_indices {
             if method_index < indices.len() {
                 return self.adjust_code_sep_offset(indices[method_index]) as i64;
@@ -1642,6 +1677,51 @@ impl RunarContract {
 // ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
+
+/// Walk a hex-encoded script and return the byte offsets of every
+/// `OP_CODESEPARATOR` (`0xab`) that sits at a real opcode boundary
+/// (i.e., not inside push-data).
+///
+/// Used by `get_code_sep_index` to recover the true on-chain byte offsets
+/// when the in-memory constructor args don't reflect what was actually
+/// baked into the locking script (e.g. after `from_txid` populates dummy
+/// `Int(0)` placeholders).
+fn find_codesep_offsets(script_hex: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    let len = script_hex.len();
+    while off + 2 <= len {
+        let op = u8::from_str_radix(&script_hex[off..off + 2], 16).unwrap_or(0);
+        let byte_pos = off / 2;
+        if op == 0xab {
+            out.push(byte_pos);
+            off += 2;
+        } else if (0x01..=0x4b).contains(&op) {
+            off += 2 + (op as usize) * 2;
+        } else if op == 0x4c {
+            if off + 4 > len { break; }
+            let push_len = u8::from_str_radix(&script_hex[off + 2..off + 4], 16).unwrap_or(0) as usize;
+            off += 4 + push_len * 2;
+        } else if op == 0x4d {
+            if off + 6 > len { break; }
+            let lo = u8::from_str_radix(&script_hex[off + 2..off + 4], 16).unwrap_or(0) as usize;
+            let hi = u8::from_str_radix(&script_hex[off + 4..off + 6], 16).unwrap_or(0) as usize;
+            let push_len = lo | (hi << 8);
+            off += 6 + push_len * 2;
+        } else if op == 0x4e {
+            if off + 10 > len { break; }
+            let b0 = u8::from_str_radix(&script_hex[off + 2..off + 4], 16).unwrap_or(0) as usize;
+            let b1 = u8::from_str_radix(&script_hex[off + 4..off + 6], 16).unwrap_or(0) as usize;
+            let b2 = u8::from_str_radix(&script_hex[off + 6..off + 8], 16).unwrap_or(0) as usize;
+            let b3 = u8::from_str_radix(&script_hex[off + 8..off + 10], 16).unwrap_or(0) as usize;
+            let push_len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+            off += 10 + push_len * 2;
+        } else {
+            off += 2;
+        }
+    }
+    out
+}
 
 /// Extract all input outpoints from a raw tx hex as a concatenated hex string.
 /// Each outpoint is txid (32 bytes LE) + vout (4 bytes LE) = 36 bytes.
