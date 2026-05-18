@@ -86,6 +86,7 @@ namespace RunarVerification.Stack
 namespace Agrees
 
 open RunarVerification.ANF
+open RunarVerification.ANF.Eval (State)
 open RunarVerification.Stack.Eval (runOps)
 open RunarVerification.Stack.Lower (StackMap)
 
@@ -933,6 +934,409 @@ theorem runMethod_lower_public_unique_no_post_leafEmptyMethodCall_then_const_isS
         hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
   exact runOps_lowerMethodUserRawOps_leafEmptyMethodCall_then_const_isSome
     methods props m initialStack hLeaf
+
+/-! ## Wave 10 — Tier 3a/3b/3c: singleton methodCall with non-const callee body
+
+This block widens the wave-5 Tier 1 singleton-methodCall wrapper to admit
+callee bodies that are NOT structurally constant. The outer caller body
+is still exactly one `.methodCall obj method args` binding with `obj`
+absent from `sm`, `args = []`, and `m.params = []`. The callee body is
+no longer required to be `structuralConstBody`; instead the wrapper
+takes an explicit structural-family premise on the callee body and
+composes it against the wave-9-exposed substrate
+
+* `runOps_lowerBindingsP_structuralRefBody_isSome`   (already public)
+* `runOps_lowerBindingsP_structuralArithBody_isSome` (wave 9, exposed)
+* `runOps_lowerBindingsP_structuralCallBody_isSome`  (wave 9, exposed)
+
+The wave-5 Tier 1 proof reduced the methodCall's op contribution to
+`(lowerBindings sm m.body).1` via
+`lowerBindingsP_eq_lowerBindings_structuralConst`. Wave 9 clarified
+that this equality DOES NOT hold for ref / arith / call callee
+bodies (consume-mode bindings make `lowerBindingsP ≠ lowerBindings`
+by design). Wave 10 therefore composes against the `_isSome`
+witnesses directly, leaving the callee body lowered through
+`lowerBindingsP` end-to-end.
+
+### Generic op-list reduction
+
+The methodCall arm of `lowerValueP`, restricted to the singleton
+shape (`obj` absent, `args = []`, callee `m` with `m.params = []`),
+produces an op list that is exactly the callee body's
+`lowerBindingsP` output. The lemma is callee-body-family-agnostic —
+it makes no assumption about the callee body shape. -/
+theorem lowerValueP_methodCall_singleton_calleeBodyP_ops
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget' currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn obj method : String) (args : List String)
+    (m : ANFMethod)
+    (hLookup : Stack.Lower.lookupMethod progMethods method = some m)
+    (hObj : sm.depth? obj = none)
+    (hArgs : args = [])
+    (_hParams : m.params = []) :
+    (Stack.Lower.lowerValueP progMethods props (budget' + 1) currentIndex
+        lastUses outerProtected localBindings constInts sm bn
+        (.methodCall obj method args)).1
+      = (Stack.Lower.lowerBindingsP progMethods props budget' 0
+            (Stack.Lower.computeLastUses m.body)
+            outerProtected (m.body.map (fun b => b.name))
+            (constInts ++ Stack.Lower.collectConstInts m.body)
+            sm m.body).1 := by
+  subst hArgs
+  -- Dispatch through methodCall arm:
+  --   budget = budget' + 1 avoids the budget-exhausted fallback.
+  --   `lookupMethod` yields `m`.
+  --   `obj` not in `sm`  →  `objDropOps = ([], sm)`.
+  --   `args = []`        →  `loadAndBindArgsLive` returns `([], sm)`.
+  --   The callee body's `lowerBindingsP` projection is the bodyOps.
+  unfold Stack.Lower.lowerValueP
+  simp only [hLookup, hObj,
+             Stack.Lower.loadAndBindArgsLive,
+             List.append_nil, List.nil_append]
+
+/-! ### Tier 3a — singleton methodCall with `structuralRefBody` callee
+
+`runMethod` succeeds for an outer method whose body is a singleton
+`.methodCall obj method args` binding whose callee `callee` has empty
+params and whose body inhabits `structuralRefBody` against the
+methodCall-arm's threaded parameters. The substrate witness is
+`runOps_lowerBindingsP_structuralRefBody_isSome` (already public in
+`Stack/Agrees.lean`).
+
+The callee-body substrate is threaded with:
+* `budget = 7`               (outer is `defaultInlineBudget = 8 = 7+1`),
+* `currentIndex = 0`         (callee body's fresh local index),
+* `lastUses = computeLastUses callee.body`,
+* `outerProtected = []`      (outer method's outerProtected),
+* `localBindings = callee.body.map (·.name)` (inner reset),
+* `constInts = collectConstInts callee.body` (outer's `[]` ++ inner's),
+* `sm = m.params.reverse`    (outer method's initial stack map; with
+  `obj` absent + `args = []` + `callee.params = []` this is unchanged
+  through `objDropOps` and `loadAndBindArgsLive`).
+
+The freshness / Nodup / `agreesTagged` premises are input-side
+invariants (PATH2_PLAN §2.1) that the caller must supply. -/
+theorem runMethod_lower_public_unique_no_post_singletonMethodCall_refCallee_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (tsm : TaggedStackMap) (anfSt : State)
+    (initialStack : Stack.Eval.StackState)
+    (bn obj method : String) (args : List String) (src : Option SourceLoc)
+    (callee : ANFMethod)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+    (hLookup : Stack.Lower.lookupMethod methods method = some callee)
+    (hObj :
+      StackMap.depth? (List.reverse (m.params.map (fun p => p.name))) obj
+        = none)
+    (hArgs : args = [])
+    (hCalleeParams : callee.params = [])
+    (hCalleeBody :
+      structuralRefBody methods props 7
+        (Stack.Lower.computeLastUses callee.body) []
+        (callee.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts callee.body)
+        callee.body (List.reverse (m.params.map (fun p => p.name))) 0)
+    (hUntagSm : untagSm tsm = List.reverse (m.params.map (fun p => p.name)))
+    (hAgrees : agreesTagged tsm anfSt initialStack)
+    (hCalleeBodyFresh :
+      ∀ b ∈ callee.body,
+        b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hCalleeBodyNodup : (callee.body.map (fun b => b.name)).Nodup) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  -- Unfold `lowerMethodUserRawOps`, rewrite the outer body to the
+  -- singleton-methodCall shape, then reduce `lowerBindingsP` of that
+  -- singleton to the methodCall arm's `lowerValueP.1`, which the
+  -- generic op-list lemma rewrites to the callee body's
+  -- `lowerBindingsP.1`.
+  unfold lowerMethodUserRawOps
+  have hBudget : Stack.Lower.defaultInlineBudget = 7 + 1 := rfl
+  rw [hBudget, hBodyShape]
+  -- Reduce singleton `lowerBindingsP` to head's `lowerValueP.1`.
+  have hUnfold :
+      (Stack.Lower.lowerBindingsP methods props (7 + 1) 0
+          (Stack.Lower.computeLastUses
+            [ANFBinding.mk bn (ANFValue.methodCall obj method args) src]) []
+          ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+            (fun b => b.name))
+          (Stack.Lower.collectConstInts
+            [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+          (List.reverse (m.params.map (fun p => p.name)))
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src]).1
+        = (Stack.Lower.lowerValueP methods props (7 + 1) 0
+              (Stack.Lower.computeLastUses
+                [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+              []
+              ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+                (fun b => b.name))
+              (Stack.Lower.collectConstInts
+                [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+              (List.reverse (m.params.map (fun p => p.name))) bn
+              (ANFValue.methodCall obj method args)).1 := by
+    with_unfolding_all
+      simp [Stack.Lower.lowerBindingsP]
+  rw [hUnfold]
+  -- Rewrite the methodCall's op list to the callee body's `lowerBindingsP.1`.
+  rw [lowerValueP_methodCall_singleton_calleeBodyP_ops
+        methods props 7 0
+        (Stack.Lower.computeLastUses
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+        []
+        ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+          (fun b => b.name))
+        (Stack.Lower.collectConstInts
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+        (List.reverse (m.params.map (fun p => p.name))) bn obj method args
+        callee hLookup hObj hArgs hCalleeParams]
+  -- The outer body's `collectConstInts` is `[]` (singleton methodCall has
+  -- no `loadConst (.int _)`). Rewrite `[] ++ collectConstInts callee.body`
+  -- to `collectConstInts callee.body` to match the substrate's `constInts`.
+  simp only [Stack.Lower.collectConstInts, List.nil_append]
+  -- Apply the wave-9-exposed structuralRefBody substrate.
+  exact runOps_lowerBindingsP_structuralRefBody_isSome
+    methods props 7
+    (Stack.Lower.computeLastUses callee.body) []
+    (callee.body.map (fun b => b.name))
+    (Stack.Lower.collectConstInts callee.body)
+    callee.body
+    (List.reverse (m.params.map (fun p => p.name))) 0
+    tsm anfSt initialStack hUntagSm hAgrees hCalleeBody
+    hCalleeBodyFresh hCalleeBodyNodup
+
+/-! ### Tier 3b — singleton methodCall with `structuralArithBody` callee
+
+Mirrors Tier 3a, swapping the callee-body substrate for the wave-9-
+exposed `runOps_lowerBindingsP_structuralArithBody_isSome`. The arith
+substrate additionally requires a per-binding runtime-success witness
+`hCalleeBodyRunOk` — see the substrate's docstring for the reason
+(arith opcodes have value-dependent failure modes; the substrate
+delegates per-opcode operational discharge to its caller). The
+`hCalleeBodyRunOk` premise is NOT conclusion-restating against THIS
+wrapper's conclusion: it witnesses success on individual callee-body
+bindings, whereas the wrapper's conclusion is about the OUTER
+method's `runMethod` (a strictly larger op set). -/
+theorem runMethod_lower_public_unique_no_post_singletonMethodCall_arithCallee_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : Stack.Eval.StackState)
+    (bn obj method : String) (args : List String) (src : Option SourceLoc)
+    (callee : ANFMethod)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+    (hLookup : Stack.Lower.lookupMethod methods method = some callee)
+    (hObj :
+      StackMap.depth? (List.reverse (m.params.map (fun p => p.name))) obj
+        = none)
+    (hArgs : args = [])
+    (hCalleeParams : callee.params = [])
+    (hCalleeBody :
+      structuralArithBody methods props 7
+        (Stack.Lower.computeLastUses callee.body) []
+        (callee.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts callee.body)
+        callee.body (List.reverse (m.params.map (fun p => p.name))) 0)
+    (hCalleeBodyFresh :
+      ∀ b ∈ callee.body,
+        b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hCalleeBodyNodup : (callee.body.map (fun b => b.name)).Nodup)
+    (hCalleeBodyRunOk :
+      ∀ b ∈ callee.body, ∀ idx : Nat, ∀ sm_acc : StackMap,
+        ∀ stkPre : Stack.Eval.StackState,
+        (Stack.Eval.runOps
+          (Stack.Lower.lowerValueP methods props 7 idx
+              (Stack.Lower.computeLastUses callee.body) []
+              (callee.body.map (fun b => b.name))
+              (Stack.Lower.collectConstInts callee.body)
+              sm_acc b.name b.value).1
+          stkPre).toOption.isSome = true) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  unfold lowerMethodUserRawOps
+  have hBudget : Stack.Lower.defaultInlineBudget = 7 + 1 := rfl
+  rw [hBudget, hBodyShape]
+  -- Reduce singleton `lowerBindingsP` to head's `lowerValueP.1`.
+  have hUnfold :
+      (Stack.Lower.lowerBindingsP methods props (7 + 1) 0
+          (Stack.Lower.computeLastUses
+            [ANFBinding.mk bn (ANFValue.methodCall obj method args) src]) []
+          ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+            (fun b => b.name))
+          (Stack.Lower.collectConstInts
+            [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+          (List.reverse (m.params.map (fun p => p.name)))
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src]).1
+        = (Stack.Lower.lowerValueP methods props (7 + 1) 0
+              (Stack.Lower.computeLastUses
+                [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+              []
+              ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+                (fun b => b.name))
+              (Stack.Lower.collectConstInts
+                [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+              (List.reverse (m.params.map (fun p => p.name))) bn
+              (ANFValue.methodCall obj method args)).1 := by
+    with_unfolding_all
+      simp [Stack.Lower.lowerBindingsP]
+  rw [hUnfold]
+  rw [lowerValueP_methodCall_singleton_calleeBodyP_ops
+        methods props 7 0
+        (Stack.Lower.computeLastUses
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+        []
+        ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+          (fun b => b.name))
+        (Stack.Lower.collectConstInts
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+        (List.reverse (m.params.map (fun p => p.name))) bn obj method args
+        callee hLookup hObj hArgs hCalleeParams]
+  simp only [Stack.Lower.collectConstInts, List.nil_append]
+  -- Apply the wave-9-exposed structuralArithBody substrate.
+  exact runOps_lowerBindingsP_structuralArithBody_isSome
+    methods props 7
+    (Stack.Lower.computeLastUses callee.body) []
+    (callee.body.map (fun b => b.name))
+    (Stack.Lower.collectConstInts callee.body)
+    callee.body
+    (List.reverse (m.params.map (fun p => p.name))) 0 initialStack
+    hCalleeBody hCalleeBodyFresh hCalleeBodyNodup hCalleeBodyRunOk
+
+/-! ### Tier 3c — singleton methodCall with `structuralCallBody` callee
+
+Mirrors Tier 3a, swapping the callee-body substrate for the wave-9-
+exposed `runOps_lowerBindingsP_structuralCallBody_isSome`. The call
+substrate, like arith, requires a per-binding runtime-success
+witness (`OP_SHA256` / `OP_CAT` / etc. each have type-dependent
+failure modes; per-builtin operational discharge is delegated to the
+caller). -/
+theorem runMethod_lower_public_unique_no_post_singletonMethodCall_callCallee_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : Stack.Eval.StackState)
+    (bn obj method : String) (args : List String) (src : Option SourceLoc)
+    (callee : ANFMethod)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+    (hLookup : Stack.Lower.lookupMethod methods method = some callee)
+    (hObj :
+      StackMap.depth? (List.reverse (m.params.map (fun p => p.name))) obj
+        = none)
+    (hArgs : args = [])
+    (hCalleeParams : callee.params = [])
+    (hCalleeBody :
+      structuralCallBody methods props 7
+        (Stack.Lower.computeLastUses callee.body) []
+        (callee.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts callee.body)
+        callee.body (List.reverse (m.params.map (fun p => p.name))) 0)
+    (hCalleeBodyFresh :
+      ∀ b ∈ callee.body,
+        b.name ∉ List.reverse (m.params.map (fun p => p.name)))
+    (hCalleeBodyNodup : (callee.body.map (fun b => b.name)).Nodup)
+    (hCalleeBodyRunOk :
+      ∀ b ∈ callee.body, ∀ idx : Nat, ∀ sm_acc : StackMap,
+        ∀ stkPre : Stack.Eval.StackState,
+        (Stack.Eval.runOps
+          (Stack.Lower.lowerValueP methods props 7 idx
+              (Stack.Lower.computeLastUses callee.body) []
+              (callee.body.map (fun b => b.name))
+              (Stack.Lower.collectConstInts callee.body)
+              sm_acc b.name b.value).1
+          stkPre).toOption.isSome = true) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  unfold lowerMethodUserRawOps
+  have hBudget : Stack.Lower.defaultInlineBudget = 7 + 1 := rfl
+  rw [hBudget, hBodyShape]
+  have hUnfold :
+      (Stack.Lower.lowerBindingsP methods props (7 + 1) 0
+          (Stack.Lower.computeLastUses
+            [ANFBinding.mk bn (ANFValue.methodCall obj method args) src]) []
+          ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+            (fun b => b.name))
+          (Stack.Lower.collectConstInts
+            [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+          (List.reverse (m.params.map (fun p => p.name)))
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src]).1
+        = (Stack.Lower.lowerValueP methods props (7 + 1) 0
+              (Stack.Lower.computeLastUses
+                [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+              []
+              ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+                (fun b => b.name))
+              (Stack.Lower.collectConstInts
+                [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+              (List.reverse (m.params.map (fun p => p.name))) bn
+              (ANFValue.methodCall obj method args)).1 := by
+    with_unfolding_all
+      simp [Stack.Lower.lowerBindingsP]
+  rw [hUnfold]
+  rw [lowerValueP_methodCall_singleton_calleeBodyP_ops
+        methods props 7 0
+        (Stack.Lower.computeLastUses
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+        []
+        ([ANFBinding.mk bn (ANFValue.methodCall obj method args) src].map
+          (fun b => b.name))
+        (Stack.Lower.collectConstInts
+          [ANFBinding.mk bn (ANFValue.methodCall obj method args) src])
+        (List.reverse (m.params.map (fun p => p.name))) bn obj method args
+        callee hLookup hObj hArgs hCalleeParams]
+  simp only [Stack.Lower.collectConstInts, List.nil_append]
+  -- Apply the wave-9-exposed structuralCallBody substrate.
+  exact runOps_lowerBindingsP_structuralCallBody_isSome
+    methods props 7
+    (Stack.Lower.computeLastUses callee.body) []
+    (callee.body.map (fun b => b.name))
+    (Stack.Lower.collectConstInts callee.body)
+    callee.body
+    (List.reverse (m.params.map (fun p => p.name))) 0 initialStack
+    hCalleeBody hCalleeBodyFresh hCalleeBodyNodup hCalleeBodyRunOk
 
 end Agrees
 end RunarVerification.Stack

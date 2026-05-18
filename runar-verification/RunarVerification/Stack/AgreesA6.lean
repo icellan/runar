@@ -1719,6 +1719,800 @@ theorem runMethod_lower_public_unique_no_post_ifValHeteroConstChain_preserves
     -- bound value. The `if b` expression on both sides matches structurally.
     cases b <;> simp [State.lookupBinding, State.addBinding]
 
+/-! ## Tier 5 — Predicate-side widening for **const + copy-ref** branch pairs
+
+Tier 4 (above) handled both-branches `structuralConstBodyEndsWithConst` chains,
+where each branch's terminal `.loadConst c?` binding pins down a stack head
+modulo intermediates. Tier 5 widens to **heterogeneous** branch pairs that mix
+const chains with copy-mode reference chains (`structuralCopyBody`).
+
+Wave 9 (commit `8d8b35ea`) exposed
+`runOps_lowerBindings_structuralCopyBody_preserves_metadata` as the
+copy-mode analogue of `runOps_lowerBindings_structuralConstBody_preserves_metadata`:
+running a `structuralCopyBody`'s lowered ops from any agreesTagged-aligned
+state preserves the four non-stack metadata fields (`altstack`, `outputs`,
+`props`, `preimage`). This unblocks three heterogeneous branch-shape pairs:
+
+* **Tier 5a** — `thn = structuralConstBody`, `els = structuralCopyBody`
+* **Tier 5b** — `thn = structuralCopyBody`, `els = structuralConstBody`
+* **Tier 5c** — both branches `structuralCopyBody`
+
+The copy substrate does NOT pin down a `head?` value (it only preserves
+metadata), so the cond-branch where the copy fires can only contribute a
+**metadata-preservation** arm, not a `stackEquivModuloIntermediates`-against-
+push witness. The const-branch arms still recover the full
+`stackEquivModuloIntermediates` against `stkSt.push (constToValue c?)` via
+the Tier 3 helper.
+
+Out of scope for this wave (still BLOCKED):
+* `structuralRefBody`'s **consume**-mode variant — lowers through
+  `lowerBindingsP` non-trivially and has no metadata-preservation lemma.
+* **Nested-ifVal** branches — would need a `structuralIfValBody`
+  metadata-preservation result, also missing from substrate.
+
+Forbidden patterns explicitly avoided. The cond-load witness is the same
+input-side shape as Tier 1/2/3/4 (talks ONLY about the `loadRef sm cond`
+prefix and the pushed cond value's bool coercion); no conclusion-restating
+premise. -/
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 5a predicate-side preservation** for the **const-thn + copyRef-els**
+both-branches `if_val` fragment. The `thn` branch is an arbitrary
+`structuralConstBody` chain ending in `.mk vnThn (.loadConst cThn) srcThn`;
+the `els` branch is an arbitrary `structuralCopyBody`.
+
+Cond-dependent conclusion:
+
+* `b = true` ⇒ `stackEquivModuloIntermediates stk' (stkSt.push (constToValue cThn))`
+  (full head + metadata witness from the Tier 3 const-chain helper);
+* `b = false` ⇒ metadata-preservation only (the copy substrate doesn't
+  pin a head?).
+
+The `agreesTagged` premise threads through to the copy-body substrate
+which needs it to discharge `structuralCopyValue`'s `depth?` obligations
+via `runOps_lowerValue_structuralCopyValue_ok`. -/
+theorem simpleStepRel_ifVal_constThenCopyRef_preserves
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (vnThn : String) (srcThn : Option SourceLoc)
+    (cThn : ConstValue)
+    (thn els : List ANFBinding)
+    (currentIndexEls : Nat)
+    (lastUsesEls : List (String × Nat))
+    (outerProtectedEls localBindingsEls : List String)
+    (tsmEls : TaggedStackMap) (anfStEls : State)
+    (hThn : structuralConstBodyEndsWithConst vnThn cThn srcThn thn)
+    (hUntagSmEls : untagSm tsmEls = sm)
+    (hAgreesEls : agreesTagged tsmEls anfStEls stkSt)
+    (hEls : structuralCopyBody lastUsesEls outerProtectedEls localBindingsEls
+              els sm currentIndexEls)
+    (hElsFresh : ∀ b ∈ els, b.name ∉ sm)
+    (hElsNodup : (els.map (·.name)).Nodup)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk' b,
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ (∃ condV stk1,
+            runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+            ∧ stk1.stack = condV :: stkSt.stack
+            ∧ asBool? condV = some b)
+      ∧ (b = true →
+            stackEquivModuloIntermediates stk' (stkSt.push (constToValue cThn)))
+      ∧ (b = false →
+            stk'.altstack = stkSt.altstack
+            ∧ stk'.outputs = stkSt.outputs
+            ∧ stk'.props = stkSt.props
+            ∧ stk'.preimage = stkSt.preimage) := by
+  obtain ⟨condV, stk1, hLoad, hStk, hAlt, hOut, hProps, hPre, b, hBool⟩ :=
+    hCondLoad
+  -- Unfold the if_val lowering: `loadRef sm cond ++ [.ifOp thnOps (some elsOps)]`.
+  have hLowerEq :
+      (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1
+        = Stack.Lower.loadRef sm cond
+          ++ [.ifOp (Stack.Lower.lowerBindings sm thn).1
+                    (some (Stack.Lower.lowerBindings sm els).1)] := by
+    simp [Stack.Lower.lowerValue]
+  -- Pop equation for stk1.
+  have hPop : stk1.pop? = some (condV, { stk1 with stack := stkSt.stack }) := by
+    show (match stk1.stack with
+          | [] => none
+          | v :: vs => some (v, { stk1 with stack := vs })) = _
+    rw [hStk]
+  -- The residual record after popping cond from stk1 equals stkSt by metadata
+  -- preservation.
+  have hStkEq : ({ stk1 with stack := stkSt.stack } : StackState) = stkSt := by
+    cases stk1
+    cases stkSt
+    simp_all
+  -- Run the const branch from `stkSt` (after popping cond) using the Tier 3
+  -- helper; run the copy branch using the wave-9 metadata-preservation lemma.
+  obtain ⟨stkT, hRunT, hEquivT⟩ :=
+    runOps_lowerBindings_structuralConstBodyEndsWithConst_stackEquiv
+      vnThn cThn srcThn thn sm stkSt hThn
+  obtain ⟨stkE, hRunE, hAltE, hOutE, hPropsE, hPreE⟩ :=
+    runOps_lowerBindings_structuralCopyBody_preserves_metadata
+      els sm currentIndexEls lastUsesEls outerProtectedEls localBindingsEls
+      tsmEls anfStEls stkSt hUntagSmEls hAgreesEls hEls hElsFresh hElsNodup
+  -- Drive runOps through the if_val lowered ops; case-split on `b`.
+  cases b with
+  | true =>
+      refine ⟨stkT, true, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩, ?_, ?_⟩
+      · rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+        simp only []
+        rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+              (some (Stack.Lower.lowerBindings sm els).1) []]
+        rw [hPop]
+        simp only []
+        rw [hBool]
+        simp only []
+        rw [hStkEq, hRunT]
+        simp [runOps]
+      · intro _; exact hEquivT
+      · intro hF; cases hF
+  | false =>
+      refine ⟨stkE, false, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩, ?_, ?_⟩
+      · rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+        simp only []
+        rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+              (some (Stack.Lower.lowerBindings sm els).1) []]
+        rw [hPop]
+        simp only []
+        rw [hBool]
+        simp only []
+        rw [hStkEq, hRunE]
+        simp [runOps]
+      · intro hT; cases hT
+      · intro _; exact ⟨hAltE, hOutE, hPropsE, hPreE⟩
+
+/-- **Tier 5a cond-independent metadata-preservation corollary**. Strips the
+cond-dependent `stackEquivModuloIntermediates` (true arm) and the
+metadata-only conjunction (false arm) down to the four cond-uniform
+metadata-preservation arms against `stkSt`. -/
+theorem simpleStepRel_ifVal_constThenCopyRef_preserves_metadata
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (vnThn : String) (srcThn : Option SourceLoc)
+    (cThn : ConstValue)
+    (thn els : List ANFBinding)
+    (currentIndexEls : Nat)
+    (lastUsesEls : List (String × Nat))
+    (outerProtectedEls localBindingsEls : List String)
+    (tsmEls : TaggedStackMap) (anfStEls : State)
+    (hThn : structuralConstBodyEndsWithConst vnThn cThn srcThn thn)
+    (hUntagSmEls : untagSm tsmEls = sm)
+    (hAgreesEls : agreesTagged tsmEls anfStEls stkSt)
+    (hEls : structuralCopyBody lastUsesEls outerProtectedEls localBindingsEls
+              els sm currentIndexEls)
+    (hElsFresh : ∀ b ∈ els, b.name ∉ sm)
+    (hElsNodup : (els.map (·.name)).Nodup)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk',
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ stk'.altstack = stkSt.altstack
+      ∧ stk'.outputs = stkSt.outputs
+      ∧ stk'.props = stkSt.props
+      ∧ stk'.preimage = stkSt.preimage := by
+  obtain ⟨stk', b, hRun, _hWit, hEquivT, hMetaE⟩ :=
+    simpleStepRel_ifVal_constThenCopyRef_preserves
+      sm stkSt bn cond vnThn srcThn cThn thn els
+      currentIndexEls lastUsesEls outerProtectedEls localBindingsEls
+      tsmEls anfStEls hThn hUntagSmEls hAgreesEls hEls hElsFresh hElsNodup
+      hCondLoad
+  cases b with
+  | true =>
+      have hEquiv := hEquivT rfl
+      obtain ⟨_hHead, hAlt, hOut, hProps, hPre⟩ := hEquiv
+      refine ⟨stk', hRun, ?_, ?_, ?_, ?_⟩
+      · rw [hAlt]; unfold StackState.push; rfl
+      · rw [hOut]; unfold StackState.push; rfl
+      · rw [hProps]; unfold StackState.push; rfl
+      · rw [hPre]; unfold StackState.push; rfl
+  | false =>
+      obtain ⟨hAlt, hOut, hProps, hPre⟩ := hMetaE rfl
+      exact ⟨stk', hRun, hAlt, hOut, hProps, hPre⟩
+
+/-! ### Tier 5a method-level wrapper
+
+Method-level companion of `simpleStepRel_ifVal_constThenCopyRef_preserves`,
+mirroring the Tier 4 wrapper. Composes:
+
+* the runtime-success arm via `runMethod_lower_public_unique_no_post_eq_userRaw`
+  + the direct construction of the `runOps` post-state from the Tier 5a
+  preservation lemma above (which yields `.toOption.isSome` definitionally);
+* the cond-dependent post-state arms (full `stackEquivModuloIntermediates`
+  for the const arm, metadata-only for the copy arm).
+
+No conclusion-restating premise (per PATH2_PLAN §2.1). -/
+set_option maxHeartbeats 1600000 in
+theorem runMethod_lower_public_unique_no_post_ifVal_constThenCopyRef_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : StackState)
+    (bn cond : String)
+    (vnThn : String) (srcThn : Option SourceLoc)
+    (cThn : ConstValue)
+    (thn els : List ANFBinding) (src : Option SourceLoc)
+    (currentIndexEls : Nat)
+    (lastUsesEls : List (String × Nat))
+    (outerProtectedEls localBindingsEls : List String)
+    (tsmEls : TaggedStackMap) (anfStEls : State)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [.mk bn (.ifVal cond thn els) src])
+    (hThn : structuralConstBodyEndsWithConst vnThn cThn srcThn thn)
+    (hUntagSmEls :
+      untagSm tsmEls = (m.params.map (fun p => p.name) |>.reverse))
+    (hAgreesEls : agreesTagged tsmEls anfStEls initialStack)
+    (hEls : structuralCopyBody lastUsesEls outerProtectedEls localBindingsEls
+              els (m.params.map (fun p => p.name) |>.reverse) currentIndexEls)
+    (hElsFresh :
+      ∀ b ∈ els, b.name ∉ (m.params.map (fun p => p.name) |>.reverse))
+    (hElsNodup : (els.map (·.name)).Nodup)
+    (hRawEqStructural :
+      lowerMethodUserRawOps methods props m =
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps
+          (Stack.Lower.loadRef
+            (m.params.map (fun p => p.name) |>.reverse) cond) initialStack
+          = .ok stk1
+        ∧ stk1.stack = condV :: initialStack.stack
+        ∧ stk1.altstack = initialStack.altstack
+        ∧ stk1.outputs = initialStack.outputs
+        ∧ stk1.props = initialStack.props
+        ∧ stk1.preimage = initialStack.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome
+    ∧ ∃ stk' b,
+        (b = true →
+          stackEquivModuloIntermediates stk' (initialStack.push (constToValue cThn)))
+        ∧ (b = false →
+          stk'.altstack = initialStack.altstack
+          ∧ stk'.outputs = initialStack.outputs
+          ∧ stk'.props = initialStack.props
+          ∧ stk'.preimage = initialStack.preimage) := by
+  let smArg := (m.params.map (fun p => p.name) |>.reverse)
+  obtain ⟨stk', b, hRun, _hWit, hEquivT, hMetaE⟩ :=
+    simpleStepRel_ifVal_constThenCopyRef_preserves
+      smArg initialStack bn cond vnThn srcThn cThn thn els
+      currentIndexEls lastUsesEls outerProtectedEls localBindingsEls
+      tsmEls anfStEls hThn hUntagSmEls hAgreesEls hEls hElsFresh hElsNodup
+      hCondLoad
+  refine ⟨?_, stk', b, hEquivT, hMetaE⟩
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hRawEqStructural]
+  rw [hBodyShape]
+  have hUnfold :
+      (Stack.Lower.lowerBindings smArg
+          [.mk bn (.ifVal cond thn els) src]).1
+        = (Stack.Lower.lowerValue smArg bn (.ifVal cond thn els)).1 := by
+    simp [Stack.Lower.lowerBindings]
+  rw [hUnfold]
+  rw [hRun]
+  simp [Except.toOption]
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 5b predicate-side preservation** for the **copyRef-thn + const-els**
+both-branches `if_val` fragment (the mirror image of Tier 5a). The `thn`
+branch is an arbitrary `structuralCopyBody`; the `els` branch is a
+`structuralConstBody` chain ending in `.mk vnEls (.loadConst cEls) srcEls`.
+
+Cond-dependent conclusion:
+
+* `b = true` ⇒ metadata-preservation only (the copy substrate doesn't pin a head?);
+* `b = false` ⇒ `stackEquivModuloIntermediates stk' (stkSt.push (constToValue cEls))`. -/
+theorem simpleStepRel_ifVal_copyRefThenConst_preserves
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (vnEls : String) (srcEls : Option SourceLoc)
+    (cEls : ConstValue)
+    (thn els : List ANFBinding)
+    (currentIndexThn : Nat)
+    (lastUsesThn : List (String × Nat))
+    (outerProtectedThn localBindingsThn : List String)
+    (tsmThn : TaggedStackMap) (anfStThn : State)
+    (hUntagSmThn : untagSm tsmThn = sm)
+    (hAgreesThn : agreesTagged tsmThn anfStThn stkSt)
+    (hThn : structuralCopyBody lastUsesThn outerProtectedThn localBindingsThn
+              thn sm currentIndexThn)
+    (hThnFresh : ∀ b ∈ thn, b.name ∉ sm)
+    (hThnNodup : (thn.map (·.name)).Nodup)
+    (hEls : structuralConstBodyEndsWithConst vnEls cEls srcEls els)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk' b,
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ (∃ condV stk1,
+            runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+            ∧ stk1.stack = condV :: stkSt.stack
+            ∧ asBool? condV = some b)
+      ∧ (b = true →
+            stk'.altstack = stkSt.altstack
+            ∧ stk'.outputs = stkSt.outputs
+            ∧ stk'.props = stkSt.props
+            ∧ stk'.preimage = stkSt.preimage)
+      ∧ (b = false →
+            stackEquivModuloIntermediates stk' (stkSt.push (constToValue cEls))) := by
+  obtain ⟨condV, stk1, hLoad, hStk, hAlt, hOut, hProps, hPre, b, hBool⟩ :=
+    hCondLoad
+  have hLowerEq :
+      (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1
+        = Stack.Lower.loadRef sm cond
+          ++ [.ifOp (Stack.Lower.lowerBindings sm thn).1
+                    (some (Stack.Lower.lowerBindings sm els).1)] := by
+    simp [Stack.Lower.lowerValue]
+  have hPop : stk1.pop? = some (condV, { stk1 with stack := stkSt.stack }) := by
+    show (match stk1.stack with
+          | [] => none
+          | v :: vs => some (v, { stk1 with stack := vs })) = _
+    rw [hStk]
+  have hStkEq : ({ stk1 with stack := stkSt.stack } : StackState) = stkSt := by
+    cases stk1
+    cases stkSt
+    simp_all
+  obtain ⟨stkT, hRunT, hAltT, hOutT, hPropsT, hPreT⟩ :=
+    runOps_lowerBindings_structuralCopyBody_preserves_metadata
+      thn sm currentIndexThn lastUsesThn outerProtectedThn localBindingsThn
+      tsmThn anfStThn stkSt hUntagSmThn hAgreesThn hThn hThnFresh hThnNodup
+  obtain ⟨stkE, hRunE, hEquivE⟩ :=
+    runOps_lowerBindings_structuralConstBodyEndsWithConst_stackEquiv
+      vnEls cEls srcEls els sm stkSt hEls
+  cases b with
+  | true =>
+      refine ⟨stkT, true, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩, ?_, ?_⟩
+      · rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+        simp only []
+        rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+              (some (Stack.Lower.lowerBindings sm els).1) []]
+        rw [hPop]
+        simp only []
+        rw [hBool]
+        simp only []
+        rw [hStkEq, hRunT]
+        simp [runOps]
+      · intro _; exact ⟨hAltT, hOutT, hPropsT, hPreT⟩
+      · intro hF; cases hF
+  | false =>
+      refine ⟨stkE, false, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩, ?_, ?_⟩
+      · rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+        simp only []
+        rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+              (some (Stack.Lower.lowerBindings sm els).1) []]
+        rw [hPop]
+        simp only []
+        rw [hBool]
+        simp only []
+        rw [hStkEq, hRunE]
+        simp [runOps]
+      · intro hT; cases hT
+      · intro _; exact hEquivE
+
+/-- **Tier 5b cond-independent metadata-preservation corollary**. -/
+theorem simpleStepRel_ifVal_copyRefThenConst_preserves_metadata
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (vnEls : String) (srcEls : Option SourceLoc)
+    (cEls : ConstValue)
+    (thn els : List ANFBinding)
+    (currentIndexThn : Nat)
+    (lastUsesThn : List (String × Nat))
+    (outerProtectedThn localBindingsThn : List String)
+    (tsmThn : TaggedStackMap) (anfStThn : State)
+    (hUntagSmThn : untagSm tsmThn = sm)
+    (hAgreesThn : agreesTagged tsmThn anfStThn stkSt)
+    (hThn : structuralCopyBody lastUsesThn outerProtectedThn localBindingsThn
+              thn sm currentIndexThn)
+    (hThnFresh : ∀ b ∈ thn, b.name ∉ sm)
+    (hThnNodup : (thn.map (·.name)).Nodup)
+    (hEls : structuralConstBodyEndsWithConst vnEls cEls srcEls els)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk',
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ stk'.altstack = stkSt.altstack
+      ∧ stk'.outputs = stkSt.outputs
+      ∧ stk'.props = stkSt.props
+      ∧ stk'.preimage = stkSt.preimage := by
+  obtain ⟨stk', b, hRun, _hWit, hMetaT, hEquivE⟩ :=
+    simpleStepRel_ifVal_copyRefThenConst_preserves
+      sm stkSt bn cond vnEls srcEls cEls thn els
+      currentIndexThn lastUsesThn outerProtectedThn localBindingsThn
+      tsmThn anfStThn hUntagSmThn hAgreesThn hThn hThnFresh hThnNodup hEls
+      hCondLoad
+  cases b with
+  | true =>
+      obtain ⟨hAlt, hOut, hProps, hPre⟩ := hMetaT rfl
+      exact ⟨stk', hRun, hAlt, hOut, hProps, hPre⟩
+  | false =>
+      have hEquiv := hEquivE rfl
+      obtain ⟨_hHead, hAlt, hOut, hProps, hPre⟩ := hEquiv
+      refine ⟨stk', hRun, ?_, ?_, ?_, ?_⟩
+      · rw [hAlt]; unfold StackState.push; rfl
+      · rw [hOut]; unfold StackState.push; rfl
+      · rw [hProps]; unfold StackState.push; rfl
+      · rw [hPre]; unfold StackState.push; rfl
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 5b method-level wrapper**. -/
+theorem runMethod_lower_public_unique_no_post_ifVal_copyRefThenConst_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : StackState)
+    (bn cond : String)
+    (vnEls : String) (srcEls : Option SourceLoc)
+    (cEls : ConstValue)
+    (thn els : List ANFBinding) (src : Option SourceLoc)
+    (currentIndexThn : Nat)
+    (lastUsesThn : List (String × Nat))
+    (outerProtectedThn localBindingsThn : List String)
+    (tsmThn : TaggedStackMap) (anfStThn : State)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [.mk bn (.ifVal cond thn els) src])
+    (hUntagSmThn :
+      untagSm tsmThn = (m.params.map (fun p => p.name) |>.reverse))
+    (hAgreesThn : agreesTagged tsmThn anfStThn initialStack)
+    (hThn : structuralCopyBody lastUsesThn outerProtectedThn localBindingsThn
+              thn (m.params.map (fun p => p.name) |>.reverse) currentIndexThn)
+    (hThnFresh :
+      ∀ b ∈ thn, b.name ∉ (m.params.map (fun p => p.name) |>.reverse))
+    (hThnNodup : (thn.map (·.name)).Nodup)
+    (hEls : structuralConstBodyEndsWithConst vnEls cEls srcEls els)
+    (hRawEqStructural :
+      lowerMethodUserRawOps methods props m =
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps
+          (Stack.Lower.loadRef
+            (m.params.map (fun p => p.name) |>.reverse) cond) initialStack
+          = .ok stk1
+        ∧ stk1.stack = condV :: initialStack.stack
+        ∧ stk1.altstack = initialStack.altstack
+        ∧ stk1.outputs = initialStack.outputs
+        ∧ stk1.props = initialStack.props
+        ∧ stk1.preimage = initialStack.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome
+    ∧ ∃ stk' b,
+        (b = true →
+          stk'.altstack = initialStack.altstack
+          ∧ stk'.outputs = initialStack.outputs
+          ∧ stk'.props = initialStack.props
+          ∧ stk'.preimage = initialStack.preimage)
+        ∧ (b = false →
+          stackEquivModuloIntermediates stk' (initialStack.push (constToValue cEls))) := by
+  let smArg := (m.params.map (fun p => p.name) |>.reverse)
+  obtain ⟨stk', b, hRun, _hWit, hMetaT, hEquivE⟩ :=
+    simpleStepRel_ifVal_copyRefThenConst_preserves
+      smArg initialStack bn cond vnEls srcEls cEls thn els
+      currentIndexThn lastUsesThn outerProtectedThn localBindingsThn
+      tsmThn anfStThn hUntagSmThn hAgreesThn hThn hThnFresh hThnNodup hEls
+      hCondLoad
+  refine ⟨?_, stk', b, hMetaT, hEquivE⟩
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hRawEqStructural]
+  rw [hBodyShape]
+  have hUnfold :
+      (Stack.Lower.lowerBindings smArg
+          [.mk bn (.ifVal cond thn els) src]).1
+        = (Stack.Lower.lowerValue smArg bn (.ifVal cond thn els)).1 := by
+    simp [Stack.Lower.lowerBindings]
+  rw [hUnfold]
+  rw [hRun]
+  simp [Except.toOption]
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 5c predicate-side preservation** for the **both-copyRef** `if_val`
+fragment. Both branches are `structuralCopyBody`. The conclusion is
+cond-uniform metadata preservation (no `head?` witness from either branch). -/
+theorem simpleStepRel_ifVal_copyRefThenCopyRef_preserves
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (thn els : List ANFBinding)
+    (currentIndexThn currentIndexEls : Nat)
+    (lastUsesThn lastUsesEls : List (String × Nat))
+    (outerProtectedThn localBindingsThn : List String)
+    (outerProtectedEls localBindingsEls : List String)
+    (tsmThn : TaggedStackMap) (anfStThn : State)
+    (tsmEls : TaggedStackMap) (anfStEls : State)
+    (hUntagSmThn : untagSm tsmThn = sm)
+    (hAgreesThn : agreesTagged tsmThn anfStThn stkSt)
+    (hThn : structuralCopyBody lastUsesThn outerProtectedThn localBindingsThn
+              thn sm currentIndexThn)
+    (hThnFresh : ∀ b ∈ thn, b.name ∉ sm)
+    (hThnNodup : (thn.map (·.name)).Nodup)
+    (hUntagSmEls : untagSm tsmEls = sm)
+    (hAgreesEls : agreesTagged tsmEls anfStEls stkSt)
+    (hEls : structuralCopyBody lastUsesEls outerProtectedEls localBindingsEls
+              els sm currentIndexEls)
+    (hElsFresh : ∀ b ∈ els, b.name ∉ sm)
+    (hElsNodup : (els.map (·.name)).Nodup)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk' b,
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ (∃ condV stk1,
+            runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+            ∧ stk1.stack = condV :: stkSt.stack
+            ∧ asBool? condV = some b)
+      ∧ stk'.altstack = stkSt.altstack
+      ∧ stk'.outputs = stkSt.outputs
+      ∧ stk'.props = stkSt.props
+      ∧ stk'.preimage = stkSt.preimage := by
+  obtain ⟨condV, stk1, hLoad, hStk, hAlt, hOut, hProps, hPre, b, hBool⟩ :=
+    hCondLoad
+  have hLowerEq :
+      (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1
+        = Stack.Lower.loadRef sm cond
+          ++ [.ifOp (Stack.Lower.lowerBindings sm thn).1
+                    (some (Stack.Lower.lowerBindings sm els).1)] := by
+    simp [Stack.Lower.lowerValue]
+  have hPop : stk1.pop? = some (condV, { stk1 with stack := stkSt.stack }) := by
+    show (match stk1.stack with
+          | [] => none
+          | v :: vs => some (v, { stk1 with stack := vs })) = _
+    rw [hStk]
+  have hStkEq : ({ stk1 with stack := stkSt.stack } : StackState) = stkSt := by
+    cases stk1
+    cases stkSt
+    simp_all
+  obtain ⟨stkT, hRunT, hAltT, hOutT, hPropsT, hPreT⟩ :=
+    runOps_lowerBindings_structuralCopyBody_preserves_metadata
+      thn sm currentIndexThn lastUsesThn outerProtectedThn localBindingsThn
+      tsmThn anfStThn stkSt hUntagSmThn hAgreesThn hThn hThnFresh hThnNodup
+  obtain ⟨stkE, hRunE, hAltE, hOutE, hPropsE, hPreE⟩ :=
+    runOps_lowerBindings_structuralCopyBody_preserves_metadata
+      els sm currentIndexEls lastUsesEls outerProtectedEls localBindingsEls
+      tsmEls anfStEls stkSt hUntagSmEls hAgreesEls hEls hElsFresh hElsNodup
+  cases b with
+  | true =>
+      refine ⟨stkT, true, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩,
+              hAltT, hOutT, hPropsT, hPreT⟩
+      rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+      simp only []
+      rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+            (some (Stack.Lower.lowerBindings sm els).1) []]
+      rw [hPop]
+      simp only []
+      rw [hBool]
+      simp only []
+      rw [hStkEq, hRunT]
+      simp [runOps]
+  | false =>
+      refine ⟨stkE, false, ?_, ⟨condV, stk1, hLoad, hStk, hBool⟩,
+              hAltE, hOutE, hPropsE, hPreE⟩
+      rw [hLowerEq, Stack.Sim.runOps_append, hLoad]
+      simp only []
+      rw [runOps.eq_2 stk1 (Stack.Lower.lowerBindings sm thn).1
+            (some (Stack.Lower.lowerBindings sm els).1) []]
+      rw [hPop]
+      simp only []
+      rw [hBool]
+      simp only []
+      rw [hStkEq, hRunE]
+      simp [runOps]
+
+/-- **Tier 5c cond-independent metadata-preservation corollary**. The Tier 5c
+predicate-side conclusion is already cond-uniform metadata preservation, so
+this corollary simply strips the cond witness. -/
+theorem simpleStepRel_ifVal_copyRefThenCopyRef_preserves_metadata
+    (sm : StackMap)
+    (stkSt : StackState)
+    (bn cond : String)
+    (thn els : List ANFBinding)
+    (currentIndexThn currentIndexEls : Nat)
+    (lastUsesThn lastUsesEls : List (String × Nat))
+    (outerProtectedThn localBindingsThn : List String)
+    (outerProtectedEls localBindingsEls : List String)
+    (tsmThn : TaggedStackMap) (anfStThn : State)
+    (tsmEls : TaggedStackMap) (anfStEls : State)
+    (hUntagSmThn : untagSm tsmThn = sm)
+    (hAgreesThn : agreesTagged tsmThn anfStThn stkSt)
+    (hThn : structuralCopyBody lastUsesThn outerProtectedThn localBindingsThn
+              thn sm currentIndexThn)
+    (hThnFresh : ∀ b ∈ thn, b.name ∉ sm)
+    (hThnNodup : (thn.map (·.name)).Nodup)
+    (hUntagSmEls : untagSm tsmEls = sm)
+    (hAgreesEls : agreesTagged tsmEls anfStEls stkSt)
+    (hEls : structuralCopyBody lastUsesEls outerProtectedEls localBindingsEls
+              els sm currentIndexEls)
+    (hElsFresh : ∀ b ∈ els, b.name ∉ sm)
+    (hElsNodup : (els.map (·.name)).Nodup)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps (Stack.Lower.loadRef sm cond) stkSt = .ok stk1
+        ∧ stk1.stack = condV :: stkSt.stack
+        ∧ stk1.altstack = stkSt.altstack
+        ∧ stk1.outputs = stkSt.outputs
+        ∧ stk1.props = stkSt.props
+        ∧ stk1.preimage = stkSt.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    ∃ stk',
+      runOps
+        (Stack.Lower.lowerValue sm bn (.ifVal cond thn els)).1 stkSt = .ok stk'
+      ∧ stk'.altstack = stkSt.altstack
+      ∧ stk'.outputs = stkSt.outputs
+      ∧ stk'.props = stkSt.props
+      ∧ stk'.preimage = stkSt.preimage := by
+  obtain ⟨stk', _b, hRun, _hWit, hAlt, hOut, hProps, hPre⟩ :=
+    simpleStepRel_ifVal_copyRefThenCopyRef_preserves
+      sm stkSt bn cond thn els
+      currentIndexThn currentIndexEls lastUsesThn lastUsesEls
+      outerProtectedThn localBindingsThn outerProtectedEls localBindingsEls
+      tsmThn anfStThn tsmEls anfStEls
+      hUntagSmThn hAgreesThn hThn hThnFresh hThnNodup
+      hUntagSmEls hAgreesEls hEls hElsFresh hElsNodup
+      hCondLoad
+  exact ⟨stk', hRun, hAlt, hOut, hProps, hPre⟩
+
+set_option maxHeartbeats 1600000 in
+/-- **Tier 5c method-level wrapper**. Cond-uniform metadata preservation
+conclusion (both branches contribute only metadata-preservation). -/
+theorem runMethod_lower_public_unique_no_post_ifVal_copyRefThenCopyRef_preserves
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod)
+    (initialStack : StackState)
+    (bn cond : String)
+    (thn els : List ANFBinding) (src : Option SourceLoc)
+    (currentIndexThn currentIndexEls : Nat)
+    (lastUsesThn lastUsesEls : List (String × Nat))
+    (outerProtectedThn localBindingsThn : List String)
+    (outerProtectedEls localBindingsEls : List String)
+    (tsmThn : TaggedStackMap) (anfStThn : State)
+    (tsmEls : TaggedStackMap) (anfStEls : State)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hBodyShape :
+      m.body = [.mk bn (.ifVal cond thn els) src])
+    (hUntagSmThn :
+      untagSm tsmThn = (m.params.map (fun p => p.name) |>.reverse))
+    (hAgreesThn : agreesTagged tsmThn anfStThn initialStack)
+    (hThn : structuralCopyBody lastUsesThn outerProtectedThn localBindingsThn
+              thn (m.params.map (fun p => p.name) |>.reverse) currentIndexThn)
+    (hThnFresh :
+      ∀ b ∈ thn, b.name ∉ (m.params.map (fun p => p.name) |>.reverse))
+    (hThnNodup : (thn.map (·.name)).Nodup)
+    (hUntagSmEls :
+      untagSm tsmEls = (m.params.map (fun p => p.name) |>.reverse))
+    (hAgreesEls : agreesTagged tsmEls anfStEls initialStack)
+    (hEls : structuralCopyBody lastUsesEls outerProtectedEls localBindingsEls
+              els (m.params.map (fun p => p.name) |>.reverse) currentIndexEls)
+    (hElsFresh :
+      ∀ b ∈ els, b.name ∉ (m.params.map (fun p => p.name) |>.reverse))
+    (hElsNodup : (els.map (·.name)).Nodup)
+    (hRawEqStructural :
+      lowerMethodUserRawOps methods props m =
+        (Stack.Lower.lowerBindings
+          (m.params.map (fun p => p.name) |>.reverse) m.body).1)
+    (hCondLoad :
+      ∃ condV stk1,
+        runOps
+          (Stack.Lower.loadRef
+            (m.params.map (fun p => p.name) |>.reverse) cond) initialStack
+          = .ok stk1
+        ∧ stk1.stack = condV :: initialStack.stack
+        ∧ stk1.altstack = initialStack.altstack
+        ∧ stk1.outputs = initialStack.outputs
+        ∧ stk1.props = initialStack.props
+        ∧ stk1.preimage = initialStack.preimage
+        ∧ (∃ b, asBool? condV = some b)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome
+    ∧ ∃ stk' : StackState,
+        stk'.altstack = initialStack.altstack
+        ∧ stk'.outputs = initialStack.outputs
+        ∧ stk'.props = initialStack.props
+        ∧ stk'.preimage = initialStack.preimage := by
+  let smArg := (m.params.map (fun p => p.name) |>.reverse)
+  obtain ⟨stk', _b, hRun, _hWit, hAlt, hOut, hProps, hPre⟩ :=
+    simpleStepRel_ifVal_copyRefThenCopyRef_preserves
+      smArg initialStack bn cond thn els
+      currentIndexThn currentIndexEls lastUsesThn lastUsesEls
+      outerProtectedThn localBindingsThn outerProtectedEls localBindingsEls
+      tsmThn anfStThn tsmEls anfStEls
+      hUntagSmThn hAgreesThn hThn hThnFresh hThnNodup
+      hUntagSmEls hAgreesEls hEls hElsFresh hElsNodup
+      hCondLoad
+  refine ⟨?_, stk', hAlt, hOut, hProps, hPre⟩
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  rw [hRawEqStructural]
+  rw [hBodyShape]
+  have hUnfold :
+      (Stack.Lower.lowerBindings smArg
+          [.mk bn (.ifVal cond thn els) src]).1
+        = (Stack.Lower.lowerValue smArg bn (.ifVal cond thn els)).1 := by
+    simp [Stack.Lower.lowerBindings]
+  rw [hUnfold]
+  rw [hRun]
+  simp [Except.toOption]
+
 end -- attribute [local irreducible] section
 
 end Agrees

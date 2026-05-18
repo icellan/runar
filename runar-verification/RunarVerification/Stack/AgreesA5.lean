@@ -1279,5 +1279,413 @@ theorem runMethod_lower_public_unique_no_post_structuralUpdatePropAnyDepthExisti
   simpleStepRel_updateProp_existingDeep_preserves
     contractName props methods m initialStack hMem hPublic hUnique hStruct
 
+/-! ## Tier 4 — fresh-prop, 2-binding body `[loadConst lit ; updateProp p t]`
+
+Tiers 1/2/3a/3b above narrow `update_prop` to a **singleton method body**
+whose only binding is `.updateProp`. The temp-ref `ref` is then required
+to sit in the initial parameter-list stackmap (Tier 1: depth 0; Tier 2/3a/3b:
+arbitrary depth) so that `loadRefLive` emits the bringToTop op list and
+the rename produces the renamed stackmap directly.
+
+This excludes the more common code-shape where the temp-ref is *itself*
+produced by an earlier binding in the same body — e.g. the compiled
+form of `this.x = 7` is the 2-binding ANF body
+
+```
+⟨t, .loadConst (.int 7), src1⟩
+⟨bn, .updateProp "x" t, src2⟩
+```
+
+Tier 4 closes the fresh-prop variant of this 2-binding shape, with the
+new value supplied as a literal constant (int / bool / bytes). Concretely:
+
+* binding 1 is `.loadConst c` for some `ConstValue c`; emits `emitConst c`
+  ops and pushes `t` at depth 0 of the stackmap, leaving the runtime
+  stack with the constant value on top.
+* binding 2 is `.updateProp propName t` with `propName` not appearing
+  in the initial parameter-list stackmap (so the cleanup search after
+  the rename finds no match and emits no ops).
+
+The fresh-prop side condition (`propName ∉ initialSm`) is the direct
+analog of Tier 1's `propName ∉ tail` — only here the "tail" is the
+*initial* stackmap rather than the *post-load* stackmap (because the
+`update_prop`'s `loadRefLive` consumes the depth-0 entry produced by
+binding 1, leaving the initial stackmap as the residual tail under the
+rename).
+
+Per §2.1 the only new input-side facts are structural — the body shape
+and the freshness side condition. No hypothesis restates the conclusion;
+no `agreesTagged` invariant is needed because the runtime is just
+`runOps [.push c'] initialStack` for some pushable `c'`, which always
+succeeds (push is total).
+
+Substrate note: Tier 4 deliberately does NOT use the `simpleStepRel`
+arm for `.updateProp` — that arm is currently `False` in
+`Stack/Agrees.lean:simpleStepRel` (line 3125), so any multi-binding
+predicate-side composition is blocked. Tier 4 stays on the runtime-side
+`no_post_eq_userRaw` bridge, same as Tiers 1/2/3a/3b. Predicate-side
+widening for `.updateProp` is the cross-A<k> follow-up flagged by the
+existing Tier-2 comment block. -/
+
+/-! ### Tier-4 auxiliary lemmas on the 2-binding body shape
+
+`computeLastUses [⟨t, .loadConst _, _⟩, ⟨bn, .updateProp p t, _⟩]`
+records `(t, 1)` — its only read. `collectConstInts` records `(t, i)`
+when the literal is `.int i`; otherwise empty. Both feed `lowerBindingsP`
+on the second binding. -/
+
+/-- For the 2-binding body `[loadConst int ; updateProp p t]`,
+`computeLastUses` records `(t, 1)`. The refAlias / thisRef cases are
+excluded from Tier 4 because their `collectRefs` is non-empty. -/
+private theorem computeLastUses_loadConstInt_then_updateProp
+    (t bn propName : String) (i : Int) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.computeLastUses
+        [⟨t, .loadConst (.int i), src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = [(t, 1)] := by
+  unfold Stack.Lower.computeLastUses
+  simp [Stack.Lower.computeLastUses.go, Stack.Lower.collectRefs,
+        Stack.Lower.lastUsesUpdate]
+
+/-- For the 2-binding body `[loadConst bool ; updateProp p t]`,
+`computeLastUses` records `(t, 1)`. -/
+private theorem computeLastUses_loadConstBool_then_updateProp
+    (t bn propName : String) (b : Bool) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.computeLastUses
+        [⟨t, .loadConst (.bool b), src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = [(t, 1)] := by
+  unfold Stack.Lower.computeLastUses
+  simp [Stack.Lower.computeLastUses.go, Stack.Lower.collectRefs,
+        Stack.Lower.lastUsesUpdate]
+
+/-- For the 2-binding body `[loadConst bytes ; updateProp p t]`,
+`computeLastUses` records `(t, 1)`. -/
+private theorem computeLastUses_loadConstBytes_then_updateProp
+    (t bn propName : String) (ba : ByteArray) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.computeLastUses
+        [⟨t, .loadConst (.bytes ba), src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = [(t, 1)] := by
+  unfold Stack.Lower.computeLastUses
+  simp [Stack.Lower.computeLastUses.go, Stack.Lower.collectRefs,
+        Stack.Lower.lastUsesUpdate]
+
+/-- `collectConstInts` of the 2-binding body: for `.loadConst (.int i)`
+it is `[(t, i)]`; for bool / bytes it is `[]`. The Tier-4 predicate
+covers each literal kind separately so this lemma is stated per-kind
+inside each wrapper rather than as a single shared lemma. -/
+
+private theorem collectConstInts_loadConstInt_then_updateProp
+    (t bn propName : String) (i : Int) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.collectConstInts
+        [⟨t, .loadConst (.int i), src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = [(t, i)] := by
+  unfold Stack.Lower.collectConstInts
+  simp [Stack.Lower.collectConstInts]
+
+private theorem collectConstInts_loadConstBool_then_updateProp
+    (t bn propName : String) (b : Bool) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.collectConstInts
+        [⟨t, .loadConst (.bool b), src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = [] := by
+  unfold Stack.Lower.collectConstInts
+  simp [Stack.Lower.collectConstInts]
+
+private theorem collectConstInts_loadConstBytes_then_updateProp
+    (t bn propName : String) (ba : ByteArray) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.collectConstInts
+        [⟨t, .loadConst (.bytes ba), src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = [] := by
+  unfold Stack.Lower.collectConstInts
+  simp [Stack.Lower.collectConstInts]
+
+/-! ### Tier-4 side-condition flag-free predicates
+
+The four no-post bridge side conditions (`bindingsUseCheckPreimage`,
+`bindingsUseCodePart`, `bodyEndsInAssert`, `bindingsUseDeserializeState`)
+are all `false` on the 2-binding body because neither `.loadConst _`
+nor `.updateProp _ _` triggers any of them. -/
+
+private theorem bindingsUseCheckPreimage_loadConst_then_updateProp
+    (t bn propName : String) (c : ConstValue) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.bindingsUseCheckPreimage
+        [⟨t, .loadConst c, src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = false := by
+  unfold Stack.Lower.bindingsUseCheckPreimage
+  simp [Stack.Lower.bindingsUseCheckPreimage]
+
+private theorem bindingsUseCodePart_loadConst_then_updateProp
+    (t bn propName : String) (c : ConstValue) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.bindingsUseCodePart
+        [⟨t, .loadConst c, src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = false := by
+  unfold Stack.Lower.bindingsUseCodePart
+  simp [Stack.Lower.bindingsUseCodePart]
+
+private theorem bindingsUseDeserializeState_loadConst_then_updateProp
+    (t bn propName : String) (c : ConstValue) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.bindingsUseDeserializeState
+        [⟨t, .loadConst c, src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = false := by
+  unfold Stack.Lower.bindingsUseDeserializeState
+  simp [Stack.Lower.bindingsUseDeserializeState]
+
+private theorem bodyEndsInAssert_loadConst_then_updateProp
+    (t bn propName : String) (c : ConstValue) (src1 src2 : Option SourceLoc) :
+    Stack.Lower.bodyEndsInAssert
+        [⟨t, .loadConst c, src1⟩, ⟨bn, .updateProp propName t, src2⟩]
+      = false := by
+  unfold Stack.Lower.bodyEndsInAssert
+  simp [Stack.Lower.bodyEndsInAssert]
+
+/-! ### Tier-4a structural predicate — fresh-prop + int-literal value
+
+The 2-binding body `[⟨t, .loadConst (.int i), _⟩, ⟨bn, .updateProp p t, _⟩]`
+where `p` is fresh against the initial parameter-list stackmap. The
+predicate is parameterised by the four binding-level components plus the
+freshness witness; there is no operational stack-shape hypothesis
+because the lowered ops are `[.push (.bigint i)]` which succeeds on any
+input stack. -/
+def structuralUpdatePropFreshInt (m : ANFMethod) : Prop :=
+  ∃ (t bn propName : String) (i : Int) (src1 src2 : Option SourceLoc),
+    m.body = [⟨t, .loadConst (.int i), src1⟩, ⟨bn, .updateProp propName t, src2⟩] ∧
+    ¬ propName ∈ (m.params.map (fun p => p.name)).reverse
+
+/-- **Tier-4a operational lemma.** Under `structuralUpdatePropFreshInt`,
+the program-aware liveness lowerer emits exactly `[.push (.bigint i)]`
+as the method's raw body ops. -/
+private theorem lowerMethodUserRawOps_structuralUpdatePropFreshInt_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hStruct : structuralUpdatePropFreshInt m) :
+    ∃ i : Int, lowerMethodUserRawOps progMethods props m
+                = [.push (.bigint i)] := by
+  obtain ⟨t, bn, propName, i, src1, src2, hBody, hNotMem⟩ := hStruct
+  refine ⟨i, ?_⟩
+  unfold lowerMethodUserRawOps
+  rw [hBody]
+  rw [computeLastUses_loadConstInt_then_updateProp t bn propName i src1 src2]
+  rw [collectConstInts_loadConstInt_then_updateProp t bn propName i src1 src2]
+  -- `lowerBindingsP` on the cons of binding 1.
+  unfold Stack.Lower.lowerBindingsP
+  -- Binding 1: `.loadConst (.int i)` → `([.push (.bigint i)], sm.push t, localBindings)`.
+  unfold Stack.Lower.lowerValueP
+  simp only [Stack.Lower.emitConst, Stack.Lower.StackMap.push]
+  -- After binding 1, sm = t :: paramsRev.
+  -- Drive the recursive call on binding 2 by unfolding `lowerBindingsP`
+  -- and `lowerValueP` for the `.updateProp` arm.
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  unfold Stack.Lower.loadRefLive
+  rw [listContains_nil t]
+  rw [isLastUse_singleton_same t 1]
+  simp only [Bool.not_false, Bool.true_and]
+  unfold Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+  have hFind :
+      (t :: (m.params.map (fun p => p.name)).reverse).findIdx? (· == t) = some 0 := by
+    unfold List.findIdx?
+    simp [List.findIdx?.go]
+  rw [hFind]
+  simp only [if_true]
+  -- After the rename step the sm becomes `propName :: paramsRev`.
+  rw [removePropEntryOps_freshHead propName _ hNotMem]
+  -- The body tail is `[]`, so `lowerBindingsP _ [] = ([], _)`.
+  simp [Stack.Lower.lowerBindingsP]
+
+/-- **Tier-4a runtime-success wrapper.** For a public, uniquely-named
+method whose body is the 2-binding fresh-prop + int-literal shape,
+`runMethod` on the lowered program is `.ok`.
+
+The hypotheses are exclusively structural / well-formedness — no
+`hRunOk`, no stack-shape input fact. The proof composes the no-post
+bridge with the operational lowering equality above and the totality
+of `.push (.bigint _)`. -/
+theorem runMethod_lower_public_unique_no_post_structuralUpdatePropFreshInt_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hStruct : structuralUpdatePropFreshInt m) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  obtain ⟨t, bn, propName, i, src1, src2, hBody, hNotMem⟩ := hStruct
+  have hNoPreimage : bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_loadConst_then_updateProp t bn propName (.int i) src1 src2
+  have hNoCode : bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_loadConst_then_updateProp t bn propName (.int i) src1 src2
+  have hNoTerminalAssert : bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_loadConst_then_updateProp t bn propName (.int i) src1 src2
+  have hNoDeserialize : bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_loadConst_then_updateProp t bn propName (.int i) src1 src2
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  obtain ⟨i', hOps⟩ :=
+    lowerMethodUserRawOps_structuralUpdatePropFreshInt_eq
+      methods props m ⟨t, bn, propName, i, src1, src2, hBody, hNotMem⟩
+  rw [hOps]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-! ### Tier-4b structural predicate — fresh-prop + bool-literal value
+
+Same shape as Tier 4a but the literal is `.loadConst (.bool b)`. The
+lowered ops are `[.push (.bool b)]`. -/
+def structuralUpdatePropFreshBool (m : ANFMethod) : Prop :=
+  ∃ (t bn propName : String) (b : Bool) (src1 src2 : Option SourceLoc),
+    m.body = [⟨t, .loadConst (.bool b), src1⟩, ⟨bn, .updateProp propName t, src2⟩] ∧
+    ¬ propName ∈ (m.params.map (fun p => p.name)).reverse
+
+/-- **Tier-4b operational lemma.** Under `structuralUpdatePropFreshBool`,
+the lowered raw body ops are `[.push (.bool b)]`. -/
+private theorem lowerMethodUserRawOps_structuralUpdatePropFreshBool_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hStruct : structuralUpdatePropFreshBool m) :
+    ∃ b : Bool, lowerMethodUserRawOps progMethods props m
+                  = [.push (.bool b)] := by
+  obtain ⟨t, bn, propName, b, src1, src2, hBody, hNotMem⟩ := hStruct
+  refine ⟨b, ?_⟩
+  unfold lowerMethodUserRawOps
+  rw [hBody]
+  rw [computeLastUses_loadConstBool_then_updateProp t bn propName b src1 src2]
+  rw [collectConstInts_loadConstBool_then_updateProp t bn propName b src1 src2]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  simp only [Stack.Lower.emitConst, Stack.Lower.StackMap.push]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  unfold Stack.Lower.loadRefLive
+  rw [listContains_nil t]
+  rw [isLastUse_singleton_same t 1]
+  simp only [Bool.not_false, Bool.true_and]
+  unfold Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+  have hFind :
+      (t :: (m.params.map (fun p => p.name)).reverse).findIdx? (· == t) = some 0 := by
+    unfold List.findIdx?
+    simp [List.findIdx?.go]
+  rw [hFind]
+  simp only [if_true]
+  rw [removePropEntryOps_freshHead propName _ hNotMem]
+  simp [Stack.Lower.lowerBindingsP]
+
+/-- **Tier-4b runtime-success wrapper.** -/
+theorem runMethod_lower_public_unique_no_post_structuralUpdatePropFreshBool_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hStruct : structuralUpdatePropFreshBool m) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  obtain ⟨t, bn, propName, b, src1, src2, hBody, hNotMem⟩ := hStruct
+  have hNoPreimage : bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_loadConst_then_updateProp t bn propName (.bool b) src1 src2
+  have hNoCode : bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_loadConst_then_updateProp t bn propName (.bool b) src1 src2
+  have hNoTerminalAssert : bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_loadConst_then_updateProp t bn propName (.bool b) src1 src2
+  have hNoDeserialize : bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_loadConst_then_updateProp t bn propName (.bool b) src1 src2
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  obtain ⟨b', hOps⟩ :=
+    lowerMethodUserRawOps_structuralUpdatePropFreshBool_eq
+      methods props m ⟨t, bn, propName, b, src1, src2, hBody, hNotMem⟩
+  rw [hOps]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-! ### Tier-4c structural predicate — fresh-prop + bytes-literal value
+
+Same shape as Tier 4a/b but the literal is `.loadConst (.bytes ba)`.
+The lowered ops are `[.push (.bytes ba)]`. -/
+def structuralUpdatePropFreshBytes (m : ANFMethod) : Prop :=
+  ∃ (t bn propName : String) (ba : ByteArray) (src1 src2 : Option SourceLoc),
+    m.body = [⟨t, .loadConst (.bytes ba), src1⟩,
+              ⟨bn, .updateProp propName t, src2⟩] ∧
+    ¬ propName ∈ (m.params.map (fun p => p.name)).reverse
+
+/-- **Tier-4c operational lemma.** Under `structuralUpdatePropFreshBytes`,
+the lowered raw body ops are `[.push (.bytes ba)]`. -/
+private theorem lowerMethodUserRawOps_structuralUpdatePropFreshBytes_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hStruct : structuralUpdatePropFreshBytes m) :
+    ∃ ba : ByteArray, lowerMethodUserRawOps progMethods props m
+                        = [.push (.bytes ba)] := by
+  obtain ⟨t, bn, propName, ba, src1, src2, hBody, hNotMem⟩ := hStruct
+  refine ⟨ba, ?_⟩
+  unfold lowerMethodUserRawOps
+  rw [hBody]
+  rw [computeLastUses_loadConstBytes_then_updateProp t bn propName ba src1 src2]
+  rw [collectConstInts_loadConstBytes_then_updateProp t bn propName ba src1 src2]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  simp only [Stack.Lower.emitConst, Stack.Lower.StackMap.push]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  unfold Stack.Lower.loadRefLive
+  rw [listContains_nil t]
+  rw [isLastUse_singleton_same t 1]
+  simp only [Bool.not_false, Bool.true_and]
+  unfold Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+  have hFind :
+      (t :: (m.params.map (fun p => p.name)).reverse).findIdx? (· == t) = some 0 := by
+    unfold List.findIdx?
+    simp [List.findIdx?.go]
+  rw [hFind]
+  simp only [if_true]
+  rw [removePropEntryOps_freshHead propName _ hNotMem]
+  simp [Stack.Lower.lowerBindingsP]
+
+/-- **Tier-4c runtime-success wrapper.** -/
+theorem runMethod_lower_public_unique_no_post_structuralUpdatePropFreshBytes_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hStruct : structuralUpdatePropFreshBytes m) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  obtain ⟨t, bn, propName, ba, src1, src2, hBody, hNotMem⟩ := hStruct
+  have hNoPreimage : bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_loadConst_then_updateProp t bn propName (.bytes ba) src1 src2
+  have hNoCode : bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_loadConst_then_updateProp t bn propName (.bytes ba) src1 src2
+  have hNoTerminalAssert : bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_loadConst_then_updateProp t bn propName (.bytes ba) src1 src2
+  have hNoDeserialize : bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_loadConst_then_updateProp t bn propName (.bytes ba) src1 src2
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  obtain ⟨ba', hOps⟩ :=
+    lowerMethodUserRawOps_structuralUpdatePropFreshBytes_eq
+      methods props m ⟨t, bn, propName, ba, src1, src2, hBody, hNotMem⟩
+  rw [hOps]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
 end Agrees
 end RunarVerification.Stack
