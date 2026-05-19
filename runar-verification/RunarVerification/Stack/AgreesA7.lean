@@ -2708,20 +2708,825 @@ theorem runMethod_lower_public_unique_no_post_loopOnly_singletonRefRefAlias_isSo
     methods props m loopName xName iterVar n count d hIterFresh hRefNotLocal
     hBody initialStack hDepth hStackLen
 
+/-! ### Tier 3b — `.loadParam p` singleton body (Wave 12)
+
+Wave 12 closes the deferred `.loadParam p` Tier 3b case using the
+wave-11 consume-path chunk substrate (`runOps_push_i_swap_drop`,
+`runOps_push_i_rot_drop`, `runOps_push_i_roll_drop`).
+
+For body `[.mk x (.loadParam n) none]` with `iterVar ≠ n`:
+
+* `bodyOuterRefs = [n]` (n is read but not bound and is not the iter
+  var). Hence `clampLastUsesForOuter` bumps n's recorded last-use to
+  `body.length = 1`.
+* **Non-final iter** (uses `nonFinalLU = [(n, 1)]`): at
+  `currentIndex = 0`, `isLastUse [(n, 1)] n 0 = false`. So
+  `loadRefLiveParam` selects `consume = false` → COPY path. Body ops
+  = `loadRef smInner n` (`smInner = sm.push iterVar`); per-iter chunk
+  = `[push i] ++ loadRef smInner n ++ [.drop]` (same as Tier 3b's
+  loadProp / refAlias copy chunks).
+* **Final iter** (uses `naturalLU = [(n, 0)]`): at
+  `currentIndex = 0`, `isLastUse [(n, 0)] n 0 = true`. So
+  `loadRefLiveParam` selects `consume = true` → CONSUME path. Body
+  ops = `(bringToTop smInner n true).1`:
+  - smInner.depth(n) = 1 (sm.depth(n) = 0): `[.swap]`,
+  - smInner.depth(n) = 2 (sm.depth(n) = 1): `[.rot]`,
+  - smInner.depth(n) = d (d ≥ 3): `[.roll d]`.
+
+  Per-iter chunk = `[push i] ++ consume-ops ++ [.drop]`.
+
+The per-iter shape therefore depends on `final` for the loadParam
+case (unlike Tier 3b's loadProp / refAlias). The recursor below
+chains non-final copy chunks for iters `0 .. count - 2` and one
+consume chunk for iter `count - 1`. -/
+
+/-- The per-iter consume-ops chunk used by the final iter. Equals
+`(bringToTop sm n true).1` — `[.swap]`, `[.rot]`, or `[.roll d]`
+depending on `sm.depth? n`. Excludes the `none` (unresolved) arm
+since callers pin `sm.depth? n = some _`. -/
+def loopParamConsumeOps (sm : StackMap) (n : String) : List StackOp :=
+  (Stack.Lower.bringToTop sm n true).1
+
+/-- Standalone Nat-recursive helper assembling the Tier 3b loadParam
+loop's op list. For each iter `j ∈ 0..count-1`: if `j < count - 1`,
+emit a copy chunk `[push j, loadRef sm n, drop]`; if `j = count - 1`,
+emit a consume chunk `[push j, loopParamConsumeOps sm n, drop]`.
+
+Mirrors the outer-to-inner recursion shape of `loopValueP.assemble`:
+the OUTERMOST call has `n = count - 1` (a copy iter when count ≥ 2),
+and the INNERMOST recursive step `k = 1` emits the consume chunk for
+iter `count - 1`. When `count = 1`, the outermost call IS the
+innermost — `assemble 1` is the single consume chunk. -/
+def loopParamAssemble (count : Nat) (sm : StackMap) (n : String) :
+    Nat → List StackOp
+  | 0     => []
+  | k + 1 =>
+      let i : Nat := count - (k + 1)
+      let chunk : List StackOp :=
+        if k = 0 then
+          [.push (.bigint (Int.ofNat i))]
+            ++ loopParamConsumeOps sm n ++ [.drop]
+        else
+          [.push (.bigint (Int.ofNat i))]
+            ++ Stack.Lower.loadRef sm n ++ [.drop]
+      chunk ++ loopParamAssemble count sm n k
+
+/-- `bringToTop sm n true`'s ops at depth 1: `[.swap]`. The
+`bringToTop` definition's depth-1 arm matches on `sm`'s top two
+entries, but both the `a :: b :: rest` and catch-all branches return
+`[.swap]` — only the resulting stack map differs. -/
+private theorem bringToTop_true_depth1_ops
+    (sm : StackMap) (n : String)
+    (hDepth : sm.depth? n = some 1) :
+    (Stack.Lower.bringToTop sm n true).1 = [StackOp.swap] := by
+  unfold Stack.Lower.bringToTop
+  rw [hDepth]
+  cases sm with
+  | nil => simp
+  | cons a sm' =>
+      cases sm' with
+      | nil => simp
+      | cons b rest => simp
+
+/-- `bringToTop sm n true`'s ops at depth 2: `[.rot]`. -/
+private theorem bringToTop_true_depth2_ops
+    (sm : StackMap) (n : String)
+    (hDepth : sm.depth? n = some 2) :
+    (Stack.Lower.bringToTop sm n true).1 = [StackOp.rot] := by
+  unfold Stack.Lower.bringToTop
+  rw [hDepth]
+  simp
+
+/-- `bringToTop sm n true`'s ops at depth `d ≥ 3`: `[.roll d]`. -/
+private theorem bringToTop_true_depthD_ops
+    (sm : StackMap) (n : String) (d : Nat)
+    (hd : 3 ≤ d)
+    (hDepth : sm.depth? n = some d) :
+    (Stack.Lower.bringToTop sm n true).1 = [StackOp.roll d] := by
+  unfold Stack.Lower.bringToTop
+  rw [hDepth]
+  match d, hd with
+  | _ + 3, _ => simp
+
+/-- Runtime success for a single consume chunk against a parent stack
+of sufficient depth. Case-splits on `sm.depth? n = some d` to compose
+the wave-11 swap / rot / roll substrate. -/
+private theorem runOps_loopParamConsume_isSome
+    (sm : StackMap) (n : String) (d : Nat) (i : Nat)
+    (hDepth : sm.depth? n = some d) (hd : 1 ≤ d) (s : StackState)
+    (hLen : d ≤ s.stack.length) :
+    (runOps
+        ([.push (.bigint (Int.ofNat i))] ++ loopParamConsumeOps sm n
+          ++ [.drop]) s).toOption.isSome := by
+  unfold loopParamConsumeOps
+  match d, hd with
+  | 1, _ =>
+      have hOps : (Stack.Lower.bringToTop sm n true).1 = [StackOp.swap] :=
+        bringToTop_true_depth1_ops sm n hDepth
+      rw [hOps]
+      -- Stack must be `top :: rest`.
+      match hStk : s.stack with
+      | [] =>
+          rw [hStk] at hLen
+          exact absurd hLen (by simp)
+      | top :: rest =>
+          have hRun :
+              runOps ([.push (.bigint (Int.ofNat i)), .swap, .drop]) s
+                = .ok ({s with stack := .vBigint (Int.ofNat i) :: rest}) :=
+            Stack.Agrees.runOps_push_i_swap_drop i s top rest hStk
+          have hEq : ([StackOp.push (.bigint (Int.ofNat i))] ++ [StackOp.swap]
+                        ++ [StackOp.drop])
+                     = [StackOp.push (.bigint (Int.ofNat i)), .swap, .drop] := rfl
+          rw [hEq, hRun]
+          simp [Except.toOption]
+  | 2, _ =>
+      have hOps : (Stack.Lower.bringToTop sm n true).1 = [StackOp.rot] :=
+        bringToTop_true_depth2_ops sm n hDepth
+      rw [hOps]
+      match hStk0 : s.stack with
+      | [] => rw [hStk0] at hLen; exact absurd hLen (by simp)
+      | x0 :: t0 =>
+          match t0, hStk0 with
+          | [], hStk0 =>
+              have : s.stack.length = 1 := by rw [hStk0]; simp
+              omega
+          | x1 :: rest, hStk0 =>
+              have hRun :
+                  runOps ([.push (.bigint (Int.ofNat i)), .rot, .drop]) s
+                    = .ok ({s with stack := .vBigint (Int.ofNat i) :: x0 :: rest}) :=
+                Stack.Agrees.runOps_push_i_rot_drop i s x0 x1 rest hStk0
+              have hEq : ([StackOp.push (.bigint (Int.ofNat i))] ++ [StackOp.rot]
+                            ++ [StackOp.drop])
+                         = [StackOp.push (.bigint (Int.ofNat i)), .rot, .drop] := rfl
+              rw [hEq, hRun]
+              simp [Except.toOption]
+  | d' + 3, _ =>
+      have hDge3 : 3 ≤ d' + 3 := by omega
+      have hOps : (Stack.Lower.bringToTop sm n true).1 = [StackOp.roll (d' + 3)] :=
+        bringToTop_true_depthD_ops sm n (d' + 3) hDge3 hDepth
+      rw [hOps]
+      have hLenPush : (d' + 3) < (s.push (.vBigint (Int.ofNat i))).stack.length := by
+        show (d' + 3) < s.stack.length + 1
+        omega
+      have hd1 : 1 ≤ (d' + 3) := by omega
+      have hRun :
+          runOps ([.push (.bigint (Int.ofNat i)), .roll (d' + 3), .drop]) s
+            = .ok ({s with stack :=
+                      ((s.push (.vBigint (Int.ofNat i))).stack.eraseIdx (d' + 3))}) :=
+        Stack.Agrees.runOps_push_i_roll_drop i (d' + 3) s hLenPush hd1
+      have hEq : ([StackOp.push (.bigint (Int.ofNat i))] ++ [StackOp.roll (d' + 3)]
+                    ++ [StackOp.drop])
+                 = [StackOp.push (.bigint (Int.ofNat i)), .roll (d' + 3), .drop] := rfl
+      rw [hEq, hRun]
+      simp [Except.toOption]
+
+/-- Runtime success for `loopParamAssemble`. Inductive on `k`. -/
+theorem runOps_loopParamAssemble_isSome
+    (count : Nat) (sm : StackMap) (n : String) (d : Nat)
+    (hDepth : sm.depth? n = some d) (hd : 1 ≤ d) :
+    ∀ (k : Nat) (s : StackState),
+      d ≤ s.stack.length →
+      (runOps (loopParamAssemble count sm n k) s).toOption.isSome
+  | 0, s, _ => by
+      unfold loopParamAssemble
+      rw [Stack.Eval.runOps_nil s]
+      simp [Except.toOption]
+  | 1, s, hLen => by
+      -- Show the assemble equals the single consume chunk and then
+      -- apply `runOps_loopParamConsume_isSome`.
+      have hAss :
+          loopParamAssemble count sm n 1
+            = [StackOp.push (.bigint (Int.ofNat (count - 1)))]
+              ++ loopParamConsumeOps sm n ++ [.drop] := by
+        show
+          ((if (0 : Nat) = 0 then
+              [StackOp.push (.bigint (Int.ofNat (count - 1)))]
+                ++ loopParamConsumeOps sm n ++ [.drop]
+            else
+              [StackOp.push (.bigint (Int.ofNat (count - 1)))]
+                ++ Stack.Lower.loadRef sm n ++ [.drop])
+              ++ loopParamAssemble count sm n 0) = _
+        simp [loopParamAssemble]
+      rw [hAss]
+      exact runOps_loopParamConsume_isSome sm n d (count - 1) hDepth hd s hLen
+  | k + 2, s, hLen => by
+      -- assemble (k+2) = copy chunk for i = count - (k+2) ++ assemble (k+1)
+      have hAss :
+          loopParamAssemble count sm n (k + 2)
+            = ([StackOp.push (.bigint (Int.ofNat (count - (k + 2))))]
+                ++ Stack.Lower.loadRef sm n ++ [.drop])
+              ++ loopParamAssemble count sm n (k + 1) := by
+        show
+          ((if (k + 1 : Nat) = 0 then
+              [StackOp.push (.bigint (Int.ofNat (count - (k + 2))))]
+                ++ loopParamConsumeOps sm n ++ [.drop]
+            else
+              [StackOp.push (.bigint (Int.ofNat (count - (k + 2))))]
+                ++ Stack.Lower.loadRef sm n ++ [.drop])
+              ++ loopParamAssemble count sm n (k + 1)) = _
+        simp
+      rw [hAss]
+      rw [Stack.Sim.runOps_append]
+      let i : Nat := count - (k + 2)
+      let v : Value := (s.push (.vBigint (Int.ofNat i))).stack[d]!
+      have hLenPush : d < (s.push (.vBigint (Int.ofNat i))).stack.length := by
+        show d < s.stack.length + 1
+        omega
+      have hAt : (s.push (.vBigint (Int.ofNat i))).stack[d]! = v := rfl
+      rw [show runOps
+              ([.push (.bigint (Int.ofNat i))] ++ Stack.Lower.loadRef sm n
+                ++ [.drop]) s
+            = .ok (s.push (.vBigint (Int.ofNat i))) from
+        Stack.Agrees.runOps_push_i_loadRef_drop sm n i d v s hDepth hLenPush hAt]
+      simp only []
+      have hLenTail : d ≤ (s.push (.vBigint (Int.ofNat i))).stack.length := by
+        show d ≤ s.stack.length + 1
+        omega
+      exact runOps_loopParamAssemble_isSome count sm n d hDepth hd (k + 1)
+        (s.push (.vBigint (Int.ofNat i))) hLenTail
+
+/-! ### Closed-form lowering of a Tier 3b loadParam loop -/
+
+/-- The `.loadParam n` arm of `lowerValueP` reduces to a `bringToTop`
+result. Independent of `consume`'s actual boolean value at this
+stage. -/
+private theorem lowerValueP_loadParam_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) (sm : StackMap)
+    (bindingName n : String) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loadParam n)
+      = (let consume : Bool :=
+           !Stack.Lower.listContains outerProtected n
+             && Stack.Lower.isLastUse lastUses n currentIndex
+         let (load, sm1) := Stack.Lower.bringToTop sm n consume
+         let sm2 := match sm1 with
+                    | _ :: rest => bindingName :: rest
+                    | []        => [bindingName]
+         (load, sm2, localBindings)) := by
+  unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam
+  rfl
+
+/-- Closed-form reduction of a singleton `.loadParam n` body's
+`lowerBindingsP`. -/
+private theorem lowerBindingsP_singletonRefParam
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) (sm : StackMap)
+    (xName n : String) :
+    Stack.Lower.lowerBindingsP progMethods props budget 0 lastUses
+        outerProtected localBindings constInts sm
+        [ANFBinding.mk xName (.loadParam n) none]
+      = (let consume : Bool :=
+           !Stack.Lower.listContains outerProtected n
+             && Stack.Lower.isLastUse lastUses n 0
+         let (load, sm1) := Stack.Lower.bringToTop sm n consume
+         let sm2 := match sm1 with
+                    | _ :: rest => xName :: rest
+                    | []        => [xName]
+         (load, sm2)) := by
+  unfold Stack.Lower.lowerBindingsP
+  rw [lowerValueP_loadParam_eq progMethods props budget 0 lastUses
+        outerProtected localBindings constInts sm xName n]
+  simp only [Stack.Lower.lowerBindingsP, List.append_nil]
+
+/-- For the singleton loadParam body with non-final `lastUses`
+(clamped so n's recorded last-use index is `1 > currentIndex`), the
+consume gate at currentIndex = 0 evaluates to `false`. Requires
+`xName ≠ n` so that `bodyOuterRefs` includes n (n is not a
+body-bound name) and `clampLastUsesForOuter` bumps n's index. -/
+private theorem singletonRefParam_consume_false_nonFinal
+    (xName iterVar n : String) (hIterFresh : iterVar ≠ n)
+    (hRefNotLocal : xName ≠ n) :
+    (!Stack.Lower.listContains ([] : List String) n
+       && Stack.Lower.isLastUse
+            (Stack.Lower.clampLastUsesForOuter
+              (Stack.Lower.computeLastUses
+                [ANFBinding.mk xName (.loadParam n) none])
+              (Stack.Lower.bodyOuterRefs
+                [ANFBinding.mk xName (.loadParam n) none] iterVar)
+              [ANFBinding.mk xName (.loadParam n) none].length)
+            n 0) = false := by
+  have hNe : (iterVar == n) = false := by simpa [beq_iff_eq] using hIterFresh
+  have hXNe : (xName == n) = false := by simpa [beq_iff_eq] using hRefNotLocal
+  -- Step 1: characterize bodyOuterRefs.
+  have hOuterRefs :
+      Stack.Lower.bodyOuterRefs
+        [ANFBinding.mk xName (.loadParam n) none] iterVar = [n] := by
+    -- collectRefsBindings emits [n], so foldl iterates once.
+    have hRead : Stack.Lower.collectRefsBindings
+        [ANFBinding.mk xName (.loadParam n) none] = [n] := by
+      show Stack.Lower.collectRefs (.loadParam n)
+            ++ Stack.Lower.collectRefsBindings [] = [n]
+      rfl
+    have hBound : Stack.Lower.collectBoundNames
+        [ANFBinding.mk xName (.loadParam n) none] = [xName] := by
+      show [xName] ++ Stack.Lower.collectBoundNames [] = [xName]
+      rfl
+    unfold Stack.Lower.bodyOuterRefs
+    rw [hRead, hBound]
+    -- foldl (init := []) [n]:
+    simp only [List.foldl_cons, List.foldl_nil]
+    -- Reduce the if-condition.
+    have hContXName : Stack.Lower.listContains [xName] n = false := by
+      unfold Stack.Lower.listContains
+      simp [List.any_cons, List.any_nil, hXNe]
+    have hContEmpty : Stack.Lower.listContains ([] : List String) n = false := by
+      unfold Stack.Lower.listContains
+      simp
+    have hNeRev : (n == iterVar) = false := by
+      have : n ≠ iterVar := Ne.symm hIterFresh
+      simp [beq_iff_eq, this]
+    rw [hNeRev]
+    rw [hContXName, hContEmpty]
+    simp
+  -- Step 2: characterize computeLastUses.
+  have hNaturalLU : Stack.Lower.computeLastUses
+      [ANFBinding.mk xName (.loadParam n) none] = [(n, 0)] := by
+    show Stack.Lower.computeLastUses.go [] 0
+            [ANFBinding.mk xName (.loadParam n) none] = [(n, 0)]
+    unfold Stack.Lower.computeLastUses.go
+    show Stack.Lower.computeLastUses.go
+            ((Stack.Lower.collectRefs (.loadParam n)).foldl
+              (init := ([] : List (String × Nat)))
+              (fun a r => Stack.Lower.lastUsesUpdate a r 0))
+            (0 + 1) [] = [(n, 0)]
+    have hCR : Stack.Lower.collectRefs (.loadParam n) = [n] := rfl
+    rw [hCR]
+    show Stack.Lower.computeLastUses.go
+            (Stack.Lower.lastUsesUpdate [] n 0) 1 [] = [(n, 0)]
+    unfold Stack.Lower.computeLastUses.go Stack.Lower.lastUsesUpdate
+    simp
+  -- Step 3: characterize clampLastUsesForOuter.
+  have hClampLU :
+      Stack.Lower.clampLastUsesForOuter
+        (Stack.Lower.computeLastUses [ANFBinding.mk xName (.loadParam n) none])
+        (Stack.Lower.bodyOuterRefs
+          [ANFBinding.mk xName (.loadParam n) none] iterVar)
+        [ANFBinding.mk xName (.loadParam n) none].length = [(n, 1)] := by
+    rw [hNaturalLU, hOuterRefs]
+    show Stack.Lower.clampLastUsesForOuter [(n, 0)] [n] 1 = [(n, 1)]
+    unfold Stack.Lower.clampLastUsesForOuter
+    simp only [List.foldl_cons, List.foldl_nil]
+    unfold Stack.Lower.lastUsesUpdate
+    -- (n, 1) :: [(n, 0)].filter (·.1 != n) = (n, 1) :: []
+    simp [beq_iff_eq]
+  -- Step 4: reduce the consume gate.
+  rw [hClampLU]
+  -- listContains [] n = false, !false = true.
+  show (!Stack.Lower.listContains [] n
+       && Stack.Lower.isLastUse [(n, 1)] n 0) = false
+  unfold Stack.Lower.listContains Stack.Lower.isLastUse
+    Stack.Lower.lastUsesLookup
+  simp [List.find?]
+
+/-- For the singleton loadParam body with natural (un-clamped)
+`lastUses = [(n, 0)]`, the consume gate at currentIndex = 0
+evaluates to `true`. -/
+private theorem singletonRefParam_consume_true_final (xName n : String) :
+    (!Stack.Lower.listContains ([] : List String) n
+       && Stack.Lower.isLastUse
+            (Stack.Lower.computeLastUses
+              [ANFBinding.mk xName (.loadParam n) none]) n 0) = true := by
+  -- computeLastUses ... = [(n, 0)] (same as in the false_nonFinal proof).
+  have hLU : Stack.Lower.computeLastUses
+      [ANFBinding.mk xName (.loadParam n) none] = [(n, 0)] := by
+    show Stack.Lower.computeLastUses.go [] 0
+            [ANFBinding.mk xName (.loadParam n) none] = [(n, 0)]
+    unfold Stack.Lower.computeLastUses.go
+    show Stack.Lower.computeLastUses.go
+            ((Stack.Lower.collectRefs (.loadParam n)).foldl
+              (init := ([] : List (String × Nat)))
+              (fun a r => Stack.Lower.lastUsesUpdate a r 0))
+            (0 + 1) [] = [(n, 0)]
+    have hCR : Stack.Lower.collectRefs (.loadParam n) = [n] := rfl
+    rw [hCR]
+    show Stack.Lower.computeLastUses.go
+            (Stack.Lower.lastUsesUpdate [] n 0) 1 [] = [(n, 0)]
+    unfold Stack.Lower.computeLastUses.go Stack.Lower.lastUsesUpdate
+    simp
+  rw [hLU]
+  show (!Stack.Lower.listContains [] n
+       && Stack.Lower.isLastUse [(n, 0)] n 0) = true
+  unfold Stack.Lower.listContains Stack.Lower.isLastUse
+    Stack.Lower.lastUsesLookup
+  simp [List.find?]
+
+/-- The inner `assemble` recursor applied to the Tier 3b loadParam
+`mkIter` lambda equals our standalone `loopParamAssemble`. -/
+theorem assemble_paramMkIter_eq (count : Nat) (sm : StackMap) (n : String) :
+    ∀ (k : Nat),
+      Stack.Lower.lowerValueP.assemble count
+        (fun (i : Nat) (final : Bool) =>
+          if final = true then
+            [StackOp.push (.bigint (Int.ofNat i))]
+              ++ loopParamConsumeOps sm n ++ [StackOp.drop]
+          else
+            [StackOp.push (.bigint (Int.ofNat i))]
+              ++ Stack.Lower.loadRef sm n ++ [StackOp.drop]) k
+        = loopParamAssemble count sm n k
+  | 0 => by
+      simp [Stack.Lower.lowerValueP.assemble, loopParamAssemble]
+  | k + 1 => by
+      unfold Stack.Lower.lowerValueP.assemble loopParamAssemble
+      rw [assemble_paramMkIter_eq count sm n k]
+      -- decide (k = 0) ↔ (k = 0). Case split.
+      cases k with
+      | zero =>
+          simp [decide_eq_true]
+      | succ k' =>
+          have hCond : (k' + 1 = 0) = False := by simp
+          simp [decide_eq_true, hCond]
+
+/-- Closed form for the resulting stack map of `bringToTop` at depth 1
+when the depth dispatch matched: `(sm.push iterVar).depth? n = some 1`.
+The output sm is `n :: iterVar :: tail_of_sm`, with iterVar surviving. -/
+private theorem bringToTop_true_smInner_depth1
+    (sm : StackMap) (iterVar n : String)
+    (hIterFresh : iterVar ≠ n)
+    (hDepth : (sm.push iterVar).depth? n = some 1) :
+    ∃ rest, (Stack.Lower.bringToTop (sm.push iterVar) n true).2
+              = n :: iterVar :: rest := by
+  -- depth(n) = 1 in iterVar :: sm means sm = n :: rest.
+  cases hSm : sm with
+  | nil =>
+      exfalso
+      rw [hSm] at hDepth
+      unfold Stack.Lower.StackMap.push Stack.Lower.StackMap.depth? at hDepth
+      have hNe : (iterVar == n) = false := by simp [beq_iff_eq, hIterFresh]
+      simp [List.findIdx?_cons, hNe] at hDepth
+  | cons b rest =>
+      rw [hSm] at hDepth
+      have hBeqN : b = n := by
+        unfold Stack.Lower.StackMap.depth? Stack.Lower.StackMap.push at hDepth
+        have hNe : (iterVar == n) = false := by simp [beq_iff_eq, hIterFresh]
+        simp [List.findIdx?_cons, hNe] at hDepth
+        exact hDepth
+      refine ⟨rest, ?_⟩
+      -- Compute bringToTop step by step.
+      unfold Stack.Lower.bringToTop
+      rw [hDepth]
+      -- The match enters the `some 1 / consume = true` arm.
+      simp only [if_true]
+      -- The inner match on sm.push iterVar.
+      unfold Stack.Lower.StackMap.push
+      -- iterVar :: b :: rest matches `a :: b :: rest` arm; result: b :: iterVar :: rest.
+      -- And b = n.
+      rw [hBeqN]
+
+/-- Closed form for `bringToTop` at depth 2. -/
+private theorem bringToTop_true_smInner_depth2
+    (sm : StackMap) (iterVar n : String)
+    (hDepth : (sm.push iterVar).depth? n = some 2) :
+    (Stack.Lower.bringToTop (sm.push iterVar) n true).2
+      = n :: iterVar :: Stack.Lower.StackMap.removeAtDepth sm 1 := by
+  unfold Stack.Lower.bringToTop
+  rw [hDepth]
+  simp only [if_true]
+  show ((Stack.Lower.StackMap.push sm iterVar).removeAtDepth 2).push n
+        = n :: iterVar :: Stack.Lower.StackMap.removeAtDepth sm 1
+  unfold Stack.Lower.StackMap.push
+  -- (iterVar :: sm).removeAtDepth 2 = iterVar :: sm.removeAtDepth 1.
+  have hRm : Stack.Lower.StackMap.removeAtDepth (iterVar :: sm) 2
+              = iterVar :: Stack.Lower.StackMap.removeAtDepth sm 1 := by
+    show Stack.Lower.StackMap.removeAtDepth (iterVar :: sm) (1 + 1) = _
+    rfl
+  rw [hRm]
+
+/-- Closed form for `bringToTop` at depth `d ≥ 3`. -/
+private theorem bringToTop_true_smInner_depthD
+    (sm : StackMap) (iterVar n : String) (d : Nat)
+    (hd : 3 ≤ d)
+    (hDepth : (sm.push iterVar).depth? n = some d) :
+    (Stack.Lower.bringToTop (sm.push iterVar) n true).2
+      = n :: iterVar :: Stack.Lower.StackMap.removeAtDepth sm (d - 1) := by
+  unfold Stack.Lower.bringToTop
+  rw [hDepth]
+  match d, hd with
+  | d' + 3, _ =>
+      simp only [if_true]
+      show ((Stack.Lower.StackMap.push sm iterVar).removeAtDepth (d' + 3)).push n
+            = n :: iterVar :: Stack.Lower.StackMap.removeAtDepth sm (d' + 3 - 1)
+      unfold Stack.Lower.StackMap.push
+      have hRm : Stack.Lower.StackMap.removeAtDepth (iterVar :: sm) (d' + 3)
+                 = iterVar :: Stack.Lower.StackMap.removeAtDepth sm (d' + 2) := by
+        show Stack.Lower.StackMap.removeAtDepth (iterVar :: sm) ((d' + 2) + 1) = _
+        rfl
+      rw [hRm]
+      -- After unfolding the second push, LHS = n :: iterVar :: sm.removeAtDepth (d'+2).
+      -- RHS uses (d' + 3 - 1) = d' + 2 (Nat arithmetic).
+      have hDArith : (d' + 3 - 1 : Nat) = d' + 2 := by omega
+      rw [hDArith]
+
+/-- For `(sm.push iterVar).depth? n = some d` with `1 ≤ d`, the
+consume-path stack map produced by `bringToTop` has iterVar still
+present in the result. -/
+private theorem bringToTop_true_smInner_contains_iterVar
+    (sm : StackMap) (iterVar n : String) (d : Nat)
+    (hIterFresh : iterVar ≠ n)
+    (hDepth : (sm.push iterVar).depth? n = some d) (hd : 1 ≤ d) :
+    ((Stack.Lower.bringToTop (sm.push iterVar) n true).2.any
+      (· == iterVar)) = true := by
+  match d, hd with
+  | 1, _ =>
+      obtain ⟨rest, hSm1⟩ := bringToTop_true_smInner_depth1 sm iterVar n
+        hIterFresh hDepth
+      rw [hSm1]
+      simp [List.any_cons]
+  | 2, _ =>
+      have hSm1 := bringToTop_true_smInner_depth2 sm iterVar n hDepth
+      rw [hSm1]
+      simp [List.any_cons]
+  | d' + 3, _ =>
+      have hd' : 3 ≤ d' + 3 := by omega
+      have hSm1 := bringToTop_true_smInner_depthD sm iterVar n (d' + 3) hd' hDepth
+      rw [hSm1]
+      simp [List.any_cons]
+
+/-- `lowerValueP` of a singleton `.loadParam n` loop body produces
+exactly `loopParamAssemble count smInner n count`. -/
+theorem lowerValueP_loop_singletonRefParam_ops_eq
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName xName iterVar n : String)
+    (count : Nat) (d : Nat)
+    (hIterFresh : iterVar ≠ n)
+    (hRefNotLocal : xName ≠ n)
+    (hDepth : sm.depth? n = some d) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loop count [.mk xName (.loadParam n) none] iterVar)).1
+      = loopParamAssemble count (sm.push iterVar) n count := by
+  have hDepthInner : (sm.push iterVar).depth? n = some (d + 1) :=
+    depth?_push_ne sm iterVar n hIterFresh d hDepth
+  have hdInner1 : 1 ≤ d + 1 := by omega
+  let body : List ANFBinding := [ANFBinding.mk xName (.loadParam n) none]
+  -- Body lowerings: NF (copy path), F (consume path).
+  have hCopyOps :
+      (Stack.Lower.bringToTop (sm.push iterVar) n false).1
+        = Stack.Lower.loadRef (sm.push iterVar) n :=
+    bringToTop_false_ops_eq_loadRef (sm.push iterVar) n (d + 1) hDepthInner
+  have hCopySm :
+      (Stack.Lower.bringToTop (sm.push iterVar) n false).2
+        = (sm.push iterVar).push n :=
+    bringToTop_false_sm_eq (sm.push iterVar) n (d + 1) hDepthInner
+  -- Non-final body lowering: ops = loadRef smInner n, sm = xName :: smInner.
+  have hBodyNF :
+      Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.clampLastUsesForOuter
+          (Stack.Lower.computeLastUses body)
+          (Stack.Lower.bodyOuterRefs body iterVar) body.length)
+        ([] : List String) (body.map (·.name)) constInts
+        (sm.push iterVar) body
+        = (Stack.Lower.loadRef (sm.push iterVar) n,
+           xName :: iterVar :: sm) := by
+    show Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.clampLastUsesForOuter
+          (Stack.Lower.computeLastUses [ANFBinding.mk xName (.loadParam n) none])
+          (Stack.Lower.bodyOuterRefs
+            [ANFBinding.mk xName (.loadParam n) none] iterVar)
+          [ANFBinding.mk xName (.loadParam n) none].length)
+        ([] : List String)
+        ((List.map ANFBinding.name [ANFBinding.mk xName (.loadParam n) none]))
+        constInts (sm.push iterVar)
+        [ANFBinding.mk xName (.loadParam n) none]
+        = (Stack.Lower.loadRef (sm.push iterVar) n, xName :: iterVar :: sm)
+    simp only [List.map_cons, List.map_nil, ANFBinding.name]
+    rw [lowerBindingsP_singletonRefParam progMethods props budget _ [] [xName]
+      constInts (sm.push iterVar) xName n]
+    have hCons := singletonRefParam_consume_false_nonFinal xName iterVar n
+      hIterFresh hRefNotLocal
+    simp only [hCons, hCopyOps, hCopySm]
+    show (Stack.Lower.loadRef (sm.push iterVar) n,
+          xName :: (sm.push iterVar)) = _
+    unfold Stack.Lower.StackMap.push
+    rfl
+  -- Final body lowering: ops = loopParamConsumeOps smInner n.
+  have hBodyF :
+      Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.computeLastUses body)
+        ([] : List String) (body.map (·.name)) constInts
+        (sm.push iterVar) body
+        = (loopParamConsumeOps (sm.push iterVar) n,
+           let sm1 := (Stack.Lower.bringToTop (sm.push iterVar) n true).2
+           match sm1 with
+           | _ :: rest => xName :: rest
+           | []        => [xName]) := by
+    show Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.computeLastUses [ANFBinding.mk xName (.loadParam n) none])
+        ([] : List String)
+        ((List.map ANFBinding.name [ANFBinding.mk xName (.loadParam n) none]))
+        constInts (sm.push iterVar)
+        [ANFBinding.mk xName (.loadParam n) none]
+        = _
+    simp only [List.map_cons, List.map_nil, ANFBinding.name]
+    rw [lowerBindingsP_singletonRefParam progMethods props budget _ [] [xName]
+      constInts (sm.push iterVar) xName n]
+    have hCons := singletonRefParam_consume_true_final xName n
+    simp only [hCons]
+    -- Now reduce the let-binding shape; ops = (bringToTop _ _ true).1 = loopParamConsumeOps.
+    show (((Stack.Lower.bringToTop (sm.push iterVar) n true).1, _) : _ × _) = _
+    unfold loopParamConsumeOps
+    rfl
+  -- Projections.
+  have hBodyOpsNF :
+      (Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.clampLastUsesForOuter (Stack.Lower.computeLastUses body)
+          (Stack.Lower.bodyOuterRefs body iterVar) body.length)
+        ([] : List String) (body.map (·.name)) constInts (sm.push iterVar) body).1
+        = Stack.Lower.loadRef (sm.push iterVar) n := by rw [hBodyNF]
+  have hBodySmNF :
+      (Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.clampLastUsesForOuter (Stack.Lower.computeLastUses body)
+          (Stack.Lower.bodyOuterRefs body iterVar) body.length)
+        ([] : List String) (body.map (·.name)) constInts (sm.push iterVar) body).2
+        = xName :: iterVar :: sm := by rw [hBodyNF]
+  have hBodyOpsF :
+      (Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.computeLastUses body) ([] : List String) (body.map (·.name))
+        constInts (sm.push iterVar) body).1
+        = loopParamConsumeOps (sm.push iterVar) n := by rw [hBodyF]
+  -- For smF, we need to show iterVar is in the result. We use the
+  -- characterizations from the helpers above: `(bringToTop … n true).2`
+  -- always has the form `n :: tail` (at depth ≥ 1) where iterVar ∈ tail.
+  have hSm1Shape :
+      ∃ tail, (Stack.Lower.bringToTop (sm.push iterVar) n true).2 = n :: tail
+              ∧ tail.any (· == iterVar) = true := by
+    -- Case-split on `d` to dispatch the three bringToTop arms.
+    rcases d with _ | _ | _ | d''
+    · -- d = 0, d + 1 = 1.
+      obtain ⟨rest, hSm1⟩ := bringToTop_true_smInner_depth1 sm iterVar n
+        hIterFresh hDepthInner
+      exact ⟨iterVar :: rest, hSm1, by simp [List.any_cons]⟩
+    · -- d = 1, d + 1 = 2.
+      refine ⟨iterVar :: Stack.Lower.StackMap.removeAtDepth sm 1, ?_, ?_⟩
+      · exact bringToTop_true_smInner_depth2 sm iterVar n hDepthInner
+      · simp [List.any_cons]
+    · -- d = 2, d + 1 = 3.
+      refine ⟨iterVar :: Stack.Lower.StackMap.removeAtDepth sm 2, ?_, ?_⟩
+      · have hd' : 3 ≤ (3 : Nat) := by omega
+        have hSm1 := bringToTop_true_smInner_depthD sm iterVar n 3 hd' hDepthInner
+        rw [hSm1]
+      · simp [List.any_cons]
+    · -- d = d'' + 3, d + 1 = d'' + 4.
+      refine ⟨iterVar :: Stack.Lower.StackMap.removeAtDepth sm (d'' + 3), ?_, ?_⟩
+      · have hd' : 3 ≤ (d'' + 4 : Nat) := by omega
+        have hSm1 := bringToTop_true_smInner_depthD sm iterVar n (d'' + 4) hd' hDepthInner
+        rw [hSm1]
+        have hArith : (d'' + 4 - 1 : Nat) = d'' + 3 := by omega
+        rw [hArith]
+      · simp [List.any_cons]
+  obtain ⟨tail, hSm1, hTail⟩ := hSm1Shape
+  have hContainsIter :
+      ((Stack.Lower.lowerBindingsP progMethods props budget 0
+        (Stack.Lower.computeLastUses body) ([] : List String) (body.map (·.name))
+        constInts (sm.push iterVar) body).2.any (· == iterVar)) = true := by
+    rw [hBodyF]
+    -- The let-bound sm1 = bringToTop ... = n :: tail.
+    show ((let sm1 := (Stack.Lower.bringToTop (sm.push iterVar) n true).2;
+           match sm1 with
+           | _ :: rest => xName :: rest
+           | []        => [xName]).any (· == iterVar)) = true
+    simp only [hSm1]
+    show ((xName :: tail).any (· == iterVar)) = true
+    simp [List.any_cons, hTail]
+  -- listContains gates for the loop arm.
+  have hContainsNF :
+      ((xName :: iterVar :: sm).any (· == iterVar)) = true := by
+    simp [List.any_cons]
+  -- Compose.
+  show
+      (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loop count body iterVar)).1
+        = loopParamAssemble count (sm.push iterVar) n count
+  unfold Stack.Lower.lowerValueP
+  simp only [hBodyOpsNF, hBodySmNF, hBodyOpsF,
+             Stack.Lower.listContains, hContainsNF, hContainsIter,
+             Bool.not_true, Bool.false_eq_true, if_false]
+  exact assemble_paramMkIter_eq count (sm.push iterVar) n count
+/-- Tier 3b value-level `.isSome`: paired with the Tier 1 value-
+level wrapper, gives runtime success for the singleton `.loadParam n`
+loop body at any non-zero count. -/
+theorem runOps_lowerValueP_loop_singletonRefParam_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bindingName xName iterVar n : String)
+    (count : Nat) (d : Nat)
+    (hIterFresh : iterVar ≠ n)
+    (hRefNotLocal : xName ≠ n)
+    (hDepth : sm.depth? n = some d) (s : StackState)
+    (hStackLen : d + 1 ≤ s.stack.length) :
+    (runOps
+      (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName
+        (.loop count [.mk xName (.loadParam n) none] iterVar)).1 s).toOption.isSome := by
+  rw [lowerValueP_loop_singletonRefParam_ops_eq progMethods props budget
+        currentIndex lastUses outerProtected localBindings constInts sm
+        bindingName xName iterVar n count d hIterFresh hRefNotLocal hDepth]
+  have hDepthInner : (sm.push iterVar).depth? n = some (d + 1) :=
+    depth?_push_ne sm iterVar n hIterFresh d hDepth
+  have hdInner1 : 1 ≤ d + 1 := by omega
+  exact runOps_loopParamAssemble_isSome count (sm.push iterVar) n (d + 1)
+    hDepthInner hdInner1 count s hStackLen
+
+/-- Body-level `.isSome`: a method body of a single Tier 3b loadParam
+loop binding runs to `.ok`. -/
+theorem runOps_lowerBindingsP_loopOnly_singletonRefParam_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (loopName xName iterVar n : String)
+    (count : Nat) (d : Nat)
+    (hIterFresh : iterVar ≠ n)
+    (hRefNotLocal : xName ≠ n)
+    (hDepth : sm.depth? n = some d) (s : StackState)
+    (hStackLen : d + 1 ≤ s.stack.length) :
+    (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex
+        lastUses outerProtected localBindings constInts sm
+        [ANFBinding.mk loopName
+          (.loop count [ANFBinding.mk xName (.loadParam n) none] iterVar)
+          none]).1 s).toOption.isSome := by
+  unfold Stack.Lower.lowerBindingsP
+  simp only [Stack.Lower.lowerBindingsP, List.append_nil]
+  exact runOps_lowerValueP_loop_singletonRefParam_isSome progMethods props budget
+    currentIndex lastUses outerProtected localBindings constInts sm loopName
+    xName iterVar n count d hIterFresh hRefNotLocal hDepth s hStackLen
+
+/-- Method-shaped specialisation for the Tier 3b loadParam singleton-
+loop body. -/
+theorem runOps_lowerMethodUserRawOps_loopOnly_singletonRefParam_isSome
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (loopName xName iterVar n : String) (count : Nat) (d : Nat)
+    (hIterFresh : iterVar ≠ n)
+    (hRefNotLocal : xName ≠ n)
+    (hBody :
+      m.body = [ANFBinding.mk loopName
+        (.loop count [ANFBinding.mk xName (.loadParam n) none] iterVar) none])
+    (s : StackState)
+    (hDepth :
+      Stack.Lower.StackMap.depth?
+        ((m.params.map (·.name)).reverse) n = some d)
+    (hStackLen : d + 1 ≤ s.stack.length) :
+    (runOps (lowerMethodUserRawOps progMethods props m) s).toOption.isSome := by
+  unfold lowerMethodUserRawOps
+  rw [hBody]
+  exact runOps_lowerBindingsP_loopOnly_singletonRefParam_isSome progMethods props
+    Stack.Lower.defaultInlineBudget 0
+    _ [] _ _ _
+    loopName xName iterVar n count d hIterFresh hRefNotLocal hDepth s hStackLen
+
+/-- Top-level wrapper for the Tier 3b loadParam singleton-loop body. -/
+theorem runMethod_lower_public_unique_no_post_loopOnly_singletonRefParam_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (loopName xName iterVar n : String) (count : Nat) (d : Nat)
+    (hIterFresh : iterVar ≠ n)
+    (hRefNotLocal : xName ≠ n)
+    (hBody :
+      m.body = [ANFBinding.mk loopName
+        (.loop count [ANFBinding.mk xName (.loadParam n) none] iterVar) none])
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hNoPreimage : bindingsUseCheckPreimage m.body = false)
+    (hNoCode : bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : bodyEndsInAssert m.body = false)
+    (hNoDeserialize : bindingsUseDeserializeState m.body = false)
+    (hDepth :
+      Stack.Lower.StackMap.depth?
+        ((m.params.map (·.name)).reverse) n = some d)
+    (hStackLen : d + 1 ≤ initialStack.stack.length) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  exact runOps_lowerMethodUserRawOps_loopOnly_singletonRefParam_isSome
+    methods props m loopName xName iterVar n count d hIterFresh hRefNotLocal
+    hBody initialStack hDepth hStackLen
+
 /-! ### Tier 3b/c follow-up — deferred
 
-* **Tier 3b — `.loadParam p` singleton body**: deferred. The body's
-  natural `lastUses` records `p` at index 0, so the FINAL iter's
-  `loadRefLiveParam` lowers to a CONSUME-path chunk (`[.swap]` /
-  `[.rot]` / `[.roll d]`) rather than the copy-path `loadRef`. Non-
-  final iters still emit `loadRef` because `clampLastUsesForOuter`
-  bumps `p`'s last-use index past the body's currentIndex. Closing
-  this case requires NEW chunk-level substrate of the shape
-  `runOps [push i, swap, drop] s = ...` / `runOps [push i, rot, drop] s = ...`
-  / `runOps [push i, roll d, drop] s = ...` keyed on the parent
-  stack's depth witness. Wave 9 deliberately landed only the copy-path
-  chunk (`runOps_push_i_loadRef_drop`); the consume-path chunks are
-  the natural next substrate widening.
+Wave 12 closed the `.loadParam p` singleton-body case (see the
+`runMethod_lower_public_unique_no_post_loopOnly_singletonRefParam_isSome`
+chain above). The remaining deferrals are:
 
 * **Tier 3b — `.loadConst .thisRef` singleton body**: not a real
   Tier 3b case. `.loadConst .thisRef` lowers to `[.push (.bigint 0)]`
