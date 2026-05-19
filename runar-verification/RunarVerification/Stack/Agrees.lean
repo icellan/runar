@@ -20557,18 +20557,24 @@ for each.
 |-----------------------|--------------------------|----------------------------------------|
 | (1, 0) [wave 10]      | `[.swap, .swap]`         | `r_v :: l_v :: rest`  (identity)       |
 | (0, 1) [wave 11]      | `[.swap]`                | `r_v :: l_v :: rest`  (swap top two)   |
-| (d≥2, 0) [wave 11]    | `[.rot/roll d, .swap]`   | `r_v :: l_v :: (rest_d_erased)`        |
-| (0, d≥2) [wave 11]    | `[.rot/roll d]`          | `r_v :: l_v :: (rest_d_erased)`        |
+| (d≥2, 0) [wave 11]    | `[.rot/roll d, .swap]`   | `r_v :: l_v :: (eraseIdx d).tail`      |
+| (0, d≥2) [wave 11]    | `[.rot/roll d]`          | `r_v :: l_v :: (eraseIdx d).tail`      |
 
 In all three new cases the opcode sees `r_v` on top and `l_v` at
 depth 1, then pops 2 / pushes 1, leaving `out :: <rest tail>`. The
 "rest tail" depends on the original stack shape:
 
-* d0d1 / d1d0: `stkSt.stack.tail.tail`.
-* dge2_d0 / d0_dge2: `stkSt.stack` with the depth-`d` slot removed
-  via `eraseIdx` and the two adjacent depth-0/1 slots also popped.
+* d0d1 / d1d0 (net stack delta −1): `stkSt.stack.tail.tail`.
+* dge2_d0 / d0_dge2 (net stack delta −1): `(stkSt.stack.eraseIdx d).tail`.
+  `eraseIdx d` removes the depth-`d` slot (one element); one further
+  `.tail` removes the original top. The d-load prefix moves the
+  depth-`d` value to the top WITHOUT removing anything else, then the
+  opcode pops 2 / pushes 1 for net delta −1.
 
-Callers supply `hOpcode` against the post-load runtime state. -/
+Callers supply `hOpcode` against the **specific** post-load runtime
+state. The opcode hypothesis is specialised to the exact stack shape
+the post-load state has, so callers can discharge it directly via the
+per-opcode `runOpcode_*_intInt` simulation lemmas. -/
 
 /-- **Stage C consume-mode binOp witness at depth pair (0, 1).**
 
@@ -20595,19 +20601,15 @@ theorem stageC_simpleStep_binOp_d0d1_consume_core
     (ops : List StackOp)
     (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
                              anfSt stkSt)
-    (_hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
-    (_hLookupR : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint b))
+    (hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint b))
     (hLowerOps : ops = [.swap, .opcode opcode])
     (hOpcode :
-      ∀ (stkPost : StackState),
-        stkPost.stack.length ≥ 2 →
-        stkPost.altstack = stkSt.altstack →
-        stkPost.outputs = stkSt.outputs →
-        stkPost.props = stkSt.props →
-        stkPost.preimage = stkSt.preimage →
-        stkPost.stack.tail.tail = stkSt.stack.tail.tail →
-        runOpcode opcode stkPost
-          = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out)) :
+      ∀ (rest : List Value),
+        stkSt.stack = .vBigint a :: .vBigint b :: rest →
+        runOpcode opcode
+            ({stkSt with stack := .vBigint b :: .vBigint a :: rest})
+          = .ok ({stkSt with stack := rest}.push out)) :
     runOps ops stkSt
       = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out) := by
   rw [hLowerOps]
@@ -20629,31 +20631,47 @@ theorem stageC_simpleStep_binOp_d0d1_consume_core
         exact absurd hTail (by simp)
     | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
   obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
-  -- After the single swap, runtime is `{stkSt with stack := botV :: topV :: rest}`.
-  let stkPost : StackState := {stkSt with stack := botV :: topV :: rest}
+  -- The alignment + lookups pin the top two values to `.vBigint a` and
+  -- `.vBigint b`. Top of stack matches `(topName, k_top)` (depth 0).
+  have hAlignStk :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt (topV :: botV :: rest) := by
+    rw [← hStk]; exact hAlign
+  unfold taggedStackAligned at hAlignStk
+  obtain ⟨hHeadTop, hRestAlign⟩ := hAlignStk
+  unfold taggedStackAligned at hRestAlign
+  obtain ⟨hHeadBot, _⟩ := hRestAlign
+  -- `lookupAnfByKind anfSt (topName, k_top) = some topV` AND `= some (.vBigint a)`
+  have hTopEq : topV = .vBigint a := by
+    have : some topV = some (.vBigint a) := hHeadTop.symm.trans hLookupL
+    exact Option.some.inj this
+  have hBotEq : botV = .vBigint b := by
+    have : some botV = some (.vBigint b) := hHeadBot.symm.trans hLookupR
+    exact Option.some.inj this
+  -- Rewrite the stack shape into the `.vBigint`-prefixed form.
+  have hStk' : stkSt.stack = .vBigint a :: .vBigint b :: rest := by
+    rw [hStk, hTopEq, hBotEq]
+  -- After the single swap, runtime is
+  -- `{stkSt with stack := .vBigint b :: .vBigint a :: rest}`.
+  let stkPost : StackState :=
+    {stkSt with stack := .vBigint b :: .vBigint a :: rest}
   have hSwap : runOps [.swap] stkSt = .ok stkPost := by
     show runOps (.swap :: []) _ = _
     unfold runOps
-    have hStep : stepNonIf .swap stkSt = Stack.Eval.applySwap stkSt := rfl
-    rw [hStep]
+    rw [Stack.Eval.stepNonIf_swap]
     unfold Stack.Eval.applySwap
-    rw [hStk]
+    rw [hStk']
     simp [Stack.Sim.run_empty, stkPost]
-  -- Verify `stkPost` satisfies the hOpcode preconditions.
-  have hLen : stkPost.stack.length ≥ 2 := by
-    show (botV :: topV :: rest).length ≥ 2
-    simp
-  have hAlt : stkPost.altstack = stkSt.altstack := rfl
-  have hOut : stkPost.outputs = stkSt.outputs := rfl
-  have hProps : stkPost.props = stkSt.props := rfl
-  have hPre : stkPost.preimage = stkSt.preimage := rfl
-  have hTailEq : stkPost.stack.tail.tail = stkSt.stack.tail.tail := by
-    show (botV :: topV :: rest).tail.tail = stkSt.stack.tail.tail
-    rw [hStk]
-    simp
-  have hOpRun := hOpcode stkPost hLen hAlt hOut hProps hPre hTailEq
-  -- Append the opcode chunk via the generic load-then-opcode helper.
-  show runOps ([.swap] ++ [.opcode opcode]) stkSt = _
+  -- Discharge the opcode step using the specialised hOpcode hypothesis.
+  have hOpRun :
+      runOpcode opcode stkPost
+        = .ok ({stkSt with stack := rest}.push out) :=
+    hOpcode rest hStk'
+  -- The conclusion's `stkSt.stack.tail.tail` equals `rest`.
+  have hTailTail : stkSt.stack.tail.tail = rest := by rw [hStk']; rfl
+  show runOps ([.swap] ++ [.opcode opcode]) stkSt
+    = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out)
+  rw [hTailTail]
   exact runOps_loadThenOpcode_unconditional [.swap] opcode stkSt
           stkPost _ hSwap hOpRun
 
@@ -20681,33 +20699,44 @@ theorem stageC_simpleStep_binOp_dge2_d0_consume_core
     (hAgrees : agreesTagged ((topName, k_top) :: tsm_rest) anfSt stkSt)
     (hAtDepth : nthOpt d ((topName, k_top) :: tsm_rest) = some (leftName, k_left))
     (_hd2 : 2 ≤ d)
-    (_hLookupL : lookupAnfByKind anfSt (leftName, k_left) = some (.vBigint a))
-    (_hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hLookupL : lookupAnfByKind anfSt (leftName, k_left) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
     (hLowerOps : ops = loadOps ++ [.opcode opcode])
-    (hLoadOk :
-      ∃ stkPost, runOps loadOps stkSt = .ok stkPost ∧
-        stkPost.altstack = stkSt.altstack ∧
-        stkPost.outputs = stkSt.outputs ∧
-        stkPost.props = stkSt.props ∧
-        stkPost.preimage = stkSt.preimage)
+    /- Post-load runtime: `.vBigint b :: .vBigint a :: (eraseIdx d).tail`.
+       Caller discharges this against `applyRot` (when d = 2 and
+       `loadOps = [.rot, .swap]`) or `applyRoll d` (when d ≥ 3 and
+       `loadOps = [.roll d, .swap]`) using the lookups + depth-aligned
+       stack-shape extraction. The substrate composes it with the
+       opcode step. -/
+    (hLoadRun :
+      runOps loadOps stkSt
+        = .ok ({stkSt with
+                stack :=
+                  .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx d).tail}))
     (hOpcode :
-      ∀ stkPost,
-        runOps loadOps stkSt = .ok stkPost →
-        runOpcode opcode stkPost
-          = .ok ({stkSt with
-                  stack := (stkSt.stack.eraseIdx d).tail.tail}.push out)) :
+      runOpcode opcode
+          ({stkSt with
+            stack :=
+              .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx d).tail})
+        = .ok ({stkSt with
+                stack := (stkSt.stack.eraseIdx d).tail}.push out)) :
     runOps ops stkSt
       = .ok ({stkSt with
-              stack := (stkSt.stack.eraseIdx d).tail.tail}.push out) := by
+              stack := (stkSt.stack.eraseIdx d).tail}.push out) := by
   rw [hLowerOps]
-  obtain ⟨stkPost, hLoadRun, _hAlt, _hOut, _hProps, _hPre⟩ := hLoadOk
-  -- Mention nthOpt/agrees to keep them used by the API contract.
+  -- Keep `hAgrees`, `hAtDepth`, and the lookups mentioned so the API
+  -- contract is non-vacuous (they pin the lookup shape that the caller
+  -- relies on to build `hLoadRun` / `hOpcode`).
   have _hAlignKeep : taggedStackAligned ((topName, k_top) :: tsm_rest)
                                           anfSt stkSt.stack := hAgrees.1
   have _hAtKeep : nthOpt d ((topName, k_top) :: tsm_rest)
                      = some (leftName, k_left) := hAtDepth
-  exact runOps_loadThenOpcode_unconditional loadOps opcode stkSt
-          stkPost _ hLoadRun (hOpcode stkPost hLoadRun)
+  have _hLkLKeep : lookupAnfByKind anfSt (leftName, k_left)
+                     = some (.vBigint a) := hLookupL
+  have _hLkRKeep : lookupAnfByKind anfSt (topName, k_top)
+                     = some (.vBigint b) := hLookupR
+  exact runOps_loadThenOpcode_unconditional loadOps opcode stkSt _ _
+          hLoadRun hOpcode
 
 /-- **Stage C consume-mode binOp witness at depth pair (0, d ≥ 2).**
 
@@ -20732,32 +20761,198 @@ theorem stageC_simpleStep_binOp_d0_dge2_consume_core
     (hAgrees : agreesTagged ((topName, k_top) :: tsm_rest) anfSt stkSt)
     (hAtDepth : nthOpt d ((topName, k_top) :: tsm_rest) = some (rightName, k_right))
     (_hd2 : 2 ≤ d)
-    (_hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
-    (_hLookupR : lookupAnfByKind anfSt (rightName, k_right) = some (.vBigint b))
+    (hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (rightName, k_right) = some (.vBigint b))
     (hLowerOps : ops = loadOps ++ [.opcode opcode])
-    (hLoadOk :
-      ∃ stkPost, runOps loadOps stkSt = .ok stkPost ∧
-        stkPost.altstack = stkSt.altstack ∧
-        stkPost.outputs = stkSt.outputs ∧
-        stkPost.props = stkSt.props ∧
-        stkPost.preimage = stkSt.preimage)
+    /- Post-load runtime: `.vBigint b :: .vBigint a :: (eraseIdx d).tail`.
+       Caller discharges this against `applyRot` (when d = 2 and
+       `loadOps = [.rot]`) or `applyRoll d` (when d ≥ 3 and
+       `loadOps = [.roll d]`). No swap is needed in this depth pair —
+       the depth-`d` element lands on top directly with the depth-0
+       element falling to position 1. -/
+    (hLoadRun :
+      runOps loadOps stkSt
+        = .ok ({stkSt with
+                stack :=
+                  .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx d).tail}))
     (hOpcode :
-      ∀ stkPost,
-        runOps loadOps stkSt = .ok stkPost →
-        runOpcode opcode stkPost
-          = .ok ({stkSt with
-                  stack := (stkSt.stack.eraseIdx d).tail.tail}.push out)) :
+      runOpcode opcode
+          ({stkSt with
+            stack :=
+              .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx d).tail})
+        = .ok ({stkSt with
+                stack := (stkSt.stack.eraseIdx d).tail}.push out)) :
     runOps ops stkSt
       = .ok ({stkSt with
-              stack := (stkSt.stack.eraseIdx d).tail.tail}.push out) := by
+              stack := (stkSt.stack.eraseIdx d).tail}.push out) := by
   rw [hLowerOps]
-  obtain ⟨stkPost, hLoadRun, _hAlt, _hOut, _hProps, _hPre⟩ := hLoadOk
   have _hAlignKeep : taggedStackAligned ((topName, k_top) :: tsm_rest)
                                           anfSt stkSt.stack := hAgrees.1
   have _hAtKeep : nthOpt d ((topName, k_top) :: tsm_rest)
                      = some (rightName, k_right) := hAtDepth
-  exact runOps_loadThenOpcode_unconditional loadOps opcode stkSt
-          stkPost _ hLoadRun (hOpcode stkPost hLoadRun)
+  have _hLkLKeep : lookupAnfByKind anfSt (topName, k_top)
+                     = some (.vBigint a) := hLookupL
+  have _hLkRKeep : lookupAnfByKind anfSt (rightName, k_right)
+                     = some (.vBigint b) := hLookupR
+  exact runOps_loadThenOpcode_unconditional loadOps opcode stkSt _ _
+          hLoadRun hOpcode
+
+/-! ### Wave 11b — smoke tests (consumability proofs)
+
+The substrates above must not be vacuously true. Each smoke test below
+discharges all of the substrate's hypotheses for OP_ADD with concrete
+shape and proves the substrate's conclusion goes through end-to-end.
+
+If a smoke test would fail to compile, the corresponding substrate is
+not consumable and would need further revision. -/
+
+/-- Smoke test for `stageC_simpleStep_binOp_d0d1_consume_core` with
+`OP_ADD`. We exhibit the substrate's hypotheses (lookups + agreesTagged)
+as inputs and discharge `hOpcode` via `runOpcode_ADD_intInt`. -/
+private theorem _smokeTest_stageC_d0d1_consume_OP_ADD
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint b)) :
+    runOps [.swap, .opcode "OP_ADD"] stkSt
+      = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push
+               (.vBigint (a + b))) := by
+  refine stageC_simpleStep_binOp_d0d1_consume_core
+    topName botName k_top k_bot tsm_rest anfSt stkSt a b
+    "OP_ADD" (.vBigint (a + b))
+    [.swap, .opcode "OP_ADD"]
+    hAgrees hLookupL hLookupR rfl ?_
+  intro rest hStk
+  -- The post-swap state has stack `.vBigint b :: .vBigint a :: rest`.
+  -- Apply `runOpcode_ADD_intInt` against that exact shape.
+  exact Stack.Sim.runOpcode_ADD_intInt
+    ({stkSt with stack := .vBigint b :: .vBigint a :: rest}) a b rest rfl
+
+/-- Smoke test for `stageC_simpleStep_binOp_dge2_d0_consume_core` with
+`OP_ADD` at `d = 2`. We exhibit a concrete depth-2 stack shape (top is
+`leftName`'s "wrong-tier" position — depth-0 corresponds to `topName`
+which is `r`; depth-2 corresponds to `leftName` which is `l`), then
+discharge `hLoadRun` against `applyRot ∘ applySwap` and `hOpcode`
+against `runOpcode_ADD_intInt`. -/
+private theorem _smokeTest_stageC_dge2_d0_consume_OP_ADD_d2
+    (topName midName leftName : String)
+    (k_top k_mid k_left : SlotKind)
+    (tsm_rest' : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (midV : Value) (rest : List Value)
+    (hStk : stkSt.stack = .vBigint b :: midV :: .vBigint a :: rest)
+    (hAgrees :
+      agreesTagged
+        ((topName, k_top) :: (midName, k_mid) :: (leftName, k_left) :: tsm_rest')
+        anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (leftName, k_left) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b)) :
+    runOps ([.rot, .swap] ++ [.opcode "OP_ADD"]) stkSt
+      = .ok ({stkSt with
+              stack := (stkSt.stack.eraseIdx 2).tail}.push (.vBigint (a + b))) := by
+  -- `nthOpt 2 (top :: mid :: left :: _) = some (left, k_left)`.
+  have hAt :
+      nthOpt 2 ((topName, k_top) :: (midName, k_mid) ::
+                (leftName, k_left) :: tsm_rest')
+        = some (leftName, k_left) := rfl
+  -- `(eraseIdx 2 stkSt.stack).tail = midV :: rest`.
+  have hErase : (stkSt.stack.eraseIdx 2).tail = midV :: rest := by
+    rw [hStk]
+    rfl
+  -- Build `hLoadRun`: running `[.rot, .swap]` on `stkSt` yields the
+  -- post-load shape `.vBigint b :: .vBigint a :: midV :: rest`.
+  have hLoadRun :
+      runOps [.rot, .swap] stkSt
+        = .ok ({stkSt with
+                stack := .vBigint b :: .vBigint a :: midV :: rest}) := by
+    simp [runOps, stepNonIf, Stack.Eval.applyRot, Stack.Eval.applySwap, hStk]
+  -- Rewrite `hLoadRun`'s RHS into the substrate's expected shape.
+  have hLoadRun' :
+      runOps [.rot, .swap] stkSt
+        = .ok ({stkSt with
+                stack :=
+                  .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx 2).tail}) := by
+    rw [hLoadRun, hErase]
+  -- Discharge `hOpcode` via `runOpcode_ADD_intInt`.
+  have hOpcode :
+      runOpcode "OP_ADD"
+          ({stkSt with
+            stack :=
+              .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx 2).tail})
+        = .ok ({stkSt with
+                stack := (stkSt.stack.eraseIdx 2).tail}.push
+                  (.vBigint (a + b))) :=
+    Stack.Sim.runOpcode_ADD_intInt
+      ({stkSt with
+        stack := .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx 2).tail})
+      a b ((stkSt.stack.eraseIdx 2).tail) rfl
+  exact stageC_simpleStep_binOp_dge2_d0_consume_core
+    topName leftName k_top k_left
+    ((midName, k_mid) :: (leftName, k_left) :: tsm_rest')
+    anfSt stkSt a b 2 "OP_ADD" (.vBigint (a + b))
+    [.rot, .swap] ([.rot, .swap] ++ [.opcode "OP_ADD"])
+    hAgrees hAt (by decide) hLookupL hLookupR rfl hLoadRun' hOpcode
+
+/-- Smoke test for `stageC_simpleStep_binOp_d0_dge2_consume_core` with
+`OP_ADD` at `d = 2`. Lowering is `[.rot]` (no swap — depth-0 element
+goes from top to depth-1 naturally when depth-2 element rotates up). -/
+private theorem _smokeTest_stageC_d0_dge2_consume_OP_ADD_d2
+    (topName midName rightName : String)
+    (k_top k_mid k_right : SlotKind)
+    (tsm_rest' : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (midV : Value) (rest : List Value)
+    (hStk : stkSt.stack = .vBigint a :: midV :: .vBigint b :: rest)
+    (hAgrees :
+      agreesTagged
+        ((topName, k_top) :: (midName, k_mid) :: (rightName, k_right) :: tsm_rest')
+        anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (rightName, k_right) = some (.vBigint b)) :
+    runOps ([.rot] ++ [.opcode "OP_ADD"]) stkSt
+      = .ok ({stkSt with
+              stack := (stkSt.stack.eraseIdx 2).tail}.push (.vBigint (a + b))) := by
+  have hAt :
+      nthOpt 2 ((topName, k_top) :: (midName, k_mid) ::
+                (rightName, k_right) :: tsm_rest')
+        = some (rightName, k_right) := rfl
+  have hErase : (stkSt.stack.eraseIdx 2).tail = midV :: rest := by
+    rw [hStk]
+    rfl
+  -- Build `hLoadRun`: running `[.rot]` yields the post-load shape
+  -- `.vBigint b :: .vBigint a :: midV :: rest`.
+  have hLoadRun :
+      runOps [.rot] stkSt
+        = .ok ({stkSt with
+                stack := .vBigint b :: .vBigint a :: midV :: rest}) := by
+    simp [runOps, stepNonIf, Stack.Eval.applyRot, hStk]
+  have hLoadRun' :
+      runOps [.rot] stkSt
+        = .ok ({stkSt with
+                stack :=
+                  .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx 2).tail}) := by
+    rw [hLoadRun, hErase]
+  have hOpcode :
+      runOpcode "OP_ADD"
+          ({stkSt with
+            stack :=
+              .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx 2).tail})
+        = .ok ({stkSt with
+                stack := (stkSt.stack.eraseIdx 2).tail}.push
+                  (.vBigint (a + b))) :=
+    Stack.Sim.runOpcode_ADD_intInt
+      ({stkSt with
+        stack := .vBigint b :: .vBigint a :: (stkSt.stack.eraseIdx 2).tail})
+      a b ((stkSt.stack.eraseIdx 2).tail) rfl
+  exact stageC_simpleStep_binOp_d0_dge2_consume_core
+    topName rightName k_top k_right
+    ((midName, k_mid) :: (rightName, k_right) :: tsm_rest')
+    anfSt stkSt a b 2 "OP_ADD" (.vBigint (a + b))
+    [.rot] ([.rot] ++ [.opcode "OP_ADD"])
+    hAgrees hAt (by decide) hLookupL hLookupR rfl hLoadRun' hOpcode
 
 /-! ### Helper 2 — `taggedStackAlignedAt`: depth-d' runtime/stack-map alignment
 
