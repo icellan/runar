@@ -3,26 +3,30 @@
 require 'spec_helper'
 require 'runar/sdk'
 
-ALICE_PRIV_HEX = '0000000000000000000000000000000000000000000000000000000000000001'
-BOB_PRIV_HEX   = '0000000000000000000000000000000000000000000000000000000000000002'
-
-def alice_pubkey
-  Runar::ECDSA.pub_key_from_priv_key(ALICE_PRIV_HEX)
-end
-
-def bob_pubkey
-  Runar::ECDSA.pub_key_from_priv_key(BOB_PRIV_HEX)
-end
-
-def alice_signer
-  ->(digest) { Runar::ECDSA.ecdsa_sign(ALICE_PRIV_HEX.to_i(16), digest) }
-end
-
-def bob_signer
-  ->(digest) { Runar::ECDSA.ecdsa_sign(BOB_PRIV_HEX.to_i(16), digest) }
-end
-
 RSpec.describe Runar::SDK::Envelope do
+  # Scoped to this example group to avoid polluting top-level constants.
+  # (ecdsa_spec.rb defines ALICE_PRIV_HEX / BOB_PRIV_HEX as top-level constants
+  # with different values; leaving these at top-level here causes load-order
+  # dependent failures in ecdsa_spec.)
+  ENVELOPE_ALICE_PRIV_HEX = '0000000000000000000000000000000000000000000000000000000000000001'
+  ENVELOPE_BOB_PRIV_HEX   = '0000000000000000000000000000000000000000000000000000000000000002'
+
+  def alice_pubkey
+    Runar::ECDSA.pub_key_from_priv_key(ENVELOPE_ALICE_PRIV_HEX)
+  end
+
+  def bob_pubkey
+    Runar::ECDSA.pub_key_from_priv_key(ENVELOPE_BOB_PRIV_HEX)
+  end
+
+  def alice_signer
+    ->(digest) { Runar::ECDSA.ecdsa_sign(ENVELOPE_ALICE_PRIV_HEX.to_i(16), digest) }
+  end
+
+  def bob_signer
+    ->(digest) { Runar::ECDSA.ecdsa_sign(ENVELOPE_BOB_PRIV_HEX.to_i(16), digest) }
+  end
+
   describe '.canonical_json' do
     it 'is insertion-order independent' do
       a = described_class.canonical_json({ 'a' => 1, 'b' => 2 })

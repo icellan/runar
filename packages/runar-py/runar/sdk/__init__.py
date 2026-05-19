@@ -6,6 +6,8 @@ from runar.sdk.types import (
     StateField, ConstructorSlot, CodeSepIndexSlot, DeployOptions, CallOptions, OutputSpec,
     PreparedCall, SdkValue, TerminalOutput,
 )
+from runar.sdk.input_limits import MAX_SCRIPT_BYTES
+from runar.sdk.errors import ScriptSizeExceededError, assert_script_hex_under_limit
 from runar.sdk.provider import Provider, MockProvider
 from runar.sdk.rpc_provider import RPCProvider
 from runar.sdk.woc_provider import WhatsOnChainProvider
@@ -23,6 +25,9 @@ from runar.sdk.anf_interpreter import (
     execute_on_chain_authoritative,
     AssertionFailureError,
     OnChainCryptoContext,
+    IntentInterpreter,
+    IntentCallResult,
+    WitnessBytesMissingError,
 )
 from runar.sdk.codegen import generate_python
 from runar.sdk.script_utils import extract_constructor_args, matches_artifact
@@ -58,6 +63,7 @@ __all__ = [
     'compute_new_state', 'compute_new_state_and_data_outputs',
     'execute_strict', 'execute_on_chain_authoritative',
     'AssertionFailureError', 'OnChainCryptoContext',
+    'IntentInterpreter', 'IntentCallResult', 'WitnessBytesMissingError',
     'generate_python',
     'extract_constructor_args', 'matches_artifact',
     'TokenWallet',
@@ -70,4 +76,5 @@ __all__ = [
     'GorillaPoolProvider',
     'canonical_json', 'sign_envelope', 'verify_envelope',
     'SignedEnvelope', 'VerifyEnvelopeResult', 'VerifyEnvelopeReason', 'SignFn',
+    'MAX_SCRIPT_BYTES', 'ScriptSizeExceededError', 'assert_script_hex_under_limit',
 ]

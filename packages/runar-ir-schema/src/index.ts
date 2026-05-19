@@ -120,3 +120,10 @@ export {
   canonicalJsonStringify,
   canonicalise,
 } from './canonical-json.js';
+
+// Input limits + typed error (foundation for size guards, item 5)
+export { InputLimits, CanonicalJsonError } from './input-limits.js';
+export type { InputLimitsKey } from './input-limits.js';
+
+// Hard error for unknown ANF kinds (item 3 / F-003)
+export { UnknownANFKindError } from './unknown-anf-kind-error.js';

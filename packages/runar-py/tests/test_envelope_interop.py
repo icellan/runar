@@ -51,3 +51,17 @@ def test_verify_rejection_vectors(fixture: dict) -> None:
         assert r.reason == VerifyEnvelopeReason(v["reason"]), (
             f"rejection {v['reason']!r}: got reason={r.reason}"
         )
+
+
+def test_canonical_json_rejection_vectors(fixture: dict) -> None:
+    """RFC 8785 §3.2.2.2: canonical_json MUST reject malformed Unicode
+    (lone surrogate). See audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6).
+    """
+    for v in fixture["canonical_json_rejection_vectors"]:
+        # Build the input string from UTF-16 code units so we don't rely on
+        # the JSON parser's lone-surrogate handling (which diverges by tier).
+        units = v["input_value_utf16_units"]
+        bad_str = "".join(chr(u) for u in units)
+        input_obj = {v["input_object_key"]: bad_str}
+        with pytest.raises(Exception):  # noqa: B017 — any error is acceptable
+            canonical_json(input_obj)

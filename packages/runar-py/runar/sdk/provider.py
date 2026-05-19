@@ -3,6 +3,8 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from runar.sdk.types import TransactionData, Utxo
+from runar.sdk.errors import assert_script_hex_under_limit
+from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 
 
 class Provider(ABC):
@@ -102,10 +104,25 @@ class MockProvider(Provider):
         return fake_txid
 
     def get_utxos(self, address: str) -> list[Utxo]:
-        return list(self._utxos.get(address, []))
+        utxos = list(self._utxos.get(address, []))
+        # DoS-bound: reject pathological scripts at the provider boundary.
+        for u in utxos:
+            if not u.script:
+                continue
+            assert_script_hex_under_limit(
+                u.script, MAX_SCRIPT_BYTES,
+                f"MockProvider.get_utxos({address})",
+            )
+        return utxos
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:
-        return self._contract_utxos.get(script_hash)
+        utxo = self._contract_utxos.get(script_hash)
+        if utxo is not None and utxo.script:
+            assert_script_hex_under_limit(
+                utxo.script, MAX_SCRIPT_BYTES,
+                f"MockProvider.get_contract_utxo({script_hash})",
+            )
+        return utxo
 
     def get_network(self) -> str:
         return self._network

@@ -9,6 +9,7 @@ pub const test_keys = @import("test_keys.zig");
 pub const testing = @import("testing_helpers.zig");
 
 // SDK modules — deployment, calling, state serialization, provider/signer interfaces
+pub const sdk_errors = @import("sdk_errors.zig");
 pub const sdk_types = @import("sdk_types.zig");
 pub const sdk_state = @import("sdk_state.zig");
 pub const sdk_provider = @import("sdk_provider.zig");
@@ -238,6 +239,7 @@ test {
     _ = @import("sdk_woc_provider.zig");
     _ = @import("sdk_script_utils.zig");
     _ = @import("sdk_anf_interpreter.zig");
+    _ = @import("sdk_anf_interpreter_intent_test.zig");
     _ = @import("sdk_envelope.zig");
     _ = @import("sdk_envelope_interop_test.zig");
     _ = @import("sdk_rpc_provider.zig");

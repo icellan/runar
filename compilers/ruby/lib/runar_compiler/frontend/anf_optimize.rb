@@ -442,39 +442,72 @@ module RunarCompiler
       private_class_method :eliminate_dead_bindings
 
       # Walk an ANFValue and collect all binding name references.
+      #
+      # Explicit kind dispatch so an unknown variant raises
+      # UnknownANFKindError instead of silently contributing zero refs
+      # (which would cause DCE to drop a live binding).
       def self.collect_refs(v, used)
-        if v.kind == "load_param"
-          return
-        end
-
-        if v.kind == "load_const"
+        case v.kind
+        when "load_param", "load_prop", "get_state_script"
+          # No refs.
+        when "load_const"
           if v.const_string && v.const_string.start_with?("@ref:")
             used.add(v.const_string[5..])
           end
-          return
+        when "bin_op"
+          used.add(v.left)  if v.left
+          used.add(v.right) if v.right
+        when "unary_op"
+          used.add(v.operand) if v.operand
+        when "call"
+          v.args&.each { |a| used.add(a) }
+        when "method_call"
+          used.add(v.object) if v.object
+          v.args&.each { |a| used.add(a) }
+        when "if"
+          used.add(v.cond) if v.cond
+          v.then&.each  { |b| collect_refs(b.value, used) }
+          v.else_&.each { |b| collect_refs(b.value, used) }
+        when "loop"
+          v.body&.each { |b| collect_refs(b.value, used) }
+        when "assert", "update_prop"
+          used.add(v.value_ref) if v.value_ref
+        when "check_preimage", "deserialize_state"
+          used.add(v.preimage) if v.preimage
+        when "add_output"
+          used.add(v.satoshis) if v.satoshis
+          v.state_values&.each { |sv| used.add(sv) }
+          used.add(v.preimage) if v.preimage
+        when "add_raw_output", "add_data_output"
+          used.add(v.satoshis)     if v.satoshis
+          used.add(v.script_bytes) if v.script_bytes
+        when "array_literal"
+          v.elements&.each { |e| used.add(e) }
+        when "raw_script"
+          # Opaque: no SSA operand refs.
+        else
+          # Exhaustiveness guard.  A silent no-op would let DCE drop a
+          # live binding because its refs go uncollected.
+          raise ::RunarCompiler::IR::UnknownANFKindError.new(v.kind, "anf-optimize.collectRefs")
         end
-
-        return if v.kind == "load_prop" || v.kind == "get_state_script"
-
-        used.add(v.left)        if v.left
-        used.add(v.right)       if v.right
-        used.add(v.operand)     if v.operand
-        used.add(v.cond)        if v.cond
-        used.add(v.value_ref)   if v.value_ref
-        used.add(v.object)      if v.object
-        used.add(v.satoshis)    if v.satoshis
-        used.add(v.script_bytes) if v.script_bytes
-        used.add(v.preimage)    if v.preimage
-        v.args&.each         { |a| used.add(a) }
-        v.state_values&.each { |sv| used.add(sv) }
-        v.then&.each  { |b| collect_refs(b.value, used) }
-        v.else_&.each { |b| collect_refs(b.value, used) }
-        v.body&.each  { |b| collect_refs(b.value, used) }
       end
       private_class_method :collect_refs
 
+      # Kinds known to have no observable side effects.  Listed explicitly
+      # so an unknown kind raises UnknownANFKindError instead of silently
+      # being treated as side-effect-free (which would cause DCE to drop
+      # a new side-effecting variant).
+      SIDE_EFFECT_FREE_KINDS = %w[
+        load_param load_prop load_const get_state_script
+        bin_op unary_op array_literal
+      ].freeze
+
       def self.has_side_effect?(v)
-        SIDE_EFFECT_KINDS.include?(v.kind)
+        kind = v.kind
+        return true  if SIDE_EFFECT_KINDS.include?(kind)
+        return false if SIDE_EFFECT_FREE_KINDS.include?(kind)
+
+        raise ::RunarCompiler::IR::UnknownANFKindError.new(kind, "anf-optimize.hasSideEffect")
       end
       private_class_method :has_side_effect?
     end

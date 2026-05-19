@@ -69,21 +69,12 @@ public final class Envelope {
             if (Double.isNaN(d) || Double.isInfinite(d)) {
                 throw new IllegalArgumentException("canonical JSON: non-finite number");
             }
-            if (d == 0.0) {
-                out.append('0');
-                return;
-            }
-            long asLong = (long) d;
-            if ((double) asLong == d && asLong >= -9_007_199_254_740_992L && asLong <= 9_007_199_254_740_992L) {
-                out.append(asLong);
-                return;
-            }
-            // Java's Double.toString is reasonably close to ES Number toString
-            // for typical values. Edge cases (very large / small) may diverge.
-            String s = Double.toString(d);
-            // Strip trailing zero in scientific notation if any, drop "+E" prefix etc.
-            // Acceptable divergence note: documented at module level.
-            out.append(s);
+            // Java's Double.toString emits "1.0E21" / "1.0E-300" for the
+            // scientific cases — that diverges from ECMA-262 §6.1.6.1.13
+            // Number::toString ("1e+21" / "1e-300"), so the wire output
+            // would not match the TS reference (audit D5). Run the spec
+            // algorithm directly.
+            out.append(formatEcma262Double(d));
             return;
         }
         if (value instanceof String) {
@@ -124,8 +115,27 @@ public final class Envelope {
 
     private static void appendJsonString(StringBuilder out, String s) {
         out.append('"');
+        // Java strings are UTF-16, so c is a code unit. We must reject any
+        // lone surrogate (high without low partner, or low without high
+        // partner) before emission — RFC 8785 §3.2.2.2 / audit D6.
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 >= s.length() || !Character.isLowSurrogate(s.charAt(i + 1))) {
+                    throw new IllegalArgumentException(String.format(
+                        "canonical JSON: lone high surrogate U+%04X in string", (int) c));
+                }
+                // Valid pair: emit both code units verbatim and skip the
+                // low half on the next iteration.
+                out.append(c);
+                out.append(s.charAt(i + 1));
+                i++;
+                continue;
+            }
+            if (Character.isLowSurrogate(c)) {
+                throw new IllegalArgumentException(String.format(
+                    "canonical JSON: lone low surrogate U+%04X in string", (int) c));
+            }
             switch (c) {
                 case '"': out.append("\\\""); break;
                 case '\\': out.append("\\\\"); break;
@@ -143,6 +153,87 @@ public final class Envelope {
             }
         }
         out.append('"');
+    }
+
+    /**
+     * Format a finite double per ECMA-262 §6.1.6.1.13 Number::toString. Output
+     * is byte-identical to JS {@code JSON.stringify(x)} / {@code String(x)}
+     * for any finite {@code x}. {@code Double.toString} alone diverges
+     * ("1.0E21" vs "1e+21" — audit D5), so we re-derive the digit string and
+     * decimal exponent from the surface form and re-emit per the spec rules.
+     */
+    private static String formatEcma262Double(double x) {
+        if (x == 0.0) {
+            return "0";
+        }
+        if (x < 0.0) {
+            return "-" + formatEcma262Double(-x);
+        }
+        String s = Double.toString(x);
+        // Split into mantissa and explicit exponent.
+        int ePos = -1;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == 'e' || c == 'E') {
+                ePos = i;
+                break;
+            }
+        }
+        String mantissa;
+        int expPart;
+        if (ePos >= 0) {
+            mantissa = s.substring(0, ePos);
+            expPart = Integer.parseInt(s.substring(ePos + 1));
+        } else {
+            mantissa = s;
+            expPart = 0;
+        }
+        int dot = mantissa.indexOf('.');
+        String intPart;
+        String fracPart;
+        if (dot >= 0) {
+            intPart = mantissa.substring(0, dot);
+            fracPart = mantissa.substring(dot + 1);
+        } else {
+            intPart = mantissa;
+            fracPart = "";
+        }
+        String rawDigits = intPart + fracPart;
+        int leadingZeros = 0;
+        while (leadingZeros < rawDigits.length() && rawDigits.charAt(leadingZeros) == '0') {
+            leadingZeros++;
+        }
+        String trimmed = rawDigits.substring(leadingZeros);
+        int end = trimmed.length();
+        while (end > 0 && trimmed.charAt(end - 1) == '0') {
+            end--;
+        }
+        String digits = trimmed.substring(0, end);
+        if (digits.isEmpty()) {
+            return "0";
+        }
+        int k = intPart.length() - leadingZeros + expPart;
+        int sLen = digits.length();
+        if (k >= sLen && k <= 21) {
+            StringBuilder b = new StringBuilder(digits);
+            for (int i = 0; i < k - sLen; i++) b.append('0');
+            return b.toString();
+        }
+        if (k > 0 && k <= 21) {
+            return digits.substring(0, k) + "." + digits.substring(k);
+        }
+        if (k > -6 && k <= 0) {
+            StringBuilder b = new StringBuilder("0.");
+            for (int i = 0; i < -k; i++) b.append('0');
+            b.append(digits);
+            return b.toString();
+        }
+        int exp = k - 1;
+        String expStr = (exp < 0) ? ("e-" + (-exp)) : ("e+" + exp);
+        if (sLen == 1) {
+            return digits + expStr;
+        }
+        return digits.charAt(0) + "." + digits.substring(1) + expStr;
     }
 
     // -------------------------------------------------------------------

@@ -11,9 +11,12 @@
     "test:filter": "tsx runner/index.ts --filter",
     "test:parser-only": "tsx runner/index.ts --parser-only",
     "update-golden": "tsx runner/index.ts --update-golden",
+    "script-size-check": "tsx runner/script-size-check.ts",
     "fuzz": "tsx fuzzer/index.ts",
     "fuzz:quick": "tsx fuzzer/index.ts --ir --compilers ts,go,rust,python,zig,ruby,java --render native --num 20",
     "fuzz:property": "tsx fuzzer/index.ts --property",
+    "fuzz:anf": "tsx fuzzer/index.ts --anf --num 100 --time-budget-ms 30000",
+    "fuzz:anf:thorough": "tsx fuzzer/index.ts --anf --num 1000 --time-budget-ms 300000",
     "sdk-output": "tsx sdk-output/runner/sdk-runner.ts"
   },
   "dependencies": {

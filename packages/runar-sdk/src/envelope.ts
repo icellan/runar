@@ -4,7 +4,7 @@
 
 import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
 import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
-import { canonicalJsonStringify } from 'runar-ir-schema';
+import { canonicalJsonStringify, InputLimits } from 'runar-ir-schema';
 
 /**
  * Deterministic JSON stringification (RFC 8785 / JCS). Sorted object keys,
@@ -73,7 +73,8 @@ export type VerifyEnvelopeReason =
   | 'bad-json'
   | 'envelope-mismatch'
   | 'bad-sig'
-  | 'pubkey-not-allowed';
+  | 'pubkey-not-allowed'
+  | 'too-large';
 
 export interface VerifyEnvelopeOpts {
   envelope: SignedEnvelope;
@@ -99,6 +100,27 @@ export interface VerifyEnvelopeResult {
 export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   const env = opts.envelope;
   const clockSkewMs = opts.clockSkewMs ?? 5_000;
+
+  // 0. DoS-bound size guard. Reject envelopes whose string fields exceed
+  //    `InputLimits` BEFORE running JSON.parse, hashing, or ECDSA verify
+  //    — those operations are linear in input size and a pathological
+  //    100 MB payload would otherwise pin the event loop. Only string-
+  //    typed fields are checked; missing/non-string fields fall through
+  //    to the field-presence check below.
+  if (env && typeof env === 'object') {
+    if (typeof env.payload === 'string') {
+      const payloadBytes = Buffer.byteLength(env.payload, 'utf8');
+      if (payloadBytes > InputLimits.MAX_IR_BYTES) {
+        return { ok: false, reason: 'too-large' };
+      }
+    }
+    if (typeof env.sig === 'string' && env.sig.length > InputLimits.MAX_STRING_BYTES) {
+      return { ok: false, reason: 'too-large' };
+    }
+    if (typeof env.pubkey === 'string' && env.pubkey.length > InputLimits.MAX_STRING_BYTES) {
+      return { ok: false, reason: 'too-large' };
+    }
+  }
 
   // 1. Field presence and types.
   if (

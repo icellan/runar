@@ -90,6 +90,14 @@ def _append_json_string(out: List[str], s: str) -> None:
     out.append('"')
     for ch in s:
         cp = ord(ch)
+        # RFC 8785 §3.2.2.2: lone surrogates (U+D800..U+DFFF) are not valid
+        # scalar values and MUST be rejected. Python's `str` happily holds
+        # them (unlike Rust's safe String) so we explicitly walk codepoints
+        # and raise — audit D6.
+        if 0xD800 <= cp <= 0xDFFF:
+            raise ValueError(
+                f"canonical JSON: lone surrogate U+{cp:04X} in string"
+            )
         if ch == '"':
             out.append('\\"')
         elif ch == "\\":

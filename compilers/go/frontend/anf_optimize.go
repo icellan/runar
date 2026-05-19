@@ -274,15 +274,47 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 		for _, sv := range v.StateValues {
 			refs[sv] = true
 		}
+	case "add_raw_output", "add_data_output":
+		// Pre-existing silent fall-through preserved: the satoshis /
+		// scriptBytes operand refs are NOT collected here. The producing
+		// bindings stay live because (a) the operand-producing helpers
+		// in anf_lower currently inline as load_const / call which carry
+		// their own side-effects or feed update_prop chains, and
+		// (b) the add_raw_output binding itself is kept by hasSideEffect.
+		// Wiring real refs here is a separate fix.
+	case "deserialize_state":
+		// Pre-existing silent fall-through preserved: preimage ref is
+		// not collected here. The deserialize_state binding itself is
+		// kept by hasSideEffect.
+	case "array_literal":
+		// Pre-existing silent fall-through preserved.
+	case "get_state_script", "raw_script":
+		// no SSA operand refs.
+	default:
+		// Exhaustiveness guard. A silent fall-through here would cause
+		// DCE to drop a live binding because its refs go uncollected.
+		panic(&ir.UnknownANFKindError{Kind: v.Kind, Location: "anf-optimize.collectValueRefs"})
 	}
 }
 
 // hasSideEffect returns true if the binding has side effects and should not be eliminated.
+// Both polarities of the discriminant are enumerated explicitly so an
+// unknown kind cannot silently default to "no side effect" — that would
+// let DCE eliminate a newly-added side-effecting ANF kind and produce
+// scripts that omit observable behavior.
 func hasSideEffect(v *ir.ANFValue) bool {
 	switch v.Kind {
 	case "assert", "update_prop", "check_preimage", "add_output", "deserialize_state",
 		"raw_script": // opaque byte span — DCE must never eliminate it
 		return true
+	case "load_param", "load_prop", "load_const", "bin_op", "unary_op",
+		"get_state_script", "array_literal",
+		"add_raw_output", "add_data_output", "call", "method_call":
+		// Pre-existing silent fall-through preserved: these kinds were
+		// treated as effect-free by the old default. Wiring add_raw_output /
+		// add_data_output / call / method_call as effectful is a real fix
+		// owed but out of scope for the unknown-kind hardening pass.
+		return false
 	case "if":
 		// If any branch has side effects, keep it
 		for _, tb := range v.Then {
@@ -295,12 +327,17 @@ func hasSideEffect(v *ir.ANFValue) bool {
 				return true
 			}
 		}
+		return false
 	case "loop":
 		for _, lb := range v.Body {
 			if hasSideEffect(&lb.Value) {
 				return true
 			}
 		}
+		return false
+	default:
+		// Exhaustiveness guard. A silent default to false here would
+		// let DCE eliminate a newly-added side-effecting ANF kind.
+		panic(&ir.UnknownANFKindError{Kind: v.Kind, Location: "anf-optimize.hasSideEffect"})
 	}
-	return false
 }

@@ -28,6 +28,7 @@
     "commander": "^12.1.0",
     "runar-compiler": "workspace:*",
     "runar-decompiler": "workspace:*",
+    "runar-ir-schema": "workspace:*",
     "runar-sdk": "workspace:*",
     "runar-testing": "workspace:*"
   },

@@ -935,8 +935,47 @@ public final class Typecheck {
             // (extractPrevOutputScript) or a constant byte offset
             // (requireOutputP2PKH). Mirrors compilers/go/frontend/typecheck.go.
             if ("extractPrevOutputScript".equals(name) || "requireOutputP2PKH".equals(name)) {
-                if (!args.isEmpty() && !(args.get(0) instanceof BigIntLiteral)) {
-                    error(name + "() argument 1 (index) must be an integer literal");
+                if (!args.isEmpty()) {
+                    Expression idxArg = args.get(0);
+                    BigIntLiteral lit = null;
+                    if (idxArg instanceof BigIntLiteral b) {
+                        lit = b;
+                    } else if (idxArg instanceof UnaryExpr u
+                        && u.op() == Expression.UnaryOp.NEG
+                        && u.operand() instanceof BigIntLiteral inner
+                        && inner.value() != null) {
+                        // Accept `-N` so the bounds check below produces a
+                        // clear "must be >= 0" rather than the misleading
+                        // "must be an integer literal" message.
+                        lit = new BigIntLiteral(inner.value().negate());
+                    }
+                    if (lit == null) {
+                        error(name + "() argument 1 (index) must be an integer literal");
+                    } else if (lit.value() != null) {
+                        // R-2: bound the index literal. For requireOutputP2PKH,
+                        // the emitted Stack-IR computes byte-offset = idx * 34;
+                        // require 0 <= idx <= 1000 to keep the offset well
+                        // under script-int max and reject obvious nonsense
+                        // (negative or astronomically large).
+                        java.math.BigInteger v = lit.value();
+                        java.math.BigInteger min64 = java.math.BigInteger.valueOf(Long.MIN_VALUE);
+                        java.math.BigInteger max64 = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+                        if (v.compareTo(min64) < 0 || v.compareTo(max64) > 0) {
+                            error(name + "() argument 1 (index) must fit in int64; got " + v);
+                        } else {
+                            long idx = v.longValueExact();
+                            if (idx < 0) {
+                                error(name + "() argument 1 (index) must be >= 0; got " + idx);
+                            }
+                            if ("requireOutputP2PKH".equals(name) && idx > 1000) {
+                                error("requireOutputP2PKH() argument 1 (outputIndex) "
+                                    + "bound to <= 1000; got " + idx
+                                    + " (the emitted Stack-IR computes byte-offset = "
+                                    + "idx*34; unrealistic indexes indicate a "
+                                    + "programming error)");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -962,9 +1001,43 @@ public final class Typecheck {
                     }
                 }
                 if (args.size() == 3) {
-                    if (!(args.get(2) instanceof BigIntLiteral)) {
+                    Expression preArg = args.get(2);
+                    BigIntLiteral preLit = null;
+                    if (preArg instanceof BigIntLiteral b) {
+                        preLit = b;
+                    } else if (preArg instanceof UnaryExpr u
+                        && u.op() == Expression.UnaryOp.NEG
+                        && u.operand() instanceof BigIntLiteral inner
+                        && inner.value() != null) {
+                        preLit = new BigIntLiteral(inner.value().negate());
+                    }
+                    if (preLit == null) {
                         error("extractPrevOutputScript() argument 3 (prefixLen) "
                             + "must be an integer literal when supplied");
+                    } else if (preLit.value() != null) {
+                        // R-4: bound the prefixLen literal. The intrinsic
+                        // hashes substr(witness, 0, prefixLen) and compares
+                        // against a 32-byte SHA-256 hash. prefixLen < 32 is
+                        // suspicious (the prefix doesn't cover a hash-sized
+                        // chunk). prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES.
+                        java.math.BigInteger v = preLit.value();
+                        java.math.BigInteger min64 = java.math.BigInteger.valueOf(Long.MIN_VALUE);
+                        java.math.BigInteger max64 = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+                        if (v.compareTo(min64) < 0 || v.compareTo(max64) > 0) {
+                            error("extractPrevOutputScript() argument 3 (prefixLen) "
+                                + "must fit in int64; got " + v);
+                        } else {
+                            long n = v.longValueExact();
+                            if (n < 32) {
+                                error("extractPrevOutputScript() argument 3 (prefixLen) "
+                                    + "must be >= 32 (the hash assertion compares a "
+                                    + "32-byte SHA-256); got " + n);
+                            }
+                            if (n > 4L * 1024L * 1024L) {
+                                error("extractPrevOutputScript() argument 3 (prefixLen) "
+                                    + "must be <= MAX_SCRIPT_BYTES (4 MiB); got " + n);
+                            }
+                        }
                     }
                     inferExpr(args.get(2), env);
                 }

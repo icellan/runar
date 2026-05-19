@@ -6,6 +6,7 @@
 # transactions, and broadcasting signed transactions to the network.
 
 require_relative 'types'
+require_relative 'errors'
 
 module Runar
   module SDK
@@ -132,11 +133,28 @@ module Runar
       end
 
       def get_utxos(address)
-        Array(@utxos[address]).dup
+        utxos = Array(@utxos[address]).dup
+        # DoS-bound: reject pathological scripts at the provider boundary.
+        utxos.each do |u|
+          next if u.script.nil? || u.script.empty?
+
+          SDK.assert_script_hex_under_limit(
+            u.script, SDK::MAX_SCRIPT_BYTES,
+            "MockProvider.get_utxos(#{address})"
+          )
+        end
+        utxos
       end
 
       def get_contract_utxo(script_hash)
-        @contract_utxos[script_hash]
+        utxo = @contract_utxos[script_hash]
+        if utxo && utxo.script && !utxo.script.empty?
+          SDK.assert_script_hex_under_limit(
+            utxo.script, SDK::MAX_SCRIPT_BYTES,
+            "MockProvider.get_contract_utxo(#{script_hash})"
+          )
+        end
+        utxo
       end
 
       def get_network

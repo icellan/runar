@@ -25,6 +25,9 @@ export type { Signer, SignCallback, WalletSignerOptions } from './signers/index.
 // Contract
 export { RunarContract } from './contract.js';
 
+// Typed SDK errors
+export { ScriptSizeExceededError, assertScriptHexUnderLimit } from './errors.js';
+
 // Transaction building
 export { buildDeployTransaction, selectUtxos, estimateDeployFee } from './deployment.js';
 export { buildCallTransaction, estimateCallFee, estimateFeeForArtifact } from './calling.js';

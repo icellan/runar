@@ -45,8 +45,8 @@ fn canonical_append(out: &mut String, value: &Value) -> Result<(), String> {
             // serde_json::Number preserves int-vs-float distinction. For
             // integers in the i64/u64 range we use the plain digit form
             // (which matches ES Number.prototype.toString for those values).
-            // For floats we use serde_json's default formatter which uses
-            // shortest-roundtrip — close to ES for typical values.
+            // For floats we run the ECMA-262 §6.1.6.1.13 Number::toString
+            // algorithm so output matches the TS reference byte-for-byte.
             if let Some(i) = n.as_i64() {
                 let _ = write!(out, "{}", i);
             } else if let Some(u) = n.as_u64() {
@@ -55,13 +55,7 @@ fn canonical_append(out: &mut String, value: &Value) -> Result<(), String> {
                 if !f.is_finite() {
                     return Err("canonical JSON: non-finite number".into());
                 }
-                if f == 0.0 {
-                    out.push('0');
-                } else if f == (f as i64) as f64 && (-9_007_199_254_740_992.0..=9_007_199_254_740_992.0).contains(&f) {
-                    let _ = write!(out, "{}", f as i64);
-                } else {
-                    let _ = write!(out, "{}", f);
-                }
+                out.push_str(&format_ecma262_double(f));
             } else {
                 return Err("canonical JSON: number not representable".into());
             }
@@ -103,6 +97,97 @@ fn canonical_append(out: &mut String, value: &Value) -> Result<(), String> {
             out.push('}');
             Ok(())
         }
+    }
+}
+
+/// Format a finite double per ECMA-262 §6.1.6.1.13 Number::toString. Output
+/// is byte-identical to JS `JSON.stringify(x)` / `String(x)` for any finite
+/// `x` (including NaN/Inf, which the caller is responsible for filtering).
+///
+/// Algorithm (paraphrased from the spec):
+///   1. If x == 0, return "0".
+///   2. If x < 0, return "-" + format(-x).
+///   3. Otherwise pick the shortest digit string n (s digits) and integer k
+///      s.t. n * 10^(k - s) == x and the float round-trips.
+///   4. If k <= 21 and k >= s, output digits + (k - s) zeros.
+///   5. If 0 < k <= 21, output digits[..k] + "." + digits[k..].
+///   6. If -6 < k <= 0, output "0." + ((-k) zeros) + digits.
+///   7. Else (single-digit case) output digits + "e" + sign + |k - 1|, or
+///      digits[0] + "." + digits[1..] + "e" + sign + |k - 1|.
+fn format_ecma262_double(x: f64) -> String {
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    if x.is_sign_negative() {
+        return format!("-{}", format_ecma262_double(-x));
+    }
+    // Rust's default `{}` for f64 prints the shortest round-trip decimal
+    // string (Ryu-equivalent). For values like 1e21 it emits "1e21";
+    // for 1.5e10 it emits "15000000000". We re-derive (digits, k) from
+    // the formatted string and re-emit per the ECMA rules, so the output
+    // is independent of Rust's chosen surface form.
+    let s = format!("{}", x);
+
+    // Split into mantissa and explicit exponent (Rust's debug shape).
+    let (mantissa, exp_part): (&str, i32) = match s.find(['e', 'E']) {
+        Some(i) => {
+            let (m, e) = s.split_at(i);
+            let e_val: i32 = e[1..].parse().unwrap_or(0);
+            (m, e_val)
+        }
+        None => (s.as_str(), 0),
+    };
+
+    // Split mantissa into integer and fractional parts.
+    let (int_part, frac_part) = match mantissa.find('.') {
+        Some(i) => (&mantissa[..i], &mantissa[i + 1..]),
+        None => (mantissa, ""),
+    };
+
+    // Collect significant digits (skip leading zeros for normalization),
+    // track how many leading zeros there were in the fractional part so we
+    // can compute k correctly.
+    let raw_digits: String = int_part.chars().chain(frac_part.chars()).collect();
+    let leading_zeros: usize = raw_digits.bytes().take_while(|b| *b == b'0').count();
+    let trimmed_leading: &str = &raw_digits[leading_zeros..];
+    // Strip trailing zeros so we have only the significant digits.
+    let mut digits: String = trimmed_leading.trim_end_matches('0').to_string();
+    if digits.is_empty() {
+        // The value was 0 (caught above) or all-zeros after normalization —
+        // safe to emit "0".
+        return "0".to_string();
+    }
+
+    // Compute k: position of decimal relative to the digit string.
+    //   - int_part.len() is the number of digits before the decimal in the
+    //     surface form.
+    //   - leading_zeros are absorbed (they shift k down).
+    //   - exp_part adjusts k by its value.
+    let int_digit_count = int_part.len() as i32;
+    let k: i32 = int_digit_count - (leading_zeros as i32) + exp_part;
+    let s_len: i32 = digits.len() as i32;
+
+    // ECMA-262 §6.1.6.1.13.
+    if k >= s_len && k <= 21 {
+        digits.push_str(&"0".repeat((k - s_len) as usize));
+        return digits;
+    }
+    if k > 0 && k <= 21 {
+        let (a, b) = digits.split_at(k as usize);
+        return format!("{}.{}", a, b);
+    }
+    if k > -6 && k <= 0 {
+        return format!("0.{}{}", "0".repeat((-k) as usize), digits);
+    }
+    // Scientific notation.
+    let exp = k - 1;
+    let exp_sign = if exp >= 0 { '+' } else { '-' };
+    let exp_abs = exp.unsigned_abs();
+    if s_len == 1 {
+        format!("{}e{}{}", digits, exp_sign, exp_abs)
+    } else {
+        let (a, b) = digits.split_at(1);
+        format!("{}.{}e{}{}", a, b, exp_sign, exp_abs)
     }
 }
 

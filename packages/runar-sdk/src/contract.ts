@@ -3,6 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
+import { InputLimits } from 'runar-ir-schema';
+import { assertScriptHexUnderLimit, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
@@ -59,6 +61,16 @@ export class RunarContract {
   getUtxo(): UTXO | null { return this.currentUtxo; }
   private _provider: Provider | null = null;
   private _signer: Signer | null = null;
+  /**
+   * Witness values for intent-covenant intrinsic auto-injected params.
+   * `_prevOutScript_<i>` values are stored per-input-index in `_prevOutScripts`;
+   * `_serialisedOutputs` is stored in `_serialisedOutputs`. Both are hex strings
+   * (normalized in the setters). Read by the call-builder when assembling the
+   * unlocking script for methods that use `extractPrevOutputScript` /
+   * `requireOutputP2PKH`.
+   */
+  private _prevOutScripts: Map<number, string> = new Map();
+  private _serialisedOutputs: string | null = null;
 
   constructor(artifact: RunarArtifact, constructorArgs: unknown[]) {
     this.artifact = artifact;
@@ -228,6 +240,13 @@ export class RunarContract {
     const deploySatoshis = options.satoshis ?? 1;
     const lockingScript = this.getLockingScript();
 
+    // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+    assertScriptHexUnderLimit(
+      lockingScript,
+      InputLimits.MAX_SCRIPT_BYTES,
+      `${this.artifact.contractName}.deploy`,
+    );
+
     // Fetch fee rate and funding UTXOs
     const feeRate = await provider.getFeeRate();
     const allUtxos = await provider.getUtxos(address);
@@ -309,6 +328,13 @@ export class RunarContract {
 
     const lockingScript = this.getLockingScript();
     const satoshis = options.satoshis ?? 1;
+
+    // DoS-bound: reject pathological scripts BEFORE involving the wallet.
+    assertScriptHexUnderLimit(
+      lockingScript,
+      InputLimits.MAX_SCRIPT_BYTES,
+      `${this.artifact.contractName}.deployWithWallet`,
+    );
 
     const result = await wallet.createAction({
       description: options.description ?? 'Runar contract deployment',
@@ -484,15 +510,22 @@ export class RunarContract {
       this.artifact.stateFields.length > 0;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
+    // Drop auto-injected continuation params AND intent-intrinsic witness
+    // params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
+    // user-facing arg count check. Witness values come from
+    // setPrevOutScript / setSerialisedOutputs, not from the args array.
+    const isAutoInjectedWitnessParam = (name: string): boolean =>
+      name.startsWith('_prevOutScript_') || name === '_serialisedOutputs';
     const userParams = isStateful
       ? method.params.filter(
           (p) =>
             p.type !== 'SigHashPreimage' &&
             p.name !== '_changePKH' &&
             p.name !== '_changeAmount' &&
-            p.name !== '_newAmount',
+            p.name !== '_newAmount' &&
+            !isAutoInjectedWitnessParam(p.name),
         )
-      : method.params;
+      : method.params.filter((p) => !isAutoInjectedWitnessParam(p.name));
 
     if (userParams.length !== args.length) {
       throw new Error(
@@ -505,6 +538,15 @@ export class RunarContract {
         'RunarContract.prepareCall: contract is not deployed. Call deploy() or fromTxId() first.',
       );
     }
+
+    // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+    // Guards the current locking script (existing UTXO) AND the new locking
+    // script if this is a stateful continuation, since both cross the wire.
+    assertScriptHexUnderLimit(
+      this.currentUtxo.script,
+      InputLimits.MAX_SCRIPT_BYTES,
+      `${this.artifact.contractName}.call(${methodName})`,
+    );
 
     const contractUtxo: UTXO = { ...this.currentUtxo };
     const address = await signer.getAddress();
@@ -559,6 +601,12 @@ export class RunarContract {
       changePKHHex = Utils.toHex(hash160Bytes);
     }
 
+    // Pre-resolve intent-intrinsic witness hex (throws WitnessValueMissingError
+    // if a `_prevOutScript_<i>` or `_serialisedOutputs` param wasn't set on the
+    // contract). Resolving up-front means the error is raised BEFORE any
+    // signing / broadcast work, mirroring the deploy/call script-size guard.
+    const witnessHex = this.buildIntentWitnessHex(method);
+
     // -------------------------------------------------------------------
     // Terminal method path
     // -------------------------------------------------------------------
@@ -572,6 +620,11 @@ export class RunarContract {
       } else {
         termUnlockScript = this.buildUnlockingScript(methodName, resolvedArgs);
       }
+      // Witness values are appended to the size-estimation script too so
+      // the BIP-143 preimage sees the same input weight that the final
+      // stateful unlock will produce (the real final unlock is built by
+      // `buildUnlock` below which inserts witnessHex in the correct ABI slot).
+      termUnlockScript += witnessHex;
 
       const buildTerminalTx = (unlock: string): BsvTransaction => {
         const ttx = new BsvTransaction();
@@ -610,7 +663,7 @@ export class RunarContract {
           if (methodNeedsNewAmount) {
             newAmountHex = encodeArg(BigInt(contractUtxo.satoshis));
           }
-          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + methodSelectorHex;
+          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
           return { unlock, opSig, preimage };
         };
 
@@ -686,6 +739,7 @@ export class RunarContract {
         _newSatoshis: 0,
         _hasMultiOutput: false,
         _contractOutputs: [],
+        _intentWitnessHex: witnessHex,
       };
     }
 
@@ -693,13 +747,17 @@ export class RunarContract {
     // Non-terminal path
     // -------------------------------------------------------------------
 
-    // Build the initial unlocking script (with placeholders)
+    // Build the initial unlocking script (with placeholders). Intent-witness
+    // hex is suffixed so size estimation (and any downstream
+    // assertScriptHexUnderLimit / fee math) accounts for the witness pushes.
+    // The real ABI-correct unlock is rebuilt by buildStatefulUnlock below for
+    // stateful methods.
     let unlockingScript: string;
     if (needsOpPushTx) {
       unlockingScript = encodePushData('00'.repeat(72)) +
-        this.buildUnlockingScript(methodName, resolvedArgs);
+        this.buildUnlockingScript(methodName, resolvedArgs) + witnessHex;
     } else {
-      unlockingScript = this.buildUnlockingScript(methodName, resolvedArgs);
+      unlockingScript = this.buildUnlockingScript(methodName, resolvedArgs) + witnessHex;
     }
 
     let newLockingScript: string | undefined;
@@ -762,6 +820,12 @@ export class RunarContract {
         this._state = { ...this._state, ...regrouped };
       }
       newLockingScript = this.getLockingScript();
+      // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+      assertScriptHexUnderLimit(
+        newLockingScript,
+        InputLimits.MAX_SCRIPT_BYTES,
+        `${this.artifact.contractName}.call(${methodName}).continuation`,
+      );
     }
 
     const feeRate = await provider.getFeeRate();
@@ -791,10 +855,11 @@ export class RunarContract {
         })
       : undefined;
 
-    // Build placeholder unlocking scripts for merge inputs
+    // Build placeholder unlocking scripts for merge inputs (witnessHex
+    // suffixed for sizing — buildStatefulUnlock builds the real scripts).
     const extraUnlockPlaceholders = extraContractUtxos.map((_, i) => {
       const argsForPlaceholder = resolvedPerInputArgs?.[i] ?? resolvedArgs;
-      return encodePushData('00'.repeat(72)) + this.buildUnlockingScript(methodName, argsForPlaceholder);
+      return encodePushData('00'.repeat(72)) + this.buildUnlockingScript(methodName, argsForPlaceholder) + witnessHex;
     });
 
     let { tx, inputCount, changeAmount } = buildCallTransaction(
@@ -878,7 +943,7 @@ export class RunarContract {
         if (methodNeedsNewAmount) {
           newAmountHex = encodeArg(BigInt(newSatoshis ?? this.currentUtxo!.satoshis));
         }
-        const unlock = this.buildStatefulPrefix(opSig, methodNeedsChange) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + methodSelectorHex;
+        const unlock = this.buildStatefulPrefix(opSig, methodNeedsChange) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + witnessHex + methodSelectorHex;
         return { unlock, opSig, preimage };
       };
 
@@ -1022,6 +1087,7 @@ export class RunarContract {
       _newSatoshis: newSatoshis ?? 0,
       _hasMultiOutput: !!hasMultiOutput,
       _contractOutputs: contractOutputs ?? [],
+      _intentWitnessHex: witnessHex,
     };
   }
 
@@ -1066,6 +1132,7 @@ export class RunarContract {
         changeHex +
         newAmountHex +
         encodePushData(prepared.preimage) +
+        prepared._intentWitnessHex +
         prepared._methodSelectorHex;
     } else if (prepared._needsOpPushTx) {
       // Stateless with SigHashPreimage: put preimage into resolvedArgs
@@ -1134,6 +1201,72 @@ export class RunarContract {
   /** Update state values directly (for stateful contracts). */
   setState(newState: Record<string, unknown>): void {
     this._state = { ...this._state, ...newState };
+  }
+
+  // -------------------------------------------------------------------------
+  // Intent-intrinsic witness values
+  // -------------------------------------------------------------------------
+
+  /**
+   * Supply the prev-output locking-script witness for input `inputIndex`.
+   * Required for methods that call `extractPrevOutputScript(inputIndex)`,
+   * which the compiler lowers into an auto-injected
+   * `_prevOutScript_<inputIndex>` ABI param.
+   *
+   * @param inputIndex the literal input index passed to extractPrevOutputScript
+   * @param bytes      hex string (with or without 0x prefix) or raw bytes
+   */
+  setPrevOutScript(inputIndex: number, bytes: string | Uint8Array): void {
+    this._prevOutScripts.set(inputIndex, normalizeWitnessBytes(bytes));
+  }
+
+  /**
+   * Supply the serialised-outputs witness for the current call.
+   * Required for methods that call `requireOutputP2PKH(...)`, which the
+   * compiler lowers into an auto-injected `_serialisedOutputs` ABI param.
+   *
+   * @param bytes hex string (with or without 0x prefix) or raw bytes
+   */
+  setSerialisedOutputs(bytes: string | Uint8Array): void {
+    this._serialisedOutputs = normalizeWitnessBytes(bytes);
+  }
+
+  /**
+   * Build the trailing witness-hex for the auto-injected intent-intrinsic
+   * params of a method, in ABI order (`_prevOutScript_*` first, then
+   * `_serialisedOutputs`). Each value is pushed via PUSHDATA so that the
+   * on-chain method body's `load_param` lifts the exact bytes the caller set.
+   *
+   * Throws {@link WitnessValueMissingError} for any auto-injected param the
+   * caller hasn't supplied via setPrevOutScript / setSerialisedOutputs.
+   */
+  private buildIntentWitnessHex(method: ABIMethod): string {
+    let hex = '';
+    for (const p of method.params) {
+      if (p.name.startsWith('_prevOutScript_')) {
+        const idxStr = p.name.slice('_prevOutScript_'.length);
+        const idx = Number(idxStr);
+        const val = this._prevOutScripts.get(idx);
+        if (val === undefined) {
+          throw new WitnessValueMissingError({
+            paramName: p.name,
+            methodName: method.name,
+            contractName: this.artifact.contractName,
+          });
+        }
+        hex += encodePushData(val);
+      } else if (p.name === '_serialisedOutputs') {
+        if (this._serialisedOutputs === null) {
+          throw new WitnessValueMissingError({
+            paramName: p.name,
+            methodName: method.name,
+            contractName: this.artifact.contractName,
+          });
+        }
+        hex += encodePushData(this._serialisedOutputs);
+      }
+    }
+    return hex;
   }
 
   // -------------------------------------------------------------------------
@@ -1817,6 +1950,30 @@ function encodeScriptNumber(n: bigint): string {
 
   const hex = bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
   return encodePushData(hex);
+}
+
+/**
+ * Normalize a witness-value input (hex string or Uint8Array) into a
+ * lowercase hex string suitable for `encodePushData`. Hex inputs may
+ * optionally carry a `0x` prefix and any casing.
+ */
+function normalizeWitnessBytes(value: string | Uint8Array): string {
+  if (typeof value === 'string') {
+    const h = value.startsWith('0x') || value.startsWith('0X') ? value.slice(2) : value;
+    if (h.length % 2 !== 0) {
+      throw new Error(`witness value: hex string must have even length (got ${h.length})`);
+    }
+    if (!/^[0-9a-fA-F]*$/.test(h)) {
+      throw new Error('witness value: invalid hex characters');
+    }
+    return h.toLowerCase();
+  }
+  // Uint8Array
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    out += value[i]!.toString(16).padStart(2, '0');
+  }
+  return out;
 }
 
 function encodePushData(dataHex: string): string {

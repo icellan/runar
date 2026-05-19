@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use bsv::transaction::Transaction as BsvTransaction;
 use super::types::{TransactionData, Utxo};
+use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 #[cfg(test)]
 use super::types::TxOutput;
 
@@ -133,11 +134,29 @@ impl Provider for MockProvider {
     }
 
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String> {
-        Ok(self.utxos.get(address).cloned().unwrap_or_default())
+        let utxos = self.utxos.get(address).cloned().unwrap_or_default();
+        // DoS-bound: reject pathological scripts at the provider boundary.
+        for u in &utxos {
+            if u.script.is_empty() { continue; }
+            assert_script_hex_under_limit(
+                &u.script, MAX_SCRIPT_BYTES,
+                &format!("MockProvider.get_utxos({})", address),
+            )?;
+        }
+        Ok(utxos)
     }
 
     fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String> {
-        Ok(self.contract_utxos.get(script_hash).cloned())
+        let utxo = self.contract_utxos.get(script_hash).cloned();
+        if let Some(ref u) = utxo {
+            if !u.script.is_empty() {
+                assert_script_hex_under_limit(
+                    &u.script, MAX_SCRIPT_BYTES,
+                    &format!("MockProvider.get_contract_utxo({})", script_hash),
+                )?;
+            }
+        }
+        Ok(utxo)
     }
 
     fn get_network(&self) -> &str {

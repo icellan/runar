@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
@@ -29,6 +30,15 @@ type RunarContract struct {
 	currentUtxo     *UTXO
 	provider        Provider
 	signer          Signer
+	// Witness values for intent-covenant intrinsic auto-injected params.
+	// `_prevOutScript_<i>` values are stored per-input-index in prevOutScripts;
+	// `_serialisedOutputs` is stored in serialisedOutputs. Both are lowercase
+	// hex strings (normalized in the setters). Read by the call-builder when
+	// assembling the unlocking script for methods that use extractPrevOutputScript
+	// / requireOutputP2PKH.
+	prevOutScripts        map[int]string
+	serialisedOutputs     string
+	serialisedOutputsSet  bool
 }
 
 // NewRunarContract creates a new contract instance from a compiled artifact
@@ -62,6 +72,7 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 		Artifact:        artifact,
 		constructorArgs: flatArgs,
 		state:           make(map[string]interface{}),
+		prevOutScripts:  make(map[int]string),
 	}
 
 	// Initialize state from constructor args for stateful contracts.
@@ -132,6 +143,108 @@ func (c *RunarContract) Connect(provider Provider, signer Signer) {
 	c.signer = signer
 }
 
+// SetPrevOutScript supplies the prev-output locking-script witness for input
+// `inputIndex`. Required for methods that call `extractPrevOutputScript(inputIndex)`,
+// which the compiler lowers into an auto-injected `_prevOutScript_<inputIndex>`
+// ABI param. The bytes are passed as a hex string (with or without 0x prefix).
+func (c *RunarContract) SetPrevOutScript(inputIndex int, bytesHex string) error {
+	norm, err := normalizeWitnessBytes(bytesHex)
+	if err != nil {
+		return err
+	}
+	if c.prevOutScripts == nil {
+		c.prevOutScripts = make(map[int]string)
+	}
+	c.prevOutScripts[inputIndex] = norm
+	return nil
+}
+
+// SetPrevOutScriptBytes is the []byte-input convenience overload of
+// SetPrevOutScript.
+func (c *RunarContract) SetPrevOutScriptBytes(inputIndex int, b []byte) {
+	if c.prevOutScripts == nil {
+		c.prevOutScripts = make(map[int]string)
+	}
+	c.prevOutScripts[inputIndex] = hex.EncodeToString(b)
+}
+
+// SetSerialisedOutputs supplies the serialised-outputs witness for the current
+// call. Required for methods that call `requireOutputP2PKH(...)`, which the
+// compiler lowers into an auto-injected `_serialisedOutputs` ABI param.
+func (c *RunarContract) SetSerialisedOutputs(bytesHex string) error {
+	norm, err := normalizeWitnessBytes(bytesHex)
+	if err != nil {
+		return err
+	}
+	c.serialisedOutputs = norm
+	c.serialisedOutputsSet = true
+	return nil
+}
+
+// SetSerialisedOutputsBytes is the []byte-input convenience overload of
+// SetSerialisedOutputs.
+func (c *RunarContract) SetSerialisedOutputsBytes(b []byte) {
+	c.serialisedOutputs = hex.EncodeToString(b)
+	c.serialisedOutputsSet = true
+}
+
+// buildIntentWitnessHex builds the trailing witness-hex for the auto-injected
+// intent-intrinsic params of a method, in ABI order (`_prevOutScript_*` first,
+// then `_serialisedOutputs`). Each value is pushed via PUSHDATA so that the
+// on-chain method body's `load_param` lifts the exact bytes the caller set.
+//
+// Returns WitnessValueMissingError for any auto-injected param the caller
+// hasn't supplied via SetPrevOutScript / SetSerialisedOutputs.
+func (c *RunarContract) buildIntentWitnessHex(method *ABIMethod) (string, error) {
+	hexOut := ""
+	for _, p := range method.Params {
+		if strings.HasPrefix(p.Name, "_prevOutScript_") {
+			idxStr := strings.TrimPrefix(p.Name, "_prevOutScript_")
+			idx, convErr := strconv.Atoi(idxStr)
+			if convErr != nil {
+				return "", fmt.Errorf("malformed auto-injected param name '%s'", p.Name)
+			}
+			val, ok := c.prevOutScripts[idx]
+			if !ok {
+				return "", &WitnessValueMissingError{
+					ParamName:    p.Name,
+					MethodName:   method.Name,
+					ContractName: c.Artifact.ContractName,
+				}
+			}
+			hexOut += EncodePushData(val)
+		} else if p.Name == "_serialisedOutputs" {
+			if !c.serialisedOutputsSet {
+				return "", &WitnessValueMissingError{
+					ParamName:    p.Name,
+					MethodName:   method.Name,
+					ContractName: c.Artifact.ContractName,
+				}
+			}
+			hexOut += EncodePushData(c.serialisedOutputs)
+		}
+	}
+	return hexOut, nil
+}
+
+// normalizeWitnessBytes normalizes a hex string (with or without 0x prefix,
+// any casing) into a lowercase hex string suitable for EncodePushData.
+func normalizeWitnessBytes(s string) (string, error) {
+	h := s
+	if len(h) >= 2 && (h[:2] == "0x" || h[:2] == "0X") {
+		h = h[2:]
+	}
+	if len(h)%2 != 0 {
+		return "", fmt.Errorf("witness value: hex string must have even length (got %d)", len(h))
+	}
+	for _, c := range h {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return "", fmt.Errorf("witness value: invalid hex characters")
+		}
+	}
+	return strings.ToLower(h), nil
+}
+
 // WithInscription attaches a 1sat ordinals inscription to this contract. The
 // inscription envelope is injected into the locking script between the compiled
 // code and the state section (if any). Once deployed, the inscription is
@@ -172,6 +285,14 @@ func (c *RunarContract) Deploy(
 		changeAddress = address
 	}
 	lockingScript := c.GetLockingScript()
+
+	// DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+	if guardErr := assertScriptHexUnderLimit(
+		lockingScript, MaxScriptBytes,
+		fmt.Sprintf("%s.Deploy", c.Artifact.ContractName),
+	); guardErr != nil {
+		return "", nil, guardErr
+	}
 
 	// Fetch fee rate and funding UTXOs
 	feeRate, err := provider.GetFeeRate()
@@ -336,15 +457,26 @@ func (c *RunarContract) PrepareCall(
 			methodNeedsNewAmount = true
 		}
 	}
+	// Drop auto-injected continuation params AND intent-intrinsic witness
+	// params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
+	// user-facing arg count check. Witness values come from
+	// SetPrevOutScript / SetSerialisedOutputs, not from the args slice.
+	isAutoInjectedWitnessParam := func(name string) bool {
+		return strings.HasPrefix(name, "_prevOutScript_") || name == "_serialisedOutputs"
+	}
 	var userParams []ABIParam
 	if isStateful {
 		for _, p := range method.Params {
-			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" && p.Name != "_newAmount" {
+			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" && p.Name != "_newAmount" && !isAutoInjectedWitnessParam(p.Name) {
 				userParams = append(userParams, p)
 			}
 		}
 	} else {
-		userParams = method.Params
+		for _, p := range method.Params {
+			if !isAutoInjectedWitnessParam(p.Name) {
+				userParams = append(userParams, p)
+			}
+		}
 	}
 	if len(userParams) != len(args) {
 		return nil, fmt.Errorf(
@@ -357,6 +489,14 @@ func (c *RunarContract) PrepareCall(
 		return nil, fmt.Errorf(
 			"RunarContract.PrepareCall: contract is not deployed. Call Deploy() or FromTxId() first.",
 		)
+	}
+
+	// DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+	if guardErr := assertScriptHexUnderLimit(
+		c.currentUtxo.Script, MaxScriptBytes,
+		fmt.Sprintf("%s.Call(%s)", c.Artifact.ContractName, methodName),
+	); guardErr != nil {
+		return nil, guardErr
 	}
 
 	contractUtxo := *c.currentUtxo
@@ -448,6 +588,15 @@ func (c *RunarContract) PrepareCall(
 		changePKHHex = hex.EncodeToString(r.Sum(nil))
 	}
 
+	// Pre-resolve intent-intrinsic witness hex (returns WitnessValueMissingError
+	// if a `_prevOutScript_<i>` or `_serialisedOutputs` param wasn't set on the
+	// contract). Resolving up-front means the error is raised BEFORE any
+	// signing / broadcast work, mirroring the script-size guard above.
+	witnessHex, witErr := c.buildIntentWitnessHex(method)
+	if witErr != nil {
+		return nil, witErr
+	}
+
 	// -------------------------------------------------------------------
 	// Terminal method path
 	// -------------------------------------------------------------------
@@ -456,7 +605,7 @@ func (c *RunarContract) PrepareCall(
 			methodName, resolvedArgs, signer, options,
 			isStateful, needsOpPushTx, methodNeedsChange,
 			sigIndices, prevoutsIndices, preimageIndex,
-			methodSelectorHex, changePKHHex, contractUtxo,
+			methodSelectorHex, changePKHHex, contractUtxo, witnessHex,
 		)
 	}
 
@@ -521,6 +670,13 @@ func (c *RunarContract) PrepareCall(
 			}
 		}
 		newLockingScript = c.GetLockingScript()
+		// DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+		if guardErr := assertScriptHexUnderLimit(
+			newLockingScript, MaxScriptBytes,
+			fmt.Sprintf("%s.Call(%s).continuation", c.Artifact.ContractName, methodName),
+		); guardErr != nil {
+			return nil, guardErr
+		}
 	}
 
 	// Fetch fee rate and funding UTXOs
@@ -540,13 +696,16 @@ func (c *RunarContract) PrepareCall(
 		}
 	}
 
-	// Initial unlocking script (with placeholders)
+	// Initial unlocking script (with placeholders). Intent-witness hex is
+	// suffixed so size estimation accounts for the witness pushes; the real
+	// ABI-correct unlock is rebuilt by buildStatefulUnlock below for stateful
+	// methods.
 	var unlockingScript string
 	if needsOpPushTx || isStateful {
 		unlockingScript = c.buildStatefulPrefix(strings.Repeat("00", 72), methodNeedsChange) +
-			c.BuildUnlockingScript(methodName, resolvedArgs)
+			c.BuildUnlockingScript(methodName, resolvedArgs) + witnessHex
 	} else {
-		unlockingScript = c.BuildUnlockingScript(methodName, resolvedArgs)
+		unlockingScript = c.BuildUnlockingScript(methodName, resolvedArgs) + witnessHex
 	}
 
 	// Resolve per-input args for additional contract inputs
@@ -586,10 +745,11 @@ func (c *RunarContract) PrepareCall(
 	}
 
 	// Build placeholder unlocking scripts for additional contract inputs
+	// (witnessHex suffixed for sizing — buildStatefulUnlock builds the real scripts).
 	extraUnlockPlaceholders := make([]string, len(extraContractUtxos))
 	for i := range extraContractUtxos {
 		extraUnlockPlaceholders[i] = c.buildStatefulPrefix(strings.Repeat("00", 72), methodNeedsChange) +
-			c.BuildUnlockingScript(methodName, extraResolvedArgs[i])
+			c.BuildUnlockingScript(methodName, extraResolvedArgs[i]) + witnessHex
 	}
 
 	// Build the BuildCallOptions
@@ -716,6 +876,7 @@ func (c *RunarContract) PrepareCall(
 				changeHex +
 				newAmountHex +
 				EncodePushData(preimageHexStr) +
+				witnessHex +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
 		}
@@ -883,6 +1044,7 @@ func (c *RunarContract) PrepareCall(
 		hasMultiOutput:    hasMultiOutput,
 		contractOutputs:   contractOutputs,
 		groth16WAWitnessHex: groth16WAWitnessHex,
+		intentWitnessHex:  witnessHex,
 		codeSepIdx:        codeSepIdx,
 	}, nil
 }
@@ -938,6 +1100,7 @@ func (c *RunarContract) FinalizeCall(
 			changeHex +
 			newAmountHex +
 			EncodePushData(prepared.Preimage) +
+			prepared.intentWitnessHex +
 			prepared.methodSelectorHex
 	} else if prepared.needsOpPushTx {
 		if prepared.preimageIndex >= 0 {
@@ -1482,11 +1645,13 @@ func (c *RunarContract) prepareCallTerminal(
 	methodSelectorHex string,
 	changePKHHex string,
 	contractUtxo UTXO,
+	witnessHex string,
 ) (*PreparedCall, error) {
 	termOutputs := options.TerminalOutputs
 	fundingUtxos := options.FundingUtxos
 
-	// Build placeholder unlocking script
+	// Build placeholder unlocking script (witnessHex suffixed for sizing;
+	// the real ABI-correct unlock is built by buildUnlock below for stateful).
 	var termUnlockScript string
 	if needsOpPushTx {
 		termUnlockScript = c.buildStatefulPrefix(strings.Repeat("00", 72), false) +
@@ -1494,6 +1659,7 @@ func (c *RunarContract) prepareCallTerminal(
 	} else {
 		termUnlockScript = c.BuildUnlockingScript(methodName, resolvedArgs)
 	}
+	termUnlockScript += witnessHex
 
 	// Build terminal transaction using go-sdk Transaction
 	buildTerminalTx := func(unlock string) *transaction.Transaction {
@@ -1552,6 +1718,7 @@ func (c *RunarContract) prepareCallTerminal(
 				argsHex +
 				changeHex +
 				EncodePushData(preimageHexStr) +
+				witnessHex +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
 		}
@@ -1654,6 +1821,7 @@ func (c *RunarContract) prepareCallTerminal(
 		newSatoshis:       0,
 		hasMultiOutput:    false,
 		contractOutputs:   nil,
+		intentWitnessHex:  witnessHex,
 		codeSepIdx:        termCodeSepIdx,
 	}, nil
 }

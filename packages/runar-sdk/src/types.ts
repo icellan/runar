@@ -84,6 +84,13 @@ export interface PreparedCall {
   /** @internal */ _newSatoshis: number;
   /** @internal */ _hasMultiOutput: boolean;
   /** @internal */ _contractOutputs: Array<{ script: string; satoshis: number }>;
+  /**
+   * @internal
+   * Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+   * `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
+   * Empty when the method has no auto-injected intent params.
+   */
+  _intentWitnessHex: string;
 }
 
 export interface CallOptions {

@@ -1153,13 +1153,46 @@ split the addDataOutput call into a separate method",
         // (extractPrevOutputScript) or a constant byte offset
         // (requireOutputP2PKH).
         if func_name == "extractPrevOutputScript" || func_name == "requireOutputP2PKH" {
-            if !args.is_empty()
-                && !matches!(&args[0], Expression::BigIntLiteral { .. })
-            {
-                self.add_error(format!(
-                    "{}() argument 1 (index) must be an integer literal",
-                    func_name
-                ));
+            if !args.is_empty() {
+                // Accept `-N` (UnaryExpr "-" over BigIntLiteral) so the
+                // bounds check below produces a clear "must be >= 0"
+                // rather than the misleading "must be an integer literal"
+                // message.
+                let idx_lit: Option<i128> = match &args[0] {
+                    Expression::BigIntLiteral { value } => Some(*value),
+                    Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
+                        if let Expression::BigIntLiteral { value } = operand.as_ref() {
+                            Some(-*value)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if idx_lit.is_none() {
+                    self.add_error(format!(
+                        "{}() argument 1 (index) must be an integer literal",
+                        func_name
+                    ));
+                } else if let Some(idx) = idx_lit {
+                    // R-2: bound the index literal. For requireOutputP2PKH,
+                    // the emitted Stack-IR computes byte-offset = idx * 34;
+                    // require 0 <= idx <= 1000 to keep the offset well
+                    // under script-int max and to reject obvious nonsense
+                    // (e.g. negative or astronomically large).
+                    if idx < 0 {
+                        self.add_error(format!(
+                            "{}() argument 1 (index) must be >= 0; got {}",
+                            func_name, idx
+                        ));
+                    }
+                    if func_name == "requireOutputP2PKH" && idx > 1000 {
+                        self.add_error(format!(
+                            "requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got {} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)",
+                            idx
+                        ));
+                    }
+                }
             }
         }
 
@@ -1190,7 +1223,28 @@ split the addDataOutput call into a separate method",
                 }
             }
             if args.len() == 3 {
-                if !matches!(&args[2], Expression::BigIntLiteral { .. }) {
+                if let Expression::BigIntLiteral { value } = &args[2] {
+                    // R-4: bound the prefixLen literal. The intrinsic
+                    // hashes substr(witness, 0, prefixLen) and compares
+                    // against a 32-byte SHA-256 hash. prefixLen < 32 is
+                    // suspicious (the prefix bytes don't even cover a
+                    // hash-sized chunk). prefixLen > 4 MiB exceeds
+                    // MAX_SCRIPT_BYTES — wouldn't fit in a legal Bitcoin
+                    // Script anyway.
+                    let n = *value;
+                    if n < 32 {
+                        self.add_error(format!(
+                            "extractPrevOutputScript() argument 3 (prefixLen) must be >= 32 (the hash assertion compares a 32-byte SHA-256); got {}",
+                            n
+                        ));
+                    }
+                    if n > 4 * 1024 * 1024 {
+                        self.add_error(format!(
+                            "extractPrevOutputScript() argument 3 (prefixLen) must be <= MAX_SCRIPT_BYTES (4 MiB); got {}",
+                            n
+                        ));
+                    }
+                } else {
                     self.add_error(
                         "extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied",
                     );

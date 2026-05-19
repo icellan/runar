@@ -85,6 +85,14 @@ public final class RPCProvider implements Provider {
             String script = u.get("scriptPubKey") == null ? "" : Json.asString(u.get("scriptPubKey"));
             utxos.add(new UTXO(txid, vout, sats, script == null ? "" : script));
         }
+        // DoS-bound: reject pathological scripts at the provider boundary.
+        for (UTXO u : utxos) {
+            if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                "RPCProvider.listUtxos(" + address + ")"
+            );
+        }
         return utxos;
     }
 
@@ -134,6 +142,12 @@ public final class RPCProvider implements Provider {
         if (out.get("scriptPubKey") instanceof Map<?, ?> sp) {
             Object hex = ((Map<?, ?>) sp).get("hex");
             if (hex instanceof String s) script = s;
+        }
+        if (!script.isEmpty()) {
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                script, InputLimits.MAX_SCRIPT_BYTES,
+                "RPCProvider.getUtxo(" + txid + ":" + vout + ")"
+            );
         }
         return new UTXO(txid, vout, sats, script);
     }

@@ -16,6 +16,8 @@ from urllib.request import Request, urlopen
 
 from runar.sdk.provider import Provider
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
+from runar.sdk.errors import assert_script_hex_under_limit
+from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 
 
 class GorillaPoolProvider(Provider):
@@ -125,6 +127,14 @@ class GorillaPoolProvider(Provider):
                 satoshis=e['satoshis'],
                 script=e.get('script', ''),
             ))
+        # DoS-bound: reject pathological scripts at the provider boundary.
+        for u in utxos:
+            if not u.script:
+                continue
+            assert_script_hex_under_limit(
+                u.script, MAX_SCRIPT_BYTES,
+                f"GorillaPoolProvider.get_utxos({address})",
+            )
         return utxos
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:
@@ -140,12 +150,18 @@ class GorillaPoolProvider(Provider):
             return None
 
         first = entries[0]
-        return Utxo(
+        utxo = Utxo(
             txid=first['txid'],
             output_index=first['vout'],
             satoshis=first['satoshis'],
             script=first.get('script', ''),
         )
+        if utxo.script:
+            assert_script_hex_under_limit(
+                utxo.script, MAX_SCRIPT_BYTES,
+                f"GorillaPoolProvider.get_contract_utxo({script_hash})",
+            )
+        return utxo
 
     def get_network(self) -> str:
         return self.network

@@ -13,6 +13,7 @@ import type {
   ANFBinding,
   ANFValue,
 } from '../ir/index.js';
+import { UnknownANFKindError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Constant value type
@@ -416,6 +417,11 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
       // Opaque byte span — never folded. Bytes are byte-canonical and the
       // EC / peephole optimizers treat it as a hard barrier.
       return value;
+
+    default: {
+      const unknown = value as { kind: string };
+      throw new UnknownANFKindError(unknown.kind, 'constant-fold.foldValue');
+    }
   }
 }
 
@@ -552,6 +558,10 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
     case 'raw_script':
       // Opaque: no SSA operand refs.
       break;
+    default: {
+      const unknown = value as { kind: string };
+      throw new UnknownANFKindError(unknown.kind, 'constant-fold.collectRefsFromValue');
+    }
   }
 }
 
@@ -568,8 +578,21 @@ function hasSideEffect(value: ANFValue): boolean {
     case 'method_call': // method calls may have side effects
     case 'raw_script':  // opaque byte span — DCE must never eliminate it
       return true;
-    default:
+    // Pure ANF kinds — no side effect, safe to DCE if unreferenced.
+    case 'load_param':
+    case 'load_prop':
+    case 'load_const':
+    case 'get_state_script':
+    case 'bin_op':
+    case 'unary_op':
+    case 'if':
+    case 'loop':
+    case 'array_literal':
       return false;
+    default: {
+      const unknown = value as { kind: string };
+      throw new UnknownANFKindError(unknown.kind, 'constant-fold.hasSideEffect');
+    }
   }
 }
 

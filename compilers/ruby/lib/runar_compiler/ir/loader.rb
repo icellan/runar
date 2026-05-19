@@ -9,6 +9,7 @@
 require "json"
 require "set"
 require_relative "types"
+require_relative "unknown_anf_kind_error"
 
 module RunarCompiler
   module IR

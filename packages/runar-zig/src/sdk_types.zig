@@ -650,6 +650,11 @@ pub const PreparedCall = struct {
     /// time so the rebuilt unlock keeps the same subscript boundary the
     /// preimage was computed over.
     code_sep_idx: i32 = -1,
+    /// Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+    /// `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
+    /// Empty when the method has no auto-injected intent params. The
+    /// stateful unlock script reuses this verbatim at finalize time.
+    intent_witness_hex: []u8 = &.{},
 
     pub fn deinit(self: *PreparedCall, allocator: std.mem.Allocator) void {
         allocator.free(self.tx_hex);
@@ -666,6 +671,7 @@ pub const PreparedCall = struct {
         if (self.preimage.len > 0) allocator.free(self.preimage);
         if (self.method_selector.len > 0) allocator.free(self.method_selector);
         if (self.change_pkh.len > 0) allocator.free(self.change_pkh);
+        if (self.intent_witness_hex.len > 0) allocator.free(self.intent_witness_hex);
         self.* = .{
             .tx_hex = &.{},
             .sighashes = &.{},

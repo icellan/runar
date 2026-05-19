@@ -153,6 +153,9 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
 }
 
 /// Return true if this value kind has observable side effects.
+/// F-003: every ANFValue variant is enumerated explicitly (no `else`) so
+/// adding a new variant fails at Zig compile time here instead of silently
+/// defaulting to "pure" — which would let DCE delete an effectful binding.
 pub fn hasSideEffect(v: types.ANFValue) bool {
     return switch (v) {
         .assert, .update_prop, .check_preimage, .deserialize_state,
@@ -161,7 +164,14 @@ pub fn hasSideEffect(v: types.ANFValue) bool {
         // when the binding is unreferenced.
         .raw_script,
         => true,
-        else => false,
+        .load_param,
+        .load_prop,
+        .load_const,
+        .bin_op,
+        .unary_op,
+        .get_state_script,
+        .array_literal,
+        => false,
     };
 }
 

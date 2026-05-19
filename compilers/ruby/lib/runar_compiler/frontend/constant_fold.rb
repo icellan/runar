@@ -347,6 +347,22 @@ module RunarCompiler
       # Fold a single value
       # -----------------------------------------------------------------
 
+      # Kinds that fall through fold_value unchanged. Listing them
+      # explicitly lets us raise UnknownANFKindError on any kind that
+      # isn't a known fold case, so a forgotten dispatch-site update fails
+      # loudly instead of silently corrupting downstream passes.
+      FOLD_VALUE_PASSTHROUGH_KINDS = %w[
+        assert
+        update_prop
+        check_preimage
+        deserialize_state
+        add_output
+        add_raw_output
+        add_data_output
+        array_literal
+        get_state_script
+      ].freeze
+
       def self.fold_value(value, env)
         kind = value.kind
 
@@ -442,8 +458,13 @@ module RunarCompiler
           return value
         end
 
-        # Terminal / side-effecting kinds pass through
-        value
+        # Terminal / side-effecting kinds pass through.  Anything not in
+        # the explicit allowlist is a forgotten dispatch-site update:
+        # fail loudly so the regression is caught at the first binding
+        # instead of leaking an unhandled variant into Stack IR / hex.
+        return value if FOLD_VALUE_PASSTHROUGH_KINDS.include?(kind)
+
+        raise ::RunarCompiler::IR::UnknownANFKindError.new(kind, "constant-fold.foldValue")
       end
       private_class_method :fold_value
 
@@ -453,12 +474,26 @@ module RunarCompiler
 
       SIDE_EFFECT_KINDS = %w[
         assert update_prop check_preimage deserialize_state
-        add_output if loop call method_call
+        add_output add_raw_output add_data_output
+        if loop call method_call raw_script
+      ].freeze
+
+      # Kinds known to have no observable side effects.  Listed explicitly
+      # so an unknown kind raises UnknownANFKindError instead of silently
+      # being treated as side-effect-free (which would cause DCE to drop
+      # a new side-effecting variant).
+      SIDE_EFFECT_FREE_KINDS = %w[
+        load_param load_prop load_const get_state_script
+        bin_op unary_op array_literal
       ].freeze
 
       # Return true if this value kind has observable side effects.
       def self.has_side_effect(value)
-        SIDE_EFFECT_KINDS.include?(value.kind)
+        kind = value.kind
+        return true  if SIDE_EFFECT_KINDS.include?(kind)
+        return false if SIDE_EFFECT_FREE_KINDS.include?(kind)
+
+        raise ::RunarCompiler::IR::UnknownANFKindError.new(kind, "constant-fold.hasSideEffect")
       end
 
       # -----------------------------------------------------------------
@@ -466,33 +501,54 @@ module RunarCompiler
       # -----------------------------------------------------------------
 
       # Walk an ANFValue and collect all binding name references.
+      #
+      # Uses an explicit kind dispatch so an unknown variant raises
+      # UnknownANFKindError instead of silently contributing zero refs
+      # (which would cause DCE to drop a live binding).
       def self.collect_refs_from_value(value, used)
-        if value.kind == "load_param"
-          return
-        end
-
-        if value.kind == "load_const"
+        case value.kind
+        when "load_param", "load_prop", "get_state_script"
+          # No refs.
+        when "load_const"
           if value.const_string && value.const_string.start_with?("@ref:")
             used.add(value.const_string[5..])
           end
-          return
+        when "bin_op"
+          used.add(value.left)  if value.left
+          used.add(value.right) if value.right
+        when "unary_op"
+          used.add(value.operand) if value.operand
+        when "call"
+          value.args&.each { |a| used.add(a) }
+        when "method_call"
+          used.add(value.object) if value.object
+          value.args&.each { |a| used.add(a) }
+        when "if"
+          used.add(value.cond) if value.cond
+          value.then&.each  { |b| collect_refs_from_value(b.value, used) }
+          value.else_&.each { |b| collect_refs_from_value(b.value, used) }
+        when "loop"
+          value.body&.each { |b| collect_refs_from_value(b.value, used) }
+        when "assert", "update_prop"
+          used.add(value.value_ref) if value.value_ref
+        when "check_preimage", "deserialize_state"
+          used.add(value.preimage) if value.preimage
+        when "add_output"
+          used.add(value.satoshis) if value.satoshis
+          value.state_values&.each { |sv| used.add(sv) }
+          used.add(value.preimage) if value.preimage
+        when "add_raw_output", "add_data_output"
+          used.add(value.satoshis)     if value.satoshis
+          used.add(value.script_bytes) if value.script_bytes
+        when "array_literal"
+          value.elements&.each { |e| used.add(e) }
+        when "raw_script"
+          # Opaque: no SSA operand refs.
+        else
+          # Exhaustiveness guard.  A silent no-op would let DCE drop a
+          # live binding because its refs go uncollected.
+          raise ::RunarCompiler::IR::UnknownANFKindError.new(value.kind, "constant-fold.collectRefsFromValue")
         end
-
-        return if value.kind == "load_prop" || value.kind == "get_state_script"
-
-        used.add(value.left)         if value.left
-        used.add(value.right)        if value.right
-        used.add(value.operand)      if value.operand
-        used.add(value.cond)         if value.cond
-        used.add(value.value_ref)    if value.value_ref
-        used.add(value.object)       if value.object
-        used.add(value.satoshis)     if value.satoshis
-        used.add(value.preimage)     if value.preimage
-        value.args&.each         { |a| used.add(a) }
-        value.state_values&.each { |sv| used.add(sv) }
-        value.then&.each  { |b| collect_refs_from_value(b.value, used) }
-        value.else_&.each { |b| collect_refs_from_value(b.value, used) }
-        value.body&.each  { |b| collect_refs_from_value(b.value, used) }
       end
 
       # -----------------------------------------------------------------

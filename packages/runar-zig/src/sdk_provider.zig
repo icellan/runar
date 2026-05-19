@@ -1,6 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const types = @import("sdk_types.zig");
+const errors_mod = @import("sdk_errors.zig");
 
 // ---------------------------------------------------------------------------
 // Provider interface
@@ -55,6 +56,10 @@ pub const ProviderError = error{
     BroadcastFailed,
     NetworkError,
     OutOfMemory,
+    /// DoS-bound: a UTXO returned by the provider carries a locking script
+    /// larger than `errors_mod.MAX_SCRIPT_BYTES`. Inspect
+    /// `errors_mod.last_error` for the structured limit/actual/context.
+    ScriptSizeExceeded,
 };
 
 // ---------------------------------------------------------------------------
@@ -182,6 +187,13 @@ pub const MockProvider = struct {
     fn getUtxosImpl(ctx: *anyopaque, allocator: std.mem.Allocator, address: []const u8) ProviderError![]types.UTXO {
         const self: *MockProvider = @ptrCast(@alignCast(ctx));
         const list = self.utxos.get(address) orelse return allocator.alloc(types.UTXO, 0) catch return ProviderError.OutOfMemory;
+        // DoS-bound: reject pathological UTXO scripts BEFORE handing to caller.
+        for (list.items) |u| {
+            if (u.script.len == 0) continue;
+            var ctx_buf: [256]u8 = undefined;
+            const c = std.fmt.bufPrint(&ctx_buf, "MockProvider.getUtxos({s})", .{address}) catch "MockProvider.getUtxos";
+            errors_mod.assertScriptHexUnderLimit(u.script, errors_mod.MAX_SCRIPT_BYTES, c) catch return ProviderError.ScriptSizeExceeded;
+        }
         var result = allocator.alloc(types.UTXO, list.items.len) catch return ProviderError.OutOfMemory;
         for (list.items, 0..) |u, i| {
             result[i] = u.clone(allocator) catch return ProviderError.OutOfMemory;
@@ -190,6 +202,7 @@ pub const MockProvider = struct {
     }
 
     fn getContractUtxoImpl(_: *anyopaque, _: std.mem.Allocator, _: []const u8) ProviderError!?types.UTXO {
+        // MockProvider has no contract-utxo map; nothing to guard.
         return null;
     }
 

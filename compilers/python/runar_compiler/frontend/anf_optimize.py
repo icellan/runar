@@ -18,6 +18,35 @@ from runar_compiler.ir.types import (
     ANFProgram,
     ANFValue,
 )
+from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
+
+
+# All ANF kinds recognized by the dispatchers below. Used as an allowlist so
+# an unknown kind raises ``UnknownANFKindError`` instead of silently being
+# treated as zero-refs (collect_refs) or side-effect-free (has_side_effect).
+# Mirrors ``KNOWN_KINDS`` in ``runar_compiler.ir.loader``.
+_DCE_KNOWN_KINDS: frozenset[str] = frozenset({
+    "load_param",
+    "load_prop",
+    "load_const",
+    "bin_op",
+    "unary_op",
+    "call",
+    "method_call",
+    "if",
+    "loop",
+    "assert",
+    "update_prop",
+    "get_state_script",
+    "check_preimage",
+    "deserialize_state",
+    "add_output",
+    "add_raw_output",
+    "add_data_output",
+    "array_literal",
+    "raw_script",
+})
+
 
 # ---------------------------------------------------------------------------
 # secp256k1 constants
@@ -328,7 +357,14 @@ def _collect_refs(v: ANFValue, used: set[str]) -> None:
     """Walk an ANFValue and collect all binding name references.
 
     Matches TS ``collectRefsFromValue`` in constant-fold.ts.
+
+    Raises ``UnknownANFKindError`` if the value's kind is not in the known
+    set. A silent fall-through would let DCE drop a live binding because
+    its refs go uncollected.
     """
+    if v.kind not in _DCE_KNOWN_KINDS:
+        raise UnknownANFKindError(v.kind, "constant-fold.collectRefsFromValue")
+
     if v.kind == "load_param":
         # Do NOT track @ref: targets here — matches TS collectRefsFromValue
         # which breaks on load_param without collecting refs.
@@ -379,7 +415,16 @@ def _collect_refs(v: ANFValue, used: set[str]) -> None:
 
 
 def _has_side_effect(v: ANFValue) -> bool:
-    """Return True if this value kind has observable side effects."""
+    """Return True if this value kind has observable side effects.
+
+    Raises ``UnknownANFKindError`` if the value's kind is not in the known
+    set. A silent ``return False`` would let DCE eliminate a new
+    side-effecting ANF kind, producing scripts that omit observable
+    behavior.
+    """
+    if v.kind not in _DCE_KNOWN_KINDS:
+        raise UnknownANFKindError(v.kind, "constant-fold.hasSideEffect")
+
     return v.kind in (
         "assert",
         "update_prop",

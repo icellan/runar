@@ -218,9 +218,24 @@ export class TestContract {
 
   /**
    * Call a public method on the contract.
+   *
+   * `args` carries the user-visible method arguments (matching the source
+   * signature). Witness values for ANF-level auto-injected params (e.g.
+   * `_prevOutScript_<i>`, `_serialisedOutputs`) live in a separate channel
+   * — set them via {@link setPrevOutScript} / {@link setSerialisedOutputs}
+   * before calling, or pass `opts.witness` here as a one-shot bag of
+   * `Uint8Array` values keyed by the auto-injected param name.
    */
-  call(methodName: string, args: Record<string, unknown> = {}): TestCallResult {
+  call(
+    methodName: string,
+    args: Record<string, unknown> = {},
+    opts?: { witness?: Record<string, Uint8Array> },
+  ): TestCallResult {
     this.interpreter.resetOutputs();
+
+    if (opts?.witness) {
+      this.interpreter.setWitnessBytes(opts.witness);
+    }
 
     const runarArgs: Record<string, RunarValue> = {};
     for (const [key, value] of Object.entries(args)) {
@@ -287,5 +302,27 @@ export class TestContract {
    */
   setMockPreimageBytes(overrides: Record<string, Uint8Array>): void {
     this.interpreter.setMockPreimageBytes(overrides);
+  }
+
+  /**
+   * Supply witness bytes for an auto-injected `_prevOutScript_<inputIndex>`
+   * parameter — the synthetic ABI slot the compiler adds when the method
+   * body calls `extractPrevOutputScript(inputIndex_literal, …)`. The
+   * interpreter feeds these bytes into the hash256 check that the
+   * intrinsic desugars to.
+   */
+  setPrevOutScript(inputIndex: bigint | number, bytes: Uint8Array): void {
+    this.interpreter.setPrevOutScript(inputIndex, bytes);
+  }
+
+  /**
+   * Supply witness bytes for the auto-injected `_serialisedOutputs`
+   * parameter — the synthetic ABI slot the compiler adds when the method
+   * body calls `requireOutputP2PKH(…)`. The interpreter checks
+   * hash256(serialisedOutputs) against preimage.hashOutputs and then
+   * substring-compares the requested output bytes.
+   */
+  setSerialisedOutputs(bytes: Uint8Array): void {
+    this.interpreter.setSerialisedOutputs(bytes);
   }
 }

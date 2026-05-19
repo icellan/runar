@@ -131,3 +131,48 @@ test "interop: every rejection vector returns the listed reason" {
         try std.testing.expectEqualStrings(reason_wire, r.reason.?.wire());
     }
 }
+
+// RFC 8785 §3.2.2.2 — canonical_json MUST reject malformed Unicode (lone
+// surrogate). See audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6).
+//
+// Each input is reconstructed from a UTF-16 code-unit array so that JSON-parse
+// divergence (Go's encoding/json folds to U+FFFD, Ruby errors at parse-time,
+// etc.) does not mask the canonical_json behaviour we are gating.
+test "interop: canonical_json rejects malformed Unicode (D6)" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const rvs = parsed.value.object.get("canonical_json_rejection_vectors").?.array;
+    try std.testing.expect(rvs.items.len > 0);
+    for (rvs.items) |rv| {
+        const key = rv.object.get("input_object_key").?.string;
+        const units = rv.object.get("input_value_utf16_units").?.array;
+        // Encode each code unit as its (illegal-for-surrogates) 3-byte UTF-8
+        // form so the canonical_json byte loop sees the lone surrogate
+        // pattern verbatim.
+        var bad_bytes: std.ArrayListUnmanaged(u8) = .empty;
+        defer bad_bytes.deinit(allocator);
+        for (units.items) |u| {
+            const cp: u32 = @intCast(u.integer);
+            try bad_bytes.append(allocator, @intCast(0xe0 | (cp >> 12)));
+            try bad_bytes.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+            try bad_bytes.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+        }
+        const kvs = try allocator.alloc(envelope.Value.KeyValue, 1);
+        kvs[0] = .{
+            .key = try allocator.dupe(u8, key),
+            .value = .{ .String = try allocator.dupe(u8, bad_bytes.items) },
+        };
+        const input_value: envelope.Value = .{ .Object = kvs };
+        defer freeValue(allocator, input_value);
+        if (envelope.canonicalJson(allocator, input_value)) |got| {
+            defer allocator.free(got);
+            std.debug.print("vector did NOT reject lone surrogate; got {s}\n", .{got});
+            return error.TestExpectedError;
+        } else |_| {
+            // Any error is acceptable — the gate requires rejection.
+        }
+    }
+}

@@ -543,13 +543,21 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		"add_output", "add_raw_output", "add_data_output":
 		return value
 
+	case "array_literal":
+		// Not folded — elements are SSA refs, not compile-time constants.
+		return value
+
 	case "raw_script":
 		// Opaque byte span — never folded. Bytes are byte-canonical and the
 		// peephole optimizer treats it as a hard barrier.
 		return value
-	}
 
-	return value
+	default:
+		// Exhaustiveness guard. A silent fall-through here would return
+		// the value unchanged when a new foldable kind is added, silently
+		// missing the fold opportunity.
+		panic(&ir.UnknownANFKindError{Kind: value.Kind, Location: "constant-fold.foldValue"})
+	}
 }
 
 // ---------------------------------------------------------------------------

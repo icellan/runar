@@ -12,6 +12,8 @@ from urllib.request import Request, urlopen
 
 from runar.sdk.provider import Provider
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
+from runar.sdk.errors import assert_script_hex_under_limit
+from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 
 
 class WhatsOnChainProvider(Provider):
@@ -110,6 +112,15 @@ class WhatsOnChainProvider(Provider):
                 satoshis=e['value'],
                 script='',  # WoC doesn't return locking script in UTXO list
             ))
+        # DoS-bound: defensive — WoC currently returns empty scripts but a
+        # future enriched response must not bypass MAX_SCRIPT_BYTES.
+        for u in utxos:
+            if not u.script:
+                continue
+            assert_script_hex_under_limit(
+                u.script, MAX_SCRIPT_BYTES,
+                f"WhatsOnChainProvider.get_utxos({address})",
+            )
         return utxos
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:
@@ -126,12 +137,18 @@ class WhatsOnChainProvider(Provider):
             return None
 
         first = entries[0]
-        return Utxo(
+        utxo = Utxo(
             txid=first['tx_hash'],
             output_index=first['tx_pos'],
             satoshis=first['value'],
             script='',
         )
+        if utxo.script:
+            assert_script_hex_under_limit(
+                utxo.script, MAX_SCRIPT_BYTES,
+                f"WhatsOnChainProvider.get_contract_utxo({script_hash})",
+            )
+        return utxo
 
     def get_network(self) -> str:
         return self.network

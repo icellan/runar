@@ -9,6 +9,11 @@ public sealed interface AnfValue
     permits LoadParam, LoadProp, LoadConst, BinOp, UnaryOp, Call, MethodCall,
             If, Loop, Assert, UpdateProp, GetStateScript, CheckPreimage,
             DeserializeState, AddOutput, AddRawOutput, AddDataOutput,
-            ArrayLiteral, RawScript {
+            ArrayLiteral, RawScript,
+            // Test-only stub used by UnknownAnfKindTest to drive every
+            // dispatcher with a kind that is not in the production schema.
+            // No production dispatch site handles this variant — that is
+            // the whole point of the F-003 regression guard.
+            SyntheticAnfValueForTests {
     String kind();
 }

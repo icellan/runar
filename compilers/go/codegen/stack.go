@@ -334,6 +334,12 @@ func collectRefs(value *ir.ANFValue) []string {
 	case "raw_script":
 		// Opaque byte span — no SSA operand refs. Stack effect is
 		// declared via InArity / OutArity.
+	default:
+		// Exhaustiveness guard. A silent fall-through here would drop
+		// the binding's operand refs from last-use analysis, causing
+		// stack lowering to consume a still-live value via ROLL instead
+		// of preserving it via PICK.
+		panic(&ir.UnknownANFKindError{Kind: value.Kind, Location: "stack.collectRefs"})
 	}
 
 	return refs
@@ -947,6 +953,11 @@ func (ctx *loweringContext) lowerBinding(binding *ir.ANFBinding, bindingIndex in
 		ctx.lowerArrayLiteral(name, value.Elements, bindingIndex, lastUses)
 	case "raw_script":
 		ctx.lowerRawScript(name, value.Bytes, value.InArity, value.OutArity)
+	default:
+		// Exhaustiveness guard. A silent fall-through here would emit no
+		// stack ops for the binding, leaving downstream consumers
+		// referencing a value that was never produced.
+		panic(&ir.UnknownANFKindError{Kind: value.Kind, Location: "stack.lowerBinding"})
 	}
 }
 

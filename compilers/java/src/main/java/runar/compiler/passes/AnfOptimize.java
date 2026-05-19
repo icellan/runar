@@ -36,6 +36,7 @@ import runar.compiler.ir.anf.MethodCall;
 import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
+import runar.compiler.ir.UnknownAnfKindError;
 
 /**
  * General ANF cleanup pass (Pass 4.5 in the Java pipeline).
@@ -588,7 +589,13 @@ public final class AnfOptimize {
         if (v instanceof ArrayLiteral al) {
             return new ArrayLiteral(resolveAll(al.elements(), rename));
         }
-        return v;
+        if (v instanceof RawScript) {
+            // Opaque byte span — no SSA operand refs to rename.
+            return v;
+        }
+        // Exhaustiveness guard. Silently returning the value would drop a
+        // pending rename and corrupt downstream lowering.
+        throw new UnknownAnfKindError(v.kind(), "anf-optimize.renameInValue");
     }
 
     private static List<AnfBinding> renameInBody(List<AnfBinding> body, Map<String, String> rename) {
@@ -704,7 +711,15 @@ public final class AnfOptimize {
         }
         if (v instanceof ArrayLiteral al) {
             if (al.elements() != null) used.addAll(al.elements());
+            return;
         }
+        if (v instanceof RawScript) {
+            // Opaque byte span — no SSA operand refs.
+            return;
+        }
+        // Exhaustiveness guard. Silently returning here would let DCE drop a
+        // live binding because its refs went uncollected.
+        throw new UnknownAnfKindError(v.kind(), "anf-optimize.collectRefs");
     }
 
     /**
@@ -740,7 +755,20 @@ public final class AnfOptimize {
             }
             return false;
         }
-        return false;
+        // Pure values — safe for DCE to drop when unreferenced.
+        if (v instanceof LoadParam
+            || v instanceof LoadProp
+            || v instanceof LoadConst
+            || v instanceof GetStateScript
+            || v instanceof BinOp
+            || v instanceof UnaryOp
+            || v instanceof ArrayLiteral) {
+            return false;
+        }
+        // Exhaustiveness guard. A silent `return false;` would cause DCE to
+        // eliminate a new side-effecting ANF kind, producing scripts that
+        // omit observable behavior.
+        throw new UnknownAnfKindError(v.kind(), "anf-optimize.hasSideEffect");
     }
 
     private static <T> List<T> orEmpty(List<T> list) {

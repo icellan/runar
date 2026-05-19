@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("sdk_types.zig");
 const provider_mod = @import("sdk_provider.zig");
+const errors_mod = @import("sdk_errors.zig");
 
 // ---------------------------------------------------------------------------
 // GorillaPoolProvider -- HTTP-based 1sat Ordinals provider
@@ -301,6 +302,12 @@ pub const GorillaPoolProvider = struct {
                 }
                 const script: []const u8 = if (obj.get("script")) |v| (if (v == .string) v.string else "") else "";
 
+                // DoS-bound: reject pathological scripts at provider boundary.
+                if (script.len > 0) {
+                    var ctx_buf: [256]u8 = undefined;
+                    const c = std.fmt.bufPrint(&ctx_buf, "GorillaPoolProvider.getUtxos({s})", .{address}) catch "GorillaPoolProvider.getUtxos";
+                    errors_mod.assertScriptHexUnderLimit(script, errors_mod.MAX_SCRIPT_BYTES, c) catch return provider_mod.ProviderError.ScriptSizeExceeded;
+                }
                 result[i] = .{
                     .txid = allocator.dupe(u8, tx_hash) catch return provider_mod.ProviderError.OutOfMemory,
                     .output_index = tx_pos,
@@ -350,6 +357,12 @@ pub const GorillaPoolProvider = struct {
             if (v == .integer) value = @intCast(v.integer);
         }
         const script: []const u8 = if (obj.get("script")) |v| (if (v == .string) v.string else "") else "";
+
+        if (script.len > 0) {
+            var ctx_buf: [256]u8 = undefined;
+            const c = std.fmt.bufPrint(&ctx_buf, "GorillaPoolProvider.getContractUtxo({s})", .{script_hash}) catch "GorillaPoolProvider.getContractUtxo";
+            errors_mod.assertScriptHexUnderLimit(script, errors_mod.MAX_SCRIPT_BYTES, c) catch return provider_mod.ProviderError.ScriptSizeExceeded;
+        }
 
         return .{
             .txid = allocator.dupe(u8, tx_hash) catch return provider_mod.ProviderError.OutOfMemory,

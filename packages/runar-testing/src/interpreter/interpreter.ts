@@ -129,6 +129,12 @@ export class RunarInterpreter {
     sequence: 0xfffffffen,
   };
   private _mockPreimageBytes: Record<string, Uint8Array> = {};
+  // Witness bytes for auto-injected intent-intrinsic params, keyed by the
+  // ANF-level synthetic name (`_prevOutScript_<idx>`, `_serialisedOutputs`).
+  // Tests populate these via TestContract.setPrevOutScript / .setSerialisedOutputs;
+  // the AST interpreter consults this map when evaluating the desugar of
+  // extractPrevOutputScript / requireOutputP2PKH (see evalCallExpr).
+  private _witnessBytes: Record<string, Uint8Array> = {};
 
   /**
    * @param properties - Contract constructor properties (name -> value).
@@ -143,6 +149,14 @@ export class RunarInterpreter {
   setContract(contract: ContractNode): void { this._contract = contract; }
   setMockPreimage(overrides: Record<string, bigint>): void { Object.assign(this._mockPreimage, overrides); }
   setMockPreimageBytes(overrides: Record<string, Uint8Array>): void { Object.assign(this._mockPreimageBytes, overrides); }
+  setPrevOutScript(inputIndex: bigint | number, bytes: Uint8Array): void {
+    const idx = typeof inputIndex === 'bigint' ? inputIndex.toString() : String(inputIndex);
+    this._witnessBytes[`_prevOutScript_${idx}`] = bytes;
+  }
+  setSerialisedOutputs(bytes: Uint8Array): void {
+    this._witnessBytes['_serialisedOutputs'] = bytes;
+  }
+  setWitnessBytes(overrides: Record<string, Uint8Array>): void { Object.assign(this._witnessBytes, overrides); }
   resetOutputs(): void { this._outputs = []; }
   getOutputs(): { satoshis: RunarValue; stateValues: Record<string, RunarValue> }[] { return [...this._outputs]; }
   getState(): Record<string, RunarValue> {
@@ -962,6 +976,90 @@ export class RunarInterpreter {
       }
 
       case 'extractLocktime':
+        return { kind: 'bigint', value: this._mockPreimage.locktime ?? 0n };
+
+      // ---------------------------------------------------------------
+      // Intent-covenant intrinsics (BSVM Phase 13). These desugar at
+      // ANF-lowering time to (load_param + hash256/substr/cat/num2bin
+      // + assert) chains; the AST interpreter must replay the same
+      // semantics directly so contracts can be exercised end-to-end
+      // without going through the stack VM.
+      // ---------------------------------------------------------------
+      case 'extractPrevOutputScript': {
+        // 2-arg form: extractPrevOutputScript(inputIndex_lit, expectedScriptHash)
+        // 3-arg form: extractPrevOutputScript(inputIndex_lit, expectedPrefixHash, prefixLen_lit)
+        const idx = this.toBigInt(args[0]!);
+        const witnessName = `_prevOutScript_${idx.toString()}`;
+        const witness = this._witnessBytes[witnessName];
+        if (witness === undefined) {
+          throw new Error(
+            `extractPrevOutputScript(${idx}) requires witness bytes. ` +
+            `Call TestContract.setPrevOutScript(${idx}n, bytes) before invoking the method.`,
+          );
+        }
+        const expectedHash = this.toBytes(args[1]!);
+        let bytesToHash: Uint8Array;
+        if (args.length === 3) {
+          const prefixLen = Number(this.toBigInt(args[2]!));
+          bytesToHash = witness.slice(0, prefixLen);
+        } else {
+          bytesToHash = witness;
+        }
+        const sha1 = createHash('sha256').update(bytesToHash).digest();
+        const actualHash = new Uint8Array(createHash('sha256').update(sha1).digest());
+        if (!bytesEqual(actualHash, expectedHash)) {
+          throw new AssertionError(
+            `extractPrevOutputScript(${idx}): hash256(witness) !== expectedHash`,
+          );
+        }
+        return { kind: 'bytes', value: witness };
+      }
+
+      case 'requireOutputP2PKH': {
+        // requireOutputP2PKH(outputIndex_lit, pubkeyHash, amount): asserts
+        // serialised-outputs witness hashes to extractOutputHash(preimage),
+        // and that the 34-byte slice at idx*34 equals the canonical P2PKH
+        // output bytes (LE-8 amount ‖ 1976a914 ‖ pkh ‖ 88ac).
+        const idx = this.toBigInt(args[0]!);
+        const pubkeyHash = this.toBytes(args[1]!);
+        const amount = this.toBigInt(args[2]!);
+        const serialised = this._witnessBytes['_serialisedOutputs'];
+        if (serialised === undefined) {
+          throw new Error(
+            'requireOutputP2PKH requires serialised-outputs witness bytes. ' +
+            'Call TestContract.setSerialisedOutputs(bytes) before invoking the method.',
+          );
+        }
+        // hash256(serialised) === extractOutputHash(preimage)
+        const sOnce = createHash('sha256').update(serialised).digest();
+        const sTwice = new Uint8Array(createHash('sha256').update(sOnce).digest());
+        const expectedOutHash = this._mockPreimageBytes['outputHash'] ?? new Uint8Array(32);
+        if (!bytesEqual(sTwice, expectedOutHash)) {
+          throw new AssertionError(
+            'requireOutputP2PKH: hash256(serialisedOutputs) !== preimage.hashOutputs',
+          );
+        }
+        // Build expected P2PKH output: 8-byte LE amount ‖ 1976a914 ‖ pkh ‖ 88ac
+        const amountLE = new Uint8Array(8);
+        let a = amount;
+        for (let i = 0; i < 8; i++) { amountLE[i] = Number(a & 0xffn); a >>= 8n; }
+        const expected = new Uint8Array(8 + 4 + 20 + 2);
+        expected.set(amountLE, 0);
+        expected.set([0x19, 0x76, 0xa9, 0x14], 8);
+        expected.set(pubkeyHash, 12);
+        expected.set([0x88, 0xac], 32);
+        const offset = Number(idx * 34n);
+        const slice = serialised.slice(offset, offset + 34);
+        if (!bytesEqual(slice, expected)) {
+          throw new AssertionError(
+            `requireOutputP2PKH(${idx}): output bytes mismatch`,
+          );
+        }
+        return { kind: 'void' };
+      }
+
+      case 'currentBlockHeight':
+        // Source-level sugar for extractLocktime(this.txPreimage).
         return { kind: 'bigint', value: this._mockPreimage.locktime ?? 0n };
 
       case 'extractAmount':

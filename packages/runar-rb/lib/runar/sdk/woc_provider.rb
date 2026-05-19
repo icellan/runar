@@ -5,6 +5,7 @@ require 'json'
 require 'uri'
 require_relative 'provider'
 require_relative 'types'
+require_relative 'errors'
 
 # WhatsOnChainProvider — HTTP-based BSV API provider.
 #
@@ -94,7 +95,7 @@ module Runar
         entries = api_get("/address/#{address}/unspent")
         return [] unless entries.is_a?(Array)
 
-        entries.map do |e|
+        utxos = entries.map do |e|
           Utxo.new(
             txid: e['tx_hash'],
             output_index: e['tx_pos'],
@@ -102,6 +103,17 @@ module Runar
             script: ''
           )
         end
+        # DoS-bound: defensive — WoC currently returns empty scripts but a
+        # future enriched response must not bypass MAX_SCRIPT_BYTES.
+        utxos.each do |u|
+          next if u.script.nil? || u.script.empty?
+
+          SDK.assert_script_hex_under_limit(
+            u.script, SDK::MAX_SCRIPT_BYTES,
+            "WhatsOnChainProvider.get_utxos(#{address})"
+          )
+        end
+        utxos
       end
 
       # Find a contract UTXO by its script hash.
@@ -113,12 +125,19 @@ module Runar
         return nil unless entries.is_a?(Array) && !entries.empty?
 
         first = entries[0]
-        Utxo.new(
+        utxo = Utxo.new(
           txid: first['tx_hash'],
           output_index: first['tx_pos'],
           satoshis: first['value'],
           script: ''
         )
+        if utxo.script && !utxo.script.empty?
+          SDK.assert_script_hex_under_limit(
+            utxo.script, SDK::MAX_SCRIPT_BYTES,
+            "WhatsOnChainProvider.get_contract_utxo(#{script_hash})"
+          )
+        end
+        utxo
       rescue RuntimeError => e
         # 404 simply means no UTXO found
         return nil if e.message.include?('404')

@@ -147,16 +147,20 @@ fn json_to_val(v: &serde_json::Value) -> Val {
         }
         serde_json::Value::Bool(b) => Val::Bool(*b),
         serde_json::Value::String(s) => {
-            // Handle BigInt strings like "42n"
+            // BigInt sigil: "42n" → Int(42). Matches the TS reference's
+            // BigIntLiteral serialisation.
             if let Some(stripped) = s.strip_suffix('n') {
                 if let Ok(n) = stripped.parse::<i64>() {
                     return Val::Int(n);
                 }
             }
-            // Plain numeric string
-            if let Ok(n) = s.parse::<i64>() {
-                return Val::Int(n);
-            }
+            // Any other JSON string is a ByteString literal. (The
+            // upstream compiler always emits integers as JSON numbers
+            // and ByteString hex literals as JSON strings; an earlier
+            // `s.parse::<i64>()` fallback here mis-parsed all-digit hex
+            // literals like "3030" as integers, breaking conformance
+            // fixtures whose hex payload happens to contain only
+            // digits.)
             Val::Bytes(s.clone())
         }
         serde_json::Value::Null => Val::Undefined,
@@ -228,7 +232,115 @@ impl std::error::Error for AssertionFailureError {}
 pub(crate) struct StrictCtx {
     pub(crate) method_name: String,
     pub(crate) real_crypto: Option<OnChainCryptoContext>,
+    /// When `Some`, intent-intrinsic witness bytes
+    /// (`_prevOutScript_<i>` / `_serialisedOutputs`) and preimage-derived
+    /// intrinsics (`extractLocktime`, `extractOutputHash`, etc.) consult
+    /// this context instead of returning the bare zero-byte defaults.
+    /// Used by [`execute_with_witness`] to port the TS
+    /// AST-interpreter intent-intrinsic semantics into the Rust ANF
+    /// interpreter.
+    pub(crate) witness: Option<IntentWitnessContext>,
 }
+
+/// Per-method witness bytes + mock preimage fields consumed by the
+/// intent-intrinsic ANF lowerings (`extractPrevOutputScript`,
+/// `requireOutputP2PKH`, `currentBlockHeight`).
+///
+/// The TS reference interpreter exposes equivalent state via
+/// `TestContract.setPrevOutScript`, `TestContract.setSerialisedOutputs`,
+/// `TestContract.setMockPreimage`, and `TestContract.setMockPreimageBytes`.
+/// This struct is the Rust-tier port of that channel — populate it before
+/// calling [`execute_with_witness`].
+#[derive(Debug, Clone, Default)]
+pub struct IntentWitnessContext {
+    /// Mock preimage integer fields (`locktime`, `amount`, `version`,
+    /// `sequence`). Consulted by `extractLocktime` / `extractAmount` /
+    /// `extractVersion` / `extractSequence` intrinsic calls.
+    pub mock_preimage: HashMap<String, i64>,
+    /// Mock preimage byte fields (`outputHash`, `hashPrevouts`,
+    /// `hashSequence`, `outpoint`). Consulted by `extractOutputHash` /
+    /// `extractOutputs` / `extractHashPrevouts` / `extractHashSequence` /
+    /// `extractOutpoint`.
+    pub mock_preimage_bytes: HashMap<String, Vec<u8>>,
+    /// Witness bytes for the auto-injected `_prevOutScript_<input_index>`
+    /// param (the desugar of `extractPrevOutputScript(inputIndex, ...)`).
+    pub prev_out_scripts: HashMap<usize, Vec<u8>>,
+    /// Witness bytes for the auto-injected `_serialisedOutputs` param
+    /// (the desugar of `requireOutputP2PKH(...)`).
+    pub serialised_outputs: Option<Vec<u8>>,
+}
+
+impl IntentWitnessContext {
+    /// Construct a context pre-populated with the same defaults the TS
+    /// reference uses (`locktime=0, amount=10000, version=1,
+    /// sequence=0xfffffffe`).
+    pub fn new() -> Self {
+        let mut mock_preimage: HashMap<String, i64> = HashMap::new();
+        mock_preimage.insert("locktime".to_string(), 0);
+        mock_preimage.insert("amount".to_string(), 10000);
+        mock_preimage.insert("version".to_string(), 1);
+        mock_preimage.insert("sequence".to_string(), 0xfffffffei64);
+        Self {
+            mock_preimage,
+            mock_preimage_bytes: HashMap::new(),
+            prev_out_scripts: HashMap::new(),
+            serialised_outputs: None,
+        }
+    }
+
+    /// Set the previous-output-script witness bytes for `input_index`.
+    /// Mirrors `TestContract.setPrevOutScript(inputIndex, bytes)` in the
+    /// TS reference.
+    pub fn set_prev_out_script(&mut self, input_index: usize, bytes: &[u8]) {
+        self.prev_out_scripts.insert(input_index, bytes.to_vec());
+    }
+
+    /// Set the serialised-outputs witness bytes. Mirrors
+    /// `TestContract.setSerialisedOutputs(bytes)` in the TS reference.
+    pub fn set_serialised_outputs(&mut self, bytes: &[u8]) {
+        self.serialised_outputs = Some(bytes.to_vec());
+    }
+
+    /// Set one preimage integer field (`locktime`, `amount`, `version`,
+    /// `sequence`).
+    pub fn set_mock_preimage_field(&mut self, key: &str, value: i64) {
+        self.mock_preimage.insert(key.to_string(), value);
+    }
+
+    /// Set one preimage byte field (`outputHash`, `hashPrevouts`,
+    /// `hashSequence`, `outpoint`).
+    pub fn set_mock_preimage_bytes_field(&mut self, key: &str, value: &[u8]) {
+        self.mock_preimage_bytes.insert(key.to_string(), value.to_vec());
+    }
+}
+
+/// Failure mode for [`execute_with_witness`].
+///
+/// Carries either an `assert(...)` failure (with method + binding name) or a
+/// missing-witness diagnostic produced when the contract's ANF references a
+/// `_prevOutScript_<i>` / `_serialisedOutputs` synthetic param the caller
+/// did not supply via [`IntentWitnessContext::set_prev_out_script`] /
+/// [`IntentWitnessContext::set_serialised_outputs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentInterpreterError {
+    Assertion(AssertionFailureError),
+    MissingWitness(String),
+    /// Driver-level error (method not found, etc.) — surfaced as a string
+    /// to match the existing `compute_new_state` error shape.
+    Driver(String),
+}
+
+impl std::fmt::Display for IntentInterpreterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntentInterpreterError::Assertion(a) => write!(f, "{}", a),
+            IntentInterpreterError::MissingWitness(m) => write!(f, "{}", m),
+            IntentInterpreterError::Driver(d) => write!(f, "{}", d),
+        }
+    }
+}
+
+impl std::error::Error for IntentInterpreterError {}
 
 /// Required cryptographic context for [`execute_on_chain_authoritative`].
 ///
@@ -335,6 +447,7 @@ pub fn execute_strict(
     let strict = StrictCtx {
         method_name: method_name.to_string(),
         real_crypto: None,
+        witness: None,
     };
     match run_method(
         anf,
@@ -373,6 +486,7 @@ pub fn execute_on_chain_authoritative(
     let strict = StrictCtx {
         method_name: method_name.to_string(),
         real_crypto: Some(ctx.clone()),
+        witness: None,
     };
     match run_method(
         anf,
@@ -385,6 +499,188 @@ pub fn execute_on_chain_authoritative(
         Ok(Ok(out)) => Ok(out),
         Ok(Err(s)) => panic!("execute_on_chain_authoritative: interpreter error: {}", s),
         Err(af) => Err(af),
+    }
+}
+
+/// Execute a contract method in strict mode with intent-intrinsic witness
+/// support — the Rust-tier port of the TS reference's AST-interpreter
+/// path for `extractPrevOutputScript` / `requireOutputP2PKH` /
+/// `currentBlockHeight` (see
+/// `packages/runar-testing/src/__tests__/intent-intrinsics-interpreter.test.ts`
+/// for the canonical fixtures this entry point mirrors).
+///
+/// Concretely, before walking the ANF body:
+///   - `witness.prev_out_scripts[i]` is injected into `args` under the
+///     synthetic param name `_prevOutScript_<i>` (as a `Bytes` hex value).
+///   - `witness.serialised_outputs` is injected as `_serialisedOutputs`.
+///   - `extractLocktime`, `extractAmount`, `extractVersion`,
+///     `extractSequence`, `extractOutputHash`, `extractOutputs`,
+///     `extractHashPrevouts`, `extractHashSequence`, and `extractOutpoint`
+///     consult [`IntentWitnessContext`] instead of returning the bare
+///     zero-byte defaults.
+///
+/// Returns `Err(IntentInterpreterError::MissingWitness)` if the contract
+/// ANF references a witness param the caller did not supply,
+/// `Err(IntentInterpreterError::Assertion)` if any `assert(predicate)`
+/// fires (e.g. `hash256(_prevOutScript_0) !== expectedHash`), and
+/// `Err(IntentInterpreterError::Driver)` for genuine interpreter errors
+/// (method not found, etc.).
+pub fn execute_with_witness(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+    witness: &IntentWitnessContext,
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>), IntentInterpreterError> {
+    // Find the method first so we can scan its params for synthetic
+    // witness names. Method-not-found surfaces as Driver(_).
+    let method = anf
+        .methods
+        .iter()
+        .find(|m| m.name == method_name && m.is_public)
+        .ok_or_else(|| {
+            IntentInterpreterError::Driver(format!(
+                "execute_with_witness: method '{}' not found in ANF IR",
+                method_name
+            ))
+        })?;
+
+    // Merge witness bytes into args under the synthetic param names. If a
+    // synthetic param is declared on the method but missing from the
+    // witness context, surface MissingWitness with the same diagnostic
+    // shape the TS reference produces.
+    let mut merged_args = args.clone();
+    for p in &method.params {
+        if let Some(rest) = p.name.strip_prefix("_prevOutScript_") {
+            if let Ok(idx) = rest.parse::<usize>() {
+                match witness.prev_out_scripts.get(&idx) {
+                    Some(bytes) => {
+                        merged_args.insert(
+                            p.name.clone(),
+                            SdkValue::Bytes(bytes_to_hex(bytes)),
+                        );
+                    }
+                    None => {
+                        return Err(IntentInterpreterError::MissingWitness(format!(
+                            "extractPrevOutputScript({}) requires witness bytes. \
+                             Call IntentWitnessContext::set_prev_out_script({}, bytes) \
+                             before invoking method '{}'.",
+                            idx, idx, method_name
+                        )));
+                    }
+                }
+            }
+        } else if p.name == "_serialisedOutputs" {
+            match &witness.serialised_outputs {
+                Some(bytes) => {
+                    merged_args.insert(
+                        p.name.clone(),
+                        SdkValue::Bytes(bytes_to_hex(bytes)),
+                    );
+                }
+                None => {
+                    return Err(IntentInterpreterError::MissingWitness(format!(
+                        "requireOutputP2PKH requires serialised-outputs witness bytes. \
+                         Call IntentWitnessContext::set_serialised_outputs(bytes) \
+                         before invoking method '{}'.",
+                        method_name
+                    )));
+                }
+            }
+        }
+    }
+
+    // Strip the auto-injected stateful-continuation assert at the END of
+    // the method body. The TS AST interpreter never sees this assertion
+    // (it lives in ANF lowering, not in the AST), so porting the
+    // intent-intrinsic tests requires us to skip it here as well —
+    // otherwise the `hash256(cat(stateOutput, changeOutput)) ===
+    // preimage.outputHash` check fires a spurious assertion failure (we
+    // have no realistic continuation hash in simulation).
+    //
+    // The pattern is recognisable: the last top-level binding is
+    // `assert(X)` where X is bound to a `bin_op {op:'===',result_type:
+    // 'bytes'}` whose right operand traces back (one hop in env-order)
+    // to a `call {func:'extractOutputHash'}`. Strip both the assert and
+    // the bin_op + hash chain that feeds it isn't necessary — the
+    // dependent bindings just become dead code and are evaluated harmlessly.
+    let mut anf_clone = anf.clone();
+    if let Some(m) = anf_clone
+        .methods
+        .iter_mut()
+        .find(|mm| mm.name == method_name && mm.is_public)
+    {
+        if let Some(last) = m.body.last() {
+            if last.value.get("kind").and_then(|k| k.as_str()) == Some("assert") {
+                let pred_ref = last
+                    .value
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let pred_binding = m.body.iter().find(|b| b.name == pred_ref);
+                let is_continuation_pattern = pred_binding
+                    .map(|b| {
+                        if b.value.get("kind").and_then(|k| k.as_str()) != Some("bin_op") {
+                            return false;
+                        }
+                        let op = b.value.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        if op != "===" && op != "==" {
+                            return false;
+                        }
+                        let result_type = b
+                            .value
+                            .get("result_type")
+                            .or_else(|| b.value.get("resultType"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if result_type != "bytes" {
+                            return false;
+                        }
+                        // Right operand should resolve to a call(extractOutputHash).
+                        let right_ref = b
+                            .value
+                            .get("right")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        m.body
+                            .iter()
+                            .find(|bb| bb.name == right_ref)
+                            .map(|bb| {
+                                bb.value.get("kind").and_then(|k| k.as_str()) == Some("call")
+                                    && bb
+                                        .value
+                                        .get("func")
+                                        .and_then(|v| v.as_str())
+                                        == Some("extractOutputHash")
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if is_continuation_pattern {
+                    m.body.pop();
+                }
+            }
+        }
+    }
+
+    let strict = StrictCtx {
+        method_name: method_name.to_string(),
+        real_crypto: None,
+        witness: Some(witness.clone()),
+    };
+    match run_method(
+        &anf_clone,
+        method_name,
+        current_state,
+        &merged_args,
+        constructor_args,
+        Some(&strict),
+    ) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(s)) => Err(IntentInterpreterError::Driver(s)),
+        Err(af) => Err(IntentInterpreterError::Assertion(af)),
     }
 }
 
@@ -591,7 +887,8 @@ fn eval_value(
                 }
             }
             let real_crypto = strict.and_then(|c| c.real_crypto.as_ref());
-            eval_call(&func, &args, real_crypto)
+            let witness = strict.and_then(|c| c.witness.as_ref());
+            eval_call(&func, &args, real_crypto, witness)
         }
 
         "method_call" => {
@@ -752,8 +1049,20 @@ fn eval_value(
             Val::Undefined
         }
 
-        // On-chain-only operations — skip in simulation
-        "check_preimage" | "deserialize_state" | "get_state_script" => Val::Undefined,
+        // On-chain-only operations — skip in simulation. When a witness
+        // context is active (i.e. `execute_with_witness`), `check_preimage`
+        // mocks success so the auto-injected `assert(check_preimage(...))`
+        // at every stateful-method entry doesn't trip a spurious assertion
+        // failure. Mirrors the TS reference, which mocks `checkPreimage`
+        // to `true` in the AST interpreter.
+        "check_preimage" => {
+            if strict.and_then(|c| c.witness.as_ref()).is_some() {
+                Val::Bool(true)
+            } else {
+                Val::Undefined
+            }
+        }
+        "deserialize_state" | "get_state_script" => Val::Undefined,
 
         _ => Val::Undefined,
     };
@@ -836,7 +1145,12 @@ fn eval_unary_op(op: &str, operand: &Val, result_type: &str) -> Val {
 // Built-in function calls
 // ---------------------------------------------------------------------------
 
-fn eval_call(func: &str, args: &[Val], real_crypto: Option<&OnChainCryptoContext>) -> Val {
+fn eval_call(
+    func: &str,
+    args: &[Val],
+    real_crypto: Option<&OnChainCryptoContext>,
+    witness: Option<&IntentWitnessContext>,
+) -> Val {
     match func {
         // Crypto — mocked unless real-crypto context is present.
         "checkSig" => {
@@ -1030,10 +1344,59 @@ fn eval_call(func: &str, args: &[Val], real_crypto: Option<&OnChainCryptoContext
             Val::Int(((a * b) / 10000) as i64)
         }
 
-        // Preimage intrinsics — return dummy values in simulation
-        "extractOutputHash" | "extractAmount" => {
-            Val::Bytes("00".repeat(32))
-        }
+        // Preimage intrinsics. When a witness context is supplied (via
+        // `execute_with_witness`), route through it so the desugared
+        // intent-intrinsic ANF chains see real preimage-derived values;
+        // otherwise fall back to the legacy zero-byte / zero-int defaults
+        // existing simulation callers rely on.
+        "extractLocktime" => Val::Int(
+            witness
+                .and_then(|w| w.mock_preimage.get("locktime").copied())
+                .unwrap_or(0),
+        ),
+        "extractAmount" => match witness {
+            Some(w) => Val::Int(w.mock_preimage.get("amount").copied().unwrap_or(10000)),
+            // Pre-witness simulation kept this as a 32-zero byte string;
+            // preserve that to avoid breaking existing callers.
+            None => Val::Bytes("00".repeat(32)),
+        },
+        "extractVersion" => Val::Int(
+            witness
+                .and_then(|w| w.mock_preimage.get("version").copied())
+                .unwrap_or(1),
+        ),
+        "extractSequence" => Val::Int(
+            witness
+                .and_then(|w| w.mock_preimage.get("sequence").copied())
+                .unwrap_or(0xfffffffei64),
+        ),
+        "extractOutputHash" | "extractOutputs" => match witness {
+            Some(w) => Val::Bytes(bytes_to_hex(
+                w.mock_preimage_bytes
+                    .get("outputHash")
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[0u8; 32]),
+            )),
+            None => Val::Bytes("00".repeat(32)),
+        },
+        "extractHashPrevouts" => Val::Bytes(bytes_to_hex(
+            witness
+                .and_then(|w| w.mock_preimage_bytes.get("hashPrevouts"))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[0u8; 32]),
+        )),
+        "extractHashSequence" => Val::Bytes(bytes_to_hex(
+            witness
+                .and_then(|w| w.mock_preimage_bytes.get("hashSequence"))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[0u8; 32]),
+        )),
+        "extractOutpoint" => Val::Bytes(bytes_to_hex(
+            witness
+                .and_then(|w| w.mock_preimage_bytes.get("outpoint"))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[0u8; 36]),
+        )),
 
         _ => Val::Undefined,
     }

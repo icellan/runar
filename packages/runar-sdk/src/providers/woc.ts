@@ -5,6 +5,8 @@
 import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
 import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
+import { InputLimits } from 'runar-ir-schema';
+import { assertScriptHexUnderLimit } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // WoC API response shapes (partial)
@@ -115,12 +117,23 @@ export class WhatsOnChainProvider implements Provider {
 
     // WoC doesn't return the locking script in the UTXO list, so we set it
     // to empty and callers can look it up if needed.
-    return entries.map((e) => ({
+    const utxos = entries.map((e) => ({
       txid: e.tx_hash,
       outputIndex: e.tx_pos,
       satoshis: e.value,
       script: '',
     }));
+    // DoS-bound: defensive guard — WoC currently returns empty scripts but a
+    // future enriched response must not bypass MAX_SCRIPT_BYTES.
+    for (const u of utxos) {
+      if (u.script) {
+        assertScriptHexUnderLimit(
+          u.script, InputLimits.MAX_SCRIPT_BYTES,
+          `WhatsOnChainProvider.getUtxos(${address})`,
+        );
+      }
+    }
+    return utxos;
   }
 
   async getContractUtxo(scriptHash: string): Promise<UTXO | null> {
@@ -135,12 +148,19 @@ export class WhatsOnChainProvider implements Provider {
 
     // Return the first (latest) unspent entry
     const first = entries[0]!;
-    return {
+    const utxo: UTXO = {
       txid: first.tx_hash,
       outputIndex: first.tx_pos,
       satoshis: first.value,
       script: '',
     };
+    if (utxo.script) {
+      assertScriptHexUnderLimit(
+        utxo.script, InputLimits.MAX_SCRIPT_BYTES,
+        `WhatsOnChainProvider.getContractUtxo(${scriptHash})`,
+      );
+    }
+    return utxo;
   }
 
   getNetwork(): 'mainnet' | 'testnet' {

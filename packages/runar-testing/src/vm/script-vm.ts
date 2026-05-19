@@ -15,6 +15,7 @@ import {
   isTruthy,
   hexToBytes,
 } from './utils.js';
+import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -131,6 +132,8 @@ export class ScriptVM {
    * of the locking script determines success.
    */
   execute(unlockingScript: Uint8Array, lockingScript: Uint8Array): VMResult {
+    this.assertScriptBytesUnderLimit(unlockingScript);
+    this.assertScriptBytesUnderLimit(lockingScript);
     this.reset();
 
     // Run unlocking script.
@@ -151,6 +154,7 @@ export class ScriptVM {
    * Execute a single script (convenience for testing).
    */
   executeScript(script: Uint8Array): VMResult {
+    this.assertScriptBytesUnderLimit(script);
     this.reset();
     return this.runScript(script);
   }
@@ -162,6 +166,23 @@ export class ScriptVM {
     return this.executeScript(hexToBytes(scriptHex));
   }
 
+  /**
+   * DoS-bound: reject scripts that exceed {@link InputLimits.MAX_SCRIPT_BYTES}
+   * BEFORE the interpreter loop starts. Each opcode iteration is cheap but
+   * a multi-megabyte script would still pin the event loop; the largest
+   * legitimate compiled Rúnar script (SLH-DSA-SHA2-256s, ~900 KB) fits
+   * comfortably under the 1 MiB cap.
+   */
+  private assertScriptBytesUnderLimit(script: Uint8Array): void {
+    if (script.length > InputLimits.MAX_SCRIPT_BYTES) {
+      throw new CanonicalJsonError(
+        'bytes',
+        `ScriptVM: script length ${script.length} exceeds InputLimits.MAX_SCRIPT_BYTES (${InputLimits.MAX_SCRIPT_BYTES})`,
+        { limit: InputLimits.MAX_SCRIPT_BYTES, actual: script.length },
+      );
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Step mode API
   // -------------------------------------------------------------------------
@@ -171,6 +192,8 @@ export class ScriptVM {
    * Call `step()` repeatedly to advance one opcode at a time.
    */
   load(unlockingScript: Uint8Array, lockingScript: Uint8Array): void {
+    this.assertScriptBytesUnderLimit(unlockingScript);
+    this.assertScriptBytesUnderLimit(lockingScript);
     this.reset();
     this._lockingScript = lockingScript;
     this._script = unlockingScript.length > 0 ? unlockingScript : lockingScript;

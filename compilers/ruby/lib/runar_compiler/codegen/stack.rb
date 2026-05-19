@@ -291,6 +291,10 @@ module RunarCompiler::Codegen
     when "raw_script"
       # Opaque byte span -- no SSA operand refs. Stack effect is declared
       # via in_arity / out_arity.
+    else
+      # Exhaustiveness guard. A silent empty-refs fall-through would let
+      # compute_last_uses miss a live operand and corrupt the stack plan.
+      raise ::RunarCompiler::IR::UnknownANFKindError.new(kind, "stack-lower.collectRefs")
     end
 
     refs
@@ -1093,6 +1097,10 @@ module RunarCompiler::Codegen
         _lower_array_literal(name, value.elements || [], binding_index, last_uses)
       when "raw_script"
         _lower_raw_script(name, value.bytes || "", value.in_arity || 0, value.out_arity || 1)
+      else
+        # Exhaustiveness guard. A silent no-op would emit a binding name
+        # with no producing ops, corrupting downstream stack tracking.
+        raise ::RunarCompiler::IR::UnknownANFKindError.new(kind, "stack-lower.lowerBinding")
       end
     end
 
@@ -3444,6 +3452,10 @@ module RunarCompiler::Codegen
   def self.lower_to_stack(program)
     _lower_to_stack_inner(program)
   rescue RuntimeError
+    raise
+  rescue ::RunarCompiler::IR::UnknownANFKindError
+    # Typed dispatch-site guards must surface untouched so callers (and
+    # the F-003 regression test) can identify the missed kind directly.
     raise
   rescue => e
     raise RuntimeError, "stack lowering: #{e}"

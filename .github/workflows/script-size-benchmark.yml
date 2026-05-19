@@ -1,0 +1,47 @@
+# Script-size regression benchmark.
+#
+# For every conformance fixture, compares the byte length of
+# conformance/tests/<name>/expected-script.hex against the baseline
+# conformance/script-size-baseline.json. Fails if any fixture grows >10%
+# from its baseline (catches unintended bloat from compiler changes — e.g.
+# a new intrinsic adding 5 KB of overhead, a peephole regression that
+# adds 200 bytes to every contract). Also fails on >50% shrinkage, which
+# is almost always a deleted / blanked-out fixture rather than a real win.
+#
+# This job runs ONLY against the checked-in expected-script.hex files —
+# it does not rebuild the goldens, by design, to keep the check fast and
+# free of spurious diffs from compiler-version drift on the runner. The
+# heavier `conformance:multi` / `cross-compiler-bytewise` jobs in ci.yml
+# are responsible for catching cross-tier regeneration drift.
+#
+# MAINTAINERS: re-stamp the baseline only on intentional size-change PRs.
+# Run `pnpm --filter runar-conformance script-size-check -- --update`
+# inside the PR branch and justify the new numbers in the PR description
+# (e.g. "new peephole pass shaves 4% off math-demo and friends — net
+# bytes-saved across all 60 fixtures: X").
+name: Script-size regression benchmark
+on:
+  push:
+    branches: [main, 'release/v*']
+  pull_request:
+    branches: [main, 'release/v*']
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  script-size-check:
+    name: conformance/script-size-baseline.json (>10% growth = fail)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run script-size verifier
+        run: pnpm --filter runar-conformance run script-size-check
+      - name: Run script-size verifier tests
+        run: npx vitest run conformance/runner/__tests__/script-size-check.test.ts

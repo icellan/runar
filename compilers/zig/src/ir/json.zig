@@ -6,6 +6,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
+const unknown_anf_kind = @import("unknown_anf_kind.zig");
 
 const ParseError = error{
     MissingField,
@@ -151,7 +152,7 @@ fn parseParams(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) ![]
     return result;
 }
 
-const BindingError = ParseError || std.mem.Allocator.Error;
+const BindingError = ParseError || std.mem.Allocator.Error || unknown_anf_kind.UnknownAnfKindError;
 
 fn parseBindings(allocator: std.mem.Allocator, arr: std.json.Array, depth: u32) BindingError![]types.ANFBinding {
     var result = try allocator.alloc(types.ANFBinding, arr.items.len);
@@ -205,7 +206,11 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
     if (depth >= max_parse_depth) return ParseError.MaxRecursionDepthExceeded;
 
     const kind = try getString(obj, "kind");
-    const tag = kind_map.get(kind) orelse return ParseError.InvalidKind;
+    // F-003: unknown ANF kinds used to return a generic InvalidKind; now they
+    // raise UnknownAnfKind via the typed helper so a missing ANFValue variant
+    // fails loudly with a useful diagnostic.
+    const tag = kind_map.get(kind) orelse
+        return unknown_anf_kind.unknownAnfKind(kind, "ir.json.parseANFValue");
 
     return switch (tag) {
         .load_param => .{ .load_param = .{

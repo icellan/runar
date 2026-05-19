@@ -1641,12 +1641,58 @@ class TypeChecker {
     // stable auto-injected witness-param name (extractPrevOutputScript) or
     // a constant byte offset (requireOutputP2PKH).
     if (funcName === 'extractPrevOutputScript' || funcName === 'requireOutputP2PKH') {
-      if (args.length >= 1 && args[0]!.kind !== 'bigint_literal') {
-        this.errors.push(makeDiagnostic(
-          `${funcName}() argument 1 (index) must be an integer literal`,
-          'error',
-          args[0]!.sourceLocation,
-        ));
+      if (args.length >= 1) {
+        let litValue: bigint | null = null;
+        if (args[0]!.kind === 'bigint_literal') {
+          litValue = (args[0] as { value: bigint }).value;
+        } else if (
+          args[0]!.kind === 'unary_expr' &&
+          (args[0] as { op: string }).op === '-' &&
+          (args[0] as { operand: { kind: string } }).operand.kind === 'bigint_literal'
+        ) {
+          // Accept `-N` (UnaryExpr "-" over BigIntLiteral) so the bounds
+          // check below produces a clear "must be >= 0" rather than the
+          // misleading "must be an integer literal" message.
+          const inner = (args[0] as { operand: { value: bigint } }).operand;
+          litValue = -inner.value;
+        } else {
+          this.errors.push(makeDiagnostic(
+            `${funcName}() argument 1 (index) must be an integer literal`,
+            'error',
+            args[0]!.sourceLocation,
+          ));
+        }
+        if (litValue !== null) {
+          // R-2: bound the index literal. For requireOutputP2PKH, the
+          // emitted Stack-IR computes byte-offset = idx * 34; require
+          // 0 <= idx <= 1000 to keep the offset well under script-int
+          // max and to reject obvious nonsense (e.g. negative or
+          // astronomically large).
+          const INT64_MAX = 9223372036854775807n;
+          const INT64_MIN = -9223372036854775808n;
+          if (litValue > INT64_MAX || litValue < INT64_MIN) {
+            this.errors.push(makeDiagnostic(
+              `${funcName}() argument 1 (index) must fit in int64; got ${litValue.toString()}`,
+              'error',
+              args[0]!.sourceLocation,
+            ));
+          } else {
+            if (litValue < 0n) {
+              this.errors.push(makeDiagnostic(
+                `${funcName}() argument 1 (index) must be >= 0; got ${litValue.toString()}`,
+                'error',
+                args[0]!.sourceLocation,
+              ));
+            }
+            if (funcName === 'requireOutputP2PKH' && litValue > 1000n) {
+              this.errors.push(makeDiagnostic(
+                `requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got ${litValue.toString()} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)`,
+                'error',
+                args[0]!.sourceLocation,
+              ));
+            }
+          }
+        }
       }
     }
 
@@ -1683,6 +1729,38 @@ class TypeChecker {
             'error',
             args[2]!.sourceLocation,
           ));
+        } else {
+          // R-4: bound the prefixLen literal. The intrinsic hashes
+          // substr(witness, 0, prefixLen) and compares against a
+          // 32-byte SHA-256 hash. prefixLen < 32 is suspicious (the
+          // prefix bytes don't even cover a hash-sized chunk).
+          // prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES — wouldn't
+          // fit in a legal Bitcoin Script anyway.
+          const n = (args[2] as { value: bigint }).value;
+          const INT64_MAX = 9223372036854775807n;
+          const INT64_MIN = -9223372036854775808n;
+          if (n > INT64_MAX || n < INT64_MIN) {
+            this.errors.push(makeDiagnostic(
+              `extractPrevOutputScript() argument 3 (prefixLen) must fit in int64; got ${n.toString()}`,
+              'error',
+              args[2]!.sourceLocation,
+            ));
+          } else {
+            if (n < 32n) {
+              this.errors.push(makeDiagnostic(
+                `extractPrevOutputScript() argument 3 (prefixLen) must be >= 32 (the hash assertion compares a 32-byte SHA-256); got ${n.toString()}`,
+                'error',
+                args[2]!.sourceLocation,
+              ));
+            }
+            if (n > 4n * 1024n * 1024n) {
+              this.errors.push(makeDiagnostic(
+                `extractPrevOutputScript() argument 3 (prefixLen) must be <= MAX_SCRIPT_BYTES (4 MiB); got ${n.toString()}`,
+                'error',
+                args[2]!.sourceLocation,
+              ));
+            }
+          }
         }
         this.inferExprType(args[2]!, env);
       }

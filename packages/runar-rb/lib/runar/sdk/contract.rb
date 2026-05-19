@@ -2,6 +2,7 @@
 
 require 'digest'
 require_relative 'types'
+require_relative 'errors'
 require_relative 'provider'
 require_relative 'signer'
 require_relative 'state'
@@ -72,8 +73,37 @@ module Runar
         @provider         = nil
         @signer           = nil
         @inscription      = nil
+        # Witness values for intent-covenant intrinsic auto-injected params.
+        # `_prevOutScript_<i>` values are stored per-input-index in
+        # `@prev_out_scripts`; `_serialisedOutputs` is stored in
+        # `@serialised_outputs`. Both are lowercase hex strings (normalized
+        # in the setters). Read by the call-builder when assembling the
+        # unlocking script for methods that use extractPrevOutputScript /
+        # requireOutputP2PKH.
+        @prev_out_scripts   = {}
+        @serialised_outputs = nil
 
         init_state_from_constructor_args
+      end
+
+      # Supply the prev-output locking-script witness for input +input_index+.
+      # Required for methods that call +extractPrevOutputScript(input_index)+,
+      # which the compiler lowers into an auto-injected
+      # +_prevOutScript_<input_index>+ ABI param.
+      #
+      # @param input_index [Integer] literal input index passed to extractPrevOutputScript
+      # @param value       [String]  hex string (with or without 0x prefix) — case-insensitive
+      def set_prev_out_script(input_index, value)
+        @prev_out_scripts[input_index] = SDK.normalize_witness_hex(value)
+      end
+
+      # Supply the serialised-outputs witness for the current call. Required
+      # for methods that call +requireOutputP2PKH(...)+, which the compiler
+      # lowers into an auto-injected +_serialisedOutputs+ ABI param.
+      #
+      # @param value [String] hex string (with or without 0x prefix)
+      def set_serialised_outputs(value)
+        @serialised_outputs = SDK.normalize_witness_hex(value)
       end
 
       # Attach a 1sat ordinals inscription to this contract.
@@ -123,6 +153,12 @@ module Runar
         address        = signer.get_address
         change_address = opts.change_address.to_s.empty? ? address : opts.change_address
         locking_script = get_locking_script
+
+        # DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        SDK.assert_script_hex_under_limit(
+          locking_script, SDK::MAX_SCRIPT_BYTES,
+          "#{@artifact.contract_name}.deploy"
+        )
 
         fee_rate  = provider.get_fee_rate
         all_utxos = provider.get_utxos(address)
@@ -185,6 +221,12 @@ module Runar
         basket = @provider.basket
         locking_script = get_locking_script
         desc = description || 'Runar contract deployment'
+
+        # DoS-bound: reject pathological scripts BEFORE involving the wallet.
+        SDK.assert_script_hex_under_limit(
+          locking_script, SDK::MAX_SCRIPT_BYTES,
+          "#{@artifact.contract_name}.deploy_with_wallet"
+        )
 
         result = wallet.create_action(
           description: desc,
@@ -277,15 +319,24 @@ module Runar
         method_needs_change     = method.params.any? { |p| p.name == '_changePKH' }
         method_needs_new_amount = method.params.any? { |p| p.name == '_newAmount' }
 
+        # Drop auto-injected continuation params AND intent-intrinsic witness
+        # params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
+        # user-facing arg count check. Witness values come from
+        # set_prev_out_script / set_serialised_outputs, not from the args array.
+        is_auto_injected_witness = ->(name) {
+          name.start_with?('_prevOutScript_') || name == '_serialisedOutputs'
+        }
+
         user_params = if is_stateful
                         method.params.reject do |p|
                           p.type == 'SigHashPreimage' ||
                             p.name == '_changePKH' ||
                             p.name == '_changeAmount' ||
-                            p.name == '_newAmount'
+                            p.name == '_newAmount' ||
+                            is_auto_injected_witness.call(p.name)
                         end
                       else
-                        method.params
+                        method.params.reject { |p| is_auto_injected_witness.call(p.name) }
                       end
 
         if user_params.length != args.length
@@ -297,6 +348,12 @@ module Runar
         unless @current_utxo
           raise 'RunarContract.prepare_call: contract is not deployed. Call deploy() or from_txid() first.'
         end
+
+        # DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        SDK.assert_script_hex_under_limit(
+          @current_utxo.script, SDK::MAX_SCRIPT_BYTES,
+          "#{@artifact.contract_name}.call(#{method_name})"
+        )
 
         contract_utxo = Utxo.new(
           txid: @current_utxo.txid, output_index: @current_utxo.output_index,
@@ -316,6 +373,12 @@ module Runar
         code_sep_idx        = get_code_sep_index(find_method_index(method_name))
 
         change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change)
+
+        # Pre-resolve intent-intrinsic witness hex (raises
+        # WitnessValueMissingError if a `_prevOutScript_<i>` or
+        # `_serialisedOutputs` param wasn't set on the contract). Resolving
+        # up-front means the error is raised BEFORE any signing / broadcast.
+        intent_witness_hex = build_intent_witness_hex(method)
 
         # Auto-compute new state via ANF interpreter when artifact has ANF IR.
         # This also resolves data outputs declared via this.addDataOutput(...)
@@ -355,7 +418,8 @@ module Runar
             method_name, resolved_args, signer, opts,
             is_stateful, needs_op_push_tx, method_needs_change,
             sig_indices, preimage_index,
-            method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx
+            method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
+            intent_witness_hex
           )
         end
 
@@ -376,6 +440,14 @@ module Runar
           end
         else
           new_locking_script, new_satoshis = build_continuation(is_stateful, opts)
+        end
+
+        # DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+        if new_locking_script && !new_locking_script.empty?
+          SDK.assert_script_hex_under_limit(
+            new_locking_script, SDK::MAX_SCRIPT_BYTES,
+            "#{@artifact.contract_name}.call(#{method_name}).continuation"
+          )
         end
 
         # Normalise additional contract inputs to Utxo objects.
@@ -413,18 +485,26 @@ module Runar
           u.txid == @current_utxo.txid && u.output_index == @current_utxo.output_index
         end
 
+        # Initial unlocking script (with placeholders). Intent-witness hex is
+        # suffixed so size estimation accounts for the witness pushes; the
+        # real ABI-correct unlock is rebuilt by build_stateful_unlock below
+        # for stateful methods.
         unlocking_script = if needs_op_push_tx
                              build_stateful_prefix('00' * 72, method_needs_change) +
-                               build_unlocking_script(method_name, resolved_args)
+                               build_unlocking_script(method_name, resolved_args) +
+                               intent_witness_hex
                            else
-                             build_unlocking_script(method_name, resolved_args)
+                             build_unlocking_script(method_name, resolved_args) +
+                               intent_witness_hex
                            end
 
         # Build placeholder unlocking scripts for extra contract inputs.
+        # Witness hex suffixed for sizing — build_stateful_unlock builds the real scripts.
         extra_unlock_placeholders = extra_contract_utxos.each_with_index.map do |_, i|
           args_for_placeholder = resolved_per_input_args[i] || resolved_args
           build_stateful_prefix('00' * 72, method_needs_change) +
-            build_unlocking_script(method_name, args_for_placeholder)
+            build_unlocking_script(method_name, args_for_placeholder) +
+            intent_witness_hex
         end
 
         call_options = {}
@@ -459,7 +539,8 @@ module Runar
             data_outputs: resolved_data_outputs,
             extra_contract_utxos: extra_contract_utxos,
             resolved_per_input_args: resolved_per_input_args,
-            prevouts_indices: prevouts_indices
+            prevouts_indices: prevouts_indices,
+            intent_witness_hex: intent_witness_hex
           )
 
         sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
@@ -471,7 +552,8 @@ module Runar
           change_amount, method_needs_new_amount, new_satoshis, preimage_index,
           contract_utxo, new_locking_script, code_sep_idx,
           has_multi_output: has_multi_output,
-          contract_outputs: contract_outputs || []
+          contract_outputs: contract_outputs || [],
+          intent_witness_hex: intent_witness_hex
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
@@ -778,7 +860,8 @@ module Runar
         method_name, resolved_args, _signer, opts,
         is_stateful, needs_op_push_tx, method_needs_change,
         sig_indices, preimage_index,
-        method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx
+        method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
+        intent_witness_hex = ''
       )
         # Normalize terminal outputs — accept TerminalOutput structs or hashes.
         term_outputs = Array(opts.terminal_outputs).map do |item|
@@ -795,11 +878,15 @@ module Runar
         end
 
         # Build placeholder unlocking script (terminal has no change output).
+        # Intent-witness hex is suffixed for sizing — the real ABI-correct
+        # unlock is built by build_stateful_terminal_unlock below for stateful.
         term_unlock_script = if needs_op_push_tx
                                build_stateful_prefix('00' * 72, false) +
-                                 build_unlocking_script(method_name, resolved_args)
+                                 build_unlocking_script(method_name, resolved_args) +
+                                 intent_witness_hex
                              else
-                               build_unlocking_script(method_name, resolved_args)
+                               build_unlocking_script(method_name, resolved_args) +
+                                 intent_witness_hex
                              end
 
         # Build raw terminal transaction: single input, exact outputs, no change.
@@ -841,6 +928,7 @@ module Runar
                      args_hex +
                      change_hex +
                      State.encode_push_data(preimage) +
+                     intent_witness_hex +
                      method_selector_hex
             [unlock, op_sig, preimage]
           end
@@ -906,7 +994,8 @@ module Runar
           new_satoshis: 0,
           has_multi_output: false,
           contract_outputs: [],
-          code_sep_idx: code_sep_idx
+          code_sep_idx: code_sep_idx,
+          intent_witness_hex: intent_witness_hex
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
@@ -1000,7 +1089,8 @@ module Runar
         data_outputs: [],
         extra_contract_utxos: [],
         resolved_per_input_args: [],
-        prevouts_indices: []
+        prevouts_indices: [],
+        intent_witness_hex: ''
       )
         final_op_push_tx_sig = ''
         final_preimage       = ''
@@ -1017,7 +1107,8 @@ module Runar
               data_outputs: data_outputs,
               extra_contract_utxos: extra_contract_utxos,
               resolved_per_input_args: resolved_per_input_args,
-              prevouts_indices: prevouts_indices
+              prevouts_indices: prevouts_indices,
+              intent_witness_hex: intent_witness_hex
             )
 
           # Update resolved_args with final prevouts so finalize_call can rebuild
@@ -1051,7 +1142,8 @@ module Runar
         data_outputs: [],
         extra_contract_utxos: [],
         resolved_per_input_args: [],
-        prevouts_indices: []
+        prevouts_indices: [],
+        intent_witness_hex: ''
       )
         pub_key     = signer.get_public_key
         p2pkh_start = 1 + extra_contract_utxos.length
@@ -1066,7 +1158,8 @@ module Runar
           method_name, method_needs_change, method_needs_new_amount,
           change_pkh_hex, method_selector_hex, code_sep_idx,
           change_amount, new_satoshis,
-          prevouts_indices: prevouts_indices
+          prevouts_indices: prevouts_indices,
+          intent_witness_hex: intent_witness_hex
         )
 
         # First-pass unlocks for extra contract inputs.
@@ -1105,7 +1198,8 @@ module Runar
           method_name, method_needs_change, method_needs_new_amount,
           change_pkh_hex, method_selector_hex, code_sep_idx,
           change_amount, new_satoshis,
-          prevouts_indices: prevouts_indices
+          prevouts_indices: prevouts_indices,
+          intent_witness_hex: intent_witness_hex
         )
         signed_tx = SDK.insert_unlocking_script(signed_tx, 0, final_unlock)
 
@@ -1186,7 +1280,8 @@ module Runar
         change_amount, method_needs_new_amount, new_satoshis, preimage_index,
         contract_utxo, new_locking_script, code_sep_idx,
         has_multi_output: false,
-        contract_outputs: []
+        contract_outputs: [],
+        intent_witness_hex: ''
       )
         PreparedCall.new(
           sighash: sighash,
@@ -1211,7 +1306,8 @@ module Runar
           new_satoshis: new_satoshis,
           has_multi_output: has_multi_output,
           contract_outputs: contract_outputs,
-          code_sep_idx: code_sep_idx
+          code_sep_idx: code_sep_idx,
+          intent_witness_hex: intent_witness_hex
         )
       end
       # rubocop:enable Metrics/ParameterLists
@@ -1236,6 +1332,7 @@ module Runar
           build_stateful_prefix(prepared.op_push_tx_sig, prepared.method_needs_change) +
             args_hex + change_hex + new_amount_hex +
             State.encode_push_data(prepared.preimage) +
+            prepared.intent_witness_hex +
             prepared.method_selector_hex
 
         elsif prepared.needs_op_push_tx
@@ -1470,7 +1567,7 @@ module Runar
                                 _method_name, method_needs_change, method_needs_new_amount,
                                 change_pkh_hex, method_selector_hex, code_sep_idx,
                                 change_amount, new_satoshis,
-                                prevouts_indices: [])
+                                prevouts_indices: [], intent_witness_hex: '')
         op_sig, preimage = SDK.compute_op_push_tx(
           tx_hex, input_idx, contract_utxo.script, contract_utxo.satoshis, code_sep_idx
         )
@@ -1497,9 +1594,41 @@ module Runar
         unlock = build_stateful_prefix(op_sig, method_needs_change) +
                  args_hex + change_hex + new_amount_hex +
                  State.encode_push_data(preimage) +
+                 intent_witness_hex +
                  method_selector_hex
 
         [unlock, op_sig, preimage]
+      end
+
+      # Build the trailing intent-intrinsic witness hex for `method`, in ABI
+      # order (+_prevOutScript_*+ first, then +_serialisedOutputs+). Raises
+      # +WitnessValueMissingError+ for any auto-injected param the caller
+      # hasn't supplied via +set_prev_out_script+ / +set_serialised_outputs+.
+      def build_intent_witness_hex(method)
+        out = String.new
+        method.params.each do |p|
+          if p.name.start_with?('_prevOutScript_')
+            idx_str = p.name.sub('_prevOutScript_', '')
+            idx = Integer(idx_str, 10)
+            value = @prev_out_scripts[idx]
+            if value.nil?
+              raise WitnessValueMissingError.new(
+                param_name: p.name, method_name: method.name,
+                contract_name: @artifact.contract_name
+              )
+            end
+            out << State.encode_push_data(value)
+          elsif p.name == '_serialisedOutputs'
+            if @serialised_outputs.nil?
+              raise WitnessValueMissingError.new(
+                param_name: p.name, method_name: method.name,
+                contract_name: @artifact.contract_name
+              )
+            end
+            out << State.encode_push_data(@serialised_outputs)
+          end
+        end
+        out
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists
     end

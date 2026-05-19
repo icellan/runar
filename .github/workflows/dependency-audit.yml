@@ -1,0 +1,226 @@
+name: Dependency Audit
+
+# Per-tier dependency vulnerability scanning. TS is already covered by
+# `pnpm audit` in the repo's main lifecycle; this workflow adds equivalent
+# coverage for the 6 non-TS tiers (Go, Rust, Python, Java, Ruby, Zig).
+#
+# Policy (matches audits/remediation-plan §6):
+#   * HIGH / CRITICAL severity advisories  -> fail the job (block merge).
+#   * MEDIUM / LOW severity advisories     -> annotate / warn, do not fail.
+#   * Zig has no canonical dependency vuln scanner today (no equivalent of
+#     govulncheck / cargo-audit / pip-audit / bundler-audit). We still ship a
+#     visible job that lists declared deps from every build.zig.zon so this
+#     gap stays surfaced for future Zig tooling to replace.
+#
+# Triggers: PRs into main / release branches, pushes to main, and a weekly
+# cron so newly-published advisories against unchanged deps still fail CI
+# without waiting for the next code change.
+
+on:
+  push:
+    branches: [main, 'release/v*']
+  pull_request:
+    branches: [main, 'release/v*']
+  schedule:
+    # Mondays 06:17 UTC - off-peak, slightly offset from the top of the hour
+    # so we don't pile onto every other repo's Monday-morning cron.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Go - govulncheck (golang.org/x/vuln). Filters to symbols actually called
+  # from the module graph, so stdlib-only advisories that don't touch our
+  # code paths don't fail the job. We scan every Go module in the workspace.
+  # ---------------------------------------------------------------------------
+  go-audit:
+    name: Go - govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan compilers/go
+        run: cd compilers/go && govulncheck ./...
+      - name: Scan packages/runar-go
+        run: cd packages/runar-go && govulncheck ./...
+      - name: Scan conformance (Go driver)
+        run: cd conformance && govulncheck ./...
+      - name: Scan integration/go
+        run: cd integration/go && govulncheck ./...
+      - name: Scan examples/go
+        run: cd examples/go && govulncheck ./...
+
+  # ---------------------------------------------------------------------------
+  # Rust - cargo-audit (RustSec advisory DB). Default behaviour is to fail
+  # on any vulnerability in Cargo.lock. RustSec only ships advisories at
+  # warning level or higher; we accept the default exit policy because
+  # everything in the DB is already triaged severity >= medium upstream.
+  # ---------------------------------------------------------------------------
+  rust-audit:
+    name: Rust - cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit compilers/rust
+        run: cd compilers/rust && cargo audit
+      - name: Audit packages/runar-rs
+        run: cd packages/runar-rs && cargo audit
+      - name: Audit packages/runar-rs-macros
+        run: cd packages/runar-rs-macros && cargo audit
+      - name: Audit examples/rust
+        run: cd examples/rust && cargo audit
+      - name: Audit integration/rust
+        run: cd integration/rust && cargo audit
+
+  # ---------------------------------------------------------------------------
+  # Python - pip-audit (PyPA). Runs against every requirements / pyproject
+  # surface in the repo. pip-audit exits non-zero on any finding by default,
+  # which matches the "fail on HIGH/CRIT" policy for our dep surface (we
+  # don't pull dev-only deps that routinely carry low-severity advisories
+  # - the manifests are intentionally minimal).
+  # ---------------------------------------------------------------------------
+  python-audit:
+    name: Python - pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Audit compilers/python (pyproject)
+        run: cd compilers/python && pip-audit
+      - name: Audit packages/runar-py (pyproject)
+        run: cd packages/runar-py && pip-audit
+      - name: Audit examples/python (requirements)
+        run: cd examples/python && pip-audit -r requirements.txt
+      - name: Audit integration/python (requirements)
+        run: cd integration/python && pip-audit -r requirements.txt
+
+  # ---------------------------------------------------------------------------
+  # Java - OWASP Dependency-Check (gradle plugin). The plugin is declared
+  # in compilers/java/build.gradle.kts and packages/runar-java/build.gradle.kts
+  # with failBuildOnCVSS = 7.0 (= HIGH/CRITICAL), which is exactly the
+  # severity gate this workflow promises. MEDIUM/LOW findings still land in
+  # the HTML/JSON report uploaded as a CI artifact.
+  #
+  # The NVD API key is optional but strongly recommended (anonymous downloads
+  # are heavily throttled and frequently 403 in CI). If NVD_API_KEY is set
+  # in the repo's secrets it's wired through; otherwise the plugin falls back
+  # to anonymous polling and the job is best-effort for that run.
+  # ---------------------------------------------------------------------------
+  java-audit:
+    name: Java - OWASP dep-check
+    runs-on: ubuntu-latest
+    env:
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Cache OWASP NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/dependency-check-data
+          key: owasp-nvd-${{ runner.os }}-${{ hashFiles('compilers/java/build.gradle.kts', 'packages/runar-java/build.gradle.kts') }}
+          restore-keys: |
+            owasp-nvd-${{ runner.os }}-
+      - name: Scan compilers/java
+        run: cd compilers/java && gradle dependencyCheckAnalyze --no-daemon
+      - name: Scan packages/runar-java
+        run: cd packages/runar-java && gradle dependencyCheckAnalyze --no-daemon
+      - name: Upload dep-check reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-owasp-dep-check-reports
+          path: |
+            compilers/java/build/reports/dependency-check-report.*
+            packages/runar-java/build/reports/dependency-check-report.*
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Ruby - bundler-audit (rubysec). Runs against every Gemfile in the repo
+  # that has a Gemfile.lock. Exits non-zero on any advisory; we accept that
+  # default since the ruby-advisory-db only ships HIGH-or-worse criticality
+  # for the gems we depend on.
+  # ---------------------------------------------------------------------------
+  ruby-audit:
+    name: Ruby - bundler-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - name: Install bundler-audit
+        run: gem install bundler-audit
+      - name: Audit packages/runar-rb
+        run: cd packages/runar-rb && bundle-audit check --update
+      - name: Audit examples/ruby
+        run: cd examples/ruby && bundle-audit check
+      - name: Audit integration/ruby
+        run: cd integration/ruby && bundle-audit check
+      - name: Audit examples/end2end-example/ruby
+        run: cd examples/end2end-example/ruby && bundle-audit check
+
+  # ---------------------------------------------------------------------------
+  # Zig - no canonical dependency vulnerability scanner today.
+  #
+  # The Zig ecosystem doesn't (yet) ship an equivalent of govulncheck /
+  # cargo-audit / pip-audit / bundler-audit. There is no public advisory DB
+  # keyed on package URLs / hashes, and `zig build` itself only resolves
+  # deps; it does not consult any vulnerability source.
+  #
+  # Until one of those lands we make the gap VISIBLE in CI instead of
+  # silently skipping the tier: this job lists every declared dependency
+  # across every build.zig.zon in the repo, so a security reviewer can
+  # manually cross-check against advisories for each upstream.
+  #
+  # When a canonical Zig vuln scanner ships (track upstream zig / ZLS RFCs),
+  # replace the manual surfacing here with a real scanner invocation.
+  # ---------------------------------------------------------------------------
+  zig-audit:
+    name: Zig - manual review surface (no canonical scanner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Surface declared Zig dependencies for manual review
+        run: |
+          echo "==============================================================="
+          echo "Zig has no canonical dependency vulnerability scanner."
+          echo "Listing all declared deps across every build.zig.zon so they"
+          echo "can be manually cross-checked against upstream advisories."
+          echo "==============================================================="
+          echo
+          found_any=0
+          while IFS= read -r -d '' zon; do
+            found_any=1
+            echo "----- $zon -----"
+            cat "$zon"
+            echo
+          done < <(find . -name 'build.zig.zon' -not -path '*/node_modules/*' -not -path '*/zig-cache/*' -not -path '*/.zig-cache/*' -not -path '*/zig-out/*' -print0)
+          if [ "$found_any" = "0" ]; then
+            echo "No build.zig.zon files found in repo (no Zig deps declared)."
+          fi
+          echo
+          echo "Action required: manually review each dep above against"
+          echo "upstream security advisories. When a Zig vuln scanner ships,"
+          echo "replace this job with a real scanner invocation."
+          # Intentional success exit - the gap is the point of the job.
+          exit 0

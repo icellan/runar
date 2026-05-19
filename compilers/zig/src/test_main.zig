@@ -1,6 +1,8 @@
 test {
     _ = @import("ir/types.zig");
     _ = @import("ir/json.zig");
+    _ = @import("ir/unknown_anf_kind.zig");
+    _ = @import("ir/unknown_anf_kind_test.zig");
     _ = @import("codegen/opcodes.zig");
     _ = @import("codegen/emit.zig");
     _ = @import("passes/stack_lower.zig");

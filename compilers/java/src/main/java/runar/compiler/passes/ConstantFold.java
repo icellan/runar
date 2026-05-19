@@ -5,20 +5,34 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import runar.compiler.ir.UnknownAnfKindError;
+import runar.compiler.ir.anf.AddDataOutput;
+import runar.compiler.ir.anf.AddOutput;
+import runar.compiler.ir.anf.AddRawOutput;
 import runar.compiler.ir.anf.AnfBinding;
 import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfProgram;
 import runar.compiler.ir.anf.AnfValue;
+import runar.compiler.ir.anf.ArrayLiteral;
+import runar.compiler.ir.anf.Assert;
 import runar.compiler.ir.anf.BigIntConst;
 import runar.compiler.ir.anf.BinOp;
 import runar.compiler.ir.anf.BoolConst;
 import runar.compiler.ir.anf.BytesConst;
 import runar.compiler.ir.anf.Call;
+import runar.compiler.ir.anf.CheckPreimage;
 import runar.compiler.ir.anf.ConstValue;
+import runar.compiler.ir.anf.DeserializeState;
+import runar.compiler.ir.anf.GetStateScript;
 import runar.compiler.ir.anf.If;
 import runar.compiler.ir.anf.LoadConst;
+import runar.compiler.ir.anf.LoadParam;
+import runar.compiler.ir.anf.LoadProp;
 import runar.compiler.ir.anf.Loop;
+import runar.compiler.ir.anf.MethodCall;
+import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
+import runar.compiler.ir.anf.UpdateProp;
 
 /**
  * Constant folding pass for ANF IR (Pass 4.25).
@@ -100,7 +114,7 @@ public final class ConstantFold {
 
     private static AnfValue foldValue(AnfValue value, Map<String, ConstSlot> env) {
         // Pass-through for constants and loads
-        if (value instanceof LoadConst || value.kind().equals("load_param") || value.kind().equals("load_prop")) {
+        if (value instanceof LoadConst || value instanceof LoadParam || value instanceof LoadProp) {
             return value;
         }
 
@@ -189,8 +203,26 @@ public final class ConstantFold {
         // Side-effecting / opaque values pass through unchanged. This matches
         // the Python `_has_side_effect` set: assert, update_prop, check_preimage,
         // deserialize_state, add_output, add_raw_output, add_data_output,
-        // method_call, get_state_script.
-        return value;
+        // method_call, get_state_script, array_literal, raw_script.
+        if (value instanceof Assert
+            || value instanceof UpdateProp
+            || value instanceof CheckPreimage
+            || value instanceof DeserializeState
+            || value instanceof AddOutput
+            || value instanceof AddRawOutput
+            || value instanceof AddDataOutput
+            || value instanceof MethodCall
+            || value instanceof GetStateScript
+            || value instanceof ArrayLiteral
+            || value instanceof RawScript) {
+            return value;
+        }
+
+        // Exhaustiveness guard. Falling off the end would return undefined-like
+        // behavior (silent pass-through of an unknown kind) and corrupt every
+        // downstream pass; throw so the regression is caught at the first
+        // binding instead.
+        throw new UnknownAnfKindError(value.kind(), "constant-fold.foldValue");
     }
 
     private static <T> List<T> orEmpty(List<T> list) {

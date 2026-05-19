@@ -24,6 +24,17 @@ public final class RunarContract {
     private final Map<String, Object> state;
     private UTXO currentUtxo;
     private Inscription inscription;
+    /**
+     * Witness values for intent-covenant intrinsic auto-injected params.
+     * {@code _prevOutScript_<i>} values are stored per-input-index in
+     * {@code prevOutScripts}; {@code _serialisedOutputs} is stored in
+     * {@code serialisedOutputs}. Both are lowercase hex strings (normalized
+     * in the setters). Read by the call-builder when assembling the
+     * unlocking script for methods that use {@code extractPrevOutputScript}
+     * / {@code requireOutputP2PKH}.
+     */
+    private final Map<Integer, String> prevOutScripts = new HashMap<>();
+    private String serialisedOutputs;
 
     public RunarContract(RunarArtifact artifact, List<Object> constructorArgs) {
         this.artifact = artifact;
@@ -146,6 +157,102 @@ public final class RunarContract {
     }
 
     // ------------------------------------------------------------------
+    // Intent-intrinsic witness values
+    // ------------------------------------------------------------------
+
+    /**
+     * Supply the prev-output locking-script witness for input
+     * {@code inputIndex}. Required for methods that call
+     * {@code extractPrevOutputScript(inputIndex)}, which the compiler lowers
+     * into an auto-injected {@code _prevOutScript_<inputIndex>} ABI param.
+     *
+     * @param inputIndex literal input index passed to {@code extractPrevOutputScript}
+     * @param bytesHex   hex string (with or without {@code 0x} prefix, any casing)
+     */
+    public void setPrevOutScript(int inputIndex, String bytesHex) {
+        prevOutScripts.put(inputIndex, normalizeWitnessHex(bytesHex));
+    }
+
+    /** {@code byte[]}-input convenience overload of {@link #setPrevOutScript}. */
+    public void setPrevOutScript(int inputIndex, byte[] bytes) {
+        prevOutScripts.put(inputIndex, ScriptUtils.bytesToHex(bytes));
+    }
+
+    /**
+     * Supply the serialised-outputs witness for the current call. Required
+     * for methods that call {@code requireOutputP2PKH(...)}, which the
+     * compiler lowers into an auto-injected {@code _serialisedOutputs} ABI
+     * param.
+     */
+    public void setSerialisedOutputs(String bytesHex) {
+        this.serialisedOutputs = normalizeWitnessHex(bytesHex);
+    }
+
+    /** {@code byte[]}-input convenience overload of {@link #setSerialisedOutputs}. */
+    public void setSerialisedOutputs(byte[] bytes) {
+        this.serialisedOutputs = ScriptUtils.bytesToHex(bytes);
+    }
+
+    /**
+     * Build the trailing intent-intrinsic witness hex for {@code method},
+     * in ABI order ({@code _prevOutScript_*} first, then
+     * {@code _serialisedOutputs}). Each value is pushed via PUSHDATA so that
+     * the on-chain method body's {@code load_param} lifts the exact bytes
+     * the caller set.
+     *
+     * @throws WitnessValueMissingError for any auto-injected param the caller
+     *     hasn't supplied via {@link #setPrevOutScript} /
+     *     {@link #setSerialisedOutputs}.
+     */
+    private String buildIntentWitnessHex(RunarArtifact.ABIMethod method) {
+        StringBuilder sb = new StringBuilder();
+        for (RunarArtifact.ABIParam p : method.params()) {
+            String n = p.name();
+            if (n.startsWith("_prevOutScript_")) {
+                String idxStr = n.substring("_prevOutScript_".length());
+                int idx;
+                try {
+                    idx = Integer.parseInt(idxStr);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("malformed auto-injected param name '" + n + "'", e);
+                }
+                String val = prevOutScripts.get(idx);
+                if (val == null) {
+                    throw new WitnessValueMissingError(n, method.name(), artifact.contractName());
+                }
+                sb.append(ScriptUtils.encodePushData(val));
+            } else if ("_serialisedOutputs".equals(n)) {
+                if (serialisedOutputs == null) {
+                    throw new WitnessValueMissingError(n, method.name(), artifact.contractName());
+                }
+                sb.append(ScriptUtils.encodePushData(serialisedOutputs));
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Normalize a witness-value hex string (optional {@code 0x} prefix,
+     * any casing) into a lowercase hex string suitable for PUSHDATA.
+     * Throws {@link IllegalArgumentException} on odd-length / non-hex inputs.
+     */
+    private static String normalizeWitnessHex(String s) {
+        if (s == null) throw new IllegalArgumentException("witness value: null");
+        String h = s;
+        if (h.startsWith("0x") || h.startsWith("0X")) h = h.substring(2);
+        if ((h.length() & 1) != 0) {
+            throw new IllegalArgumentException(
+                "witness value: hex string must have even length (got " + h.length() + ")");
+        }
+        for (int i = 0; i < h.length(); i++) {
+            char c = h.charAt(i);
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!ok) throw new IllegalArgumentException("witness value: invalid hex characters");
+        }
+        return h.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    // ------------------------------------------------------------------
     // Deploy / Call
     // ------------------------------------------------------------------
 
@@ -156,6 +263,11 @@ public final class RunarContract {
      */
     public DeployOutcome deploy(Provider provider, Signer signer, long satoshis, String changeAddress) {
         String lockingScript = lockingScript();
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        ScriptSizeExceededError.assertScriptHexUnderLimit(
+            lockingScript, InputLimits.MAX_SCRIPT_BYTES,
+            artifact.contractName() + ".deploy"
+        );
         TransactionBuilder.DeployResult r = TransactionBuilder.buildDeployWithLockingScript(
             lockingScript, provider, signer, satoshis, changeAddress
         );
@@ -215,6 +327,11 @@ public final class RunarContract {
                 "RunarContract.call: contract has not been deployed. Call deploy() or setCurrentUtxo()."
             );
         }
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        ScriptSizeExceededError.assertScriptHexUnderLimit(
+            currentUtxo.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+            artifact.contractName() + ".call(" + methodName + ")"
+        );
         RunarArtifact.ABIMethod m = findMethod(methodName);
         if (m == null) {
             throw new IllegalArgumentException(
@@ -337,7 +454,10 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
-        String unlockHex = buildUnlockingScript(m, resolved);
+        // Pre-resolve intent-intrinsic witness hex (throws
+        // WitnessValueMissingError if any auto-injected param wasn't set).
+        String intentWitnessHex = buildIntentWitnessHex(m);
+        String unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;
 
         TransactionBuilder.CallResult result = TransactionBuilder.buildCallTransaction(
             artifact, currentUtxo, unlockHex, null, 0, provider, signer, null
@@ -352,7 +472,7 @@ public final class RunarContract {
                     + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
                 resolved.set(idx, sigHex);
             }
-            unlockHex = buildUnlockingScript(m, resolved);
+            unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;
             result = TransactionBuilder.buildCallTransaction(
                 artifact, currentUtxo, unlockHex, null, 0, provider, signer, null
             );
@@ -382,6 +502,12 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
+        // Pre-resolve intent-intrinsic witness hex. Throws
+        // WitnessValueMissingError if a `_prevOutScript_<i>` or
+        // `_serialisedOutputs` param wasn't set on the contract — raised
+        // BEFORE any signing / broadcast work, mirroring other entry guards.
+        String intentWitnessHex = buildIntentWitnessHex(m);
+
         // Continuation output (stateful contracts).
         String newLockingScript = null;
         long newSats = 0;
@@ -431,7 +557,8 @@ public final class RunarContract {
             m, methodName, resolved, /*opPushTxSigHex*/ "00".repeat(72),
             methodNeedsChange ? changePkhHex : null,
             /*changeAmount*/ 0L, methodNeedsNewAmount, newSats,
-            /*preimageHex*/ "00".repeat(181)
+            /*preimageHex*/ "00".repeat(181),
+            intentWitnessHex
         );
 
         TransactionBuilder.CallTxResult firstPass =
@@ -450,7 +577,8 @@ public final class RunarContract {
             m, methodName, resolved, /*opPushTxSigHex*/ "00".repeat(72),
             methodNeedsChange ? changePkhHex : null,
             changeAmount, methodNeedsNewAmount, newSats,
-            /*preimageHex*/ "00".repeat(181)
+            /*preimageHex*/ "00".repeat(181),
+            intentWitnessHex
         );
         TransactionBuilder.CallTxResult secondPass =
             TransactionBuilder.buildCallTransactionFull(
@@ -492,7 +620,8 @@ public final class RunarContract {
             ScriptUtils.bytesToHex(opPushTxSig),
             methodNeedsChange ? changePkhHex : null,
             finalChangeAmount, methodNeedsNewAmount, newSats,
-            ScriptUtils.bytesToHex(preimage)
+            ScriptUtils.bytesToHex(preimage),
+            intentWitnessHex
         );
         tx.setUnlockingScript(0, finalUnlock);
 
@@ -551,6 +680,10 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
+        // Pre-resolve intent-intrinsic witness hex. Throws
+        // WitnessValueMissingError BEFORE any signing / broadcast.
+        String intentWitnessHex = buildIntentWitnessHex(m);
+
         boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
         long contractSats = currentUtxo.satoshis();
 
@@ -613,7 +746,8 @@ public final class RunarContract {
                 m, methodName, resolved, "00".repeat(72),
                 methodNeedsChange ? "00".repeat(20) : null,
                 /*changeAmount*/ 0L, methodNeedsNewAmount, /*newSats*/ 0L,
-                "00".repeat(181)
+                "00".repeat(181),
+                intentWitnessHex
             );
             RawTx tx = buildTx.get();
             tx.setUnlockingScript(0, placeholderUnlock);
@@ -645,12 +779,13 @@ public final class RunarContract {
                 m, methodName, resolved, opPushTxSigHex,
                 /*changePkhHex (terminal: no change)*/ null,
                 /*changeAmount*/ 0L, methodNeedsNewAmount, /*newSats*/ 0L,
-                preimageHex
+                preimageHex,
+                intentWitnessHex
             );
         } else {
             // Pure stateless terminal — sign each Sig against the
             // contract-input sighash on the final tx layout.
-            String placeholderUnlock = buildUnlockingScript(m, resolved);
+            String placeholderUnlock = buildUnlockingScript(m, resolved) + intentWitnessHex;
             RawTx tx = buildTx.get();
             tx.setUnlockingScript(0, placeholderUnlock);
             if (!sigIndices.isEmpty()) {
@@ -664,7 +799,7 @@ public final class RunarContract {
                     resolved.set(idx, sigHex);
                 }
             }
-            contractUnlock = buildUnlockingScript(m, resolved);
+            contractUnlock = buildUnlockingScript(m, resolved) + intentWitnessHex;
         }
 
         RawTx finalTx = buildTx.get();
@@ -708,7 +843,8 @@ public final class RunarContract {
         long changeAmount,
         boolean methodNeedsNewAmount,
         long newSatoshis,
-        String preimageHex
+        String preimageHex,
+        String intentWitnessHex
     ) {
         StringBuilder sb = new StringBuilder();
 
@@ -741,6 +877,13 @@ public final class RunarContract {
 
         // Preimage push.
         sb.append(ScriptUtils.encodePushData(preimageHex));
+
+        // Intent-intrinsic witness pushes (`_prevOutScript_*` then
+        // `_serialisedOutputs`, ABI order). Empty when the method has no
+        // auto-injected intent params.
+        if (intentWitnessHex != null && !intentWitnessHex.isEmpty()) {
+            sb.append(intentWitnessHex);
+        }
 
         // Method selector (only when the contract has multiple public methods).
         int publicMethodCount = countPublicMethods();
@@ -820,18 +963,30 @@ public final class RunarContract {
         return baseOffset + shift;
     }
 
-    /** Returns user-facing params (skips compiler-injected implicit params for stateful methods). */
+    /** Returns user-facing params (skips compiler-injected implicit params
+     * for stateful methods and intent-intrinsic auto-injected witness params
+     * for any method). Witness values come from
+     * {@link #setPrevOutScript} / {@link #setSerialisedOutputs}, not from
+     * the user args list. */
     private static List<RunarArtifact.ABIParam> userParams(RunarArtifact.ABIMethod m, boolean isStateful) {
-        if (!isStateful) return m.params();
         List<RunarArtifact.ABIParam> out = new ArrayList<>();
         for (RunarArtifact.ABIParam p : m.params()) {
             String n = p.name();
             String t = p.type();
-            if ("SigHashPreimage".equals(t)) continue;
-            if ("_changePKH".equals(n) || "_changeAmount".equals(n) || "_newAmount".equals(n)) continue;
+            if (isAutoInjectedWitnessParam(n)) continue;
+            if (isStateful) {
+                if ("SigHashPreimage".equals(t)) continue;
+                if ("_changePKH".equals(n) || "_changeAmount".equals(n) || "_newAmount".equals(n)) continue;
+            }
             out.add(p);
         }
         return out;
+    }
+
+    /** True if {@code paramName} is an auto-injected intent-intrinsic
+     * witness param ({@code _prevOutScript_<i>} or {@code _serialisedOutputs}). */
+    private static boolean isAutoInjectedWitnessParam(String paramName) {
+        return paramName.startsWith("_prevOutScript_") || "_serialisedOutputs".equals(paramName);
     }
 
     private static boolean hasParam(RunarArtifact.ABIMethod m, String name) {
@@ -896,6 +1051,11 @@ public final class RunarContract {
                 "RunarContract.prepareCall: contract has not been deployed. Call deploy() or setCurrentUtxo()."
             );
         }
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        ScriptSizeExceededError.assertScriptHexUnderLimit(
+            currentUtxo.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+            artifact.contractName() + ".prepareCall(" + methodName + ")"
+        );
         RunarArtifact.ABIMethod m = findMethod(methodName);
         if (m == null) {
             throw new IllegalArgumentException(
@@ -908,6 +1068,10 @@ public final class RunarContract {
         if (artifact.isStateful() && stateUpdates != null) {
             state.putAll(stateUpdates);
         }
+
+        // Pre-resolve intent-intrinsic witness hex (throws
+        // WitnessValueMissingError if any auto-injected param wasn't set).
+        String intentWitnessHex = buildIntentWitnessHex(m);
 
         List<Integer> sigIndices = new ArrayList<>();
         List<Object> resolved = new ArrayList<>(args);
@@ -922,13 +1086,20 @@ public final class RunarContract {
             }
         }
 
-        String unlockHex = buildUnlockingScript(m, resolved);
+        String unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;
         Map<String, Object> continuation = artifact.isStateful() ? new java.util.LinkedHashMap<>(state) : null;
         long newSats = artifact.isStateful() ? currentUtxo.satoshis() : 0;
 
         TransactionBuilder.CallResult result = TransactionBuilder.buildCallTransaction(
             artifact, currentUtxo, unlockHex, continuation, newSats, provider, signer, null
         );
+        // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+        if (result.newLockingScriptHex() != null) {
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                result.newLockingScriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                artifact.contractName() + ".prepareCall(" + methodName + ").continuation"
+            );
+        }
         String txHex = result.txHex();
 
         // BIP-143 is invariant under scriptSig contents (it hashes the
@@ -955,7 +1126,8 @@ public final class RunarContract {
             artifact.isStateful(),
             continuation,
             result.newLockingScriptHex(),
-            newSats
+            newSats,
+            intentWitnessHex
         );
     }
 
@@ -1029,6 +1201,10 @@ public final class RunarContract {
         boolean methodNeedsNewAmount = hasParam(m, "_newAmount");
         boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
 
+        // Pre-resolve intent-intrinsic witness hex (throws
+        // WitnessValueMissingError if any auto-injected param wasn't set).
+        String intentWitnessHex = buildIntentWitnessHex(m);
+
         // Track Sig placeholders the external signer will fill in.
         List<Object> resolved = new ArrayList<>(args);
         List<Integer> sigIndices = new ArrayList<>();
@@ -1074,7 +1250,8 @@ public final class RunarContract {
             String placeholderUnlock = buildPushTxUnlock(
                 m, methodName, resolved, "00".repeat(72),
                 methodNeedsChange ? "00".repeat(20) : null,
-                0L, methodNeedsNewAmount, 0L, "00".repeat(181)
+                0L, methodNeedsNewAmount, 0L, "00".repeat(181),
+                intentWitnessHex
             );
             RawTx tx = buildTx.get();
             tx.setUnlockingScript(0, placeholderUnlock);
@@ -1101,12 +1278,13 @@ public final class RunarContract {
             contractUnlock = buildPushTxUnlock(
                 m, methodName, resolved, opPushTxSigHex,
                 /*changePkhHex (terminal: no change)*/ null,
-                0L, methodNeedsNewAmount, 0L, preimageHex
+                0L, methodNeedsNewAmount, 0L, preimageHex,
+                intentWitnessHex
             );
         } else {
             // Pure stateless terminal — finalizeCall splices Sig pushes
             // into the rebuilt unlock.
-            String placeholderUnlock = buildUnlockingScript(m, resolved);
+            String placeholderUnlock = buildUnlockingScript(m, resolved) + intentWitnessHex;
             RawTx tx = buildTx.get();
             tx.setUnlockingScript(0, placeholderUnlock);
             byte[] sh = sigIndices.isEmpty()
@@ -1116,6 +1294,8 @@ public final class RunarContract {
                 );
             sighashes = new ArrayList<>(sigIndices.size());
             for (int i = 0; i < sigIndices.size(); i++) sighashes.add(sh.clone());
+            // placeholderUnlock already includes intent witness suffix; reuse
+            // it as the final contract unlock for stateless terminal.
             contractUnlock = placeholderUnlock;
         }
 
@@ -1145,7 +1325,8 @@ public final class RunarContract {
         return new PreparedCall(
             finalTx.toHex(), sighashes, sigIndices,
             methodName, resolved, currentUtxo, /*isStateful*/ false,
-            /*continuation*/ null, /*newLockingScriptHex*/ null, /*newSatoshis*/ 0L
+            /*continuation*/ null, /*newLockingScriptHex*/ null, /*newSatoshis*/ 0L,
+            intentWitnessHex
         );
     }
 
@@ -1207,7 +1388,7 @@ public final class RunarContract {
                 + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
             resolved.set(argIdx, sigHex);
         }
-        String unlockHex = buildUnlockingScript(m, resolved);
+        String unlockHex = buildUnlockingScript(m, resolved) + prepared.intentWitnessHex;
 
         // Rebuild the tx with the real unlocking script. The outputs
         // (and therefore BIP-143 sighash inputs) are identical to the

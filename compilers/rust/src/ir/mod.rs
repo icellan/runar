@@ -5,6 +5,9 @@
 //! JSON), so these types serve as the universal interchange format.
 
 pub mod loader;
+pub mod unknown_anf_kind_error;
+
+pub use unknown_anf_kind_error::UnknownAnfKindError;
 
 use serde::{Deserialize, Serialize};
 

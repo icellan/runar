@@ -54,7 +54,16 @@ public final class MockProvider implements Provider {
 
     @Override
     public List<UTXO> listUtxos(String address) {
-        return new ArrayList<>(utxosByAddress.getOrDefault(address, Collections.emptyList()));
+        List<UTXO> utxos = new ArrayList<>(utxosByAddress.getOrDefault(address, Collections.emptyList()));
+        // DoS-bound: reject pathological scripts at the provider boundary.
+        for (UTXO u : utxos) {
+            if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                "MockProvider.listUtxos(" + address + ")"
+            );
+        }
+        return utxos;
     }
 
     @Override
@@ -67,7 +76,14 @@ public final class MockProvider implements Provider {
 
     @Override
     public UTXO getUtxo(String txid, int vout) {
-        return utxosByOutpoint.get(outpointKey(txid, vout));
+        UTXO u = utxosByOutpoint.get(outpointKey(txid, vout));
+        if (u != null && u.scriptHex() != null && !u.scriptHex().isEmpty()) {
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                "MockProvider.getUtxo(" + txid + ":" + vout + ")"
+            );
+        }
+        return u;
     }
 
     private static String outpointKey(String txid, int vout) {

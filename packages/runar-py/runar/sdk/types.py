@@ -249,6 +249,10 @@ class PreparedCall:
     has_multi_output: bool = False
     contract_outputs: list[dict] = field(default_factory=list)
     code_sep_idx: int = -1  # adjusted OP_CODESEPARATOR byte offset, -1 if none
+    # Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+    # `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
+    # Empty when the method has no auto-injected intent params.
+    intent_witness_hex: str = ''
 
 
 # SdkValue is the union of types that can be passed as contract arguments
