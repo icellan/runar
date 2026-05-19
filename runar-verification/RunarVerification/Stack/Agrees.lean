@@ -14442,6 +14442,280 @@ theorem runOps_push_i_loadRef_drop_preserves_metadata
           runOps_push_i_loadRef_drop sm n i d v s hDepth hLen hAt, ?_, ?_, ?_, ?_⟩
   all_goals unfold StackState.push; rfl
 
+/-! ### Wave 11 — consume-path per-iter chunk identities
+
+Wave 9 (`runOps_push_i_loadRef_drop`) covers the copy-path body chunk
+shape `[push i] ++ loadRef sm n ++ [drop]`. Wave 10's A7 Tier 3b
+`.loadParam p` singleton-body wrapper additionally needs **consume**-
+path body chunks for the FINAL iter: when the natural `lastUses`
+records `p`'s last-use at index 0, `loadRefLiveParam` lowers to a
+bare `[.swap]` / `[.rot]` / `[.roll d]` (no preceding depth push).
+The per-iter chunk is then `[push i, swap, drop]` / `[push i, rot,
+drop]` / `[push i, roll d, drop]`.
+
+Each chunk pushes the iter index, executes the consume opcode against
+the post-push runtime stack (which the lowerer already accounted for
+when computing the parent-stack depth witness), then drops the moved
+value off the top. The net effect on `s` is to **leave the iter index
+on top with one parent-stack slot consumed**. Concretely:
+
+* `swap, drop` after `push i`: consumes `s.stack[0]` (parent top).
+  Net stack = `(.vBigint i) :: s.stack.tail`.
+* `rot, drop` after `push i`: consumes `s.stack[1]` (parent depth 1).
+  Net stack = `(.vBigint i) :: s.stack[0] :: s.stack.tail.tail`.
+* `roll d, drop` after `push i` (for `d ≥ 1`): consumes
+  `(s.push i).stack[d] = s.stack[d-1]`. Net stack
+  = `(.vBigint i) :: (s.stack.eraseIdx (d-1))`.
+
+All three opcodes mutate only `.stack`, so altstack / outputs / props /
+preimage are preserved end-to-end.
+
+The lemmas here are the operational substrate; downstream A7 Tier 3b
+wrappers (in `Stack/AgreesA7.lean`) compose them via the
+`loopRefAssemble`-style recursors against a parent-stack length
+invariant.
+-/
+
+/-- **Consume-path per-iter chunk identity at parent-depth 0.**
+
+The `[push i, swap, drop]` chunk consumes the parent stack's
+top-of-stack and leaves the iter index in its place.
+
+This is the wave-11 consume-path companion to
+`runOps_push_i_loadRef_drop` (depth-0 copy-path). The depth condition
+is captured purely structurally: `s.stack = top :: rest`. No depth
+witness or stack-map hypothesis is needed because `swap` operates on
+the runtime depth pair (0, 1) directly. -/
+theorem runOps_push_i_swap_drop
+    (i : Nat) (s : StackState) (top : Value) (rest : List Value)
+    (hStk : s.stack = top :: rest) :
+    runOps [.push (.bigint (Int.ofNat i)), .swap, .drop] s
+      = .ok ({s with stack := .vBigint (Int.ofNat i) :: rest}) := by
+  -- Compose three single-op chunks via `runOps_append`.
+  have hPush :
+      runOps [.push (.bigint (Int.ofNat i))] s
+        = .ok (s.push (.vBigint (Int.ofNat i))) :=
+    Stack.Sim.run_push_bigint s (Int.ofNat i)
+  have hSwap :
+      runOps [.swap] (s.push (.vBigint (Int.ofNat i)))
+        = .ok ({s.push (.vBigint (Int.ofNat i))
+                with stack := top :: .vBigint (Int.ofNat i) :: rest}) := by
+    show runOps (.swap :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .swap (s.push (.vBigint (Int.ofNat i)))
+        = Stack.Eval.applySwap (s.push (.vBigint (Int.ofNat i))) := rfl
+    rw [hStep]
+    unfold Stack.Eval.applySwap StackState.push
+    rw [hStk]
+    simp [Stack.Sim.run_empty]
+  have hDrop :
+      runOps [.drop] ({s.push (.vBigint (Int.ofNat i))
+                       with stack := top :: .vBigint (Int.ofNat i) :: rest})
+        = .ok ({s with stack := .vBigint (Int.ofNat i) :: rest}) := by
+    show runOps (.drop :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .drop
+            ({s.push (.vBigint (Int.ofNat i))
+              with stack := top :: .vBigint (Int.ofNat i) :: rest})
+          = Stack.Eval.applyDrop
+              ({s.push (.vBigint (Int.ofNat i))
+                with stack := top :: .vBigint (Int.ofNat i) :: rest}) := rfl
+    rw [hStep]
+    unfold Stack.Eval.applyDrop StackState.push
+    simp [Stack.Sim.run_empty]
+  show runOps ([.push (.bigint (Int.ofNat i))] ++ [.swap] ++ [.drop]) s = _
+  rw [Stack.Sim.runOps_append, Stack.Sim.runOps_append, hPush]
+  simp only []
+  rw [hSwap]
+  simp only []
+  exact hDrop
+
+/-- **Metadata-preservation corollary** for the depth-0 consume-path
+per-iter chunk identity. `swap` and `drop` only mutate `.stack`; the
+post-state's altstack / outputs / props / preimage equal the input's. -/
+theorem runOps_push_i_swap_drop_preserves_metadata
+    (i : Nat) (s : StackState) (top : Value) (rest : List Value)
+    (hStk : s.stack = top :: rest) :
+    ∃ s',
+      runOps [.push (.bigint (Int.ofNat i)), .swap, .drop] s = .ok s'
+      ∧ s'.altstack = s.altstack
+      ∧ s'.outputs = s.outputs
+      ∧ s'.props = s.props
+      ∧ s'.preimage = s.preimage := by
+  refine ⟨{s with stack := .vBigint (Int.ofNat i) :: rest},
+          runOps_push_i_swap_drop i s top rest hStk, rfl, rfl, rfl, rfl⟩
+
+/-- **Consume-path per-iter chunk identity at parent-depth 1.**
+
+The `[push i, rot, drop]` chunk consumes the parent stack's
+depth-1 slot and leaves the iter index on top with the parent's old
+top untouched (now occupying the parent depth-1 position relative to
+the iter).
+
+The depth condition is captured structurally: `s.stack = x0 :: x1 :: rest`.
+After `push i`, runtime stack is `i :: x0 :: x1 :: rest`; `rot` brings
+`x1` to top → `x1 :: i :: x0 :: rest`; `drop` removes `x1` →
+`i :: x0 :: rest`. Net: removed `x1` (parent depth 1). -/
+theorem runOps_push_i_rot_drop
+    (i : Nat) (s : StackState) (x0 x1 : Value) (rest : List Value)
+    (hStk : s.stack = x0 :: x1 :: rest) :
+    runOps [.push (.bigint (Int.ofNat i)), .rot, .drop] s
+      = .ok ({s with stack := .vBigint (Int.ofNat i) :: x0 :: rest}) := by
+  have hPush :
+      runOps [.push (.bigint (Int.ofNat i))] s
+        = .ok (s.push (.vBigint (Int.ofNat i))) :=
+    Stack.Sim.run_push_bigint s (Int.ofNat i)
+  have hRot :
+      runOps [.rot] (s.push (.vBigint (Int.ofNat i)))
+        = .ok ({s.push (.vBigint (Int.ofNat i))
+                with stack := x1 :: .vBigint (Int.ofNat i) :: x0 :: rest}) := by
+    show runOps (.rot :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .rot (s.push (.vBigint (Int.ofNat i)))
+        = Stack.Eval.applyRot (s.push (.vBigint (Int.ofNat i))) := rfl
+    rw [hStep]
+    unfold Stack.Eval.applyRot StackState.push
+    rw [hStk]
+    simp [Stack.Sim.run_empty]
+  have hDrop :
+      runOps [.drop] ({s.push (.vBigint (Int.ofNat i))
+                       with stack := x1 :: .vBigint (Int.ofNat i) :: x0 :: rest})
+        = .ok ({s with stack := .vBigint (Int.ofNat i) :: x0 :: rest}) := by
+    show runOps (.drop :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .drop
+            ({s.push (.vBigint (Int.ofNat i))
+              with stack := x1 :: .vBigint (Int.ofNat i) :: x0 :: rest})
+          = Stack.Eval.applyDrop
+              ({s.push (.vBigint (Int.ofNat i))
+                with stack := x1 :: .vBigint (Int.ofNat i) :: x0 :: rest}) := rfl
+    rw [hStep]
+    unfold Stack.Eval.applyDrop StackState.push
+    simp [Stack.Sim.run_empty]
+  show runOps ([.push (.bigint (Int.ofNat i))] ++ [.rot] ++ [.drop]) s = _
+  rw [Stack.Sim.runOps_append, Stack.Sim.runOps_append, hPush]
+  simp only []
+  rw [hRot]
+  simp only []
+  exact hDrop
+
+/-- **Metadata-preservation corollary** for the depth-1 consume-path
+per-iter chunk identity. -/
+theorem runOps_push_i_rot_drop_preserves_metadata
+    (i : Nat) (s : StackState) (x0 x1 : Value) (rest : List Value)
+    (hStk : s.stack = x0 :: x1 :: rest) :
+    ∃ s',
+      runOps [.push (.bigint (Int.ofNat i)), .rot, .drop] s = .ok s'
+      ∧ s'.altstack = s.altstack
+      ∧ s'.outputs = s.outputs
+      ∧ s'.props = s.props
+      ∧ s'.preimage = s.preimage := by
+  refine ⟨{s with stack := .vBigint (Int.ofNat i) :: x0 :: rest},
+          runOps_push_i_rot_drop i s x0 x1 rest hStk, rfl, rfl, rfl, rfl⟩
+
+/-- **Consume-path per-iter chunk identity at runtime-depth `d`**
+(for `d ≥ 1`, matching the lowerer's `[.roll d_inner]` emit at
+`d_inner ≥ 3` and as a generalisation that covers any `d` for which
+`(s.push i).stack` is long enough).
+
+The `[push i, roll d, drop]` chunk consumes the element at runtime
+position `d` of `(s.push i)` — equivalently, parent position `d-1`
+of `s` — and leaves the iter index on top with the surrounding parent
+slots compacted (i.e., `s.stack.eraseIdx (d-1)` shifted by the iter
+push).
+
+The post-state's stack is expressed as `eraseIdx d` over the *runtime*
+post-push stack `((.vBigint i) :: s.stack)` to keep the statement
+free of off-by-one bookkeeping; callers reading this against parent
+depths simply observe `((.vBigint i) :: s.stack).eraseIdx d` =
+`(.vBigint i) :: s.stack.eraseIdx (d-1)` whenever `d ≥ 1`. -/
+theorem runOps_push_i_roll_drop
+    (i : Nat) (d : Nat) (s : StackState)
+    (hLen : d < (s.push (.vBigint (Int.ofNat i))).stack.length)
+    (_hd1 : 1 ≤ d) :
+    runOps [.push (.bigint (Int.ofNat i)), .roll d, .drop] s
+      = .ok ({s with stack :=
+                ((s.push (.vBigint (Int.ofNat i))).stack.eraseIdx d)}) := by
+  -- Capture sPush as a named local for the intermediate equations.
+  let sPush : StackState := s.push (.vBigint (Int.ofNat i))
+  have hLen' : d < sPush.stack.length := hLen
+  have hPushEq : sPush = s.push (.vBigint (Int.ofNat i)) := rfl
+  have hPush :
+      runOps [.push (.bigint (Int.ofNat i))] s
+        = .ok sPush :=
+    Stack.Sim.run_push_bigint s (Int.ofNat i)
+  -- Rolled element + erased tail describe the post-roll state.
+  let vRoll : Value := sPush.stack[d]!
+  let restRoll : List Value := sPush.stack.eraseIdx d
+  let sMid : StackState := {sPush with stack := vRoll :: restRoll}
+  have hRoll : runOps [.roll d] sPush = .ok sMid := by
+    show runOps (.roll d :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf (.roll d) sPush = Stack.Eval.applyRoll sPush d := rfl
+    rw [hStep]
+    unfold Stack.Eval.applyRoll
+    rw [if_neg (by omega)]
+    simp [Stack.Sim.run_empty, sMid, vRoll, restRoll]
+  -- Drop on `sMid` removes `vRoll`, leaving `{sPush with stack := restRoll}`.
+  -- Since `sPush` only differs from `s` in `.stack`, this equals
+  -- `{s with stack := restRoll}`.
+  have hSPushAlt : sPush.altstack = s.altstack := by
+    show (s.push (.vBigint (Int.ofNat i))).altstack = s.altstack
+    unfold StackState.push; rfl
+  have hSPushOut : sPush.outputs = s.outputs := by
+    show (s.push (.vBigint (Int.ofNat i))).outputs = s.outputs
+    unfold StackState.push; rfl
+  have hSPushProps : sPush.props = s.props := by
+    show (s.push (.vBigint (Int.ofNat i))).props = s.props
+    unfold StackState.push; rfl
+  have hSPushPre : sPush.preimage = s.preimage := by
+    show (s.push (.vBigint (Int.ofNat i))).preimage = s.preimage
+    unfold StackState.push; rfl
+  have hDrop :
+      runOps [.drop] sMid = .ok ({s with stack := restRoll}) := by
+    show runOps (.drop :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .drop sMid = Stack.Eval.applyDrop sMid := rfl
+    rw [hStep]
+    have hApplyDrop : Stack.Eval.applyDrop sMid
+        = .ok ({sPush with stack := restRoll}) := by
+      unfold Stack.Eval.applyDrop
+      simp [sMid]
+    rw [hApplyDrop]
+    -- {sPush with stack := restRoll} = {s with stack := restRoll}
+    -- because sPush's other fields equal s's. Unfold sPush via push.
+    have hSubst : ({sPush with stack := restRoll} : StackState)
+        = {s with stack := restRoll} := by
+      show ({s.push (.vBigint (Int.ofNat i)) with stack := restRoll} : StackState)
+            = ({s with stack := restRoll} : StackState)
+      unfold StackState.push
+      rfl
+    rw [hSubst]
+    exact Stack.Sim.run_empty _
+  show runOps ([.push (.bigint (Int.ofNat i))] ++ [.roll d] ++ [.drop]) s = _
+  rw [Stack.Sim.runOps_append, Stack.Sim.runOps_append, hPush]
+  simp only []
+  rw [hRoll]
+  simp only []
+  exact hDrop
+
+/-- **Metadata-preservation corollary** for the runtime-depth-`d`
+consume-path per-iter chunk identity. -/
+theorem runOps_push_i_roll_drop_preserves_metadata
+    (i : Nat) (d : Nat) (s : StackState)
+    (hLen : d < (s.push (.vBigint (Int.ofNat i))).stack.length)
+    (hd1 : 1 ≤ d) :
+    ∃ s',
+      runOps [.push (.bigint (Int.ofNat i)), .roll d, .drop] s = .ok s'
+      ∧ s'.altstack = s.altstack
+      ∧ s'.outputs = s.outputs
+      ∧ s'.props = s.props
+      ∧ s'.preimage = s.preimage := by
+  refine ⟨{s with stack :=
+              ((s.push (.vBigint (Int.ofNat i))).stack.eraseIdx d)},
+          runOps_push_i_roll_drop i d s hLen hd1, rfl, rfl, rfl, rfl⟩
+
+
 private theorem lowerValue_snd_structuralCopy
     (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
     (sm : StackMap) (currentIndex : Nat)
@@ -15538,6 +15812,246 @@ theorem runOps_lowerValueP_structuralConsumeValue_ok
   | arrayLiteral _ => simp [structuralConsumeValue] at h
   | rawScript _ _ _ => simp [structuralConsumeValue] at h
 
+/-! ### Wave 11 — consume-mode single-step metadata-preservation helpers
+
+Each consume-mode ref step (`refAlias` / `loadParam`) emits one of
+`[]` / `[.swap]` / `[.rot]` / `[.roll d]`. All four runtime steps
+mutate only `.stack`. The witness lemmas
+(`lowerValueP_refAlias_consume_d0/d1/d2/dge3_witness`, similarly for
+`loadParam`) already pin the result state to a `{stkSt with stack := ...}`
+shape; we just read the metadata equalities off that shape.
+
+We expose a *single helper* `runOps_consumeStep_preserves_metadata`
+keyed on the shape `runOps [.swap] stkSt` / `runOps [.rot] stkSt` /
+`runOps [.roll d] stkSt` directly, plus an `[]` identity case. The
+helper handles every consume-mode emit unconditionally on the ops
+list. Then we case-split on the value at the body level to map the
+witness onto one of these shapes. -/
+
+/-- `runOps [.swap]` preserves all four metadata fields when it
+succeeds. The post-state's `.stack` may differ; the other fields are
+inherited from `stkSt`. -/
+private theorem runOps_singleSwap_preserves_metadata
+    (stkSt stkSt' : StackState)
+    (hRun : runOps [.swap] stkSt = .ok stkSt') :
+    stkSt'.altstack = stkSt.altstack
+    ∧ stkSt'.outputs = stkSt.outputs
+    ∧ stkSt'.props = stkSt.props
+    ∧ stkSt'.preimage = stkSt.preimage := by
+  -- runOps [.swap] reduces to applySwap; on success, applySwap leaves
+  -- altstack/outputs/props/preimage untouched.
+  unfold runOps at hRun
+  have hStep : stepNonIf .swap stkSt = Stack.Eval.applySwap stkSt := rfl
+  rw [hStep] at hRun
+  unfold Stack.Eval.applySwap at hRun
+  match hCases : stkSt.stack with
+  | [] => rw [hCases] at hRun; simp at hRun
+  | [_] => rw [hCases] at hRun; simp at hRun
+  | a :: b :: rest =>
+      rw [hCases] at hRun
+      simp only [Stack.Sim.run_empty] at hRun
+      have hEq : stkSt' = ({stkSt with stack := b :: a :: rest} : StackState) := by
+        injection hRun with hEq2
+        exact hEq2.symm
+      rw [hEq]; exact ⟨rfl, rfl, rfl, rfl⟩
+
+/-- `runOps [.rot]` preserves all four metadata fields when it succeeds. -/
+private theorem runOps_singleRot_preserves_metadata
+    (stkSt stkSt' : StackState)
+    (hRun : runOps [.rot] stkSt = .ok stkSt') :
+    stkSt'.altstack = stkSt.altstack
+    ∧ stkSt'.outputs = stkSt.outputs
+    ∧ stkSt'.props = stkSt.props
+    ∧ stkSt'.preimage = stkSt.preimage := by
+  unfold runOps at hRun
+  have hStep : stepNonIf .rot stkSt = Stack.Eval.applyRot stkSt := rfl
+  rw [hStep] at hRun
+  unfold Stack.Eval.applyRot at hRun
+  match hCases : stkSt.stack with
+  | [] => rw [hCases] at hRun; simp at hRun
+  | [_] => rw [hCases] at hRun; simp at hRun
+  | [_, _] => rw [hCases] at hRun; simp at hRun
+  | a :: b :: c :: rest =>
+      rw [hCases] at hRun
+      simp only [Stack.Sim.run_empty] at hRun
+      have hEq : stkSt' = ({stkSt with stack := c :: a :: b :: rest} : StackState) := by
+        injection hRun with hEq2
+        exact hEq2.symm
+      rw [hEq]; exact ⟨rfl, rfl, rfl, rfl⟩
+
+/-- `runOps [.roll d]` preserves all four metadata fields when it succeeds. -/
+private theorem runOps_singleRoll_preserves_metadata
+    (d : Nat) (stkSt stkSt' : StackState)
+    (hRun : runOps [.roll d] stkSt = .ok stkSt') :
+    stkSt'.altstack = stkSt.altstack
+    ∧ stkSt'.outputs = stkSt.outputs
+    ∧ stkSt'.props = stkSt.props
+    ∧ stkSt'.preimage = stkSt.preimage := by
+  unfold runOps at hRun
+  have hStep : stepNonIf (.roll d) stkSt = Stack.Eval.applyRoll stkSt d := rfl
+  rw [hStep] at hRun
+  unfold Stack.Eval.applyRoll at hRun
+  by_cases hLen : d ≥ stkSt.stack.length
+  · rw [if_pos hLen] at hRun
+    simp at hRun
+  · rw [if_neg hLen] at hRun
+    simp only [Stack.Sim.run_empty] at hRun
+    have hEq : stkSt' = ({stkSt with
+                          stack := stkSt.stack[d]! :: stkSt.stack.eraseIdx d}
+                        : StackState) := by
+      injection hRun with hEq2
+      exact hEq2.symm
+    rw [hEq]; exact ⟨rfl, rfl, rfl, rfl⟩
+
+/-- Single-step metadata-preservation for consume-mode `loadConst (.refAlias _)`. -/
+private theorem consumeRefAlias_preserves_metadata_aux
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (bn n : String)
+    (h : structuralConsumeValue lastUses outerProtected localBindings (untagSm tsm)
+        currentIndex (.loadConst (.refAlias n)))
+    (_hFresh : freshIn bn (untagSm tsm))
+    (stkSt' : StackState) (_loadedVal : Value)
+    (hHeadRun :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn
+                (.loadConst (.refAlias n))).1 stkSt = .ok stkSt')
+    (_hAgrees : agreesTagged tsm anfSt stkSt) :
+    stkSt'.altstack = stkSt.altstack
+    ∧ stkSt'.outputs = stkSt.outputs
+    ∧ stkSt'.props = stkSt.props
+    ∧ stkSt'.preimage = stkSt.preimage := by
+  unfold structuralConsumeValue at h
+  obtain ⟨⟨d, hDepth⟩, hConsume⟩ := h
+  -- The emitted ops are determined by `d`.
+  have hOpsShape :
+      (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts (untagSm tsm) bn
+          (.loadConst (.refAlias n))).1
+      = (if d = 0 then ([] : List StackOp)
+         else if d = 1 then [.swap]
+         else if d = 2 then [.rot]
+         else [.roll d]) := by
+    unfold Stack.Lower.lowerValueP Stack.Lower.bringToTop
+    rw [hDepth]
+    cases d with
+    | zero => simp [hConsume]
+    | succ d1 =>
+        cases d1 with
+        | zero =>
+            simp [hConsume]
+            split <;> rfl
+        | succ d2 =>
+            cases d2 with
+            | zero => simp [hConsume]
+            | succ _ => simp [hConsume]
+  rw [hOpsShape] at hHeadRun
+  -- Dispatch on `d` to pick the matching helper.
+  cases d with
+  | zero =>
+      -- ops = []; runOps [] stkSt = .ok stkSt, so stkSt' = stkSt.
+      have hHeadRunReduced : runOps ([] : List StackOp) stkSt = .ok stkSt' := by
+        simpa using hHeadRun
+      have hEq : stkSt = stkSt' := by
+        have hNil := Stack.Sim.run_empty stkSt
+        rw [hNil] at hHeadRunReduced
+        exact Except.ok.inj hHeadRunReduced
+      rw [← hEq]; exact ⟨rfl, rfl, rfl, rfl⟩
+  | succ d1 =>
+      cases d1 with
+      | zero =>
+          -- ops = [.swap]
+          have hHeadRunReduced : runOps [.swap] stkSt = .ok stkSt' := by
+            simpa using hHeadRun
+          exact runOps_singleSwap_preserves_metadata stkSt stkSt' hHeadRunReduced
+      | succ d2 =>
+          cases d2 with
+          | zero =>
+              -- ops = [.rot]
+              have hHeadRunReduced : runOps [.rot] stkSt = .ok stkSt' := by
+                simpa using hHeadRun
+              exact runOps_singleRot_preserves_metadata stkSt stkSt' hHeadRunReduced
+          | succ d3 =>
+              -- ops = [.roll (d3 + 3)]
+              have hHeadRunReduced : runOps [.roll (d3 + 3)] stkSt = .ok stkSt' := by
+                simpa using hHeadRun
+              exact runOps_singleRoll_preserves_metadata (d3 + 3) stkSt stkSt' hHeadRunReduced
+
+/-- Single-step metadata-preservation for consume-mode `loadParam _`. -/
+private theorem consumeLoadParam_preserves_metadata_aux
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (bn n : String)
+    (h : structuralConsumeValue lastUses outerProtected localBindings (untagSm tsm)
+        currentIndex (.loadParam n))
+    (_hFresh : freshIn bn (untagSm tsm))
+    (stkSt' : StackState) (_loadedVal : Value)
+    (hHeadRun :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts (untagSm tsm) bn (.loadParam n)).1
+              stkSt = .ok stkSt')
+    (_hAgrees : agreesTagged tsm anfSt stkSt) :
+    stkSt'.altstack = stkSt.altstack
+    ∧ stkSt'.outputs = stkSt.outputs
+    ∧ stkSt'.props = stkSt.props
+    ∧ stkSt'.preimage = stkSt.preimage := by
+  unfold structuralConsumeValue at h
+  obtain ⟨⟨d, hDepth⟩, hConsume⟩ := h
+  have hOpsShape :
+      (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts (untagSm tsm) bn (.loadParam n)).1
+      = (if d = 0 then ([] : List StackOp)
+         else if d = 1 then [.swap]
+         else if d = 2 then [.rot]
+         else [.roll d]) := by
+    unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLiveParam Stack.Lower.bringToTop
+    rw [hDepth]
+    cases d with
+    | zero => simp [hConsume]
+    | succ d1 =>
+        cases d1 with
+        | zero =>
+            simp [hConsume]
+            split <;> rfl
+        | succ d2 =>
+            cases d2 with
+            | zero => simp [hConsume]
+            | succ _ => simp [hConsume]
+  rw [hOpsShape] at hHeadRun
+  cases d with
+  | zero =>
+      have hHeadRunReduced : runOps ([] : List StackOp) stkSt = .ok stkSt' := by
+        simpa using hHeadRun
+      have hEq : stkSt = stkSt' := by
+        have hNil := Stack.Sim.run_empty stkSt
+        rw [hNil] at hHeadRunReduced
+        exact Except.ok.inj hHeadRunReduced
+      rw [← hEq]; exact ⟨rfl, rfl, rfl, rfl⟩
+  | succ d1 =>
+      cases d1 with
+      | zero =>
+          have hHeadRunReduced : runOps [.swap] stkSt = .ok stkSt' := by
+            simpa using hHeadRun
+          exact runOps_singleSwap_preserves_metadata stkSt stkSt' hHeadRunReduced
+      | succ d2 =>
+          cases d2 with
+          | zero =>
+              have hHeadRunReduced : runOps [.rot] stkSt = .ok stkSt' := by
+                simpa using hHeadRun
+              exact runOps_singleRot_preserves_metadata stkSt stkSt' hHeadRunReduced
+          | succ d3 =>
+              have hHeadRunReduced : runOps [.roll (d3 + 3)] stkSt = .ok stkSt' := by
+                simpa using hHeadRun
+              exact runOps_singleRoll_preserves_metadata (d3 + 3) stkSt stkSt' hHeadRunReduced
+
 /-- `runOps` of a structural-consume body's lowered op list succeeds from
 any starting state with `agreesTagged tsm anfSt stkSt`.
 
@@ -15691,6 +16205,272 @@ theorem runOps_lowerBindingsP_structuralConsumeBody_isSome
         hRest
         hFreshInSm'
         hRestNodup
+
+/-- **Metadata-preservation strengthening** of
+`runOps_lowerBindingsP_structuralConsumeBody_isSome`.
+
+Wave 11 (Path 2 Tier 1 substrate widening): for any
+`structuralConsumeBody`, running its `lowerBindingsP`-emitted op list
+from a state `stkSt` yields a post-state `stkSt'` whose four metadata
+fields (`altstack`, `outputs`, `props`, `preimage`) equal `stkSt`'s.
+
+Each consume-mode value step emits one of:
+* `[.push (.bigint/bool/bytes ...)]` — push only mutates `.stack`.
+* `[]` (depth-0 consume) — identity, all fields equal.
+* `[.swap]` (depth-1 consume) — `applySwap` only mutates `.stack`.
+* `[.rot]` (depth-2 consume) — `applyRot` only mutates `.stack`.
+* `[.roll d]` (depth d ≥ 3 consume) — `applyRoll` only mutates `.stack`.
+
+Required by `Stack/AgreesA6.lean` Tier 4 ref-branch widening to
+discharge the consume-mode counterpart to the copy-mode
+`runOps_lowerBindings_structuralCopyBody_preserves_metadata`. -/
+theorem runOps_lowerBindingsP_structuralConsumeBody_preserves_metadata
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat)
+      (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState),
+      untagSm tsm = sm →
+      agreesTagged tsm anfSt stkSt →
+      structuralConsumeBody progMethods props budget lastUses outerProtected
+          localBindings constInts body sm currentIndex →
+      (∀ b ∈ body, b.name ∉ sm) →
+      (body.map (·.name)).Nodup →
+      ∃ stkSt',
+        runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex
+                   lastUses outerProtected localBindings constInts sm body).1 stkSt
+          = .ok stkSt'
+        ∧ stkSt'.altstack = stkSt.altstack
+        ∧ stkSt'.outputs = stkSt.outputs
+        ∧ stkSt'.props = stkSt.props
+        ∧ stkSt'.preimage = stkSt.preimage
+  | [], _sm, _idx, _tsm, _anfSt, _stkSt, _h1, _h2, _h3, _h4, _h5 => by
+      refine ⟨_stkSt, ?_, rfl, rfl, rfl, rfl⟩
+      simp [Stack.Lower.lowerBindingsP, runOps]
+  | (.mk name v _src) :: rest, sm, currentIndex, tsm, anfSt, stkSt,
+      hUntagSm, hAgrees, h, hFreshInSm, hBodyNodup => by
+      simp only [structuralConsumeBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hHeadSm : structuralConsumeValue lastUses outerProtected localBindings (untagSm tsm)
+          currentIndex v := by rw [hUntagSm]; exact hHead
+      have hFreshHead : name ∉ sm := hFreshInSm (.mk name v _src) List.mem_cons_self
+      have hFresh : freshIn name (untagSm tsm) := by rw [hUntagSm]; exact hFreshHead
+      obtain ⟨stkSt', loadedVal, hHeadRun, tsm', hUntagTsm', hAgreesNew⟩ :=
+        runOps_lowerValueP_structuralConsumeValue_ok
+          progMethods props budget currentIndex lastUses outerProtected localBindings constInts
+          tsm anfSt stkSt hAgrees name v hHeadSm hFresh
+      -- The head step preserves metadata: every consume-mode value step
+      -- either pushes (mutating only `.stack`) or runs `swap` / `rot` /
+      -- `roll d` (each mutates only `.stack`). We extract these field
+      -- equalities by case analysis on `v` mirroring
+      -- `runOps_lowerValueP_structuralConsumeValue_ok`'s dispatch.
+      have hHeadMeta :
+          stkSt'.altstack = stkSt.altstack
+          ∧ stkSt'.outputs = stkSt.outputs
+          ∧ stkSt'.props = stkSt.props
+          ∧ stkSt'.preimage = stkSt.preimage := by
+        -- `hHeadRun` already pins `stkSt'` to a known shape via the
+        -- value-specific witnesses; we re-derive that shape and read off
+        -- the metadata fields directly.
+        cases v with
+        | loadConst c =>
+            cases c with
+            | int i =>
+                -- lowerValueP emits `[.push (.bigint i)]`, result = stkSt.push (.vBigint i).
+                have hShape :
+                    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts (untagSm tsm) name
+                        (.loadConst (.int i))
+                      = ([.push (.bigint i)], (untagSm tsm).push name, localBindings) := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+                rw [hShape] at hHeadRun
+                simp only [] at hHeadRun
+                have hPushRun :
+                    runOps [.push (.bigint i)] stkSt = .ok (stkSt.push (.vBigint i)) :=
+                  Stack.Sim.run_push_bigint stkSt i
+                rw [hPushRun] at hHeadRun
+                have hEq : stkSt.push (.vBigint i) = stkSt' :=
+                  Except.ok.inj hHeadRun
+                rw [← hEq]; refine ⟨?_, ?_, ?_, ?_⟩ <;>
+                  (unfold StackState.push; rfl)
+            | bool b =>
+                have hShape :
+                    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts (untagSm tsm) name
+                        (.loadConst (.bool b))
+                      = ([.push (.bool b)], (untagSm tsm).push name, localBindings) := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+                rw [hShape] at hHeadRun
+                simp only [] at hHeadRun
+                have hPushRun :
+                    runOps [.push (.bool b)] stkSt = .ok (stkSt.push (.vBool b)) :=
+                  Stack.Sim.run_push_bool stkSt b
+                rw [hPushRun] at hHeadRun
+                have hEq : stkSt.push (.vBool b) = stkSt' :=
+                  Except.ok.inj hHeadRun
+                rw [← hEq]; refine ⟨?_, ?_, ?_, ?_⟩ <;>
+                  (unfold StackState.push; rfl)
+            | bytes bs =>
+                have hShape :
+                    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts (untagSm tsm) name
+                        (.loadConst (.bytes bs))
+                      = ([.push (.bytes bs)], (untagSm tsm).push name, localBindings) := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst; rfl
+                rw [hShape] at hHeadRun
+                simp only [] at hHeadRun
+                have hPushRun :
+                    runOps [.push (.bytes bs)] stkSt = .ok (stkSt.push (.vBytes bs)) :=
+                  Stack.Sim.run_push_bytes stkSt bs
+                rw [hPushRun] at hHeadRun
+                have hEq : stkSt.push (.vBytes bs) = stkSt' :=
+                  Except.ok.inj hHeadRun
+                rw [← hEq]; refine ⟨?_, ?_, ?_, ?_⟩ <;>
+                  (unfold StackState.push; rfl)
+            | thisRef => simp [structuralConsumeValue] at hHead
+            | refAlias n =>
+                -- Consume-mode refAlias: emits `[]` / `[.swap]` / `[.rot]` /
+                -- `[.roll d]`. All four runtime steps mutate only `.stack`.
+                exact consumeRefAlias_preserves_metadata_aux
+                  progMethods props budget currentIndex lastUses outerProtected
+                  localBindings constInts tsm anfSt stkSt name n hHeadSm hFresh
+                  stkSt' loadedVal hHeadRun hAgrees
+        | loadParam n =>
+            exact consumeLoadParam_preserves_metadata_aux
+              progMethods props budget currentIndex lastUses outerProtected
+              localBindings constInts tsm anfSt stkSt name n hHeadSm hFresh
+              stkSt' loadedVal hHeadRun hAgrees
+        | loadProp _ => simp [structuralConsumeValue] at hHead
+        | binOp _ _ _ _ => simp [structuralConsumeValue] at hHead
+        | unaryOp _ _ _ => simp [structuralConsumeValue] at hHead
+        | call _ _ => simp [structuralConsumeValue] at hHead
+        | methodCall _ _ _ => simp [structuralConsumeValue] at hHead
+        | ifVal _ _ _ => simp [structuralConsumeValue] at hHead
+        | loop _ _ _ => simp [structuralConsumeValue] at hHead
+        | assert _ => simp [structuralConsumeValue] at hHead
+        | updateProp _ _ => simp [structuralConsumeValue] at hHead
+        | getStateScript => simp [structuralConsumeValue] at hHead
+        | checkPreimage _ => simp [structuralConsumeValue] at hHead
+        | deserializeState _ => simp [structuralConsumeValue] at hHead
+        | addOutput _ _ _ => simp [structuralConsumeValue] at hHead
+        | addRawOutput _ _ => simp [structuralConsumeValue] at hHead
+        | addDataOutput _ _ => simp [structuralConsumeValue] at hHead
+        | arrayLiteral _ => simp [structuralConsumeValue] at hHead
+        | rawScript _ _ _ => simp [structuralConsumeValue] at hHead
+      -- Unfold `lowerBindingsP` on a cons, then chain head + tail steps.
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm ((ANFBinding.mk name v _src) :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1)
+                    lastUses outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      -- Rewrite hHeadRun to use sm.
+      have hHeadRunSm :
+          runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).1 stkSt = .ok stkSt' := by
+        rw [← hUntagSm]; exact hHeadRun
+      -- Freshness for the tail.
+      simp only [List.map_cons, List.nodup_cons] at hBodyNodup
+      obtain ⟨hNameNotInRest, hRestNodup⟩ := hBodyNodup
+      have hTailSubsetSm : ∀ x, x ≠ name →
+          x ∈ (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name v).2.1 →
+          x ∈ sm := by
+        intro x hxNe hxMem
+        cases v with
+        | loadConst c =>
+            cases c with
+            | int i =>
+                have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name
+                        (.loadConst (.int i))).2.1 = name :: sm := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                    Stack.Lower.StackMap.push; rfl
+                rw [hSm] at hxMem
+                exact (List.mem_cons.mp hxMem).resolve_left hxNe
+            | bool b =>
+                have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name
+                        (.loadConst (.bool b))).2.1 = name :: sm := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                    Stack.Lower.StackMap.push; rfl
+                rw [hSm] at hxMem
+                exact (List.mem_cons.mp hxMem).resolve_left hxNe
+            | bytes bs =>
+                have hSm : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name
+                        (.loadConst (.bytes bs))).2.1 = name :: sm := by
+                  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+                    Stack.Lower.StackMap.push; rfl
+                rw [hSm] at hxMem
+                exact (List.mem_cons.mp hxMem).resolve_left hxNe
+            | thisRef => simp [structuralConsumeValue] at hHead
+            | refAlias consuming =>
+                unfold structuralConsumeValue at hHead
+                obtain ⟨⟨d, hDepth⟩, hCons⟩ := hHead
+                have hShape : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name (.loadConst (.refAlias consuming))).2.1
+                    = Stack.Lower.StackMap.push (Stack.Lower.StackMap.removeAtDepth sm d) name :=
+                  lowerValueP_refAlias_consume_sm2_eq progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name consuming d hDepth hCons
+                rw [hShape, Stack.Lower.StackMap.push] at hxMem
+                simp [List.mem_cons] at hxMem
+                exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+        | loadParam consuming =>
+            unfold structuralConsumeValue at hHead
+            obtain ⟨⟨d, hDepth⟩, hCons⟩ := hHead
+            have hShape : (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                    outerProtected localBindings constInts sm name (.loadParam consuming)).2.1
+                = Stack.Lower.StackMap.push (Stack.Lower.StackMap.removeAtDepth sm d) name :=
+              lowerValueP_loadParam_consume_sm2_eq progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name consuming d hDepth hCons
+            rw [hShape, Stack.Lower.StackMap.push] at hxMem
+            simp [List.mem_cons] at hxMem
+            exact mem_removeAtDepth x sm d (hxMem.resolve_left hxNe)
+        | _ => simp [structuralConsumeValue] at hHead
+      have hFreshInSm' :
+          ∀ b ∈ rest, b.name ∉
+            (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).2.1 := by
+        intro b hbMem hbIn
+        by_cases hbEqName : b.name = name
+        · apply hNameNotInRest
+          exact List.mem_map.mpr ⟨b, hbMem, hbEqName⟩
+        · exact hFreshInSm b (List.mem_cons_of_mem _ hbMem) (hTailSubsetSm b.name hbEqName hbIn)
+      have hLocalBindingsUnchanged :
+          (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm name v).2.2 = localBindings :=
+        lowerValueP_snd_snd_eq_localBindings progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm name v (Or.inr hHead)
+      -- Tail step.
+      obtain ⟨stkSt'', hRunTail, hAlt, hOut, hProps, hPre⟩ :=
+        runOps_lowerBindingsP_structuralConsumeBody_preserves_metadata
+          progMethods props budget lastUses outerProtected localBindings constInts
+          rest _ (currentIndex + 1)
+          tsm' (anfSt.addBinding name loadedVal) stkSt'
+          (by rw [← hUntagTsm', hUntagSm])
+          hAgreesNew
+          hRest
+          hFreshInSm'
+          hRestNodup
+      refine ⟨stkSt'', ?_, ?_, ?_, ?_, ?_⟩
+      · rw [hUnfold, Stack.Sim.runOps_append, hHeadRunSm]
+        simp only []
+        rw [hLocalBindingsUnchanged]
+        exact hRunTail
+      · rw [hAlt]; exact hHeadMeta.1
+      · rw [hOut]; exact hHeadMeta.2.1
+      · rw [hProps]; exact hHeadMeta.2.2.1
+      · rw [hPre]; exact hHeadMeta.2.2.2
 
 /-- Named-method runtime-success theorem for the structural-consume
 fragment.  Unlike the copy-mode version, the consume-mode lowerer does
@@ -19760,6 +20540,224 @@ theorem stageC_simpleStep_binOp_d1d0_consume_core
   exact runOps_two_swap_intOpcode_d1d0_consume
     topName botName k_top k_bot tsm_rest anfSt stkSt opcode out
     hAgrees hOpcode
+
+/-! ### Wave 11 — additional consume-mode binOp depth pairs
+
+Wave 10's A3 closure landed the d1d0 consume substrate
+(`stageC_simpleStep_binOp_d1d0_consume_core` + 12 binop wrappers).
+The remaining last-use-friendly depth pairs — (0, 1), (d≥2, 0),
+(0, d≥2) — also fire in the program-aware lowerer when both operands
+are at their natural last-use. We add operational substrate (no
+predicate-side `simpleStepRel` discharge, mirroring the d1d0 helper)
+for each.
+
+**Stack shapes in consume mode (left = `l`, right = `r`):**
+
+| depth pair (d_l, d_r) | lowered ops              | post-load stack (top → bottom)        |
+|-----------------------|--------------------------|----------------------------------------|
+| (1, 0) [wave 10]      | `[.swap, .swap]`         | `r_v :: l_v :: rest`  (identity)       |
+| (0, 1) [wave 11]      | `[.swap]`                | `r_v :: l_v :: rest`  (swap top two)   |
+| (d≥2, 0) [wave 11]    | `[.rot/roll d, .swap]`   | `r_v :: l_v :: (rest_d_erased)`        |
+| (0, d≥2) [wave 11]    | `[.rot/roll d]`          | `r_v :: l_v :: (rest_d_erased)`        |
+
+In all three new cases the opcode sees `r_v` on top and `l_v` at
+depth 1, then pops 2 / pushes 1, leaving `out :: <rest tail>`. The
+"rest tail" depends on the original stack shape:
+
+* d0d1 / d1d0: `stkSt.stack.tail.tail`.
+* dge2_d0 / d0_dge2: `stkSt.stack` with the depth-`d` slot removed
+  via `eraseIdx` and the two adjacent depth-0/1 slots also popped.
+
+Callers supply `hOpcode` against the post-load runtime state. -/
+
+/-- **Stage C consume-mode binOp witness at depth pair (0, 1).**
+
+`binOp op topName botName rt` with `l = topName` at depth 0 and
+`r = botName` at depth 1, both consumed on last use. Lowerer emits
+`[.swap, .opcode opcode]`. The single swap brings botV (right-arg)
+to the top and pushes topV (left-arg) down to depth 1, exactly the
+ordering the opcode expects.
+
+Conclusion shape mirrors `stageC_simpleStep_binOp_d1d0_consume_core`:
+the chunk's post-state is `({stkSt with stack := stkSt.stack.tail.tail}.push out)`.
+The hOpcode hypothesis runs against the post-swap state because the
+single swap is NOT an identity (unlike d1d0's two swaps).
+
+Like d1d0, this helper exposes only the **operational** witness —
+`simpleStepRel` cannot match the consume-mode tsm shape, so Stage C
+predicate-side composition is deferred per the §2.4 file isolation
+guideline. -/
+theorem stageC_simpleStep_binOp_d0d1_consume_core
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (opcode : String) (out : Value)
+    (ops : List StackOp)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                             anfSt stkSt)
+    (_hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
+    (_hLookupR : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint b))
+    (hLowerOps : ops = [.swap, .opcode opcode])
+    (hOpcode :
+      ∀ (stkPost : StackState),
+        stkPost.stack.length ≥ 2 →
+        stkPost.altstack = stkSt.altstack →
+        stkPost.outputs = stkSt.outputs →
+        stkPost.props = stkSt.props →
+        stkPost.preimage = stkSt.preimage →
+        stkPost.stack.tail.tail = stkSt.stack.tail.tail →
+        runOpcode opcode stkPost
+          = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out)) :
+    runOps ops stkSt
+      = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push out) := by
+  rw [hLowerOps]
+  -- Extract the top-two values from `taggedStackAligned`.
+  have hAlign :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV botV rest, stkSt.stack = topV :: botV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
+  obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
+  -- After the single swap, runtime is `{stkSt with stack := botV :: topV :: rest}`.
+  let stkPost : StackState := {stkSt with stack := botV :: topV :: rest}
+  have hSwap : runOps [.swap] stkSt = .ok stkPost := by
+    show runOps (.swap :: []) _ = _
+    unfold runOps
+    have hStep : stepNonIf .swap stkSt = Stack.Eval.applySwap stkSt := rfl
+    rw [hStep]
+    unfold Stack.Eval.applySwap
+    rw [hStk]
+    simp [Stack.Sim.run_empty, stkPost]
+  -- Verify `stkPost` satisfies the hOpcode preconditions.
+  have hLen : stkPost.stack.length ≥ 2 := by
+    show (botV :: topV :: rest).length ≥ 2
+    simp
+  have hAlt : stkPost.altstack = stkSt.altstack := rfl
+  have hOut : stkPost.outputs = stkSt.outputs := rfl
+  have hProps : stkPost.props = stkSt.props := rfl
+  have hPre : stkPost.preimage = stkSt.preimage := rfl
+  have hTailEq : stkPost.stack.tail.tail = stkSt.stack.tail.tail := by
+    show (botV :: topV :: rest).tail.tail = stkSt.stack.tail.tail
+    rw [hStk]
+    simp
+  have hOpRun := hOpcode stkPost hLen hAlt hOut hProps hPre hTailEq
+  -- Append the opcode chunk via the generic load-then-opcode helper.
+  show runOps ([.swap] ++ [.opcode opcode]) stkSt = _
+  exact runOps_loadThenOpcode_unconditional [.swap] opcode stkSt
+          stkPost _ hSwap hOpRun
+
+/-- **Stage C consume-mode binOp witness at depth pair (d ≥ 2, 0).**
+
+`binOp op leftName topName rt` with `l = leftName` at depth `d ≥ 2`
+and `r = topName` at depth 0, both consumed on last use. Lowerer
+emits `[.rot, .swap, .opcode opcode]` (when d = 2) or
+`[.roll d, .swap, .opcode opcode]` (when d ≥ 3). After the load
+prefix, runtime stack is `topV :: leftV :: (stkSt.stack with depth-d
+slot removed via eraseIdx d).tail.tail`; opcode pops 2 / pushes 1.
+
+The post-state is captured generically as `{stkSt with stack :=
+post}.push out`, where `post = (stkSt.stack.eraseIdx d).tail.tail`.
+
+Callers supply `hOpcode` against the post-load runtime state, parameterised
+by `stkPost` to permit either the d=2 (`rot`) or d≥3 (`roll`) load
+prefix. -/
+theorem stageC_simpleStep_binOp_dge2_d0_consume_core
+    (topName leftName : String) (k_top k_left : SlotKind)
+    (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (d : Nat) (opcode : String) (out : Value)
+    (loadOps : List StackOp) (ops : List StackOp)
+    (hAgrees : agreesTagged ((topName, k_top) :: tsm_rest) anfSt stkSt)
+    (hAtDepth : nthOpt d ((topName, k_top) :: tsm_rest) = some (leftName, k_left))
+    (_hd2 : 2 ≤ d)
+    (_hLookupL : lookupAnfByKind anfSt (leftName, k_left) = some (.vBigint a))
+    (_hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hLowerOps : ops = loadOps ++ [.opcode opcode])
+    (hLoadOk :
+      ∃ stkPost, runOps loadOps stkSt = .ok stkPost ∧
+        stkPost.altstack = stkSt.altstack ∧
+        stkPost.outputs = stkSt.outputs ∧
+        stkPost.props = stkSt.props ∧
+        stkPost.preimage = stkSt.preimage)
+    (hOpcode :
+      ∀ stkPost,
+        runOps loadOps stkSt = .ok stkPost →
+        runOpcode opcode stkPost
+          = .ok ({stkSt with
+                  stack := (stkSt.stack.eraseIdx d).tail.tail}.push out)) :
+    runOps ops stkSt
+      = .ok ({stkSt with
+              stack := (stkSt.stack.eraseIdx d).tail.tail}.push out) := by
+  rw [hLowerOps]
+  obtain ⟨stkPost, hLoadRun, _hAlt, _hOut, _hProps, _hPre⟩ := hLoadOk
+  -- Mention nthOpt/agrees to keep them used by the API contract.
+  have _hAlignKeep : taggedStackAligned ((topName, k_top) :: tsm_rest)
+                                          anfSt stkSt.stack := hAgrees.1
+  have _hAtKeep : nthOpt d ((topName, k_top) :: tsm_rest)
+                     = some (leftName, k_left) := hAtDepth
+  exact runOps_loadThenOpcode_unconditional loadOps opcode stkSt
+          stkPost _ hLoadRun (hOpcode stkPost hLoadRun)
+
+/-- **Stage C consume-mode binOp witness at depth pair (0, d ≥ 2).**
+
+`binOp op topName rightName rt` with `l = topName` at depth 0 and
+`r = rightName` at depth `d ≥ 2`, both consumed on last use. Lowerer
+emits `[.rot, .opcode opcode]` (when d = 2) or
+`[.roll d, .opcode opcode]` (when d ≥ 3) — the depth-0 consume is a
+no-op, then the depth-d consume brings right-arg to the top.
+
+Post-load runtime: `rV :: topV :: (rest with rV erased)`. Opcode then
+pops 2 / pushes 1.
+
+The post-state uses the same `(stkSt.stack.eraseIdx d).tail.tail`-
+plus-`push out` shape as dge2_d0; callers supply the loadOps + an
+hOpcode against the post-load state. -/
+theorem stageC_simpleStep_binOp_d0_dge2_consume_core
+    (topName rightName : String) (k_top k_right : SlotKind)
+    (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (d : Nat) (opcode : String) (out : Value)
+    (loadOps : List StackOp) (ops : List StackOp)
+    (hAgrees : agreesTagged ((topName, k_top) :: tsm_rest) anfSt stkSt)
+    (hAtDepth : nthOpt d ((topName, k_top) :: tsm_rest) = some (rightName, k_right))
+    (_hd2 : 2 ≤ d)
+    (_hLookupL : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint a))
+    (_hLookupR : lookupAnfByKind anfSt (rightName, k_right) = some (.vBigint b))
+    (hLowerOps : ops = loadOps ++ [.opcode opcode])
+    (hLoadOk :
+      ∃ stkPost, runOps loadOps stkSt = .ok stkPost ∧
+        stkPost.altstack = stkSt.altstack ∧
+        stkPost.outputs = stkSt.outputs ∧
+        stkPost.props = stkSt.props ∧
+        stkPost.preimage = stkSt.preimage)
+    (hOpcode :
+      ∀ stkPost,
+        runOps loadOps stkSt = .ok stkPost →
+        runOpcode opcode stkPost
+          = .ok ({stkSt with
+                  stack := (stkSt.stack.eraseIdx d).tail.tail}.push out)) :
+    runOps ops stkSt
+      = .ok ({stkSt with
+              stack := (stkSt.stack.eraseIdx d).tail.tail}.push out) := by
+  rw [hLowerOps]
+  obtain ⟨stkPost, hLoadRun, _hAlt, _hOut, _hProps, _hPre⟩ := hLoadOk
+  have _hAlignKeep : taggedStackAligned ((topName, k_top) :: tsm_rest)
+                                          anfSt stkSt.stack := hAgrees.1
+  have _hAtKeep : nthOpt d ((topName, k_top) :: tsm_rest)
+                     = some (rightName, k_right) := hAtDepth
+  exact runOps_loadThenOpcode_unconditional loadOps opcode stkSt
+          stkPost _ hLoadRun (hOpcode stkPost hLoadRun)
 
 /-! ### Helper 2 — `taggedStackAlignedAt`: depth-d' runtime/stack-map alignment
 
