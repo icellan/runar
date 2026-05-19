@@ -1,0 +1,17 @@
+{
+  "case": "intent-output-p2pkh",
+  "methodName": "payBond",
+  "currentState": {
+    "bondPKH": "00112233445566778899aabbccddeeff00112233",
+    "bondAmount": "1000n",
+    "count": "0n"
+  },
+  "args": {
+    "_serialisedOutputs": "e803000000000000001976a91400112233445566778899aabbccddeeff0011223388ac"
+  },
+  "constructorArgs": [
+    "00112233445566778899aabbccddeeff00112233",
+    "1000n",
+    "0n"
+  ]
+}

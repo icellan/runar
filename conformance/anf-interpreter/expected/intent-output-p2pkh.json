@@ -1,0 +1,9 @@
+{
+  "state": {
+    "bondPKH": "00112233445566778899aabbccddeeff00112233",
+    "bondAmount": "1000n",
+    "count": "1n"
+  },
+  "dataOutputs": [],
+  "rawOutputs": []
+}

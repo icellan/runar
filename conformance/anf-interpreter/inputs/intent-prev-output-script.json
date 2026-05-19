@@ -1,0 +1,15 @@
+{
+  "case": "intent-prev-output-script",
+  "methodName": "bind",
+  "currentState": {
+    "expectedHash": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    "count": "0n"
+  },
+  "args": {
+    "_prevOutScript_0": "deadbeefcafebabe"
+  },
+  "constructorArgs": [
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    "0n"
+  ]
+}

@@ -7,6 +7,18 @@
 **Authored by:** internal review, READ-ONLY pass over compiler / SDK / IR-schema
 sources + checked-in tests.
 
+> **Document status — this is an audit *input*, not an audit *report*.**
+> This packet is the internally-authored scoping brief handed to an external
+> security firm so they can plan and price an engagement. It enumerates the
+> attack surface, lists 7 residual risks (R-1…R-7), and proposes a ~2-week
+> scope. It does **not** itself constitute an independent security review,
+> and nothing here should be read as an audit sign-off. The external
+> engagement that consumes this packet is booked and executed outside this
+> repository (user/owner action); when its findings land they will be filed
+> as a separate report, not appended here. The BSVM team flagged this
+> distinction ("Major-3") to avoid the prep packet being mistaken for the
+> deliverable — hence this banner.
+
 ---
 
 ## 1. Scope statement

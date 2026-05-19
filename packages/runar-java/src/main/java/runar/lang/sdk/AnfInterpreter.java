@@ -464,25 +464,39 @@ public final class AnfInterpreter {
                     idx = -1;
                 }
                 byte[] bytes = witness == null ? null : witness.prevOutScript(idx);
-                if (bytes == null) {
+                if (bytes != null) {
+                    env.put(pname, HEX.formatHex(bytes));
+                    continue;
+                }
+                if (args.containsKey(pname)) {
+                    env.put(pname, args.get(pname));
+                    continue;
+                }
+                if (strict) {
                     throw new InterpreterException(
                         "extractPrevOutputScript(" + idx + ") requires witness bytes. "
                             + "Call WitnessContext.setPrevOutScript(" + idx
                             + ", bytes) before invoking the method."
                     );
                 }
-                env.put(pname, HEX.formatHex(bytes));
                 continue;
             }
             if ("_serialisedOutputs".equals(pname)) {
                 byte[] bytes = witness == null ? null : witness.serialisedOutputs();
-                if (bytes == null) {
+                if (bytes != null) {
+                    env.put(pname, HEX.formatHex(bytes));
+                    continue;
+                }
+                if (args.containsKey(pname)) {
+                    env.put(pname, args.get(pname));
+                    continue;
+                }
+                if (strict) {
                     throw new InterpreterException(
                         "requireOutputP2PKH requires witness bytes. "
                             + "Call WitnessContext.setSerialisedOutputs(bytes) before invoking the method."
                     );
                 }
-                env.put(pname, HEX.formatHex(bytes));
                 continue;
             }
             if (args.containsKey(pname)) {

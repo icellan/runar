@@ -707,6 +707,8 @@ function evalCall(
     case 'extractOutputHash':
     case 'extractAmount':
       return '00'.repeat(32);
+    case 'extractLocktime':
+      return 0n;
 
     default:
       return undefined;

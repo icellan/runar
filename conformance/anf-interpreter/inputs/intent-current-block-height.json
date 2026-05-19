@@ -1,0 +1,7 @@
+{
+  "case": "intent-current-block-height",
+  "methodName": "spend",
+  "currentState": { "deadline": "1000n", "count": "5n" },
+  "args": {},
+  "constructorArgs": ["1000n", "5n"]
+}
