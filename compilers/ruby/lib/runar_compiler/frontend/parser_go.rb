@@ -1260,6 +1260,22 @@ module RunarCompiler
         expr
       end
 
+      # Nested composite literal body: `{elem, elem, ...}` or `{ {..}, {..} }`.
+      def parse_go_brace_literal
+        expect(TOK_LBRACE)
+        elements = []
+        while !check(TOK_RBRACE) && !check(TOK_EOF)
+          elements << if check(TOK_LBRACE)
+            parse_go_brace_literal
+          else
+            parse_expression
+          end
+          match_tok(TOK_COMMA)
+        end
+        expect(TOK_RBRACE)
+        ArrayLiteralExpr.new(elements: elements)
+      end
+
       def parse_primary
         tok = peek
 
@@ -1304,16 +1320,54 @@ module RunarCompiler
           return expr
         end
 
-        # Array literal: [expr, expr, ...]
+        # Go composite literal for arrays: [N]Type{elements} or
+        # [N][M]Type{{...},{...}}. Also accept the plain bracket-list form
+        # `[a, b, c]` for compatibility. Both lower to an ArrayLiteralExpr so
+        # downstream passes (typecheck, ANF-lowering for +checkMultiSig+) see
+        # the same array_literal node shape used by every other format parser.
         if tok.kind == TOK_LBRACKET
-          advance
+          saved = @pos
+          advance # skip '['
+          # Look ahead to decide between Go composite literal (`[N]...{...}`)
+          # and the legacy bracket-list form (`[a, b, c]`).
+          if check(TOK_NUMBER) && peek_next.kind == TOK_RBRACKET
+            advance # number
+            advance # ']'
+            # Consume any additional leading `[M]` dimensions.
+            while check(TOK_LBRACKET) && peek_next.kind == TOK_NUMBER &&
+                  @pos + 2 < @tokens.length && @tokens[@pos + 2].kind == TOK_RBRACKET
+              advance # '['
+              advance # number
+              advance # ']'
+            end
+            # Consume the element type: `runar.Sig`, `bool`, etc.
+            if check_ident("runar") && peek_next.kind == TOK_DOT
+              advance # runar
+              advance # .
+              advance if check(TOK_IDENT) # type name
+            elsif check(TOK_IDENT)
+              advance # type name
+            end
+            # Now expect `{` -- composite literal body.
+            if check(TOK_LBRACE)
+              return parse_go_brace_literal
+            end
+            # Not a composite literal after all -- roll back.
+            @pos = saved
+            advance # re-skip '['
+          end
           elements = []
           while !check(TOK_RBRACKET) && !check(TOK_EOF)
             elements << parse_expression
             match_tok(TOK_COMMA)
           end
           expect(TOK_RBRACKET)
-          return CallExpr.new(callee: Identifier.new(name: "FixedArray"), args: elements)
+          return ArrayLiteralExpr.new(elements: elements)
+        end
+
+        # Nested composite literal body: `{elem, elem, ...}`.
+        if tok.kind == TOK_LBRACE
+          return parse_go_brace_literal
         end
 
         # Identifier -- handles runar.X, receiver.Field, plain idents

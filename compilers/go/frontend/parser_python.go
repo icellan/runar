@@ -1828,11 +1828,10 @@ func (p *pyParser) parsePyArrayLiteral() Expression {
 		}
 	}
 	p.expect(pyTokRBracket)
-	// Represent as a call to FixedArray constructor (same pattern as other parsers)
-	return CallExpr{
-		Callee: Identifier{Name: "FixedArray"},
-		Args:   elements,
-	}
+	// Emit a dedicated ArrayLiteralExpr so downstream passes (typecheck,
+	// ANF-lowering for checkMultiSig) see the same array_literal node shape
+	// used by every other format parser.
+	return ArrayLiteralExpr{Elements: elements}
 }
 
 func (p *pyParser) parsePyCallArgs() []Expression {

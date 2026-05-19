@@ -331,12 +331,18 @@ class IntentInterpreterTest {
             src("branched-readonly-len", "BranchedReadonlyLen.runar.ts"),
             "BranchedReadonlyLen.runar.ts"
         );
+        // Stateful contract: strict mode mocks check_preimage only when a
+        // WitnessContext is supplied (i.e. the caller is simulating a concrete
+        // spend). An empty context is enough here — this contract uses no
+        // intent intrinsics, so no prevOutScript / serialisedOutputs bytes are
+        // needed; the context's presence is the "simulate a real spend" signal.
         ExecutionResult r = AnfInterpreter.executeStrict(
             anf,
             "spend",
             Map.of("count", BigInteger.TEN, "tag", "00"),
             Map.of("scratch", "aabbcc"),
-            List.of(BigInteger.TEN, "00")
+            List.of(BigInteger.TEN, "00"),
+            new WitnessContext()
         );
         assertEquals(BigInteger.valueOf(11), r.newState.get("count"));
         assertEquals("aabbcc", r.newState.get("tag"));
@@ -348,12 +354,16 @@ class IntentInterpreterTest {
             src("branched-readonly-len", "BranchedReadonlyLen.runar.ts"),
             "BranchedReadonlyLen.runar.ts"
         );
+        // Empty WitnessContext: signals "simulate a concrete spend" so strict
+        // mode mocks the on-chain-only check_preimage prologue assert. See the
+        // then-branch test for the rationale.
         ExecutionResult r = AnfInterpreter.executeStrict(
             anf,
             "spend",
             Map.of("count", BigInteger.TEN, "tag", "aa"),
             Map.of("scratch", ""),
-            List.of(BigInteger.TEN, "aa")
+            List.of(BigInteger.TEN, "aa"),
+            new WitnessContext()
         );
         assertEquals(BigInteger.valueOf(9), r.newState.get("count"));
         assertEquals("3030", r.newState.get("tag"));

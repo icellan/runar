@@ -1292,7 +1292,7 @@ module RunarCompiler
           break unless match(TOK_COMMA)
         end
         expect(TOK_RBRACKET)
-        CallExpr.new(callee: Identifier.new(name: "FixedArray"), args: elements)
+        ArrayLiteralExpr.new(elements: elements)
       end
 
       def parse_sol_number(s)

@@ -45,7 +45,15 @@ include_re='\.(go|rs|ts|tsx|py|zig|rb|java|sh|yml|yaml|md|markdown)$'
 # `unimplemented!` from matching `unimplemented_macro` etc.
 markers='\bTODO\b|\bFIXME\b|\bXXX\b|\btodo!|\bunimplemented!'
 
-marker_self_re='(scripts/lint-no-silent-skips\.sh|\.github/workflows/ci\.yml:.*TODO|\.github/workflows/ci\.yml:.*FIXME)'
+# Self-references plus the runar-verification subproject's Markdown planning
+# docs. That subproject is a long-running formal-verification effort that
+# tracks its axiom-discharge work in-repo via `TODO.md` / `PATH2_PLAN.md`
+# (referenced from its README + TRUST_MANIFEST). "TODO" is legitimate
+# planning vocabulary there and the file is literally named `TODO.md`, so the
+# blanket "no TODO markers in Markdown" rule does not apply to those docs.
+# Code/config under runar-verification/ (.sh, .yml, .lean is not even in
+# include_re) is still checked.
+marker_self_re='(scripts/lint-no-silent-skips\.sh|\.github/workflows/ci\.yml:.*TODO|\.github/workflows/ci\.yml:.*FIXME|^runar-verification/.*\.(md|markdown):)'
 
 # Discover both directory roots and explicit file roots.
 candidate_paths=$(for r in "${roots[@]}"; do
