@@ -1091,6 +1091,12 @@ impl<'a> MoveParser<'a> {
                 object: Box::new(self.convert_self_to_this(*object)),
                 index: Box::new(self.convert_self_to_this(*index)),
             },
+            Expression::ArrayLiteral { elements } => Expression::ArrayLiteral {
+                elements: elements
+                    .into_iter()
+                    .map(|e| self.convert_self_to_this(e))
+                    .collect(),
+            },
             Expression::IncrementExpr { operand, prefix } => Expression::IncrementExpr {
                 operand: Box::new(self.convert_self_to_this(*operand)),
                 prefix,

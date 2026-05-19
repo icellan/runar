@@ -1265,7 +1265,7 @@ module RunarCompiler
             match_tok(TOK_COMMA)
           end
           expect(TOK_RBRACKET)
-          return CallExpr.new(callee: Identifier.new(name: "FixedArray"), args: elements)
+          return ArrayLiteralExpr.new(elements: elements)
         end
 
         # Identifier

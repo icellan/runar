@@ -734,11 +734,17 @@ public final class AnfInterpreter {
             }
             case "check_preimage": {
                 // On-chain-only: the on-chain script enforces sighash
-                // equality. Off-chain, mock-return TRUE so the wrapping
+                // equality. Off-chain we can only mock it once the caller has
+                // supplied witness bytes (i.e. is genuinely simulating a
+                // concrete spend) — then mock-return TRUE so the wrapping
                 // `assert(check_preimage(...))` in the stateful-contract
-                // prologue doesn't trip strict mode. Real preimage
-                // verification belongs in executeOnChainAuthoritative.
-                return Boolean.TRUE;
+                // prologue doesn't trip strict mode. With no WitnessContext
+                // the preimage is unverifiable off-chain, so we return a
+                // falsy value and let strict mode report the failure at the
+                // prologue assert — matching the TS/Go/Rust/Ruby/Zig tiers
+                // (and the pinned cross-interpreter strict goldens). Real
+                // preimage verification belongs in executeOnChainAuthoritative.
+                return witness != null ? Boolean.TRUE : null;
             }
             case "update_prop": {
                 String pname = (String) value.get("name");

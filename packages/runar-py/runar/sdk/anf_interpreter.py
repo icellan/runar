@@ -899,12 +899,17 @@ def _eval_value(
         raw_outputs.append({'satoshis': sats, 'script': script_hex})
         return None
 
-    # On-chain-only operations -- skip in simulation. ``check_preimage``
-    # mock-returns True so the strict-mode ``assert(check_preimage(...))``
-    # the stateful-contract prologue emits doesn't trip; the on-chain script
-    # is the authoritative source for sighash verification.
+    # On-chain-only operations -- skip in simulation. ``check_preimage`` can
+    # only be mocked once the caller supplies an intent/witness context (i.e.
+    # is genuinely simulating a concrete spend): then mock-return ``True`` so
+    # the strict-mode ``assert(check_preimage(...))`` the stateful-contract
+    # prologue emits doesn't trip. With no witness context the preimage is
+    # unverifiable off-chain, so return a falsy value and let strict mode
+    # report the failure at the prologue assert -- matching the
+    # TS/Go/Rust/Ruby/Zig tiers (and the pinned cross-interpreter strict
+    # goldens). Real verification belongs in ``execute_on_chain_authoritative``.
     if kind == 'check_preimage':
-        return True
+        return True if intent is not None else None
     if kind in ('deserialize_state', 'get_state_script'):
         return None
 
