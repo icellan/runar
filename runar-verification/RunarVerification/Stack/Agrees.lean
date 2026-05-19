@@ -22741,5 +22741,215 @@ theorem SupportedANFBody_of_structuralMethodCallBody
                   structuralUpdatePropValue, structuralCallValue, structuralArithValue,
                   structuralRefValue, structuralCopyValue, structuralConsumeValue])
 
+
+/-! ## Path 2 Tier 1 Wave 13 — A6 ifVal clean-shape substrate
+
+`lowerValueP_ifVal_clean_shape` rewrites the `.ifVal` arm of `lowerValueP`
+into the clean `cond-load ++ [ifOp thn-ops (some els-ops)]` form, under an
+explicit `ifValCleanShape` precondition that rules out BOTH cleanup paths of
+the arm (`Stack/Lower.lean:3349-3507`):
+
+* the **shadow-rebind synthesis** path (`Lower.lean:3396-3449`), excluded by
+  `2 ≤ els.length` — the shadowRebind match only fires for `els = []` /
+  `els = [b]`; and
+* the **asymmetric-consumption cleanup** path (`Lower.lean:3450-3507`),
+  excluded by the two `ifValDrops … = []` conjuncts plus the depth-balance
+  equality, which together force `dropsForEls = dropsForThn = []`, both
+  `removeConsumedAtDepths` cleanups empty, and the empty-bytes balance push
+  to vanish.
+
+Downstream A6 consumer waves can `rw [lowerValueP_ifVal_clean_shape …]` to
+expose the two branch `lowerBindingsP` op-lists directly inside an `.ifOp`,
+then compose the wave-11 `runOps_lowerBindingsP_structuralConsumeBody_*`
+metadata-preservation lemmas on each branch.  The trailing `example` is the
+consumability smoke test: a concrete two-binding-branch `.ifVal` whose
+`ifValCleanShape` is discharged structurally, yielding the clean form. -/
+
+/-- `ifValDrops smBranch refSm otherSm` mirrors the in-arm `parentInBoth`
+helper of `lowerValueP`'s `.ifVal` arm (`Stack/Lower.lean:3468-3475`):
+the parent-scope refs (folded over `smBranch`) that are present in `refSm`
+but absent from `otherSm`. When both `ifValDrops smBranch smEls smThn` and
+`ifValDrops smBranch smThn smEls` are empty, neither branch consumed a
+parent slot the other kept, so the asymmetric-consumption cleanup path
+(ROLL+DROP injection) does not fire. -/
+def ifValDrops (smBranch refSm otherSm : StackMap) : List String :=
+  List.foldl
+    (fun acc n =>
+      if Stack.Lower.listContains acc n = true then acc
+      else
+        match refSm.depth? n, otherSm.depth? n with
+        | some _, none => acc ++ [n]
+        | _, _ => acc)
+    [] smBranch
+
+/-- `removeConsumedAtDepths sm []` is the identity (no names ⇒ no ops). -/
+theorem removeConsumedAtDepths_nil (sm : StackMap) :
+    Stack.Lower.removeConsumedAtDepths sm [] = ([], sm) := rfl
+
+/-- Branch stackmap after peeling the cond: the parent map with the cond
+top consumed. Names the `smBranch` intermediate of the `.ifVal` arm. -/
+abbrev ifValSmBranch (sm : StackMap) (cond : String) (currentIndex : Nat)
+    (lastUses : List (String × Nat)) (outerProtected : List String) : StackMap :=
+  (Stack.Lower.loadRefLive sm cond currentIndex lastUses outerProtected).2.popN 1
+
+/-- The protected-ref set the `.ifVal` arm computes for each branch. -/
+abbrev ifValInnerProtected (sm : StackMap) (cond : String) (currentIndex : Nat)
+    (lastUses : List (String × Nat)) (outerProtected : List String) : List String :=
+  Stack.Lower.computeBranchProtected (ifValSmBranch sm cond currentIndex lastUses outerProtected)
+    lastUses currentIndex outerProtected
+
+/-- Result of lowering the THEN branch exactly as the `.ifVal` arm does. -/
+abbrev ifValThnRes (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) (constInts : List (String × Int))
+    (sm : StackMap) (cond : String) (thn : List ANFBinding) : List StackOp × StackMap :=
+  Stack.Lower.lowerBindingsP progMethods props budget 0 (Stack.Lower.computeLastUses thn)
+    (ifValInnerProtected sm cond currentIndex lastUses outerProtected)
+    (List.map (fun b => b.name) thn) constInts
+    (ifValSmBranch sm cond currentIndex lastUses outerProtected) thn
+
+/-- Result of lowering the ELSE branch exactly as the `.ifVal` arm does. -/
+abbrev ifValElsRes (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) (constInts : List (String × Int))
+    (sm : StackMap) (cond : String) (els : List ANFBinding) : List StackOp × StackMap :=
+  Stack.Lower.lowerBindingsP progMethods props budget 0 (Stack.Lower.computeLastUses els)
+    (ifValInnerProtected sm cond currentIndex lastUses outerProtected)
+    (List.map (fun b => b.name) els) constInts
+    (ifValSmBranch sm cond currentIndex lastUses outerProtected) els
+
+/-- **Clean-path precondition for the `lowerValueP` `.ifVal` arm.**
+
+Holds exactly when the lowering takes the "clean" path — neither the
+shadow-rebind synthesis (`Stack/Lower.lean:3396-3449`) nor the
+asymmetric-consumption cleanup (`Stack/Lower.lean:3450-3507`) injects
+extra cleanup ops, and the branches are depth-balanced with a non-empty
+else.  Each conjunct rules out one cleanup trigger:
+
+* `2 ≤ els.length` — the ELSE has at least two bindings, so the
+  shadow-rebind match's `[]` / `[b]` arms cannot fire ⇒ `shadowRebind = none`.
+* `ifValDrops smBranch smEls smThn = []` — ELSE consumed no parent slot
+  that THEN kept ⇒ `dropsForEls = []`.
+* `ifValDrops smBranch smThn smEls = []` — THEN consumed no parent slot
+  that ELSE kept ⇒ `dropsForThn = []`.
+* `smThn.length = smEls.length` — branches are depth-balanced ⇒ no
+  empty-bytes balance push.
+* `elsOps ≠ []` — the lowered ELSE is non-empty ⇒ `elseOpt = some elsOps`. -/
+def ifValCleanShape (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) (constInts : List (String × Int))
+    (sm : StackMap) (cond : String) (thn els : List ANFBinding) : Prop :=
+  2 ≤ els.length ∧
+  ifValDrops (ifValSmBranch sm cond currentIndex lastUses outerProtected)
+      (ifValElsRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond els).2
+      (ifValThnRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond thn).2 = [] ∧
+  ifValDrops (ifValSmBranch sm cond currentIndex lastUses outerProtected)
+      (ifValThnRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond thn).2
+      (ifValElsRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond els).2 = [] ∧
+  (ifValThnRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond thn).2.length
+    = (ifValElsRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond els).2.length ∧
+  (ifValElsRes progMethods props budget currentIndex lastUses outerProtected constInts sm cond els).1 ≠ []
+
+/-- **Clean-shape lemma for the `lowerValueP` `.ifVal` arm.**  Under
+`ifValCleanShape`, the lowered op-list of `.ifVal cond thn els` is exactly
+the cond-load ops followed by a single `ifOp` carrying the two branch
+op-lists (with a `some`-else). -/
+theorem lowerValueP_ifVal_clean_shape
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (bindingName : String)
+    (cond : String) (thn els : List ANFBinding)
+    (hClean : ifValCleanShape progMethods props budget currentIndex lastUses
+                outerProtected constInts sm cond thn els) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bindingName (.ifVal cond thn els)).1
+      = (Stack.Lower.loadRefLive sm cond currentIndex lastUses outerProtected).1
+          ++ [StackOp.ifOp
+                (ifValThnRes progMethods props budget currentIndex lastUses
+                  outerProtected constInts sm cond thn).1
+                (some (ifValElsRes progMethods props budget currentIndex lastUses
+                  outerProtected constInts sm cond els).1)] := by
+  obtain ⟨hElsLen, hDropsEls, hDropsThn, hDepth, hElsNonEmpty⟩ := hClean
+  obtain ⟨b1, b2, rest, hElsForm⟩ : ∃ b1 b2 rest, els = b1 :: b2 :: rest := by
+    match els, hElsLen with
+    | b1 :: b2 :: rest, _ => exact ⟨b1, b2, rest, rfl⟩
+  subst hElsForm
+  unfold Stack.Lower.lowerValueP
+  cases hLR : Stack.Lower.loadRefLive sm cond currentIndex lastUses outerProtected with
+  | mk condOps sm1 =>
+    simp only [ifValThnRes, ifValElsRes, ifValSmBranch, ifValInnerProtected, hLR]
+      at hDropsEls hDropsThn hDepth hElsNonEmpty ⊢
+    generalize hRemEls :
+      Stack.Lower.removeConsumedAtDepths
+        (Stack.Lower.lowerBindingsP progMethods props budget 0
+          (Stack.Lower.computeLastUses (b1 :: b2 :: rest))
+          (Stack.Lower.computeBranchProtected (sm1.popN 1) lastUses currentIndex outerProtected)
+          (List.map (fun b => b.name) (b1 :: b2 :: rest)) constInts (sm1.popN 1) (b1 :: b2 :: rest)).2 _ = remEls
+    generalize hRemThn :
+      Stack.Lower.removeConsumedAtDepths
+        (Stack.Lower.lowerBindingsP progMethods props budget 0 (Stack.Lower.computeLastUses thn)
+          (Stack.Lower.computeBranchProtected (sm1.popN 1) lastUses currentIndex outerProtected)
+          (List.map (fun b => b.name) thn) constInts (sm1.popN 1) thn).2 _ = remThn
+    have hEemEls : remEls = ([],
+        (Stack.Lower.lowerBindingsP progMethods props budget 0
+          (Stack.Lower.computeLastUses (b1 :: b2 :: rest))
+          (Stack.Lower.computeBranchProtected (sm1.popN 1) lastUses currentIndex outerProtected)
+          (List.map (fun b => b.name) (b1 :: b2 :: rest)) constInts (sm1.popN 1) (b1 :: b2 :: rest)).2) := by
+      rw [← hRemEls]
+      show Stack.Lower.removeConsumedAtDepths _ (ifValDrops (sm1.popN 1) _ _) = _
+      rw [hDropsEls]; rfl
+    have hEemThn : remThn = ([],
+        (Stack.Lower.lowerBindingsP progMethods props budget 0 (Stack.Lower.computeLastUses thn)
+          (Stack.Lower.computeBranchProtected (sm1.popN 1) lastUses currentIndex outerProtected)
+          (List.map (fun b => b.name) thn) constInts (sm1.popN 1) thn).2) := by
+      rw [← hRemThn]
+      show Stack.Lower.removeConsumedAtDepths _ (ifValDrops (sm1.popN 1) _ _) = _
+      rw [hDropsThn]; rfl
+    rw [hEemEls, hEemThn]
+    simp only []
+    rw [if_neg (by omega), if_neg (by omega)]
+    simp only [List.append_nil]
+    rw [if_neg (by simpa using hElsNonEmpty)]
+
+/-! ### Smoke test (consumability proof) -/
+
+private def smokeCleanSm : StackMap := ["c"]
+private def smokeCleanBr : List ANFBinding :=
+  [ANFBinding.mk "v1" (.loadConst (.int 9)) none,
+   ANFBinding.mk "v2" (.loadConst (.int 9)) none]
+private def smokeCleanLU : List (String × Nat) := [("c", 0)]
+
+/-- Consumability smoke test: `lowerValueP_ifVal_clean_shape` applies to a
+concrete two-binding-branch `.ifVal`, with `ifValCleanShape` discharged
+structurally (no `native_decide`), yielding the clean cond-load ++ ifOp form. -/
+example :
+    (Stack.Lower.lowerValueP [] [] 8 0 smokeCleanLU [] [] [] smokeCleanSm "ifres"
+        (.ifVal "c" smokeCleanBr smokeCleanBr)).1
+      = (Stack.Lower.loadRefLive smokeCleanSm "c" 0 smokeCleanLU []).1
+          ++ [StackOp.ifOp
+                (ifValThnRes [] [] 8 0 smokeCleanLU [] [] smokeCleanSm "c" smokeCleanBr).1
+                (some (ifValElsRes [] [] 8 0 smokeCleanLU [] [] smokeCleanSm "c" smokeCleanBr).1)] := by
+  apply lowerValueP_ifVal_clean_shape
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · decide
+  · show ifValDrops (ifValSmBranch smokeCleanSm "c" 0 smokeCleanLU []) _ _ = []
+    have hb : ifValSmBranch smokeCleanSm "c" 0 smokeCleanLU [] = [] := by
+      unfold ifValSmBranch Stack.Lower.loadRefLive smokeCleanSm smokeCleanLU
+      decide
+    rw [hb]; rfl
+  · show ifValDrops (ifValSmBranch smokeCleanSm "c" 0 smokeCleanLU []) _ _ = []
+    have hb : ifValSmBranch smokeCleanSm "c" 0 smokeCleanLU [] = [] := by
+      unfold ifValSmBranch Stack.Lower.loadRefLive smokeCleanSm smokeCleanLU
+      decide
+    rw [hb]; rfl
+  · rfl
+  · show (ifValElsRes [] [] 8 0 smokeCleanLU [] [] smokeCleanSm "c" smokeCleanBr).1 ≠ []
+    unfold ifValElsRes smokeCleanBr
+    unfold Stack.Lower.lowerBindingsP
+    unfold Stack.Lower.lowerValueP
+    simp only [Stack.Lower.emitConst]
+    exact (by decide)
+
 end Agrees
 end RunarVerification.Stack

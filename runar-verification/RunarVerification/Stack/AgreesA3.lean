@@ -3219,55 +3219,35 @@ This wave covers the mirror depth pair (0, 1): params reversed
 operand to the top, after which the opcode sees `b=n2V` on top and `a=n1V` at
 depth 1 — exactly the operand ordering `runOpcode_*_intInt` expects.
 
-### BLOCKED — Wave-11 substrates `dge2_d0`, `d0_dge2`, and `d0d1`
+### History — wave-11 substrate defects, resolved in wave-11b/12/13
 
-The wave-11 substrates `stageC_simpleStep_binOp_d0d1_consume_core`,
+The original wave-11 substrates `stageC_simpleStep_binOp_d0d1_consume_core`,
 `stageC_simpleStep_binOp_dge2_d0_consume_core`, and
-`stageC_simpleStep_binOp_d0_dge2_consume_core` all have signature defects that
-prevent honest discharge by wave-12 callers:
+`stageC_simpleStep_binOp_d0_dge2_consume_core` shipped with signature defects:
 
-* `d0d1`: `hOpcode` is universally quantified over `stkPost` constrained only
-  by metadata-equality and `stkPost.stack.tail.tail = stkSt.stack.tail.tail`.
-  Those constraints leave the top two values of `stkPost.stack` arbitrary
-  (`X :: Y :: rest` for any `Value`s X, Y). For real opcodes like `OP_ADD`,
-  `runOpcode "OP_ADD" stkPost = .ok (vBigint (a+b) :: rest)` is FALSE when
-  X, Y are not `.vBigint` values. The universal quantification therefore
-  admits stkPost values for which the substrate's conclusion is false; no
-  honest caller can discharge it for any real integer opcode.
+* `d0d1`: `hOpcode` was universally quantified over `stkPost` constrained only
+  by metadata-equality and `stkPost.stack.tail.tail = stkSt.stack.tail.tail`,
+  leaving the top two values of `stkPost.stack` arbitrary. For real opcodes
+  the substrate's conclusion was then unprovable by any honest caller.
 
-* `dge2_d0` and `d0_dge2`: the substrate's claimed post-state
-  `({stkSt with stack := (stkSt.stack.eraseIdx d).tail.tail}.push out)`
-  encodes a net `-2` element delta (eraseIdx removes 1, two `.tail`s remove
-  2 more, push adds 1). The actual runtime of `[.rot, .swap, .opcode]`
-  (dge2_d0, d=2) or `[.rot, .opcode]` (d0_dge2, d=2) is a net `-1` delta
-  (rearrangement-only prefix + 2-pop-1-push opcode). The depth-1 element
-  the rot/roll prefix steps over but does not consume is preserved at
-  runtime, yet erased by the substrate's post-state. The `hOpcode` premise
-  is therefore unsatisfiable for any real opcode + load-prefix combination.
+* `dge2_d0` and `d0_dge2`: the substrate's claimed post-state used a net `-2`
+  element delta (`(eraseIdx d).tail.tail.push out`), whereas the actual
+  runtime of `[.rot, .swap, .opcode]` (dge2_d0, d=2) / `[.rot, .opcode]`
+  (d0_dge2, d=2) is a net `-1` delta — the stepped-over depth-1 element is
+  preserved at runtime but was erased by the post-state.
 
-Because the d0d1 substrate cannot be used, the wave-12 d0d1 wrappers below
-bypass `stageC_simpleStep_binOp_d0d1_consume_core` entirely and prove
-runtime success directly via `runOps_append` + `runOpcode_*_intInt`. The
-lowerer reduction (`lowerMethodUserRawOps_singletonBinOpWithCap_d0d1`)
-is independent of the broken substrate and is reused unchanged.
-
-For the dge2_d0 / d0_dge2 cases, no parallel direct-proof exists because the
-load prefix (`.rot` / `.roll d`) takes runtime stacks whose depth-d entry is
-the consumed left/right operand — and the wave-12 wrapper would need a
-parallel cap predicate fixing `(m.params.map name).reverse = topName :: m :: leftName :: tail`
-for some unbound middle slot `m`. That requires extending `singletonBinOpWithCap`'s
-distinct-names contract to four distinct names (one extra slot for the
-"stepped-over" middle position) AND a parallel `lowerMethodUserRawOps`
-reduction that threads the rot/roll load through the lowerer. Both can be
-written, but the runtime composition still hits the wave-11 post-state
-mismatch — so even bypassing the substrate, the resulting wrapper would
-need to claim a different post-state than the wave-11 substrate authors.
-Per §2.4 file-isolation rule (no modifications outside `AgreesA3.lean`), I
-cannot rewrite the wave-11 substrate to fix the post-state, and writing
-non-substrate-aware wrappers would diverge from the wave-12 mandate (the
-task says "consume substrate at additional depth pairs"). All 24 dge2 / d0_dge2
-binop wrappers (12 binops × 2 pairs) + 6 wave-4 trio widenings = 30
-combinations are BLOCKED pending substrate correction in a future wave.
+These have since been fixed. Wave-12's `d0d1` wrappers (below) bypass the
+`d0d1` substrate and prove runtime success directly via `runOps_append` +
+`runOpcode_*_intInt`. Wave-11b corrected the `dge2_d0` / `d0_dge2` substrates
+to the net `-1` post-state `(eraseIdx d).tail.push out` and added smoke tests
+demonstrating consumability at d=2; wave-13 (end of this file) lands the
+30 `dge2_d0` / `d0_dge2` binop wrappers (15 binops × 2 depth pairs) on top of
+those corrected substrates, via per-pair lowerer reductions
+(`lowerMethodUserRawOps_singletonBinOpWithCap_{dge2_d0,d0_dge2}`) plus direct
+`[.rot(, .swap)]`-post-load runtime helpers. The wave-13 wrappers cover the
+`d = 2` (`.rot`) instances; the `d ≥ 3` (`.roll d`) instances remain pending
+the generic-`d` lowerer/runtime induction lemmas (see the wave-13 section
+header for details).
 -/
 
 /-! ### Cap predicate at depth pair (0, 1) -/
@@ -4729,6 +4709,2995 @@ theorem runMethod_lower_public_unique_no_post_singletonBinShr_d0d1_isSome
           [.swap, .opcode "OP_RSHIFT", .push (.bool true)]
           initialStack).toOption.isSome
   exact runOps_swap_shr_pushTrue_of_agreesTagged_d0d1 n1 n2 tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-! ## A3 — Wave 13: binOp wrappers at depth pairs (d ≥ 2, 0) and (0, d ≥ 2)
+
+Wave 12 landed the (1, 0) and (0, 1) depth-pair binop wrappers. This wave
+lands the analogous wrappers at depth pairs (2, 0) [`dge2_d0`] and (0, 2)
+[`d0_dge2`], i.e. the `d = 2` instances of the general `d ≥ 2` family.
+
+### Why d = 2 (not generic d ≥ 3) here
+
+The lowerer reduction at a *generic* depth `d ≥ 3` would require the
+method's params (= the initial `StackMap`) to carry a generic list of
+`d − 1` "stepped-over" middle slots between the top operand and the
+depth-`d` operand, and to reason about `StackMap.depth? = some d` and
+`StackMap.removeAtDepth d` on that generic-length list, AND the runtime
+side needs `applyRoll d` on a generic-length runtime stack. Both are
+provable by list induction but add machinery disproportionate to this
+wave. The Wave 11b smoke tests (`_smokeTest_stageC_dge2_d0_consume_OP_ADD_d2`,
+`_smokeTest_stageC_d0_dge2_consume_OP_ADD_d2`) likewise pin `d = 2`. The
+wrappers below therefore cover the `d = 2` (`.rot`) instances. The
+`d ≥ 3` (`.roll d`) instances are documented BLOCKED at the end of this
+section pending the generic-`d` lowerer/runtime induction lemmas.
+
+### Substrate use
+
+The Wave 11b corrected substrates `stageC_simpleStep_binOp_dge2_d0_consume_core`
+and `stageC_simpleStep_binOp_d0_dge2_consume_core` have a net `−1` element
+delta post-state `(stkSt.stack.eraseIdx d).tail.push out`. The runtime
+helpers below follow the smoke-test recipe: build `hLoadRun` against
+`applyRot (∘ applySwap)`, build `hOpcode` against `runOpcode_*_intInt`,
+then close via the substrate. The method-level wrappers reduce the
+lowered method to the fixed op list via the per-pair lowerer reductions
+and chain through the runtime helper. -/
+
+/-! ### Cap predicate at depth pair (2, 0) -/
+
+/-- Generic composite body shape for a single `binOp opName n1 n2 rt`
+binding at depth pair (2, 0) followed by the sentinel-true cap. The left
+operand `n1` sits at depth 2, the right operand `n2` at depth 0, with one
+"stepped-over" middle slot `nm` at depth 1. Params reversed is
+`n2 :: nm :: n1 :: tail`. -/
+def singletonBinOpWithCap_dge2_d0 (m : ANFMethod)
+    (opName : String) (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc) : Prop :=
+  m.body = [⟨bn, .binOp opName n1 n2 rt, src⟩,
+            ⟨bcap, .loadConst (.bool true), srcCap⟩] ∧
+  (m.params.map (fun p => p.name)).reverse = n2 :: nm :: n1 :: tail ∧
+  n1 ≠ n2 ∧ n1 ≠ nm ∧ n2 ≠ nm ∧
+  bn ≠ bcap ∧ bcap ≠ n1 ∧ bcap ≠ n2
+
+/-! ### Lowering of `singletonBinOpWithCap_dge2_d0`:
+   `[.rot, .swap, .opcode (binopOpcode opName rt), .push (.bool true)]`
+
+The body's `computeLastUses` is `[(n2, 0), (n1, 0)]` (identical to the
+(1, 0)/(0, 1) cases — depends only on the body, not on params). The
+binOp loads `n1` (left) first: it is at depth 2, last-use → consume →
+`bringToTop` emits `[.rot]` and updates the stack map to
+`n1 :: n2 :: nm :: tail`. Then `n2` (right) is loaded: now at depth 1,
+last-use → consume → `[.swap]`. -/
+
+set_option maxHeartbeats 4000000 in
+set_option linter.unusedSimpArgs false in
+private theorem lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) (opName : String)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (hCap : singletonBinOpWithCap_dge2_d0 m opName n1 n2 nm bn bcap tail rt src srcCap)
+    (hNotNeqBytes : (opName == "!==" && rt == some "bytes") = false) :
+    lowerMethodUserRawOps progMethods props m
+      = [.rot, .swap, .opcode (Stack.Lower.binopOpcode opName rt),
+         .push (.bool true)] := by
+  obtain ⟨hBody, hRev, hne12, hne1m, hne2m, _hBnCap, _hBcapN1, _hBcapN2⟩ := hCap
+  unfold lowerMethodUserRawOps
+  rw [hBody, hRev]
+  rw [computeLastUses_singletonBinOpWithCap opName bn bcap n1 n2 rt src srcCap hne12]
+  rw [collectConstInts_singletonBinOpWithCap opName bn bcap n1 n2 rt src srcCap]
+  -- Depth-2 lookup of n1 in [n2, nm, n1, ...tail] is some 2.
+  have hFind1 : (n2 :: nm :: n1 :: tail).findIdx? (· == n1) = some 2 := by
+    have h21 : (n2 == n1) = false := by
+      have h : n2 ≠ n1 := fun h => hne12 h.symm
+      simp [beq_iff_eq, h]
+    have hm1 : (nm == n1) = false := by
+      have h : nm ≠ n1 := fun h => hne1m h.symm
+      simp [beq_iff_eq, h]
+    unfold List.findIdx?
+    simp [List.findIdx?.go, h21, hm1]
+  -- Depth-1 lookup of n2 in [n1, n2, nm, ...tail] (after the rot) is some 1.
+  have hFind2 : (n1 :: n2 :: nm :: tail).findIdx? (· == n2) = some 1 := by
+    have h12 : (n1 == n2) = false := by
+      simp [beq_iff_eq, hne12]
+    unfold List.findIdx?
+    simp [List.findIdx?.go, h12]
+  -- Build a `loadRefLive` result for n1 at depth 2, consume-mode: `[.rot]`.
+  have hLoadN1 :
+      Stack.Lower.loadRefLive (n2 :: nm :: n1 :: tail) n1 0 [(n2, 0), (n1, 0)] []
+        = ([.rot], n1 :: n2 :: nm :: tail) := by
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop
+    rw [listContains_nil_local n1, isLastUse_two_first n1 n2 hne12]
+    simp only [Bool.not_false, Bool.true_and]
+    unfold Stack.Lower.StackMap.depth?
+    rw [hFind1]
+    simp [Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+  -- Same for n2 at depth 1 of the rotated sm: `[.swap]`.
+  have hLoadN2 :
+      Stack.Lower.loadRefLive (n1 :: n2 :: nm :: tail) n2 0 [(n2, 0), (n1, 0)] []
+        = ([.swap], n2 :: n1 :: nm :: tail) := by
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop
+    rw [listContains_nil_local n2, isLastUse_two_second n1 n2]
+    simp only [Bool.not_false, Bool.true_and]
+    unfold Stack.Lower.StackMap.depth?
+    rw [hFind2]
+    simp
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  rw [hLoadN1]
+  simp only [hLoadN2]
+  rw [hNotNeqBytes]
+  simp only [Bool.false_eq_true, if_false, reduceIte]
+  unfold Stack.Lower.StackMap.popN
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+  simp [Stack.Lower.lowerBindingsP, Stack.Lower.StackMap.push]
+
+/-! ### Three-value top-of-stack extraction at depth pair (2, 0)
+
+For binOp at depth pair (2, 0) we need the right operand (`n2`, value `b`)
+on top, a stepped-over middle slot (`nm`) at depth 1, and the left operand
+(`n1`, value `a`) at depth 2. The lookups plus `agreesTagged` over the
+prefix `[(n2, .param), (nm, .param), (n1, .param)]` deliver the shape
+`.vBigint b :: midV :: .vBigint a :: rest`. -/
+
+private theorem initialStack_top_three_vBigint_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    ∃ midV rest,
+      initialStack.stack = .vBigint b :: midV :: .vBigint a :: rest := by
+  have hAlign :
+      taggedStackAligned ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest)
+                         anfSt initialStack.stack := hAgrees.1
+  match hCases : initialStack.stack with
+  | [] =>
+      rw [hCases] at hAlign
+      simp [taggedStackAligned] at hAlign
+  | [_] =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      simp [taggedStackAligned] at hTail
+  | [_, _] =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      unfold taggedStackAligned at hTail
+      obtain ⟨_, hTail2⟩ := hTail
+      simp [taggedStackAligned] at hTail2
+  | topV :: midV :: botV :: rest =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨hHeadTop, hRestAlign⟩ := hAlign
+      unfold taggedStackAligned at hRestAlign
+      obtain ⟨_hHeadMid, hRest2⟩ := hRestAlign
+      unfold taggedStackAligned at hRest2
+      obtain ⟨hHeadBot, _⟩ := hRest2
+      have hHeadTop' : anfSt.lookupParam n2 = some topV := hHeadTop
+      have hHeadBot' : anfSt.lookupParam n1 = some botV := hHeadBot
+      have hTopEq : topV = .vBigint b := by
+        have hCombined : some topV = some (.vBigint b) := hHeadTop'.symm.trans hLookupR
+        exact Option.some.inj hCombined
+      have hBotEq : botV = .vBigint a := by
+        have hCombined : some botV = some (.vBigint a) := hHeadBot'.symm.trans hLookupL
+        exact Option.some.inj hCombined
+      exact ⟨midV, rest, by rw [hTopEq, hBotEq]⟩
+
+/-! ### `[.rot, .swap]` post-load helper at depth pair (2, 0)
+
+After `[.rot, .swap]` on a stack `.vBigint b :: midV :: .vBigint a :: rest`,
+`.rot` yields `.vBigint a :: .vBigint b :: midV :: rest` and `.swap`
+yields `.vBigint b :: .vBigint a :: midV :: rest` — the canonical
+post-load shape `.vBigint b :: .vBigint a :: (stack.eraseIdx 2).tail`. -/
+
+private theorem runOps_rot_swap_post_state_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    ∃ midV rest,
+      initialStack.stack = .vBigint b :: midV :: .vBigint a :: rest ∧
+      Stack.Eval.runOps [.rot, .swap] initialStack
+        = .ok ({initialStack with
+                 stack := .vBigint b :: .vBigint a :: midV :: rest}) := by
+  obtain ⟨midV, rest, hStk⟩ :=
+    initialStack_top_three_vBigint_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+      initialStack a b hAgrees hLookupL hLookupR
+  refine ⟨midV, rest, hStk, ?_⟩
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyRot,
+        Stack.Eval.applySwap, hStk, Stack.Sim.run_empty]
+
+/-! ### Per-kind runtime-success helpers at depth pair (2, 0)
+
+Each helper exposes the `[.rot, .swap]` post-load state, applies the
+matching `runOpcode_*_intInt` simulation lemma, chains via
+`runOps_loadThenOpcode_unconditional`, and appends the unconditional
+cap push. The lowered op list is `[.rot, .swap, .opcode O, .push true]`. -/
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_ADD", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_add_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_ADD", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hAdd :
+      Stack.Eval.runOpcode "OP_ADD" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a + b))) :=
+    Stack.Sim.runOpcode_ADD_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_ADD"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a + b))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_ADD" initialStack
+      stkLoad _ hLoad hAdd
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_ADD"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_SUB", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_sub_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_SUB", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_SUB" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a - b))) :=
+    Stack.Sim.runOpcode_SUB_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_SUB"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a - b))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_SUB" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_SUB"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_MUL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_mul_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_MUL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_MUL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * b))) :=
+    Stack.Sim.runOpcode_MUL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_MUL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * b))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_MUL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_MUL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_DIV", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). Requires `b ≠ 0`. -/
+private theorem runOps_rot_swap_div_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_DIV", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_DIV" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / b))) :=
+    Stack.Sim.runOpcode_DIV_intInt_nonzero stkLoad a b (midV :: rest) hStkLoad hNonzero
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_DIV"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / b))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_DIV" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_DIV"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_MOD", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). Requires `b ≠ 0`. -/
+private theorem runOps_rot_swap_mod_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_MOD", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_MOD" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a % b))) :=
+    Stack.Sim.runOpcode_MOD_intInt_nonzero stkLoad a b (midV :: rest) hStkLoad hNonzero
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_MOD"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a % b))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_MOD" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_MOD"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_LESSTHAN", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_lt_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_LESSTHAN", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_LESSTHAN" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a < b)))) :=
+    Stack.Sim.runOpcode_LESSTHAN_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_LESSTHAN"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a < b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_LESSTHAN" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_LESSTHAN"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_LESSTHANOREQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_le_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_LESSTHANOREQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_LESSTHANOREQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≤ b)))) :=
+    Stack.Sim.runOpcode_LESSTHANOREQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_LESSTHANOREQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≤ b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_LESSTHANOREQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_LESSTHANOREQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_GREATERTHAN", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_gt_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_GREATERTHAN", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_GREATERTHAN" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a > b)))) :=
+    Stack.Sim.runOpcode_GREATERTHAN_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_GREATERTHAN"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a > b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_GREATERTHAN" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_GREATERTHAN"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_GREATERTHANOREQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_ge_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_GREATERTHANOREQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_GREATERTHANOREQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≥ b)))) :=
+    Stack.Sim.runOpcode_GREATERTHANOREQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_GREATERTHANOREQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≥ b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_GREATERTHANOREQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_GREATERTHANOREQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_NUMEQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_eq_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_NUMEQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_NUMEQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a = b)))) :=
+    Stack.Sim.runOpcode_NUMEQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_NUMEQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a = b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_NUMEQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_NUMEQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_NUMNOTEQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_neq_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_NUMNOTEQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_NUMNOTEQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ b)))) :=
+    Stack.Sim.runOpcode_NUMNOTEQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_NUMNOTEQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_NUMNOTEQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_NUMNOTEQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_BOOLAND", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_and_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_BOOLAND", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_BOOLAND" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∧ b ≠ 0)))) :=
+    Stack.Sim.runOpcode_BOOLAND_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_BOOLAND"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∧ b ≠ 0)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_BOOLAND" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_BOOLAND"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_BOOLOR", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_or_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_BOOLOR", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_BOOLOR" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∨ b ≠ 0)))) :=
+    Stack.Sim.runOpcode_BOOLOR_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_BOOLOR"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∨ b ≠ 0)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_BOOLOR" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_BOOLOR"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_LSHIFT", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_shl_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_LSHIFT", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_LSHIFT" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * (2 ^ b.toNat)))) :=
+    Stack.Sim.runOpcode_LSHIFT_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_LSHIFT"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * (2 ^ b.toNat)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_LSHIFT" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_LSHIFT"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .swap, .opcode "OP_RSHIFT", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (2, 0). -/
+private theorem runOps_rot_swap_shr_pushTrue_of_agreesTagged_dge2_d0
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .swap, .opcode "OP_RSHIFT", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_swap_post_state_dge2_d0 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_RSHIFT" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / (2 ^ b.toNat)))) :=
+    Stack.Sim.runOpcode_RSHIFT_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .swap, .opcode "OP_RSHIFT"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / (2 ^ b.toNat)))) :=
+    runOps_loadThenOpcode_unconditional [.rot, .swap] "OP_RSHIFT" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .swap, .opcode "OP_RSHIFT"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-! ### Method-level wrapper for `+` at depth pair (2, 0) -/
+
+/-- **Method-level runtime-success wrapper for the `+` body at depth pair
+(2, 0) consume.** The left operand sits at depth 2, the right at depth 0,
+with a stepped-over middle slot at depth 1. The lowerer emits
+`[.rot, .swap, .opcode, .push true]`; runtime success is delivered by
+`runOps_rot_swap_add_pushTrue_of_agreesTagged_dge2_d0`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinAdd_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "+" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "+" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("+" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "+" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_ADD", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_add_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `-` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinSub_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "-" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "-" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("-" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "-" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_SUB", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_sub_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `*` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinMul_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "*" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "*" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("*" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "*" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_MUL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_mul_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `/` at depth pair (2, 0)
+consume.** Requires `b ≠ 0`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinDiv_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "/" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "/" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("/" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "/" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_DIV", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_div_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR hNonzero
+
+/-- **Method-level runtime-success wrapper for `%` at depth pair (2, 0)
+consume.** Requires `b ≠ 0`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinMod_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "%" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "%" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("%" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "%" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_MOD", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_mod_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR hNonzero
+
+/-- **Method-level runtime-success wrapper for `<` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinLt_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "<" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "<" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("<" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "<" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_LESSTHAN", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_lt_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `<=` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinLe_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "<=" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "<=" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("<=" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "<=" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_LESSTHANOREQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_le_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `>` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinGt_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m ">" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp ">" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : ((">" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m ">" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_GREATERTHAN", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_gt_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `>=` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinGe_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m ">=" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp ">=" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : ((">=" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m ">=" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_GREATERTHANOREQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_ge_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `===` at depth pair (2, 0)
+consume.** Requires `rt ≠ some "bytes"` so the lowerer picks `OP_NUMEQUAL`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinEq_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "===" n1 n2 nm bn bcap tail rt src srcCap)
+    (hRtNotBytes : rt ≠ some "bytes")
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "===" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("===" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "===" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  have hOpcode : Stack.Lower.binopOpcode "===" rt = "OP_NUMEQUAL" := by
+    unfold Stack.Lower.binopOpcode
+    cases hRt : rt with
+    | none => rfl
+    | some s =>
+        by_cases hBytes : s = "bytes"
+        · exact absurd (by rw [hRt, hBytes]) hRtNotBytes
+        · simp [hBytes]
+  rw [hOpcode]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_NUMEQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_eq_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `!==` at depth pair (2, 0)
+consume.** Requires `rt ≠ some "bytes"` so the lowerer picks `OP_NUMNOTEQUAL`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinNeq_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "!==" n1 n2 nm bn bcap tail rt src srcCap)
+    (hRtNotBytes : rt ≠ some "bytes")
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "!==" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("!==" == "!==") && rt == some "bytes") = false := by
+    have hRt : (rt == some "bytes") = false := by
+      cases hRt' : rt with
+      | none => rfl
+      | some s =>
+          by_cases hBytes : s = "bytes"
+          · exact absurd (by rw [hRt', hBytes]) hRtNotBytes
+          · simp [hBytes]
+    simp [hRt]
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "!==" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  have hOpcode : Stack.Lower.binopOpcode "!==" rt = "OP_NUMNOTEQUAL" := by
+    unfold Stack.Lower.binopOpcode
+    cases hRt : rt with
+    | none => rfl
+    | some s =>
+        by_cases hBytes : s = "bytes"
+        · exact absurd (by rw [hRt, hBytes]) hRtNotBytes
+        · simp [hBytes]
+  rw [hOpcode]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_NUMNOTEQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_neq_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `&&` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinAnd_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "&&" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "&&" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("&&" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "&&" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_BOOLAND", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_and_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `||` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinOr_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "||" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "||" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("||" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "||" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_BOOLOR", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_or_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `<<` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinShl_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m "<<" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "<<" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("<<" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m "<<" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_LSHIFT", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_shl_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `>>` at depth pair (2, 0)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinShr_dge2_d0_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_dge2_d0 m ">>" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n2, .param) :: (nm, .param) :: (n1, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp ">>" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : ((">>" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_dge2_d0
+        methods props m ">>" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .swap, .opcode "OP_RSHIFT", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_swap_shr_pushTrue_of_agreesTagged_dge2_d0 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-! ### Cap predicate at depth pair (0, 2) -/
+
+/-- Generic composite body shape for a single `binOp opName n1 n2 rt`
+binding at depth pair (0, 2) followed by the sentinel-true cap. The left
+operand `n1` sits at depth 0, the right operand `n2` at depth 2, with one
+"stepped-over" middle slot `nm` at depth 1. Params reversed is
+`n1 :: nm :: n2 :: tail`. -/
+def singletonBinOpWithCap_d0_dge2 (m : ANFMethod)
+    (opName : String) (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc) : Prop :=
+  m.body = [⟨bn, .binOp opName n1 n2 rt, src⟩,
+            ⟨bcap, .loadConst (.bool true), srcCap⟩] ∧
+  (m.params.map (fun p => p.name)).reverse = n1 :: nm :: n2 :: tail ∧
+  n1 ≠ n2 ∧ n1 ≠ nm ∧ n2 ≠ nm ∧
+  bn ≠ bcap ∧ bcap ≠ n1 ∧ bcap ≠ n2
+
+/-! ### Lowering of `singletonBinOpWithCap_d0_dge2`:
+   `[.rot, .opcode (binopOpcode opName rt), .push (.bool true)]`
+
+The binOp loads `n1` (left) first: it is at depth 0, last-use → consume →
+`bringToTop` emits `[]` (no-op), the stack map is unchanged. Then `n2`
+(right) is loaded: at depth 2, last-use → consume → `[.rot]`. -/
+
+set_option maxHeartbeats 4000000 in
+set_option linter.unusedSimpArgs false in
+private theorem lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) (opName : String)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (hCap : singletonBinOpWithCap_d0_dge2 m opName n1 n2 nm bn bcap tail rt src srcCap)
+    (hNotNeqBytes : (opName == "!==" && rt == some "bytes") = false) :
+    lowerMethodUserRawOps progMethods props m
+      = [.rot, .opcode (Stack.Lower.binopOpcode opName rt),
+         .push (.bool true)] := by
+  obtain ⟨hBody, hRev, hne12, hne1m, hne2m, _hBnCap, _hBcapN1, _hBcapN2⟩ := hCap
+  unfold lowerMethodUserRawOps
+  rw [hBody, hRev]
+  rw [computeLastUses_singletonBinOpWithCap opName bn bcap n1 n2 rt src srcCap hne12]
+  rw [collectConstInts_singletonBinOpWithCap opName bn bcap n1 n2 rt src srcCap]
+  -- Depth-0 lookup of n1 in [n1, nm, n2, ...tail] is some 0.
+  have hFind1 : (n1 :: nm :: n2 :: tail).findIdx? (· == n1) = some 0 := by
+    unfold List.findIdx?
+    simp [List.findIdx?.go]
+  -- Depth-2 lookup of n2 in [n1, nm, n2, ...tail] (sm unchanged after no-op) is some 2.
+  have hFind2 : (n1 :: nm :: n2 :: tail).findIdx? (· == n2) = some 2 := by
+    have h12 : (n1 == n2) = false := by
+      simp [beq_iff_eq, hne12]
+    have hm2 : (nm == n2) = false := by
+      have h : nm ≠ n2 := fun h => hne2m h.symm
+      simp [beq_iff_eq, h]
+    unfold List.findIdx?
+    simp [List.findIdx?.go, h12, hm2]
+  -- Load n1 at depth 0, consume-mode: no-op, sm unchanged.
+  have hLoadN1 :
+      Stack.Lower.loadRefLive (n1 :: nm :: n2 :: tail) n1 0 [(n2, 0), (n1, 0)] []
+        = ([], n1 :: nm :: n2 :: tail) := by
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop
+    rw [listContains_nil_local n1, isLastUse_two_first n1 n2 hne12]
+    simp only [Bool.not_false, Bool.true_and]
+    unfold Stack.Lower.StackMap.depth?
+    rw [hFind1]
+    simp
+  -- Load n2 at depth 2 of the unchanged sm: `[.rot]`.
+  have hLoadN2 :
+      Stack.Lower.loadRefLive (n1 :: nm :: n2 :: tail) n2 0 [(n2, 0), (n1, 0)] []
+        = ([.rot], n2 :: n1 :: nm :: tail) := by
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop
+    rw [listContains_nil_local n2, isLastUse_two_second n1 n2]
+    simp only [Bool.not_false, Bool.true_and]
+    unfold Stack.Lower.StackMap.depth?
+    rw [hFind2]
+    simp [Stack.Lower.StackMap.removeAtDepth, Stack.Lower.StackMap.push]
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP
+  rw [hLoadN1]
+  simp only [hLoadN2]
+  rw [hNotNeqBytes]
+  simp only [Bool.false_eq_true, if_false, reduceIte]
+  unfold Stack.Lower.StackMap.popN
+  unfold Stack.Lower.lowerBindingsP
+  unfold Stack.Lower.lowerValueP Stack.Lower.emitConst
+  simp [Stack.Lower.lowerBindingsP, Stack.Lower.StackMap.push]
+
+/-! ### Three-value top-of-stack extraction at depth pair (0, 2)
+
+The left operand (`n1`, value `a`) sits on top, a stepped-over middle slot
+(`nm`) at depth 1, and the right operand (`n2`, value `b`) at depth 2. -/
+
+private theorem initialStack_top_three_vBigint_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    ∃ midV rest,
+      initialStack.stack = .vBigint a :: midV :: .vBigint b :: rest := by
+  have hAlign :
+      taggedStackAligned ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest)
+                         anfSt initialStack.stack := hAgrees.1
+  match hCases : initialStack.stack with
+  | [] =>
+      rw [hCases] at hAlign
+      simp [taggedStackAligned] at hAlign
+  | [_] =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      simp [taggedStackAligned] at hTail
+  | [_, _] =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      unfold taggedStackAligned at hTail
+      obtain ⟨_, hTail2⟩ := hTail
+      simp [taggedStackAligned] at hTail2
+  | topV :: midV :: botV :: rest =>
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      obtain ⟨hHeadTop, hRestAlign⟩ := hAlign
+      unfold taggedStackAligned at hRestAlign
+      obtain ⟨_hHeadMid, hRest2⟩ := hRestAlign
+      unfold taggedStackAligned at hRest2
+      obtain ⟨hHeadBot, _⟩ := hRest2
+      have hHeadTop' : anfSt.lookupParam n1 = some topV := hHeadTop
+      have hHeadBot' : anfSt.lookupParam n2 = some botV := hHeadBot
+      have hTopEq : topV = .vBigint a := by
+        have hCombined : some topV = some (.vBigint a) := hHeadTop'.symm.trans hLookupL
+        exact Option.some.inj hCombined
+      have hBotEq : botV = .vBigint b := by
+        have hCombined : some botV = some (.vBigint b) := hHeadBot'.symm.trans hLookupR
+        exact Option.some.inj hCombined
+      exact ⟨midV, rest, by rw [hTopEq, hBotEq]⟩
+
+/-! ### `[.rot]` post-load helper at depth pair (0, 2)
+
+After `[.rot]` on a stack `.vBigint a :: midV :: .vBigint b :: rest`,
+`.rot` yields `.vBigint b :: .vBigint a :: midV :: rest` — the canonical
+post-load shape `.vBigint b :: .vBigint a :: (stack.eraseIdx 2).tail`. -/
+
+private theorem runOps_rot_post_state_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b)) :
+    ∃ midV rest,
+      initialStack.stack = .vBigint a :: midV :: .vBigint b :: rest ∧
+      Stack.Eval.runOps [.rot] initialStack
+        = .ok ({initialStack with
+                 stack := .vBigint b :: .vBigint a :: midV :: rest}) := by
+  obtain ⟨midV, rest, hStk⟩ :=
+    initialStack_top_three_vBigint_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+      initialStack a b hAgrees hLookupL hLookupR
+  refine ⟨midV, rest, hStk, ?_⟩
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Stack.Eval.applyRot,
+        hStk, Stack.Sim.run_empty]
+
+/-! ### Per-kind runtime-success helpers at depth pair (0, 2) -/
+
+/-- Runtime success of `[.rot, .opcode "OP_ADD", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_add_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_ADD", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_ADD" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a + b))) :=
+    Stack.Sim.runOpcode_ADD_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_ADD"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a + b))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_ADD" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_ADD"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_SUB", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_sub_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_SUB", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_SUB" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a - b))) :=
+    Stack.Sim.runOpcode_SUB_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_SUB"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a - b))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_SUB" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_SUB"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_MUL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_mul_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_MUL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_MUL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * b))) :=
+    Stack.Sim.runOpcode_MUL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_MUL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * b))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_MUL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_MUL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_DIV", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). Requires `b ≠ 0`. -/
+private theorem runOps_rot_div_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_DIV", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_DIV" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / b))) :=
+    Stack.Sim.runOpcode_DIV_intInt_nonzero stkLoad a b (midV :: rest) hStkLoad hNonzero
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_DIV"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / b))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_DIV" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_DIV"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_MOD", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). Requires `b ≠ 0`. -/
+private theorem runOps_rot_mod_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_MOD", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_MOD" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a % b))) :=
+    Stack.Sim.runOpcode_MOD_intInt_nonzero stkLoad a b (midV :: rest) hStkLoad hNonzero
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_MOD"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a % b))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_MOD" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_MOD"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_LESSTHAN", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_lt_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_LESSTHAN", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_LESSTHAN" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a < b)))) :=
+    Stack.Sim.runOpcode_LESSTHAN_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_LESSTHAN"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a < b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_LESSTHAN" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_LESSTHAN"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_LESSTHANOREQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_le_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_LESSTHANOREQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_LESSTHANOREQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≤ b)))) :=
+    Stack.Sim.runOpcode_LESSTHANOREQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_LESSTHANOREQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≤ b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_LESSTHANOREQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_LESSTHANOREQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_GREATERTHAN", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_gt_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_GREATERTHAN", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_GREATERTHAN" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a > b)))) :=
+    Stack.Sim.runOpcode_GREATERTHAN_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_GREATERTHAN"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a > b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_GREATERTHAN" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_GREATERTHAN"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_GREATERTHANOREQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_ge_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_GREATERTHANOREQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_GREATERTHANOREQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≥ b)))) :=
+    Stack.Sim.runOpcode_GREATERTHANOREQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_GREATERTHANOREQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≥ b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_GREATERTHANOREQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_GREATERTHANOREQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_NUMEQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_eq_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_NUMEQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_NUMEQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a = b)))) :=
+    Stack.Sim.runOpcode_NUMEQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_NUMEQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a = b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_NUMEQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_NUMEQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_NUMNOTEQUAL", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_neq_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_NUMNOTEQUAL", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_NUMNOTEQUAL" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ b)))) :=
+    Stack.Sim.runOpcode_NUMNOTEQUAL_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_NUMNOTEQUAL"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ b)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_NUMNOTEQUAL" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_NUMNOTEQUAL"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_BOOLAND", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_and_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_BOOLAND", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_BOOLAND" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∧ b ≠ 0)))) :=
+    Stack.Sim.runOpcode_BOOLAND_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_BOOLAND"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∧ b ≠ 0)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_BOOLAND" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_BOOLAND"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_BOOLOR", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_or_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_BOOLOR", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_BOOLOR" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∨ b ≠ 0)))) :=
+    Stack.Sim.runOpcode_BOOLOR_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_BOOLOR"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBool (decide (a ≠ 0 ∨ b ≠ 0)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_BOOLOR" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_BOOLOR"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_LSHIFT", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_shl_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_LSHIFT", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_LSHIFT" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * (2 ^ b.toNat)))) :=
+    Stack.Sim.runOpcode_LSHIFT_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_LSHIFT"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a * (2 ^ b.toNat)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_LSHIFT" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_LSHIFT"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-- Runtime success of `[.rot, .opcode "OP_RSHIFT", .push (.bool true)]`
+under `agreesTagged + two-int lookups` at depth pair (0, 2). -/
+private theorem runOps_rot_shr_pushTrue_of_agreesTagged_d0_dge2
+    (n1 n2 nm : String) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (initialStack : StackState) (a b : Int)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    :
+    (Stack.Eval.runOps
+        [.rot, .opcode "OP_RSHIFT", .push (.bool true)]
+        initialStack).toOption.isSome := by
+  obtain ⟨midV, rest, _hStk, hLoad⟩ :=
+    runOps_rot_post_state_d0_dge2 n1 n2 nm tsm_rest anfSt initialStack a b
+      hAgrees hLookupL hLookupR
+  let stkLoad : StackState :=
+    {initialStack with stack := .vBigint b :: .vBigint a :: midV :: rest}
+  have hStkLoad : stkLoad.stack = .vBigint b :: .vBigint a :: midV :: rest := rfl
+  have hOp :
+      Stack.Eval.runOpcode "OP_RSHIFT" stkLoad
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / (2 ^ b.toNat)))) :=
+    Stack.Sim.runOpcode_RSHIFT_intInt stkLoad a b (midV :: rest) hStkLoad
+  have hChain :
+      Stack.Eval.runOps [.rot, .opcode "OP_RSHIFT"] initialStack
+        = .ok ({stkLoad with stack := midV :: rest}.push (.vBigint (a / (2 ^ b.toNat)))) :=
+    runOps_loadThenOpcode_unconditional [.rot] "OP_RSHIFT" initialStack
+      stkLoad _ hLoad hOp
+  show (Stack.Eval.runOps
+          ([.rot, .opcode "OP_RSHIFT"] ++ [.push (.bool true)])
+          initialStack).toOption.isSome
+  rw [Stack.Sim.runOps_append]
+  rw [hChain]
+  simp [Stack.Eval.runOps, Stack.Eval.stepNonIf, Except.toOption]
+
+/-! ### Method-level wrappers at depth pair (0, 2) -/
+
+/-- **Method-level runtime-success wrapper for `+` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinAdd_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "+" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "+" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "+" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("+" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "+" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_ADD", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_add_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `-` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinSub_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "-" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "-" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "-" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("-" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "-" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_SUB", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_sub_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `*` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinMul_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "*" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "*" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "*" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("*" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "*" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_MUL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_mul_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `/` at depth pair (0, 2)
+consume.** Requires `b ≠ 0`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinDiv_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "/" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "/" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "/" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("/" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "/" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_DIV", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_div_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR hNonzero
+
+/-- **Method-level runtime-success wrapper for `%` at depth pair (0, 2)
+consume.** Requires `b ≠ 0`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinMod_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "%" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (hNonzero : b ≠ 0)
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "%" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "%" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("%" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "%" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_MOD", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_mod_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR hNonzero
+
+/-- **Method-level runtime-success wrapper for `<` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinLt_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "<" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "<" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "<" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("<" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "<" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_LESSTHAN", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_lt_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `<=` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinLe_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "<=" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "<=" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "<=" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("<=" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "<=" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_LESSTHANOREQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_le_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `>` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinGt_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m ">" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp ">" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap ">" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : ((">" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m ">" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_GREATERTHAN", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_gt_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `>=` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinGe_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m ">=" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp ">=" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap ">=" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : ((">=" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m ">=" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_GREATERTHANOREQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_ge_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `===` at depth pair (0, 2)
+consume.** Requires `rt ≠ some "bytes"` so the lowerer picks `OP_NUMEQUAL`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinEq_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "===" n1 n2 nm bn bcap tail rt src srcCap)
+    (hRtNotBytes : rt ≠ some "bytes")
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "===" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "===" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("===" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "===" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  have hOpcode : Stack.Lower.binopOpcode "===" rt = "OP_NUMEQUAL" := by
+    unfold Stack.Lower.binopOpcode
+    cases hRt : rt with
+    | none => rfl
+    | some s =>
+        by_cases hBytes : s = "bytes"
+        · exact absurd (by rw [hRt, hBytes]) hRtNotBytes
+        · simp [hBytes]
+  rw [hOpcode]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_NUMEQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_eq_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `!==` at depth pair (0, 2)
+consume.** Requires `rt ≠ some "bytes"` so the lowerer picks `OP_NUMNOTEQUAL`. -/
+theorem runMethod_lower_public_unique_no_post_singletonBinNeq_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "!==" n1 n2 nm bn bcap tail rt src srcCap)
+    (hRtNotBytes : rt ≠ some "bytes")
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "!==" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "!==" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("!==" == "!==") && rt == some "bytes") = false := by
+    have hRt : (rt == some "bytes") = false := by
+      cases hRt' : rt with
+      | none => rfl
+      | some s =>
+          by_cases hBytes : s = "bytes"
+          · exact absurd (by rw [hRt', hBytes]) hRtNotBytes
+          · simp [hBytes]
+    simp [hRt]
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "!==" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  have hOpcode : Stack.Lower.binopOpcode "!==" rt = "OP_NUMNOTEQUAL" := by
+    unfold Stack.Lower.binopOpcode
+    cases hRt : rt with
+    | none => rfl
+    | some s =>
+        by_cases hBytes : s = "bytes"
+        · exact absurd (by rw [hRt, hBytes]) hRtNotBytes
+        · simp [hBytes]
+  rw [hOpcode]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_NUMNOTEQUAL", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_neq_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `&&` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinAnd_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "&&" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "&&" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "&&" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("&&" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "&&" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_BOOLAND", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_and_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `||` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinOr_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "||" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "||" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "||" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("||" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "||" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_BOOLOR", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_or_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `<<` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinShl_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m "<<" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp "<<" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap "<<" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : (("<<" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m "<<" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_LSHIFT", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_shl_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
+    initialStack a b hAgrees hLookupL hLookupR
+
+/-- **Method-level runtime-success wrapper for `>>` at depth pair (0, 2)
+consume.** -/
+theorem runMethod_lower_public_unique_no_post_singletonBinShr_d0_dge2_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (n1 n2 nm bn bcap : String) (tail : List String)
+    (rt : Option String) (src srcCap : Option SourceLoc)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (a b : Int)
+    (hMem : m ∈ methods)
+    (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hCap : singletonBinOpWithCap_d0_dge2 m ">>" n1 n2 nm bn bcap tail rt src srcCap)
+    (hAgrees : agreesTagged
+      ((n1, .param) :: (nm, .param) :: (n2, .param) :: tsm_rest) anfSt initialStack)
+    (hLookupL : anfSt.lookupParam n1 = some (.vBigint a))
+    (hLookupR : anfSt.lookupParam n2 = some (.vBigint b))
+    (_hUntagSm : untagSm tsm_rest = tail) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  have hBody : m.body = [⟨bn, .binOp ">>" n1 n2 rt, src⟩,
+                          ⟨bcap, .loadConst (.bool true), srcCap⟩] := hCap.1
+  have hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false := by
+    rw [hBody]
+    exact bindingsUseCheckPreimage_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  have hNoCode : Stack.Lower.bindingsUseCodePart m.body = false := by
+    rw [hBody]
+    exact bindingsUseCodePart_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  have hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false := by
+    rw [hBody]
+    exact bodyEndsInAssert_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  have hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false := by
+    rw [hBody]
+    exact bindingsUseDeserializeState_singletonBinOpWithCap ">>" bn bcap n1 n2 rt src srcCap
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  have hNotNeqBytes : ((">>" == "!==") && rt == some "bytes") = false := by
+    simp
+  rw [lowerMethodUserRawOps_singletonBinOpWithCap_d0_dge2
+        methods props m ">>" n1 n2 nm bn bcap tail rt src srcCap hCap hNotNeqBytes]
+  show (Stack.Eval.runOps
+          [.rot, .opcode "OP_RSHIFT", .push (.bool true)]
+          initialStack).toOption.isSome
+  exact runOps_rot_shr_pushTrue_of_agreesTagged_d0_dge2 n1 n2 nm tsm_rest anfSt
     initialStack a b hAgrees hLookupL hLookupR
 
 end Agrees
