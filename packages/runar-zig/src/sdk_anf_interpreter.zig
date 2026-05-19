@@ -152,6 +152,11 @@ pub const StrictError = error{
     MethodNotFound,
     OutOfMemory,
     AssertionFailure,
+    /// An ANF binding referenced an auto-injected witness param
+    /// (`_prevOutScript_<idx>` or `_serialisedOutputs`) but the caller did
+    /// not bind it via `MockEnv.setPrevOutScript` / `setSerialisedOutputs`.
+    /// Mirrors the TS interpreter's "requires witness bytes" error.
+    MissingWitness,
 };
 
 /// Context for strict-mode evaluation. Carries the public method name being
@@ -169,11 +174,130 @@ const StrictCtx = struct {
     real_crypto: ?*const RealCryptoCtx = null,
 };
 
+/// Bag of optional contexts threaded through evaluation. Kept as a
+/// pointer-bag struct so we don't grow the signature of every helper.
+const EvalCtx = struct {
+    strict: ?*StrictCtx = null,
+    mock_env: ?*const MockEnv = null,
+};
+
 /// Real-crypto context for `executeOnChainAuthoritative`. The 32-byte
 /// `sighash` is what `checkSig` ECDSA-verifies signatures against and what
 /// `checkPreimage` requires `hash256(preimage)` to equal.
 pub const RealCryptoCtx = struct {
     sighash: [32]u8,
+};
+
+/// Mock environment for intent-covenant intrinsics (BSVM Phase 13).
+///
+/// Mirrors the TS reference at
+/// `packages/runar-testing/src/interpreter/interpreter.ts` — its
+/// `_witnessBytes` map plus `_mockPreimage` / `_mockPreimageBytes` shims —
+/// for the Zig ANF interpreter.
+///
+/// ANF lowering desugars `extractPrevOutputScript(idx, ...)` /
+/// `requireOutputP2PKH(...)` / `currentBlockHeight()` into ANF chains that
+/// load auto-injected method params (`_prevOutScript_<idx>`,
+/// `_serialisedOutputs`) and call primitive intrinsics (`hash256`,
+/// `substr`, `cat`, `num2bin`, `extractLocktime`, `extractOutputHash`,
+/// `bin_op`, `assert`). The Zig interpreter walks that lowered ANF;
+/// `MockEnv` lets callers supply the auto-injected witness bytes (via
+/// setters) and override the preimage fields the desugar reads.
+///
+/// Ownership: `setPrevOutScript` / `setSerialisedOutputs` borrow the
+/// caller-supplied hex slice — the caller must keep it alive for the
+/// duration of any `execute*WithMockEnv` call. `MockEnv` does NOT dupe.
+/// Call `deinit` after use to free the witness-name map (the bytes
+/// themselves are caller-owned). `output_hash_hex` /
+/// `hash_prevouts_hex` / `hash_sequence_hex` are also borrows.
+pub const MockEnv = struct {
+    /// Witness bytes keyed by the ANF-level synthetic name
+    /// (`_prevOutScript_<idx>`, `_serialisedOutputs`). Hex-encoded slices,
+    /// matching the rest of the Zig interpreter's `ANFValue.bytes` convention.
+    witness_bytes: std.StringHashMap([]const u8),
+
+    /// Preimage scalar fields surfaced by `extractLocktime` /
+    /// `extractAmount` / `extractVersion` / `extractSequence`. Defaults
+    /// mirror the TS reference: locktime=0, amount=10000, version=1,
+    /// sequence=0xfffffffe.
+    locktime: i64 = 0,
+    amount: i64 = 10000,
+    version: i64 = 1,
+    sequence: i64 = 0xfffffffe,
+
+    /// Preimage byte fields surfaced by `extractOutputHash` /
+    /// `extractHashPrevouts` / `extractHashSequence`. Hex-encoded; null
+    /// falls back to the legacy stub ("00" * 32).
+    output_hash_hex: ?[]const u8 = null,
+    hash_prevouts_hex: ?[]const u8 = null,
+    hash_sequence_hex: ?[]const u8 = null,
+
+    /// Caller-supplied allocator used to allocate the witness-name keys
+    /// (the bytes themselves are caller-owned). Same allocator must be
+    /// used for both `init` and `deinit`.
+    name_allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) MockEnv {
+        return .{
+            .witness_bytes = std.StringHashMap([]const u8).init(allocator),
+            .name_allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MockEnv) void {
+        // Free the duped key strings allocated by setPrevOutScript.
+        // setSerialisedOutputs uses a static literal so no free is needed.
+        var it = self.witness_bytes.iterator();
+        while (it.next()) |entry| {
+            const k = entry.key_ptr.*;
+            if (!std.mem.eql(u8, k, "_serialisedOutputs")) {
+                self.name_allocator.free(k);
+            }
+        }
+        self.witness_bytes.deinit();
+    }
+
+    /// Bind witness bytes for `extractPrevOutputScript(idx, ...)`. Mirrors
+    /// `TestContract.setPrevOutScript(idx, bytes)` from the TS reference.
+    /// `bytes_hex` is a hex-encoded slice; ownership stays with the caller.
+    pub fn setPrevOutScript(self: *MockEnv, input_index: i64, bytes_hex: []const u8) !void {
+        // Build the synthetic param name "_prevOutScript_<idx>".
+        var buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "_prevOutScript_{d}", .{input_index});
+        const owned = try self.name_allocator.dupe(u8, name);
+        // If a previous binding for the same idx existed, free its key first.
+        if (self.witness_bytes.fetchRemove(owned)) |old| {
+            self.name_allocator.free(old.key);
+        }
+        try self.witness_bytes.put(owned, bytes_hex);
+    }
+
+    /// Bind serialised-outputs witness bytes for `requireOutputP2PKH(...)`.
+    /// Mirrors `TestContract.setSerialisedOutputs(bytes)`. `bytes_hex` is
+    /// caller-owned.
+    pub fn setSerialisedOutputs(self: *MockEnv, bytes_hex: []const u8) !void {
+        try self.witness_bytes.put("_serialisedOutputs", bytes_hex);
+    }
+
+    /// Override preimage byte fields. Mirrors
+    /// `TestContract.setMockPreimageBytes({ outputHash: ... })`.
+    pub fn setMockPreimageBytes(self: *MockEnv, output_hash_hex: ?[]const u8) void {
+        self.output_hash_hex = output_hash_hex;
+    }
+
+    /// Override preimage scalar fields. Mirrors
+    /// `TestContract.setMockPreimage({ locktime, amount, version, sequence })`.
+    pub fn setMockPreimage(self: *MockEnv, opts: struct {
+        locktime: ?i64 = null,
+        amount: ?i64 = null,
+        version: ?i64 = null,
+        sequence: ?i64 = null,
+    }) void {
+        if (opts.locktime) |v| self.locktime = v;
+        if (opts.amount) |v| self.amount = v;
+        if (opts.version) |v| self.version = v;
+        if (opts.sequence) |v| self.sequence = v;
+    }
 };
 
 /// Sentinel value for "no result" / undefined.
@@ -228,6 +352,40 @@ pub fn computeNewState(
     return result.state;
 }
 
+/// Strict-mode entry point with a `MockEnv` for intent-covenant intrinsics
+/// (BSVM Phase 13). Mirrors `executeStrict` but additionally consults
+/// `mock_env` for auto-injected witness params (`_prevOutScript_<idx>`,
+/// `_serialisedOutputs`) and overridden preimage fields (extractLocktime,
+/// extractOutputHash, etc.). If `_prevOutScript_<idx>` is referenced in the
+/// ANF body and `mock_env` has no matching binding, evaluation returns
+/// `error.MissingWitness` so the caller can surface a clear "call
+/// setPrevOutScript(...) first" diagnostic.
+pub fn executeStrictWithMockEnv(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+    mock_env: *const MockEnv,
+) StrictError!NewStateResult {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, null, mock_env);
+}
+
+/// Lenient counterpart to `executeStrictWithMockEnv`: same MockEnv plumbing
+/// but skips assert enforcement (matches `computeNewState` semantics).
+pub fn computeNewStateWithMockEnv(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+    mock_env: *const MockEnv,
+) StrictError!NewStateResult {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, false, null, null, mock_env);
+}
+
 /// On `error.AssertionFailure`, callers that supply
 /// `executeStrictWithFailureInfo`'s `out_info` parameter can read the
 /// failing method + binding name. Both fields point into the ANF program's
@@ -255,7 +413,7 @@ pub fn executeStrict(
     args: std.StringHashMap(ANFValue),
     constructor_args: []const ANFValue,
 ) StrictError!NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, null);
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, null, null);
 }
 
 /// Like `executeStrict` but additionally populates `out_info.method_name`
@@ -273,7 +431,7 @@ pub fn executeStrictWithFailureInfo(
     constructor_args: []const ANFValue,
     out_info: *AssertionFailureInfo,
 ) StrictError!NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, out_info);
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, out_info, null);
 }
 
 /// On-chain authoritative simulation: strict assert enforcement PLUS real
@@ -307,7 +465,7 @@ pub fn executeOnChainAuthoritative(
     constructor_args: []const ANFValue,
     ctx: RealCryptoCtx,
 ) StrictError!NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, null);
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, null, null);
 }
 
 /// Like `executeOnChainAuthoritative` but additionally populates
@@ -325,7 +483,7 @@ pub fn executeOnChainAuthoritativeWithFailureInfo(
     ctx: RealCryptoCtx,
     out_info: *AssertionFailureInfo,
 ) StrictError!NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, out_info);
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, out_info, null);
 }
 
 /// Like `computeNewState` but also returns data outputs resolved from
@@ -340,10 +498,14 @@ pub fn computeNewStateAndDataOutputs(
     args: std.StringHashMap(ANFValue),
     constructor_args: []const ANFValue,
 ) !NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, false, null, null) catch |err| switch (err) {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, false, null, null, null) catch |err| switch (err) {
         // Lenient mode never reports AssertionFailure (asserts are skipped),
         // but the unified runMethod return type includes it, so coerce away.
+        // Likewise lenient mode without a MockEnv cannot surface
+        // MissingWitness — the auto-injected params either get values
+        // (none/empty) or stay unbound (also fine for lenient).
         error.AssertionFailure => unreachable,
+        error.MissingWitness => unreachable,
         else => |e| return e,
     };
 }
@@ -361,6 +523,7 @@ fn runMethod(
     strict: bool,
     real_crypto: ?*const RealCryptoCtx,
     out_failure_info: ?*AssertionFailureInfo,
+    mock_env: ?*const MockEnv,
 ) StrictError!NewStateResult {
     // Use an arena for all intermediate allocations during interpretation
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -429,13 +592,14 @@ fn runMethod(
     // mock-returning true.
     var strict_ctx_storage: StrictCtx = .{ .method_name = method_name, .real_crypto = real_crypto };
     const strict_ctx_ptr: ?*StrictCtx = if (strict) &strict_ctx_storage else null;
-    evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, &raw_outputs_arena, anf, strict_ctx_ptr) catch |err| {
+    const eval_ctx: EvalCtx = .{ .strict = strict_ctx_ptr, .mock_env = mock_env };
+    evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, &raw_outputs_arena, anf, eval_ctx) catch |err| {
         // On strict-mode AssertionFailure, populate the caller-supplied
         // out_failure_info (if any) so the driver can emit a structured
         // {error, methodName, bindingName} envelope on the wire. Both names
         // are slices into the ANF program's own storage, not the arena, so
         // they remain valid after this function returns.
-        if (err == error.AssertionFailure) {
+        if (err == error.AssertionFailure or err == error.MissingWitness) {
             if (out_failure_info) |info| {
                 info.method_name = strict_ctx_storage.method_name;
                 info.binding_name = strict_ctx_storage.last_binding_name;
@@ -497,11 +661,11 @@ fn evalBindings(
     data_outputs: *std.ArrayList(DataOutputEntry),
     raw_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
-    strict_ctx: ?*StrictCtx,
-) error{ OutOfMemory, AssertionFailure }!void {
+    eval_ctx: EvalCtx,
+) error{ OutOfMemory, AssertionFailure, MissingWitness }!void {
     for (bindings) |binding| {
-        if (strict_ctx) |ctx| ctx.last_binding_name = binding.name;
-        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
+        if (eval_ctx.strict) |ctx| ctx.last_binding_name = binding.name;
+        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
         try env.put(binding.name, val);
     }
 }
@@ -514,10 +678,33 @@ fn evalNode(
     data_outputs: *std.ArrayList(DataOutputEntry),
     raw_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
-    strict_ctx: ?*StrictCtx,
-) error{ OutOfMemory, AssertionFailure }!ANFValue {
+    eval_ctx: EvalCtx,
+) error{ OutOfMemory, AssertionFailure, MissingWitness }!ANFValue {
+    const strict_ctx = eval_ctx.strict;
     switch (node) {
         .load_param => |lp| {
+            // Consult the MockEnv witness map FIRST for auto-injected intent
+            // params (`_prevOutScript_<idx>`, `_serialisedOutputs`). If the
+            // ANF references such a param and the caller did not bind it
+            // via MockEnv.setPrevOutScript / setSerialisedOutputs, surface
+            // `error.MissingWitness` so the driver can emit a clear
+            // diagnostic — mirrors the TS interpreter's "requires witness
+            // bytes" error.
+            const is_witness_param = std.mem.startsWith(u8, lp.name, "_prevOutScript_") or
+                std.mem.eql(u8, lp.name, "_serialisedOutputs");
+            if (is_witness_param) {
+                if (eval_ctx.mock_env) |me| {
+                    if (me.witness_bytes.get(lp.name)) |bytes_hex| {
+                        return .{ .bytes = bytes_hex };
+                    }
+                    return error.MissingWitness;
+                }
+                // No MockEnv supplied — fall through to env so existing
+                // callers (which may still set the param via `args`) keep
+                // working. If nothing is bound, return none and the
+                // downstream desugar will fail its hash check, which
+                // matches lenient behaviour.
+            }
             return env.get(lp.name) orelse anf_none;
         },
         .load_prop => |lp| {
@@ -559,15 +746,15 @@ fn evalNode(
                 return anf_none;
             }
             const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
-            return evalCall(allocator, c.func, c.args, env, real_crypto);
+            return evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
         },
         .method_call => |mc| {
-            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
+            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
         },
         .if_node => |ifn| {
             const cond = env.get(ifn.cond) orelse anf_none;
             const branch = if (isTruthy(cond)) ifn.then_branch else ifn.else_branch;
-            try evalBindings(allocator, branch, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
+            try evalBindings(allocator, branch, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
             if (branch.len > 0) {
                 return env.get(branch[branch.len - 1].name) orelse anf_none;
             }
@@ -577,7 +764,7 @@ fn evalNode(
             var last_val: ANFValue = anf_none;
             for (0..ln.count) |i| {
                 try env.put(ln.iter_var, .{ .int = @intCast(i) });
-                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
+                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
                 if (ln.body.len > 0) {
                     last_val = env.get(ln.body[ln.body.len - 1].name) orelse anf_none;
                 }
@@ -795,6 +982,7 @@ fn evalCall(
     arg_names: []const []const u8,
     env: *const std.StringHashMap(ANFValue),
     real_crypto: ?*const RealCryptoCtx,
+    mock_env: ?*const MockEnv,
 ) ANFValue {
     // Crypto — mocked unless real_crypto context is present.
     if (std.mem.eql(u8, func, "checkSig")) {
@@ -1041,12 +1229,46 @@ fn evalCall(
         return computeMerkleRoot(allocator, arg_names, env, use_double);
     }
 
-    // Preimage intrinsics — dummy values
-    if (std.mem.eql(u8, func, "extractOutputHash") or std.mem.eql(u8, func, "extractAmount")) {
-        return .{ .bytes = "00" ** 32 };
+    // Preimage intrinsics — surface MockEnv overrides if present, else
+    // legacy stubs. `extractAmount` is treated as a bytes-shaped output by
+    // the legacy stub but the TS reference returns it as a bigint; we
+    // preserve the existing Zig stub shape for `extractAmount` so existing
+    // callers don't regress, while exposing the MockEnv override path for
+    // `extractOutputHash` / `extractLocktime` which the intent intrinsic
+    // desugars actually consume.
+    if (std.mem.eql(u8, func, "extractOutputHash")) {
+        if (mock_env) |me| {
+            if (me.output_hash_hex) |h| return .{ .bytes = h };
+        }
+        return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
+    }
+    if (std.mem.eql(u8, func, "extractAmount")) {
+        if (mock_env) |me| return .{ .int = me.amount };
+        return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
     }
     if (std.mem.eql(u8, func, "extractLocktime")) {
+        if (mock_env) |me| return .{ .int = me.locktime };
         return .{ .int = 0 };
+    }
+    if (std.mem.eql(u8, func, "extractVersion")) {
+        if (mock_env) |me| return .{ .int = me.version };
+        return .{ .int = 1 };
+    }
+    if (std.mem.eql(u8, func, "extractSequence")) {
+        if (mock_env) |me| return .{ .int = me.sequence };
+        return .{ .int = 0xfffffffe };
+    }
+    if (std.mem.eql(u8, func, "extractHashPrevouts")) {
+        if (mock_env) |me| {
+            if (me.hash_prevouts_hex) |h| return .{ .bytes = h };
+        }
+        return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
+    }
+    if (std.mem.eql(u8, func, "extractHashSequence")) {
+        if (mock_env) |me| {
+            if (me.hash_sequence_hex) |h| return .{ .bytes = h };
+        }
+        return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
     }
 
     return anf_none;
@@ -1061,8 +1283,8 @@ fn evalMethodCall(
     data_outputs: *std.ArrayList(DataOutputEntry),
     raw_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
-    strict_ctx: ?*StrictCtx,
-) error{ OutOfMemory, AssertionFailure }!ANFValue {
+    eval_ctx: EvalCtx,
+) error{ OutOfMemory, AssertionFailure, MissingWitness }!ANFValue {
     // Find the private method
     for (anf.methods) |*m| {
         if (!m.is_public and std.mem.eql(u8, m.name, method_name)) {
@@ -1084,9 +1306,9 @@ fn evalMethodCall(
                 }
             }
 
-            // Execute the method body — propagate strict_ctx so nested
-            // private-method asserts also abort.
-            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
+            // Execute the method body — propagate eval_ctx so nested
+            // private-method asserts (and MockEnv overrides) also apply.
+            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
 
             // Propagate property changes back
             for (anf.properties) |prop| {

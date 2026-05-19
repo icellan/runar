@@ -184,6 +184,19 @@ func (p *WhatsOnChainProvider) GetUtxos(address string) ([]UTXO, error) {
 			Script:      "", // WoC doesn't return locking script in UTXO list
 		}
 	}
+	// DoS-bound: defensive guard — WoC currently returns empty scripts but a
+	// future enriched response must not bypass MaxScriptBytes.
+	for _, u := range utxos {
+		if u.Script == "" {
+			continue
+		}
+		if err := assertScriptHexUnderLimit(
+			u.Script, MaxScriptBytes,
+			fmt.Sprintf("WhatsOnChainProvider.GetUtxos(%s)", address),
+		); err != nil {
+			return nil, err
+		}
+	}
 	return utxos, nil
 }
 
@@ -215,12 +228,21 @@ func (p *WhatsOnChainProvider) GetContractUtxo(scriptHash string) (*UTXO, error)
 	}
 
 	first := entries[0]
-	return &UTXO{
+	utxo := &UTXO{
 		Txid:        first.TxHash,
 		OutputIndex: first.TxPos,
 		Satoshis:    first.Value,
 		Script:      "",
-	}, nil
+	}
+	if utxo.Script != "" {
+		if err := assertScriptHexUnderLimit(
+			utxo.Script, MaxScriptBytes,
+			fmt.Sprintf("WhatsOnChainProvider.GetContractUtxo(%s)", scriptHash),
+		); err != nil {
+			return nil, err
+		}
+	}
+	return utxo, nil
 }
 
 // GetNetwork returns the network this provider is connected to.

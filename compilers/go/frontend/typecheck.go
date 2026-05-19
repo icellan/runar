@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -1108,8 +1109,38 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 	// a constant byte offset (requireOutputP2PKH).
 	if funcName == "extractPrevOutputScript" || funcName == "requireOutputP2PKH" {
 		if len(args) >= 1 {
-			if _, ok := args[0].(BigIntLiteral); !ok {
+			lit, ok := args[0].(BigIntLiteral)
+			// Accept `-N` (UnaryExpr "-" over BigIntLiteral) so the bounds
+			// check below produces a clear "must be >= 0" rather than the
+			// misleading "must be an integer literal" message.
+			if !ok {
+				if u, isUnary := args[0].(UnaryExpr); isUnary && u.Op == "-" {
+					if inner, innerOk := u.Operand.(BigIntLiteral); innerOk && inner.Value != nil {
+						neg := new(big.Int).Neg(inner.Value)
+						lit = BigIntLiteral{Value: neg}
+						ok = true
+					}
+				}
+			}
+			if !ok {
 				tc.addError(fmt.Sprintf("%s() argument 1 (index) must be an integer literal", funcName))
+			} else if lit.Value != nil {
+				// R-2: bound the index literal. For requireOutputP2PKH, the
+				// emitted Stack-IR computes byte-offset = idx * 34; require
+				// 0 <= idx <= 1000 to keep the offset well under script-int
+				// max and to reject obvious nonsense (e.g. negative or
+				// astronomically large).
+				if !lit.Value.IsInt64() {
+					tc.addError(fmt.Sprintf("%s() argument 1 (index) must fit in int64; got %s", funcName, lit.Value.String()))
+				} else {
+					idx := lit.Value.Int64()
+					if idx < 0 {
+						tc.addError(fmt.Sprintf("%s() argument 1 (index) must be >= 0; got %d", funcName, idx))
+					}
+					if funcName == "requireOutputP2PKH" && idx > 1000 {
+						tc.addError(fmt.Sprintf("requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got %d (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)", idx))
+					}
+				}
 			}
 		}
 	}
@@ -1133,8 +1164,27 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 			}
 		}
 		if len(args) == 3 {
-			if _, ok := args[2].(BigIntLiteral); !ok {
+			lit, ok := args[2].(BigIntLiteral)
+			if !ok {
 				tc.addError("extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied")
+			} else if lit.Value != nil {
+				// R-4: bound the prefixLen literal. The intrinsic hashes
+				// substr(witness, 0, prefixLen) and compares against a
+				// 32-byte SHA-256 hash. prefixLen < 32 is suspicious (the
+				// prefix bytes don't even cover a hash-sized chunk).
+				// prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES — wouldn't
+				// fit in a legal Bitcoin Script anyway.
+				if !lit.Value.IsInt64() {
+					tc.addError(fmt.Sprintf("extractPrevOutputScript() argument 3 (prefixLen) must fit in int64; got %s", lit.Value.String()))
+				} else {
+					n := lit.Value.Int64()
+					if n < 32 {
+						tc.addError(fmt.Sprintf("extractPrevOutputScript() argument 3 (prefixLen) must be >= 32 (the hash assertion compares a 32-byte SHA-256); got %d", n))
+					}
+					if n > 4*1024*1024 {
+						tc.addError(fmt.Sprintf("extractPrevOutputScript() argument 3 (prefixLen) must be <= MAX_SCRIPT_BYTES (4 MiB); got %d", n))
+					}
+				}
 			}
 			tc.inferExprType(args[2], env)
 		}

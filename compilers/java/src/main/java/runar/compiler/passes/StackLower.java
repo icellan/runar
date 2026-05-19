@@ -35,6 +35,7 @@ import runar.compiler.ir.anf.MethodCall;
 import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
+import runar.compiler.ir.UnknownAnfKindError;
 import runar.compiler.ir.stack.DropOp;
 import runar.compiler.ir.stack.DupOp;
 import runar.compiler.ir.stack.IfOp;
@@ -321,6 +322,13 @@ public final class StackLower {
             refs.add(ad.scriptBytes());
         } else if (value instanceof ArrayLiteral al) {
             refs.addAll(al.elements());
+        } else if (value instanceof RawScript) {
+            // Opaque byte span — no SSA operand refs.
+        } else {
+            // Exhaustiveness guard. Refusing to handle unknown ANF kinds here
+            // is critical: silently returning [] would make last-use / liveness
+            // analysis produce wrong PICK/ROLL placement and corrupt Stack IR.
+            throw new UnknownAnfKindError(value.kind(), "stack-lower.collectRefs");
         }
         return refs;
     }
@@ -668,6 +676,11 @@ public final class StackLower {
                 lowerArrayLiteral(name, al.elements(), idx, lastUses);
             } else if (v instanceof RawScript rs) {
                 lowerRawScript(name, rs.bytes(), rs.inArity(), rs.outArity());
+            } else {
+                // Exhaustiveness guard. Silently skipping an unknown ANF kind
+                // here would emit a script that omits the binding entirely —
+                // passing type-check while producing wrong on-chain bytes.
+                throw new UnknownAnfKindError(v.kind(), "stack-lower.lowerBinding");
             }
         }
 

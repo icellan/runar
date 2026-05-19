@@ -1959,10 +1959,28 @@ fn maxTempIndex(bindings: []const ANFBinding) i64 {
 }
 
 /// Check if a binding value is side-effect-free (safe to hoist).
+/// F-003: every ANFValue variant is enumerated explicitly (no `else`) so
+/// adding a new variant fails at Zig compile time here instead of silently
+/// defaulting to "not pure" — which would conservatively block hoisting but
+/// hide the missed dispatch update.
 fn isSideEffectFree(v: ANFValue) bool {
     return switch (v) {
         .load_prop, .load_param, .load_const, .bin_op, .unary_op => true,
-        else => false,
+        .call,
+        .method_call,
+        .@"if",
+        .loop,
+        .assert,
+        .update_prop,
+        .get_state_script,
+        .check_preimage,
+        .deserialize_state,
+        .add_output,
+        .add_raw_output,
+        .add_data_output,
+        .array_literal,
+        .raw_script,
+        => false,
     };
 }
 
@@ -2202,7 +2220,18 @@ fn remapValueRefs(
             };
             return .{ .@"if" = new_if };
         },
-        else => return value,
+        // F-003: explicit per-variant arms (no `else`) so adding a new
+        // ANFValue variant fails at Zig compile time here instead of silently
+        // skipping the rename and corrupting downstream IR. Mirrors the
+        // `UnknownANFKindError` default in TS
+        // `passes/04-anf-lower.ts#remapValueRefs`.
+        .loop => return value,
+        .array_literal => |al| {
+            const new_elems = try allocator.alloc([]const u8, al.elements.len);
+            for (al.elements, 0..) |e, i| new_elems[i] = r(name_map, e);
+            return .{ .array_literal = .{ .elements = new_elems } };
+        },
+        .raw_script => return value,
     }
 }
 

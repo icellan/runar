@@ -1768,12 +1768,26 @@ func maxTempIndex(bindings []ir.ANFBinding) int {
 }
 
 // isSideEffectFree checks if an ANF value kind is side-effect-free.
+// Both sides of the discriminant are enumerated explicitly so an
+// unknown kind cannot silently default to "has side effect" (which
+// would conservatively preserve the binding but mask a missing
+// dispatch wire-up in the rest of the pipeline).
 func isSideEffectFree(v *ir.ANFValue) bool {
 	switch v.Kind {
-	case "load_prop", "load_param", "load_const", "bin_op", "unary_op":
+	case "load_prop", "load_param", "load_const", "bin_op", "unary_op",
+		"get_state_script", "if", "loop", "array_literal":
 		return true
+	case "assert", "update_prop", "check_preimage", "deserialize_state",
+		"add_output", "add_raw_output", "add_data_output",
+		"call", "method_call", "raw_script":
+		return false
+	default:
+		// Exhaustiveness guard. A silent default here would either
+		// preserve every unknown binding (masking a missing dispatch)
+		// or — depending on caller polarity — strand a side-effecting
+		// new kind in dead-code-elimination's path.
+		panic(&ir.UnknownANFKindError{Kind: v.Kind, Location: "anf-lower.isSideEffectFree"})
 	}
-	return false
 }
 
 func allBindingsSideEffectFree(bindings []ir.ANFBinding) bool {
@@ -1966,8 +1980,13 @@ func remapValueRefs(v ir.ANFValue, nameMap map[string]string) ir.ANFValue {
 		return v
 	case "loop":
 		return v
+	default:
+		// Exhaustiveness guard. A silent fall-through here would return
+		// the value unchanged when a remap was actually required —
+		// resulting in a binding that references a hoisted/renamed
+		// temp by its pre-remap name, producing dangling SSA refs.
+		panic(&ir.UnknownANFKindError{Kind: v.Kind, Location: "anf-lower.remapValueRefs"})
 	}
-	return v
 }
 
 // liftBranchUpdateProps transforms if-bindings whose branches all end

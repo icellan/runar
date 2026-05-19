@@ -5,6 +5,7 @@ require 'json'
 require 'uri'
 require_relative 'provider'
 require_relative 'types'
+require_relative 'errors'
 
 # GorillaPoolProvider -- HTTP-based BSV provider for 1sat Ordinals.
 #
@@ -99,7 +100,7 @@ module Runar
         entries = api_get("/address/#{address}/utxos")
         return [] unless entries.is_a?(Array)
 
-        entries.map do |e|
+        utxos = entries.map do |e|
           Utxo.new(
             txid: e['txid'],
             output_index: e['vout'],
@@ -107,6 +108,16 @@ module Runar
             script: e['script'] || ''
           )
         end
+        # DoS-bound: reject pathological scripts at the provider boundary.
+        utxos.each do |u|
+          next if u.script.nil? || u.script.empty?
+
+          SDK.assert_script_hex_under_limit(
+            u.script, SDK::MAX_SCRIPT_BYTES,
+            "GorillaPoolProvider.get_utxos(#{address})"
+          )
+        end
+        utxos
       rescue RuntimeError => e
         return [] if e.message.include?('404')
 
@@ -122,12 +133,19 @@ module Runar
         return nil unless entries.is_a?(Array) && !entries.empty?
 
         first = entries[0]
-        Utxo.new(
+        utxo = Utxo.new(
           txid: first['txid'],
           output_index: first['vout'],
           satoshis: first['satoshis'],
           script: first['script'] || ''
         )
+        if utxo.script && !utxo.script.empty?
+          SDK.assert_script_hex_under_limit(
+            utxo.script, SDK::MAX_SCRIPT_BYTES,
+            "GorillaPoolProvider.get_contract_utxo(#{script_hash})"
+          )
+        end
+        utxo
       rescue RuntimeError => e
         return nil if e.message.include?('404')
 

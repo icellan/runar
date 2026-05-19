@@ -19,6 +19,24 @@ from runar_compiler.ir.types import (
     ANFProgram,
     ANFValue,
 )
+from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
+
+
+# Kinds that fall through ``_fold_value`` unchanged. Listing them explicitly
+# lets us raise UnknownANFKindError on any kind that isn't a known fold case,
+# so a forgotten dispatch-site update fails loudly instead of silently
+# corrupting downstream passes.
+_FOLD_VALUE_PASSTHROUGH_KINDS: frozenset[str] = frozenset({
+    "assert",
+    "update_prop",
+    "check_preimage",
+    "deserialize_state",
+    "add_output",
+    "add_raw_output",
+    "add_data_output",
+    "array_literal",
+    "get_state_script",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +509,13 @@ def _fold_value(value: ANFValue, env: ConstEnv) -> ANFValue:
         # peephole optimizer treats it as a hard barrier.
         return value
 
-    # Terminal / side-effecting kinds pass through
-    return value
+    # Terminal / side-effecting kinds pass through.  Anything not in the
+    # explicit allowlist is a forgotten dispatch-site update: fail loudly
+    # so the regression is caught at the first binding instead of leaking
+    # an unhandled variant into Stack IR / hex.
+    if kind in _FOLD_VALUE_PASSTHROUGH_KINDS:
+        return value
+    raise UnknownANFKindError(kind, "constant-fold.foldValue")
 
 
 # ---------------------------------------------------------------------------

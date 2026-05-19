@@ -13,6 +13,8 @@
 import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
 import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
+import { InputLimits } from 'runar-ir-schema';
+import { assertScriptHexUnderLimit } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // GorillaPool API response shapes
@@ -132,12 +134,22 @@ export class GorillaPoolProvider implements Provider {
       throw new Error(`GorillaPool getUtxos failed (${resp.status}): ${await resp.text()}`);
     }
     const entries = (await resp.json()) as GpUtxoEntry[];
-    return entries.map((e) => ({
+    const utxos = entries.map((e) => ({
       txid: e.txid,
       outputIndex: e.vout,
       satoshis: e.satoshis,
       script: e.script ?? '',
     }));
+    // DoS-bound: reject pathological scripts at the provider boundary.
+    for (const u of utxos) {
+      if (u.script) {
+        assertScriptHexUnderLimit(
+          u.script, InputLimits.MAX_SCRIPT_BYTES,
+          `GorillaPoolProvider.getUtxos(${address})`,
+        );
+      }
+    }
+    return utxos;
   }
 
   async getContractUtxo(scriptHash: string): Promise<UTXO | null> {
@@ -149,12 +161,19 @@ export class GorillaPoolProvider implements Provider {
     const entries = (await resp.json()) as GpUtxoEntry[];
     if (entries.length === 0) return null;
     const first = entries[0]!;
-    return {
+    const utxo: UTXO = {
       txid: first.txid,
       outputIndex: first.vout,
       satoshis: first.satoshis,
       script: first.script ?? '',
     };
+    if (utxo.script) {
+      assertScriptHexUnderLimit(
+        utxo.script, InputLimits.MAX_SCRIPT_BYTES,
+        `GorillaPoolProvider.getContractUtxo(${scriptHash})`,
+      );
+    }
+    return utxo;
   }
 
   getNetwork(): 'mainnet' | 'testnet' {

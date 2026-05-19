@@ -53,7 +53,7 @@ func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, erro
 		}
 		return append(out, "false"...), nil
 	case string:
-		return appendJSONString(out, v), nil
+		return appendJSONString(out, v)
 	case int:
 		return strconv.AppendInt(out, int64(v), 10), nil
 	case int8:
@@ -114,9 +114,12 @@ func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, erro
 				out = append(out, ',')
 			}
 			first = false
-			out = appendJSONString(out, k)
-			out = append(out, ':')
 			var err error
+			out, err = appendJSONString(out, k)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ':')
 			out, err = canonicalAppend(out, elem, seen)
 			if err != nil {
 				return nil, err
@@ -170,9 +173,32 @@ func utf16Less(a, b string) bool {
 // appendJSONString escapes s per ES JSON.stringify rules. Note: ES does NOT
 // escape U+002F '/' by default in modern engines, and DOES \u-escape
 // U+0000–U+001F. Backslash and quote are escaped with their short forms.
-func appendJSONString(out []byte, s string) []byte {
+//
+// Returns an error if s contains a lone surrogate (U+D800..U+DFFF) — RFC
+// 8785 §3.2.2.2 / audit D6 requires rejection. Go's `for ... range` over
+// strings silently folds invalid UTF-8 to utf8.RuneError (U+FFFD), so we
+// walk the bytes manually to detect the surrogate pattern verbatim
+// regardless of how the caller constructed the string.
+func appendJSONString(out []byte, s string) ([]byte, error) {
 	out = append(out, '"')
-	for _, r := range s {
+	i := 0
+	for i < len(s) {
+		// Detect the 3-byte UTF-8-encoded-surrogate pattern
+		// (0xED, 0xA0..0xBF, 0x80..0xBF) and reject — that range is
+		// reserved for paired surrogates in UTF-16 and is illegal as
+		// scalar UTF-8.
+		if i+2 < len(s) && s[i] == 0xED && s[i+1] >= 0xA0 && s[i+1] <= 0xBF &&
+			s[i+2] >= 0x80 && s[i+2] <= 0xBF {
+			cp := (uint32(s[i]&0x0F) << 12) | (uint32(s[i+1]&0x3F) << 6) | uint32(s[i+2]&0x3F)
+			return nil, fmt.Errorf("canonical JSON: lone surrogate U+%04X in string", cp)
+		}
+		r, size := decodeRune(s[i:])
+		// decodeRune returns utf8.RuneError for malformed sequences; treat
+		// any such case as a hard rejection rather than silently folding
+		// to U+FFFD (which is exactly what the audit D6 vector catches).
+		if r == 0xFFFD && size == 1 && s[i] != 0xEF {
+			return nil, fmt.Errorf("canonical JSON: malformed UTF-8 at byte %d", i)
+		}
 		switch r {
 		case '"':
 			out = append(out, '\\', '"')
@@ -202,8 +228,46 @@ func appendJSONString(out []byte, s string) []byte {
 				out = append(out, buf[:n]...)
 			}
 		}
+		i += size
 	}
-	return append(out, '"')
+	return append(out, '"'), nil
+}
+
+// decodeRune is a minimal UTF-8 decoder that preserves illegal-sequence
+// signalling — we deliberately do not import "unicode/utf8" so that the
+// CESU-8 / WTF-8 surrogate range above can be caught before falling back
+// here. Returns (rune, byteSize). For invalid sequences returns
+// (0xFFFD, 1) so the caller can advance and report.
+func decodeRune(s string) (rune, int) {
+	if len(s) == 0 {
+		return 0xFFFD, 0
+	}
+	b0 := s[0]
+	if b0 < 0x80 {
+		return rune(b0), 1
+	}
+	if b0 < 0xC2 {
+		return 0xFFFD, 1
+	}
+	if b0 < 0xE0 {
+		if len(s) < 2 || s[1]&0xC0 != 0x80 {
+			return 0xFFFD, 1
+		}
+		return rune(b0&0x1F)<<6 | rune(s[1]&0x3F), 2
+	}
+	if b0 < 0xF0 {
+		if len(s) < 3 || s[1]&0xC0 != 0x80 || s[2]&0xC0 != 0x80 {
+			return 0xFFFD, 1
+		}
+		return rune(b0&0x0F)<<12 | rune(s[1]&0x3F)<<6 | rune(s[2]&0x3F), 3
+	}
+	if b0 < 0xF8 {
+		if len(s) < 4 || s[1]&0xC0 != 0x80 || s[2]&0xC0 != 0x80 || s[3]&0xC0 != 0x80 {
+			return 0xFFFD, 1
+		}
+		return rune(b0&0x07)<<18 | rune(s[1]&0x3F)<<12 | rune(s[2]&0x3F)<<6 | rune(s[3]&0x3F), 4
+	}
+	return 0xFFFD, 1
 }
 
 func utf8EncodeRune(p []byte, r rune) int {

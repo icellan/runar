@@ -325,6 +325,11 @@ def collect_refs(value: ANFValue) -> list[str]:
         # Opaque byte span -- no SSA operand refs. Stack effect is declared
         # via in_arity / out_arity.
         pass
+    else:
+        # Exhaustiveness guard. A silent empty-refs fall-through would let
+        # computeLastUses miss a live operand and corrupt the stack plan.
+        from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
+        raise UnknownANFKindError(kind, "stack.collect_refs")
 
     return refs
 
@@ -875,6 +880,12 @@ class _LoweringContext:
             self._lower_array_literal(name, value.elements, binding_index, last_uses)
         elif kind == "raw_script":
             self._lower_raw_script(name, value.bytes, value.in_arity, value.out_arity)
+        else:
+            # Exhaustiveness guard. A silent no-op fall-through would emit
+            # zero opcodes for a binding the caller expects to leave a value
+            # on the stack, desynchronizing every subsequent lowering step.
+            from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
+            raise UnknownANFKindError(kind, "stack.lower_binding")
 
     # -----------------------------------------------------------------
     # Individual lowering methods
@@ -3914,12 +3925,17 @@ def lower_to_stack(program: ANFProgram) -> list[StackMethod]:
     mismatches, etc.) and converts them to RuntimeError with a descriptive
     message instead of letting raw exceptions propagate.
     """
+    from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
     try:
         return _lower_to_stack_inner(program)
     except RuntimeError:
         # RuntimeError messages are already descriptive (e.g. "stack underflow",
         # "unknown binary operator: ...", "value 'x' not found on stack").
         # Re-raise as-is so callers get a clear error.
+        raise
+    except UnknownANFKindError:
+        # Typed exhaustiveness guard -- preserve the kind / location so the
+        # regression test (and any caller) can pattern-match on it.
         raise
     except Exception as e:
         raise RuntimeError(f"stack lowering: {e}") from e

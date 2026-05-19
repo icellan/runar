@@ -8,6 +8,8 @@ from runar.sdk.types import (
 )
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
+from runar.sdk.errors import assert_script_hex_under_limit, WitnessValueMissingError
+from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
     build_deploy_transaction, select_utxos, build_p2pkh_script,
     _to_le32, _to_le64, _encode_varint, _reverse_hex,
@@ -47,6 +49,15 @@ class RunarContract:
         self._current_utxo: Utxo | None = None
         self._provider: Provider | None = None
         self._signer: Signer | None = None
+        # Witness values for intent-covenant intrinsic auto-injected params.
+        # `_prevOutScript_<i>` values are stored per-input-index in
+        # `_prev_out_scripts`; `_serialisedOutputs` is stored in
+        # `_serialised_outputs`. Both are lowercase hex strings (normalized
+        # in the setters). Read by the call-builder when assembling the
+        # unlocking script for methods that use extractPrevOutputScript /
+        # requireOutputP2PKH.
+        self._prev_out_scripts: dict[int, str] = {}
+        self._serialised_outputs: str | None = None
 
         # Initialize state from constructor args for stateful contracts.
         # Properties with initial_value use their default; others are matched
@@ -89,6 +100,74 @@ class RunarContract:
         self._provider = provider
         self._signer = signer
 
+    # ------------------------------------------------------------------
+    # Intent-intrinsic witness values
+    # ------------------------------------------------------------------
+
+    def set_prev_out_script(self, input_index: int, value) -> None:
+        """Supply the prev-output locking-script witness for input ``input_index``.
+
+        Required for methods that call ``extractPrevOutputScript(input_index)``,
+        which the compiler lowers into an auto-injected
+        ``_prevOutScript_<input_index>`` ABI param.
+
+        Args:
+            input_index: literal input index passed to extractPrevOutputScript.
+            value:       hex string (with or without 0x prefix) or raw bytes.
+        """
+        self._prev_out_scripts[input_index] = _normalize_witness_bytes(value)
+
+    def set_serialised_outputs(self, value) -> None:
+        """Supply the serialised-outputs witness for the current call.
+
+        Required for methods that call ``requireOutputP2PKH(...)``, which the
+        compiler lowers into an auto-injected ``_serialisedOutputs`` ABI param.
+
+        Args:
+            value: hex string (with or without 0x prefix) or raw bytes.
+        """
+        self._serialised_outputs = _normalize_witness_bytes(value)
+
+    def _build_intent_witness_hex(self, method) -> str:
+        """Build the trailing witness-hex for the auto-injected intent-intrinsic
+        params of ``method``, in ABI order (``_prevOutScript_*`` first, then
+        ``_serialisedOutputs``). Each value is pushed via PUSHDATA so the
+        on-chain method body's ``load_param`` lifts the exact bytes the caller
+        set.
+
+        Raises:
+            WitnessValueMissingError: any auto-injected param the caller hasn't
+                supplied via :meth:`set_prev_out_script` /
+                :meth:`set_serialised_outputs`.
+        """
+        out = ''
+        for p in method.params:
+            if p.name.startswith('_prevOutScript_'):
+                idx_str = p.name[len('_prevOutScript_'):]
+                try:
+                    idx = int(idx_str)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"malformed auto-injected param name '{p.name}'"
+                    ) from exc
+                val = self._prev_out_scripts.get(idx)
+                if val is None:
+                    raise WitnessValueMissingError(
+                        param_name=p.name,
+                        method_name=method.name,
+                        contract_name=self.artifact.contract_name,
+                    )
+                out += encode_push_data(val)
+            elif p.name == '_serialisedOutputs':
+                if self._serialised_outputs is None:
+                    raise WitnessValueMissingError(
+                        param_name=p.name,
+                        method_name=method.name,
+                        contract_name=self.artifact.contract_name,
+                    )
+                out += encode_push_data(self._serialised_outputs)
+        return out
+
     def deploy(
         self,
         provider: Provider | None = None,
@@ -107,6 +186,12 @@ class RunarContract:
         address = signer.get_address()
         change_address = opts.change_address or address
         locking_script = self.get_locking_script()
+
+        # DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        assert_script_hex_under_limit(
+            locking_script, MAX_SCRIPT_BYTES,
+            f"{self.artifact.contract_name}.deploy",
+        )
 
         fee_rate = provider.get_fee_rate()
         all_utxos = provider.get_utxos(address)
@@ -178,6 +263,12 @@ class RunarContract:
 
         locking_script = self.get_locking_script()
         desc = description or 'Runar contract deployment'
+
+        # DoS-bound: reject pathological scripts BEFORE involving the wallet.
+        assert_script_hex_under_limit(
+            locking_script, MAX_SCRIPT_BYTES,
+            f"{self.artifact.contract_name}.deploy_with_wallet",
+        )
 
         result = wallet.create_action(
             description=desc,
@@ -296,6 +387,13 @@ class RunarContract:
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
         method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
+        # Drop auto-injected continuation params AND intent-intrinsic witness
+        # params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
+        # user-facing arg count check. Witness values come from
+        # set_prev_out_script / set_serialised_outputs, not from the args list.
+        def _is_intent_witness_param(name: str) -> bool:
+            return name.startswith('_prevOutScript_') or name == '_serialisedOutputs'
+
         if is_stateful:
             user_params = [
                 p for p in method.params
@@ -303,9 +401,10 @@ class RunarContract:
                 and p.name != '_changePKH'
                 and p.name != '_changeAmount'
                 and p.name != '_newAmount'
+                and not _is_intent_witness_param(p.name)
             ]
         else:
-            user_params = method.params
+            user_params = [p for p in method.params if not _is_intent_witness_param(p.name)]
 
         if len(user_params) != len(args):
             raise ValueError(
@@ -315,6 +414,12 @@ class RunarContract:
             raise RuntimeError(
                 "RunarContract.prepare_call: contract is not deployed. Call deploy() or from_txid() first."
             )
+
+        # DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        assert_script_hex_under_limit(
+            self._current_utxo.script, MAX_SCRIPT_BYTES,
+            f"{self.artifact.contract_name}.call({method_name})",
+        )
 
         contract_utxo = Utxo(
             txid=self._current_utxo.txid,
@@ -376,6 +481,13 @@ class RunarContract:
             ).digest()
             change_pkh_hex = hash160_bytes.hex()
 
+        # Pre-resolve intent-intrinsic witness hex (raises
+        # WitnessValueMissingError if a `_prevOutScript_<i>` or
+        # `_serialisedOutputs` param wasn't set on the contract). Resolving
+        # up-front means the error is raised BEFORE any signing / broadcast
+        # work, mirroring the script-size guard above.
+        witness_hex = self._build_intent_witness_hex(method)
+
         # -------------------------------------------------------------------
         # Terminal method path: exact outputs, no funding, no change
         # -------------------------------------------------------------------
@@ -384,18 +496,22 @@ class RunarContract:
                 method_name, resolved_args, signer, opts,
                 is_stateful, needs_op_push_tx, method_needs_change,
                 sig_indices, prevouts_indices, preimage_index,
-                method_selector_hex, change_pkh_hex, contract_utxo,
+                method_selector_hex, change_pkh_hex, contract_utxo, witness_hex,
             )
 
         # -------------------------------------------------------------------
         # Non-terminal path
         # -------------------------------------------------------------------
+        # Initial unlocking script (with placeholders). Intent-witness hex is
+        # suffixed so size estimation accounts for the witness pushes; the
+        # real ABI-correct unlock is rebuilt by _build_stateful_unlock below
+        # for stateful methods.
         if needs_op_push_tx:
             # Prepend placeholder prefix (optionally _codePart + _opPushTxSig)
             unlocking_script = self._build_stateful_prefix('00' * 72, method_needs_change) + \
-                self.build_unlocking_script(method_name, resolved_args)
+                self.build_unlocking_script(method_name, resolved_args) + witness_hex
         else:
-            unlocking_script = self.build_unlocking_script(method_name, resolved_args)
+            unlocking_script = self.build_unlocking_script(method_name, resolved_args) + witness_hex
 
         new_locking_script = ''
         new_satoshis = 0
@@ -495,6 +611,11 @@ class RunarContract:
             elif method_needs_change and anf_computed_state is not None:
                 self._state = {**self._state, **anf_computed_state}
             new_locking_script = self.get_locking_script()
+            # DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+            assert_script_hex_under_limit(
+                new_locking_script, MAX_SCRIPT_BYTES,
+                f"{self.artifact.contract_name}.call({method_name}).continuation",
+            )
 
         # Fetch fee rate and funding UTXOs for all contract types.
         # For stateful contracts with change output support, the change output
@@ -525,12 +646,13 @@ class RunarContract:
                         resolved[i] = '00' * (36 * estimated_inputs)
                 resolved_per_input_args.append(resolved)
 
-        # Build placeholder unlocking scripts for merge inputs
+        # Build placeholder unlocking scripts for merge inputs (witness_hex
+        # suffixed for sizing — _build_stateful_unlock builds the real scripts).
         extra_unlock_placeholders = []
         for i in range(len(extra_contract_utxos)):
             args_for_placeholder = resolved_per_input_args[i] if resolved_per_input_args and i < len(resolved_per_input_args) else resolved_args
             extra_unlock_placeholders.append(
-                self._build_stateful_prefix('00' * 72, method_needs_change) + self.build_unlocking_script(method_name, args_for_placeholder)
+                self._build_stateful_prefix('00' * 72, method_needs_change) + self.build_unlocking_script(method_name, args_for_placeholder) + witness_hex
             )
 
         tx_hex, input_count, change_amount = build_call_transaction(
@@ -598,6 +720,7 @@ class RunarContract:
                     change_hex +
                     new_amount_hex +
                     encode_push_data(preimage) +
+                    witness_hex +
                     method_selector_hex
                 )
                 return unlock, op_sig, preimage
@@ -731,6 +854,7 @@ class RunarContract:
             has_multi_output=bool(has_multi_output),
             contract_outputs=contract_outputs or [],
             code_sep_idx=code_sep_idx,
+            intent_witness_hex=witness_hex,
         )
 
     def finalize_call(
@@ -774,6 +898,7 @@ class RunarContract:
                 change_hex +
                 new_amount_hex +
                 encode_push_data(prepared.preimage) +
+                prepared.intent_witness_hex +
                 prepared.method_selector_hex
             )
         elif prepared.needs_op_push_tx:
@@ -965,6 +1090,7 @@ class RunarContract:
         method_selector_hex: str,
         change_pkh_hex: str,
         contract_utxo: Utxo,
+        witness_hex: str = '',
     ) -> PreparedCall:
         """Handle the terminal method code path for prepare_call."""
         # Normalize terminal outputs
@@ -980,12 +1106,15 @@ class RunarContract:
             else:
                 term_outputs.append(item)
 
-        # Build placeholder unlocking script
+        # Build placeholder unlocking script (witness_hex suffixed for sizing
+        # — the real ABI-correct unlock is built by
+        # build_stateful_terminal_unlock below for stateful methods).
         if needs_op_push_tx:
             term_unlock_script = self._build_stateful_prefix('00' * 72, False) + \
                 self.build_unlocking_script(method_name, resolved_args)
         else:
             term_unlock_script = self.build_unlocking_script(method_name, resolved_args)
+        term_unlock_script += witness_hex
 
         # Resolve funding UTXOs for terminal methods
         funding_utxos = opts.funding_utxos or []
@@ -1039,6 +1168,7 @@ class RunarContract:
                     args_hex +
                     change_hex +
                     encode_push_data(preimage) +
+                    witness_hex +
                     method_selector_hex
                 )
                 return unlock, op_sig, preimage
@@ -1108,6 +1238,7 @@ class RunarContract:
             has_multi_output=False,
             contract_outputs=[],
             code_sep_idx=term_code_sep_idx,
+            intent_witness_hex=witness_hex,
         )
 
     # -- Code separator helpers --
@@ -1371,6 +1502,31 @@ def _flatten_fixed_array_args(args: list, abi_params: list) -> list:
         else:
             out.append(value)
     return out
+
+
+def _normalize_witness_bytes(value) -> str:
+    """Normalize a witness-value input (hex string or bytes-like) into a
+    lowercase hex string suitable for ``encode_push_data``. Hex inputs may
+    optionally carry a ``0x`` prefix and any casing.
+    """
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    if not isinstance(value, str):
+        raise TypeError(
+            f"witness value: expected str or bytes-like, got {type(value).__name__}"
+        )
+    h = value
+    if h.startswith(('0x', '0X')):
+        h = h[2:]
+    if len(h) % 2 != 0:
+        raise ValueError(
+            f"witness value: hex string must have even length (got {len(h)})"
+        )
+    try:
+        int(h, 16) if h else None
+    except ValueError as exc:
+        raise ValueError("witness value: invalid hex characters") from exc
+    return h.lower()
 
 
 def _encode_arg(value) -> str:

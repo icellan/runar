@@ -182,6 +182,85 @@ func (c *IntentCov) CoSpend() {
 	}
 }
 
+// R-2 / R-4 — typecheck bounds checks ------------------------------------
+
+func TestRequireOutputP2PKH_OutputIndexBound_Rejects(t *testing.T) {
+	source := `
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+	runar.StatefulSmartContract
+	PKH runar.ByteString ` + "`runar:\"readonly\"`" + `
+	A   runar.Bigint     ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Cov) Pay() {
+	// 2000 > 1000 bound — should be rejected at typecheck.
+	runar.RequireOutputP2PKH(2000, c.PKH, c.A)
+}
+`
+	expectIntrinsicTypeError(t, source, "bound to <= 1000")
+}
+
+func TestRequireOutputP2PKH_NegativeIndex_Rejects(t *testing.T) {
+	source := `
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+	runar.StatefulSmartContract
+	PKH runar.ByteString ` + "`runar:\"readonly\"`" + `
+	A   runar.Bigint     ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Cov) Pay() {
+	runar.RequireOutputP2PKH(-1, c.PKH, c.A)
+}
+`
+	expectIntrinsicTypeError(t, source, "must be >= 0")
+}
+
+func TestExtractPrevOutputScript_PrefixLenTooSmall_Rejects(t *testing.T) {
+	source := `
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+	runar.StatefulSmartContract
+	H runar.ByteString ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Cov) Bind() {
+	// prefixLen=16 < 32 (hash size) — should be rejected.
+	_ = runar.ExtractPrevOutputScript(0, c.H, 16)
+}
+`
+	expectIntrinsicTypeError(t, source, "must be >= 32")
+}
+
+func TestExtractPrevOutputScript_PrefixLenTooLarge_Rejects(t *testing.T) {
+	source := `
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+	runar.StatefulSmartContract
+	H runar.ByteString ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Cov) Bind() {
+	// prefixLen=10485760 > 4 MiB — should be rejected.
+	_ = runar.ExtractPrevOutputScript(0, c.H, 10485760)
+}
+`
+	expectIntrinsicTypeError(t, source, "MAX_SCRIPT_BYTES")
+}
+
 // Crit-2 — prefix-hash 3-arg form ----------------------------------------
 
 func TestExtractPrevOutputScript_PrefixForm_LowersWithSubstr(t *testing.T) {

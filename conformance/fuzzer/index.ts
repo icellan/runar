@@ -31,6 +31,11 @@ import {
   runIRDifferentialFuzzing,
   type RenderStrategy,
 } from './ir-differential.js';
+import {
+  runAnfDifferential,
+  ALL_TIERS,
+  type CompilerName as AnfCompilerName,
+} from './anf-differential.js';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -52,6 +57,14 @@ interface FuzzerCLIOptions {
   renderStrategy: RenderStrategy;
   /** Include stateful contracts in the generated distribution (IR mode only). */
   stateful: boolean;
+  /**
+   * Use the ANF-IR differential fuzzer (Item 7): generates random ANF
+   * programs directly, skips the source-rendering frontends, and
+   * stresses every tier's loader + stack-lowerer + emitter.
+   */
+  anf: boolean;
+  /** Wall-clock budget in ms (anf mode only). */
+  timeBudgetMs?: number;
 }
 
 function parseArgs(argv: string[]): FuzzerCLIOptions {
@@ -72,6 +85,7 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
     ir: false,
     renderStrategy: 'ts',
     stateful: false,
+    anf: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -118,6 +132,12 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
       case '--stateful':
         opts.stateful = true;
         break;
+      case '--anf':
+        opts.anf = true;
+        break;
+      case '--time-budget-ms':
+        opts.timeBudgetMs = parseInt(argv[++i] ?? '0', 10);
+        break;
       case '--help':
       case '-h':
         opts.help = true;
@@ -161,6 +181,11 @@ Options:
                          native source (.runar.go / .runar.rs / .runar.py / …) to
                          also stress each compiler's frontend.
   --stateful             IR mode only. Mix stateful contracts into the sample.
+  --anf                  Item 7 — direct ANF IR differential fuzzer.
+                         Generates random valid ANF programs and asserts every
+                         tier's --ir --hex pipeline produces byte-identical
+                         Bitcoin Script. Skips frontends entirely.
+  --time-budget-ms <n>   ANF mode only. Early-stop once wall-clock exceeded.
   --help, -h             Show this help message
 
 Examples:
@@ -207,8 +232,53 @@ async function main(): Promise<void> {
   if (opts.ir) {
     console.log(`  Generator: IR (render=${opts.renderStrategy}${opts.stateful ? ', stateful' : ''})`);
   }
+  if (opts.anf) {
+    console.log('  Generator: ANF (Item 7 — direct ANF IR, all 7 tiers via --ir --hex)');
+    if (opts.timeBudgetMs !== undefined) {
+      console.log(`  Budget: ${opts.timeBudgetMs}ms`);
+    }
+  }
   console.log(`  Mode: ${opts.property ? 'property-based (with shrinking)' : 'sample-based'}`);
   console.log('');
+
+  if (opts.anf) {
+    // Filter the requested compilers down to the ANF tier list (the
+    // CompilerName union in differential.ts matches the ANF one — same
+    // 7-tier set).
+    const tiers = (opts.compilers as readonly string[]).filter((c): c is AnfCompilerName =>
+      (ALL_TIERS as readonly string[]).includes(c),
+    );
+    const report = await runAnfDifferential({
+      numPrograms: opts.num,
+      seed: opts.seed,
+      tiers,
+      verbose: opts.verbose,
+      findingsDir: opts.findingsDir,
+      timeBudgetMs: opts.timeBudgetMs,
+    });
+    console.log('');
+    console.log(`ANF differential fuzzing complete:`);
+    console.log(`  Programs run:  ${report.programsRun}/${report.totalPrograms}`);
+    console.log(`  Mismatches:    ${report.mismatchCount}`);
+    console.log(`  Duration:      ${report.durationMs}ms`);
+    if (report.earlyStop) console.log(`  Early-stopped: time budget reached`);
+    console.log(`  Tiers:         ${Object.entries(report.perTierAvailable)
+      .map(([t, ok]) => `${t}=${ok ? 'ok' : 'skip'}`)
+      .join(' ')}`);
+    if (report.findings.length > 0) {
+      console.log(`  Findings dir:  ${report.findings[0]}`);
+    }
+    if (opts.output) {
+      writeOutput(opts.output, {
+        timestamp: new Date().toISOString(),
+        seed: opts.seed,
+        ...report,
+      });
+      console.log(`\nResults written to: ${opts.output}`);
+    }
+    if (report.mismatchCount > 0) process.exit(1);
+    return;
+  }
 
   if (opts.ir) {
     const results = await runIRDifferentialFuzzing(opts.num, {

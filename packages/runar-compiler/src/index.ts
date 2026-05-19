@@ -41,6 +41,20 @@ export { assembleArtifact } from './artifact/assembler.js';
 export type { CompilerDiagnostic, Severity } from './errors.js';
 export { CompilerError, ParseError, ValidationError, TypeError, makeDiagnostic } from './errors.js';
 
+// CompilerResult<T> / DiagnosticList — uniform pass-recovery wrapper.
+// Optional, typed enhancement of the existing per-pass return shapes.
+export { CompilerResult } from './compiler-result.js';
+export type { Diagnostic, DiagnosticList } from './compiler-result.js';
+export {
+  parseR,
+  validateR,
+  typecheckR,
+  expandFixedArraysR,
+  lowerToANFR,
+  lowerToStackR,
+  emitR,
+} from './passes/compiler-result-passes.js';
+
 export * from './ir/index.js';
 
 import { parse } from './passes/01-parse.js';
@@ -56,6 +70,7 @@ import { foldConstants } from './optimizer/constant-fold.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
+import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Compile options and result
@@ -478,12 +493,35 @@ export function compileFromANF(
  * downstream stack-lowering will reject malformed IR with an explicit error.
  */
 export function loadANFFromJSON(json: string): ANFProgram {
-  const parsed = JSON.parse(json, (_key, value) => {
-    if (typeof value === 'string' && /^-?\d+n$/.test(value)) {
-      return BigInt(value.slice(0, -1));
-    }
-    return value;
-  }) as unknown;
+  // Input-bytes guard: reject obviously oversized IR before JSON.parse.
+  const inputBytes = Buffer.byteLength(json, 'utf8');
+  if (inputBytes > InputLimits.MAX_IR_BYTES) {
+    throw new CanonicalJsonError(
+      'bytes',
+      `loadANFFromJSON: IR JSON exceeds ${InputLimits.MAX_IR_BYTES} bytes (actual ${inputBytes})`,
+      { limit: InputLimits.MAX_IR_BYTES, actual: inputBytes },
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json, (_key, value) => {
+      if (typeof value === 'string' && /^-?\d+n$/.test(value)) {
+        return BigInt(value.slice(0, -1));
+      }
+      return value;
+    }) as unknown;
+  } catch (e) {
+    throw new CanonicalJsonError(
+      'invalid',
+      `loadANFFromJSON: input is not valid JSON: ${(e as Error).message}`,
+    );
+  }
+
+  // Iterative depth-walk: cap structural nesting at MAX_NESTING before any
+  // recursive consumer (typecheck, stack-lower) touches the tree.
+  assertNestingDepth(parsed, InputLimits.MAX_NESTING);
+
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('loadANFFromJSON: top-level value is not an object');
   }
@@ -498,6 +536,33 @@ export function loadANFFromJSON(json: string): ANFProgram {
     throw new Error('loadANFFromJSON: missing array field "methods"');
   }
   return program as ANFProgram;
+}
+
+/**
+ * Iteratively walk a parsed JSON value and throw CanonicalJsonError('depth')
+ * if the structural nesting exceeds `limit`. Iterative form avoids native
+ * stack overflow on adversarial inputs whose nesting alone is the attack.
+ */
+function assertNestingDepth(value: unknown, limit: number): void {
+  const stack: Array<{ v: unknown; d: number }> = [{ v: value, d: 0 }];
+  while (stack.length > 0) {
+    const { v, d } = stack.pop()!;
+    if (v === null || typeof v !== 'object') continue;
+    if (d > limit) {
+      throw new CanonicalJsonError(
+        'depth',
+        `loadANFFromJSON: IR nesting exceeds ${limit}`,
+        { limit, actual: d },
+      );
+    }
+    if (Array.isArray(v)) {
+      for (const child of v) stack.push({ v: child, d: d + 1 });
+    } else {
+      for (const child of Object.values(v as Record<string, unknown>)) {
+        stack.push({ v: child, d: d + 1 });
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

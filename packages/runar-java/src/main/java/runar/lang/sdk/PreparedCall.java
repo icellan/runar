@@ -45,6 +45,12 @@ public final class PreparedCall {
     final Map<String, Object> continuation;
     final String newLockingScriptHex;
     final long newSatoshis;
+    /**
+     * Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+     * {@code _prevOutScript_*} followed by {@code _serialisedOutputs}, ABI
+     * order). Empty when the method has no auto-injected intent params.
+     */
+    final String intentWitnessHex;
 
     PreparedCall(
         String txHex,
@@ -57,6 +63,23 @@ public final class PreparedCall {
         Map<String, Object> continuation,
         String newLockingScriptHex,
         long newSatoshis
+    ) {
+        this(txHex, sighashes, sigIndices, methodName, resolvedArgs, contractUtxo,
+             isStateful, continuation, newLockingScriptHex, newSatoshis, "");
+    }
+
+    PreparedCall(
+        String txHex,
+        List<byte[]> sighashes,
+        List<Integer> sigIndices,
+        String methodName,
+        List<Object> resolvedArgs,
+        UTXO contractUtxo,
+        boolean isStateful,
+        Map<String, Object> continuation,
+        String newLockingScriptHex,
+        long newSatoshis,
+        String intentWitnessHex
     ) {
         this.txHex = txHex;
         // Deep-copy each sighash array so callers cannot mutate the
@@ -74,6 +97,7 @@ public final class PreparedCall {
             : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(continuation));
         this.newLockingScriptHex = newLockingScriptHex;
         this.newSatoshis = newSatoshis;
+        this.intentWitnessHex = intentWitnessHex == null ? "" : intentWitnessHex;
     }
 
     /** Tx hex with 72-byte zero-filled placeholders at every Sig slot. */

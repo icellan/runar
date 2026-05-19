@@ -107,6 +107,63 @@
         "b": "\\"
       },
       "expected": "{\"b\":\"\\\\\"}"
+    },
+    {
+      "_vector_id": "v18-empty-key-vs-astral",
+      "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 1 (D1)",
+      "_notes": "Empty key MUST sort before astral plane char in UTF-16 code-unit order (not UTF-8 byte order). Gates Zig D1 fix.",
+      "input": {
+        "😀": 1,
+        "": 2
+      },
+      "expected": "{\"\":2,\"😀\":1}"
+    },
+    {
+      "_vector_id": "v18b-astral-vs-bmp-private-use",
+      "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 1 (D1)",
+      "_notes": "Astral-plane char U+1F600 vs BMP char U+E000. UTF-16 sort: high surrogate 0xD83D < 0xE000 ⇒ astral first. UTF-8 byte sort: 0xF0… > 0xEE… ⇒ BMP first. Triggers a byte-vs-UTF-16 divergence that v18 misses (empty key compares equal under both orders).",
+      "input": {
+        "😀": 1,
+        "": 2
+      },
+      "expected": "{\"😀\":1,\"\":2}"
+    },
+    {
+      "_vector_id": "v19-boolean-false-preserved",
+      "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 3 (D4)",
+      "_notes": "Boolean false MUST be preserved verbatim. Gates Ruby D4 fix (the `value[k] || value[k.to_sym]` fallthrough silently rewrote falsy values).",
+      "input": {
+        "k": false
+      },
+      "expected": "{\"k\":false}"
+    },
+    {
+      "_vector_id": "v20-float-1e21-scientific",
+      "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 5 (D5)",
+      "_notes": "Float at the ECMA-262 1e21 boundary MUST emit `1e+21`. Known divergences (audit D5): Ruby emits `1.0e+21`, Java emits `1.0E21`, Zig emits `{e}`-format. Gates the float-formatter family.",
+      "input": {
+        "big": 1e21
+      },
+      "expected": "{\"big\":1e+21}"
+    },
+    {
+      "_vector_id": "v21-float-1e-300-no-trailing-dotzero",
+      "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 4 (D5)",
+      "_notes": "Tiny float MUST emit `1e-300` (no trailing `.0`). Known divergences (audit D5): Ruby/Java emit `1.0e-300` / `1.0E-300`.",
+      "input": {
+        "r": 1e-300
+      },
+      "expected": "{\"r\":1e-300}"
+    }
+  ],
+  "canonical_json_rejection_vectors": [
+    {
+      "_vector_id": "v22-lone-surrogate-rejected",
+      "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6)",
+      "_notes": "Lone surrogate (U+D800 with no low-surrogate partner) is invalid Unicode per RFC 8785 and MUST be rejected. Today (per audit D6) NO tier rejects: TS/JS happily emits `\\ud800`, Go replaces with U+FFFD, Ruby's JSON parser errors before canonical_json even runs, Java/Python pass through as-is. This vector documents the desired behavior and gates the eventual fix. The input is supplied as a UTF-16 code-unit array so each tier constructs the string deterministically without relying on its JSON parser's lone-surrogate handling.",
+      "description": "object with a value containing the lone high surrogate U+D800",
+      "input_object_key": "surrogate",
+      "input_value_utf16_units": [55296]
     }
   ],
   "valid_envelope": {

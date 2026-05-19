@@ -37,6 +37,7 @@ import runar.compiler.ir.anf.MethodCall;
 import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
+import runar.compiler.ir.UnknownAnfKindError;
 import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
@@ -1660,7 +1661,9 @@ public final class AnfLower {
     }
 
     // Map temp refs inside an AnfValue.
-    private static AnfValue remapValueRefs(AnfValue value, Map<String, String> nameMap) {
+    // Package-private so the F-003 regression test
+    // (UnknownAnfKindTest) can drive this dispatcher directly.
+    static AnfValue remapValueRefs(AnfValue value, Map<String, String> nameMap) {
         if (value instanceof LoadProp) return value;
         if (value instanceof LoadParam) return value;
         if (value instanceof GetStateScript) return value;
@@ -1725,7 +1728,14 @@ public final class AnfLower {
             for (String e : al.elements()) els.add(mapOr(e, nameMap));
             return new ArrayLiteral(els);
         }
-        return value;
+        if (value instanceof RawScript) {
+            // Opaque byte span — no SSA operand refs to remap.
+            return value;
+        }
+        // Exhaustiveness guard. If a new ANFValue variant is added without
+        // wiring it through this dispatch, fail loudly so the regression is
+        // caught at the first call site instead of corrupting downstream IR.
+        throw new UnknownAnfKindError(value.kind(), "anf-lower.remapValueRefs");
     }
 
     private static String mapOr(String s, Map<String, String> nameMap) {

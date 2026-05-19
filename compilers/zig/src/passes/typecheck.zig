@@ -927,9 +927,36 @@ const TypeChecker = struct {
             std.mem.eql(u8, func_name, "requireOutputP2PKH"))
         {
             if (args.len >= 1) {
+                // Accept `-N` (UnaryOp negate over literal_int) so the bounds
+                // check below produces a clear "must be >= 0" rather than the
+                // misleading "must be an integer literal" message.
+                var idx_lit: ?i64 = null;
                 switch (args[0]) {
-                    .literal_int => {},
-                    else => self.addError("{s}() argument 1 (index) must be an integer literal", .{func_name}),
+                    .literal_int => |v| idx_lit = v,
+                    .unary_op => |u| {
+                        if (u.op == .negate) {
+                            switch (u.operand) {
+                                .literal_int => |v| idx_lit = -v,
+                                else => {},
+                            }
+                        }
+                    },
+                    else => {},
+                }
+                if (idx_lit) |idx| {
+                    // R-2: bound the index literal. For requireOutputP2PKH, the
+                    // emitted Stack-IR computes byte-offset = idx * 34; require
+                    // 0 <= idx <= 1000 to keep the offset well under script-int
+                    // max and to reject obvious nonsense (e.g. negative or
+                    // astronomically large).
+                    if (idx < 0) {
+                        self.addError("{s}() argument 1 (index) must be >= 0; got {d}", .{ func_name, idx });
+                    }
+                    if (std.mem.eql(u8, func_name, "requireOutputP2PKH") and idx > 1000) {
+                        self.addError("requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got {d} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)", .{idx});
+                    }
+                } else {
+                    self.addError("{s}() argument 1 (index) must be an integer literal", .{func_name});
                 }
             }
         }
@@ -951,7 +978,20 @@ const TypeChecker = struct {
             }
             if (args.len == 3) {
                 switch (args[2]) {
-                    .literal_int => {},
+                    .literal_int => |n| {
+                        // R-4: bound the prefixLen literal. The intrinsic hashes
+                        // substr(witness, 0, prefixLen) and compares against a
+                        // 32-byte SHA-256 hash. prefixLen < 32 is suspicious (the
+                        // prefix bytes don't even cover a hash-sized chunk).
+                        // prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES — wouldn't
+                        // fit in a legal Bitcoin Script anyway.
+                        if (n < 32) {
+                            self.addError("extractPrevOutputScript() argument 3 (prefixLen) must be >= 32 (the hash assertion compares a 32-byte SHA-256); got {d}", .{n});
+                        }
+                        if (n > 4 * 1024 * 1024) {
+                            self.addError("extractPrevOutputScript() argument 3 (prefixLen) must be <= MAX_SCRIPT_BYTES (4 MiB); got {d}", .{n});
+                        }
+                    },
                     else => self.addError("extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied", .{}),
                 }
                 _ = self.inferExprType(args[2], env);

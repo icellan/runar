@@ -86,6 +86,9 @@ importers:
       runar-decompiler:
         specifier: workspace:*
         version: link:../decompiler
+      runar-ir-schema:
+        specifier: workspace:*
+        version: link:../runar-ir-schema
       runar-sdk:
         specifier: workspace:*
         version: link:../runar-sdk

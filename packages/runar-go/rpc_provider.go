@@ -219,6 +219,18 @@ func (p *RPCProvider) GetUtxos(address string) ([]UTXO, error) {
 			Script:      scriptPubKey,
 		})
 	}
+	// DoS-bound: reject pathological scripts at the provider boundary.
+	for _, u := range utxos {
+		if u.Script == "" {
+			continue
+		}
+		if err := assertScriptHexUnderLimit(
+			u.Script, MaxScriptBytes,
+			fmt.Sprintf("RPCProvider.GetUtxos(%s)", address),
+		); err != nil {
+			return nil, err
+		}
+	}
 	return utxos, nil
 }
 

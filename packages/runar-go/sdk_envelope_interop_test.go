@@ -145,3 +145,59 @@ func TestEnvelopeInterop_RejectionVectors(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvelopeInterop_CanonicalJSONRejectionVectors verifies that
+// CanonicalJSON rejects inputs which RFC 8785 forbids. Per
+// audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6), the lone-surrogate
+// case is the gating example. Each input is reconstructed from a UTF-16
+// code-unit array so JSON-parser divergence (Go's encoding/json replaces lone
+// surrogates with U+FFFD, Ruby errors at parse-time, etc.) does not mask the
+// canonical_json behaviour we are gating.
+func TestEnvelopeInterop_CanonicalJSONRejectionVectors(t *testing.T) {
+	path := mustFixturePath(t)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var top map[string]any
+	dec := json.NewDecoder(stringReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&top); err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	rvs, _ := top["canonical_json_rejection_vectors"].([]any)
+	if len(rvs) == 0 {
+		t.Fatal("canonical_json_rejection_vectors missing or empty")
+	}
+	for _, raw := range rvs {
+		v := raw.(map[string]any)
+		id, _ := v["_vector_id"].(string)
+		key, _ := v["input_object_key"].(string)
+		units, _ := v["input_value_utf16_units"].([]any)
+		// Build a Go string from UTF-16 units. Go strings are byte sequences;
+		// utf16.Decode returns runes but a lone surrogate becomes
+		// utf8.RuneError. We instead emit the surrogate as its WTF-8 / CESU-8
+		// byte pattern so the canonical_json escaper sees the lone surrogate
+		// rather than a replacement char.
+		var bad []byte
+		for _, u := range units {
+			n, _ := u.(json.Number)
+			cp, _ := n.Int64()
+			// Encode lone surrogate as 3-byte UTF-8 of the surrogate value
+			// itself (illegal but unambiguous; Go's range loop will yield
+			// utf8.RuneError 0xFFFD on this).
+			bad = append(bad, byte(0xe0|(cp>>12)), byte(0x80|((cp>>6)&0x3f)), byte(0x80|(cp&0x3f)))
+		}
+		input := map[string]any{key: string(bad)}
+		got, err := CanonicalJSON(input)
+		if err == nil {
+			t.Errorf("vector %s: CanonicalJSON did NOT reject lone surrogate; got %s", id, got)
+		}
+	}
+}
+
+func mustFixturePath(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "conformance", "sdk-envelope", "fixtures.json")
+}

@@ -34,7 +34,7 @@ pub const Value = union(enum) {
 // canonicalJson
 // ---------------------------------------------------------------------------
 
-pub const CanonicalError = error{ NonFiniteNumber, OutOfMemory };
+pub const CanonicalError = error{ NonFiniteNumber, OutOfMemory, LoneSurrogate, InvalidUtf8, DuplicateObjectKey };
 
 /// Serialize `value` to RFC 8785 / JCS canonical JSON. Caller owns result.
 pub fn canonicalJson(allocator: std.mem.Allocator, value: Value) ![]u8 {
@@ -55,24 +55,7 @@ fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
         },
         .Float => |f| {
             if (std.math.isNan(f) or std.math.isInf(f)) return error.NonFiniteNumber;
-            if (f == 0.0) {
-                try out.append(allocator, '0');
-                return;
-            }
-            const as_int: i64 = @intFromFloat(f);
-            const round_trip: f64 = @floatFromInt(as_int);
-            if (round_trip == f and as_int >= -9_007_199_254_740_992 and as_int <= 9_007_199_254_740_992) {
-                var tmp: [32]u8 = undefined;
-                const s = try std.fmt.bufPrint(&tmp, "{d}", .{as_int});
-                try out.appendSlice(allocator, s);
-                return;
-            }
-            // Float fallback — Zig's {e} / {d} formatting differs from ES
-            // for some edge cases. The envelope wire protocol only carries
-            // integer timestamps in practice; floats here are best-effort.
-            var tmp: [64]u8 = undefined;
-            const s = try std.fmt.bufPrint(&tmp, "{e}", .{f});
-            try out.appendSlice(allocator, s);
+            try appendEcma262Double(allocator, out, f);
         },
         .String => |s| try appendJsonString(allocator, out, s),
         .Array => |arr| {
@@ -84,18 +67,41 @@ fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
             try out.append(allocator, ']');
         },
         .Object => |kvs| {
-            // Sort keys by UTF-16 code-unit order. Zig strings are UTF-8 —
-            // compare via UTF-16 encoding for cross-tier byte parity. For
-            // ASCII-only keys (overwhelmingly common in overlay payloads)
-            // this reduces to byte-order comparison.
+            // Sort keys by UTF-16 code-unit order (RFC 8785 / ES spec). Zig
+            // strings are UTF-8, so we transcode each key to UTF-16LE once,
+            // then compare those buffers by code unit. Byte-compare on the
+            // raw UTF-8 diverges for astral-plane characters (audit D1):
+            //   "\u{1F600}" → UTF-8 0xF0 0x9F 0x98 0x80  (4 bytes, 0xF0…)
+            //                UTF-16  0xD83D 0xDE00      (surrogate pair)
+            //   "\u{E000}"  → UTF-8 0xEE 0x80 0x80      (3 bytes, 0xEE…)
+            //                UTF-16  0xE000             (BMP)
+            // Byte-order puts U+E000 first; UTF-16 order puts U+1F600 first
+            // because the high surrogate 0xD83D < 0xE000.
+            const utf16_keys = try allocator.alloc([]u16, kvs.len);
+            defer {
+                for (utf16_keys) |k| allocator.free(k);
+                allocator.free(utf16_keys);
+            }
+            for (kvs, 0..) |kv, i| {
+                utf16_keys[i] = try std.unicode.utf8ToUtf16LeAlloc(allocator, kv.key);
+            }
             const indices = try allocator.alloc(usize, kvs.len);
             defer allocator.free(indices);
             for (0..kvs.len) |i| indices[i] = i;
-            std.mem.sort(usize, indices, kvs, struct {
-                fn lessThan(ctx: []const Value.KeyValue, a: usize, b: usize) bool {
-                    return utf16Less(ctx[a].key, ctx[b].key);
+            std.mem.sort(usize, indices, utf16_keys, struct {
+                fn lessThan(ctx: []const []u16, a: usize, b: usize) bool {
+                    return utf16Less(ctx[a], ctx[b]);
                 }
             }.lessThan);
+            // Reject duplicate keys (audit D3 / RFC 8785 §3.2.3). Two keys
+            // are duplicates iff their UTF-16 code-unit sequences are equal;
+            // post-sort adjacency check is sufficient.
+            var di: usize = 1;
+            while (di < indices.len) : (di += 1) {
+                const prev = utf16_keys[indices[di - 1]];
+                const cur = utf16_keys[indices[di]];
+                if (std.mem.eql(u16, prev, cur)) return error.DuplicateObjectKey;
+            }
             try out.append(allocator, '{');
             for (indices, 0..) |idx, i| {
                 if (i > 0) try out.append(allocator, ',');
@@ -111,32 +117,165 @@ fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
 fn appendJsonString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
     try out.append(allocator, '"');
     var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        switch (c) {
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            0x08 => try out.appendSlice(allocator, "\\b"),
-            0x0C => try out.appendSlice(allocator, "\\f"),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    var tmp: [8]u8 = undefined;
-                    const fmt = try std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{c});
-                    try out.appendSlice(allocator, fmt);
-                } else {
-                    try out.append(allocator, c);
-                }
-            },
+    while (i < s.len) {
+        const b0 = s[i];
+        // ASCII fast path.
+        if (b0 < 0x80) {
+            switch (b0) {
+                '"' => try out.appendSlice(allocator, "\\\""),
+                '\\' => try out.appendSlice(allocator, "\\\\"),
+                0x08 => try out.appendSlice(allocator, "\\b"),
+                0x0C => try out.appendSlice(allocator, "\\f"),
+                '\n' => try out.appendSlice(allocator, "\\n"),
+                '\r' => try out.appendSlice(allocator, "\\r"),
+                '\t' => try out.appendSlice(allocator, "\\t"),
+                else => {
+                    if (b0 < 0x20) {
+                        var tmp: [8]u8 = undefined;
+                        const fmt = try std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{b0});
+                        try out.appendSlice(allocator, fmt);
+                    } else {
+                        try out.append(allocator, b0);
+                    }
+                },
+            }
+            i += 1;
+            continue;
         }
+        // Multi-byte UTF-8 — validate well-formedness and reject the
+        // 0xED, 0xA0..0xBF, 0x80..0xBF surrogate range (RFC 8785 §3.2.2.2
+        // / audit D6). For valid multi-byte sequences, emit verbatim.
+        if (b0 < 0xC2) return error.InvalidUtf8;
+        const size: usize = if (b0 < 0xE0) 2 else if (b0 < 0xF0) 3 else if (b0 < 0xF8) 4 else return error.InvalidUtf8;
+        if (i + size > s.len) return error.InvalidUtf8;
+        // Validate continuation bytes.
+        var j: usize = 1;
+        while (j < size) : (j += 1) {
+            if (s[i + j] & 0xC0 != 0x80) return error.InvalidUtf8;
+        }
+        // Surrogate detection: only possible for the 3-byte form starting
+        // with 0xED, 0xA0..0xBF.
+        if (size == 3 and b0 == 0xED and s[i + 1] >= 0xA0 and s[i + 1] <= 0xBF) {
+            return error.LoneSurrogate;
+        }
+        try out.appendSlice(allocator, s[i .. i + size]);
+        i += size;
     }
     try out.append(allocator, '"');
 }
 
-fn utf16Less(a: []const u8, b: []const u8) bool {
-    // ASCII fast path covers all realistic envelope keys.
+/// Append a finite f64 per ECMA-262 §6.1.6.1.13 Number::toString. Output is
+/// byte-identical to JS `String(x)` / `JSON.stringify(x)` for any finite x.
+/// Zig's stdlib {d}/{e} formatters diverge (audit D5), so we re-derive the
+/// shortest digit string and decimal exponent from the surface form and
+/// re-emit per the spec rules. Also fixes the @intFromFloat(1e21) overflow
+/// panic in the old impl.
+fn appendEcma262Double(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), x: f64) !void {
+    if (x == 0.0) {
+        try out.append(allocator, '0');
+        return;
+    }
+    if (x < 0.0) {
+        try out.append(allocator, '-');
+        try appendEcma262Double(allocator, out, -x);
+        return;
+    }
+    // Render with Zig's "shortest" decimal/scientific formatter (Ryu-style),
+    // then re-parse. We use {e} which always gives "d.dddde±NN" form for
+    // any non-zero positive finite double, which is straightforward to
+    // tokenise and round-trip.
+    var tmp: [64]u8 = undefined;
+    const s = try std.fmt.bufPrint(&tmp, "{e}", .{x});
+    // Parse: <int_part>[.<frac_part>]e<sign><exp_digits>
+    var e_pos: ?usize = null;
+    for (s, 0..) |c, idx| {
+        if (c == 'e' or c == 'E') {
+            e_pos = idx;
+            break;
+        }
+    }
+    const mantissa = if (e_pos) |p| s[0..p] else s;
+    const exp_part: i32 = if (e_pos) |p| blk: {
+        const exp_slice = s[p + 1 ..];
+        break :blk std.fmt.parseInt(i32, exp_slice, 10) catch 0;
+    } else 0;
+    var dot_pos: ?usize = null;
+    for (mantissa, 0..) |c, idx| {
+        if (c == '.') {
+            dot_pos = idx;
+            break;
+        }
+    }
+    const int_part: []const u8 = if (dot_pos) |p| mantissa[0..p] else mantissa;
+    const frac_part: []const u8 = if (dot_pos) |p| mantissa[p + 1 ..] else "";
+    // Concatenate digits, strip leading and trailing zeros.
+    var digits_buf: [128]u8 = undefined;
+    var dn: usize = 0;
+    for (int_part) |c| {
+        digits_buf[dn] = c;
+        dn += 1;
+    }
+    for (frac_part) |c| {
+        digits_buf[dn] = c;
+        dn += 1;
+    }
+    var leading_zeros: usize = 0;
+    while (leading_zeros < dn and digits_buf[leading_zeros] == '0') {
+        leading_zeros += 1;
+    }
+    var end: usize = dn;
+    while (end > leading_zeros and digits_buf[end - 1] == '0') {
+        end -= 1;
+    }
+    if (end <= leading_zeros) {
+        try out.append(allocator, '0');
+        return;
+    }
+    const digits: []const u8 = digits_buf[leading_zeros..end];
+    const s_len: i32 = @intCast(digits.len);
+    const k: i32 = @as(i32, @intCast(int_part.len)) - @as(i32, @intCast(leading_zeros)) + exp_part;
+    // ECMA-262 cases.
+    if (k >= s_len and k <= 21) {
+        try out.appendSlice(allocator, digits);
+        var z: i32 = k - s_len;
+        while (z > 0) : (z -= 1) try out.append(allocator, '0');
+        return;
+    }
+    if (k > 0 and k <= 21) {
+        const ku: usize = @intCast(k);
+        try out.appendSlice(allocator, digits[0..ku]);
+        try out.append(allocator, '.');
+        try out.appendSlice(allocator, digits[ku..]);
+        return;
+    }
+    if (k > -6 and k <= 0) {
+        try out.appendSlice(allocator, "0.");
+        var z: i32 = -k;
+        while (z > 0) : (z -= 1) try out.append(allocator, '0');
+        try out.appendSlice(allocator, digits);
+        return;
+    }
+    // Scientific notation.
+    if (s_len == 1) {
+        try out.appendSlice(allocator, digits);
+    } else {
+        try out.appendSlice(allocator, digits[0..1]);
+        try out.append(allocator, '.');
+        try out.appendSlice(allocator, digits[1..]);
+    }
+    const exp = k - 1;
+    var ebuf: [16]u8 = undefined;
+    const estr = if (exp < 0)
+        try std.fmt.bufPrint(&ebuf, "e-{d}", .{-exp})
+    else
+        try std.fmt.bufPrint(&ebuf, "e+{d}", .{exp});
+    try out.appendSlice(allocator, estr);
+}
+
+/// Compare two strings that have already been transcoded to UTF-16LE code
+/// units. Lexicographic, code-unit-by-code-unit — matches JS native string
+/// comparison and the TS reference (`packages/runar-ir-schema/src/canonical-json.ts`).
+fn utf16Less(a: []const u16, b: []const u16) bool {
     var i: usize = 0;
     while (i < a.len and i < b.len) : (i += 1) {
         if (a[i] != b[i]) return a[i] < b[i];

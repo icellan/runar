@@ -78,6 +78,15 @@ public final class WhatsOnChainProvider implements Provider {
             // WoC's UTXO listing does not include the locking script.
             utxos.add(new UTXO(txid, pos, value, ""));
         }
+        // DoS-bound: defensive — WoC currently returns empty scripts but a
+        // future enriched response must not bypass MAX_SCRIPT_BYTES.
+        for (UTXO u : utxos) {
+            if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                "WhatsOnChainProvider.listUtxos(" + address + ")"
+            );
+        }
         return utxos;
     }
 
@@ -128,6 +137,12 @@ public final class WhatsOnChainProvider implements Provider {
         if (out.get("scriptPubKey") instanceof Map<?, ?> sp) {
             Object hex = ((Map<?, ?>) sp).get("hex");
             if (hex instanceof String s) script = s;
+        }
+        if (!script.isEmpty()) {
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                script, InputLimits.MAX_SCRIPT_BYTES,
+                "WhatsOnChainProvider.getUtxo(" + txid + ":" + vout + ")"
+            );
         }
         return new UTXO(txid, vout, sats, script);
     }

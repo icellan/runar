@@ -5,6 +5,7 @@
 use bsv::transaction::Transaction as BsvTransaction;
 use super::types::{TransactionData, TxOutput, Utxo};
 use super::provider::Provider;
+use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 use serde_json::Value;
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::TcpStream;
@@ -172,6 +173,14 @@ impl Provider for RPCProvider {
                 satoshis: (u["amount"].as_f64().unwrap_or(0.0) * 1e8).round() as i64,
                 script: u["scriptPubKey"].as_str().unwrap_or("").to_string(),
             });
+        }
+        // DoS-bound: reject pathological scripts at the provider boundary.
+        for u in &utxos {
+            if u.script.is_empty() { continue; }
+            assert_script_hex_under_limit(
+                &u.script, MAX_SCRIPT_BYTES,
+                &format!("RPCProvider.get_utxos({})", address),
+            )?;
         }
         Ok(utxos)
     }

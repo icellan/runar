@@ -497,3 +497,229 @@ test "intent: requireOutputP2PKH without addDataOutput ok" {
 
     _ = try mustLowerGoSource(allocator, source);
 }
+
+// ============================================================================
+// R-2 — index-literal bounds on extractPrevOutputScript / requireOutputP2PKH
+// ============================================================================
+
+test "intent R-2: requireOutputP2PKH negative index errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    BondPKH runar.ByteString `runar:"readonly"`
+        \\    Bond    runar.Bigint     `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) PayBond() {
+        \\    runar.RequireOutputP2PKH(-1, c.BondPKH, c.Bond)
+        \\}
+    ;
+
+    try expectIntrinsicTypeError(allocator, source, "must be >= 0");
+}
+
+test "intent R-2: requireOutputP2PKH index over 1000 errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    BondPKH runar.ByteString `runar:"readonly"`
+        \\    Bond    runar.Bigint     `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) PayBond() {
+        \\    runar.RequireOutputP2PKH(1001, c.BondPKH, c.Bond)
+        \\}
+    ;
+
+    try expectIntrinsicTypeError(allocator, source, "bound to <= 1000");
+}
+
+test "intent R-2: requireOutputP2PKH index 1000 is allowed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    BondPKH runar.ByteString `runar:"readonly"`
+        \\    Bond    runar.Bigint     `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) PayBond() {
+        \\    runar.RequireOutputP2PKH(1000, c.BondPKH, c.Bond)
+        \\}
+    ;
+
+    _ = try mustLowerGoSource(allocator, source);
+}
+
+test "intent R-2: extractPrevOutputScript negative index errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type IntentCov struct {
+        \\    runar.StatefulSmartContract
+        \\    H0 runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *IntentCov) CoSpend() {
+        \\    s := runar.ExtractPrevOutputScript(-1, c.H0)
+        \\    _ = s
+        \\}
+    ;
+
+    try expectIntrinsicTypeError(allocator, source, "must be >= 0");
+}
+
+test "intent R-2: extractPrevOutputScript large index is allowed (no upper bound)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // R-2 only bounds requireOutputP2PKH at <= 1000.
+    // extractPrevOutputScript only requires idx >= 0.
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type IntentCov struct {
+        \\    runar.StatefulSmartContract
+        \\    H0 runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *IntentCov) CoSpend() {
+        \\    s := runar.ExtractPrevOutputScript(5000, c.H0)
+        \\    _ = s
+        \\}
+    ;
+
+    _ = try mustLowerGoSource(allocator, source);
+}
+
+// ============================================================================
+// R-4 — prefixLen-literal bounds on extractPrevOutputScript 3-arg form
+// ============================================================================
+
+test "intent R-4: extractPrevOutputScript prefixLen < 32 errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    H runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) Bind() {
+        \\    s := runar.ExtractPrevOutputScript(0, c.H, 16)
+        \\    _ = s
+        \\}
+    ;
+
+    try expectIntrinsicTypeError(allocator, source, "must be >= 32");
+}
+
+test "intent R-4: extractPrevOutputScript prefixLen = 32 is allowed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    H runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) Bind() {
+        \\    s := runar.ExtractPrevOutputScript(0, c.H, 32)
+        \\    _ = s
+        \\}
+    ;
+
+    _ = try mustLowerGoSource(allocator, source);
+}
+
+test "intent R-4: extractPrevOutputScript prefixLen > 4 MiB errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    H runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) Bind() {
+        \\    s := runar.ExtractPrevOutputScript(0, c.H, 4194305)
+        \\    _ = s
+        \\}
+    ;
+
+    try expectIntrinsicTypeError(allocator, source, "must be <= MAX_SCRIPT_BYTES");
+}
+
+test "intent R-4: extractPrevOutputScript prefixLen = 4 MiB is allowed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\package x
+        \\
+        \\import runar "github.com/icellan/runar/packages/runar-go"
+        \\
+        \\type Cov struct {
+        \\    runar.StatefulSmartContract
+        \\    H runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *Cov) Bind() {
+        \\    s := runar.ExtractPrevOutputScript(0, c.H, 4194304)
+        \\    _ = s
+        \\}
+    ;
+
+    _ = try mustLowerGoSource(allocator, source);
+}

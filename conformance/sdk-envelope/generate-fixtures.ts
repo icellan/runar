@@ -70,6 +70,33 @@ const canonicalVectors = [
   { input: { t: 'a\tb' },                            expected: '{"t":"a\\tb"}' },
   { input: { q: 'say "hi"' },                        expected: '{"q":"say \\"hi\\""}' },
   { input: { b: '\\' },                              expected: '{"b":"\\\\"}' },
+  // RFC 8785 parity gates added per audits/canonical-json-rfc8785-parity.md §3.
+  // v18 — D1 (Zig key sort): empty key MUST sort before astral char in UTF-16 order.
+  { input: { '😀': 1, '': 2 },                       expected: '{"":2,"😀":1}' },
+  // v19 — D4 (Ruby `||` falsy fallthrough): boolean false MUST be preserved.
+  { input: { k: false },                             expected: '{"k":false}' },
+  // v20 — D5 (float formatter, 1e21 boundary): MUST emit `1e+21`.
+  { input: { big: 1e21 },                            expected: '{"big":1e+21}' },
+  // v21 — D5 (float formatter, tiny float): MUST emit `1e-300` (no trailing `.0`).
+  { input: { r: 1e-300 },                            expected: '{"r":1e-300}' },
+];
+
+// v22 — D6 (lone surrogate): MUST reject. Encoded as a UTF-16 code-unit array
+// so each tier constructs the input deterministically without going through its
+// JSON parser's lone-surrogate handling (Go replaces with U+FFFD, Ruby errors
+// at parse-time, etc.). Today NO tier rejects — this vector pins the desired
+// behavior and gates the future fix. The cross-tier runners must consume this
+// section and assert rejection (any error/throw/return-false is acceptable).
+const canonicalRejectionVectors = [
+  {
+    _vector_id: 'v22-lone-surrogate-rejected',
+    _audit_ref: 'audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6)',
+    _notes:
+      'Lone surrogate (U+D800 with no low-surrogate partner) is invalid Unicode per RFC 8785 and MUST be rejected.',
+    description: 'object with a value containing the lone high surrogate U+D800',
+    input_object_key: 'surrogate',
+    input_value_utf16_units: [0xd800],
+  },
 ];
 
 async function main() {
@@ -109,6 +136,7 @@ async function main() {
     expires_at: EXPIRES_AT,
     verify_now_ms: NONCE + 500,
     canonical_json_vectors: canonicalVectors,
+    canonical_json_rejection_vectors: canonicalRejectionVectors,
     valid_envelope: {
       payload: fixedPayload,
       sig: fixedSig,

@@ -1,5 +1,6 @@
 //! Rúnar deployment SDK — deploy and interact with compiled contracts on BSV.
 
+pub mod errors;
 pub mod types;
 pub mod state;
 pub mod deployment;
@@ -48,6 +49,7 @@ pub use ordinals::{
     bsv21_deploy_mint, bsv21_transfer,
 };
 pub use gorillapool::GorillaPoolProvider;
+pub use errors::{ScriptSizeExceededError, assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 pub use envelope::{
     canonical_json,
     sign_envelope, verify_envelope,

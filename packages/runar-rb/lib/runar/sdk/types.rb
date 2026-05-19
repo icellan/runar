@@ -291,6 +291,10 @@ module Runar
       :has_multi_output,
       :contract_outputs,
       :code_sep_idx,
+      # Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+      # `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
+      # Empty when the method has no auto-injected intent params.
+      :intent_witness_hex,
       keyword_init: true
     ) do
       # rubocop:disable Metrics/ParameterLists
@@ -312,6 +316,7 @@ module Runar
         method_needs_new_amount: false,
         new_amount: 0,
         preimage_index: -1,
+        intent_witness_hex: '',
         contract_utxo: nil,
         new_locking_script: '',
         new_satoshis: 0,

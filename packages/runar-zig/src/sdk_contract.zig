@@ -9,6 +9,7 @@ const call_mod = @import("sdk_call.zig");
 const oppushtx_mod = @import("sdk_oppushtx.zig");
 const anf_interp = @import("sdk_anf_interpreter.zig");
 const ordinals = @import("sdk_ordinals.zig");
+const errors_mod = @import("sdk_errors.zig");
 
 // ---------------------------------------------------------------------------
 // RunarContract — main contract runtime wrapper
@@ -40,6 +41,15 @@ pub const RunarContract = struct {
     current_utxo: ?types.UTXO = null,
     provider: ?provider_mod.Provider = null,
     signer: ?signer_mod.Signer = null,
+    /// Witness values for intent-covenant intrinsic auto-injected params.
+    /// `_prevOutScript_<i>` values are stored per-input-index in
+    /// `prev_out_scripts`; `_serialisedOutputs` is stored in
+    /// `serialised_outputs`. Both are owned lowercase hex strings (normalized
+    /// in the setters). Read by the call-builder when assembling the
+    /// unlocking script for methods that use extractPrevOutputScript /
+    /// requireOutputP2PKH.
+    prev_out_scripts: std.AutoHashMapUnmanaged(usize, []u8) = .{},
+    serialised_outputs: ?[]u8 = null,
 
     /// Create a new contract instance from a compiled artifact and constructor arguments.
     pub fn init(
@@ -94,12 +104,75 @@ pub const RunarContract = struct {
             var mu = u.*;
             mu.deinit(self.allocator);
         }
+        // Free intent witness storage
+        var it = self.prev_out_scripts.iterator();
+        while (it.next()) |entry| self.allocator.free(entry.value_ptr.*);
+        self.prev_out_scripts.deinit(self.allocator);
+        if (self.serialised_outputs) |s| self.allocator.free(s);
         self.* = .{
             .allocator = self.allocator,
             .artifact = self.artifact,
             .constructor_args = &.{},
             .state = &.{},
         };
+    }
+
+    /// Supply the prev-output locking-script witness for input `input_index`.
+    /// Required for methods that call `extractPrevOutputScript(input_index)`,
+    /// which the compiler lowers into an auto-injected
+    /// `_prevOutScript_<input_index>` ABI param. `bytes_hex` is a hex string
+    /// (with or without 0x prefix, any casing).
+    pub fn setPrevOutScript(self: *RunarContract, input_index: usize, bytes_hex: []const u8) !void {
+        const normalized = try normalizeWitnessHex(self.allocator, bytes_hex);
+        errdefer self.allocator.free(normalized);
+        if (self.prev_out_scripts.fetchRemove(input_index)) |kv| {
+            self.allocator.free(kv.value);
+        }
+        try self.prev_out_scripts.put(self.allocator, input_index, normalized);
+    }
+
+    /// Supply the serialised-outputs witness for the current call. Required
+    /// for methods that call `requireOutputP2PKH(...)`, which the compiler
+    /// lowers into an auto-injected `_serialisedOutputs` ABI param.
+    pub fn setSerialisedOutputs(self: *RunarContract, bytes_hex: []const u8) !void {
+        const normalized = try normalizeWitnessHex(self.allocator, bytes_hex);
+        if (self.serialised_outputs) |old| self.allocator.free(old);
+        self.serialised_outputs = normalized;
+    }
+
+    /// Build the trailing witness-hex for the auto-injected intent-intrinsic
+    /// params of a method, in ABI order (`_prevOutScript_*` first, then
+    /// `_serialisedOutputs`). Returns `error.WitnessValueMissing` (after
+    /// recording diagnostic info via `raiseWitnessValueMissing`) for any
+    /// auto-injected param the caller hasn't supplied.
+    fn buildIntentWitnessHex(
+        self: *const RunarContract,
+        method: *const types.ABIMethod,
+    ) ![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        for (method.params) |p| {
+            if (std.mem.startsWith(u8, p.name, "_prevOutScript_")) {
+                const idx_str = p.name["_prevOutScript_".len..];
+                const idx = std.fmt.parseInt(usize, idx_str, 10) catch {
+                    return error.WitnessValueMissing;
+                };
+                const val = self.prev_out_scripts.get(idx) orelse {
+                    return errors_mod.raiseWitnessValueMissing(p.name, method.name, self.artifact.contract_name);
+                };
+                const enc = try state_mod.encodePushData(self.allocator, val);
+                defer self.allocator.free(enc);
+                try out.appendSlice(self.allocator, enc);
+            } else if (std.mem.eql(u8, p.name, "_serialisedOutputs")) {
+                const val = self.serialised_outputs orelse {
+                    return errors_mod.raiseWitnessValueMissing(p.name, method.name, self.artifact.contract_name);
+                };
+                const enc = try state_mod.encodePushData(self.allocator, val);
+                defer self.allocator.free(enc);
+                try out.appendSlice(self.allocator, enc);
+            }
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     /// Connect stores a provider and signer on this contract.
@@ -146,6 +219,13 @@ pub const RunarContract = struct {
 
         const locking_script = try self.getLockingScript();
         defer self.allocator.free(locking_script);
+
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        {
+            var ctx_buf: [256]u8 = undefined;
+            const ctx = std.fmt.bufPrint(&ctx_buf, "{s}.deploy", .{self.artifact.contract_name}) catch "RunarContract.deploy";
+            try errors_mod.assertScriptHexUnderLimit(locking_script, errors_mod.MAX_SCRIPT_BYTES, ctx);
+        }
 
         // Fetch fee rate and funding UTXOs
         const fee_rate = prov.getFeeRate() catch 100;
@@ -238,6 +318,13 @@ pub const RunarContract = struct {
         if (self.current_utxo == null) return ContractError.NotDeployed;
         const contract_utxo = self.current_utxo.?;
 
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        {
+            var ctx_buf: [256]u8 = undefined;
+            const ctx = std.fmt.bufPrint(&ctx_buf, "{s}.call({s})", .{ self.artifact.contract_name, method_name }) catch "RunarContract.call";
+            try errors_mod.assertScriptHexUnderLimit(contract_utxo.script, errors_mod.MAX_SCRIPT_BYTES, ctx);
+        }
+
         // Resolve method
         const method = self.findMethod(method_name) orelse return ContractError.MethodNotFound;
         _ = method;
@@ -267,20 +354,33 @@ pub const RunarContract = struct {
             if (std.mem.eql(u8, p.name, "_newAmount")) needs_new_amount = true;
         }
 
-        // Filter user params (exclude auto-injected stateful params)
+        // Drop auto-injected continuation params AND intent-intrinsic
+        // witness params (`_prevOutScript_<i>`, `_serialisedOutputs`) from
+        // the user-facing arg count check. Witness values come from
+        // setPrevOutScript / setSerialisedOutputs, not the args slice.
+        const isAutoInjectedWitness = struct {
+            fn check(name: []const u8) bool {
+                return std.mem.startsWith(u8, name, "_prevOutScript_") or
+                    std.mem.eql(u8, name, "_serialisedOutputs");
+            }
+        }.check;
+
         var user_param_count: usize = 0;
         if (is_stateful) {
             for (abi_method.params) |p| {
                 if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
                     !std.mem.eql(u8, p.name, "_changePKH") and
                     !std.mem.eql(u8, p.name, "_changeAmount") and
-                    !std.mem.eql(u8, p.name, "_newAmount"))
+                    !std.mem.eql(u8, p.name, "_newAmount") and
+                    !isAutoInjectedWitness(p.name))
                 {
                     user_param_count += 1;
                 }
             }
         } else {
-            user_param_count = abi_method.params.len;
+            for (abi_method.params) |p| {
+                if (!isAutoInjectedWitness(p.name)) user_param_count += 1;
+            }
         }
 
         if (args.len != user_param_count) return ContractError.ArgCountMismatch;
@@ -302,15 +402,19 @@ pub const RunarContract = struct {
                     if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
                         !std.mem.eql(u8, p.name, "_changePKH") and
                         !std.mem.eql(u8, p.name, "_changeAmount") and
-                        !std.mem.eql(u8, p.name, "_newAmount"))
+                        !std.mem.eql(u8, p.name, "_newAmount") and
+                        !isAutoInjectedWitness(p.name))
                     {
                         user_params[idx] = p;
                         idx += 1;
                     }
                 }
             } else {
-                for (abi_method.params, 0..) |p, i| {
-                    user_params[i] = p;
+                for (abi_method.params) |p| {
+                    if (!isAutoInjectedWitness(p.name)) {
+                        user_params[idx] = p;
+                        idx += 1;
+                    }
                 }
             }
         }
@@ -514,6 +618,12 @@ pub const RunarContract = struct {
             } else {
                 new_locking_script = try self.getLockingScript();
             }
+            // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+            if (new_locking_script.len > 0) {
+                var ctx_buf: [256]u8 = undefined;
+                const ctx = std.fmt.bufPrint(&ctx_buf, "{s}.call({s}).continuation", .{ self.artifact.contract_name, method_name }) catch "RunarContract.call.continuation";
+                try errors_mod.assertScriptHexUnderLimit(new_locking_script, errors_mod.MAX_SCRIPT_BYTES, ctx);
+            }
         }
 
         // Compute change PKH for stateful methods that need it
@@ -544,6 +654,14 @@ pub const RunarContract = struct {
         }
 
         const code_sep_idx = try self.getCodeSepIndex(method_index);
+
+        // Pre-resolve intent-intrinsic witness hex (returns
+        // `error.WitnessValueMissing` if a `_prevOutScript_<i>` or
+        // `_serialisedOutputs` param wasn't set on the contract). Resolving
+        // up-front means the error is raised BEFORE any signing / broadcast
+        // work, mirroring the script-size guard above.
+        const witness_hex = try self.buildIntentWitnessHex(abi_method);
+        defer self.allocator.free(witness_hex);
 
         // ---------------------------------------------------------------
         // Additional contract inputs (e.g. `merge` on a fungible token spends
@@ -762,6 +880,7 @@ pub const RunarContract = struct {
             new_satoshis,
             "00" ** 181, // placeholder preimage
             method_selector_hex,
+            witness_hex,
         );
         defer self.allocator.free(placeholder_unlock);
 
@@ -786,6 +905,7 @@ pub const RunarContract = struct {
                 new_satoshis,
                 "00" ** 181,
                 method_selector_hex,
+                witness_hex,
             );
             try extra_placeholder_unlocks.append(self.allocator, u);
         }
@@ -896,6 +1016,7 @@ pub const RunarContract = struct {
             new_satoshis,
             ptx_result.preimage_hex,
             method_selector_hex,
+            witness_hex,
         );
 
         // Rebuild transaction with real unlocking script (size may differ)
@@ -1007,6 +1128,7 @@ pub const RunarContract = struct {
             new_satoshis,
             ptx_result.preimage_hex,
             method_selector_hex,
+            witness_hex,
         );
         defer self.allocator.free(final_unlock);
 
@@ -1088,6 +1210,7 @@ pub const RunarContract = struct {
                 new_satoshis,
                 xptx.preimage_hex,
                 method_selector_hex,
+                witness_hex,
             );
             defer self.allocator.free(x_unlock);
             const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, x_unlock);
@@ -1184,6 +1307,13 @@ pub const RunarContract = struct {
 
         if (self.current_utxo == null) return ContractError.NotDeployed;
         const contract_utxo = self.current_utxo.?;
+
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        {
+            var ctx_buf: [256]u8 = undefined;
+            const ctx = std.fmt.bufPrint(&ctx_buf, "{s}.prepareCall({s})", .{ self.artifact.contract_name, method_name }) catch "RunarContract.prepareCall";
+            try errors_mod.assertScriptHexUnderLimit(contract_utxo.script, errors_mod.MAX_SCRIPT_BYTES, ctx);
+        }
 
         const is_stateful = self.artifact.state_fields.len > 0;
         if (is_stateful) {
@@ -1390,12 +1520,24 @@ pub const RunarContract = struct {
         }
 
         // ---- Filter user params ------------------------------------------
+        // Drop auto-injected continuation params AND intent-intrinsic
+        // witness params (`_prevOutScript_<i>`, `_serialisedOutputs`) from
+        // the user-facing arg count check. Witness values come from
+        // setPrevOutScript / setSerialisedOutputs, not the args slice.
+        const isAutoInjectedWitness = struct {
+            fn check(name: []const u8) bool {
+                return std.mem.startsWith(u8, name, "_prevOutScript_") or
+                    std.mem.eql(u8, name, "_serialisedOutputs");
+            }
+        }.check;
+
         var user_param_count: usize = 0;
         for (abi_method.params) |p| {
             if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
                 !std.mem.eql(u8, p.name, "_changePKH") and
                 !std.mem.eql(u8, p.name, "_changeAmount") and
-                !std.mem.eql(u8, p.name, "_newAmount"))
+                !std.mem.eql(u8, p.name, "_newAmount") and
+                !isAutoInjectedWitness(p.name))
             {
                 user_param_count += 1;
             }
@@ -1410,7 +1552,8 @@ pub const RunarContract = struct {
                 if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
                     !std.mem.eql(u8, p.name, "_changePKH") and
                     !std.mem.eql(u8, p.name, "_changeAmount") and
-                    !std.mem.eql(u8, p.name, "_newAmount"))
+                    !std.mem.eql(u8, p.name, "_newAmount") and
+                    !isAutoInjectedWitness(p.name))
                 {
                     user_params[idx] = p;
                     idx += 1;
@@ -1532,6 +1675,12 @@ pub const RunarContract = struct {
 
         const code_sep_idx = (try self.getCodeSepIndex(method_index)) orelse -1;
 
+        // Pre-resolve intent-intrinsic witness hex (returns
+        // `error.WitnessValueMissing` if a `_prevOutScript_<i>` or
+        // `_serialisedOutputs` param wasn't set on the contract).
+        const witness_hex = try self.buildIntentWitnessHex(abi_method);
+        defer self.allocator.free(witness_hex);
+
         // ---- Pass 1: placeholder unlock → tx → P2PKH sign → preimage -----
         const change_pkh_opt: ?[]const u8 = if (change_pkh_buf.len > 0) change_pkh_buf else null;
         const method_selector_opt: ?[]const u8 = if (method_selector_buf.len > 0) method_selector_buf else null;
@@ -1541,6 +1690,7 @@ pub const RunarContract = struct {
             needs_change, change_pkh_opt, 0,
             needs_new_amount, new_satoshis,
             "00" ** 181, method_selector_opt,
+            witness_hex,
         );
         defer self.allocator.free(placeholder_unlock);
 
@@ -1570,6 +1720,7 @@ pub const RunarContract = struct {
                 needs_change, change_pkh_opt, change_amount,
                 needs_new_amount, new_satoshis,
                 ptx_result.preimage_hex, method_selector_opt,
+                witness_hex,
             );
             errdefer self.allocator.free(first_unlock);
 
@@ -1607,6 +1758,7 @@ pub const RunarContract = struct {
             needs_change, change_pkh_opt, change_amount,
             needs_new_amount, new_satoshis,
             ptx_result.preimage_hex, method_selector_opt,
+            witness_hex,
         );
         defer self.allocator.free(final_placeholder);
 
@@ -1648,6 +1800,7 @@ pub const RunarContract = struct {
         const utxo_owned = try contract_utxo.clone(self.allocator);
         const op_push_tx_sig_owned = try self.allocator.dupe(u8, ptx_result.sig_hex);
         const preimage_owned = try self.allocator.dupe(u8, ptx_result.preimage_hex);
+        const intent_witness_owned = try self.allocator.dupe(u8, witness_hex);
 
         return types.PreparedCall{
             .tx_hex = signed_tx,
@@ -1667,6 +1820,7 @@ pub const RunarContract = struct {
             .change_amount = change_amount,
             .needs_new_amount = needs_new_amount,
             .code_sep_idx = code_sep_idx,
+            .intent_witness_hex = intent_witness_owned,
         };
     }
 
@@ -1744,6 +1898,7 @@ pub const RunarContract = struct {
                 prepared.new_satoshis,
                 prepared.preimage,
                 method_selector_opt,
+                prepared.intent_witness_hex,
             );
         } else try self.buildUnlockingScript(prepared.method_name, prepared.resolved_args);
         defer self.allocator.free(final_unlock);
@@ -1787,7 +1942,11 @@ pub const RunarContract = struct {
     }
 
     /// Build the full stateful unlocking script:
-    ///   [codePart] + opPushTxSig + args + [changePKH + changeAmount] + preimage + [methodSelector]
+    ///   [codePart] + opPushTxSig + args + [changePKH + changeAmount] + preimage + [witnessHex] + [methodSelector]
+    /// `intent_witness_hex` carries pre-encoded PUSHDATA pushes for the
+    /// compiler's auto-injected intent-intrinsic params (`_prevOutScript_*`
+    /// then `_serialisedOutputs`, ABI order). Empty when the method has no
+    /// auto-injected intent params.
     fn buildStatefulUnlockScript(
         self: *const RunarContract,
         op_sig_hex: []const u8,
@@ -1799,6 +1958,7 @@ pub const RunarContract = struct {
         new_amount: i64,
         preimage_hex: []const u8,
         method_selector_hex: ?[]const u8,
+        intent_witness_hex: []const u8,
     ) ![]u8 {
         var script: std.ArrayListUnmanaged(u8) = .empty;
         errdefer script.deinit(self.allocator);
@@ -1849,6 +2009,13 @@ pub const RunarContract = struct {
             const encoded = try state_mod.encodePushData(self.allocator, preimage_hex);
             defer self.allocator.free(encoded);
             try script.appendSlice(self.allocator, encoded);
+        }
+
+        // Intent-intrinsic witness pushes (`_prevOutScript_*` then
+        // `_serialisedOutputs`, ABI order). Empty for methods with no
+        // auto-injected intent params.
+        if (intent_witness_hex.len > 0) {
+            try script.appendSlice(self.allocator, intent_witness_hex);
         }
 
         // Method selector
@@ -2562,6 +2729,27 @@ fn computeBip143Sighash(
 /// that declare an `allPrevouts: ByteString` param to assert
 /// `hash256(allPrevouts) == extractHashPrevouts(ctx.txPreimage)`. Mirrors
 /// Go's `extractAllPrevouts` (`packages/runar-go/sdk_contract.go:1664`).
+/// Normalize a witness-value hex string (optional `0x` prefix, any casing)
+/// into an owned lowercase hex slice suitable for `encodePushData`. Errors
+/// on odd-length / non-hex inputs.
+fn normalizeWitnessHex(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var h = s;
+    if (h.len >= 2 and (std.mem.eql(u8, h[0..2], "0x") or std.mem.eql(u8, h[0..2], "0X"))) {
+        h = h[2..];
+    }
+    if (h.len % 2 != 0) return error.InvalidWitnessHex;
+    const out = try allocator.alloc(u8, h.len);
+    errdefer allocator.free(out);
+    for (h, 0..) |c, i| {
+        const lc: u8 = if (c >= 'A' and c <= 'F') c + 32 else c;
+        if (!((lc >= '0' and lc <= '9') or (lc >= 'a' and lc <= 'f'))) {
+            return error.InvalidWitnessHex;
+        }
+        out[i] = lc;
+    }
+    return out;
+}
+
 pub fn extractAllPrevoutsHex(allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
     if (tx_hex.len < 10) return allocator.dupe(u8, "");
     var pos: usize = 8; // skip version (4 bytes = 8 hex chars)
@@ -3169,4 +3357,352 @@ test "RunarContract.fromUtxo detects inscription in code script" {
     // code_script should include the envelope (not stripped)
     try std.testing.expect(contract.code_script != null);
     try std.testing.expect(std.mem.indexOf(u8, contract.code_script.?, "0063036f726451") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Item 8 — ScriptSizeExceededError at SDK entry points
+// ---------------------------------------------------------------------------
+
+test "Item 8 — MockProvider.getUtxos rejects oversized script" {
+    const allocator = std.testing.allocator;
+
+    // Build a hex-encoded script that exceeds MAX_SCRIPT_BYTES.
+    const limit = errors_mod.MAX_SCRIPT_BYTES;
+    const hex_len = (limit + 1) * 2;
+    const oversized = try allocator.alloc(u8, hex_len);
+    defer allocator.free(oversized);
+    @memset(oversized, '5');
+    var i: usize = 1;
+    while (i < oversized.len) : (i += 2) oversized[i] = '1';
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+
+    const utxo = types.UTXO{
+        .txid = "aa" ** 32,
+        .output_index = 0,
+        .satoshis = 1000,
+        .script = oversized,
+    };
+    try prov.addUtxo("addr", utxo);
+
+    const provider = prov.provider();
+    const result = provider.getUtxos(allocator, "addr");
+    try std.testing.expectError(provider_mod.ProviderError.ScriptSizeExceeded, result);
+
+    const rec = errors_mod.last_error.?;
+    try std.testing.expectEqual(@as(usize, limit), rec.limit);
+    try std.testing.expectEqual(@as(usize, limit + 1), rec.actual);
+    try std.testing.expect(std.mem.indexOf(u8, rec.contextSlice(), "MockProvider.getUtxos") != null);
+}
+
+test "Item 8 — at-limit script passes MockProvider guard" {
+    const allocator = std.testing.allocator;
+
+    const limit = errors_mod.MAX_SCRIPT_BYTES;
+    const hex_len = limit * 2;
+    const at_limit = try allocator.alloc(u8, hex_len);
+    defer allocator.free(at_limit);
+    @memset(at_limit, '5');
+    var j: usize = 1;
+    while (j < at_limit.len) : (j += 2) at_limit[j] = '1';
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    try prov.addUtxo("addr", types.UTXO{
+        .txid = "bb" ** 32,
+        .output_index = 0,
+        .satoshis = 1000,
+        .script = at_limit,
+    });
+
+    const provider = prov.provider();
+    const utxos = try provider.getUtxos(allocator, "addr");
+    defer {
+        for (utxos) |*u| u.deinit(allocator);
+        allocator.free(utxos);
+    }
+    try std.testing.expectEqual(@as(usize, 1), utxos.len);
+    try std.testing.expectEqual(hex_len, utxos[0].script.len);
+}
+
+test "Item 8 — RunarContract.deploy rejects oversized locking script" {
+    const allocator = std.testing.allocator;
+
+    // Stateless artifact whose `script` already exceeds MAX_SCRIPT_BYTES.
+    // Build it as JSON so we go through the real loader.
+    const limit = errors_mod.MAX_SCRIPT_BYTES;
+    const script_hex_len = (limit + 1) * 2;
+    var script_hex = try allocator.alloc(u8, script_hex_len);
+    defer allocator.free(script_hex);
+    @memset(script_hex, '5');
+    var k: usize = 1;
+    while (k < script_hex.len) : (k += 2) script_hex[k] = '1';
+
+    const json_template =
+        \\{"contractName":"OversizedContract","version":"1","compilerVersion":"1.0","script":"
+    ;
+    const json_tail =
+        \\","asm":"","abi":{"constructor":{"params":[]},"methods":[]},"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    const json = try std.mem.concat(allocator, u8, &[_][]const u8{ json_template, script_hex, json_tail });
+    defer allocator.free(json);
+
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    try prov.addUtxo("00" ** 20, types.UTXO{
+        .txid = "aa" ** 32,
+        .output_index = 0,
+        .satoshis = 100_000,
+        .script = "76a914" ++ "00" ** 20 ++ "88ac",
+    });
+
+    var mock_signer = signer_mod.MockSigner.init(null, null);
+    const signer = mock_signer.signer();
+    const provider = prov.provider();
+
+    const result = contract.deploy(provider, signer, .{ .satoshis = 1000, .change_address = null });
+    try std.testing.expectError(error.ScriptSizeExceeded, result);
+
+    const rec = errors_mod.last_error.?;
+    try std.testing.expectEqual(@as(usize, limit), rec.limit);
+    try std.testing.expectEqual(@as(usize, limit + 1), rec.actual);
+    try std.testing.expect(std.mem.indexOf(u8, rec.contextSlice(), "OversizedContract.deploy") != null);
+
+    // No broadcast should have happened.
+    try std.testing.expectEqual(@as(usize, 0), prov.getBroadcastedTxs().len);
+}
+
+// ===========================================================================
+// R-6 — SDK consumer support for intent-intrinsic auto-injected witness params
+// (`_prevOutScript_<i>`, `_serialisedOutputs`).
+// ===========================================================================
+
+fn makeIntentWitnessArtifact(
+    allocator: std.mem.Allocator,
+    prev_out_inputs: []const usize,
+    serialised: bool,
+) !types.RunarArtifact {
+    // Build the params JSON list dynamically based on the input args.
+    var params_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer params_buf.deinit(allocator);
+    try params_buf.appendSlice(allocator,
+        \\{"name":"amount","type":"int"},{"name":"_changePKH","type":"Ripemd160"},{"name":"_changeAmount","type":"int"},{"name":"_newAmount","type":"int"},{"name":"txPreimage","type":"SigHashPreimage"}
+    );
+    for (prev_out_inputs) |idx| {
+        var n_buf: [128]u8 = undefined;
+        const n_str = try std.fmt.bufPrint(&n_buf, ",{{\"name\":\"_prevOutScript_{d}\",\"type\":\"ByteString\"}}", .{idx});
+        try params_buf.appendSlice(allocator, n_str);
+    }
+    if (serialised) {
+        try params_buf.appendSlice(allocator,
+            \\,{"name":"_serialisedOutputs","type":"ByteString"}
+        );
+    }
+    const params_json = params_buf.items;
+
+    const head =
+        \\{"contractName":"IntentWitnessTest","version":"1","compilerVersion":"1.0","script":"005100","asm":"",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"move","params":[
+    ;
+    const tail =
+        \\],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+    ;
+    const json = try std.mem.concat(allocator, u8, &[_][]const u8{ head, params_json, tail });
+    defer allocator.free(json);
+    return types.RunarArtifact.fromJson(allocator, json);
+}
+
+test "R-6 — filter excludes auto-injected intent witness params from arg count" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{ 0, 1 }, true);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32,
+        .output_index = 0,
+        .satoshis = 1_000,
+        .script = "005100",
+    });
+
+    try contract.setPrevOutScript(0, "aa");
+    try contract.setPrevOutScript(1, "bb");
+    try contract.setSerialisedOutputs("cc");
+
+    // 1 user arg only — without the filter we'd hit ArgCountMismatch.
+    const args = [_]types.StateValue{.{ .int = 123 }};
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+    var prepared = try contract.prepareCall("move", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    // intent_witness_hex should be non-empty (3 pushes captured).
+    try std.testing.expect(prepared.intent_witness_hex.len > 0);
+}
+
+test "R-6 — filter still rejects real arg count mismatches" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{0}, true);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100",
+    });
+
+    // 2 args when only `amount` is user-facing
+    const args = [_]types.StateValue{ .{ .int = 1 }, .{ .int = 2 } };
+    const result = contract.prepareCall("move", &args, prov.provider(), signer.signer(), null);
+    try std.testing.expectError(error.ArgCountMismatch, result);
+}
+
+test "R-6 — missing `_prevOutScript_<i>` raises WitnessValueMissing" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{0}, false);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100",
+    });
+
+    const args = [_]types.StateValue{.{ .int = 1 }};
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+    const result = contract.prepareCall("move", &args, prov.provider(), signer.signer(), opts);
+    try std.testing.expectError(error.WitnessValueMissing, result);
+
+    const rec = errors_mod.last_witness_error.?;
+    try std.testing.expectEqualStrings("_prevOutScript_0", rec.paramName());
+    try std.testing.expectEqualStrings("move", rec.methodName());
+    try std.testing.expectEqualStrings("IntentWitnessTest", rec.contractName());
+}
+
+test "R-6 — missing `_serialisedOutputs` raises WitnessValueMissing" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{}, true);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100",
+    });
+
+    const args = [_]types.StateValue{.{ .int = 1 }};
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+    const result = contract.prepareCall("move", &args, prov.provider(), signer.signer(), opts);
+    try std.testing.expectError(error.WitnessValueMissing, result);
+
+    const rec = errors_mod.last_witness_error.?;
+    try std.testing.expectEqualStrings("_serialisedOutputs", rec.paramName());
+}
+
+test "R-6 — appends multiple `_prevOutScript_*` pushes in ABI order" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{ 0, 1 }, false);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100",
+    });
+
+    try contract.setPrevOutScript(0, "deadbeef");
+    try contract.setPrevOutScript(1, "cafebabe");
+
+    const args = [_]types.StateValue{.{ .int = 1 }};
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+    var prepared = try contract.prepareCall("move", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    // PUSHDATA for 4 bytes = "04" + data
+    const push0 = "04deadbeef";
+    const push1 = "04cafebabe";
+    const idx0 = std.mem.indexOf(u8, prepared.intent_witness_hex, push0).?;
+    const idx1 = std.mem.indexOf(u8, prepared.intent_witness_hex, push1).?;
+    try std.testing.expect(idx1 > idx0);
+}
+
+test "R-6 — appends `_prevOutScript_*` then `_serialisedOutputs` in ABI order" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{0}, true);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32, .output_index = 0, .satoshis = 1_000, .script = "005100",
+    });
+
+    try contract.setPrevOutScript(0, "11223344");
+    try contract.setSerialisedOutputs("55667788");
+
+    const args = [_]types.StateValue{.{ .int = 1 }};
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+    var prepared = try contract.prepareCall("move", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    const idx_prev = std.mem.indexOf(u8, prepared.intent_witness_hex, "0411223344").?;
+    const idx_serial = std.mem.indexOf(u8, prepared.intent_witness_hex, "0455667788").?;
+    try std.testing.expect(idx_serial > idx_prev);
+}
+
+test "R-6 — setPrevOutScript rejects invalid hex" {
+    const allocator = std.testing.allocator;
+    var artifact = try makeIntentWitnessArtifact(allocator, &[_]usize{0}, false);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    try std.testing.expectError(error.InvalidWitnessHex, contract.setPrevOutScript(0, "not-hex!"));
+    try std.testing.expectError(error.InvalidWitnessHex, contract.setSerialisedOutputs("abc"));
 }

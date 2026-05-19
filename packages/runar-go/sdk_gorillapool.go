@@ -229,6 +229,18 @@ func (p *GorillaPoolProvider) GetUtxos(address string) ([]UTXO, error) {
 			Script:      e.Script,
 		}
 	}
+	// DoS-bound: reject pathological scripts at the provider boundary.
+	for _, u := range utxos {
+		if u.Script == "" {
+			continue
+		}
+		if err := assertScriptHexUnderLimit(
+			u.Script, MaxScriptBytes,
+			fmt.Sprintf("GorillaPoolProvider.GetUtxos(%s)", address),
+		); err != nil {
+			return nil, err
+		}
+	}
 	return utxos, nil
 }
 
@@ -260,12 +272,21 @@ func (p *GorillaPoolProvider) GetContractUtxo(scriptHash string) (*UTXO, error) 
 	}
 
 	first := entries[0]
-	return &UTXO{
+	utxo := &UTXO{
 		Txid:        first.Txid,
 		OutputIndex: first.Vout,
 		Satoshis:    first.Satoshis,
 		Script:      first.Script,
-	}, nil
+	}
+	if utxo.Script != "" {
+		if err := assertScriptHexUnderLimit(
+			utxo.Script, MaxScriptBytes,
+			fmt.Sprintf("GorillaPoolProvider.GetContractUtxo(%s)", scriptHash),
+		); err != nil {
+			return nil, err
+		}
+	}
+	return utxo, nil
 }
 
 // GetNetwork returns the network this provider is connected to.

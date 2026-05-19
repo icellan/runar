@@ -66,7 +66,16 @@ public final class GorillaPoolProvider implements Provider {
         if (resp.statusCode() == 404) return List.of();
         requireOk(resp, "GorillaPool getUtxos");
 
-        return parseUtxoList(resp.body(), "GorillaPool getUtxos");
+        List<UTXO> utxos = parseUtxoList(resp.body(), "GorillaPool getUtxos");
+        // DoS-bound: reject pathological scripts at the provider boundary.
+        for (UTXO u : utxos) {
+            if (u.scriptHex() == null || u.scriptHex().isEmpty()) continue;
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                u.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
+                "GorillaPoolProvider.listUtxos(" + address + ")"
+            );
+        }
+        return utxos;
     }
 
     @Override
@@ -113,6 +122,12 @@ public final class GorillaPoolProvider implements Provider {
         if (out.get("scriptPubKey") instanceof Map<?, ?> sp) {
             Object hex = ((Map<?, ?>) sp).get("hex");
             if (hex instanceof String s) script = s;
+        }
+        if (!script.isEmpty()) {
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                script, InputLimits.MAX_SCRIPT_BYTES,
+                "GorillaPoolProvider.getUtxo(" + txid + ":" + vout + ")"
+            );
         }
         return new UTXO(txid, vout, sats, script);
     }

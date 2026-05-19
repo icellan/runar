@@ -5,6 +5,8 @@
 import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
 import type { TransactionData, UTXO } from '../types.js';
+import { InputLimits } from 'runar-ir-schema';
+import { assertScriptHexUnderLimit } from '../errors.js';
 
 /**
  * In-memory mock provider for unit tests and local development.
@@ -87,11 +89,29 @@ export class MockProvider implements Provider {
   }
 
   async getUtxos(address: string): Promise<UTXO[]> {
-    return this.utxos.get(address) ?? [];
+    const utxos = this.utxos.get(address) ?? [];
+    // DoS-bound: reject pathological scripts from the provider layer BEFORE
+    // they propagate into signature / broadcast paths.
+    for (const u of utxos) {
+      if (u.script) {
+        assertScriptHexUnderLimit(
+          u.script, InputLimits.MAX_SCRIPT_BYTES,
+          `MockProvider.getUtxos(${address})`,
+        );
+      }
+    }
+    return utxos;
   }
 
   async getContractUtxo(scriptHash: string): Promise<UTXO | null> {
-    return this.contractUtxos.get(scriptHash) ?? null;
+    const utxo = this.contractUtxos.get(scriptHash) ?? null;
+    if (utxo && utxo.script) {
+      assertScriptHexUnderLimit(
+        utxo.script, InputLimits.MAX_SCRIPT_BYTES,
+        `MockProvider.getContractUtxo(${scriptHash})`,
+      );
+    }
+    return utxo;
   }
 
   getNetwork(): 'mainnet' | 'testnet' {

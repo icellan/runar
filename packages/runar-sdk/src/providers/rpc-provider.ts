@@ -5,6 +5,8 @@
 import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
 import type { TransactionData, TxOutput, UTXO } from '../types.js';
+import { InputLimits } from 'runar-ir-schema';
+import { assertScriptHexUnderLimit } from '../errors.js';
 
 export interface RPCProviderOptions {
   /** Auto-mine 1 block after broadcast (for regtest). Default: false. */
@@ -111,12 +113,22 @@ export class RPCProvider implements Provider {
       Record<string, unknown>
     >;
 
-    return utxoList.map((u) => ({
+    const utxos = utxoList.map((u) => ({
       txid: u.txid as string,
       outputIndex: u.vout as number,
       satoshis: Math.round((u.amount as number) * 1e8),
       script: u.scriptPubKey as string,
     }));
+    // DoS-bound: reject pathological scripts at the provider boundary.
+    for (const u of utxos) {
+      if (u.script) {
+        assertScriptHexUnderLimit(
+          u.script, InputLimits.MAX_SCRIPT_BYTES,
+          `RPCProvider.getUtxos(${address})`,
+        );
+      }
+    }
+    return utxos;
   }
 
   async getContractUtxo(_scriptHash: string): Promise<UTXO | null> {

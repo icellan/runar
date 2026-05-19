@@ -155,6 +155,11 @@ type PreparedCall struct {
 	// rebuilds the primary unlock from this PreparedCall, otherwise
 	// the witness ends up missing and the verifier preamble fails.
 	groth16WAWitnessHex string
+
+	// Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+	// `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
+	// Empty when the method has no auto-injected intent params.
+	intentWitnessHex string
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,82 @@ public final class AnfInterpreter {
     private AnfInterpreter() {}
 
     // ------------------------------------------------------------------
+    // Witness / mock-preimage context for intent-intrinsic execution
+    // ------------------------------------------------------------------
+
+    /**
+     * Mutable bag of off-chain witness inputs that the AST-level
+     * intent-covenant intrinsics ({@code extractPrevOutputScript},
+     * {@code requireOutputP2PKH}, {@code currentBlockHeight}) desugar
+     * into. Java port of the TS {@code TestContract.setPrevOutScript /
+     * setSerialisedOutputs / setMockPreimage / setMockPreimageBytes}
+     * channel.
+     *
+     * <p>The compiler lowers {@code extractPrevOutputScript(0n, ...)}
+     * into a method parameter named {@code _prevOutScript_0} plus a
+     * {@code hash256(_) === expected} assert; {@code requireOutputP2PKH}
+     * lowers into {@code _serialisedOutputs} plus
+     * {@code hash256(_) === extractOutputHash(txPreimage)} plus a
+     * per-output substring assert; {@code currentBlockHeight} is sugar
+     * for {@code extractLocktime(txPreimage)}.
+     *
+     * <p>Pass a populated {@code WitnessContext} to
+     * {@link #executeStrict(Map, String, Map, Map, List, WitnessContext)}
+     * to make those desugared chains actually evaluate against off-chain
+     * test inputs instead of zero-bytes.
+     */
+    public static final class WitnessContext {
+        private final Map<Integer, byte[]> prevOutScripts = new HashMap<>();
+        private byte[] serialisedOutputs;
+        private final Map<String, BigInteger> mockPreimage = new HashMap<>();
+        private final Map<String, byte[]> mockPreimageBytes = new HashMap<>();
+
+        public WitnessContext() {
+            // Reference defaults match the TS RunarInterpreter._mockPreimage.
+            mockPreimage.put("locktime", BigInteger.ZERO);
+            mockPreimage.put("amount", BigInteger.valueOf(10_000));
+            mockPreimage.put("version", BigInteger.ONE);
+            mockPreimage.put("sequence", BigInteger.valueOf(0xfffffffeL));
+        }
+
+        /** Mirror of {@code TestContract.setPrevOutScript(inputIndex, bytes)}. */
+        public WitnessContext setPrevOutScript(int inputIndex, byte[] bytes) {
+            prevOutScripts.put(inputIndex, bytes == null ? null : bytes.clone());
+            return this;
+        }
+
+        /** Mirror of {@code TestContract.setSerialisedOutputs(bytes)}. */
+        public WitnessContext setSerialisedOutputs(byte[] bytes) {
+            this.serialisedOutputs = bytes == null ? null : bytes.clone();
+            return this;
+        }
+
+        /** Mirror of {@code TestContract.setMockPreimage({ field: value })}. */
+        public WitnessContext setMockPreimage(String field, BigInteger value) {
+            mockPreimage.put(field, value);
+            return this;
+        }
+
+        /** Mirror of {@code TestContract.setMockPreimageBytes({ field: bytes })}. */
+        public WitnessContext setMockPreimageBytes(String field, byte[] bytes) {
+            mockPreimageBytes.put(field, bytes == null ? null : bytes.clone());
+            return this;
+        }
+
+        byte[] prevOutScript(int idx) { return prevOutScripts.get(idx); }
+        boolean hasPrevOutScript(int idx) { return prevOutScripts.containsKey(idx); }
+        byte[] serialisedOutputs() { return serialisedOutputs; }
+        BigInteger mockBigInt(String field, BigInteger fallback) {
+            BigInteger v = mockPreimage.get(field);
+            return v == null ? fallback : v;
+        }
+        byte[] mockBytes(String field, byte[] fallback) {
+            byte[] v = mockPreimageBytes.get(field);
+            return v == null ? fallback : v;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------
 
@@ -86,7 +162,7 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        return run(anf, methodName, currentState, args, constructorArgs, false, null).newState;
+        return run(anf, methodName, currentState, args, constructorArgs, false, null, null).newState;
     }
 
     /**
@@ -105,7 +181,7 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null);
+        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null, null);
         return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
     }
 
@@ -160,7 +236,29 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        Run r = run(anf, methodName, currentState, args, constructorArgs, true, null);
+        Run r = run(anf, methodName, currentState, args, constructorArgs, true, null, null);
+        return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
+    }
+
+    /**
+     * Strict execution with a {@link WitnessContext} carrying off-chain
+     * witness bytes ({@code _prevOutScript_<i>}, {@code _serialisedOutputs})
+     * and mock preimage fields ({@code locktime}, {@code amount}, ...).
+     *
+     * <p>Mirrors the TS reference's
+     * {@code c.setPrevOutScript / c.setSerialisedOutputs /
+     * c.setMockPreimage / c.setMockPreimageBytes} setup channel used to
+     * exercise the four intent-intrinsic fixtures end-to-end.
+     */
+    public static ExecutionResult executeStrict(
+        Map<String, Object> anf,
+        String methodName,
+        Map<String, Object> currentState,
+        Map<String, Object> args,
+        List<Object> constructorArgs,
+        WitnessContext witness
+    ) {
+        Run r = run(anf, methodName, currentState, args, constructorArgs, true, null, witness);
         return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
     }
 
@@ -202,7 +300,7 @@ public final class AnfInterpreter {
                 "executeOnChainAuthoritative: ctx.sighash must be exactly 32 bytes"
             );
         }
-        Run r = run(anf, methodName, currentState, args, constructorArgs, true, ctx);
+        Run r = run(anf, methodName, currentState, args, constructorArgs, true, ctx, null);
         return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
     }
 
@@ -293,7 +391,8 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs,
         boolean strict,
-        OnChainCryptoContext realCrypto
+        OnChainCryptoContext realCrypto,
+        WitnessContext witness
     ) {
         if (anf == null) {
             throw new InterpreterException("AnfInterpreter: anf IR is null");
@@ -349,10 +448,43 @@ public final class AnfInterpreter {
         }
 
         // Method params: skip implicit ones; map by name.
+        // Auto-injected intent-intrinsic params (`_prevOutScript_<i>`,
+        // `_serialisedOutputs`) read from the witness context instead of
+        // `args`. Missing witness bytes raise InterpreterException with
+        // the same "requires witness bytes" sentinel the TS reference uses.
         List<Map<String, Object>> params = listOfObjects(method.get("params"));
         for (Map<String, Object> param : params) {
             String pname = (String) param.get("name");
             if (IMPLICIT_PARAMS.contains(pname)) continue;
+            if (pname != null && pname.startsWith("_prevOutScript_")) {
+                int idx;
+                try {
+                    idx = Integer.parseInt(pname.substring("_prevOutScript_".length()));
+                } catch (NumberFormatException nfe) {
+                    idx = -1;
+                }
+                byte[] bytes = witness == null ? null : witness.prevOutScript(idx);
+                if (bytes == null) {
+                    throw new InterpreterException(
+                        "extractPrevOutputScript(" + idx + ") requires witness bytes. "
+                            + "Call WitnessContext.setPrevOutScript(" + idx
+                            + ", bytes) before invoking the method."
+                    );
+                }
+                env.put(pname, HEX.formatHex(bytes));
+                continue;
+            }
+            if ("_serialisedOutputs".equals(pname)) {
+                byte[] bytes = witness == null ? null : witness.serialisedOutputs();
+                if (bytes == null) {
+                    throw new InterpreterException(
+                        "requireOutputP2PKH requires witness bytes. "
+                            + "Call WitnessContext.setSerialisedOutputs(bytes) before invoking the method."
+                    );
+                }
+                env.put(pname, HEX.formatHex(bytes));
+                continue;
+            }
             if (args.containsKey(pname)) {
                 env.put(pname, args.get(pname));
             }
@@ -362,7 +494,7 @@ public final class AnfInterpreter {
         List<DataOutput> dataOutputs = new ArrayList<>();
         List<DataOutput> rawOutputs = new ArrayList<>();
 
-        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
+        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, methodName);
 
         Map<String, Object> newState = new LinkedHashMap<>();
         newState.putAll(currentState);
@@ -383,13 +515,95 @@ public final class AnfInterpreter {
         List<DataOutput> rawOutputs,
         boolean strict,
         OnChainCryptoContext realCrypto,
+        WitnessContext witness,
         String methodName
+    ) {
+        evalBindings(anf, bindings, env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, methodName, new java.util.HashSet<>());
+    }
+
+    /**
+     * Walk the binding list, propagating the continuation-taint set used
+     * to skip the auto-injected stateful-contract continuation-hash assert
+     * under strict mode. Bindings whose value is a {@code computeStateOutput}
+     * call or {@code get_state_script} ANF node mark the head of the
+     * synthetic continuation-hash subgraph; downstream bindings that consume
+     * a tainted ref inherit the taint. Mirrors the Python reference's
+     * {@code continuation_taint} mechanism.
+     */
+    private static void evalBindings(
+        Map<String, Object> anf,
+        List<Map<String, Object>> bindings,
+        Map<String, Object> env,
+        Map<String, Object> stateDelta,
+        List<DataOutput> dataOutputs,
+        List<DataOutput> rawOutputs,
+        boolean strict,
+        OnChainCryptoContext realCrypto,
+        WitnessContext witness,
+        String methodName,
+        java.util.Set<String> continuationTaint
     ) {
         for (Map<String, Object> binding : bindings) {
             String bindingName = (String) binding.get("name");
-            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName, bindingName);
+            Map<String, Object> valueNode = asObject(binding.get("value"));
+            Object val = evalValue(anf, valueNode, env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, methodName, bindingName, continuationTaint);
             env.put(bindingName, val);
+            if (isContinuationOrigin(valueNode) || refsTainted(valueNode, continuationTaint)) {
+                continuationTaint.add(bindingName);
+            }
         }
+    }
+
+    private static boolean isContinuationOrigin(Map<String, Object> value) {
+        if (value == null) return false;
+        String kind = String.valueOf(value.getOrDefault("kind", ""));
+        if ("call".equals(kind)) {
+            Object f = value.get("func");
+            if ("computeStateOutput".equals(f)
+                || "buildChangeOutput".equals(f)
+                || "buildDataOutput".equals(f)
+                || "buildRawOutput".equals(f)) {
+                return true;
+            }
+        }
+        if ("get_state_script".equals(kind)
+            || "add_output".equals(kind)
+            || "add_raw_output".equals(kind)
+            || "add_data_output".equals(kind)) {
+            return true;
+        }
+        return false;
+    }
+
+    /** Return true if any ref-shaped field of {@code value} names a tainted binding. */
+    private static boolean refsTainted(Map<String, Object> value, java.util.Set<String> taint) {
+        if (value == null || taint.isEmpty()) return false;
+        for (String k : new String[]{"left", "right", "operand", "object", "cond"}) {
+            Object v = value.get(k);
+            if (v instanceof String s && taint.contains(s)) return true;
+        }
+        Object args = value.get("args");
+        if (args instanceof List<?> raw) {
+            for (Object a : raw) {
+                if (a instanceof String s && taint.contains(s)) return true;
+            }
+        }
+        Object v = value.get("value");
+        if (v instanceof String s) {
+            String ref = s.startsWith("@ref:") ? s.substring(5) : s;
+            if (taint.contains(ref)) return true;
+        }
+        for (String k : new String[]{"satoshis", "scriptBytes", "preimage"}) {
+            Object x = value.get(k);
+            if (x instanceof String s && taint.contains(s)) return true;
+        }
+        Object sv = value.get("stateValues");
+        if (sv instanceof List<?> raw) {
+            for (Object a : raw) {
+                if (a instanceof String s && taint.contains(s)) return true;
+            }
+        }
+        return false;
     }
 
     private static Object evalValue(
@@ -401,8 +615,10 @@ public final class AnfInterpreter {
         List<DataOutput> rawOutputs,
         boolean strict,
         OnChainCryptoContext realCrypto,
+        WitnessContext witness,
         String methodName,
-        String bindingName
+        String bindingName,
+        java.util.Set<String> continuationTaint
     ) {
         String kind = String.valueOf(value.getOrDefault("kind", ""));
 
@@ -445,14 +661,14 @@ public final class AnfInterpreter {
                     }
                     return null;
                 }
-                return evalCall(func, argVals, realCrypto);
+                return evalCall(func, argVals, realCrypto, witness);
             }
             case "method_call": {
                 String mname = (String) value.get("method");
                 List<String> argNames = stringList(value.get("args"));
                 List<Object> argVals = new ArrayList<>(argNames.size());
                 for (String n : argNames) argVals.add(env.get(n));
-                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
+                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, methodName);
             }
             case "if": {
                 Object cond = env.get((String) value.get("cond"));
@@ -460,7 +676,7 @@ public final class AnfInterpreter {
                     ? listOfObjects(value.get("then"))
                     : listOfObjects(value.get("else"));
                 Map<String, Object> childEnv = new LinkedHashMap<>(env);
-                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
+                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, methodName, continuationTaint);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
                     return childEnv.get((String) branch.get(branch.size() - 1).get("name"));
@@ -475,7 +691,7 @@ public final class AnfInterpreter {
                 for (long i = 0; i < count; i++) {
                     env.put(iterVar, BigInteger.valueOf(i));
                     Map<String, Object> loopEnv = new LinkedHashMap<>(env);
-                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
+                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, methodName, continuationTaint);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
                         lastVal = loopEnv.get((String) body.get(body.size() - 1).get("name"));
@@ -485,12 +701,30 @@ public final class AnfInterpreter {
             }
             case "assert": {
                 if (strict) {
-                    Object cond = env.get((String) value.get("value"));
+                    String predRef = (String) value.get("value");
+                    // Skip asserts whose predicate transitively derives from
+                    // the auto-injected continuation-hash subgraph
+                    // (computeStateOutput / get_state_script). The on-chain
+                    // VM is the authoritative source for that check; we have
+                    // no script bytes off-chain to make hash256(continuation)
+                    // === extractOutputHash(preimage) hold.
+                    if (predRef != null && continuationTaint.contains(predRef)) {
+                        return null;
+                    }
+                    Object cond = env.get(predRef);
                     if (!isTruthy(cond)) {
                         throw new AssertionFailureException(methodName, bindingName);
                     }
                 }
                 return null;
+            }
+            case "check_preimage": {
+                // On-chain-only: the on-chain script enforces sighash
+                // equality. Off-chain, mock-return TRUE so the wrapping
+                // `assert(check_preimage(...))` in the stateful-contract
+                // prologue doesn't trip strict mode. Real preimage
+                // verification belongs in executeOnChainAuthoritative.
+                return Boolean.TRUE;
             }
             case "update_prop": {
                 String pname = (String) value.get("name");
@@ -553,6 +787,7 @@ public final class AnfInterpreter {
         List<DataOutput> rawOutputs,
         boolean strict,
         OnChainCryptoContext realCrypto,
+        WitnessContext witness,
         String callerMethodName
     ) {
         if (anf == null || methodName == null) return null;
@@ -576,7 +811,7 @@ public final class AnfInterpreter {
                 // Strict-mode failures inside a private helper still report
                 // the public method name the caller invoked. Mirrors how the
                 // TS SDK threads `methodName` through evalMethodCall.
-                evalBindings(anf, body, callEnv, childDelta, dataOutputs, rawOutputs, strict, realCrypto, callerMethodName);
+                evalBindings(anf, body, callEnv, childDelta, dataOutputs, rawOutputs, strict, realCrypto, witness, callerMethodName);
                 stateDelta.putAll(childDelta);
                 // Mirror property mutations back into caller env
                 for (Map.Entry<String, Object> e : childDelta.entrySet()) {
@@ -656,7 +891,7 @@ public final class AnfInterpreter {
     // Built-in calls
     // ------------------------------------------------------------------
 
-    private static Object evalCall(String func, List<Object> args, OnChainCryptoContext realCrypto) {
+    private static Object evalCall(String func, List<Object> args, OnChainCryptoContext realCrypto, WitnessContext witness) {
         switch (func) {
             // Mocked crypto unless real-crypto context is supplied.
             case "checkSig": {
@@ -748,13 +983,49 @@ public final class AnfInterpreter {
             case "mulDiv":     return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(toBigInt(args.get(2)));
             case "percentOf":  return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(BigInteger.valueOf(10000));
 
-            // Preimage extractors that aren't backed by a real preimage in
-            // the simulator return zero-bytes so dependent computations
-            // continue without crashing. Real values are only meaningful
-            // inside the on-chain VM.
-            case "extractOutputHash":
+            // Preimage extractors. When a WitnessContext is supplied, read
+            // the mock preimage fields from it (mirroring the TS reference's
+            // `_mockPreimage` / `_mockPreimageBytes`). Otherwise fall back
+            // to the same zero / default values the TS interpreter emits.
+            case "extractLocktime":
+                return witness != null
+                    ? witness.mockBigInt("locktime", BigInteger.ZERO)
+                    : BigInteger.ZERO;
             case "extractAmount":
-                return repeatHex("00", 32);
+                return witness != null
+                    ? witness.mockBigInt("amount", BigInteger.valueOf(10_000))
+                    : BigInteger.valueOf(10_000);
+            case "extractVersion":
+                return witness != null
+                    ? witness.mockBigInt("version", BigInteger.ONE)
+                    : BigInteger.ONE;
+            case "extractSequence":
+                return witness != null
+                    ? witness.mockBigInt("sequence", BigInteger.valueOf(0xfffffffeL))
+                    : BigInteger.valueOf(0xfffffffeL);
+            case "extractInputIndex":
+                return BigInteger.ZERO;
+            case "extractSigHashType":
+                return BigInteger.valueOf(0x41);
+            case "extractOutputHash":
+            case "extractOutputs":
+                return HEX.formatHex(
+                    witness != null ? witness.mockBytes("outputHash", new byte[32]) : new byte[32]
+                );
+            case "extractHashPrevouts":
+                return HEX.formatHex(
+                    witness != null ? witness.mockBytes("hashPrevouts", new byte[32]) : new byte[32]
+                );
+            case "extractHashSequence":
+                return HEX.formatHex(
+                    witness != null ? witness.mockBytes("hashSequence", new byte[32]) : new byte[32]
+                );
+            case "extractOutpoint":
+                return HEX.formatHex(
+                    witness != null ? witness.mockBytes("outpoint", new byte[36]) : new byte[36]
+                );
+            case "extractScriptCode":
+                return "";
 
             // Post-quantum / proof-system primitives — delegate to MockCrypto
             // so they raise UnsupportedOperationException loudly. Never silently

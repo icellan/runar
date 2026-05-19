@@ -85,4 +85,50 @@ class EnvelopeInteropTest {
             assertEquals(reasonWire, r.reason.wire, "rejection " + reasonWire);
         }
     }
+
+    /**
+     * RFC 8785 §3.2.2.2 — canonical_json MUST reject malformed Unicode
+     * (lone surrogate). See audits/canonical-json-rfc8785-parity.md §3 rec 6
+     * (D6). Today no tier rejects; this test pins the desired behaviour and
+     * gates the future fix.
+     *
+     * Inputs are reconstructed from a UTF-16 code-unit array so the JSON
+     * parser's per-tier lone-surrogate handling does not mask the
+     * canonical_json behaviour we are gating.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void canonicalJsonRejectionVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        List<Map<String, Object>> rvs =
+            (List<Map<String, Object>>) fixture.get("canonical_json_rejection_vectors");
+        if (rvs == null || rvs.isEmpty()) {
+            throw new AssertionError("canonical_json_rejection_vectors missing or empty");
+        }
+        for (Map<String, Object> v : rvs) {
+            String id = (String) v.get("_vector_id");
+            String key = (String) v.get("input_object_key");
+            List<Object> units = (List<Object>) v.get("input_value_utf16_units");
+            // Java `char` is a UTF-16 code unit; construct the bad String
+            // from the raw code units, lone surrogates and all.
+            char[] chars = new char[units.size()];
+            for (int i = 0; i < units.size(); i++) {
+                chars[i] = (char) ((Number) units.get(i)).intValue();
+            }
+            String bad = new String(chars);
+            Map<String, Object> input = new java.util.LinkedHashMap<>();
+            input.put(key, bad);
+            Throwable caught = null;
+            String got = null;
+            try {
+                got = Envelope.canonicalJson(input);
+            } catch (Throwable t) {
+                caught = t;
+            }
+            if (caught == null) {
+                throw new AssertionError(
+                    "vector " + id + ": canonical_json MUST reject lone surrogate; got " + got);
+            }
+        }
+    }
 }

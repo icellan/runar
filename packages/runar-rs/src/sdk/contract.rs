@@ -15,6 +15,7 @@ use super::deployment::{
 use super::calling::{build_call_transaction_ext, CallTxOptions, ContractOutput, AdditionalContractInput};
 use super::provider::Provider;
 use super::signer::Signer;
+use super::errors::{assert_script_hex_under_limit, WitnessValueMissingError, MAX_SCRIPT_BYTES};
 use super::anf_interpreter;
 use super::ordinals::{Inscription, build_inscription_envelope, parse_inscription_envelope};
 use crate::prelude::hash160 as compute_hash160;
@@ -22,6 +23,25 @@ use crate::prelude::hash160 as compute_hash160;
 /// Convert a raw transaction hex string to a BSV SDK Transaction object for broadcasting.
 fn hex_to_bsv_tx(hex: &str) -> Result<BsvTransaction, String> {
     BsvTransaction::from_hex(hex).map_err(|e| format!("hex_to_bsv_tx: {}", e))
+}
+
+/// Normalize a hex-string witness input (optional `0x` prefix, any casing)
+/// into a lowercase hex string suitable for `encode_push_data`. Returns an
+/// error for odd-length or non-hex inputs.
+fn normalize_witness_hex(s: &str) -> Result<String, String> {
+    let trimmed = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    if trimmed.len() % 2 != 0 {
+        return Err(format!(
+            "witness value: hex string must have even length (got {})",
+            trimmed.len()
+        ));
+    }
+    for c in trimmed.chars() {
+        if !c.is_ascii_hexdigit() {
+            return Err("witness value: invalid hex characters".to_string());
+        }
+    }
+    Ok(trimmed.to_ascii_lowercase())
 }
 
 /// Runtime wrapper for a compiled Rúnar contract.
@@ -43,6 +63,15 @@ pub struct RunarContract {
     current_utxo: Option<Utxo>,
     connected_provider: Option<Box<dyn Provider>>,
     connected_signer: Option<Box<dyn Signer>>,
+    /// Witness values for intent-covenant intrinsic auto-injected params.
+    /// `_prevOutScript_<i>` values are stored per-input-index in
+    /// `prev_out_scripts`; `_serialisedOutputs` is stored in
+    /// `serialised_outputs`. Both are lowercase hex strings (normalized in
+    /// the setters). Read by the call-builder when assembling the unlocking
+    /// script for methods that use `extractPrevOutputScript` /
+    /// `requireOutputP2PKH`.
+    prev_out_scripts: HashMap<usize, String>,
+    serialised_outputs: Option<String>,
 }
 
 impl std::fmt::Debug for RunarContract {
@@ -95,6 +124,8 @@ impl RunarContract {
             current_utxo: None,
             connected_provider: None,
             connected_signer: None,
+            prev_out_scripts: HashMap::new(),
+            serialised_outputs: None,
         }
     }
 
@@ -116,6 +147,76 @@ impl RunarContract {
     pub fn connect(&mut self, provider: Box<dyn Provider>, signer: Box<dyn Signer>) {
         self.connected_provider = Some(provider);
         self.connected_signer = Some(signer);
+    }
+
+    // -----------------------------------------------------------------------
+    // Intent-intrinsic witness values
+    // -----------------------------------------------------------------------
+
+    /// Supply the prev-output locking-script witness for input `input_index`.
+    /// Required for methods that call `extractPrevOutputScript(input_index)`,
+    /// which the compiler lowers into an auto-injected
+    /// `_prevOutScript_<input_index>` ABI param.
+    pub fn set_prev_out_script(&mut self, input_index: usize, bytes_hex: &str) -> Result<(), String> {
+        let normalized = normalize_witness_hex(bytes_hex)?;
+        self.prev_out_scripts.insert(input_index, normalized);
+        Ok(())
+    }
+
+    /// `&[u8]`-input convenience overload of `set_prev_out_script`.
+    pub fn set_prev_out_script_bytes(&mut self, input_index: usize, bytes: &[u8]) {
+        let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        self.prev_out_scripts.insert(input_index, hex);
+    }
+
+    /// Supply the serialised-outputs witness for the current call. Required
+    /// for methods that call `requireOutputP2PKH(...)`, which the compiler
+    /// lowers into an auto-injected `_serialisedOutputs` ABI param.
+    pub fn set_serialised_outputs(&mut self, bytes_hex: &str) -> Result<(), String> {
+        let normalized = normalize_witness_hex(bytes_hex)?;
+        self.serialised_outputs = Some(normalized);
+        Ok(())
+    }
+
+    /// `&[u8]`-input convenience overload of `set_serialised_outputs`.
+    pub fn set_serialised_outputs_bytes(&mut self, bytes: &[u8]) {
+        let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        self.serialised_outputs = Some(hex);
+    }
+
+    /// Build the trailing witness-hex for the auto-injected intent-intrinsic
+    /// params of a method, in ABI order (`_prevOutScript_*` first, then
+    /// `_serialisedOutputs`). Returns `WitnessValueMissingError` (boxed into
+    /// the SDK's `String` error currency) for any auto-injected param the
+    /// caller hasn't supplied via `set_prev_out_script` /
+    /// `set_serialised_outputs`.
+    fn build_intent_witness_hex(&self, method: &AbiMethod) -> Result<String, String> {
+        let mut hex_out = String::new();
+        for p in &method.params {
+            if let Some(rest) = p.name.strip_prefix("_prevOutScript_") {
+                let idx: usize = rest.parse().map_err(|_| {
+                    format!("malformed auto-injected param name '{}'", p.name)
+                })?;
+                let val = self.prev_out_scripts.get(&idx).ok_or_else(|| {
+                    String::from(WitnessValueMissingError {
+                        param_name: p.name.clone(),
+                        method_name: method.name.clone(),
+                        contract_name: self.artifact.contract_name.clone(),
+                    })
+                })?;
+                hex_out.push_str(&encode_push_data(val));
+            } else if p.name == "_serialisedOutputs" {
+                let val = self.serialised_outputs.as_ref().ok_or_else(|| {
+                    String::from(WitnessValueMissingError {
+                        param_name: p.name.clone(),
+                        method_name: method.name.clone(),
+                        contract_name: self.artifact.contract_name.clone(),
+                    })
+                })?;
+                hex_out.push_str(&encode_push_data(val));
+            }
+        }
+        Ok(hex_out)
     }
 
     /// Deploy using the connected provider and signer.
@@ -222,6 +323,12 @@ impl RunarContract {
             .as_deref()
             .unwrap_or(&address);
         let locking_script = self.get_locking_script();
+
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        assert_script_hex_under_limit(
+            &locking_script, MAX_SCRIPT_BYTES,
+            &format!("{}.deploy", self.artifact.contract_name),
+        )?;
 
         // Fetch fee rate and funding UTXOs
         let fee_rate = provider.get_fee_rate()?;
@@ -375,15 +482,23 @@ impl RunarContract {
         // _changePKH and _changeAmount). The SDK auto-computes these.
         let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
         let method_needs_new_amount = method.params.iter().any(|p| p.name == "_newAmount");
+        // Drop auto-injected continuation params AND intent-intrinsic witness
+        // params (`_prevOutScript_<i>`, `_serialisedOutputs`) from the
+        // user-facing arg count check. Witness values come from
+        // set_prev_out_script / set_serialised_outputs, not from the args slice.
+        let is_auto_injected_witness_param = |name: &str| -> bool {
+            name.starts_with("_prevOutScript_") || name == "_serialisedOutputs"
+        };
         let user_params: Vec<&AbiParam> = if is_stateful {
             method.params.iter().filter(|p| {
                 p.param_type != "SigHashPreimage"
                     && p.name != "_changePKH"
                     && p.name != "_changeAmount"
                     && p.name != "_newAmount"
+                    && !is_auto_injected_witness_param(&p.name)
             }).collect()
         } else {
-            method.params.iter().collect()
+            method.params.iter().filter(|p| !is_auto_injected_witness_param(&p.name)).collect()
         };
 
         if user_params.len() != args.len() {
@@ -400,6 +515,12 @@ impl RunarContract {
                 .to_string()
         })?
         .clone();
+
+        // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
+        assert_script_hex_under_limit(
+            &current_utxo.script, MAX_SCRIPT_BYTES,
+            &format!("{}.call({})", self.artifact.contract_name, method_name),
+        )?;
 
         let address = signer.get_address()?;
         let change_address = options
@@ -470,6 +591,13 @@ impl RunarContract {
             String::new()
         };
 
+        // Pre-resolve intent-intrinsic witness hex (returns WitnessValueMissingError
+        // — converted into the SDK's String error currency — if a
+        // `_prevOutScript_<i>` or `_serialisedOutputs` param wasn't set on the
+        // contract). Resolving up-front means the error is raised BEFORE any
+        // signing / broadcast work, mirroring the script-size guard above.
+        let witness_hex = self.build_intent_witness_hex(&method)?;
+
         // -------------------------------------------------------------------
         // Terminal method path: exact outputs, no funding, no change
         // -------------------------------------------------------------------
@@ -479,7 +607,7 @@ impl RunarContract {
                 options, terminal_outputs, &current_utxo,
                 is_stateful, needs_op_push_tx, method_needs_change,
                 &sig_indices, &prevouts_indices, preimage_index,
-                &method_selector_hex, &change_pkh_hex,
+                &method_selector_hex, &change_pkh_hex, &witness_hex,
             );
         }
 
@@ -487,15 +615,24 @@ impl RunarContract {
         // Non-terminal path
         // -------------------------------------------------------------------
 
+        // Initial unlocking script (with placeholders). Intent-witness hex is
+        // suffixed so size estimation accounts for the witness pushes; the real
+        // ABI-correct unlock is rebuilt by build_stateful_unlock below for
+        // stateful methods.
         let unlocking_script = if needs_op_push_tx {
             // Prepend placeholder prefix (optionally _codePart + _opPushTxSig) before user args
             format!(
-                "{}{}",
+                "{}{}{}",
                 self.build_stateful_prefix(&"00".repeat(72), method_needs_change),
-                self.build_unlocking_script(method_name, &resolved_args)?
+                self.build_unlocking_script(method_name, &resolved_args)?,
+                witness_hex,
             )
         } else {
-            self.build_unlocking_script(method_name, &resolved_args)?
+            format!(
+                "{}{}",
+                self.build_unlocking_script(method_name, &resolved_args)?,
+                witness_hex,
+            )
         };
 
         let mut new_locking_script: Option<String> = None;
@@ -578,6 +715,13 @@ impl RunarContract {
                 }
             }
             new_locking_script = Some(self.get_locking_script());
+            // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+            if let Some(ref nls) = new_locking_script {
+                assert_script_hex_under_limit(
+                    nls, MAX_SCRIPT_BYTES,
+                    &format!("{}.call({}).continuation", self.artifact.contract_name, method_name),
+                )?;
+            }
         }
 
         // Fetch fee rate and funding UTXOs for all contract types.
@@ -615,15 +759,17 @@ impl RunarContract {
                 }).collect()
             });
 
-        // Build placeholder unlocking scripts for merge inputs
+        // Build placeholder unlocking scripts for merge inputs (witness_hex
+        // suffixed for sizing — build_stateful_unlock builds the real scripts).
         let extra_unlock_placeholders: Vec<String> = extra_contract_utxos.iter().enumerate().map(|(i, _)| {
             let args_for_placeholder = resolved_per_input_args.as_ref()
                 .and_then(|v| v.get(i))
                 .unwrap_or(&resolved_args);
             format!(
-                "{}{}",
+                "{}{}{}",
                 self.build_stateful_prefix(&"00".repeat(72), method_needs_change),
                 self.build_unlocking_script(method_name, args_for_placeholder).unwrap_or_default(),
+                witness_hex,
             )
         }).collect();
 
@@ -754,12 +900,13 @@ impl RunarContract {
                 prefix.push_str(&encode_push_data(&op_sig));
 
                 let unlock = format!(
-                    "{}{}{}{}{}{}",
+                    "{}{}{}{}{}{}{}",
                     prefix,
                     user_args_hex,
                     change_hex,
                     new_amount_hex,
                     encode_push_data(&preimage),
+                    witness_hex,
                     method_selector_hex,
                 );
 
@@ -944,6 +1091,7 @@ impl RunarContract {
             has_multi_output,
             contract_outputs: prepared_contract_outputs,
             code_sep_idx,
+            intent_witness_hex: witness_hex,
         })
     }
 
@@ -982,12 +1130,13 @@ impl RunarContract {
                 new_amount_hex.push_str(&encode_arg(&SdkValue::Int(prepared.new_amount)));
             }
             format!(
-                "{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}",
                 self.build_stateful_prefix(&prepared.op_push_tx_sig, prepared.method_needs_change),
                 args_hex,
                 change_hex,
                 new_amount_hex,
                 encode_push_data(&prepared.preimage),
+                prepared.intent_witness_hex,
                 prepared.method_selector_hex,
             )
         } else if prepared.needs_op_push_tx {
@@ -1067,19 +1216,27 @@ impl RunarContract {
         preimage_index: Option<usize>,
         method_selector_hex: &str,
         change_pkh_hex: &str,
+        witness_hex: &str,
     ) -> Result<PreparedCall, String> {
         let term_code_sep_idx = self.get_code_sep_index(self.find_method_index(method_name));
 
-        // Build placeholder unlocking script
+        // Build placeholder unlocking script (witness_hex suffixed for sizing
+        // — the real ABI-correct unlock is built by build_unlock below for
+        // stateful methods).
         // Terminal never needs code part (needsCodePart = false)
         let term_unlock_script = if needs_op_push_tx {
             format!(
-                "{}{}",
+                "{}{}{}",
                 self.build_stateful_prefix(&"00".repeat(72), false),
-                self.build_unlocking_script(method_name, resolved_args)?
+                self.build_unlocking_script(method_name, resolved_args)?,
+                witness_hex,
             )
         } else {
-            self.build_unlocking_script(method_name, resolved_args)?
+            format!(
+                "{}{}",
+                self.build_unlocking_script(method_name, resolved_args)?,
+                witness_hex,
+            )
         };
 
         // Build raw transaction: single input (contract UTXO), exact outputs
@@ -1122,11 +1279,12 @@ impl RunarContract {
                 }
                 // Terminal never needs code part
                 let unlock = format!(
-                    "{}{}{}{}{}",
+                    "{}{}{}{}{}{}",
                     encode_push_data(&op_sig),
                     args_hex,
                     change_hex,
                     encode_push_data(&preimage),
+                    witness_hex,
                     method_selector_hex,
                 );
                 Ok((unlock, op_sig, preimage))
@@ -1217,6 +1375,7 @@ impl RunarContract {
             has_multi_output: false,
             contract_outputs: vec![],
             code_sep_idx: term_code_sep_idx,
+            intent_witness_hex: witness_hex.to_string(),
         })
     }
 

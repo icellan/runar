@@ -492,10 +492,22 @@ fn foldValue(allocator: Allocator, value: ANFValue, env: *ConstEnv) anyerror!ANF
             return .{ .loop = new_loop };
         },
 
-        // All other kinds (assert, update_prop, get_state_script, check_preimage,
-        // deserialize_state, add_output, add_raw_output, array_literal, legacy variants)
-        // pass through unchanged.
-        else => return value,
+        // F-003: every remaining variant is enumerated explicitly (no `else`
+        // arm) so that adding a new ANFValue variant becomes a Zig compile
+        // error here instead of silently passing through and corrupting fold
+        // output. Mirrors the `UnknownANFKindError` default in TS
+        // `optimizer/constant-fold.ts#foldValue`.
+        .assert,
+        .update_prop,
+        .get_state_script,
+        .check_preimage,
+        .deserialize_state,
+        .add_output,
+        .add_raw_output,
+        .add_data_output,
+        .array_literal,
+        .raw_script,
+        => return value,
     }
 }
 

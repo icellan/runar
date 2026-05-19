@@ -4,6 +4,7 @@ use bsv::transaction::Transaction as BsvTransaction;
 use serde_json::Value;
 use super::types::{TransactionData, TxInput, TxOutput, Utxo};
 use super::provider::Provider;
+use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 
 // ---------------------------------------------------------------------------
 // WhatsOnChainProvider
@@ -115,7 +116,7 @@ impl Provider for WhatsOnChainProvider {
         let entries: Vec<Value> = serde_json::from_str(&body)
             .map_err(|e| format!("WoC getUtxos parse: {}", e))?;
 
-        Ok(entries
+        let utxos: Vec<Utxo> = entries
             .iter()
             .map(|e| Utxo {
                 txid: e["tx_hash"].as_str().unwrap_or("").to_string(),
@@ -123,7 +124,17 @@ impl Provider for WhatsOnChainProvider {
                 satoshis: e["value"].as_i64().unwrap_or(0),
                 script: String::new(), // WoC doesn't return script in UTXO list
             })
-            .collect())
+            .collect();
+        // DoS-bound: defensive — WoC currently returns empty scripts but a
+        // future enriched response must not bypass MAX_SCRIPT_BYTES.
+        for u in &utxos {
+            if u.script.is_empty() { continue; }
+            assert_script_hex_under_limit(
+                &u.script, MAX_SCRIPT_BYTES,
+                &format!("WhatsOnChainProvider.get_utxos({})", address),
+            )?;
+        }
+        Ok(utxos)
     }
 
     fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String> {
@@ -147,12 +158,19 @@ impl Provider for WhatsOnChainProvider {
         }
 
         let first = &entries[0];
-        Ok(Some(Utxo {
+        let utxo = Utxo {
             txid: first["tx_hash"].as_str().unwrap_or("").to_string(),
             output_index: first["tx_pos"].as_u64().unwrap_or(0) as u32,
             satoshis: first["value"].as_i64().unwrap_or(0),
             script: String::new(),
-        }))
+        };
+        if !utxo.script.is_empty() {
+            assert_script_hex_under_limit(
+                &utxo.script, MAX_SCRIPT_BYTES,
+                &format!("WhatsOnChainProvider.get_contract_utxo({})", script_hash),
+            )?;
+        }
+        Ok(Some(utxo))
     }
 
     fn get_network(&self) -> &str {

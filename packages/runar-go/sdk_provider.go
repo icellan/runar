@@ -122,15 +122,37 @@ func (m *MockProvider) Broadcast(tx *transaction.Transaction) (string, error) {
 }
 
 // GetUtxos returns UTXOs for the given address from the mock store.
+// DoS-bound: rejects pathological UTXO scripts BEFORE they enter the SDK.
 func (m *MockProvider) GetUtxos(address string) ([]UTXO, error) {
-	return m.utxos[address], nil
+	utxos := m.utxos[address]
+	for _, u := range utxos {
+		if u.Script == "" {
+			continue
+		}
+		if err := assertScriptHexUnderLimit(
+			u.Script, MaxScriptBytes,
+			fmt.Sprintf("MockProvider.GetUtxos(%s)", address),
+		); err != nil {
+			return nil, err
+		}
+	}
+	return utxos, nil
 }
 
 // GetContractUtxo returns a UTXO by script hash from the mock store.
+// DoS-bound: rejects pathological UTXO scripts BEFORE they enter the SDK.
 func (m *MockProvider) GetContractUtxo(scriptHash string) (*UTXO, error) {
 	utxo, ok := m.contractUtxos[scriptHash]
 	if !ok {
 		return nil, nil
+	}
+	if utxo != nil && utxo.Script != "" {
+		if err := assertScriptHexUnderLimit(
+			utxo.Script, MaxScriptBytes,
+			fmt.Sprintf("MockProvider.GetContractUtxo(%s)", scriptHash),
+		); err != nil {
+			return nil, err
+		}
 	}
 	return utxo, nil
 }

@@ -19,6 +19,7 @@ import type {
   StackMethod,
   StackOp,
 } from '../ir/index.js';
+import { UnknownANFKindError } from 'runar-ir-schema';
 import { emitVerifySLHDSA } from './slh-dsa-codegen.js';
 import { emitVerifyWOTS } from './wots-codegen.js';
 import { emitVerifyRabinSig } from './rabin-codegen.js';
@@ -352,6 +353,10 @@ function collectRefs(value: ANFValue): string[] {
       // No operand refs — the raw byte span has no SSA inputs visible to
       // the optimizer. Stack effect is declared via in_arity / out_arity.
       break;
+    default: {
+      const unknown = value as { kind: string };
+      throw new UnknownANFKindError(unknown.kind, 'stack-lower.collectRefs');
+    }
   }
 
   return refs;
@@ -1046,6 +1051,10 @@ class LoweringContext {
       case 'raw_script':
         this.lowerRawScript(name, value.bytes, value.in_arity, value.out_arity);
         break;
+      default: {
+        const unknown = value as { kind: string };
+        throw new UnknownANFKindError(unknown.kind, 'stack-lower.lowerBinding');
+      }
     }
   }
 

@@ -860,10 +860,38 @@ class _TypeChecker:
         # stable auto-injected witness-param name (extractPrevOutputScript) or
         # a constant byte offset (requireOutputP2PKH).
         if func_name in ("extractPrevOutputScript", "requireOutputP2PKH"):
-            if len(args) >= 1 and not isinstance(args[0], BigIntLiteral):
-                self._add_error(
-                    f"{func_name}() argument 1 (index) must be an integer literal"
-                )
+            if len(args) >= 1:
+                idx_lit: BigIntLiteral | None = None
+                if isinstance(args[0], BigIntLiteral):
+                    idx_lit = args[0]
+                # Accept `-N` (UnaryExpr "-" over BigIntLiteral) so the bounds
+                # check below produces a clear "must be >= 0" rather than the
+                # misleading "must be an integer literal" message.
+                elif (
+                    isinstance(args[0], UnaryExpr)
+                    and args[0].op == "-"
+                    and isinstance(args[0].operand, BigIntLiteral)
+                ):
+                    idx_lit = BigIntLiteral(value=-args[0].operand.value)
+                if idx_lit is None:
+                    self._add_error(
+                        f"{func_name}() argument 1 (index) must be an integer literal"
+                    )
+                else:
+                    # R-2: bound the index literal. For requireOutputP2PKH, the
+                    # emitted Stack-IR computes byte-offset = idx * 34; require
+                    # 0 <= idx <= 1000 to keep the offset well under script-int
+                    # max and to reject obvious nonsense (e.g. negative or
+                    # astronomically large).
+                    idx = idx_lit.value
+                    if idx < 0:
+                        self._add_error(
+                            f"{func_name}() argument 1 (index) must be >= 0; got {idx}"
+                        )
+                    if func_name == "requireOutputP2PKH" and idx > 1000:
+                        self._add_error(
+                            f"requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got {idx} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)"
+                        )
 
         # extractPrevOutputScript variable-arity special case (2-arg full-hash
         # or 3-arg prefix-hash form). Validates types + literal-only on the
@@ -888,6 +916,22 @@ class _TypeChecker:
                     self._add_error(
                         "extractPrevOutputScript() argument 3 (prefixLen) must be an integer literal when supplied"
                     )
+                else:
+                    # R-4: bound the prefixLen literal. The intrinsic hashes
+                    # substr(witness, 0, prefixLen) and compares against a
+                    # 32-byte SHA-256 hash. prefixLen < 32 is suspicious (the
+                    # prefix bytes don't even cover a hash-sized chunk).
+                    # prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES — wouldn't
+                    # fit in a legal Bitcoin Script anyway.
+                    n = args[2].value
+                    if n < 32:
+                        self._add_error(
+                            f"extractPrevOutputScript() argument 3 (prefixLen) must be >= 32 (the hash assertion compares a 32-byte SHA-256); got {n}"
+                        )
+                    if n > 4 * 1024 * 1024:
+                        self._add_error(
+                            f"extractPrevOutputScript() argument 3 (prefixLen) must be <= MAX_SCRIPT_BYTES (4 MiB); got {n}"
+                        )
                 self._infer_expr_type(args[2], env)
             return sig.return_type
 

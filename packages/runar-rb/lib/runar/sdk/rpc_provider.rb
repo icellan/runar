@@ -4,6 +4,7 @@ require 'net/http'
 require 'json'
 require_relative 'provider'
 require_relative 'types'
+require_relative 'errors'
 
 # RPCProvider — JSON-RPC provider for Bitcoin nodes.
 #
@@ -87,7 +88,7 @@ module Runar
       # @return [Array<Utxo>]
       def get_utxos(address)
         result = Array(rpc_call('listunspent', 0, 9_999_999, [address]))
-        result.map do |u|
+        utxos = result.map do |u|
           Utxo.new(
             txid: u['txid'],
             output_index: u['vout'].to_i,
@@ -95,6 +96,16 @@ module Runar
             script: u.fetch('scriptPubKey', '')
           )
         end
+        # DoS-bound: reject pathological scripts at the provider boundary.
+        utxos.each do |u|
+          next if u.script.nil? || u.script.empty?
+
+          SDK.assert_script_hex_under_limit(
+            u.script, SDK::MAX_SCRIPT_BYTES,
+            "RPCProvider.get_utxos(#{address})"
+          )
+        end
+        utxos
       end
 
       # Script-hash UTXO lookup via scantxoutset (best-effort).

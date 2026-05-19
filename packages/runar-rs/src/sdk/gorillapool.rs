@@ -11,6 +11,7 @@ use bsv::transaction::Transaction as BsvTransaction;
 use serde_json::Value;
 use super::types::{TransactionData, TxInput, TxOutput, Utxo};
 use super::provider::Provider;
+use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 
 // ---------------------------------------------------------------------------
 // Ordinal-specific response types
@@ -324,7 +325,7 @@ impl Provider for GorillaPoolProvider {
         let entries: Vec<Value> = serde_json::from_str(&body)
             .map_err(|e| format!("GorillaPool getUtxos parse: {}", e))?;
 
-        Ok(entries
+        let utxos: Vec<Utxo> = entries
             .iter()
             .map(|e| Utxo {
                 txid: e["txid"].as_str().unwrap_or("").to_string(),
@@ -332,7 +333,16 @@ impl Provider for GorillaPoolProvider {
                 satoshis: e["satoshis"].as_i64().unwrap_or(0),
                 script: e["script"].as_str().unwrap_or("").to_string(),
             })
-            .collect())
+            .collect();
+        // DoS-bound: reject pathological scripts at the provider boundary.
+        for u in &utxos {
+            if u.script.is_empty() { continue; }
+            assert_script_hex_under_limit(
+                &u.script, MAX_SCRIPT_BYTES,
+                &format!("GorillaPoolProvider.get_utxos({})", address),
+            )?;
+        }
+        Ok(utxos)
     }
 
     fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String> {
@@ -354,12 +364,19 @@ impl Provider for GorillaPoolProvider {
         }
 
         let first = &entries[0];
-        Ok(Some(Utxo {
+        let utxo = Utxo {
             txid: first["txid"].as_str().unwrap_or("").to_string(),
             output_index: first["vout"].as_u64().unwrap_or(0) as u32,
             satoshis: first["satoshis"].as_i64().unwrap_or(0),
             script: first["script"].as_str().unwrap_or("").to_string(),
-        }))
+        };
+        if !utxo.script.is_empty() {
+            assert_script_hex_under_limit(
+                &utxo.script, MAX_SCRIPT_BYTES,
+                &format!("GorillaPoolProvider.get_contract_utxo({})", script_hash),
+            )?;
+        }
+        Ok(Some(utxo))
     }
 
     fn get_network(&self) -> &str {

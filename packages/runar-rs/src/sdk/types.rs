@@ -589,6 +589,10 @@ pub struct PreparedCall {
     pub(crate) has_multi_output: bool,
     pub(crate) contract_outputs: Vec<ContractOutputEntry>,
     pub(crate) code_sep_idx: i64,
+    /// Pre-resolved intent-intrinsic witness hex (PUSHDATA-encoded
+    /// `_prevOutScript_*` followed by `_serialisedOutputs`, ABI order).
+    /// Empty when the method has no auto-injected intent params.
+    pub(crate) intent_witness_hex: String,
 }
 
 /// A contract output entry stored in PreparedCall (script + satoshis).

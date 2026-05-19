@@ -34,6 +34,7 @@ import type {
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import type { MethodNode } from '../ir/runar-ast.js';
+import { UnknownANFKindError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1839,8 +1840,12 @@ function maxTempIndex(bindings: ANFBinding[]): number {
 
 /**
  * Remap temp references in an ANF value according to a name mapping.
+ *
+ * Exported for the F-003 regression test in `__tests__/unknown-anf-kind.test.ts`
+ * which drives the dispatch with a synthetic ANF kind to verify it throws
+ * `UnknownANFKindError` instead of silently dropping the binding.
  */
-function remapValueRefs(value: ANFValue, map: Record<string, string>): ANFValue {
+export function remapValueRefs(value: ANFValue, map: Record<string, string>): ANFValue {
   const r = (ref: string) => map[ref] || ref;
   switch (value.kind) {
     case 'load_param':
@@ -1881,8 +1886,15 @@ function remapValueRefs(value: ANFValue, map: Record<string, string>): ANFValue 
       return { ...value, cond: r(value.cond) };
     case 'loop':
       return value;
-    default:
+    case 'array_literal':
+      return { ...value, elements: value.elements.map(r) };
+    case 'raw_script':
+      // Opaque byte span — no SSA inputs to remap.
       return value;
+    default: {
+      const unknown = value as { kind: string };
+      throw new UnknownANFKindError(unknown.kind, 'anf-lower.remapValueRefs');
+    }
   }
 }
 

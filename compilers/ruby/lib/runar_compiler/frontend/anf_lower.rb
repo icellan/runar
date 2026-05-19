@@ -2013,8 +2013,21 @@ module RunarCompiler
         new_v.satoshis = r.call(value.satoshis)
         new_v.script_bytes = r.call(value.script_bytes)
         new_v
-      else
+      when "loop"
+        # No top-level refs to remap (body is walked by the caller).
         value
+      when "array_literal"
+        new_v = _clone_anf_value(value)
+        new_v.elements = (value.elements || []).map { |e| r.call(e) }
+        new_v
+      when "raw_script"
+        # Opaque byte span -- no SSA operand refs to remap.
+        value
+      else
+        # Exhaustiveness guard. If a new ANFValue variant is added without
+        # wiring it through this dispatch, fail loudly so the regression is
+        # caught at the first call site instead of corrupting downstream IR.
+        raise ::RunarCompiler::IR::UnknownANFKindError.new(value.kind, "anf-lower.remapValueRefs")
       end
     end
     private_class_method :_remap_value_refs

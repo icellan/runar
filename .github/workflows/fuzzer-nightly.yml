@@ -1,0 +1,194 @@
+name: Fuzzer nightly
+
+# Item 7 — nightly cross-tier ANF differential fuzz. Generates 100 random
+# valid ANF programs (deterministic; varies per-run via GitHub's
+# `github.run_id` for unique coverage over time), feeds them through every
+# tier's `--ir --hex` pipeline, and fails the job on any byte-level hex
+# divergence across tiers or any compiler crash that doesn't reproduce on
+# every other tier.
+#
+# Triggers:
+#   - midnight UTC daily (always-on nightly coverage)
+#   - on push to main (immediate feedback when a compiler change lands)
+#   - manual workflow_dispatch (for ad-hoc investigation; seed input lets
+#     a developer replay a specific corpus)
+#
+# Findings: a non-zero mismatch count fails the workflow AND uploads the
+# per-finding directory tree (canonical IR JSON + per-tier diverging hex)
+# as an artifact, so the failing case can be replayed offline via
+#   `compilers/<tier>/<bin> --ir program.json --hex --disable-constant-folding`
+# against any tier.
+#
+# Security: all workflow_dispatch inputs are routed through `env:` blocks
+# (never interpolated directly into `run:` shell scripts) so the fuzzer
+# binary receives them as untrusted argv values via the standard
+# `parseInt` path in the fuzzer's option parser. See
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+on:
+  schedule:
+    # 00:00 UTC nightly
+    - cron: '0 0 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: 'RNG seed (integer). Leave blank for run_id-based.'
+        required: false
+        default: ''
+      num_programs:
+        description: 'Number of random programs to generate'
+        required: false
+        default: '100'
+      time_budget_ms:
+        description: 'Wall-clock budget in ms (early-stop)'
+        required: false
+        default: '300000'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  fuzz:
+    name: ANF differential (7 tiers x N random programs)
+    runs-on: ubuntu-latest
+    # The fuzzer spawns each compiler twice per program (load + lower +
+    # hex emit). At 100 programs * 7 tiers = 700 process launches, the
+    # heavy-tail tiers (Java cold start, Python interpreter start) push
+    # the wall-clock above 15 min on a busy runner; budget 45.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----- Toolchains for all 7 tiers (mirrors cross-compiler-bytewise) -----
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: compilers/go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      # ----- TypeScript workspace install + build (so the fuzzer can
+      # ----- in-process `import` the runar-compiler / runar-ir-schema)
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      # conformance/ is not a pnpm workspace member; install its own deps.
+      - run: cd conformance && npm ci
+
+      # ----- Build every native compiler the fuzzer dispatches to -----
+      - name: Build Go compiler
+        run: cd compilers/go && go build -o runar-go .
+      - name: Build Rust compiler
+        run: cd compilers/rust && cargo build --release
+      - name: Build Zig compiler
+        run: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline
+      - name: Build Java compiler jar
+        run: cd compilers/java && gradle jar --no-daemon
+
+      # ----- Resolve fuzz parameters via env (avoids `${{ inputs.* }}`
+      # ----- interpolation directly into shell scripts).
+      - name: Resolve fuzz parameters
+        id: params
+        env:
+          INPUT_SEED: ${{ inputs.seed }}
+          INPUT_NUM: ${{ inputs.num_programs }}
+          INPUT_BUDGET: ${{ inputs.time_budget_ms }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          seed="$INPUT_SEED"
+          if [ -z "$seed" ]; then
+            seed=$(( RUN_ID % 2147483647 ))
+          fi
+          num="$INPUT_NUM"
+          if [ -z "$num" ]; then num=100; fi
+          budget="$INPUT_BUDGET"
+          if [ -z "$budget" ]; then budget=300000; fi
+          {
+            echo "seed=$seed"
+            echo "num=$num"
+            echo "budget=$budget"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fuzz (ANF differential, all 7 tiers)
+        id: fuzz
+        working-directory: conformance
+        env:
+          SEED: ${{ steps.params.outputs.seed }}
+          NUM: ${{ steps.params.outputs.num }}
+          BUDGET: ${{ steps.params.outputs.budget }}
+        # All variable values come from `env:` (already validated as ints
+        # by the previous step) so they reach the fuzzer's argv as
+        # untrusted-but-typed values, never as shell-interpreted strings.
+        run: |
+          set -euo pipefail
+          node_modules/.bin/tsx fuzzer/index.ts \
+            --anf \
+            --num "$NUM" \
+            --seed "$SEED" \
+            --time-budget-ms "$BUDGET" \
+            --compilers ts,go,rust,python,zig,ruby,java \
+            --output /tmp/anf-fuzz-report.json
+
+      # ----- Always upload the per-finding artifact tree so a failing
+      # ----- run leaves behind a replayable repro corpus.
+      - name: Upload fuzz findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anf-fuzz-findings-${{ steps.params.outputs.seed }}
+          path: |
+            conformance/fuzz-findings-anf/
+            /tmp/anf-fuzz-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Emit summary
+        if: always()
+        env:
+          SEED: ${{ steps.params.outputs.seed }}
+          NUM: ${{ steps.params.outputs.num }}
+          BUDGET: ${{ steps.params.outputs.budget }}
+        run: |
+          {
+            printf '## ANF differential fuzzer\n\n'
+            printf '- Seed: `%s`\n' "$SEED"
+            printf '- Programs: `%s`\n' "$NUM"
+            printf '- Time budget: `%s` ms\n\n' "$BUDGET"
+            if [ -f /tmp/anf-fuzz-report.json ]; then
+              printf '### Report\n\n'
+              printf '```json\n'
+              # Top-level summary keys only (avoid dumping every per-program output).
+              jq '{
+                totalPrograms,
+                programsRun,
+                mismatchCount,
+                earlyStop,
+                durationMs,
+                perTierAvailable
+              }' /tmp/anf-fuzz-report.json
+              printf '\n```\n'
+            else
+              printf '_no report produced_\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

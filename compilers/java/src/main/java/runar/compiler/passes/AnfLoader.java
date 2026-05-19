@@ -34,6 +34,7 @@ import runar.compiler.ir.anf.MethodCall;
 import runar.compiler.ir.anf.RawScript;
 import runar.compiler.ir.anf.UnaryOp;
 import runar.compiler.ir.anf.UpdateProp;
+import runar.compiler.ir.UnknownAnfKindError;
 
 /**
  * Hand-rolled loader for canonical ANF JSON → {@link AnfProgram}.
@@ -165,7 +166,7 @@ public final class AnfLoader {
             );
             case "array_literal" -> new ArrayLiteral(toStringList(obj.get("elements")));
             case "raw_script" -> toRawScript(obj);
-            default -> throw new RuntimeException("unknown ANF value kind: " + kind);
+            default -> throw new UnknownAnfKindError(kind, "anf-loader.parseValue");
         };
     }
 

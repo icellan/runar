@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -91,6 +92,13 @@ func (c *IntentDemo) CoSpendPrivileged() {
 
 // TestIntentIntrinsics_ExtractPrevOutputScriptOnly checks the simplest
 // single-intrinsic compile path (just the witness-bridge for input 0).
+//
+// Performs a deeper opcode-sequence audit than the combined-fixture test —
+// asserts (1) OP_HASH256 (0xaa) appears AND (2) is followed within a
+// narrow window by OP_EQUAL (0x87) or OP_EQUALVERIFY (0x88), proving the
+// hash is being compared against an expected value (not just left on the
+// stack). This catches a regression where the lowering passes drop the
+// equality assertion after computing hash256.
 func TestIntentIntrinsics_ExtractPrevOutputScriptOnly(t *testing.T) {
 	source := `
 package x
@@ -119,16 +127,137 @@ func (c *MinIntent) Bind() {
 		t.Fatal("expected non-empty hex")
 	}
 
-	// Opcode-sequence audit (minor cleanup from Phase 13 review): the
-	// emitted Script for an `extractPrevOutputScript(0, H)` call MUST
-	// contain OP_HASH256 (0xaa) — the witness-bridge identity check that
-	// distinguishes the intrinsic from a plain identity pass-through. The
-	// stack scaffolding (which side the expected hash is pushed from and
-	// whether the equality is OP_EQUAL+OP_VERIFY-via-assert or
-	// OP_EQUALVERIFY) is allowed to evolve; we only assert the load-
-	// bearing primitive is present.
 	hex := result.Artifact.Script
 	if !strings.Contains(hex, "aa") {
-		t.Errorf("expected OP_HASH256 (`aa`) in compiled hex; missing the witness-bridge hash assertion. Hex: %s", hex)
+		t.Fatalf("expected OP_HASH256 (`aa`) in compiled hex; missing the witness-bridge hash assertion. Hex: %s", hex)
 	}
+
+	// Find OP_HASH256 and assert OP_EQUAL (0x87) or OP_EQUALVERIFY (0x88)
+	// appears within the next 8 bytes (16 hex chars), proving the hash
+	// is being compared. Window is clamped to len(hex) — for a witness-
+	// bridge intrinsic the comparison is one of the LAST things the
+	// script does, so the OP_HASH256 sits near the end and the window
+	// is naturally short.
+	idx := strings.Index(hex, "aa")
+	end := idx + 18
+	if end > len(hex) {
+		end = len(hex)
+	}
+	window := hex[idx:end]
+	if !strings.Contains(window, "87") && !strings.Contains(window, "88") {
+		t.Errorf("expected OP_EQUAL (`87`) or OP_EQUALVERIFY (`88`) within 8 bytes after OP_HASH256 (idx=%d); the bridge equality is not enforced. Window: %q (full hex: %s)", idx, window, hex)
+	}
+
+	// The auto-injected `_prevOutScript_0` MUST be the last ABI param
+	// after txPreimage (matching the auto-injection ordering documented
+	// in docs/cross-covenant-pattern.md). Verify ordering, not just
+	// presence — out-of-order witness params would break SDK consumers
+	// that build the unlocking script by ABI position.
+	for _, m := range result.Artifact.ABI.Methods {
+		if m.Name != "bind" {
+			continue
+		}
+		var names []string
+		for _, p := range m.Params {
+			names = append(names, p.Name)
+		}
+		txPreimageIdx, prevOutScriptIdx := -1, -1
+		for i, n := range names {
+			if n == "txPreimage" {
+				txPreimageIdx = i
+			}
+			if n == "_prevOutScript_0" {
+				prevOutScriptIdx = i
+			}
+		}
+		if txPreimageIdx < 0 {
+			t.Errorf("expected txPreimage in bind ABI; got %v", names)
+		}
+		if prevOutScriptIdx < 0 {
+			t.Errorf("expected _prevOutScript_0 in bind ABI; got %v", names)
+		}
+		if prevOutScriptIdx >= 0 && txPreimageIdx >= 0 && prevOutScriptIdx <= txPreimageIdx {
+			t.Errorf("_prevOutScript_0 (idx=%d) must come after txPreimage (idx=%d) per auto-injection ordering; got %v", prevOutScriptIdx, txPreimageIdx, names)
+		}
+		break
+	}
+}
+
+// TestIntentIntrinsics_RequireOutputP2PKH_OnceOnlyHashCheck verifies that
+// when multiple requireOutputP2PKH calls appear in the same method body,
+// the hashOutputs check is emitted EXACTLY ONCE (per the idempotency
+// contract in the dispatch code). Counts OP_HASH256 occurrences and
+// asserts the count matches: 1 (hashOutputs assertion) + N (per-output
+// P2PKH hash), where N = number of distinct output indices.
+//
+// This guards against a regression where the methodScope.didEmitHashOutputsCheck
+// flag gets reset between calls, doubling the emitted hashOutputs check
+// and bloating the script.
+func TestIntentIntrinsics_RequireOutputP2PKH_OnceOnlyHashCheck(t *testing.T) {
+	// Two RequireOutputP2PKH calls, same method — should produce exactly
+	// ONE hashOutputs check, NOT two.
+	source := `
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Two struct {
+	runar.StatefulSmartContract
+	PKH1 runar.ByteString ` + "`runar:\"readonly\"`" + `
+	PKH2 runar.ByteString ` + "`runar:\"readonly\"`" + `
+	A1   runar.Bigint     ` + "`runar:\"readonly\"`" + `
+	A2   runar.Bigint     ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Two) Bind() {
+	runar.RequireOutputP2PKH(0, c.PKH1, c.A1)
+	runar.RequireOutputP2PKH(1, c.PKH2, c.A2)
+}
+`
+	// Compile via the source-to-IR path so we get the ANF directly,
+	// independent of whether Artifact.ANF is populated for this contract
+	// shape. Counting hash256 in ANF is authoritative — counting `aa`
+	// bytes in compiled hex would over-count any 0xaa in pushdata.
+	tmpFile := writeTempGoSource(t, "Two.runar.go", source)
+	program, err := CompileSourceToIR(tmpFile)
+	if err != nil {
+		t.Fatalf("CompileSourceToIR failed: %v", err)
+	}
+	var foundMethod bool
+	for _, m := range program.Methods {
+		if m.Name != "bind" {
+			continue
+		}
+		foundMethod = true
+		hash256Count := 0
+		for _, b := range m.Body {
+			if b.Value.Kind == "call" && b.Value.Func == "hash256" {
+				hash256Count++
+			}
+		}
+		// Expected hash256 count:
+		// - 1 for the once-per-method hashOutputs(serialised) check
+		// - 0 for the per-output assertion (uses Substr equality, not hash)
+		// = 1 total
+		// Anything > 1 means the dispatch lost its idempotency flag.
+		if hash256Count != 1 {
+			t.Errorf("expected exactly 1 hash256 call (once-per-method hashOutputs check) for two requireOutputP2PKH calls in same body; got %d. Idempotency regression?", hash256Count)
+		}
+		break
+	}
+	if !foundMethod {
+		t.Fatal("method 'bind' not found in ANF")
+	}
+}
+
+// writeTempGoSource writes a Go-DSL source string to a temp file with the
+// given basename and returns the path. Cleanup is automatic via t.TempDir.
+func writeTempGoSource(t *testing.T, name, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := dir + "/" + name
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writeTempGoSource: %v", err)
+	}
+	return path
 }

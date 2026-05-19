@@ -12,6 +12,7 @@
 # entry point. It is wired in separately (see issue #15).
 
 require_relative 'sdk/types'
+require_relative 'sdk/errors'
 require_relative 'sdk/provider'
 require_relative 'sdk/signer'
 require_relative 'sdk/state'

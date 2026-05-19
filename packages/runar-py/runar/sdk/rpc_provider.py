@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 
 from runar.sdk.provider import Provider
 from runar.sdk.types import TransactionData, TxOutput, Utxo
+from runar.sdk.errors import assert_script_hex_under_limit
+from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 
 
 class RPCProvider(Provider):
@@ -123,6 +125,14 @@ class RPCProvider(Provider):
                 satoshis=round(u['amount'] * 1e8),
                 script=u.get('scriptPubKey', ''),
             ))
+        # DoS-bound: reject pathological scripts at the provider boundary.
+        for u in utxos:
+            if not u.script:
+                continue
+            assert_script_hex_under_limit(
+                u.script, MAX_SCRIPT_BYTES,
+                f"RPCProvider.get_utxos({address})",
+            )
         return utxos
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:
