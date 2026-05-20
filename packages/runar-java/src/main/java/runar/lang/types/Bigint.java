@@ -112,6 +112,20 @@ public final class Bigint {
         return o instanceof Bigint that && this.value.equals(that.value);
     }
 
+    /**
+     * Value-equality overload against a raw {@link BigInteger}. The Rúnar
+     * {@code len} builtin returns the numeric {@code bigint} type (here a
+     * {@code Bigint}); contract bodies written in Java that compare its
+     * result with a {@code BigInteger} literal — e.g.
+     * {@code len(bytes).equals(BigInteger.valueOf(33))} — bind to this
+     * overload so the comparison evaluates on the wrapped value rather
+     * than failing the {@code instanceof Bigint} check in
+     * {@link #equals(Object)}.
+     */
+    public boolean equals(BigInteger other) {
+        return other != null && this.value.equals(other);
+    }
+
     @Override
     public int hashCode() {
         return value.hashCode();

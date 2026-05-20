@@ -65,4 +65,21 @@ public abstract class UnsafeSmartContract {
             "asm() cannot be called at runtime — compile this contract with the Rúnar compiler"
         );
     }
+
+    /**
+     * Positional {@code asm} overload — {@code asm(body, inArity, outArity)}.
+     * Mirrors the Go {@code runar.Asm("51", 0, 1)} surface so Rúnar Java
+     * contracts can spell the intrinsic inline without constructing an
+     * {@link AsmArgs}. The compiler intercepts the call at parse time; this
+     * stub panics if reached at runtime.
+     *
+     * @param body     even-length hex string of the raw opcode bytes
+     * @param inArity  stack items consumed on entry
+     * @param outArity stack items left on exit
+     */
+    protected static void asm(String body, int inArity, int outArity) {
+        throw new UnsupportedOperationException(
+            "asm() cannot be called at runtime — compile this contract with the Rúnar compiler"
+        );
+    }
 }

@@ -47,6 +47,29 @@ public final class Builtins {
     }
 
     // ===================================================================
+    // Raw-script escape hatch (UnsafeSmartContract only).
+    // ===================================================================
+
+    /**
+     * Embed a raw Bitcoin Script byte sequence. Mirrors the Go
+     * {@code runar.Asm("51", 0, 1)} and TS {@code asm({...})} surfaces:
+     * Rúnar Java sources inside an {@link UnsafeSmartContract} call
+     * {@code asm(body, inArity, outArity)} via static import. The Rúnar
+     * compiler intercepts the call at parse time and lowers it to a
+     * {@code raw_script} ANF node, so this stub never runs on-chain — it
+     * throws if invoked from plain Java.
+     *
+     * @param body     even-length hex string of the raw opcode bytes
+     * @param inArity  stack items consumed on entry
+     * @param outArity stack items left on exit
+     */
+    public static void asm(String body, int inArity, int outArity) {
+        throw new UnsupportedOperationException(
+            "asm() is a compile-time intrinsic; compile this contract with the Rúnar compiler"
+        );
+    }
+
+    // ===================================================================
     // Hashing
     // ===================================================================
 
@@ -216,14 +239,26 @@ public final class Builtins {
         if (!SimulatorContext.isActive()) throw notInSimulator("bool");
         return MockCrypto.bool(v);
     }
+    public static BigInteger divmod(BigInteger a, BigInteger b) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("divmod");
+        return MockCrypto.divmod(a, b);
+    }
 
     // ===================================================================
     // ByteString ops
     // ===================================================================
 
-    public static BigInteger len(ByteString bs) {
+    /**
+     * Byte length of {@code bs}. Returns the Rúnar numeric {@code bigint}
+     * type ({@link Bigint}) — mirroring the TS frontend where {@code len}
+     * yields {@code bigint} — so callers can chain comparison helpers like
+     * {@code len(bs).gt(Bigint.ZERO)}. The {@link Bigint#equals(BigInteger)}
+     * overload keeps {@code len(bs).equals(BigInteger.valueOf(n))} working
+     * for sources written against the raw-{@code BigInteger} spelling.
+     */
+    public static Bigint len(ByteString bs) {
         if (!SimulatorContext.isActive()) throw notInSimulator("len");
-        return MockCrypto.len(bs);
+        return new Bigint(MockCrypto.len(bs));
     }
     public static ByteString cat(ByteString a, ByteString b) {
         if (!SimulatorContext.isActive()) throw notInSimulator("cat");
@@ -513,6 +548,17 @@ public final class Builtins {
     }
 
     public static void requireOutputP2PKH(BigInteger outputIndex, ByteString pubkeyHash, BigInteger amount) {
+        // no-op (off-chain stub)
+    }
+
+    /**
+     * {@link Bigint}-typed amount overload. Rúnar Java sources carry
+     * satoshi amounts as the wrapper {@link Bigint} (the canonical
+     * {@code bigint} surface), so the contract spelling
+     * {@code requireOutputP2PKH(0L, this.bondPKH, this.bondAmount)} —
+     * where {@code bondAmount} is a {@code Bigint} — resolves here.
+     */
+    public static void requireOutputP2PKH(long outputIndex, ByteString pubkeyHash, Bigint amount) {
         // no-op (off-chain stub)
     }
 
