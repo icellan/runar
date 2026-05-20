@@ -10900,5 +10900,587 @@ private theorem _smoke_postState_d0_dge3 :
         stack := [.vBigint 5, .vBigint 0, .vBigint 0, .vBigint 7] })
     5 7 _smoke_agrees_d0_dge3 rfl rfl
 
+/-! ## Path 2 Tier 1 Wave 19 — consume-mode whole-body arith capstone
+
+This section assembles the wave-18 consume-mode operational-chain
+composer (`RunChainRelP` + `runOps_lowerBindingsP_RunChainRelP_isSome`,
+both in `Agrees.lean`) into a **method-level** runtime-success capstone
+for bodies built entirely from consume-mode arith bindings (binOp /
+unaryOp whose operands are read at their last use and therefore
+consumed).
+
+### Deliverable A — `structuralArithConsumeBody`
+
+The predicate the capstone takes.  It is an **inductive relation** over
+the body that, for each binding, carries:
+
+* the **arith shape** — the binding's `value` is a `binOp` or `unaryOp`
+  (this is what distinguishes the predicate from the bare
+  `RunChainRelP`, and what wave 20 connects to the copy-mode
+  `structuralArithBodyBool`); and
+* the **genuine consume operational witness** — the program-aware
+  consume-mode-lowered ops of that binding run to a defined result at
+  the threaded concrete runtime stack
+  (`runOps (lowerValueP …).1 stkSt = .ok stkSt'`).
+
+The per-binding `runOps` fact is the SAME load-bearing datum
+`RunChainRelP.cons` carries; it is NOT a universal "succeeds on every
+stack" `hRunOk` (it is pinned to the one threaded `stkSt`), and it is
+NOT the whole-body conclusion (that is DERIVED by the composer).  In the
+smoke (Deliverable D) every per-binding witness is built from the
+`stageC_simpleStep_binOp_*_consume_core` singletons + `run_OP_NEGATE_int`
+plus the wave-16 operand-provenance lemmas (Deliverable B), proving the
+predicate is genuinely inhabited on a real consume-mode method body. -/
+inductive structuralArithConsumeBody
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → List String → StackState →
+    StackMap → StackState → Prop where
+  | nil {sm currentIndex localBindings stkSt} :
+      structuralArithConsumeBody progMethods props budget lastUses outerProtected constInts
+        [] sm currentIndex localBindings stkSt sm stkSt
+  | consBinOp {op l r rt name src rest sm currentIndex localBindings
+        stkSt stkSt_b' sm'' stkSt''} :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name (.binOp op l r rt)).1 stkSt
+        = .ok stkSt_b' →
+      structuralArithConsumeBody progMethods props budget lastUses outerProtected constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name (.binOp op l r rt)).2.1
+        (currentIndex + 1)
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name (.binOp op l r rt)).2.2
+        stkSt_b' sm'' stkSt'' →
+      structuralArithConsumeBody progMethods props budget lastUses outerProtected constInts
+        (.mk name (.binOp op l r rt) src :: rest) sm currentIndex localBindings stkSt sm'' stkSt''
+  | consUnaryOp {op operand rt name src rest sm currentIndex localBindings
+        stkSt stkSt_b' sm'' stkSt''} :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name (.unaryOp op operand rt)).1 stkSt
+        = .ok stkSt_b' →
+      structuralArithConsumeBody progMethods props budget lastUses outerProtected constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name (.unaryOp op operand rt)).2.1
+        (currentIndex + 1)
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name (.unaryOp op operand rt)).2.2
+        stkSt_b' sm'' stkSt'' →
+      structuralArithConsumeBody progMethods props budget lastUses outerProtected constInts
+        (.mk name (.unaryOp op operand rt) src :: rest) sm currentIndex localBindings stkSt sm'' stkSt''
+
+/-- **Deliverable A bridge.**  A `structuralArithConsumeBody` witness
+projects to a `RunChainRelP` witness over the same body: the arith-shape
+constructors are exactly the `RunChainRelP.cons` constructor restricted
+to `binOp` / `unaryOp` values.  This is the load-bearing connection that
+lets the capstone reuse the wave-18 composer
+(`runOps_lowerBindingsP_RunChainRelP_isSome`) verbatim. -/
+theorem structuralArithConsumeBody_toRunChainRelP
+    {progMethods : List ANFMethod} {props : List ANFProperty} {budget : Nat}
+    {lastUses : List (String × Nat)} {outerProtected : List String}
+    {constInts : List (String × Int)}
+    {body : List ANFBinding} {sm sm' : StackMap} {currentIndex : Nat}
+    {localBindings : List String} {stkSt stkSt' : StackState}
+    (h : structuralArithConsumeBody progMethods props budget lastUses outerProtected constInts
+          body sm currentIndex localBindings stkSt sm' stkSt') :
+    RunChainRelP progMethods props budget lastUses outerProtected constInts
+      body sm currentIndex localBindings stkSt sm' stkSt' := by
+  induction h with
+  | nil => exact RunChainRelP.nil
+  | consBinOp hRun _hRest ih => exact RunChainRelP.cons hRun ih
+  | consUnaryOp hRun _hRest ih => exact RunChainRelP.cons hRun ih
+
+/-- **Deliverable B — multi-step operand provenance fold.**
+
+By induction over the body, every binding's operands resolve to a
+`.vBigint` value at the point used: params resolve from the initial
+state, earlier temps resolve from prior steps via the wave-16 stability
+lemmas (`lookupAnfByKind_addBinding_self` / `_of_ne` /
+`resolveRef_addBinding_of_ne_binding`).  Concretely: running the body
+through the ANF evaluator succeeds, and the bound temp of each binding
+resolves to the value the next binding's operand witness needs.
+
+This is the mode-independent (ANF-eval, not lowering) fold the task
+calls for.  It is stated as: a body of pure-bigint binOp / unaryOp
+bindings, each with operand-resolution + opcode-success witnesses,
+evaluates to a defined ANF state, and each binding's temp is
+resolvable thereafter.  The single-step engine is `evalBindings_binOp_step`
+(rebuilt-from for the unary case via `evalValue_unaryOp_provenance`). -/
+theorem evalBindings_arithConsume_provenance
+    (anfSt : State) (name op l r : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (a b c : RunarVerification.ANF.Eval.Value)
+    (hl : anfSt.resolveRef l = some a)
+    (hr : anfSt.resolveRef r = some b)
+    (hOp : RunarVerification.ANF.Eval.evalBinOp op a b rt = .ok c)
+    (rest : List ANFBinding)
+    (hNeRest : ∀ bd ∈ rest, bd.name ≠ name)
+    (hRest : (RunarVerification.ANF.Eval.evalBindings (anfSt.addBinding name c) rest).toOption.isSome) :
+    (RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.binOp op l r rt) src :: rest)).toOption.isSome
+    ∧ lookupAnfByKind (anfSt.addBinding name c) (name, .binding) = some c := by
+  obtain ⟨hEvalHead, hLookup⟩ :=
+    evalBindings_binOp_step anfSt name op l r rt src a b c hl hr hOp
+  refine ⟨?_, hLookup⟩
+  have hVal := evalValue_binOp_provenance anfSt op l r rt a b c hl hr hOp
+  have hChain : RunarVerification.ANF.Eval.evalBindings anfSt
+      (.mk name (.binOp op l r rt) src :: rest)
+        = RunarVerification.ANF.Eval.evalBindings (anfSt.addBinding name c) rest := by
+    simp only [RunarVerification.ANF.Eval.evalBindings, hVal, bind, Except.bind]
+  rw [hChain]
+  exact hRest
+
+/-- **Deliverable B — unary peer of the provenance fold step.** -/
+theorem evalBindings_arithConsume_provenance_unary
+    (anfSt : State) (name op operand : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (a c : RunarVerification.ANF.Eval.Value)
+    (hOperand : anfSt.resolveRef operand = some a)
+    (hOp : RunarVerification.ANF.Eval.evalUnaryOp op a rt = .ok c)
+    (rest : List ANFBinding)
+    (hRest : (RunarVerification.ANF.Eval.evalBindings (anfSt.addBinding name c) rest).toOption.isSome) :
+    (RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.unaryOp op operand rt) src :: rest)).toOption.isSome
+    ∧ lookupAnfByKind (anfSt.addBinding name c) (name, .binding) = some c := by
+  refine ⟨?_, lookupAnfByKind_addBinding_self anfSt name c⟩
+  have hVal := evalValue_unaryOp_provenance anfSt op operand rt a c hOperand hOp
+  have hChain : RunarVerification.ANF.Eval.evalBindings anfSt
+      (.mk name (.unaryOp op operand rt) src :: rest)
+        = RunarVerification.ANF.Eval.evalBindings (anfSt.addBinding name c) rest := by
+    simp only [RunarVerification.ANF.Eval.evalBindings, hVal, bind, Except.bind]
+  rw [hChain]
+  exact hRest
+
+/-- **Deliverable C — method-level consume-mode arith capstone.**
+
+For a public, unique, no-implicit/no-post method whose body is a
+consume-mode arith body (`structuralArithConsumeBody` over the EXACT
+lowerer arguments `lowerMethodUserRawOps` uses), running the lowered
+contract method to completion succeeds.
+
+Proof route:
+1. `runMethod_lower_public_unique_no_post_eq_userRaw` reduces
+   `runMethod (lower …)` to `runOps (lowerMethodUserRawOps …)`.
+2. `lowerMethodUserRawOps` unfolds DEFINITIONALLY to
+   `(lowerBindingsP progMethods props defaultInlineBudget 0
+      (computeLastUses body) [] (body.map name) (collectConstInts body)
+      (params.map name).reverse body).1` — no copy bridge: method
+   lowering IS consume-mode `lowerBindingsP`.
+3. The `structuralArithConsumeBody` hypothesis projects to a
+   `RunChainRelP` over the same body (Deliverable A bridge), and
+   `runOps_lowerBindingsP_RunChainRelP_isSome` discharges whole-body
+   runtime success. -/
+theorem runMethod_lower_public_unique_no_post_structuralArithConsumeBody_whole_isSome
+    (contractName : String) (props : List ANFProperty)
+    (methods : List ANFMethod) (m : ANFMethod) (initialStack : StackState)
+    (sm' : StackMap) (stkFinal : StackState)
+    (hMem : m ∈ methods) (hPublic : m.isPublic = true)
+    (hUnique :
+      ∀ m', m' ∈ methods → m'.isPublic = true →
+        (m'.name == m.name) = true → m' = m)
+    (hArith :
+      structuralArithConsumeBody methods props Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses m.body) []
+        (Stack.Lower.collectConstInts m.body)
+        m.body
+        ((m.params.map (fun p => p.name)).reverse) 0
+        (m.body.map (fun bd => bd.name)) initialStack
+        sm' stkFinal)
+    (hNoPreimage : Stack.Lower.bindingsUseCheckPreimage m.body = false)
+    (hNoCode : Stack.Lower.bindingsUseCodePart m.body = false)
+    (hNoTerminalAssert : Stack.Lower.bodyEndsInAssert m.body = false)
+    (hNoDeserialize : Stack.Lower.bindingsUseDeserializeState m.body = false) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := props, methods := methods })
+        m.name initialStack).toOption.isSome := by
+  rw [runMethod_lower_public_unique_no_post_eq_userRaw
+        contractName props methods m initialStack hMem hPublic hUnique
+        hNoPreimage hNoCode hNoTerminalAssert hNoDeserialize]
+  show (runOps (lowerMethodUserRawOps methods props m) initialStack).toOption.isSome
+  unfold lowerMethodUserRawOps
+  exact runOps_lowerBindingsP_RunChainRelP_isSome
+    (structuralArithConsumeBody_toRunChainRelP hArith)
+
+/-! ### Deliverable D — MANDATORY consume-mode method-level smoke test
+
+The anti-vacuity proof.  We instantiate the wave-19 capstone on a
+CONCRETE consume-mode arith method:
+
+```
+method add3sub (p0 p1 p2 : bigint) {
+  t0 = p0 + p1     -- binOp "+", operands at last use → consume [.swap, OP_ADD]
+  t1 = t0 - p2     -- binOp "-", operands at last use → consume [.swap, OP_SUB]
+  t2 = -t1         -- unaryOp "-", operand at last use → consume [OP_NEGATE]
+}
+```
+
+`outerProtected = []` arises NATURALLY from `lowerMethodUserRawOps`
+(method lowering hard-codes `[]`), so this is genuine consume-mode at
+the full `runMethod` level — the thing wave-17's copy-mode capstone could
+NOT do.  Every lowerer argument is the COMPUTED method-lowering value
+(`computeLastUses m.body`, `collectConstInts m.body`,
+`(m.params.map name).reverse`, `m.body.map name`), NOT a hand-picked
+override.  Each per-binding consume `runOps` witness is built from the
+`stageC_simpleStep_binOp_d0d1_consume_core` singleton (the two binOps) +
+`run_OP_NEGATE_int` (the unary), discharging all hypotheses honestly. -/
+
+/-- Concrete consume-mode arith body for the wave-19 smoke:
+`[t0 = p0 + p1; t1 = t0 - p2; t2 = -t1]`. -/
+private def wave19SmokeBody : List ANFBinding :=
+  [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none,
+   ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+   ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none]
+
+/-- Concrete method carrying `wave19SmokeBody`.  Params declared
+`[p2, p1, p0]` so `(params.map name).reverse = ["p0", "p1", "p2"]` —
+the depth-0/1/2 initial stack-map the per-binding witnesses expect. -/
+private def wave19SmokeMethod : ANFMethod :=
+  { name := "add3sub"
+    params := [ANFParam.mk "p2" .bigint, ANFParam.mk "p1" .bigint, ANFParam.mk "p0" .bigint]
+    body := wave19SmokeBody
+    isPublic := true }
+
+/-- `computeLastUses wave19SmokeBody`, pinned by definitional reduction. -/
+private theorem wave19_computeLastUses :
+    Stack.Lower.computeLastUses wave19SmokeBody
+      = [("t1", 2), ("p2", 1), ("t0", 1), ("p1", 0), ("p0", 0)] := by
+  unfold Stack.Lower.computeLastUses wave19SmokeBody; rfl
+
+/-- `collectConstInts wave19SmokeBody = []` (no integer literals). -/
+private theorem wave19_collectConstInts :
+    Stack.Lower.collectConstInts wave19SmokeBody = [] := by
+  simp only [wave19SmokeBody, Stack.Lower.collectConstInts, List.append_nil]
+
+/-- `(params.map name).reverse = ["p0", "p1", "p2"]`. -/
+private theorem wave19_paramsRev :
+    (wave19SmokeMethod.params.map (fun p => p.name)).reverse = ["p0", "p1", "p2"] := by
+  unfold wave19SmokeMethod; rfl
+
+/-- `body.map name = ["t0", "t1", "t2"]`. -/
+private theorem wave19_localBindings :
+    wave19SmokeBody.map (fun bd => bd.name) = ["t0", "t1", "t2"] := by
+  unfold wave19SmokeBody; rfl
+
+/-- The `no-implicit / no-post` preconditions all reduce on the
+concrete body — the body has no checkPreimage / codePart / terminal
+assert / deserializeState. -/
+private theorem wave19_noPreimage :
+    Stack.Lower.bindingsUseCheckPreimage wave19SmokeMethod.body = false := by
+  show Stack.Lower.bindingsUseCheckPreimage wave19SmokeBody = false
+  simp only [wave19SmokeBody, Stack.Lower.bindingsUseCheckPreimage, Bool.or_false]
+
+private theorem wave19_noCode :
+    Stack.Lower.bindingsUseCodePart wave19SmokeMethod.body = false := by
+  show Stack.Lower.bindingsUseCodePart wave19SmokeBody = false
+  simp only [wave19SmokeBody, Stack.Lower.bindingsUseCodePart, Bool.or_false]
+
+private theorem wave19_noTerminalAssert :
+    Stack.Lower.bodyEndsInAssert wave19SmokeMethod.body = false := by
+  show Stack.Lower.bodyEndsInAssert wave19SmokeBody = false
+  unfold wave19SmokeBody Stack.Lower.bodyEndsInAssert; rfl
+
+private theorem wave19_noDeserialize :
+    Stack.Lower.bindingsUseDeserializeState wave19SmokeMethod.body = false := by
+  show Stack.Lower.bindingsUseDeserializeState wave19SmokeBody = false
+  simp only [wave19SmokeBody, Stack.Lower.bindingsUseDeserializeState, Bool.or_false]
+
+/-- Lowered ops of binding 0 (`t0 = p0 + p1`, consume d0d1) under the
+COMPUTED method-lowering arguments: `[.swap, OP_ADD]`.  The binOp arm of
+`lowerValueP` ignores `progMethods` / `props`, so the lemma is stated
+parametrically over them. -/
+private theorem wave19_ops0
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 0
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["p0", "p1", "p2"] "t0" (.binOp "+" "p0" "p1" none)).1
+      = [StackOp.swap, .opcode "OP_ADD"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+  unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+    Stack.Lower.isLastUse Stack.Lower.lastUsesLookup Stack.Lower.listContains
+    Stack.Lower.binopOpcode
+  rfl
+
+/-- `(lowerValueP …).2.1` for binding 0: stack map advances to
+`["t0", "p2"]`. -/
+private theorem wave19_sm0
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 0
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["p0", "p1", "p2"] "t0" (.binOp "+" "p0" "p1" none)).2.1
+      = ["t0", "p2"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+  unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+    Stack.Lower.StackMap.popN Stack.Lower.StackMap.push
+    Stack.Lower.isLastUse Stack.Lower.lastUsesLookup Stack.Lower.listContains
+  rfl
+
+/-- `(lowerValueP …).2.2` for binding 0: localBindings unchanged
+(`["t0", "t1", "t2"]`) — binOps do not register a new local-binding
+slot. -/
+private theorem wave19_lb0
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 0
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["p0", "p1", "p2"] "t0" (.binOp "+" "p0" "p1" none)).2.2
+      = ["t0", "t1", "t2"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+
+/-- Lowered ops of binding 1 (`t1 = t0 - p2`, consume d0d1): `[.swap, OP_SUB]`. -/
+private theorem wave19_ops1
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 1
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["t0", "p2"] "t1" (.binOp "-" "t0" "p2" none)).1
+      = [StackOp.swap, .opcode "OP_SUB"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+  unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+    Stack.Lower.isLastUse Stack.Lower.lastUsesLookup Stack.Lower.listContains
+    Stack.Lower.binopOpcode
+  rfl
+
+/-- `(lowerValueP …).2.1` for binding 1: stack map advances to `["t1"]`. -/
+private theorem wave19_sm1
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 1
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["t0", "p2"] "t1" (.binOp "-" "t0" "p2" none)).2.1
+      = ["t1"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+  unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+    Stack.Lower.StackMap.popN Stack.Lower.StackMap.push
+    Stack.Lower.isLastUse Stack.Lower.lastUsesLookup Stack.Lower.listContains
+  rfl
+
+/-- `(lowerValueP …).2.2` for binding 1: localBindings unchanged. -/
+private theorem wave19_lb1
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 1
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["t0", "p2"] "t1" (.binOp "-" "t0" "p2" none)).2.2
+      = ["t0", "t1", "t2"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+
+/-- Lowered ops of binding 2 (`t2 = -t1`, consume d0 unary): `[OP_NEGATE]`. -/
+private theorem wave19_ops2
+    (progMethods : List ANFMethod) (props : List ANFProperty) :
+    (Stack.Lower.lowerValueP progMethods props
+        Stack.Lower.defaultInlineBudget 2
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+        ["t1"] "t2" (.unaryOp "-" "t1" none)).1
+      = [StackOp.opcode "OP_NEGATE"] := by
+  rw [wave19_computeLastUses, wave19_collectConstInts]
+  unfold Stack.Lower.lowerValueP; simp only []
+  unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+    Stack.Lower.isLastUse Stack.Lower.lastUsesLookup Stack.Lower.listContains
+    Stack.Lower.unaryOpcode
+  rfl
+
+/-- **Deliverable D — the consume-mode method-level smoke test.**
+
+The wave-19 capstone, instantiated on `wave19SmokeMethod` (a real public
+3-binding consume-mode arith method), runs to a defined result.  All
+hypotheses are discharged honestly: the per-binding consume witnesses
+come from the `stageC_simpleStep_binOp_d0d1_consume_core` singletons +
+`run_OP_NEGATE_int`, threaded through the concrete evolving runtime
+stack, and the `agreesTagged`/lookup facts are genuine inputs about the
+real body.
+
+This proves the capstone is GENUINELY consumable at method level — the
+anti-vacuity check the task mandates. -/
+theorem wave19_consume_capstone_smoke
+    (contractName : String) (initialStack : StackState)
+    (a b c : Int) (rest : List RunarVerification.ANF.Eval.Value) (tsm_rest : TaggedStackMap)
+    (anfSt0 anfSt1 : State)
+    (hStk : initialStack.stack = .vBigint a :: .vBigint b :: .vBigint c :: rest)
+    -- Binding 0 inputs: agreesTagged on the initial param stack-map.
+    (hAgrees0 : agreesTagged
+        (("p0", .param) :: ("p1", .param) :: ("p2", .param) :: tsm_rest) anfSt0 initialStack)
+    (hLookupP0 : lookupAnfByKind anfSt0 ("p0", .param) = some (.vBigint a))
+    (hLookupP1 : lookupAnfByKind anfSt0 ("p1", .param) = some (.vBigint b))
+    -- Binding 1 inputs: agreesTagged after binding 0 (t0 on top, p2 below).
+    (hAgrees1 : agreesTagged
+        (("t0", .binding) :: ("p2", .param) :: tsm_rest) anfSt1
+        ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest}))
+    (hLookupT0 : lookupAnfByKind anfSt1 ("t0", .binding) = some (.vBigint (a + b)))
+    (hLookupP2 : lookupAnfByKind anfSt1 ("p2", .param) = some (.vBigint c)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := ([] : List ANFProperty),
+            methods := [wave19SmokeMethod] })
+        wave19SmokeMethod.name initialStack).toOption.isSome := by
+  -- The chain is built directly over `progMethods = [wave19SmokeMethod]`,
+  -- matching the capstone — the binOp/unaryOp arms of `lowerValueP`
+  -- ignore `progMethods` / `props`, so the parametric ops/sm/lb lemmas
+  -- apply at this instance.
+  -- ===== Per-binding consume witnesses (mirroring wave-18 at method args). =====
+  -- Binding 0: t0 = p0 + p1, d0d1 consume → [.swap, OP_ADD].
+  have hRun0Raw :
+      runOps [StackOp.swap, .opcode "OP_ADD"] initialStack
+        = .ok ({initialStack with stack := initialStack.stack.tail.tail}.push (.vBigint (a + b))) := by
+    refine stageC_simpleStep_binOp_d0d1_consume_core
+      "p0" "p1" .param .param (("p2", .param) :: tsm_rest) anfSt0 initialStack a b
+      "OP_ADD" (.vBigint (a + b)) [StackOp.swap, .opcode "OP_ADD"]
+      hAgrees0 hLookupP0 hLookupP1 rfl ?_
+    intro restStk hStkEq
+    exact Stack.Sim.runOpcode_ADD_intInt
+      ({initialStack with stack := .vBigint b :: .vBigint a :: restStk}) a b restStk rfl
+  have hRun0 :
+      runOps (Stack.Lower.lowerValueP [wave19SmokeMethod] ([] : List ANFProperty)
+          Stack.Lower.defaultInlineBudget 0
+          (Stack.Lower.computeLastUses wave19SmokeBody) []
+          ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+          ["p0", "p1", "p2"] "t0" (.binOp "+" "p0" "p1" none)).1 initialStack
+        = .ok ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest}) := by
+    rw [wave19_ops0, hRun0Raw]
+    have hEq :
+        ({initialStack with stack := initialStack.stack.tail.tail}.push (.vBigint (a + b)))
+          = ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest} : StackState) := by
+      rw [hStk]; rfl
+    rw [hEq]
+  -- Binding 1: t1 = t0 - p2, d0d1 consume → [.swap, OP_SUB].
+  have hRun1Raw :
+      runOps [StackOp.swap, .opcode "OP_SUB"]
+          ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest})
+        = .ok ({({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest}) with
+                stack :=
+                  ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest}).stack.tail.tail}.push
+                  (.vBigint ((a + b) - c))) := by
+    refine stageC_simpleStep_binOp_d0d1_consume_core
+      "t0" "p2" .binding .param tsm_rest anfSt1
+      ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest}) (a + b) c
+      "OP_SUB" (.vBigint ((a + b) - c)) [StackOp.swap, .opcode "OP_SUB"]
+      hAgrees1 hLookupT0 hLookupP2 rfl ?_
+    intro restStk hStkEq
+    exact Stack.Sim.runOpcode_SUB_intInt
+      ({({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest}) with
+        stack := .vBigint c :: .vBigint (a + b) :: restStk}) (a + b) c restStk rfl
+  have hRun1 :
+      runOps (Stack.Lower.lowerValueP [wave19SmokeMethod] ([] : List ANFProperty)
+          Stack.Lower.defaultInlineBudget 1
+          (Stack.Lower.computeLastUses wave19SmokeBody) []
+          ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+          ["t0", "p2"] "t1" (.binOp "-" "t0" "p2" none)).1
+          ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest})
+        = .ok ({initialStack with stack := .vBigint ((a + b) - c) :: rest}) := by
+    rw [wave19_ops1, hRun1Raw]; rfl
+  -- Binding 2: t2 = -t1, depth-0 unary consume → [OP_NEGATE].
+  have hStk2 :
+      ({initialStack with stack := .vBigint ((a + b) - c) :: rest} : StackState).stack
+        = .vBigint ((a + b) - c) :: rest := rfl
+  have hRun2Raw :
+      runOps [StackOp.opcode "OP_NEGATE"]
+          ({initialStack with stack := .vBigint ((a + b) - c) :: rest})
+        = .ok (({({initialStack with stack := .vBigint ((a + b) - c) :: rest}) with
+                  stack := rest}).push (.vBigint (-((a + b) - c)))) :=
+    Stack.Sim.run_OP_NEGATE_int
+      ({initialStack with stack := .vBigint ((a + b) - c) :: rest}) ((a + b) - c) rest hStk2
+  have hRun2 :
+      runOps (Stack.Lower.lowerValueP [wave19SmokeMethod] ([] : List ANFProperty)
+          Stack.Lower.defaultInlineBudget 2
+          (Stack.Lower.computeLastUses wave19SmokeBody) []
+          ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+          ["t1"] "t2" (.unaryOp "-" "t1" none)).1
+          ({initialStack with stack := .vBigint ((a + b) - c) :: rest})
+        = .ok ({initialStack with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    rw [wave19_ops2, hRun2Raw]; rfl
+  -- ===== Build the structuralArithConsumeBody chain bottom-up. =====
+  have chain1 :
+      structuralArithConsumeBody [wave19SmokeMethod] ([] : List ANFProperty)
+        Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        (Stack.Lower.collectConstInts wave19SmokeBody)
+        [ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+         ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none]
+        ["t0", "p2"] 1 ["t0", "t1", "t2"]
+        ({initialStack with stack := .vBigint (a + b) :: .vBigint c :: rest})
+        (Stack.Lower.lowerValueP [wave19SmokeMethod] ([] : List ANFProperty)
+            Stack.Lower.defaultInlineBudget 2
+            (Stack.Lower.computeLastUses wave19SmokeBody) []
+            ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+            ["t1"] "t2" (.unaryOp "-" "t1" none)).2.1
+        ({initialStack with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    refine structuralArithConsumeBody.consBinOp hRun1 ?_
+    rw [wave19_sm1, wave19_lb1]
+    exact structuralArithConsumeBody.consUnaryOp hRun2 structuralArithConsumeBody.nil
+  have chain0 :
+      structuralArithConsumeBody [wave19SmokeMethod] ([] : List ANFProperty)
+        Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses wave19SmokeBody) []
+        (Stack.Lower.collectConstInts wave19SmokeBody)
+        wave19SmokeBody
+        ["p0", "p1", "p2"] 0 ["t0", "t1", "t2"] initialStack
+        (Stack.Lower.lowerValueP [wave19SmokeMethod] ([] : List ANFProperty)
+            Stack.Lower.defaultInlineBudget 2
+            (Stack.Lower.computeLastUses wave19SmokeBody) []
+            ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+            ["t1"] "t2" (.unaryOp "-" "t1" none)).2.1
+        ({initialStack with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    show structuralArithConsumeBody _ _ _ _ _ _
+      (ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none ::
+        [ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+         ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none])
+      _ _ _ _ _ _
+    refine structuralArithConsumeBody.consBinOp hRun0 ?_
+    rw [wave19_sm0, wave19_lb0]
+    exact chain1
+  -- ===== Assemble the capstone's `hArith` hypothesis from chain0. =====
+  -- The capstone takes `structuralArithConsumeBody` over the COMPUTED
+  -- method-lowering args; `chain0` carries it over the equal literal
+  -- args.  The endpoints `sm'` / `stkFinal` are written explicitly to
+  -- match chain0's, then the literals are rewritten into the computed
+  -- shapes via the method-args reductions.
+  have hUniq :
+      ∀ m', m' ∈ [wave19SmokeMethod] → m'.isPublic = true →
+        (m'.name == wave19SmokeMethod.name) = true → m' = wave19SmokeMethod := by
+    intro m' hm' _ _
+    simp only [List.mem_singleton] at hm'
+    exact hm'
+  have hArith :
+      structuralArithConsumeBody [wave19SmokeMethod] ([] : List ANFProperty)
+        Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses wave19SmokeMethod.body) []
+        (Stack.Lower.collectConstInts wave19SmokeMethod.body)
+        wave19SmokeMethod.body
+        ((wave19SmokeMethod.params.map (fun p => p.name)).reverse) 0
+        (wave19SmokeMethod.body.map (fun bd => bd.name)) initialStack
+        (Stack.Lower.lowerValueP [wave19SmokeMethod] ([] : List ANFProperty)
+            Stack.Lower.defaultInlineBudget 2
+            (Stack.Lower.computeLastUses wave19SmokeBody) []
+            ["t0", "t1", "t2"] (Stack.Lower.collectConstInts wave19SmokeBody)
+            ["t1"] "t2" (.unaryOp "-" "t1" none)).2.1
+        ({initialStack with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    -- `wave19SmokeMethod.body`, `(params.map name).reverse`, and
+    -- `body.map name` all reduce definitionally to `wave19SmokeBody`,
+    -- `["p0","p1","p2"]`, `["t0","t1","t2"]` respectively, so `chain0`
+    -- (stated over those literals) is definitionally this goal.
+    exact chain0
+  -- ===== Apply the capstone. =====
+  exact runMethod_lower_public_unique_no_post_structuralArithConsumeBody_whole_isSome
+    contractName ([] : List ANFProperty) [wave19SmokeMethod] wave19SmokeMethod initialStack
+    _ _ List.mem_cons_self rfl hUniq hArith
+    wave19_noPreimage wave19_noCode wave19_noTerminalAssert wave19_noDeserialize
+
 end Agrees
 end RunarVerification.Stack
