@@ -57,8 +57,27 @@ function listContractFiles(dir: string): string[] {
   return out.sort();
 }
 
+// Examples whose compiled script drives the symbolic-execution lifter into
+// pathological (super-linear) runtime — minutes-to-hours each. Mirrors the
+// PATHOLOGICAL_DECOMPILE set in __tests__/roundtrip.test.ts: the parameterized
+// SLH-DSA "naive INSECURE" pedagogy contracts unroll into enormous hash-chain
+// scripts. The trigger is script *structure*, not raw size (p384-wallet ~1.95
+// MB decompiles in <1s). Recorded as 'skipped' so the matrix completes in
+// seconds instead of hours; the base post-quantum-slhdsa-naive-INSECURE (128s)
+// is fast and stays measured.
+const PATHOLOGICAL_DECOMPILE: ReadonlySet<string> = new Set([
+  'post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f',
+  'post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f',
+  'post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s',
+  'post-quantum-slhdsa-naive-INSECURE-256f/PostQuantumSLHDSANaiveInsecure256f',
+  'post-quantum-slhdsa-naive-INSECURE-256s/PostQuantumSLHDSANaiveInsecure256s',
+]);
+
 function tryExample(file: string): Row {
   const id = relative(EXAMPLES_DIR, file).replace(/\.runar\.ts$/, '');
+  if (PATHOLOGICAL_DECOMPILE.has(id)) {
+    return { id, source: file, outcome: 'skipped', detail: 'pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE' };
+  }
   const source = readFileSync(file, 'utf8');
   const r = compile(source, { fileName: basename(file) });
   if (!r.success || !r.scriptHex) {

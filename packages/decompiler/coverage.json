@@ -1,17 +1,17 @@
 {
-  "generatedAt": "2026-05-13T01:30:34.025Z",
+  "generatedAt": "2026-05-20T17:46:17.086Z",
   "summary": {
-    "byte-match": 63,
+    "byte-match": 68,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
-    "skipped": 0
+    "skipped": 5
   },
   "pathBreakdown": {
-    "template": 58,
-    "assert-recognizer": 1,
-    "symexec": 0,
-    "raw_script": 4
+    "template": 57,
+    "assert-recognizer": 2,
+    "symexec": 1,
+    "raw_script": 8
   },
   "rows": [
     {
@@ -28,6 +28,11 @@
       "id": "arithmetic/Arithmetic",
       "outcome": "byte-match",
       "recoveryPath": "template"
+    },
+    {
+      "id": "asm-raw-script/Anyone",
+      "outcome": "byte-match",
+      "recoveryPath": "assert-recognizer"
     },
     {
       "id": "auction/Auction",
@@ -63,6 +68,11 @@
       "id": "bounded-loop/BoundedLoop",
       "outcome": "byte-match",
       "recoveryPath": "template"
+    },
+    {
+      "id": "branched-readonly-len/BranchedReadonlyLen",
+      "outcome": "byte-match",
+      "recoveryPath": "symexec"
     },
     {
       "id": "bsv20-token/BSV20Token",
@@ -145,9 +155,24 @@
       "recoveryPath": "template"
     },
     {
+      "id": "intent-current-block-height/IntentCurrentBlockHeight",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "intent-output-p2pkh/IntentOutputP2PKH",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "intent-prev-output-script/IntentPrevOutputScript",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
       "id": "math-demo/MathDemo",
       "outcome": "byte-match",
-      "recoveryPath": "template"
+      "recoveryPath": "raw_script"
     },
     {
       "id": "merkle-proof/MerkleProofDemo",
@@ -208,6 +233,31 @@
       "id": "p384-wallet/P384Wallet",
       "outcome": "byte-match",
       "recoveryPath": "template"
+    },
+    {
+      "id": "post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f",
+      "outcome": "skipped",
+      "detail": "pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE"
+    },
+    {
+      "id": "post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f",
+      "outcome": "skipped",
+      "detail": "pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE"
+    },
+    {
+      "id": "post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s",
+      "outcome": "skipped",
+      "detail": "pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE"
+    },
+    {
+      "id": "post-quantum-slhdsa-naive-INSECURE-256f/PostQuantumSLHDSANaiveInsecure256f",
+      "outcome": "skipped",
+      "detail": "pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE"
+    },
+    {
+      "id": "post-quantum-slhdsa-naive-INSECURE-256s/PostQuantumSLHDSANaiveInsecure256s",
+      "outcome": "skipped",
+      "detail": "pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE"
     },
     {
       "id": "post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure",
