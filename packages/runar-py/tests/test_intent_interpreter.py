@@ -50,7 +50,10 @@ from runar_compiler.compiler import compile_source_to_ir, _serialize_anf_program
 # Fixture paths
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path('/Users/siggioskarsson/gitcheckout/runar-review-remediation')
+# Repo root resolved relative to this file (tests -> runar-py -> packages ->
+# repo root) so the suite runs in any checkout / CI runner. (A hardcoded
+# absolute worktree path was committed here by mistake.)
+REPO_ROOT = Path(__file__).resolve().parents[3]
 EX = REPO_ROOT / 'examples' / 'ts'
 
 
