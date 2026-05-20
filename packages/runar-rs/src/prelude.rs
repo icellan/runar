@@ -795,6 +795,35 @@ pub fn bool_cast(n: Int) -> bool {
     n != 0
 }
 
+/// Boolean cast — returns true if n is non-zero. Alias of `bool_cast` so that
+/// Rúnar contracts calling the `bool` builtin compile as native Rust. The name
+/// `bool` lives in the value namespace and does not collide with the primitive
+/// `bool` type in the type namespace.
+pub fn bool(n: Int) -> bool {
+    bool_cast(n)
+}
+
+/// Absolute value.
+pub fn abs(n: Int) -> Int {
+    if n < 0 { -n } else { n }
+}
+
+/// Smaller of two values.
+pub fn min(a: Int, b: Int) -> Int {
+    if a < b { a } else { b }
+}
+
+/// Larger of two values.
+pub fn max(a: Int, b: Int) -> Int {
+    if a > b { a } else { b }
+}
+
+/// Half-open range check: `lo <= value && value < hi` (min inclusive, max
+/// exclusive), matching Bitcoin Script's OP_WITHIN.
+pub fn within(value: Int, lo: Int, hi: Int) -> bool {
+    value >= lo && value < hi
+}
+
 // ---------------------------------------------------------------------------
 // Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921)
 // ---------------------------------------------------------------------------
