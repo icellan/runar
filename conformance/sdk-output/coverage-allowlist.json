@@ -35,6 +35,17 @@
     "if-without-else-multi-temp":       "Stack-lowering edge case for if-without-else with multiple temporaries; the resulting locking script is structurally captured by if-else / if-without-else (SDK-output covered).",
     "bitwise-ops":                      "Compiler-level bitwise codegen unit; deploy locking script behaviour is captured by arithmetic / boolean-logic / shift-ops parity.",
     "shift-ops":                        "Companion to bitwise-ops; same reasoning.",
-    "state-ripemd160":                  "Stateful RIPEMD-160 unit test; structurally redundant with stateful-bytestring + stateful-counter for the deploy locking script."
+    "state-ripemd160":                  "Stateful RIPEMD-160 unit test; structurally redundant with stateful-bytestring + stateful-counter for the deploy locking script.",
+    "multisig":                         "Stateless 2-of-3 multisig; checkMultiSig + array_literal are method-time codegen (compiler-conformance covered), and multi-constructor-slot splicing across the 7 SDKs is already exercised by p256-wallet / auction. Adds no new SDK deploy-locking-script behaviour.",
+    "asm-raw-script":                   "Raw-asm intrinsic unit (UnsafeSmartContract); stateless deploy with no constructor slots — the locking script is the compiled hex already gated by compiler conformance, structurally redundant at the SDK layer.",
+    "branched-readonly-len":            "Affine-checker regression fixture (Len-driven if/else with state mutation on both arms); deploy locking script is the stateful continuation already covered by stateful / stateful-counter, and the method-time branch behaviour is covered by ANF parity.",
+    "intent-current-block-height":      "Intent-covenant intrinsic (currentBlockHeight, sugar for extractLocktime); deploy locking script is the stateful continuation covered by stateful, and method-time witness behaviour is covered by conformance/anf-interpreter/inputs/intent-current-block-height.json (lenient + strict goldens, all 7 SDK drivers).",
+    "intent-output-p2pkh":              "Intent-covenant intrinsic (requireOutputP2PKH); stateful deploy covered by stateful; method-time witness behaviour covered by conformance/anf-interpreter/inputs/intent-output-p2pkh.json across all 7 SDK drivers.",
+    "intent-prev-output-script":        "Intent-covenant intrinsic (extractPrevOutputScript); stateful deploy covered by stateful; method-time witness behaviour covered by conformance/anf-interpreter/inputs/intent-prev-output-script.json across all 7 SDK drivers.",
+    "post-quantum-slhdsa-128f":         "SLH-DSA parameter-set variant of post-quantum-slhdsa (SDK-output covered); identical SDK deploy-splice path, differs only in compile-time SLH-DSA parameter constants.",
+    "post-quantum-slhdsa-192f":         "SLH-DSA parameter-set variant of post-quantum-slhdsa (SDK-output covered); identical SDK deploy-splice path, differs only in compile-time SLH-DSA parameter constants.",
+    "post-quantum-slhdsa-192s":         "SLH-DSA parameter-set variant of post-quantum-slhdsa (SDK-output covered); identical SDK deploy-splice path, differs only in compile-time SLH-DSA parameter constants.",
+    "post-quantum-slhdsa-256f":         "SLH-DSA parameter-set variant of post-quantum-slhdsa (SDK-output covered); identical SDK deploy-splice path, differs only in compile-time SLH-DSA parameter constants.",
+    "post-quantum-slhdsa-256s":         "SLH-DSA parameter-set variant of post-quantum-slhdsa (SDK-output covered); identical SDK deploy-splice path, differs only in compile-time SLH-DSA parameter constants."
   }
 }
