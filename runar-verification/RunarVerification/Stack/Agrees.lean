@@ -11406,6 +11406,247 @@ theorem stageD_simpleANF_full_capstone
   exact stageD_simpleANF_outputs_preserved body tsm tsm' initialAnf anfFinal
           initialStack stkFinal hChain hAgrees
 
+/-! ## Wave 15 — Whole-body operational composition (runOps · ChainRel)
+
+`agreesTagged_chain_preserves` composes the **predicate side**
+(`agreesTagged` preservation) over a `ChainRel R bindings`.  Its
+operational analogue — "running the lowered body over `lowerBindings`
+witnesses runtime success across the whole binding list" — was the
+missing substrate: the concrete demos (`stageC_mixed_loadConst_unaryNegate`,
+`stageC_three_double_negation`) inline the cons-by-cons threading by
+hand, but no reusable lemma exposed it.
+
+This section ships that lemma.  The key design point is that the
+per-binding witnesses produced by the Phase 7.6 / AgreesA3 wrappers
+(e.g. `stageC_simpleStep_binOp_ADD_d1d0`, `stageC_simpleStep_unaryOp_NEGATE_d0`)
+return BOTH facts in composable form for an arbitrary input stack:
+
+  `runOps (lowerValue sm b.name b.value).1 stkSt = .ok stkSt'`
+  ∧ `simpleStepRel (.mk …) tsm anfSt stkSt tsm' anfSt' stkSt'`
+
+We bundle the operational fact, the `simpleStepRel` fact, AND the
+simple-lowerer stack-map evolution (`sm' = (lowerValue …).2`) into a
+single chained relation `RunChainRel`, and prove that a `RunChainRel`
+over a body delivers whole-body `runOps (lowerBindings sm body).1
+isSome`.  This is the operational composer that a follow-up Pipeline
+wave consumes (after the `lowerBindingsP ↔ lowerBindings` arith bridge
+and a per-binding witness selector land) to retire
+`compileSafe_observational_correct_modulo_arith_codegen`.
+
+Unlike `runOps_lowerBindingsP_structuralArithBody_isSome` (which takes
+the forbidden universal-`hRunOk` "succeeds on EVERY stack" hypothesis —
+false for value-dependent opcodes like `OP_ADD` / `OP_VERIFY`), the
+`RunChainRel` hypothesis is the genuine per-binding success witness
+threaded through the concrete evolving stack, so it composes from the
+existing `agreesTagged`-conditioned per-binding wrappers without
+restating the whole-body conclusion. -/
+
+/-- Operational chained relation over a binding list against the
+**simple** lowerer.  Mirrors `ChainRel simpleStepRel` but additionally
+threads the simple-lowerer stack-map (`sm`) and the per-binding `runOps`
+success, so the whole-body run can be reconstructed by composition.
+
+* `nil` — empty body: stack map, ANF state and runtime stack unchanged.
+* `cons` — for the head binding `b`, running the simple-lowered ops of
+  `b` from `stkSt` produces `stkSt_b'`, the lowerer advances the stack
+  map to `(lowerValue sm b.name b.value).2`, the predicate side records
+  a `simpleStepRel` step, and the tail chains from the advanced state. -/
+inductive RunChainRel :
+    List ANFBinding → StackMap → TaggedStackMap → State → StackState →
+    StackMap → TaggedStackMap → State → StackState → Prop where
+  | nil {sm tsm anfSt stkSt} :
+      RunChainRel [] sm tsm anfSt stkSt sm tsm anfSt stkSt
+  | cons {b rest sm sm'' tsm tsm' tsm'' anfSt anfSt' anfSt''
+          stkSt stkSt_b' stkSt''} :
+      runOps (Stack.Lower.lowerValue sm b.name b.value).1 stkSt = .ok stkSt_b' →
+      simpleStepRel b tsm anfSt stkSt tsm' anfSt' stkSt_b' →
+      RunChainRel rest (Stack.Lower.lowerValue sm b.name b.value).2
+          tsm' anfSt' stkSt_b' sm'' tsm'' anfSt'' stkSt'' →
+      RunChainRel (b :: rest) sm tsm anfSt stkSt sm'' tsm'' anfSt'' stkSt''
+
+/-- A `RunChainRel` forgets its operational content to a plain
+`ChainRel simpleStepRel` over the same binding list.  Lets a
+`RunChainRel` feed the predicate-side composer
+`agreesTagged_chain_preserves` / `stageD_simpleANF_outputs_preserved`
+without re-deriving the per-step `simpleStepRel` facts. -/
+theorem RunChainRel.toChainRel
+    {body : List ANFBinding} {sm sm' : StackMap}
+    {tsm tsm' : TaggedStackMap} {anfSt anfSt' : State}
+    {stkSt stkSt' : StackState}
+    (h : RunChainRel body sm tsm anfSt stkSt sm' tsm' anfSt' stkSt') :
+    ChainRel simpleStepRel body tsm anfSt stkSt tsm' anfSt' stkSt' := by
+  induction h with
+  | nil => exact ChainRel.nil
+  | cons _hRun hStep _hRest ih => exact ChainRel.cons hStep ih
+
+/-- **Whole-body operational composition.**  From a `RunChainRel`
+witness over `body` (every binding's simple-lowered ops run
+successfully and the predicate side advances by `simpleStepRel`),
+running the simple-lowered body over `lowerBindings` succeeds and
+lands on the chain's final runtime stack.
+
+This is the operational analogue of `agreesTagged_chain_preserves`:
+it composes the per-binding `runOps` witnesses into one whole-body run
+by induction over the binding list, using `runOps_lowerBindings_cons`
+for the inductive step and `runOps_lowerBindings_nil` for the base. -/
+theorem runOps_lowerBindings_RunChainRel
+    {body : List ANFBinding} {sm sm' : StackMap}
+    {tsm tsm' : TaggedStackMap} {anfSt anfSt' : State}
+    {stkSt stkSt' : StackState}
+    (h : RunChainRel body sm tsm anfSt stkSt sm' tsm' anfSt' stkSt') :
+    runOps (Stack.Lower.lowerBindings sm body).1 stkSt = .ok stkSt' := by
+  induction h with
+  | nil => exact runOps_lowerBindings_nil _ _
+  | @cons b rest sm sm'' tsm tsm' tsm'' anfSt anfSt' anfSt''
+        stkSt stkSt_b' stkSt'' hRun _hStep _hRest ih =>
+      exact runOps_lowerBindings_cons sm
+              (Stack.Lower.lowerValue sm b.name b.value).2
+              b rest stkSt stkSt_b' stkSt''
+              hRun rfl ih
+
+/-- **Whole-body operational composition — `isSome` form.**  The
+runtime-success corollary of `runOps_lowerBindings_RunChainRel`: a
+`RunChainRel` witness over `body` makes the simple-lowered whole body
+run to a defined result. -/
+theorem runOps_lowerBindings_RunChainRel_isSome
+    {body : List ANFBinding} {sm sm' : StackMap}
+    {tsm tsm' : TaggedStackMap} {anfSt anfSt' : State}
+    {stkSt stkSt' : StackState}
+    (h : RunChainRel body sm tsm anfSt stkSt sm' tsm' anfSt' stkSt') :
+    (runOps (Stack.Lower.lowerBindings sm body).1 stkSt).toOption.isSome := by
+  rw [runOps_lowerBindings_RunChainRel h]
+  simp [Except.toOption]
+
+/-- Single-step `RunChainRel` builder from a per-binding witness in the
+exact shape the Phase 7.6 / AgreesA3 wrappers return:
+`runOps (lowerValue …).1 stkSt = .ok stkSt'` paired with the
+`simpleStepRel` step.  Caps the chain with a `nil` tail. -/
+theorem RunChainRel.singleton
+    (b : ANFBinding) (sm : StackMap)
+    (tsm tsm' : TaggedStackMap) (anfSt anfSt' : State)
+    (stkSt stkSt' : StackState)
+    (hRun : runOps (Stack.Lower.lowerValue sm b.name b.value).1 stkSt = .ok stkSt')
+    (hStep : simpleStepRel b tsm anfSt stkSt tsm' anfSt' stkSt') :
+    RunChainRel [b] sm tsm anfSt stkSt
+      (Stack.Lower.lowerValue sm b.name b.value).2 tsm' anfSt' stkSt' :=
+  RunChainRel.cons hRun hStep RunChainRel.nil
+
+/-- Cons builder for `RunChainRel`: prepend a per-binding witness to an
+existing chain.  Lets callers thread the Phase 7.6 wrappers
+binding-by-binding without unfolding the inductive. -/
+theorem RunChainRel.consWitness
+    (b : ANFBinding) (rest : List ANFBinding)
+    (sm sm'' : StackMap)
+    (tsm tsm' tsm'' : TaggedStackMap)
+    (anfSt anfSt' anfSt'' : State)
+    (stkSt stkSt_b' stkSt'' : StackState)
+    (hRun : runOps (Stack.Lower.lowerValue sm b.name b.value).1 stkSt = .ok stkSt_b')
+    (hStep : simpleStepRel b tsm anfSt stkSt tsm' anfSt' stkSt_b')
+    (hRest : RunChainRel rest (Stack.Lower.lowerValue sm b.name b.value).2
+        tsm' anfSt' stkSt_b' sm'' tsm'' anfSt'' stkSt'') :
+    RunChainRel (b :: rest) sm tsm anfSt stkSt sm'' tsm'' anfSt'' stkSt'' :=
+  RunChainRel.cons hRun hStep hRest
+
+/-! ### Wave 15 — multi-binding smoke test for the operational composer
+
+`runOps_lowerBindings_RunChainRel` is worthless unless a CONCRETE
+multi-binding arith body can be threaded through it from the genuine
+`agreesTagged`-conditioned per-binding wrappers.  The smoke test below
+instantiates the composer on a real **3-binding** body that mixes a
+literal load, a real `binOp "+"` (depth pair (1,0)), and a real
+`unaryOp "-"` (depth 0) — i.e. the binOp / unaryOp / const constructors
+the arith fragment is built from — discharging every `RunChainRel`
+hypothesis from `stageC_simpleStep_*` witnesses with no `sorry` and no
+conclusion-restating hypothesis.
+
+Body (over an initial stack `[a]` with the param `p` at depth 0):
+
+  let t0 = i                      -- loadConst .int
+  let t1 = p + t0                 -- binOp "+", operands at depth (1,0)
+  let t2 = -t1                    -- unaryOp "-", operand at depth 0
+
+Final stack: `[a, i, a+i, -(a+i)]` (top). -/
+theorem runChainRel_smoke_three_binding
+    (p bn0 bn1 bn2 : String) (a i : Int) (rt1 rt2 : Option String)
+    (tsm_rest : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((p, .param) :: tsm_rest) anfSt stkSt)
+    (hLookupP : lookupAnfByKind anfSt (p, .param) = some (.vBigint a))
+    (hFresh0 : freshIn bn0 (untagSm ((p, .param) :: tsm_rest)))
+    (hFresh1 : freshIn bn1 (bn0 :: p :: untagSm tsm_rest))
+    (hFresh2 : freshIn bn2
+        (untagSm ((bn1, .binding) :: (bn0, .binding) :: (p, .param) :: tsm_rest)))
+    (hLoadLeft1 :
+      loadRef (untagSm ((bn0, .binding) :: (p, .param) :: tsm_rest)) p = [.over])
+    (hLoadRight1 :
+      loadRef ((untagSm ((bn0, .binding) :: (p, .param) :: tsm_rest)).push p) bn0
+        = [.over])
+    (hLoadRef2 :
+      loadRef (untagSm ((bn1, .binding) :: (bn0, .binding) :: (p, .param) :: tsm_rest)) bn1
+        = [.dup]) :
+    (runOps (Stack.Lower.lowerBindings (untagSm ((p, .param) :: tsm_rest))
+              [.mk bn0 (.loadConst (.int i)) none,
+               .mk bn1 (.binOp "+" p bn0 rt1) none,
+               .mk bn2 (.unaryOp "-" bn1 rt2) none]).1 stkSt).toOption.isSome := by
+  -- Binding 0: loadConst .int.
+  have ⟨hRun0, hStep0⟩ :=
+    stageC_simpleStep_loadConst_int bn0 i ((p, .param) :: tsm_rest) anfSt stkSt hFresh0
+  -- agreesTagged after binding 0.
+  have hAgrees1 :
+      agreesTagged ((bn0, .binding) :: (p, .param) :: tsm_rest)
+                   (anfSt.addBinding bn0 (.vBigint i))
+                   (stkSt.push (.vBigint i)) :=
+    agreesTagged_push_value ((p, .param) :: tsm_rest) bn0 anfSt stkSt
+      (.vBigint i) hAgrees hFresh0
+  -- Binding 1: binOp "+" p bn0 — left operand p at depth 1, right bn0 at depth 0.
+  -- For ADD_d1d0: botName = p (deeper, value a), topName = bn0 (top, value i),
+  -- the operating tsm is (bn0, .binding) :: (p, .param) :: tsm_rest.
+  -- Left operand p resolves to a; `addBinding` only touches `bindings`,
+  -- so `lookupParam` (over `params`) is unchanged.
+  have hLookupL1 :
+      lookupAnfByKind (anfSt.addBinding bn0 (.vBigint i)) (p, .param)
+        = some (.vBigint a) := by
+    show (anfSt.addBinding bn0 (.vBigint i)).lookupParam p = some (.vBigint a)
+    unfold State.addBinding State.lookupParam
+    exact hLookupP
+  have hLookupR1 :
+      lookupAnfByKind (anfSt.addBinding bn0 (.vBigint i)) (bn0, .binding)
+        = some (.vBigint i) :=
+    addBinding_self_lookup anfSt bn0 (.vBigint i)
+  have ⟨hRun1, hStep1⟩ :=
+    stageC_simpleStep_binOp_ADD_d1d0
+      bn1 bn0 p .binding .param tsm_rest
+      (anfSt.addBinding bn0 (.vBigint i)) (stkSt.push (.vBigint i)) a i rt1
+      hAgrees1 hLookupL1 hLookupR1 hFresh1 hLoadLeft1 hLoadRight1
+  -- agreesTagged after binding 1.
+  have hAgrees2 :
+      agreesTagged ((bn1, .binding) :: (bn0, .binding) :: (p, .param) :: tsm_rest)
+                   ((anfSt.addBinding bn0 (.vBigint i)).addBinding bn1 (.vBigint (a + i)))
+                   ((stkSt.push (.vBigint i)).push (.vBigint (a + i))) :=
+    agreesTagged_push_value ((bn0, .binding) :: (p, .param) :: tsm_rest) bn1
+      (anfSt.addBinding bn0 (.vBigint i)) (stkSt.push (.vBigint i))
+      (.vBigint (a + i)) hAgrees1 hFresh1
+  -- Binding 2: unaryOp "-" with operand bn1 at depth 0.
+  have hLookup2 :
+      lookupAnfByKind
+        ((anfSt.addBinding bn0 (.vBigint i)).addBinding bn1 (.vBigint (a + i)))
+        (bn1, .binding) = some (.vBigint (a + i)) :=
+    addBinding_self_lookup _ bn1 (.vBigint (a + i))
+  have hFresh2' :
+      freshIn bn2 (bn1 :: untagSm ((bn0, .binding) :: (p, .param) :: tsm_rest)) := hFresh2
+  have ⟨hRun2, hStep2⟩ :=
+    stageC_simpleStep_unaryOp_NEGATE_d0
+      bn2 bn1 .binding ((bn0, .binding) :: (p, .param) :: tsm_rest)
+      ((anfSt.addBinding bn0 (.vBigint i)).addBinding bn1 (.vBigint (a + i)))
+      ((stkSt.push (.vBigint i)).push (.vBigint (a + i)))
+      (a + i) rt2 hAgrees2 hLookup2 hFresh2' hLoadRef2
+  -- Compose the three per-binding witnesses into a RunChainRel and run.
+  -- `RunChainRel.cons`'s state arguments are all implicit, so the
+  -- per-binding `runOps`/`simpleStepRel` witnesses fully determine them.
+  exact runOps_lowerBindings_RunChainRel_isSome
+    (RunChainRel.cons hRun0 hStep0
+      (RunChainRel.cons hRun1 hStep1
+        (RunChainRel.cons hRun2 hStep2 RunChainRel.nil)))
+
 /-- **Concrete Stage D instance** — observational equivalence for
 the mixed-constructor demo body `[loadConst .int i; unaryOp "-" t0]`.
 Combines the Phase 7.6.e Stage C closure with the Stage D
