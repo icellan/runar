@@ -1263,6 +1263,41 @@ instance (ops : List StackOp) : Decidable (noIfOp ops) :=
   then isTrue ((noIfOpBool_iff ops).mp h)
   else isFalse (fun hNo => h ((noIfOpBool_iff ops).mpr hNo))
 
+/-- Predicate: an op list contains no `.push` constructor at the top
+level. Mirrors `noIfOp`. The chain-fold post-pass
+(`applyPushAddPushAdd` / `applyPushAddPushSub`) only rewrites windows
+that begin with `.push (.bigint _)`, so a `pushFree` list is a fixpoint
+of the chain-fold. Used by `peepholeChainFold_eq_self_of_noIfOp_pushFree`
+to discharge the pure-syntactic identity for the arith consume fragment,
+which lowers to `[.swap, .opcode …]` (no `.push`). -/
+def pushFree : List StackOp → Prop
+  | [] => True
+  | .push _ :: _ => False
+  | _ :: rest => pushFree rest
+
+/-- Boolean checker for `pushFree`. Returns `true` iff no element of
+`ops` is a `.push` constructor. -/
+def pushFreeBool : List StackOp → Bool
+  | [] => true
+  | .push _ :: _ => false
+  | _ :: rest => pushFreeBool rest
+
+/-- `pushFreeBool` reflects `pushFree`. -/
+theorem pushFreeBool_iff (ops : List StackOp) :
+    pushFreeBool ops = true ↔ pushFree ops := by
+  induction ops with
+  | nil => simp [pushFreeBool, pushFree]
+  | cons op rest ih =>
+      cases op with
+      | push _ => simp [pushFreeBool, pushFree]
+      | _ => simp [pushFreeBool, pushFree, ih]
+
+/-- `pushFree` is decidable via the Boolean checker. -/
+instance (ops : List StackOp) : Decidable (pushFree ops) :=
+  if h : pushFreeBool ops = true
+  then isTrue ((pushFreeBool_iff ops).mp h)
+  else isFalse (fun hNo => h ((pushFreeBool_iff ops).mpr hNo))
+
 /-- For a non-`ifOp` op, `runOps (op :: applyXxx rest) s = runOps (op :: rest) s`
 when `runOps (applyXxx rest) s' = runOps rest s'` for the post-op state `s'`.
 
@@ -10984,6 +11019,101 @@ theorem peepholeChainFold_runOps_eq (ops : List StackOp) (s : StackState)
   unfold peepholeChainFold
   rw [chainFoldListTRgo_nil_acc_of_noIfOp ops hNoIf]
   exact chainFoldFixpointFlat_runOps_eq 64 ops hNoIf s hWT
+
+/-! ### Pure syntactic chain-fold identity on push-free lists (M3 substrate)
+
+The two 4-op chain-fold rules (`applyPushAddPushAdd` /
+`applyPushAddPushSub`) only fire on windows beginning with
+`.push (.bigint _)`. On a `pushFree` list neither window ever matches, so
+each pass is the identity, the fixpoint length-check stabilises after one
+iteration, and `peepholeChainFold` reduces to its input. This is the
+file-local twin of `peepholeRollPickFold_eq_self_of_noIfOp_flatNoop`. -/
+
+/-- On a `pushFree` list, `applyPushAddPushAdd` is the identity: every
+4-op window's lead op is non-`.push`, so the rewrite arm never fires. -/
+private theorem applyPushAddPushAdd_eq_self_of_pushFree :
+    ∀ (ops : List StackOp), pushFree ops → applyPushAddPushAdd ops = ops := by
+  intro ops
+  induction ops with
+  | nil => intro _; rfl
+  | cons op rest ih =>
+      intro hPF
+      have hRest : pushFree rest := by
+        cases op with
+        | push _ => exact absurd hPF (by simp [pushFree])
+        | _ => simpa [pushFree] using hPF
+      cases op with
+      | push _ => exact absurd hPF (by simp [pushFree])
+      | _ => simp [applyPushAddPushAdd, ih hRest]
+
+/-- On a `pushFree` list, `applyPushAddPushSub` is the identity. -/
+private theorem applyPushAddPushSub_eq_self_of_pushFree :
+    ∀ (ops : List StackOp), pushFree ops → applyPushAddPushSub ops = ops := by
+  intro ops
+  induction ops with
+  | nil => intro _; rfl
+  | cons op rest ih =>
+      intro hPF
+      have hRest : pushFree rest := by
+        cases op with
+        | push _ => exact absurd hPF (by simp [pushFree])
+        | _ => simpa [pushFree] using hPF
+      cases op with
+      | push _ => exact absurd hPF (by simp [pushFree])
+      | _ => simp [applyPushAddPushSub, ih hRest]
+
+/-- The composed chain-fold step is the identity on a `pushFree` list. -/
+private theorem chainFoldStep_eq_self_of_pushFree
+    (ops : List StackOp) (hPF : pushFree ops) :
+    applyPushAddPushSub (applyPushAddPushAdd ops) = ops := by
+  rw [applyPushAddPushAdd_eq_self_of_pushFree ops hPF]
+  exact applyPushAddPushSub_eq_self_of_pushFree ops hPF
+
+/-- `chainFoldFixpointFlat` is the identity on a `pushFree` list at any
+fuel: the composed step returns the input, so the length check stabilises
+on the first iteration. -/
+private theorem chainFoldFixpointFlat_eq_self_of_pushFree :
+    ∀ (fuel : Nat) (ops : List StackOp), pushFree ops →
+        chainFoldFixpointFlat fuel ops = ops := by
+  intro fuel
+  cases fuel with
+  | zero => intro ops _; simp [chainFoldFixpointFlat]
+  | succ k =>
+      intro ops hPF
+      unfold chainFoldFixpointFlat
+      simp [chainFoldStep_eq_self_of_pushFree ops hPF]
+
+/-- Pure syntactic identity: `peepholeChainFold` is the identity on op
+lists that are both if-free and push-free. The arith consume fragment
+lowers to `[.swap, .opcode …]` (no `.push`, no `.ifOp`), so both
+hypotheses hold at that call site. This retires the M3 substrate gap
+without the `wellTypedRun` precondition of
+`peepholeChainFold_runOps_eq`. -/
+theorem peepholeChainFold_eq_self_of_noIfOp_pushFree
+    (ops : List StackOp) (hNoIf : noIfOp ops) (hPushFree : pushFree ops) :
+    peepholeChainFold ops = ops := by
+  unfold peepholeChainFold
+  rw [chainFoldListTRgo_nil_acc_of_noIfOp ops hNoIf]
+  exact chainFoldFixpointFlat_eq_self_of_pushFree 64 ops hPushFree
+
+/-! ### Smoke test — `peepholeChainFold_eq_self_of_noIfOp_pushFree`.
+
+Instantiate the lemma on the lowered wave-19 `add3sub` method body
+(`[.swap, OP_ADD, .swap, OP_SUB, OP_NEGATE]`): push-free, if-free arith
+ops. The fold must return the list unchanged. -/
+
+private def chainFoldSmokeOps : List StackOp :=
+  [.swap, .opcode "OP_ADD", .swap, .opcode "OP_SUB", .opcode "OP_NEGATE"]
+
+private theorem chainFoldSmoke_noIfOp : noIfOp chainFoldSmokeOps := by
+  unfold chainFoldSmokeOps; decide
+
+private theorem chainFoldSmoke_pushFree : pushFree chainFoldSmokeOps := by
+  unfold chainFoldSmokeOps; decide
+
+example : peepholeChainFold chainFoldSmokeOps = chainFoldSmokeOps :=
+  peepholeChainFold_eq_self_of_noIfOp_pushFree chainFoldSmokeOps
+    chainFoldSmoke_noIfOp chainFoldSmoke_pushFree
 
 /-- `chainFoldFixpointFlat` is the identity on the empty op list at any
 fuel: each iteration's length check immediately stabilises. -/
