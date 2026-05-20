@@ -3218,6 +3218,333 @@ theorem compileSafe_multi_public_observational_correct
 
 end
 
+/-! ## Path 2 Tier 1 Wave 21 — M3/M4/shape structural derivations
+
+This section discharges the M3 `noIfOp`, the M4 `AreRunarEmittable`, and
+the `hPublicSingleton` / `hStackBody` shape hypotheses of the
+single-method capstone
+(`compileSafe_single_public_observational_correct_unconditional`) FROM
+`compileSafe p = .ok bytes` plus minimal structural facts about the
+program (single public method; lowered body is the concrete consume-mode
+arith op list).  These are the family-independent legs that a later flip
+wave composes with the M2 lowering leg (wave 19/20) to retire a
+sub-omnibus axiom.
+
+Fragment scope: the **consume-mode arith** op shape that wave-19
+lowering produces — `.swap` / allowlisted `.opcode` ops with NO `.push`.
+This is the fragment for which `AreRunarEmittable` is genuinely TRUE:
+`RunarEmittable` excludes `.push`, so the `structuralConstBody` (literal
+load → `.push`) fragment's `AreRunarEmittable` hypothesis is
+UNSATISFIABLE — derivation here therefore targets the arith op shape, not
+the const op shape. -/
+
+/-- **M3/M4 bridge — `noIfOp` from `AreRunarEmittable`.**
+
+`RunarEmittable` does not include the `.ifOp` constructor, so every
+`AreRunarEmittable` op list is `noIfOp`.  This is the family-independent
+structural fact: any op shape that satisfies the M4 emit/parse round-trip
+precondition automatically satisfies M3's no-conditional precondition. -/
+theorem noIfOp_of_areRunarEmittable :
+    ∀ (ops : List StackOp), Parse.AreRunarEmittable ops → Peephole.noIfOp ops
+  | [], _ => True.intro
+  | op :: rest, h => by
+      cases h with
+      | cons _ _ hOp hRest =>
+          -- `hOp : RunarEmittable op` rules out `op = .ifOp _ _`; the
+          -- tail follows by induction on the `AreRunarEmittable` witness.
+          cases op with
+          | ifOp _ _ => cases hOp
+          | _ =>
+              simp only [Peephole.noIfOp]
+              exact noIfOp_of_areRunarEmittable rest hRest
+
+/-- The concrete consume-mode arith op list produced by lowering the
+wave-19 smoke method `add3sub` (`t0=p0+p1; t1=t0-p2; t2=-t1`):
+`[.swap, OP_ADD, .swap, OP_SUB, OP_NEGATE]`.  Every op is `.swap` or an
+allowlisted `.opcode`, so the list is the witness that the arith fragment
+genuinely inhabits both `AreRunarEmittable` and `noIfOp`. -/
+def wave21ArithOps : List StackOp :=
+  [.swap, .opcode "OP_ADD", .swap, .opcode "OP_SUB", .opcode "OP_NEGATE"]
+
+/-- **M4 derivation (smoke) — `AreRunarEmittable` of the arith op list.**
+
+`OP_ADD`, `OP_SUB`, `OP_NEGATE` are all in `isAllowedOpcodeName`, and
+`.swap` is unconditionally `RunarEmittable`.  Built by hand from the
+`AreRunarEmittable.cons` constructors so the witness is genuine (not a
+`decide` black box). -/
+theorem wave21ArithOps_areRunarEmittable :
+    Parse.AreRunarEmittable wave21ArithOps := by
+  unfold wave21ArithOps
+  refine Parse.AreRunarEmittable.cons _ _ Parse.RunarEmittable.swap ?_
+  refine Parse.AreRunarEmittable.cons _ _ (Parse.RunarEmittable.opcode "OP_ADD" (by decide)) ?_
+  refine Parse.AreRunarEmittable.cons _ _ Parse.RunarEmittable.swap ?_
+  refine Parse.AreRunarEmittable.cons _ _ (Parse.RunarEmittable.opcode "OP_SUB" (by decide)) ?_
+  refine Parse.AreRunarEmittable.cons _ _ (Parse.RunarEmittable.opcode "OP_NEGATE" (by decide)) ?_
+  exact Parse.AreRunarEmittable.nil
+
+/-- **M3 derivation (smoke) — `noIfOp` of the arith op list**, obtained
+from the `AreRunarEmittable` witness via `noIfOp_of_areRunarEmittable`.
+This is the composition the flip wave reuses: M4 ⟹ M3 for the arith
+fragment, both from the same structural op shape. -/
+theorem wave21ArithOps_noIfOp : Peephole.noIfOp wave21ArithOps :=
+  noIfOp_of_areRunarEmittable wave21ArithOps wave21ArithOps_areRunarEmittable
+
+/-! ### Shape derivation — `hPublicSingleton` / `hStackBody`
+
+These two hypotheses of the single-method capstone are pure SHAPE facts
+about the post-peephole program: that it has exactly one public method,
+and that method's ops are the peephole-rewritten lowered body of the
+selected ANF method.  Both are derivable from a single structural
+premise — `p.methods.filter (·.isPublic) = [anfM]` with `anfM.name`
+not the reserved `"constructor"` name — with NO appeal to `compileSafe`
+or to runtime stack state.  The flip wave supplies that filter premise
+(it follows from `compileSafe` succeeding on a single-public program) and
+takes `stackM` to be the witness this lemma names. -/
+
+/-- The post-peephole single public method named by `hPublicSingleton` /
+`hStackBody`: the lowered ANF method `anfM`, with its ops rewritten by
+`peepholeMethodOps`. -/
+def peepholedLoweredMethod (p : ANFProgram) (anfM : ANFMethod) : StackMethod :=
+  let loweredM := Lower.lowerMethod p.methods p.properties anfM
+  { loweredM with ops := peepholeMethodOps loweredM.ops }
+
+/-- `lowerMethod` preserves the method name. -/
+theorem lowerMethod_name (progMethods : List ANFMethod)
+    (props : List ANFProperty) (m : ANFMethod) :
+    (Lower.lowerMethod progMethods props m).name = m.name := rfl
+
+/-- **Shape derivation — both `hPublicSingleton` and `hStackBody`.**
+
+Given that `anfM` is the unique public ANF method and its name is not the
+reserved `"constructor"`, the post-peephole program has exactly one
+public method (`peepholedLoweredMethod p anfM`) and that method's ops are
+exactly the peephole-rewritten lowered body of `anfM`. -/
+theorem peepholeProgram_single_public_shape
+    (p : ANFProgram) (anfM : ANFMethod)
+    (hFilter : p.methods.filter (·.isPublic) = [anfM])
+    (hName : anfM.name ≠ "constructor") :
+    Emit.publicMethodsOf (peepholeProgram (Lower.lower p))
+        = [peepholedLoweredMethod p anfM]
+      ∧ (peepholeProgram (Lower.lower p)).bodyOf anfM.name
+          = (peepholedLoweredMethod p anfM).ops := by
+  -- `(lower p).methods = (filter public).map (lowerMethod …)` reduces to a
+  -- singleton list under `hFilter`.
+  have hLowMethods :
+      (Lower.lower p).methods
+        = [Lower.lowerMethod p.methods p.properties anfM] := by
+    show (p.methods.filter (·.isPublic)).map
+        (Lower.lowerMethod p.methods p.properties) = _
+    rw [hFilter]; rfl
+  -- The peephole program maps `peepholeMethodOps` over the single method.
+  have hPeepMethods :
+      (peepholeProgram (Lower.lower p)).methods
+        = [peepholedLoweredMethod p anfM] := by
+    show (Lower.lower p).methods.map
+        (fun mm => { mm with ops := peepholeMethodOps mm.ops }) = _
+    rw [hLowMethods]; rfl
+  -- The lowered method's name is `anfM.name`, which is not "constructor",
+  -- so `isPublicStackMethod` holds on the post-peephole method.
+  have hPubName : (peepholedLoweredMethod p anfM).name = anfM.name := rfl
+  have hIsPublic : Emit.isPublicStackMethod (peepholedLoweredMethod p anfM) = true := by
+    unfold Emit.isPublicStackMethod
+    rw [hPubName]
+    exact bne_iff_ne.mpr hName
+  refine ⟨?_, ?_⟩
+  · -- `publicMethodsOf` filters the single-method list; the predicate holds.
+    unfold Emit.publicMethodsOf
+    rw [hPeepMethods]
+    simp only [List.filter, hIsPublic]
+  · -- `bodyOf` resolves through the single-method list to its ops.
+    unfold StackProgram.bodyOf StackProgram.findMethod
+    rw [hPeepMethods]
+    simp only [List.find?, hPubName, beq_self_eq_true]
+
+/-! ### Shape derivation smoke test
+
+Instantiate `peepholeProgram_single_public_shape` on a concrete
+single-public consume-mode arith program (`add3sub`, the wave-19 smoke
+method).  This is the anti-vacuity check: the shape lemma is genuinely
+inhabited on a real program. -/
+
+/-- A concrete single-public arith program: one public method `add3sub`
+(`t0=p0+p1; t1=t0-p2; t2=-t1`), no private methods, no properties. -/
+private def wave21SmokeProgram : ANFProgram :=
+  { contractName := "Add3Sub"
+    properties := []
+    methods :=
+      [ { name := "add3sub"
+          params := [ANFParam.mk "p2" .bigint, ANFParam.mk "p1" .bigint,
+                     ANFParam.mk "p0" .bigint]
+          body :=
+            [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none,
+             ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+             ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none]
+          isPublic := true } ] }
+
+/-- The single public method of `wave21SmokeProgram`. -/
+private def wave21SmokeProgramMethod : ANFMethod :=
+  { name := "add3sub"
+    params := [ANFParam.mk "p2" .bigint, ANFParam.mk "p1" .bigint,
+               ANFParam.mk "p0" .bigint]
+    body :=
+      [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none,
+       ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+       ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none]
+    isPublic := true }
+
+/-- The public-method filter of the smoke program is the singleton
+`[wave21SmokeProgramMethod]` — discharges the lemma's `hFilter` premise. -/
+private theorem wave21SmokeProgram_filter :
+    wave21SmokeProgram.methods.filter (·.isPublic) = [wave21SmokeProgramMethod] := by
+  unfold wave21SmokeProgram wave21SmokeProgramMethod
+  rfl
+
+/-- **Shape smoke** — the shape lemma applies to the concrete arith
+program, yielding both `hPublicSingleton` and `hStackBody` for it. -/
+theorem wave21SmokeProgram_shape :
+    Emit.publicMethodsOf (peepholeProgram (Lower.lower wave21SmokeProgram))
+        = [peepholedLoweredMethod wave21SmokeProgram wave21SmokeProgramMethod]
+      ∧ (peepholeProgram (Lower.lower wave21SmokeProgram)).bodyOf
+            wave21SmokeProgramMethod.name
+          = (peepholedLoweredMethod wave21SmokeProgram wave21SmokeProgramMethod).ops :=
+  peepholeProgram_single_public_shape wave21SmokeProgram wave21SmokeProgramMethod
+    wave21SmokeProgram_filter (by decide)
+
+/-! ### Deliverable C — the runtime-precondition gate (regime bypass)
+
+The capstone's three RUNTIME M3 preconditions — `hPre`
+(`peepholePassAllFlat_preconditions`), `hPostWT` (`wellTypedRun` of the
+post-fold phase), and `hChainDepth` (`rollPickDepthOK` of the chain-fold
+phase) — all depend on `initialStack`.  They are NOT derivable from
+`compileSafe = .ok` for ALL `initialStack` (a too-shallow stack fails
+`rollPickDepthOK`).
+
+The path that makes `successAgrees` hold across ALL `initialStack` for
+the arith fragment is the **op-list identity** regime: the wave-19 arith
+lowering produces a `.swap`/allowlisted-`.opcode` op list with NO `.push`
+and NO `.roll`/`.pick`, so NONE of the 19 flat rules, the post-fold, the
+chain-fold, or the roll/pick fold fire — `peepholeMethodOps body = body`
+as a SYNTACTIC equality.  When the peephole rewrite is the literal
+identity on the body, the M3 leg collapses to `runMethod (peephole p) m s
+= runMethod p m s` by reflexivity, UNCONDITIONALLY on `initialStack`:
+both the precondition-holds and precondition-fails regimes are subsumed
+because the two op lists are EQUAL, so they fail/succeed together for
+EVERY stack.
+
+`peephole_M3_unconditional_of_bodyId` discharges the M3 `successAgrees`
+leg from that single SYNTACTIC identity hypothesis — with NO appeal to
+`wellTypedRun` / `rollPickDepthOK` / `peepholePassAllFlat_preconditions`.
+The identity hypothesis is a genuine structural fact about the op shape
+(it does NOT restate the `successAgrees` conclusion); the flip wave
+supplies it from a substrate lemma (see the BLOCK note below). -/
+
+/-- **M3 runtime-gate bypass.**  If the per-method peephole rewrite is the
+literal identity on the lowered body (`peepholeMethodOps (p.bodyOf m) =
+p.bodyOf m`), then `peepholeProgram` preserves the method's run result
+EXACTLY — `runMethod (peepholeProgram p) m s = runMethod p m s` — and the
+M3 `successAgrees` leg holds for EVERY `initialStack`, with no
+`wellTypedRun` / `rollPickDepthOK` precondition. -/
+theorem peephole_M3_unconditional_of_bodyId
+    (p : StackProgram) (m : String) (initialStack : StackState)
+    (hBodyId : peepholeMethodOps (p.bodyOf m) = p.bodyOf m) :
+    successAgrees
+      (runMethod p m initialStack)
+      (runMethod (peepholeProgram p) m initialStack) := by
+  have hEq :
+      runMethod p m initialStack
+        = runMethod (peepholeProgram p) m initialStack := by
+    unfold runMethod
+    rw [peepholeProgram_bodyOf p m, hBodyId]
+  rw [hEq]
+  exact successAgrees_refl _
+
+/-! #### BLOCK — discharging `hBodyId` for the arith fragment
+
+`peephole_M3_unconditional_of_bodyId` reduces the entire runtime gate to
+ONE syntactic fact for the arith fragment:
+
+```
+peepholeMethodOps wave21ArithOps = wave21ArithOps
+```
+
+`peepholeMethodOps = peepholeRollPickFold ∘ peepholeChainFold ∘
+peepholePostFold ∘ peepholePassAll`.  Three of the four phases discharge
+in-file on the concrete arith op list:
+
+* `peepholePassAll`  →  `peepholePassAll_eq_flat_of_noIfOp` +
+  `peepholePassAllFlat _ = _` is `rfl` (verified: all 19 `applyXxx` rules
+  are the identity, no `.push`/adjacent-`.swap`/fusable pattern fires).
+* `peepholePostFold`  →  `rfl` (verified).
+* `peepholeRollPickFold`  →  `peepholeRollPickFold_eq_self_of_noIfOp_flatNoop`
+  (PUBLIC, applies: no `.roll`/`.pick` in the arith ops).
+
+The ONE missing piece is the chain-fold phase:
+
+```
+peepholeChainFold ops = ops   for noIfOp, push-free `ops`
+```
+
+`peepholeChainFold` = `chainFoldFixpointFlat 64 (chainFoldListTRgo ops
+[])`.  Both `chainFoldFixpointFlat` and the reduction lemma
+`chainFoldListTRgo_nil_acc_of_noIfOp` are **`private`** in
+`Stack/Peephole.lean`, and the only PUBLIC chain-fold reduction is
+`peepholeChainFold_runOps_eq`, which carries a `wellTypedRun ops s`
+precondition — i.e. it is a RUNTIME equality, not the syntactic op-list
+identity the bypass needs.
+
+**Exact lemma needed (in `Stack/Peephole.lean`, NOT this file):**
+
+```
+theorem peepholeChainFold_eq_self_of_noIfOp_pushFree
+    (ops : List StackOp) (hNoIf : noIfOp ops)
+    (hNoPush : ∀ op, op ∈ ops → ¬ ∃ v, op = .push v) :
+    peepholeChainFold ops = ops
+```
+
+(or the weaker `peepholeChainFold_eq_self_of_chainFoldFlatNoop` mirroring
+the existing roll/pick `_eq_self_of_noIfOp_flatNoop`).  Its proof is the
+chain-fold analogue of `peepholeRollPickFold_eq_self_of_noIfOp_flatNoop`
+(lines ~9353): rewrite via the private `chainFoldListTRgo_nil_acc_of_noIfOp`,
+then show `applyPushAddPushSub (applyPushAddPushAdd ops) = ops` on
+push-free lists (the chain rules fire only on `[push a, OP_ADD, …]`
+prefixes), so `chainFoldFixpointFlat`'s first iteration's length check
+stabilises immediately.
+
+**Why it's hard / why it must be a substrate wave:** the load-bearing
+defs (`chainFoldFixpointFlat`, `chainFoldListTRgo_nil_acc_of_noIfOp`,
+`applyPushAddPushAdd`, `applyPushAddPushSub`) are all `private` to
+`Stack/Peephole.lean`; this file (constraint 8) may not add lemmas there.
+The proof itself is SHORT (~15 lines, structurally identical to the
+roll/pick noop lemma already present), so the estimate is **~0.5 day** for
+the substrate wave once it lands `peepholeChainFold_eq_self_of_…`.
+
+**Feasibility verdict:** the regime argument is SOUND and the op-list
+identity route is the correct discharge — when the rewrite is the literal
+identity, the precondition-fails regime is subsumed (equal op lists fail
+together).  It is BLOCKED ONLY on the one private-substrate chain-fold
+identity lemma above; no new axiom is required, and the alternative
+"arith ANF-eval failure ⟺ peephole-precondition failure" connection is
+NOT needed (the op-list identity sidesteps it entirely). -/
+
+/-- **Deliverable C smoke (partial).**  The three in-file-dischargeable
+phases of `peepholeMethodOps` are the identity on the arith op list,
+isolating the gate to the single private-substrate chain-fold lemma named
+in the BLOCK note.  `peepholePassAll` and `peepholePostFold` reduce by
+`rfl` after the `noIfOp`-flat rewrite; `peepholeRollPickFold` reduces via
+the public `_eq_self_of_noIfOp_flatNoop`. -/
+theorem wave21ArithOps_peephole_phases_id_modulo_chainFold :
+    Peephole.peepholePostFold (Peephole.peepholePassAll wave21ArithOps)
+        = wave21ArithOps
+      ∧ (∀ (ops : List StackOp),
+          Peephole.noIfOp ops → Peephole.rollPickFoldFlatNoop ops →
+            Peephole.peepholeRollPickFold ops = ops) := by
+  refine ⟨?_, ?_⟩
+  · rw [Peephole.peepholePassAll_eq_flat_of_noIfOp wave21ArithOps wave21ArithOps_noIfOp]
+    unfold wave21ArithOps
+    rfl
+  · intro ops hNoIf hNoop
+    exact Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop ops hNoIf hNoop
+
 end Soundness
 
 end Pipeline
