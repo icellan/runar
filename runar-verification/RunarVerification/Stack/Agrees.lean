@@ -14592,6 +14592,119 @@ theorem runOps_loadRef_at_depth
           simp only
           exact run_pickStruct_at_depth stkSt (d'' + 2) v hLen hAt
 
+/-! #### Item 2 — depth-general (≥2, ≥2) two-operand binOp witness
+
+The existing per-binding binOp witnesses (`stageC_simpleStep_binOp_*`)
+cover operand depth pairs (1,0), (0,1), (d≥2,0), (0,d≥2) — single-deep
+cases where one operand is always at depth 0 or 1.  A body with 4+ live
+temps puts BOTH operands at depth ≥ 2.  The witness below fills that hole
+by composing two `runOps_loadRef_at_depth` (the single-load depth-general
+primitive proved above): the first load brings `l`'s value to the top,
+the second load — run against `sm.push l` and the post-load stack — brings
+`r`'s value to the top, then the opcode pops both and pushes the result.
+
+Stated purely operationally (no `agreesTagged` / `simpleStepRel` overhead)
+against the explicit op list `loadRef sm l ++ loadRef (sm.push l) r ++
+[.opcode opcode]` — exactly the shape `lowerValue`'s `binOp` arm produces
+(modulo the `!==`/bytes `OP_NOT` suffix, which a caller composes
+separately).  The depth hypotheses are fully general (`dl`, `dr'` are
+arbitrary `Nat`), so this subsumes the (≥2,≥2) case and any other pair. -/
+theorem runOps_loadRef_loadRef_opcode_depth_general
+    (sm : StackMap) (l r : String) (dl dr' : Nat) (vl vr : Value) (out : StackState)
+    (opcode : String) (stkSt : StackState)
+    (hDl : sm.depth? l = some dl)
+    (hLenL : dl < stkSt.stack.length)
+    (hAtL : stkSt.stack[dl]! = vl)
+    (hDr : (sm.push l).depth? r = some dr')
+    (hLenR : dr' < (stkSt.push vl).stack.length)
+    (hAtR : (stkSt.push vl).stack[dr']! = vr)
+    (hOpcode : runOpcode opcode ((stkSt.push vl).push vr) = .ok out) :
+    runOps (Stack.Lower.loadRef sm l
+              ++ Stack.Lower.loadRef (sm.push l) r
+              ++ [.opcode opcode]) stkSt = .ok out := by
+  -- First load: bring `l`'s value to the top.
+  have hLoadL : runOps (Stack.Lower.loadRef sm l) stkSt = .ok (stkSt.push vl) :=
+    runOps_loadRef_at_depth sm l dl vl stkSt hDl hLenL hAtL
+  -- Second load: bring `r`'s value to the top of `stkSt.push vl`.
+  have hLoadR : runOps (Stack.Lower.loadRef (sm.push l) r) (stkSt.push vl)
+      = .ok ((stkSt.push vl).push vr) :=
+    runOps_loadRef_at_depth (sm.push l) r dr' vr (stkSt.push vl) hDr hLenR hAtR
+  -- Compose the two loads into one op list.
+  have hBoth : runOps (Stack.Lower.loadRef sm l ++ Stack.Lower.loadRef (sm.push l) r) stkSt
+      = .ok ((stkSt.push vl).push vr) := by
+    rw [runOps_append, hLoadL]
+    exact hLoadR
+  -- Append the opcode via the sequencing helper.
+  exact runOps_loadThenOpcode_unconditional
+    (Stack.Lower.loadRef sm l ++ Stack.Lower.loadRef (sm.push l) r) opcode
+    stkSt ((stkSt.push vl).push vr) out hBoth hOpcode
+
+/-- **Item 2 (lowerValue-shaped).**  The depth-general two-operand binOp
+witness specialized to `lowerValue`'s `binOp` op list, for the non-bytes
+case (`op ≠ "!=="` or `rt ≠ some "bytes"`, so no trailing `OP_NOT`).
+This is the form a body-level arith capstone consumes directly:
+`runOps (lowerValue sm bn (.binOp …)).1 stkSt = .ok out`. -/
+theorem runOps_lowerValue_binOp_depth_general
+    (sm : StackMap) (bn l r : String) (rt : Option String) (op : String)
+    (dl dr' : Nat) (vl vr : Value) (out : StackState) (stkSt : StackState)
+    (hNotBytes : ¬ (op = "!==" ∧ rt = some "bytes"))
+    (hDl : sm.depth? l = some dl)
+    (hLenL : dl < stkSt.stack.length)
+    (hAtL : stkSt.stack[dl]! = vl)
+    (hDr : (sm.push l).depth? r = some dr')
+    (hLenR : dr' < (stkSt.push vl).stack.length)
+    (hAtR : (stkSt.push vl).stack[dr']! = vr)
+    (hOpcode : runOpcode (Stack.Lower.binopOpcode op rt) ((stkSt.push vl).push vr) = .ok out) :
+    runOps (Stack.Lower.lowerValue sm bn (.binOp op l r rt)).1 stkSt = .ok out := by
+  have hOps :
+      (Stack.Lower.lowerValue sm bn (.binOp op l r rt)).1
+        = Stack.Lower.loadRef sm l
+            ++ Stack.Lower.loadRef (sm.push l) r
+            ++ [.opcode (Stack.Lower.binopOpcode op rt)] := by
+    unfold Stack.Lower.lowerValue
+    have hGuard : (op == "!==" && rt == some "bytes") = false := by
+      by_cases hop : op = "!=="
+      · by_cases hrt : rt = some "bytes"
+        · exact absurd ⟨hop, hrt⟩ hNotBytes
+        · simp [hrt]
+      · simp [hop]
+    simp only [hGuard, Bool.false_eq_true, if_false]
+  rw [hOps]
+  exact runOps_loadRef_loadRef_opcode_depth_general sm l r dl dr' vl vr out
+    (Stack.Lower.binopOpcode op rt) stkSt hDl hLenL hAtL hDr hLenR hAtR hOpcode
+
+/-- **Item 2 smoke test.**  A CONCRETE binOp `t = l + r` with BOTH
+operands at depth ≥ 2:
+
+  sm    = ["a", "b", "l", "r"]   -- `l` at depth 2, `r` at depth 3
+  stack = [10, 20, 30, 40]       -- `l`'s value (30) at index 2;
+                                 -- after pushing it, `r`'s value (40) at index 4
+
+`(sm.push "l").depth? "r" = some 4` (depth ≥ 2 on the second load too).
+Running the lowered binOp ops pushes `OP_ADD`'s result `30 + 40 = 70`
+onto the original stack. -/
+private theorem runOps_lowerValue_binOp_depth_general_smoke :
+    let stk0 : StackState :=
+      { stack := [.vBigint 10, .vBigint 20, .vBigint 30, .vBigint 40] }
+    runOps (Stack.Lower.lowerValue ["a", "b", "l", "r"] "t"
+              (.binOp "+" "l" "r" none)).1 stk0
+      = .ok (stk0.push (.vBigint 70)) := by
+  intro stk0
+  exact runOps_lowerValue_binOp_depth_general
+    ["a", "b", "l", "r"] "t" "l" "r" none "+" 2 4
+    (.vBigint 30) (.vBigint 40) (stk0.push (.vBigint 70)) stk0
+    (by intro h; exact absurd h.1 (by decide))
+    (by show Stack.Lower.StackMap.depth? ["a", "b", "l", "r"] "l" = some 2; rfl)
+    (by show 2 < stk0.stack.length; decide)
+    (by show stk0.stack[2]! = .vBigint 30; rfl)
+    (by show Stack.Lower.StackMap.depth?
+            (Stack.Lower.StackMap.push ["a", "b", "l", "r"] "l") "r" = some 4; rfl)
+    (by show 4 < (stk0.push (.vBigint 30)).stack.length; decide)
+    (by show (stk0.push (.vBigint 30)).stack[4]! = .vBigint 40; rfl)
+    (by show runOpcode (Stack.Lower.binopOpcode "+" none)
+            ((stk0.push (.vBigint 30)).push (.vBigint 40)) = .ok (stk0.push (.vBigint 70))
+        rfl)
+
 /-- **Depth-aware per-iteration chunk identity** for an A7 loop body
 that copies a single outer reference.
 
@@ -17753,6 +17866,205 @@ theorem lowerValueP_assert_copy_eq_lowerValue
 -- `lowerValueP_unaryOp_copy_eq_lowerValue`, `lowerValueP_assert_copy_eq_lowerValue`)
 -- are used directly in the proofs below.
 
+/-! #### Item 1 (KEYSTONE) — `lowerBindingsP ↔ lowerBindings` arith bridge
+
+The const/copy fragments each ship a body-level bridge
+(`lowerBindingsP_eq_lowerBindings_structuralConst` /
+`...structuralCopy`) proving the program-aware lowerer (`lowerBindingsP`)
+and the simple lowerer (`lowerBindings`) emit byte-identical op lists on
+their respective fragments.  The whole-body arith capstone needs the
+same bridge for the arith fragment, because `lowerMethodUserRawOps`
+(the method-level conclusion) reduces to `lowerBindingsP`, while the
+wave-15 `RunChainRel` composer and every per-binding arith witness use
+`lowerBindings`.
+
+The bridge cannot be stated over the full `structuralArithBody`: that
+predicate admits CONSUME-mode refs (its first disjunct is
+`structuralRefValue = structuralCopyValue ∨ structuralConsumeValue`),
+and in consume mode `lowerValueP` deliberately diverges from
+`lowerValue` (it emits a consume op + renames the slot).  This is why a
+prior `lowerValueP_eq_lowerValue_structuralArith` was removed.  We
+therefore restrict to a COPY-mode arith fragment — matching the
+const/copy bridges, both of which are copy-only — via
+`structuralArithCopyValue` / `structuralArithCopyBody`.  Consume-mode
+bindings are handled by the separate Option-3 consume witnesses. -/
+
+/-- Copy-restricted per-value arith fragment.  Identical to
+`structuralArithValue` except the ref disjunct is restricted to
+`structuralCopyValue` (no consume mode), so that `lowerValueP` and
+`lowerValue` agree byte-for-byte.  The three arith forms
+(binOp/unaryOp/assert) are already copy-mode in `structuralArithValue`. -/
+def structuralArithCopyValue
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
+    (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
+  structuralCopyValue lastUses outerProtected localBindings sm currentIndex v ∨
+  (∃ op l r rt,
+    v = .binOp op l r rt ∧
+    (∃ _dl, sm.depth? l = some _dl) ∧
+    (∃ _dr, sm.depth? r = some _dr) ∧
+    (!Stack.Lower.listContains outerProtected l &&
+        Stack.Lower.isLastUse lastUses l currentIndex) = false ∧
+    (!Stack.Lower.listContains outerProtected r &&
+        Stack.Lower.isLastUse lastUses r currentIndex) = false ∧
+    isProvedBinOpKind op = true) ∨
+  (∃ op operand rt,
+    v = .unaryOp op operand rt ∧
+    (∃ _d, sm.depth? operand = some _d) ∧
+    (!Stack.Lower.listContains outerProtected operand &&
+        Stack.Lower.isLastUse lastUses operand currentIndex) = false ∧
+    isProvedUnaryOpKind op = true) ∨
+  (∃ operand,
+    v = .assert operand ∧
+    (∃ _d, sm.depth? operand = some _d) ∧
+    (!Stack.Lower.listContains outerProtected operand &&
+        Stack.Lower.isLastUse lastUses operand currentIndex) = false)
+
+/-- Copy-restricted body-level arith predicate.  Threads the SIMPLE
+lowerer's stack map `(lowerValue sm name v).2` (matching
+`structuralCopyBody`), which the per-value bridge below proves equal to
+`(lowerValueP …).2.1` on this fragment. -/
+def structuralArithCopyBody
+    (lastUses : List (String × Nat)) (outerProtected localBindings : List String) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name v _) :: rest, sm, currentIndex =>
+      structuralArithCopyValue lastUses outerProtected localBindings sm currentIndex v ∧
+      structuralArithCopyBody lastUses outerProtected localBindings rest
+        (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1)
+
+/-- Per-value arith bridge: on the copy-restricted arith fragment,
+`lowerValueP` agrees with `lowerValue` on ops and output stack map (and
+leaves `localBindings` unchanged).  Dispatches each disjunct to the
+existing copy bridges (`lowerValueP_eq_lowerValue_structuralCopy` for
+refs, `lowerValueP_{binOp,unaryOp,assert}_copy_eq_lowerValue` for the
+three arith forms). -/
+theorem lowerValueP_eq_lowerValue_structuralArithCopy
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget currentIndex : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int))
+    (sm : StackMap) (bn : String) (v : ANFValue)
+    (h : structuralArithCopyValue lastUses outerProtected localBindings sm currentIndex v) :
+    Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        outerProtected localBindings constInts sm bn v
+      = ((Stack.Lower.lowerValue sm bn v).1,
+         (Stack.Lower.lowerValue sm bn v).2,
+         localBindings) := by
+  rcases h with hCopy | ⟨op, l, r, rt, hvEq, hl_depth, hr_depth, hl_copy, hr_copy, _⟩ |
+      ⟨op, operand, rt, hvEq, hd, hcopy, _⟩ | ⟨operand, hvEq, hd, hcopy⟩
+  · -- Ref case: delegate to the copy bridge.
+    exact lowerValueP_eq_lowerValue_structuralCopy progMethods props budget currentIndex
+      lastUses outerProtected localBindings constInts sm bn v hCopy
+  · -- binOp case.
+    subst hvEq
+    exact lowerValueP_binOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+      outerProtected localBindings constInts sm bn op l r rt hl_depth hr_depth hl_copy hr_copy
+  · -- unaryOp case.
+    subst hvEq
+    exact lowerValueP_unaryOp_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+      outerProtected localBindings constInts sm bn op operand rt hd hcopy
+  · -- assert case.
+    subst hvEq
+    exact lowerValueP_assert_copy_eq_lowerValue progMethods props budget currentIndex lastUses
+      outerProtected localBindings constInts sm bn operand hd hcopy
+
+/-- **Item 1 keystone (body level).**  On copy-restricted arith bodies,
+`lowerBindingsP` and `lowerBindings` produce the same op list and final
+stack map.  This is the arith peer of
+`lowerBindingsP_eq_lowerBindings_structuralConst` /
+`...structuralCopy`. -/
+theorem lowerBindingsP_eq_lowerBindings_structuralArith
+    (progMethods : List ANFMethod) (props : List ANFProperty)
+    (budget : Nat)
+    (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String)
+    (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (currentIndex : Nat),
+      structuralArithCopyBody lastUses outerProtected localBindings body sm currentIndex →
+      Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm body
+        = Stack.Lower.lowerBindings sm body
+  | [], _sm, _currentIndex, _h => by
+      simp [Stack.Lower.lowerBindingsP, Stack.Lower.lowerBindings]
+  | (.mk name v src) :: rest, sm, currentIndex, h => by
+      simp only [structuralArithCopyBody] at h
+      obtain ⟨hHead, hRest⟩ := h
+      have hValue :=
+        lowerValueP_eq_lowerValue_structuralArithCopy
+          progMethods props budget currentIndex lastUses outerProtected
+          localBindings constInts sm name v hHead
+      have hTail :=
+        lowerBindingsP_eq_lowerBindings_structuralArith
+          progMethods props budget lastUses outerProtected localBindings constInts
+          rest (Stack.Lower.lowerValue sm name v).2 (currentIndex + 1) hRest
+      simp [Stack.Lower.lowerBindingsP, Stack.Lower.lowerBindings, hValue, hTail]
+
+/-- **Item 1 keystone (method level).**  The method-shaped specialization
+of the arith bridge for the raw body ops exposed by
+`lowerMethodUserRawOps`.  This is the arith peer of
+`lowerMethodUserRawOps_eq_lowerBindings_structuralConst` /
+`...structuralCopy`, and is exactly what the wave-17 method-level
+capstone rewrites the `lowerMethodUserRawOps` LHS with so the
+`RunChainRel` composer (which runs `lowerBindings`) discharges runtime
+success. -/
+theorem lowerMethodUserRawOps_eq_lowerBindings_structuralArith
+    (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod)
+    (hArith :
+      structuralArithCopyBody (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name)) m.body
+        (m.params.map (fun p => p.name) |>.reverse) 0) :
+    lowerMethodUserRawOps progMethods props m =
+      (Stack.Lower.lowerBindings
+        (m.params.map (fun p => p.name) |>.reverse) m.body).1 := by
+  unfold lowerMethodUserRawOps
+  rw [lowerBindingsP_eq_lowerBindings_structuralArith
+        progMethods props Stack.Lower.defaultInlineBudget
+        (Stack.Lower.computeLastUses m.body) []
+        (m.body.map (fun b => b.name))
+        (Stack.Lower.collectConstInts m.body)
+        m.body (m.params.map (fun p => p.name) |>.reverse) 0 hArith]
+
+/-- **Item 1 smoke test.**  A CONCRETE 3-binding arith body over the
+initial stack map `["p0", "p1"]`:
+
+  t0 = p0 + p1     -- binOp "+", operands at depths (0, 1)
+  t1 = -t0         -- unaryOp "-", operand at depth 0
+  t2 = t1 + t0     -- binOp "+", operands at depths (0, 1)
+
+All operands sit in `outerProtected = ["p0","p1","t0","t1"]`, so every
+ref is copy-mode (`!listContains outerProtected name = false`,
+short-circuiting the liveness conjunct to `false`).  The
+`structuralArithCopyBody` hypothesis is discharged by `decide` over the
+fully concrete predicate, and the keystone bridge then collapses the
+program-aware lowering to the simple lowering. -/
+private theorem lowerBindingsP_eq_lowerBindings_structuralArith_smoke :
+    Stack.Lower.lowerBindingsP [] [] 0 0 [] ["p0", "p1", "t0", "t1"]
+        ["t0", "t1", "t2"] [] ["p0", "p1"]
+        [.mk "t0" (.binOp "+" "p0" "p1" none) none,
+         .mk "t1" (.unaryOp "-" "t0" none) none,
+         .mk "t2" (.binOp "+" "t1" "t0" none) none]
+      = Stack.Lower.lowerBindings ["p0", "p1"]
+          [.mk "t0" (.binOp "+" "p0" "p1" none) none,
+           .mk "t1" (.unaryOp "-" "t0" none) none,
+           .mk "t2" (.binOp "+" "t1" "t0" none) none] := by
+  have hArith :
+      structuralArithCopyBody [] ["p0", "p1", "t0", "t1"] ["t0", "t1", "t2"]
+        [.mk "t0" (.binOp "+" "p0" "p1" none) none,
+         .mk "t1" (.unaryOp "-" "t0" none) none,
+         .mk "t2" (.binOp "+" "t1" "t0" none) none]
+        ["p0", "p1"] 0 := by
+    refine ⟨Or.inr (Or.inl ⟨"+", "p0", "p1", none, rfl, ⟨0, rfl⟩, ⟨1, rfl⟩, rfl, rfl, rfl⟩), ?_⟩
+    refine ⟨Or.inr (Or.inr (Or.inl ⟨"-", "t0", none, rfl, ⟨0, rfl⟩, rfl, rfl⟩)), ?_⟩
+    refine ⟨Or.inr (Or.inl ⟨"+", "t1", "t0", none, rfl, ⟨0, rfl⟩, ⟨1, rfl⟩, rfl, rfl, rfl⟩), ?_⟩
+    exact True.intro
+  exact lowerBindingsP_eq_lowerBindings_structuralArith [] [] 0 [] ["p0", "p1", "t0", "t1"]
+    ["t0", "t1", "t2"] []
+    [.mk "t0" (.binOp "+" "p0" "p1" none) none,
+     .mk "t1" (.unaryOp "-" "t0" none) none,
+     .mk "t2" (.binOp "+" "t1" "t0" none) none]
+    ["p0", "p1"] 0 hArith
+
 /-! #### ANF-side success for the arith fragment -/
 
 /-- `evalValue` succeeds on a structural-arith value given domain conditions.
@@ -17940,6 +18252,170 @@ theorem evalBindings_structuralArithBody_isSome
         (anfSt.addBinding name val) hRest
         hParamDomain' hPropDomain' hRefReady'
         hBinOp' hUnaryOp' hAssert' hRestNodup
+
+/-! #### Item 3 — ANF-eval value provenance
+
+The per-binding arith witnesses (`stageC_simpleStep_binOp_*`) all take
+`lookupAnfByKind anfSt (operand) = some (.vBigint a)` by hand.  A
+whole-body theorem cannot supply these manually for each step: after the
+ANF evaluator processes binding `k`, the value bound at temp `k` and the
+resolution of operands in binding `k+1` must be DERIVED from the
+evaluator's per-step output.
+
+These lemmas thread value provenance through `evalBindings`:
+
+* `evalValue_binOp_provenance` / `evalValue_unaryOp_provenance` derive the
+  bound value of an arith binding from the operands' resolved values and
+  the concrete `evalBinOp` / `evalUnaryOp` result, AND record that the
+  evaluator leaves the ANF state unchanged (arith bindings are pure).
+* `lookupAnfByKind_addBinding_self` / `..._of_ne` give the provenance of
+  a freshly-bound temp (resolves to its value) and the stability of an
+  earlier temp's resolution under a later, distinct binding (so a later
+  binding's operand referencing an earlier temp still resolves).
+* `evalBindings_binOp_step` is the single-binding threading step: it
+  combines the above into `evalBindings anfSt [binOp …] = .ok (addBinding
+  …)` plus the self-resolution of the bound temp. -/
+
+/-- Provenance for a `binOp` binding: from the operands' resolved values
+and the concrete operator result, `evalValue` succeeds with that result
+and an UNCHANGED state.  This is the value the `stageC_simpleStep_binOp_*`
+witnesses take by hand, here DERIVED from the evaluator. -/
+theorem evalValue_binOp_provenance
+    (s : State) (op l r : String) (rt : Option String) (a b c : Value)
+    (hl : s.resolveRef l = some a)
+    (hr : s.resolveRef r = some b)
+    (hOp : RunarVerification.ANF.Eval.evalBinOp op a b rt = .ok c) :
+    RunarVerification.ANF.Eval.evalValue s (.binOp op l r rt) = .ok (c, s) := by
+  simp only [RunarVerification.ANF.Eval.evalValue,
+    RunarVerification.ANF.Eval.lookupRef, hl, hr]
+  simp only [bind, Except.bind, hOp, pure, Except.pure]
+
+/-- Provenance for a `unaryOp` binding (same shape as the binOp case). -/
+theorem evalValue_unaryOp_provenance
+    (s : State) (op operand : String) (rt : Option String) (a c : Value)
+    (hOperand : s.resolveRef operand = some a)
+    (hOp : RunarVerification.ANF.Eval.evalUnaryOp op a rt = .ok c) :
+    RunarVerification.ANF.Eval.evalValue s (.unaryOp op operand rt) = .ok (c, s) := by
+  simp only [RunarVerification.ANF.Eval.evalValue,
+    RunarVerification.ANF.Eval.lookupRef, hOperand]
+  simp only [bind, Except.bind, hOp, pure, Except.pure]
+
+/-- A freshly-bound temp resolves to its value via the binding namespace. -/
+theorem lookupAnfByKind_addBinding_self
+    (anfSt : State) (name : String) (v : Value) :
+    lookupAnfByKind (anfSt.addBinding name v) (name, .binding) = some v :=
+  addBinding_self_lookup anfSt name v
+
+/-- An earlier temp's binding-namespace resolution is stable under a
+later binding at a DISTINCT name.  Lets a later binding's operand that
+references an earlier temp resolve to its already-computed value. -/
+theorem lookupAnfByKind_addBinding_of_ne
+    (anfSt : State) (name n : String) (v : Value) (hNe : n ≠ name) :
+    lookupAnfByKind (anfSt.addBinding name v) (n, .binding)
+      = lookupAnfByKind anfSt (n, .binding) := by
+  unfold lookupAnfByKind State.lookupBinding State.addBinding
+  have hNeq : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hNe)
+  simp only [List.find?_cons, hNeq]
+
+/-- `resolveRef` of an earlier temp is stable under a later binding at a
+DISTINCT name, PROVIDED the earlier temp already resolves through the
+binding namespace.  This is the operand-side fact a multi-binding
+provenance threading needs: binding `k+1` referencing temp `k` (which is
+in `bindings`) still resolves after `addBinding` of binding `k+1`'s own
+name. -/
+theorem resolveRef_addBinding_of_ne_binding
+    (anfSt : State) (name n : String) (v w : Value) (hNe : n ≠ name)
+    (hPrev : anfSt.lookupBinding n = some w) :
+    (anfSt.addBinding name v).resolveRef n = some w := by
+  have hBind : (anfSt.addBinding name v).lookupBinding n = some w := by
+    unfold State.lookupBinding State.addBinding
+    have hNeq : (name == n) = false := beq_eq_false_iff_ne.mpr (Ne.symm hNe)
+    simp only [List.find?_cons, hNeq]
+    unfold State.lookupBinding at hPrev
+    exact hPrev
+  unfold State.resolveRef
+  rw [hBind]
+  rfl
+
+/-- **Item 3 single-binding threading step (binOp).**  Evaluating a body
+consisting of one `binOp` binding succeeds, leaving the state extended
+with that binding, AND the bound temp resolves to the computed result.
+This is what a whole-body provenance induction applies at each step:
+the post-state is fully determined, and the next binding's operands
+resolve against it via `lookupAnfByKind_addBinding_*`. -/
+theorem evalBindings_binOp_step
+    (anfSt : State) (name op l r : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (a b c : Value)
+    (hl : anfSt.resolveRef l = some a)
+    (hr : anfSt.resolveRef r = some b)
+    (hOp : RunarVerification.ANF.Eval.evalBinOp op a b rt = .ok c) :
+    RunarVerification.ANF.Eval.evalBindings anfSt [.mk name (.binOp op l r rt) src]
+        = .ok (anfSt.addBinding name c)
+    ∧ lookupAnfByKind (anfSt.addBinding name c) (name, .binding) = some c := by
+  refine ⟨?_, lookupAnfByKind_addBinding_self anfSt name c⟩
+  have hVal := evalValue_binOp_provenance anfSt op l r rt a b c hl hr hOp
+  simp only [RunarVerification.ANF.Eval.evalBindings, hVal, bind, Except.bind,
+    RunarVerification.ANF.Eval.evalBindings]
+
+/-- **Item 3 smoke test.**  A CONCRETE 2-binding body where binding 2's
+operand is binding 1's temp:
+
+  state: params  p0 = 7,  p1 = 5
+  t0 = p0 + p1     -- binding 1, binOp "+"  (resolves to 12)
+  t1 = t0 + p1     -- binding 2, operand t0 is binding 1's temp
+
+We run the provenance step for binding 1 to obtain the post-state, then
+show binding 2's operand `t0` resolves through that post-state to the
+DERIVED value `.vBigint 12` (not supplied by hand) — and that the
+second binding's own evaluation then succeeds against it. -/
+private theorem evalBindings_binOp_step_smoke :
+    let s0 : State := { params := [("p0", .vBigint 7), ("p1", .vBigint 5)] }
+    -- Binding 1 evaluates and binds t0 = 12.
+    RunarVerification.ANF.Eval.evalBindings s0 [.mk "t0" (.binOp "+" "p0" "p1" none) none]
+        = .ok (s0.addBinding "t0" (.vBigint 12))
+    -- Binding 2's operand t0 (binding 1's temp) resolves to the DERIVED 12.
+    ∧ (s0.addBinding "t0" (.vBigint 12)).resolveRef "t0" = some (.vBigint 12)
+    -- Binding 2's other operand p1 still resolves to 5 past the new binding.
+    ∧ (s0.addBinding "t0" (.vBigint 12)).resolveRef "p1" = some (.vBigint 5)
+    -- Binding 1's temp t0 stays resolvable past a LATER binding t1 (this is
+    -- the operand-stability fact `resolveRef_addBinding_of_ne_binding`).
+    ∧ ((s0.addBinding "t0" (.vBigint 12)).addBinding "t1" (.vBigint 17)).resolveRef "t0"
+        = some (.vBigint 12)
+    -- And the full 2-binding body evaluates, binding t1 = 12 + 5 = 17.
+    ∧ RunarVerification.ANF.Eval.evalBindings s0
+          [.mk "t0" (.binOp "+" "p0" "p1" none) none,
+           .mk "t1" (.binOp "+" "t0" "p1" none) none]
+        = .ok ((s0.addBinding "t0" (.vBigint 12)).addBinding "t1" (.vBigint 17)) := by
+  intro s0
+  -- Operand resolution in the initial state.
+  have hp0 : s0.resolveRef "p0" = some (.vBigint 7) := by
+    show s0.resolveRef "p0" = some (.vBigint 7); rfl
+  have hp1 : s0.resolveRef "p1" = some (.vBigint 5) := by
+    show s0.resolveRef "p1" = some (.vBigint 5); rfl
+  -- Binding 1 provenance step: derives the bound value 12.
+  have hStep1 := evalBindings_binOp_step s0 "t0" "+" "p0" "p1" none none
+    (.vBigint 7) (.vBigint 5) (.vBigint 12) hp0 hp1 rfl
+  -- t0 resolves to the derived 12 in the post-state (operand of binding 2).
+  have hT0 : (s0.addBinding "t0" (.vBigint 12)).resolveRef "t0" = some (.vBigint 12) := by
+    show (s0.addBinding "t0" (.vBigint 12)).resolveRef "t0" = some (.vBigint 12); rfl
+  -- t0 stays resolvable past binding t1, via the operand-stability lemma.
+  have hT0PastT1 :
+      ((s0.addBinding "t0" (.vBigint 12)).addBinding "t1" (.vBigint 17)).resolveRef "t0"
+        = some (.vBigint 12) :=
+    resolveRef_addBinding_of_ne_binding (s0.addBinding "t0" (.vBigint 12))
+      "t1" "t0" (.vBigint 17) (.vBigint 12) (by decide)
+      (lookupAnfByKind_addBinding_self s0 "t0" (.vBigint 12))
+  refine ⟨hStep1.1, hT0, ?_, hT0PastT1, ?_⟩
+  · show (s0.addBinding "t0" (.vBigint 12)).resolveRef "p1" = some (.vBigint 5); rfl
+  · -- Full 2-binding body: binding 1 then binding 2 (operand t0 resolved above).
+    have hVal2 := evalValue_binOp_provenance (s0.addBinding "t0" (.vBigint 12))
+      "+" "t0" "p1" none (.vBigint 12) (.vBigint 5) (.vBigint 17) hT0
+      (by show (s0.addBinding "t0" (.vBigint 12)).resolveRef "p1" = some (.vBigint 5); rfl) rfl
+    have hVal1 := evalValue_binOp_provenance s0 "+" "p0" "p1" none
+      (.vBigint 7) (.vBigint 5) (.vBigint 12) hp0 hp1 rfl
+    simp only [RunarVerification.ANF.Eval.evalBindings, hVal1, bind, Except.bind,
+      hVal2, RunarVerification.ANF.Eval.evalBindings]
 
 -- Note: `lowerValue_snd_structuralArith` was removed (the theorem statement
 -- was incorrect for consume-mode refs, and the theorem was unused).
