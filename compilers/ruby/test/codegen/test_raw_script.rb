@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 require_relative 'codegen_helper'
+# Explicitly load the emit module: this file calls `Codegen.emit` directly
+# (not via the full compile pipeline), so without this require the method is
+# only defined if some other test happened to run the pipeline first — a
+# minitest seed-dependent ordering flake.
+require 'runar_compiler/codegen/emit'
 
 # raw_script ANF round-trip test for the Ruby compiler.
 #
