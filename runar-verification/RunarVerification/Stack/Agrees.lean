@@ -23668,5 +23668,413 @@ example :
     simp only [Stack.Lower.emitConst]
     exact (by decide)
 
+
+/-! ## Wave 18 — consume-mode whole-body operational-chain composer
+
+Wave 15's `RunChainRel` composes per-binding operational witnesses over
+the **simple** lowerer (`lowerBindings`) in **copy mode**: each binding
+pushes its result and the stack map grows monotonically via `push`.
+Wave 17 proved that copy-mode whole-body composition is vacuous at the
+method level — real method lowering (`lowerMethodUserRawOps` →
+`lowerBindingsP` with `outerProtected = []`) runs in **consume mode**:
+each operand at its last use is consumed (the `loadRefLive` consume flag
+= `isLastUse`).  No real method body satisfies the copy-mode predicate.
+
+This wave builds the consume-mode peer.  Structural differences from
+wave 15:
+
+* It runs `lowerBindingsP` (the program-aware lowerer method lowering
+  actually uses) — NOT `lowerBindings`.  No copy bridge is needed; the
+  composer works directly on the consume-mode lowering output.
+* The stack map evolves as the lowerer's **actual** `(lowerValueP …).2.1`
+  projection (shrink-then-grow: `removeAtDepth`/`popN` at the consumed
+  operands' depths, then `push` of the result), not push-only.  The
+  composer threads this projection opaquely — the same
+  "narrow-structural-predicate" technique already used by
+  `structuralConsumeBody` — so no closed-form sm-update is required.
+* It threads `currentIndex + 1` and the lowerer's `(lowerValueP …).2.2`
+  (`localBindings'`) through the recursion, matching `lowerBindingsP`'s
+  cons arm.
+
+The per-binding consume-mode operational witnesses already exist
+(waves 10–14): `stageC_simpleStep_binOp_d1d0_consume_core`,
+`…_d0d1_…`, `…_dge2_d0_…`, `…_d0_dge2_…` for binOp depth pairs, plus
+the literal-const and depth-0 unary paths (the latter discharged from
+`run_OP_NEGATE_int`).  The composer's `cons` arm carries the
+**operational** fact only — `runOps (lowerValueP …).1 stkSt = .ok
+stkSt_b'` — because the consume-mode tsm/stack shapes do not match
+`simpleStepRel` (the singletons document this explicitly).  The
+predicate side is left to the wave-19 capstone.
+
+The smoke test at the end of this section is the GO/NO-GO deliverable:
+it instantiates the composer on a CONCRETE 3-binding consume-mode arith
+body lowered with `outerProtected = []` (the real method-lowering
+setting) — the thing wave 17 could not do in copy mode. -/
+
+/-- Operational chained relation over a binding list against the
+**program-aware** lowerer (`lowerBindingsP`) in **consume mode**.
+
+The fixed lowering context `(progMethods, props, budget, lastUses,
+outerProtected, constInts)` is shared by every step.  The relation is
+indexed by the evolving `(body, sm, currentIndex, localBindings, stkSt)`
+state and the final `(sm', stkSt')`.
+
+* `nil` — empty body: stack map and runtime stack unchanged.
+* `cons` — for the head binding `b = .mk name v _`, running the
+  consume-mode-lowered ops of `b` from `stkSt` produces `stkSt_b'`; the
+  lowerer advances the stack map to `(lowerValueP … sm name v).2.1` and
+  the local-bindings set to `(lowerValueP … sm name v).2.2`; the tail
+  chains from the advanced state at `currentIndex + 1`. -/
+inductive RunChainRelP
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (lastUses : List (String × Nat)) (outerProtected : List String)
+    (constInts : List (String × Int)) :
+    List ANFBinding → StackMap → Nat → List String → StackState →
+    StackMap → StackState → Prop where
+  | nil {sm currentIndex localBindings stkSt} :
+      RunChainRelP progMethods props budget lastUses outerProtected constInts
+        [] sm currentIndex localBindings stkSt sm stkSt
+  | cons {name v src rest sm currentIndex localBindings stkSt stkSt_b' sm'' stkSt''} :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                outerProtected localBindings constInts sm name v).1 stkSt = .ok stkSt_b' →
+      RunChainRelP progMethods props budget lastUses outerProtected constInts
+        rest
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.1
+        (currentIndex + 1)
+        (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+            outerProtected localBindings constInts sm name v).2.2
+        stkSt_b' sm'' stkSt'' →
+      RunChainRelP progMethods props budget lastUses outerProtected constInts
+        (.mk name v src :: rest) sm currentIndex localBindings stkSt sm'' stkSt''
+
+/-- **Whole-body consume-mode operational composition.**  From a
+`RunChainRelP` witness over `body` (every binding's consume-mode-lowered
+ops run successfully and the stack map / local bindings advance via the
+lowerer's own projections), running the program-aware-lowered body over
+`lowerBindingsP` succeeds and lands on the chain's final runtime stack.
+
+This is the consume-mode analogue of
+`runOps_lowerBindings_RunChainRel`: it composes the per-binding `runOps`
+witnesses into one whole-body run by induction over the binding list,
+using the `lowerBindingsP` cons unfold (`ops ++ ops'`) + `runOps_append`
+for the inductive step and the empty-op-list identity for the base. -/
+theorem runOps_lowerBindingsP_RunChainRelP
+    {progMethods : List ANFMethod} {props : List ANFProperty} {budget : Nat}
+    {lastUses : List (String × Nat)} {outerProtected : List String}
+    {constInts : List (String × Int)}
+    {body : List ANFBinding} {sm sm' : StackMap} {currentIndex : Nat}
+    {localBindings : List String} {stkSt stkSt' : StackState}
+    (h : RunChainRelP progMethods props budget lastUses outerProtected constInts
+          body sm currentIndex localBindings stkSt sm' stkSt') :
+    runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm body).1 stkSt = .ok stkSt' := by
+  induction h with
+  | @nil sm0 currentIndex0 localBindings0 stkSt0 =>
+      have hNilOps :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex0 lastUses
+              outerProtected localBindings0 constInts sm0 ([] : List ANFBinding)).1
+            = ([] : List StackOp) := by
+        simp [Stack.Lower.lowerBindingsP]
+      rw [hNilOps]
+      exact Stack.Sim.run_empty _
+  | @cons name v src rest sm currentIndex localBindings stkSt stkSt_b' sm'' stkSt''
+        hHeadRun _hRest ih =>
+      have hUnfold :
+          (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm (.mk name v src :: rest)).1
+            = (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  outerProtected localBindings constInts sm name v).1
+              ++ (Stack.Lower.lowerBindingsP progMethods props budget (currentIndex + 1) lastUses
+                    outerProtected
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.2
+                    constInts
+                    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                        outerProtected localBindings constInts sm name v).2.1
+                    rest).1 := by
+        simp [Stack.Lower.lowerBindingsP]
+      rw [hUnfold, Stack.Sim.runOps_append, hHeadRun]
+      exact ih
+
+/-- **Whole-body consume-mode operational composition — `isSome` form.**
+The runtime-success corollary of `runOps_lowerBindingsP_RunChainRelP`: a
+`RunChainRelP` witness over `body` makes the consume-mode-lowered whole
+body run to a defined result.
+
+This is the consume-mode peer of
+`runOps_lowerBindings_RunChainRel_isSome` and the
+non-conclusion-restating replacement for the wave-9
+`runOps_lowerBindingsP_structuralArithBody_isSome` (which carried a
+forbidden universal `hRunOk` "succeeds on EVERY stack" hypothesis):
+here the per-binding `runOps` success is supplied by genuine consume-mode
+witnesses threaded through the concrete evolving stack, so the conclusion
+is DERIVED, not restated. -/
+theorem runOps_lowerBindingsP_RunChainRelP_isSome
+    {progMethods : List ANFMethod} {props : List ANFProperty} {budget : Nat}
+    {lastUses : List (String × Nat)} {outerProtected : List String}
+    {constInts : List (String × Int)}
+    {body : List ANFBinding} {sm sm' : StackMap} {currentIndex : Nat}
+    {localBindings : List String} {stkSt stkSt' : StackState}
+    (h : RunChainRelP progMethods props budget lastUses outerProtected constInts
+          body sm currentIndex localBindings stkSt sm' stkSt') :
+    (runOps (Stack.Lower.lowerBindingsP progMethods props budget currentIndex lastUses
+              outerProtected localBindings constInts sm body).1 stkSt).toOption.isSome := by
+  rw [runOps_lowerBindingsP_RunChainRelP h]
+  simp [Except.toOption]
+
+/-- Single-step `RunChainRelP` builder from a per-binding consume-mode
+operational witness.  Caps the chain with a `nil` tail. -/
+theorem RunChainRelP.singleton
+    {progMethods : List ANFMethod} {props : List ANFProperty} {budget : Nat}
+    {lastUses : List (String × Nat)} {outerProtected : List String}
+    {constInts : List (String × Int)}
+    (name : String) (v : ANFValue) (src : Option SourceLoc)
+    (sm : StackMap) (currentIndex : Nat) (localBindings : List String)
+    (stkSt stkSt' : StackState)
+    (hRun : runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                      outerProtected localBindings constInts sm name v).1 stkSt = .ok stkSt') :
+    RunChainRelP progMethods props budget lastUses outerProtected constInts
+      [.mk name v src] sm currentIndex localBindings stkSt
+      (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+          outerProtected localBindings constInts sm name v).2.1 stkSt' :=
+  RunChainRelP.cons hRun RunChainRelP.nil
+
+/-! ### Wave 18 — consume-mode method-shaped smoke test (GO/NO-GO)
+
+`runOps_lowerBindingsP_RunChainRelP_isSome` is worthless unless a
+CONCRETE method-shaped (consume-mode, `outerProtected = []`) ≥3-binding
+arith body can be threaded through it from the genuine per-binding
+consume witnesses — the exact thing wave 17 could NOT do in copy mode.
+
+The body (over an initial stack `[p0, p1, p2]` with the three params at
+depths 0/1/2, each used exactly once → consumed on its last use):
+
+  let t0 = p0 + p1                -- binOp "+", consume (l@0, r@1): `[.swap, OP_ADD]`
+  let t1 = t0 - p2                -- binOp "-", consume (l@0, r@1): `[.swap, OP_SUB]`
+  let t2 = -t1                    -- unaryOp "-", consume @0:        `[OP_NEGATE]`
+
+Lowered with `outerProtected = []`.  `lastUses` marks each operand's
+final-read index so `loadRefLive` consumes (SWAP / no-op) rather than
+copies.  Each per-binding `runOps` fact is discharged from the matching
+`stageC_simpleStep_binOp_d0d1_consume_core` witness (the two binOps) or
+`run_OP_NEGATE_int` (the unary step), then composed via
+`RunChainRelP.cons`.
+
+The whole point: this proves consume-mode chaining CLOSES on a real
+method-shaped body.  The depth-shift bookkeeping (each binding's
+operands sit at SHIFTED depths after the previous consume) is discharged
+by rewriting each step's `(lowerValueP …).2.1` projection to the
+concrete post-step stack map, so the next binding's witness sees the
+right depths. -/
+
+/-- Concrete consume-mode arith body for the smoke test:
+`[t0 = p0 + p1; t1 = t0 - p2; t2 = -t1]`. -/
+private def wave18SmokeBody : List ANFBinding :=
+  [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none,
+   ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+   ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none]
+
+/-- Last-use map for `wave18SmokeBody`: `p0`/`p1` last read at index 0
+(the `p0 + p1` step), `p2`/`t0` at index 1 (the `t0 - p2` step), `t1` at
+index 2 (the `-t1` step). -/
+private def wave18SmokeLU : List (String × Nat) :=
+  [("p0", 0), ("p1", 0), ("p2", 1), ("t0", 1), ("t1", 2)]
+
+/-- Smoke test for the wave-18 consume-mode composer.
+
+A concrete 3-binding consume-mode arith body, lowered with
+`outerProtected = []` and a `lastUses` map that forces consumption on
+every operand's final read, runs to a defined result.  Each per-binding
+`runOps` fact is supplied by genuine consume-mode witnesses
+(`stageC_simpleStep_binOp_d0d1_consume_core` + `run_OP_NEGATE_int`); the
+composer chains them and `runOps_lowerBindingsP_RunChainRelP_isSome`
+discharges whole-body runtime success.
+
+`agreesTagged` + the param/binding lookups at each step are taken as
+hypotheses — they are genuine facts about a real consume body, not the
+forbidden conclusion-restating `hRunOk` — and the body-level runtime
+success is DERIVED from them via the composer.
+
+The initial stack-map is `["p0", "p1", "p2"]` and the runtime stack
+carries the matching `agreesTagged` values `a :: b :: c :: rest`.  This
+is the method-shaped instantiation wave 17 could not produce in copy
+mode. -/
+theorem wave18_consume_chain_smoke
+    (anfSt : State) (stkSt : StackState) (a b c : Int) (rest : List Value)
+    (tsm_rest : TaggedStackMap)
+    (hStk : stkSt.stack = .vBigint a :: .vBigint b :: .vBigint c :: rest)
+    -- Step 0 inputs: agreesTagged on the initial param stack-map.
+    (hAgrees0 : agreesTagged
+        (("p0", .param) :: ("p1", .param) :: ("p2", .param) :: tsm_rest) anfSt stkSt)
+    (hLookupP0 : lookupAnfByKind anfSt ("p0", .param) = some (.vBigint a))
+    (hLookupP1 : lookupAnfByKind anfSt ("p1", .param) = some (.vBigint b))
+    -- Step 1 inputs: agreesTagged after binding 0 (t0 on top, p2 below).
+    (anfSt1 : State)
+    (hAgrees1 : agreesTagged
+        (("t0", .binding) :: ("p2", .param) :: tsm_rest) anfSt1
+        ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest}))
+    (hLookupT0 : lookupAnfByKind anfSt1 ("t0", .binding) = some (.vBigint (a + b)))
+    (hLookupP2 : lookupAnfByKind anfSt1 ("p2", .param) = some (.vBigint c)) :
+    (runOps (Stack.Lower.lowerBindingsP ([] : List ANFMethod) ([] : List ANFProperty) 64 0
+              wave18SmokeLU [] [] ([] : List (String × Int)) ["p0", "p1", "p2"]
+              wave18SmokeBody).1 stkSt).toOption.isSome := by
+  -- ===== Binding 0: t0 = p0 + p1, d0d1 consume → [.swap, OP_ADD] =====
+  have hOps0 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 0
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["p0", "p1", "p2"] "t0"
+          (.binOp "+" "p0" "p1" none)).1 = [.swap, .opcode "OP_ADD"] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+      wave18SmokeLU Stack.Lower.isLastUse Stack.Lower.listContains Stack.Lower.binopOpcode
+    rfl
+  have hSm0 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 0
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["p0", "p1", "p2"] "t0"
+          (.binOp "+" "p0" "p1" none)).2.1 = ["t0", "p2"] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+      Stack.Lower.StackMap.popN Stack.Lower.StackMap.push wave18SmokeLU
+      Stack.Lower.isLastUse Stack.Lower.listContains
+    rfl
+  have hLB0 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 0
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["p0", "p1", "p2"] "t0"
+          (.binOp "+" "p0" "p1" none)).2.2 = [] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+  -- Run binding 0 via the d0d1 consume singleton, then normalise the
+  -- post-state (the singleton's tail.tail-then-push shape equals the
+  -- explicit record update by hStk).
+  have hRun0Raw :
+      runOps [.swap, .opcode "OP_ADD"] stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint (a + b))) := by
+    refine stageC_simpleStep_binOp_d0d1_consume_core
+      "p0" "p1" .param .param (("p2", .param) :: tsm_rest) anfSt stkSt a b
+      "OP_ADD" (.vBigint (a + b)) [.swap, .opcode "OP_ADD"]
+      hAgrees0 hLookupP0 hLookupP1 rfl ?_
+    intro restStk hStkEq
+    exact Stack.Sim.runOpcode_ADD_intInt
+      ({stkSt with stack := .vBigint b :: .vBigint a :: restStk}) a b restStk rfl
+  have hRun0 :
+      runOps (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 0
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["p0", "p1", "p2"] "t0"
+          (.binOp "+" "p0" "p1" none)).1 stkSt
+        = .ok ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest}) := by
+    rw [hOps0, hRun0Raw]
+    have hEq :
+        ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint (a + b)))
+          = ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest} : StackState) := by
+      rw [hStk]; rfl
+    rw [hEq]
+  -- ===== Binding 1: t1 = t0 - p2, d0d1 consume → [.swap, OP_SUB] =====
+  have hOps1 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 1
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["t0", "p2"] "t1"
+          (.binOp "-" "t0" "p2" none)).1 = [.swap, .opcode "OP_SUB"] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+      wave18SmokeLU Stack.Lower.isLastUse Stack.Lower.listContains Stack.Lower.binopOpcode
+    rfl
+  have hSm1 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 1
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["t0", "p2"] "t1"
+          (.binOp "-" "t0" "p2" none)).2.1 = ["t1"] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+      Stack.Lower.StackMap.popN Stack.Lower.StackMap.push wave18SmokeLU
+      Stack.Lower.isLastUse Stack.Lower.listContains
+    rfl
+  have hLB1 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 1
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["t0", "p2"] "t1"
+          (.binOp "-" "t0" "p2" none)).2.2 = [] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+  have hStk1 :
+      ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest} : StackState).stack
+        = .vBigint (a + b) :: .vBigint c :: rest := rfl
+  have hRun1Raw :
+      runOps [.swap, .opcode "OP_SUB"]
+          ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest})
+        = .ok ({({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest}) with
+                stack :=
+                  ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest}).stack.tail.tail}.push
+                  (.vBigint ((a + b) - c))) := by
+    refine stageC_simpleStep_binOp_d0d1_consume_core
+      "t0" "p2" .binding .param tsm_rest anfSt1
+      ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest}) (a + b) c
+      "OP_SUB" (.vBigint ((a + b) - c)) [.swap, .opcode "OP_SUB"]
+      hAgrees1 hLookupT0 hLookupP2 rfl ?_
+    intro restStk hStkEq
+    exact Stack.Sim.runOpcode_SUB_intInt
+      ({({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest}) with
+        stack := .vBigint c :: .vBigint (a + b) :: restStk}) (a + b) c restStk rfl
+  have hRun1 :
+      runOps (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 1
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["t0", "p2"] "t1"
+          (.binOp "-" "t0" "p2" none)).1
+          ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest})
+        = .ok ({stkSt with stack := .vBigint ((a + b) - c) :: rest}) := by
+    rw [hOps1, hRun1Raw]; rfl
+  -- ===== Binding 2: t2 = -t1, depth-0 unary consume → [OP_NEGATE] =====
+  have hOps2 :
+      (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 2
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["t1"] "t2"
+          (.unaryOp "-" "t1" none)).1 = [.opcode "OP_NEGATE"] := by
+    unfold Stack.Lower.lowerValueP; simp only []
+    unfold Stack.Lower.loadRefLive Stack.Lower.bringToTop Stack.Lower.StackMap.depth?
+      wave18SmokeLU Stack.Lower.isLastUse Stack.Lower.listContains Stack.Lower.unaryOpcode
+    rfl
+  have hStk2 :
+      ({stkSt with stack := .vBigint ((a + b) - c) :: rest} : StackState).stack
+        = .vBigint ((a + b) - c) :: rest := rfl
+  have hRun2Raw :
+      runOps [.opcode "OP_NEGATE"]
+          ({stkSt with stack := .vBigint ((a + b) - c) :: rest})
+        = .ok (({({stkSt with stack := .vBigint ((a + b) - c) :: rest}) with
+                  stack := rest}).push (.vBigint (-((a + b) - c)))) :=
+    Stack.Sim.run_OP_NEGATE_int
+      ({stkSt with stack := .vBigint ((a + b) - c) :: rest}) ((a + b) - c) rest hStk2
+  have hRun2 :
+      runOps (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 2
+          wave18SmokeLU [] [] ([] : List (String × Int)) ["t1"] "t2"
+          (.unaryOp "-" "t1" none)).1
+          ({stkSt with stack := .vBigint ((a + b) - c) :: rest})
+        = .ok ({stkSt with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    rw [hOps2, hRun2Raw]; rfl
+  -- ===== Compose via RunChainRelP, threading the .2.1/.2.2 projections. =====
+  -- Build the chain bottom-up.  The tail relations are stated at the
+  -- lowerer's own projections; we rewrite each via hSm*/hLB* so the next
+  -- binding's witness applies at the concrete shifted stack map.
+  have chain1 :
+      RunChainRelP ([] : List ANFMethod) ([] : List ANFProperty) 64 wave18SmokeLU [] []
+        [ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+         ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none]
+        ["t0", "p2"] 1 []
+        ({stkSt with stack := .vBigint (a + b) :: .vBigint c :: rest})
+        (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 2
+            wave18SmokeLU [] [] ([] : List (String × Int)) ["t1"] "t2"
+            (.unaryOp "-" "t1" none)).2.1
+        ({stkSt with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    refine RunChainRelP.cons hRun1 ?_
+    rw [hSm1, hLB1]
+    exact RunChainRelP.cons hRun2 RunChainRelP.nil
+  have chain0 :
+      RunChainRelP ([] : List ANFMethod) ([] : List ANFProperty) 64 wave18SmokeLU [] []
+        wave18SmokeBody
+        ["p0", "p1", "p2"] 0 [] stkSt
+        (Stack.Lower.lowerValueP ([] : List ANFMethod) ([] : List ANFProperty) 64 2
+            wave18SmokeLU [] [] ([] : List (String × Int)) ["t1"] "t2"
+            (.unaryOp "-" "t1" none)).2.1
+        ({stkSt with stack := .vBigint (-((a + b) - c)) :: rest}) := by
+    show RunChainRelP _ _ _ _ _ _
+      (ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none ::
+        [ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+         ANFBinding.mk "t2" (.unaryOp "-" "t1" none) none])
+      _ _ _ _ _ _
+    refine RunChainRelP.cons hRun0 ?_
+    rw [hSm0, hLB0]
+    exact chain1
+  exact runOps_lowerBindingsP_RunChainRelP_isSome chain0
+
 end Agrees
 end RunarVerification.Stack
