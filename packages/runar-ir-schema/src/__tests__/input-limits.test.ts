@@ -12,7 +12,7 @@ import {
 describe('InputLimits', () => {
   it('exposes the documented byte bounds', () => {
     expect(InputLimits.MAX_IR_BYTES).toBe(16 * 1024 * 1024);
-    expect(InputLimits.MAX_SCRIPT_BYTES).toBe(1 * 1024 * 1024);
+    expect(InputLimits.MAX_SCRIPT_BYTES).toBe(4 * 1024 * 1024);
     expect(InputLimits.MAX_NESTING).toBe(512);
     expect(InputLimits.MAX_STRING_BYTES).toBe(4 * 1024 * 1024);
   });
@@ -39,7 +39,7 @@ describe('InputLimits', () => {
     // We assert the values are exactly what the constants module declares.
     const snapshot = { ...InputLimits };
     expect(snapshot.MAX_IR_BYTES).toBe(16 * 1024 * 1024);
-    expect(snapshot.MAX_SCRIPT_BYTES).toBe(1 * 1024 * 1024);
+    expect(snapshot.MAX_SCRIPT_BYTES).toBe(4 * 1024 * 1024);
     expect(snapshot.MAX_NESTING).toBe(512);
     expect(snapshot.MAX_STRING_BYTES).toBe(4 * 1024 * 1024);
   });
