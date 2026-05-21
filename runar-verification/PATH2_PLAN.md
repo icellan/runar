@@ -2301,6 +2301,88 @@ A new contributor picking up Path 2 cold reads these in order:
 
 ---
 
+## 11. Retirement roadmap (status as of 2026-05-21, waves 18–29)
+
+The first sub-omnibus retirement (arith) was pursued through waves
+18–29. The substrate is built and sound; the retirement is **gated**,
+not done. This section is the resume point.
+
+### 11.1 What's done (sound, on `main`)
+
+* **Framework soundness fix (waves 24/25).** The omnibus + 9
+  sub-omnibus axioms were proven *false-as-stated* (independent
+  `initialAnf`/`initialStack` quantification — counterexample in
+  `wave24-counterexample.lean.txt`) and re-stated with the
+  `agreesTagged` alignment premise, making them sound. This is the
+  single most important correctness result of the arc — independent of
+  any retirement. See TRUST_MANIFEST.md "Tier 1 wave 25".
+* **Consume-arith correctness substrate (waves 18–28).** The full
+  machinery to discharge the emittable-consume-arith fragment:
+  `RunChainRelP` composer (18), M2 method capstone (19), decidable
+  reflection (20), M3 regime-bypass + `peepholeChainFold` identity
+  (21/22), operational ANF↔stack lockstep + arbitrary-length assembly
+  (27/28). All smoke-tested, no `sorry`. See TRUST_MANIFEST.md
+  "Tier 1 waves 26–29".
+
+### 11.2 The open gate: `taggedAllBigint`
+
+Discharging the arith sub-omnibus needs operand bigint provenance
+(`taggedAllBigint anfSt tsm`), which is neither decidable on the
+symbolic `initialAnf` nor derivable from `agreesTagged` / `WF.ANF`.
+The dispatch cannot supply it. Full diagnosis in TRUST_MANIFEST.md
+"Tier 1 waves 26–29 … the open gate".
+
+### 11.3 Next deliberate steps (in order)
+
+1. **Close the gate — prefer option (B), the both-fail leg.** Prove,
+   for an `emittableArithChainReady` body,
+   `¬ taggedAllBigint initialAnf tsm →
+    (evalBindings initialAnf body).toOption.isNone ∧
+    (runParsedBytes bytes initialStack).toOption.isNone`.
+   Needs arith-failure-propagation lemmas in `ANF/Eval.lean` (ANF side)
+   and `Stack/Agrees.lean` (stack side). Removes the `taggedAllBigint`
+   dispatch dependency entirely (the iff then holds unconditionally
+   under the alignment premise). Option (A), a `WF`→witness bigint
+   typing bridge, is the alternative but touches the omnibus signature.
+2. **The retirement wave.** With the gate closed, add a dispatch
+   `by_cases` (single-public ∧ `emittableArithChainReady`) →
+   `compileSafe_observational_correct_arith_consume` (compose the
+   wave-18–28 substrate into `successAgrees`); remove the vacuous
+   copy-mode `arith_codegen` axiom; bump `TARGET_AXIOMS` 87 → 86 +
+   TRUST_MANIFEST. First retirement.
+3. **Remaining arith holes** (separate substrate, then re-flip): the
+   `(≥2,≥2)` consume depth combo (needs a `loadRefLive`-consume
+   depth-general singleton in `Stack/Agrees.lean`) and non-emittable
+   arith ops (DIV/MOD/comparisons, outside `isAllowedOpcodeName`).
+4. **The other families** (if_val, loop, method_call) follow the same
+   shape: each has its M2 Stage C substrate (waves 8–14); each needs
+   its own consume-mode operational lockstep + the shared gate fix from
+   step 1, then its retirement wave.
+
+### 11.4 Hard-won process lessons (do not relearn these)
+
+* **Substrate lemmas must ship with a consumer (smoke test).** Wave 11
+  produced type-correct but *vacuously unconsumable* lemmas (an
+  `hOpcode` premise no caller could discharge; an off-by-one post-state
+  whose hypothesis was unsatisfiable). Wave 11b fixed them and
+  established the rule: every substrate lemma lands with an in-file
+  smoke test instantiating it on a concrete input.
+* **Trust the build, not the agent's prose, and beware Lake cache
+  hits.** Several external "lean4-finish" worktrees produced fraudulent
+  discharges (undefined `compileSafe_observational_correct_skeleton`,
+  self-recursive theorems, English prose in `exact`, literal `sorry`)
+  that initially appeared green via stale `.olean` cache. Always
+  re-verify from a clean build of the integrated file; `grep` for
+  `sorry`/`admit`/`...`-in-code; `#print axioms` to confirm
+  non-circularity.
+* **The "modulo codegen axioms" must be alignment-conditioned.** An
+  unconditional `successAgrees` over independent inputs is false for
+  every input-reading family. This was latent until someone tried to
+  *prove* it (wave 24). Any new sub-omnibus must carry the
+  `agreesTagged` premise from the start.
+
+---
+
 End of plan. When this is fully executed, the omnibus axiom is
 gone, the conformance harness reports 56/56 VERIFIED-direct, and
 the trust footprint contains only cryptographic-primitive

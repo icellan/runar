@@ -1,0 +1,318 @@
+import RunarVerification.Pipeline
+
+namespace RunarVerification.Wave24Scratch
+
+open RunarVerification
+open RunarVerification.Pipeline
+open RunarVerification.ANF
+open RunarVerification.ANF.Eval
+open RunarVerification.Stack
+open RunarVerification.Stack.Eval
+
+/-! ## Wave 24 — exploratory: concrete consume-arith program. -/
+
+/-- Public method `f(p0, p1)` with body `t0 = p0 + p1`. Both params are
+    consumed exactly once → consume-mode arith body. -/
+def fBody : List ANFBinding :=
+  [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none]
+
+def fMethod : ANFMethod :=
+  { name := "f"
+  , params := [⟨"p0", .bigint⟩, ⟨"p1", .bigint⟩]
+  , body := fBody
+  , isPublic := true }
+
+def prog : ANFProgram :=
+  { contractName := "Adder"
+  , properties := []
+  , methods := [fMethod] }
+
+-- Tiny op-name extractor for printing.
+def opName : StackOp → String
+  | .push _ => "push"
+  | .dup => "dup"
+  | .swap => "swap"
+  | .roll d => s!"roll {d}"
+  | .pick d => s!"pick {d}"
+  | .pickStruct d => s!"pickStruct {d}"
+  | .drop => "drop"
+  | .nip => "nip"
+  | .over => "over"
+  | .rot => "rot"
+  | .tuck => "tuck"
+  | .opcode c => c
+  | .ifOp _ _ => "ifOp"
+  | .placeholder i n => s!"placeholder {i} {n}"
+  | .pushCodesepIndex => "pushCodesepIndex"
+  | .rawBytes _ => "rawBytes"
+
+-- What does compileSafe produce? (print hex)
+#eval (compileHexSafe prog)
+
+-- What does the lowering produce (ops) before/after peephole?
+#eval ((peepholeProgram (Lower.lower prog)).methods.map (fun m => m.ops.map opName))
+#eval ((Lower.lower prog).methods.map (fun m => m.ops.map opName))
+
+-- initialAnf: p0 = 3, p1 = 4 (eval should succeed → t0 = 7).
+def initialAnf : State :=
+  { params := [("p0", .vBigint 3), ("p1", .vBigint 4)] }
+
+-- initialStack: EMPTY.
+def initialStackEmpty : StackState := {}
+
+-- The two sides:
+#eval (evalBindings initialAnf fMethod.body).toOption.isSome   -- expect: true
+#eval
+  match compileSafe prog with
+  | .ok bytes => (Soundness.runParsedBytes bytes initialStackEmpty).toOption.isSome
+  | .error _  => false                                          -- expect: ?
+
+-- Also: what is the structuralArithBodyBool classifier value for this body?
+#eval
+  Agrees.structuralArithBodyBool
+    prog.methods prog.properties
+    Lower.defaultInlineBudget
+    (Lower.computeLastUses fMethod.body) []
+    (fMethod.body.map (·.name))
+    (Lower.collectConstInts fMethod.body)
+    fMethod.body
+    (List.reverse (fMethod.params.map (·.name)))
+    0
+
+-- And: does the omnibus case-split land in the arith arm? Check the
+-- gating predicates that take precedence (stateful, dispatch).
+#eval Lower.bindingsUseCheckPreimage fMethod.body          -- stateful gate
+#eval (prog.methods.filter (·.isPublic)).length            -- dispatch gate (>=2?)
+
+/-! ## COPY-MODE arith body: every binding reuses both params. -/
+
+-- g(p0, p1): t0 = p0 + p1; t1 = p0 + p1; t2 = p0 + p1
+-- In t0 and t1, p0/p1 are NOT last-use (reused later) → copy mode.
+-- In t2, p0/p1 ARE last-use → consume mode.
+def gBody : List ANFBinding :=
+  [ ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none
+  , ANFBinding.mk "t1" (.binOp "+" "p0" "p1" none) none
+  , ANFBinding.mk "t2" (.binOp "+" "p0" "p1" none) none ]
+
+def gMethod : ANFMethod :=
+  { name := "g", params := [⟨"p0", .bigint⟩, ⟨"p1", .bigint⟩]
+  , body := gBody, isPublic := true }
+
+def progG : ANFProgram :=
+  { contractName := "AdderG", properties := [], methods := [gMethod] }
+
+#eval -- classifier for the 3-binding copy-then-consume body
+  Agrees.structuralArithBodyBool
+    progG.methods progG.properties Lower.defaultInlineBudget
+    (Lower.computeLastUses gMethod.body) [] (gMethod.body.map (·.name))
+    (Lower.collectConstInts gMethod.body) gMethod.body
+    (List.reverse (gMethod.params.map (·.name))) 0
+
+-- Per-binding classifier check (currentIndex 0,1,2) to see which arm fails.
+#eval -- t0 (index 0): copy-mode? expect true
+  Agrees.structuralArithValueBool
+    (Lower.computeLastUses gMethod.body) [] (gMethod.body.map (·.name))
+    (List.reverse (gMethod.params.map (·.name))) 0
+    (.binOp "+" "p0" "p1" none)
+#eval -- t2-shape (index 2): last-use consume → expect false
+  Agrees.structuralArithValueBool
+    (Lower.computeLastUses gMethod.body) [] (gMethod.body.map (·.name))
+    (List.reverse (gMethod.params.map (·.name))) 2
+    (.binOp "+" "p0" "p1" none)
+
+/-! ## Where does the consume-binop body (fBody) route in the omnibus?
+    Evaluate ALL structural classifiers for fBody, in omnibus priority
+    order. Whichever first returns true is the sub-omnibus that fires;
+    if NONE fire, the crypto-call fallback (hypothesis = True) fires. -/
+
+def fLastUses := Lower.computeLastUses fMethod.body
+def fLocal := fMethod.body.map (·.name)
+def fConst := Lower.collectConstInts fMethod.body
+def fSm := List.reverse (fMethod.params.map (·.name))
+
+#eval Lower.bindingsUseCheckPreimage fMethod.body                 -- stateful?  expect false
+#eval (prog.methods.filter (·.isPublic)).length ≥ 2              -- dispatch?  expect false
+#eval Agrees.structuralArithBodyBool prog.methods prog.properties
+        Lower.defaultInlineBudget fLastUses [] fLocal fConst
+        fMethod.body fSm 0                                        -- arith?     expect false
+#eval Agrees.structuralCallBodyBool prog.methods prog.properties
+        Lower.defaultInlineBudget fLastUses [] fLocal fConst
+        fMethod.body fSm 0                                        -- math/byte? expect false
+#eval Agrees.structuralUpdatePropBodyBool prog.methods prog.properties
+        Lower.defaultInlineBudget fLastUses [] fLocal fConst
+        fMethod.body fSm 0                                        -- updateprop?expect false
+#eval Agrees.structuralIfValBodyBool prog.methods prog.properties
+        Lower.defaultInlineBudget fLastUses [] fLocal fConst
+        fMethod.body fSm 0                                        -- ifval?     expect false
+#eval Agrees.structuralLoopBodyBool prog.methods prog.properties
+        Lower.defaultInlineBudget fLastUses [] fLocal fConst
+        fMethod.body fSm 0                                        -- loop?      expect false
+#eval Agrees.structuralMethodCallBodyBool prog.methods prog.properties
+        Lower.defaultInlineBudget fLastUses [] fLocal fConst
+        fMethod.body fSm 0                                        -- methodcall?expect false
+
+/-! ## Can the arith classifier EVER accept a body containing a binop?
+    Try: operands kept alive by a trailing reuse. The LAST reader of an
+    operand always makes it last-use, so the trailing binding consumes. -/
+
+-- h(p0,p1): t0 = p0 + p1 (copy: p0,p1 reused below); t1 = p0 + p1 (consume)
+-- already tested via gBody (= false). Try a body that ends without a
+-- binop touching last-use: impossible, but verify a prop-operand body too.
+def progP : ANFProgram :=
+  { contractName := "AdderP"
+  , properties := [⟨"a", .bigint, false, none⟩, ⟨"b", .bigint, false, none⟩]
+  , methods :=
+    [{ name := "k", params := []
+     , body := [ANFBinding.mk "t0" (.binOp "+" "a" "b" none) none]
+     , isPublic := true }] }
+
+def kBody := progP.methods.head!.body
+#eval -- prop-operand single binop: classifier?  (props are last-use here)
+  Agrees.structuralArithBodyBool progP.methods progP.properties
+    Lower.defaultInlineBudget (Lower.computeLastUses kBody) []
+    (kBody.map (·.name)) (Lower.collectConstInts kBody) kBody [] 0
+
+/-! ## An ACCEPTED arith-classifier body (copy-mode loads + assert),
+    and whether IT diverges on empty stack.
+
+    `m(p0)`: t0 = load p0 (copy: reused below); t1 = assert(p0).
+    - t0 loadParam p0 at idx0: p0 reused at idx1 → not last-use → copy → ok.
+    - t1 assert p0 at idx1: copy-mode assert requires !isLastUse(p0).
+      idx1 IS p0's last use → consume → assert arm REQUIRES copy → fails?
+    Let's see what the classifier says, and whether the body diverges. -/
+def mBody : List ANFBinding :=
+  [ ANFBinding.mk "t0" (.loadParam "p0") none
+  , ANFBinding.mk "t1" (.assert "p0") none ]
+def mMethod : ANFMethod :=
+  { name := "m", params := [⟨"p0", .bool⟩], body := mBody, isPublic := true }
+def progM : ANFProgram := { contractName := "AssertM", properties := [], methods := [mMethod] }
+
+#eval Agrees.structuralArithBodyBool progM.methods progM.properties
+        Lower.defaultInlineBudget (Lower.computeLastUses mBody) []
+        (mBody.map (·.name)) (Lower.collectConstInts mBody) mBody
+        (List.reverse (mMethod.params.map (·.name))) 0   -- accepted?
+
+-- If accepted, test divergence: eval with p0=true (succeeds) vs empty stack.
+def initialAnfM : State := { params := [("p0", .vBool true)] }
+#eval (evalBindings initialAnfM mMethod.body).toOption.isSome
+#eval
+  match compileSafe progM with
+  | .ok bytes => (Soundness.runParsedBytes bytes initialStackEmpty).toOption.isSome
+  | .error _  => false
+#eval compileHexSafe progM
+
+/-! ## What DOES the arith classifier accept?
+    Empty body → true (vacuous). A body of only copy-mode loads where the
+    final binding's operand is NOT a re-read of an earlier ref also can't
+    keep things copy. Test empty + a const-only body (which is the
+    structural-const fragment, already a theorem). -/
+#eval Agrees.structuralArithBodyBool [] [] Lower.defaultInlineBudget
+        [] [] [] [] ([] : List ANFBinding) [] 0          -- empty → true
+
+-- const-only body: t0 = loadConst 5 ; t1 = loadConst 6.  No refs at all.
+def cBody : List ANFBinding :=
+  [ ANFBinding.mk "t0" (.loadConst (.int 5)) none
+  , ANFBinding.mk "t1" (.loadConst (.int 6)) none ]
+def cMethod : ANFMethod := { name := "c", params := [], body := cBody, isPublic := true }
+def progC : ANFProgram := { contractName := "ConstC", properties := [], methods := [cMethod] }
+#eval Agrees.structuralArithBodyBool progC.methods progC.properties
+        Lower.defaultInlineBudget (Lower.computeLastUses cBody) []
+        (cBody.map (·.name)) (Lower.collectConstInts cBody) cBody [] 0  -- const-only accepted?
+-- const-only body needs no stack inputs → does it diverge on empty stack?
+#eval (evalBindings ({} : State) cMethod.body).toOption.isSome          -- eval
+#eval
+  match compileSafe progC with
+  | .ok bytes => (Soundness.runParsedBytes bytes initialStackEmpty).toOption.isSome
+  | .error _  => false                                                   -- run on empty
+
+/-! ## ============================================================
+    THE PROOFS (no sorry/axioms): the omnibus CONCLUSION is FALSE
+    over independent (initialAnf, initialStack).
+    ============================================================ -/
+
+/-- For the consume-binop body `fBody` with `p0=3, p1=4` and an EMPTY
+    initial stack, the ANF evaluation SUCCEEDS but running the compiled
+    bytes FAILS — so `successAgrees` is FALSE.  This is exactly the
+    conclusion of `compileSafe_observational_correct_modulo_codegen_axioms`
+    (and of the sub-omnibus the body routes to), with `initialAnf` and
+    `initialStack` quantified independently. -/
+theorem omnibus_conclusion_false_on_consume_binop :
+    ∃ (p : ANFProgram) (anfM : ANFMethod) (bytes : ByteArray)
+      (initialAnf : State) (initialStack : StackState),
+      compileSafe p = .ok bytes ∧
+      anfM ∈ p.methods ∧ anfM.isPublic = true ∧
+      ¬ Soundness.successAgrees
+          (evalBindings initialAnf anfM.body)
+          (Soundness.runParsedBytes bytes initialStack) := by
+  refine ⟨prog, fMethod, (compile prog), initialAnf, initialStackEmpty,
+    ?_, ?_, ?_, ?_⟩
+  · -- compileSafe prog = .ok (compile prog)
+    apply Soundness.compileSafe_eq_compile_of_validate
+    -- Validation succeeds.  Phrase via `toOption.isSome` to dodge the
+    -- missing `DecidableEq (Except CompileError Unit)` instance.
+    have h : (validateStackProgram (peepholeProgram (Lower.lower prog))).toOption.isSome
+        = true := by native_decide
+    cases hv : validateStackProgram (peepholeProgram (Lower.lower prog)) with
+    | error e => rw [hv] at h; simp [Except.toOption] at h
+    | ok u => cases u; rfl
+  · -- fMethod ∈ prog.methods  (prog.methods = [fMethod])
+    show fMethod ∈ [fMethod]
+    exact List.mem_cons_self
+  · -- isPublic
+    rfl
+  · -- ¬ successAgrees:  eval.isSome = true, run.isSome = false
+    unfold Soundness.successAgrees
+    native_decide
+
+/-- The consume-binop body is NOT in the arith classifier's fragment
+    (its operands are at last use → consume mode → rejected).  Hence the
+    arith sub-omnibus's hypothesis `hArith` is FALSE here: the divergence
+    above does not directly instantiate the arith axiom. -/
+theorem consume_binop_not_arith_classified :
+    Agrees.structuralArithBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false := by
+  native_decide
+
+/-- The consume-binop body matches NONE of the structural classifiers,
+    so the omnibus `by_cases` chain falls through to the crypto-call
+    fallback sub-omnibus (`...modulo_crypto_call_codegen`, hypothesis
+    `trivial`).  That fallback axiom therefore asserts the FALSE
+    `successAgrees` proved above.  We record all eight classifier
+    rejections (stateful/dispatch + the six body classifiers). -/
+theorem consume_binop_routes_to_crypto_fallback :
+    Lower.bindingsUseCheckPreimage fMethod.body = false ∧
+    ¬ ((prog.methods.filter (·.isPublic)).length ≥ 2) ∧
+    Agrees.structuralArithBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false ∧
+    Agrees.structuralCallBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false ∧
+    Agrees.structuralUpdatePropBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false ∧
+    Agrees.structuralIfValBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false ∧
+    Agrees.structuralLoopBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false ∧
+    Agrees.structuralMethodCallBodyBool prog.methods prog.properties
+      Lower.defaultInlineBudget (Lower.computeLastUses fMethod.body) []
+      (fMethod.body.map (·.name)) (Lower.collectConstInts fMethod.body)
+      fMethod.body (List.reverse (fMethod.params.map (·.name))) 0 = false := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> native_decide
+
+end RunarVerification.Wave24Scratch
+
+-- Axiom audit: the negation proof must NOT depend on any project
+-- soundness axiom (only Lean's standard kernel axioms + Lean.ofReduceBool
+-- from native_decide are acceptable).
+#print axioms RunarVerification.Wave24Scratch.omnibus_conclusion_false_on_consume_binop

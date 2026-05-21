@@ -50,6 +50,7 @@ that are preserved by design.
 | Tier 1 wave 2: O1 omnibus split | 2026-05-17 | 86 | +8 | +8 (9 sub-omnibus axioms +1 omnibus theorem) | 0 |
 | Tier 1 wave 3: B1 follow-up FIPS axiom | 2026-05-17 | 87 | +1 | 0 | +1 (FIPS 180-4 §6.2 composition axiom; `runOps_sha256CompressOps_eq` / `_FinalizeOps_eq` land in Stack/HashOps.lean as theorems via the composition) |
 | Tier 1 wave 25: alignment re-statement | 2026-05-21 | 87 | 0 | 0 (9 sub-omnibus axiom *signatures* gain an alignment premise; no axiom added or retired) | 0 |
+| Tier 1 waves 26–29: consume-arith retirement substrate | 2026-05-21 | 87 | 0 | 0 (M2 capstone + reflection + M3/M4/shape + operational lockstep all built; arith retirement gated on the `taggedAllBigint` typing bridge / both-fail leg — see the waves-26–29 section) | 0 |
 
 **Net Tier 1 wave 2 (2026-05-17, omnibus-split inflation + Stage C widenings):** 78 → 86,
 Δ = +8 (intentional). The 9 per-family sub-omnibuses replace the single omnibus
@@ -515,6 +516,108 @@ the sub-omnibus carries, and (b) the ANF-side `evalBindings … isSome`
 leg for the arith fragment. Both are the wave-21/22 substrate; the
 alignment premise added here is the missing relating hypothesis that
 makes those legs composable into the sub-omnibus conclusion.
+
+### Tier 1 waves 26–29 — consume-arith retirement substrate + the `taggedAllBigint` gate (2026-05-21)
+
+After wave 25 made the framework sound, waves 26–29 pursued the **first
+axiom retirement** (discharging the arith sub-omnibus → 87 → 86). The
+substrate was built; the retirement is **gated, not done** — precisely
+characterized below. No axiom was retired; count stays **87**.
+
+**What was built (all sound, on `main`, smoke-tested, no `sorry`):**
+
+* **Wave 18 — `RunChainRelP`** (`Stack/Agrees.lean`): the consume-mode
+  whole-body operational-chain composer. The operational analogue of
+  `agreesTagged_chain_preserves`, over `lowerBindingsP` (the
+  consume-mode lowerer real method lowering uses). Replaces the latent
+  poison lemma `runOps_lowerBindingsP_structuralArithBody_isSome`
+  (which carried a forbidden universal `hRunOk` and was never
+  consumable).
+* **Wave 19 — M2 method capstone** (`Stack/AgreesA3.lean`):
+  `runMethod_lower_public_unique_no_post_structuralArithConsumeBody_whole_isSome`
+  — the first **non-vacuous** whole-body arith correctness theorem at
+  the method level (consume-mode, `outerProtected = []`). Wave 17's
+  copy-mode analogue was vacuous because `outerProtected = []` forces
+  last-use operands to consume-mode; consume-mode is the real path.
+* **Wave 20 — reflection** (`Stack/AgreesA3.lean`):
+  `structuralArithConsumeBodyBool` (decidable) +
+  `structuralArithConsumeBodyBool_reflect_consBinOp` / `_consUnaryOp`,
+  bridging the Bool classifier to the witness-carrying inductive.
+* **Waves 21/22 — M3/M4/shape from `compileSafe`** (`Pipeline.lean`,
+  `Stack/Peephole.lean`): the **regime-bypass**
+  `peephole_M3_unconditional_of_bodyId` (arith lowering fires no
+  peephole rule, so `peepholeMethodOps body = body` syntactically → M3
+  holds by `rfl` for every stack, sidestepping the runtime peephole
+  preconditions), gated on `peepholeChainFold_eq_self_of_noIfOp_pushFree`
+  (wave 22) + `pushFree`. Plus `noIfOp_of_areRunarEmittable`,
+  `peepholeProgram_single_public_shape`, and the M4 emittability
+  witness. Finding: `AreRunarEmittable` excludes `.push`, so the
+  emittable arith fragment is `{OP_ADD, OP_SUB, OP_MUL, OP_NEGATE,
+  OP_NOT}` (no DIV/MOD/comparisons), and the const capstone's
+  `AreRunarEmittable` hypothesis is itself unsatisfiable — the
+  retirement target is consume-arith, not const.
+* **Waves 27/28 — operational ANF↔stack lockstep**
+  (`Stack/AgreesA3.lean`): `agreesTagged_consume_top_two` / `_one`
+  (transport entry `agreesTagged` across a consume-and-push — the
+  `removeAtDepth`-then-`push` preservation, fully general) and the
+  arbitrary-length `structuralArithConsumeBody_of_entry_agreesTagged`,
+  which builds the full inductive from a **bare entry `agreesTagged`**
+  + `taggedAllBigint` + `emittableArithChainReady`, deriving every
+  per-binding intermediate alignment. Length-5 smoke fires the M2
+  capstone end-to-end. This closed the "operational composition next
+  phase" the substrate docstrings (`Agrees.lean:3047/3172`) had
+  deferred.
+
+**The open gate (wave 29 finding) — `taggedAllBigint`.** Every road to
+the `structuralArithConsumeBody` inductive requires bigint provenance
+of the operands: `taggedAllBigint anfSt tsm`, i.e. each tracked slot
+resolves to `some (.vBigint _)`. The omnibus dispatch cannot supply it:
+
+1. `taggedAllBigint` is **not decidable** on dispatch data — its
+   definition is `∃ i : Int, lookupAnfByKind anfSt s = some (.vBigint i)`,
+   existential over `Int`, and `initialAnf` is a universally-quantified
+   symbolic witness. So the dispatch cannot `by_cases` on it.
+2. `taggedAllBigint` is **not derivable** from `agreesTagged` (which
+   aligns values positionally but does not force them to be `.vBigint`)
+   or `WF.ANF p` (a Bool fact about the program `p`, silent about the
+   runtime witness `initialAnf`). An arbitrary spending witness may put
+   `.vBytes` in a parameter slot and still satisfy `agreesTagged`.
+
+So even with alignment + lockstep, the M2 capstone (which needs
+bigints) cannot fire from dispatch-suppliable hypotheses, and routing
+to the arith leg without `taggedAllBigint` would be unsound (its
+hypothesis unsuppliable) — equivalent to relabelling the obligation
+onto the `crypto_call` `True` fallback. Eight successive sub-agents
+refused this fake; the axiom stays.
+
+**To close the gate (next deliberate session), one of:**
+
+* **(A) bigint-typing bridge** — `WF.ANF p` + arith-fragment parameter
+  typing + `agreesTagged tsm initialAnf initialStack` ⟹
+  `taggedAllBigint initialAnf tsm`. Requires threading parameter
+  value-types from `WF` into the runtime entry witness — likely a new
+  well-typed-entry invariant on the omnibus, compounding the wave-25
+  alignment premise (touches the omnibus signature).
+* **(B) both-fail leg** (cleaner, no signature change) — for an
+  `emittableArithChainReady` body, `¬ taggedAllBigint initialAnf tsm →
+  (evalBindings initialAnf body).toOption.isNone ∧
+  (runParsedBytes bytes initialStack).toOption.isNone`. Then under the
+  alignment premise the iff holds unconditionally (`False ↔ False` on
+  the non-bigint branch, `True ↔ True` on the bigint branch), and the
+  dispatch needs only the decidable `emittableArithChainReady` +
+  single-public — `taggedAllBigint` drops out entirely. Cost:
+  arith-failure-propagation lemmas on BOTH the ANF side (`ANF/Eval.lean`)
+  and the stack side (`Stack/Agrees.lean`). This is the recommended
+  fix; estimate non-trivial but self-contained.
+
+Once (A) or (B) lands, the dispatch routes the single-public,
+emittable, no-`(≥2,≥2)` consume-arith fragment to a discharged
+`compileSafe_observational_correct_arith_consume` theorem, the
+copy-mode `arith_codegen` axiom (vacuous at method level) is removed,
+and the count drops 87 → 86. Two further documented holes stay
+axiomatized until their own substrate lands: the `(≥2,≥2)` consume
+depth combo (needs a `loadRefLive`-consume depth-general singleton in
+`Stack/Agrees.lean`) and non-emittable arith ops (DIV/MOD/comparisons).
 
 ## External Hash Backend
 
