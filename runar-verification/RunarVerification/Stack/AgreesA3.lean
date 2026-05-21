@@ -12177,5 +12177,553 @@ theorem wave20_bool_to_capstone_closed
     anfSt0 anfSt1 wave20_smokeBodyBool_true hStk hAgrees0 hLookupP0 hLookupP1
     hAgrees1 hLookupT0 hLookupP2
 
+/-! ## Path 2 Tier 1 Wave 27 — operational ANF↔stack lockstep
+
+The genuine deferred operational-composition phase.  Wave 19 landed the
+`structuralArithConsumeBody` inductive whose `consBinOp` / `consUnaryOp`
+constructors each carry a per-binding INTERMEDIATE
+`agreesTagged ((l,k_l)::(r,k_r)::tsm_rest) anfSt_i stkSt_i` plus operand
+bigint lookups AT the threaded intermediate state.  The wave-20 smoke
+(`wave20_reflect_capstone_smoke`) supplied each intermediate
+`agreesTagged` (`hAgrees1`) and intermediate operand lookups
+(`hLookupT0` / `hLookupP2`) BY HAND — it never transported the entry
+`agreesTagged` across a consume-and-push.
+
+Wave 27 lands the missing substrate: the **consume-mode `agreesTagged`
+preservation** lemma.  From an entry `agreesTagged` with the two
+consumed operands at the top, after the consume-and-push
+(`stack := stack.tail.tail` then `push out`), the alignment is
+re-established with the operands removed and the new temp on top — the
+exact post-state shape the inductive's `.2.1` / `.2.2` projections
+describe for d0d1 consume.  This is the `removeAtDepth`-then-`push`
+preservation the BLOCK guidance anticipated.
+
+### Step 3 — the consume preservation lemma
+
+`agreesTagged_consume_top_two` is the bridge.  It is NOT a push (which
+retains the whole tail); it removes the top two tracked entries and the
+top two stack values, then pushes the fresh result.  The proof reuses
+`agreesTagged_push_value` on the CONSUMED view (the StackState with the
+two operands dropped) — the consumed view's alignment against
+`tsm_rest` is the drop-two projection of the entry alignment. -/
+
+/-- **Wave 27 Step 3 — consume-mode `agreesTagged` preservation.**
+
+From `agreesTagged ((l,k_l)::(r,k_r)::tsm_rest) anfSt stkSt` (the two
+operands tracked at the top), after dropping the two operands from the
+stack (`stkSt.stack.tail.tail`) and pushing the fresh result `out` under
+a fresh binding name `bn`, alignment holds for
+`(bn,.binding)::tsm_rest`.
+
+This is the post-state the d0d1 consume binOp lowering produces:
+`sm3 = (sm2.popN 2).push bindingName`, removing the operands and binding
+the result where they sat.  No new operand-retention slots — the tail
+`tsm_rest` is exactly the entry tail with the two operand heads peeled
+off. -/
+theorem agreesTagged_consume_top_two
+    (l r : String) (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState)
+    (out : RunarVerification.ANF.Eval.Value)
+    (hAgrees : agreesTagged ((l, k_l) :: (r, k_r) :: tsm_rest) anfSt stkSt)
+    (hFresh : freshIn bn (untagSm tsm_rest)) :
+    agreesTagged ((bn, .binding) :: tsm_rest)
+      (anfSt.addBinding bn out)
+      ({stkSt with stack := stkSt.stack.tail.tail}.push out) := by
+  -- Peel the entry alignment down to the operand-free tail.
+  have hAlign : taggedStackAligned ((l, k_l) :: (r, k_r) :: tsm_rest)
+      anfSt stkSt.stack := hAgrees.1
+  -- The stack is at least two deep, else the cons-cons alignment is False.
+  obtain ⟨v0, v1, restStk, hStk⟩ :
+      ∃ v0 v1 restStk, stkSt.stack = v0 :: v1 :: restStk := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | v0 :: v1 :: restStk => exact ⟨v0, v1, restStk, rfl⟩
+  -- The drop-two alignment for the tail.
+  have hTailAlign : taggedStackAligned tsm_rest anfSt restStk := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hAlign1⟩ := hAlign
+    unfold taggedStackAligned at hAlign1
+    exact hAlign1.2
+  -- The CONSUMED-view StackState: operands dropped, props/outputs intact.
+  -- `agreesTagged tsm_rest anfSt ({stkSt with stack := restStk})` — same
+  -- props/outputs as `stkSt`, alignment is the drop-two tail.
+  have hAgreesCons : agreesTagged tsm_rest anfSt ({stkSt with stack := restStk}) := by
+    refine ⟨?_, ?_, ?_⟩
+    · show taggedStackAligned tsm_rest anfSt restStk; exact hTailAlign
+    · show anfSt.props = stkSt.props; exact hAgrees.2.1
+    · show anfSt.outputs = stkSt.outputs; exact hAgrees.2.2
+  -- Push the fresh result onto the consumed view — reusing the push lemma.
+  have hPush := agreesTagged_push_value tsm_rest bn anfSt ({stkSt with stack := restStk})
+    out hAgreesCons hFresh
+  -- The pushed consumed view equals `{stkSt with stack := tail.tail}.push out`.
+  have hStateEq :
+      ({stkSt with stack := restStk}).push out
+        = ({stkSt with stack := stkSt.stack.tail.tail}.push out) := by
+    rw [hStk]; rfl
+  rw [hStateEq] at hPush
+  exact hPush
+
+/-- **Wave 27 Step 3 (unary peer) — consume-mode `agreesTagged`
+preservation for a single consumed operand.**
+
+The d0 unary consume lowering produces `sm2 = (sm1.popN 1).push
+bindingName`: one operand dropped, the result bound where it sat.  After
+dropping ONE stack value (`stkSt.stack.tail`) and pushing `out`,
+alignment holds for `(bn,.binding)::tsm_rest`. -/
+theorem agreesTagged_consume_top_one
+    (operand : String) (k_op : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState)
+    (out : RunarVerification.ANF.Eval.Value)
+    (hAgrees : agreesTagged ((operand, k_op) :: tsm_rest) anfSt stkSt)
+    (hFresh : freshIn bn (untagSm tsm_rest)) :
+    agreesTagged ((bn, .binding) :: tsm_rest)
+      (anfSt.addBinding bn out)
+      ({stkSt with stack := stkSt.stack.tail}.push out) := by
+  have hAlign : taggedStackAligned ((operand, k_op) :: tsm_rest)
+      anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v0, restStk, hStk⟩ :
+      ∃ v0 restStk, stkSt.stack = v0 :: restStk := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | v0 :: restStk => exact ⟨v0, restStk, rfl⟩
+  have hTailAlign : taggedStackAligned tsm_rest anfSt restStk := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    exact hAlign.2
+  have hAgreesCons : agreesTagged tsm_rest anfSt ({stkSt with stack := restStk}) := by
+    refine ⟨?_, ?_, ?_⟩
+    · show taggedStackAligned tsm_rest anfSt restStk; exact hTailAlign
+    · show anfSt.props = stkSt.props; exact hAgrees.2.1
+    · show anfSt.outputs = stkSt.outputs; exact hAgrees.2.2
+  have hPush := agreesTagged_push_value tsm_rest bn anfSt ({stkSt with stack := restStk})
+    out hAgreesCons hFresh
+  have hStateEq :
+      ({stkSt with stack := restStk}).push out
+        = ({stkSt with stack := stkSt.stack.tail}.push out) := by
+    rw [hStk]; rfl
+  rw [hStateEq] at hPush
+  exact hPush
+
+/-! ### Wave 27 Deliverable A — the operational lockstep lemma
+
+The three-binding d0d1 + d0d1 + unary-d0 consume-arith pattern is the
+omnibus shape the omnibus arith bodies (and the wave-19 smoke) start
+from.  `structuralArithConsumeBody_d0d1d0_of_entry_agreesTagged` builds
+the full `structuralArithConsumeBody` inductive from:
+
+* a BARE entry `agreesTagged` over the three params (NO intermediate
+  `agreesTagged` supplied), and
+* the entry stack as a concrete three-bigint list (the alignment witness
+  the smoke constructs once), and
+* the three opcode-arithmetic facts (genuinely about the operators, not
+  the whole-body conclusion — §2.1 input-side).
+
+Each INTERMEDIATE `agreesTagged` and INTERMEDIATE operand bigint lookup
+is DERIVED — `agreesTagged_consume_top_two` / `_one` transport the entry
+alignment across each consume-and-push, and `lookupAnfByKind_addBinding_*`
+re-resolve the operands at the post-states.  This is the transport the
+wave-20 smoke could not do (it took `hAgrees1` / `hLookupT0` by hand).
+
+The shape is pinned to the d0d1 + d0d1 + unary-d0 layout the
+`build_consume_*_witness_d0d1` / `_d0` substrate covers; the (≥2,≥2)
+binOp combo remains the documented uncovered hole (no `loadRefLive`
+consume depth-general singleton — see `build_consume_binOp_witness`). -/
+
+/-- The binOp arm of `lowerValueP` leaves `localBindings` (`.2.2`)
+unchanged.  Used to align the per-binding `runOps` witnesses with the
+inductive's threaded `(lowerValueP …).2.2`. -/
+theorem lowerValueP_binOp_localBindings
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name op l r : String) (rt : Option String) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+      outerProtected localBindings constInts sm name (.binOp op l r rt)).2.2
+      = localBindings := by
+  unfold Stack.Lower.lowerValueP; rfl
+
+/-- The unaryOp arm of `lowerValueP` likewise leaves `localBindings`
+unchanged. -/
+theorem lowerValueP_unaryOp_localBindings
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name op operand : String) (rt : Option String) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+      outerProtected localBindings constInts sm name (.unaryOp op operand rt)).2.2
+      = localBindings := by
+  unfold Stack.Lower.lowerValueP; rfl
+
+/-- **Wave 27 Deliverable A.**  Build a 3-binding consume-arith inductive
+(`t0 = p0 ⊙ p1; t1 = t0 ⊙ p2; t2 = ⊙ t1`, all consume d0d1 / unary-d0)
+from the ENTRY `agreesTagged` alone.
+
+`vOut0 / vOut1 / vOut2` are the per-binding result values; the opcode
+hypotheses pin them to the genuine `runOpcode` / `runOps` outputs (the
+operator facts), and the inductive's stack-final is `stkFinal` carrying
+`vOut2` on top.  No intermediate `agreesTagged` is taken — both are
+transported by `agreesTagged_consume_top_two` / `_one`. -/
+theorem structuralArithConsumeBody_d0d1d0_of_entry_agreesTagged
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (lastUses : List (String × Nat)) (constInts : List (String × Int))
+    (sm : StackMap) (localBindings : List String)
+    (n0 n1 n2 : String) (s0 s1 s2 : Option RunarVerification.ANF.SourceLoc)
+    (op0 op1 op2 : String) (rt0 rt1 rt2 : Option String)
+    (p0 p1 p2 : String) (k0 k1 k2 : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (va vb vc vOut0 vOut1 : Int)
+    -- Entry alignment: the two operand values resolve to bigints via the
+    -- entry `agreesTagged` + the operand lookups (no separate explicit
+    -- entry-stack-shape hypothesis is needed — the alignment carries it).
+    (hAgrees : agreesTagged ((p0, k0) :: (p1, k1) :: (p2, k2) :: tsm_rest)
+                 anfSt stkSt)
+    (hLookupA : lookupAnfByKind anfSt (p0, k0) = some (.vBigint va))
+    (hLookupB : lookupAnfByKind anfSt (p1, k1) = some (.vBigint vb))
+    (hLookupC : lookupAnfByKind anfSt (p2, k2) = some (.vBigint vc))
+    -- Lowering-shape facts: each binding is the d0d1 / unary-d0 consume layout.
+    (hD0_p0 : sm.depth? p0 = some 0) (hD0_p1 : sm.depth? p1 = some 1)
+    (hLU_p0 : Stack.Lower.isLastUse lastUses p0 0 = true)
+    (hLU_p1 : Stack.Lower.isLastUse lastUses p1 0 = true)
+    (hNB0 : (op0 == "!==" && rt0 == some "bytes") = false)
+    (hD1_n0 : (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+                [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1.depth? n0
+                = some 0)
+    (hD1_p2 : (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+                [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1.depth? p2
+                = some 1)
+    (hLU_n0 : Stack.Lower.isLastUse lastUses n0 1 = true)
+    (hLU_p2 : Stack.Lower.isLastUse lastUses p2 1 = true)
+    (hNB1 : (op1 == "!==" && rt1 == some "bytes") = false)
+    (hD2_n1 : (Stack.Lower.lowerValueP progMethods props budget 1 lastUses []
+                localBindings constInts
+                (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+                  [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1
+                n1 (.binOp op1 n0 p2 rt1)).2.1.depth? n1 = some 0)
+    (hLU_n1 : Stack.Lower.isLastUse lastUses n1 2 = true)
+    -- Freshness for the two consumed-result binding names (SSA): each new
+    -- temp is fresh in the operand-free tail it transports into.
+    (hFresh0 : freshIn n0 (untagSm ((p2, k2) :: tsm_rest)))
+    (hFresh1 : freshIn n1 (untagSm tsm_rest))
+    -- Operator-arithmetic facts (the genuine per-opcode runtime witnesses).
+    (hOpc0 :
+      ∀ (rs : List RunarVerification.ANF.Eval.Value),
+        stkSt.stack = .vBigint va :: .vBigint vb :: rs →
+        Stack.Eval.runOpcode (Stack.Lower.binopOpcode op0 rt0)
+            ({stkSt with stack := .vBigint vb :: .vBigint va :: rs})
+          = .ok ({stkSt with stack := rs}.push (.vBigint vOut0)))
+    (hOpc1 :
+      ∀ (rs : List RunarVerification.ANF.Eval.Value),
+        (({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) : StackState).stack
+            = .vBigint vOut0 :: .vBigint vc :: rs →
+        Stack.Eval.runOpcode (Stack.Lower.binopOpcode op1 rt1)
+            ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+              stack := .vBigint vc :: .vBigint vOut0 :: rs})
+          = .ok ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+                  stack := rs}.push (.vBigint vOut1)))
+    -- The binding-1 post-consume state, named once to tame nesting.
+    (stkFinal : StackState)
+    (hRun2 :
+      runOps [StackOp.opcode (Stack.Lower.unaryOpcode op2)]
+          ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+              stack :=
+                ({stkSt with stack := stkSt.stack.tail.tail}.push
+                  (.vBigint vOut0)).stack.tail.tail}.push (.vBigint vOut1))
+        = .ok stkFinal) :
+    structuralArithConsumeBody progMethods props budget lastUses [] constInts
+      [ANFBinding.mk n0 (.binOp op0 p0 p1 rt0) s0,
+       ANFBinding.mk n1 (.binOp op1 n0 p2 rt1) s1,
+       ANFBinding.mk n2 (.unaryOp op2 n1 rt2) s2]
+      sm 0 localBindings stkSt
+      (Stack.Lower.lowerValueP progMethods props budget 2 lastUses []
+        localBindings constInts
+        (Stack.Lower.lowerValueP progMethods props budget 1 lastUses []
+          localBindings constInts
+          (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+            [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1
+          n1 (.binOp op1 n0 p2 rt1)).2.1
+        n2 (.unaryOp op2 n1 rt2)).2.1
+      stkFinal := by
+  -- ===== Binding 0 (t0 = p0 op0 p1) — d0d1 consume. =====
+  -- Operand witness from the entry alignment + opcode fact.
+  have hRun0 :
+      runOps (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+                [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).1 stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) :=
+    build_consume_binOp_witness_d0d1 progMethods props budget 0 lastUses
+      localBindings constInts sm n0 op0 p0 p1 rt0 va vb k0 k1 ((p2, k2) :: tsm_rest)
+      anfSt stkSt
+      (.vBigint vOut0) hD0_p0 hD0_p1 hLU_p0 hLU_p1 hNB0 hAgrees hLookupA hLookupB hOpc0
+  -- Derive the INTERMEDIATE agreesTagged for binding 1 from the entry.
+  have hAgrees1 :
+      agreesTagged ((n0, .binding) :: (p2, k2) :: tsm_rest)
+        (anfSt.addBinding n0 (.vBigint vOut0))
+        ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) :=
+    agreesTagged_consume_top_two p0 p1 k0 k1 ((p2, k2) :: tsm_rest) n0 anfSt stkSt
+      (.vBigint vOut0) hAgrees hFresh0
+  -- Derive the INTERMEDIATE operand lookups for binding 1.
+  have hLookupT0 :
+      lookupAnfByKind (anfSt.addBinding n0 (.vBigint vOut0)) (n0, .binding)
+        = some (.vBigint vOut0) :=
+    lookupAnfByKind_addBinding_self anfSt n0 (.vBigint vOut0)
+  have hLookupP2' :
+      lookupAnfByKind (anfSt.addBinding n0 (.vBigint vOut0)) (p2, k2)
+        = some (.vBigint vc) := by
+    -- p2 lives below the consumed operands; its lookup is stable under
+    -- the new binding (distinct kind / name handled by the entry alignment).
+    -- The entry alignment already resolved p2 to vc against `anfSt`; the
+    -- `addBinding n0` only shadows the binding namespace.
+    cases k2 with
+    | param =>
+        show (anfSt.addBinding n0 (.vBigint vOut0)).lookupParam p2 = some (.vBigint vc)
+        unfold State.addBinding State.lookupParam
+        simp only []
+        have : anfSt.lookupParam p2 = some (.vBigint vc) := hLookupC
+        unfold State.lookupParam at this
+        exact this
+    | prop =>
+        show (anfSt.addBinding n0 (.vBigint vOut0)).lookupProp p2 = some (.vBigint vc)
+        unfold State.addBinding State.lookupProp
+        simp only []
+        have : anfSt.lookupProp p2 = some (.vBigint vc) := hLookupC
+        unfold State.lookupProp at this
+        exact this
+    | binding =>
+        have hNe_p2_n0 : p2 ≠ n0 := by
+          intro hEq
+          apply hFresh0
+          unfold untagSm
+          rw [hEq]; simp
+        rw [lookupAnfByKind_addBinding_of_ne anfSt n0 p2 (.vBigint vOut0) hNe_p2_n0]
+        exact hLookupC
+  -- ===== Binding 1 (t1 = t0 op1 p2) — d0d1 consume. =====
+  have hRun1 :
+      runOps (Stack.Lower.lowerValueP progMethods props budget 1 lastUses
+                [] localBindings constInts
+                (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+                  [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1
+                n1 (.binOp op1 n0 p2 rt1)).1
+            ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0))
+        = .ok ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+                stack :=
+                  ({stkSt with stack := stkSt.stack.tail.tail}.push
+                    (.vBigint vOut0)).stack.tail.tail}.push (.vBigint vOut1)) :=
+    build_consume_binOp_witness_d0d1 progMethods props budget 1 lastUses
+      localBindings constInts
+      (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+        [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1
+      n1 op1 n0 p2 rt1 vOut0 vc .binding k2 tsm_rest
+      (anfSt.addBinding n0 (.vBigint vOut0))
+      ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0))
+      (.vBigint vOut1) hD1_n0 hD1_p2 hLU_n0 hLU_p2 hNB1 hAgrees1 hLookupT0 hLookupP2' hOpc1
+  -- Derive the INTERMEDIATE agreesTagged for binding 2 from binding 1's
+  -- post-state.  The unary-d0 builder does not consume `agreesTagged`
+  -- (it needs only depth + last-use + the opcode run), but transporting
+  -- the alignment here demonstrates the lockstep stays closed past the
+  -- second consume — the third binding's operand `n1` is the live top.
+  have _hAgrees2 :
+      agreesTagged ((n1, .binding) :: tsm_rest)
+        ((anfSt.addBinding n0 (.vBigint vOut0)).addBinding n1 (.vBigint vOut1))
+        ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+          stack :=
+            ({stkSt with stack := stkSt.stack.tail.tail}.push
+              (.vBigint vOut0)).stack.tail.tail}.push (.vBigint vOut1)) :=
+    agreesTagged_consume_top_two n0 p2 .binding k2 tsm_rest n1
+      (anfSt.addBinding n0 (.vBigint vOut0))
+      ({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0))
+      (.vBigint vOut1) hAgrees1 hFresh1
+  -- ===== Binding 2 (t2 = op2 t1) — unary-d0 consume. =====
+  have hRunWit2 :
+      runOps (Stack.Lower.lowerValueP progMethods props budget 2 lastUses
+                [] localBindings constInts
+                (Stack.Lower.lowerValueP progMethods props budget 1 lastUses []
+                  localBindings constInts
+                  (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+                    [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1
+                  n1 (.binOp op1 n0 p2 rt1)).2.1
+                n2 (.unaryOp op2 n1 rt2)).1
+            ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+              stack :=
+                ({stkSt with stack := stkSt.stack.tail.tail}.push
+                  (.vBigint vOut0)).stack.tail.tail}.push (.vBigint vOut1))
+        = .ok stkFinal :=
+    build_consume_unaryOp_witness_d0 progMethods props budget 2 lastUses
+      localBindings constInts
+      (Stack.Lower.lowerValueP progMethods props budget 1 lastUses []
+        localBindings constInts
+        (Stack.Lower.lowerValueP progMethods props budget 0 lastUses
+          [] localBindings constInts sm n0 (.binOp op0 p0 p1 rt0)).2.1
+        n1 (.binOp op1 n0 p2 rt1)).2.1
+      n2 op2 n1 rt2
+      ({({stkSt with stack := stkSt.stack.tail.tail}.push (.vBigint vOut0)) with
+        stack :=
+          ({stkSt with stack := stkSt.stack.tail.tail}.push
+            (.vBigint vOut0)).stack.tail.tail}.push (.vBigint vOut1))
+      _ hD2_n1 hLU_n1 hRun2
+  -- ===== Assemble the inductive bottom-up. =====
+  -- The `consBinOp` constructor threads the rest's `localBindings` as
+  -- `(lowerValueP … binOp).2.2`; rewrite those projections back to the
+  -- literal `localBindings` (the binOp / unaryOp arms leave it unchanged)
+  -- so the pre-built per-binding witnesses unify.
+  refine structuralArithConsumeBody.consBinOp hRun0 ?_
+  rw [lowerValueP_binOp_localBindings]
+  refine structuralArithConsumeBody.consBinOp hRun1 ?_
+  rw [lowerValueP_binOp_localBindings]
+  exact structuralArithConsumeBody.consUnaryOp hRunWit2 structuralArithConsumeBody.nil
+
+/-! ### Wave 27 Deliverable B — MANDATORY lockstep smoke (entry-only)
+
+The consumability proof.  We instantiate Deliverable A
+(`structuralArithConsumeBody_d0d1d0_of_entry_agreesTagged`) on the
+wave-19 concrete consume-arith body (`[t0=p0+p1; t1=t0-p2; t2=-t1]`)
+from a **BARE entry `agreesTagged`** over the three params — NO
+intermediate `agreesTagged` and NO intermediate operand lookups supplied
+by hand (the wave-20 smoke supplied `hAgrees1` / `hLookupT0` / `hLookupP2`
+explicitly; this one derives them inside the lockstep).  We obtain the
+full `structuralArithConsumeBody`, then feed it to the wave-19 M2
+capstone to conclude `runMethod … isSome`.
+
+Each per-binding INTERMEDIATE `agreesTagged` and operand bigint lookup is
+DERIVED by `agreesTagged_consume_top_two` (transport across the
+consume-and-push) inside Deliverable A.  The only inputs are the entry
+alignment, the entry operand lookups, the entry stack shape (used only to
+build the operator facts), and the per-opcode arithmetic witnesses — the
+§2.1-sanctioned input-side context.  This is the lockstep wave 26 could
+not close. -/
+theorem wave27_lockstep_capstone_smoke
+    (contractName : String) (initialStack : StackState)
+    (a b c : Int) (rest : List RunarVerification.ANF.Eval.Value)
+    (tsm_rest : TaggedStackMap) (anfSt0 : State)
+    (hStk : initialStack.stack = .vBigint a :: .vBigint b :: .vBigint c :: rest)
+    (hAgrees0 : agreesTagged
+        (("p0", .param) :: ("p1", .param) :: ("p2", .param) :: tsm_rest) anfSt0 initialStack)
+    (hLookupP0 : lookupAnfByKind anfSt0 ("p0", .param) = some (.vBigint a))
+    (hLookupP1 : lookupAnfByKind anfSt0 ("p1", .param) = some (.vBigint b))
+    (hLookupP2 : lookupAnfByKind anfSt0 ("p2", .param) = some (.vBigint c))
+    -- SSA freshness: the temp names `t0`/`t1` do not clash with the residual
+    -- stack-map tail `tsm_rest` (an input-side invariant — the body's SSA
+    -- temps are fresh against whatever sits below the method's params).
+    (hFreshT0 : freshIn "t0" (untagSm (("p2", .param) :: tsm_rest)))
+    (hFreshT1 : freshIn "t1" (untagSm tsm_rest)) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := ([] : List ANFProperty),
+            methods := [wave19SmokeMethod] })
+        wave19SmokeMethod.name initialStack).toOption.isSome := by
+  -- Operator-arithmetic witnesses (built from the entry stack shape).
+  have hOpc0 :
+      ∀ (rs : List RunarVerification.ANF.Eval.Value),
+        initialStack.stack = .vBigint a :: .vBigint b :: rs →
+        Stack.Eval.runOpcode (Stack.Lower.binopOpcode "+" none)
+            ({initialStack with stack := .vBigint b :: .vBigint a :: rs})
+          = .ok ({initialStack with stack := rs}.push (.vBigint (a + b))) := by
+    intro rs hEq
+    have hRestEq : rs = .vBigint c :: rest := by
+      rw [hStk] at hEq; simp only [List.cons.injEq, true_and] at hEq; exact hEq.symm
+    rw [hRestEq]
+    exact Stack.Sim.runOpcode_ADD_intInt
+      ({initialStack with stack := .vBigint b :: .vBigint a :: .vBigint c :: rest})
+      a b (.vBigint c :: rest) rfl
+  have hOpc1 :
+      ∀ (rs : List RunarVerification.ANF.Eval.Value),
+        (({initialStack with stack := initialStack.stack.tail.tail}.push
+            (.vBigint (a + b))) : StackState).stack
+            = .vBigint (a + b) :: .vBigint c :: rs →
+        Stack.Eval.runOpcode (Stack.Lower.binopOpcode "-" none)
+            ({({initialStack with stack := initialStack.stack.tail.tail}.push
+                (.vBigint (a + b))) with stack := .vBigint c :: .vBigint (a + b) :: rs})
+          = .ok ({({initialStack with stack := initialStack.stack.tail.tail}.push
+                (.vBigint (a + b))) with stack := rs}.push (.vBigint ((a + b) - c))) := by
+    intro rs hEq
+    -- The binding-1 entry stack is `vBigint (a+b) :: vBigint c :: rest`.
+    have hMid : (({initialStack with stack := initialStack.stack.tail.tail}.push
+        (.vBigint (a + b))) : StackState).stack
+          = .vBigint (a + b) :: .vBigint c :: rest := by
+      show (.vBigint (a + b) :: (initialStack.stack.tail.tail)) = _
+      rw [hStk]; rfl
+    have hRestEq : rs = rest := by
+      rw [hMid] at hEq; simp only [List.cons.injEq, true_and] at hEq; exact hEq.symm
+    rw [hRestEq]
+    exact Stack.Sim.runOpcode_SUB_intInt
+      ({({initialStack with stack := initialStack.stack.tail.tail}.push
+          (.vBigint (a + b))) with stack := .vBigint c :: .vBigint (a + b) :: rest})
+      (a + b) c rest rfl
+  -- Binding-1 post-consume state (the unary builder's input).
+  have hRun2 :
+      runOps [StackOp.opcode (Stack.Lower.unaryOpcode "-")]
+          ({({initialStack with stack := initialStack.stack.tail.tail}.push (.vBigint (a + b))) with
+              stack :=
+                ({initialStack with stack := initialStack.stack.tail.tail}.push
+                  (.vBigint (a + b))).stack.tail.tail}.push (.vBigint ((a + b) - c)))
+        = .ok ({({({initialStack with stack := initialStack.stack.tail.tail}.push
+              (.vBigint (a + b))) with
+              stack :=
+                ({initialStack with stack := initialStack.stack.tail.tail}.push
+                  (.vBigint (a + b))).stack.tail.tail}.push (.vBigint ((a + b) - c))) with
+              stack :=
+                (({({initialStack with stack := initialStack.stack.tail.tail}.push
+                    (.vBigint (a + b))) with
+                    stack :=
+                      ({initialStack with stack := initialStack.stack.tail.tail}.push
+                        (.vBigint (a + b))).stack.tail.tail}.push
+                    (.vBigint ((a + b) - c)))).stack.tail}.push (.vBigint (-((a + b) - c)))) := by
+    show runOps [StackOp.opcode "OP_NEGATE"] _ = _
+    rw [Stack.Sim.run_OP_NEGATE_int _ ((a + b) - c)
+          (({({initialStack with stack := initialStack.stack.tail.tail}.push
+              (.vBigint (a + b))) with
+              stack :=
+                ({initialStack with stack := initialStack.stack.tail.tail}.push
+                  (.vBigint (a + b))).stack.tail.tail}.push
+              (.vBigint ((a + b) - c)))).stack.tail rfl]
+  -- ===== Build the inductive from the BARE entry agreesTagged. =====
+  -- The lemma produces the inductive over the wave-19 literal body /
+  -- params / localBindings; the capstone consumes it over
+  -- `wave19SmokeMethod.{body,params}` (defeq to those literals).
+  have hArith :=
+    structuralArithConsumeBody_d0d1d0_of_entry_agreesTagged
+      [wave19SmokeMethod] ([] : List ANFProperty) Stack.Lower.defaultInlineBudget
+      (Stack.Lower.computeLastUses wave19SmokeBody)
+      (Stack.Lower.collectConstInts wave19SmokeBody)
+      ["p0", "p1", "p2"] ["t0", "t1", "t2"]
+      "t0" "t1" "t2" none none none
+      "+" "-" "-" none none none
+      "p0" "p1" "p2" .param .param .param tsm_rest
+      anfSt0 initialStack a b c (a + b) ((a + b) - c)
+      hAgrees0 hLookupP0 hLookupP1 hLookupP2
+      (by decide)                                      -- hD0_p0
+      (by decide)                                      -- hD0_p1
+      (by rw [wave19_computeLastUses]; decide)         -- hLU_p0
+      (by rw [wave19_computeLastUses]; decide)         -- hLU_p1
+      (by decide)                                      -- hNB0
+      (by rw [wave19_sm0]; decide)                     -- hD1_n0
+      (by rw [wave19_sm0]; decide)                     -- hD1_p2
+      (by rw [wave19_computeLastUses]; decide)         -- hLU_n0
+      (by rw [wave19_computeLastUses]; decide)         -- hLU_p2
+      (by decide)                                      -- hNB1
+      (by rw [wave19_sm0, wave19_sm1]; decide)         -- hD2_n1
+      (by rw [wave19_computeLastUses]; decide)         -- hLU_n1
+      hFreshT0 hFreshT1
+      hOpc0 hOpc1 _ hRun2
+  -- ===== Apply the wave-19 capstone. =====
+  have hUniq :
+      ∀ m', m' ∈ [wave19SmokeMethod] → m'.isPublic = true →
+        (m'.name == wave19SmokeMethod.name) = true → m' = wave19SmokeMethod := by
+    intro m' hm' _ _
+    simp only [List.mem_singleton] at hm'
+    exact hm'
+  exact runMethod_lower_public_unique_no_post_structuralArithConsumeBody_whole_isSome
+    contractName ([] : List ANFProperty) [wave19SmokeMethod] wave19SmokeMethod initialStack
+    _ _ List.mem_cons_self rfl hUniq hArith
+    wave19_noPreimage wave19_noCode wave19_noTerminalAssert wave19_noDeserialize
+
 end Agrees
 end RunarVerification.Stack
