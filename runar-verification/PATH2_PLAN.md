@@ -2324,32 +2324,72 @@ not done. This section is the resume point.
   (27/28). All smoke-tested, no `sorry`. See TRUST_MANIFEST.md
   "Tier 1 waves 26–29".
 
-### 11.2 The open gate: `taggedAllBigint`
+### 11.2 The open gate: per-binding SUCCESS lockstep (refined through waves 30/31)
 
-Discharging the arith sub-omnibus needs operand bigint provenance
-(`taggedAllBigint anfSt tsm`), which is neither decidable on the
-symbolic `initialAnf` nor derivable from `agreesTagged` / `WF.ANF`.
-The dispatch cannot supply it. Full diagnosis in TRUST_MANIFEST.md
-"Tier 1 waves 26–29 … the open gate".
+The original `taggedAllBigint` gate (wave 29) is half-closed:
+
+* **Failure direction — DONE (wave 30, option B).** The both-fail leg
+  `successAgrees_arith_consume_first_binOp_fail` / `_unary_fail`
+  (`Stack/AgreesA3.lean`): under `agreesTagged`, a non-bigint head
+  operand makes BOTH `evalBindings` and `runOps` `isNone` (iff is
+  `False ↔ False`). Plus the per-side failure-propagation lemmas. The
+  non-bigint-both-fail smoke passes concretely.
+* **Success direction — the remaining gap (wave 31 finding).** The only
+  builder of the `structuralArithConsumeBody` inductive that the M2
+  capstone consumes (`structuralArithConsumeBody_of_entry_agreesTagged`,
+  wave 28) demands **whole-state** `taggedAllBigint` at entry. The
+  "walk to the first non-bigint read" needs only **per-binding head**
+  bigint-ness, not whole-state — but there is no per-binding SUCCESS
+  lockstep to bridge the two. Wave 30 only built the FAILURE-direction
+  step.
+
+So the precise missing substrate is a **per-binding success lockstep**
+(head-operand-bigint only, NOT whole-state), the success-direction
+analogue of wave 30's failure step. Its cons-step reductions live in
+the core model files:
+
+1. `evalBindings_binOp_bigint_cons_step` (`ANF/Eval.lean`) — head
+   operands bigint ⇒ `evalBindings (b::rest) anfSt = evalBindings rest
+   (anfSt.addBinding name out)`.
+2. `runOps_binopOpcode_bigint_cons_step` (`Stack/Eval.lean`) — top two
+   ints ⇒ `runOps (op::stkRest) stkSt = runOps stkRest stkSt'` with the
+   consumed/pushed stack.
+3. Glue with the existing `agreesTagged_consume_top_two` (re-establishes
+   `agreesTagged tsm'`) → a per-binding success lockstep needing only
+   HEAD-bigint.
+
+These touch `ANF/Eval.lean` + `Stack/Eval.lean` (core model files —
+higher risk; a regression there breaks every proof). That is why
+wave 31 STOP-and-BLOCKed rather than edit them under a substrate-file
+mandate.
 
 ### 11.3 Next deliberate steps (in order)
 
-1. **Close the gate — prefer option (B), the both-fail leg.** Prove,
-   for an `emittableArithChainReady` body,
-   `¬ taggedAllBigint initialAnf tsm →
-    (evalBindings initialAnf body).toOption.isNone ∧
-    (runParsedBytes bytes initialStack).toOption.isNone`.
-   Needs arith-failure-propagation lemmas in `ANF/Eval.lean` (ANF side)
-   and `Stack/Agrees.lean` (stack side). Removes the `taggedAllBigint`
-   dispatch dependency entirely (the iff then holds unconditionally
-   under the alignment premise). Option (A), a `WF`→witness bigint
-   typing bridge, is the alternative but touches the omnibus signature.
-2. **The retirement wave.** With the gate closed, add a dispatch
-   `by_cases` (single-public ∧ `emittableArithChainReady`) →
-   `compileSafe_observational_correct_arith_consume` (compose the
-   wave-18–28 substrate into `successAgrees`); remove the vacuous
+1. **Build the per-binding success lockstep** (cons-steps 1–3 above) in
+   `ANF/Eval.lean` + `Stack/Eval.lean`, **add-only** (do not modify
+   existing defs/proofs — re-verify the FULL build, not one module).
+   Each with a smoke test.
+2. **The walk induction** (`Stack/AgreesA3.lean`): compose the wave-30
+   failure step + the new success step into
+   `successAgrees_arith_consume_unconditional` over arbitrary-length
+   bodies (peel bigint-reading bindings via the success step until the
+   first non-bigint read, then the failure step; or all-bigint to the
+   end). Discharge `hHeadCorr` from the SSA-fresh invariant the fragment
+   carries.
+3. **The retirement wave.** With the unconditional `successAgrees`, add
+   a dispatch `by_cases` (single-public ∧ `emittableArithChainReady`) →
+   `compileSafe_observational_correct_arith_consume`; remove the vacuous
    copy-mode `arith_codegen` axiom; bump `TARGET_AXIOMS` 87 → 86 +
    TRUST_MANIFEST. First retirement.
+
+> **Note on cadence.** Through wave 31 the first retirement has revealed
+> a succession of deep substrate prerequisites (alignment → operational
+> lockstep → `taggedAllBigint` → failure step → per-binding success
+> step), each in progressively more core files. This is genuine deep
+> verification, not churn — but it is best resumed as a focused,
+> rested effort, not chased at the tail of a long session, precisely
+> because the remaining steps edit core model files where a mistake is
+> expensive.
 3. **Remaining arith holes** (separate substrate, then re-flip): the
    `(≥2,≥2)` consume depth combo (needs a `loadRefLive`-consume
    depth-general singleton in `Stack/Agrees.lean`) and non-emittable
