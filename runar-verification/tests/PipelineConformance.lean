@@ -43,6 +43,23 @@ and classifies each one against the formal verification corpus using a
   its Stage C / Phase B / Phase D milestone lands; see
   `TRUST_MANIFEST.md`).
 
+  **Tier 1 wave 25 (2026-05-21) — alignment re-statement.** Each
+  sub-omnibus axiom (and the omnibus theorem) now carries an explicit
+  input-side alignment premise `(tsm : Agrees.TaggedStackMap)` +
+  `(hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)`,
+  mirroring the ref capstone
+  `compileSafe_single_public_observational_correct_unconditional_ref`.
+  This makes the previously-false unconditional statement true (wave 24
+  exhibited a counterexample where `initialAnf` and `initialStack` were
+  unrelated). This harness is a purely syntactic classifier: it runs the
+  per-family Bool checkers on each fixture body and emits a tier label.
+  It never instantiates `successAgrees` and never applies a sub-omnibus,
+  so it does not (and never did) supply `agreesTagged`; the alignment
+  premise is a proof-time obligation discharged externally (the same
+  status the M5/A15 runtime-witness premises already had — see the
+  `checkFixture` note below). The classification logic is therefore
+  unchanged by this re-statement.
+
 A fixture that fails the static parse / WF / compile-safe checks lands
 in a `DEFERRED-<reason>` bucket.
 

@@ -117,21 +117,32 @@ cat "$OUTPUT_FILE"
 # --------------------------------------------------------------------
 # Parse buckets out of the captured output.
 #
-# We count any line containing the bucket name as one occurrence of
-# that bucket. The Lean harness prints one line per fixture in the form
-#   <fixture-name>: <bucket>[: <detail>]
-# so the substring match is sufficient for CI gating without parsing
-# the line shape further.
+# The Lean harness prints a fixed legend block, one line per bucket, as
+#   "  <BucketName>   : <N>"
+# where <N> is the true number of fixtures in that bucket. We read <N>
+# directly from that legend row. A plain `grep -c <bucket>` would ALSO
+# match the legend row itself (and, when non-empty, the per-group
+# breakdown header "  <bucket>: <N> fixture(s)"), producing a phantom +1
+# even when the real count is 0 — which previously failed this gate on
+# every run despite all buckets being empty. We anchor on the leading
+# two-space indent + bucket name + spaces + colon and take the trailing
+# integer.
 # --------------------------------------------------------------------
-count_lines() {
-  local needle="$1"
-  grep -c -- "$needle" "$OUTPUT_FILE" || true
+bucket_count() {
+  local bucket="$1"
+  local n
+  n="$(grep -E "^  ${bucket} +: [0-9]+\$" "$OUTPUT_FILE" | grep -oE '[0-9]+$' | head -n1 || true)"
+  if [ -z "$n" ]; then
+    echo "[pipeline-conformance] FAIL: could not read count for bucket '${bucket}' from harness output" >&2
+    exit 2
+  fi
+  echo "$n"
 }
 
-HARD_PARSE="$(count_lines 'DEFERRED-parse-failure')"
-HARD_WF="$(count_lines 'DEFERRED-not-well-formed')"
-SOFT_COMPILE="$(count_lines 'DEFERRED-compile-safe-error')"
-SOFT_NO_PUBLIC="$(count_lines 'DEFERRED-no-public-method')"
+HARD_PARSE="$(bucket_count 'DEFERRED-parse-failure')"
+HARD_WF="$(bucket_count 'DEFERRED-not-well-formed')"
+SOFT_COMPILE="$(bucket_count 'DEFERRED-compile-safe-error')"
+SOFT_NO_PUBLIC="$(bucket_count 'DEFERRED-no-public-method')"
 
 echo ""
 echo "[pipeline-conformance] bucket summary:"

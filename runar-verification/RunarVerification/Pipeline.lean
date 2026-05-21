@@ -2689,6 +2689,8 @@ axiom compileSafe_observational_correct_modulo_arith_codegen (p : ANFProgram)
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hArith :
       Agrees.structuralArithBodyBool
         p.methods p.properties
@@ -2720,6 +2722,8 @@ axiom compileSafe_observational_correct_modulo_math_byte_call_codegen (p : ANFPr
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hMathByteCall :
       Agrees.structuralCallBodyBool
         p.methods p.properties
@@ -2759,6 +2763,8 @@ axiom compileSafe_observational_correct_modulo_crypto_call_codegen (p : ANFProgr
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hCryptoCall : True) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
@@ -2780,6 +2786,8 @@ axiom compileSafe_observational_correct_modulo_update_prop_codegen (p : ANFProgr
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hUpdateProp :
       Agrees.structuralUpdatePropBodyBool
         p.methods p.properties
@@ -2809,6 +2817,8 @@ axiom compileSafe_observational_correct_modulo_if_val_codegen (p : ANFProgram)
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hIfVal :
       Agrees.structuralIfValBodyBool
         p.methods p.properties
@@ -2839,6 +2849,8 @@ axiom compileSafe_observational_correct_modulo_loop_codegen (p : ANFProgram)
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hLoop :
       Agrees.structuralLoopBodyBool
         p.methods p.properties
@@ -2868,6 +2880,8 @@ axiom compileSafe_observational_correct_modulo_method_call_codegen (p : ANFProgr
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hMethodCall :
       Agrees.structuralMethodCallBodyBool
         p.methods p.properties
@@ -2900,6 +2914,8 @@ axiom compileSafe_observational_correct_modulo_dispatch_codegen (p : ANFProgram)
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hDispatch : (p.methods.filter (·.isPublic)).length ≥ 2) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
@@ -2924,6 +2940,8 @@ axiom compileSafe_observational_correct_modulo_stateful_codegen (p : ANFProgram)
     (_hMem : anfM ∈ p.methods) (_hPublic : anfM.isPublic = true)
     (_hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (_hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hStateful : Lower.bindingsUseCheckPreimage anfM.body = true) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
@@ -2970,7 +2988,9 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
     (hWF : WF.ANF p) (anfM : ANFMethod) (bytes : ByteArray)
     (hMem : anfM ∈ p.methods) (hPublic : anfM.isPublic = true)
     (hSafe : compileSafe p = .ok bytes)
-    (initialAnf : State) (initialStack : StackState) :
+    (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (hAgrees : Agrees.agreesTagged tsm initialAnf initialStack) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
       (runParsedBytes bytes initialStack) := by
@@ -2985,10 +3005,10 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
   -- the structural body classification.
   by_cases hStateful : Lower.bindingsUseCheckPreimage anfM.body = true
   · exact compileSafe_observational_correct_modulo_stateful_codegen
-      p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hStateful
+      p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hStateful
   · by_cases hDispatch : (p.methods.filter (·.isPublic)).length ≥ 2
     · exact compileSafe_observational_correct_modulo_dispatch_codegen
-        p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hDispatch
+        p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hDispatch
     · -- Body-level structural classification (decidable Bool checkers).
       by_cases hArith :
           Agrees.structuralArithBodyBool
@@ -2997,7 +3017,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
             lastUses [] localBindings constInts
             anfM.body initialSm 0 = true
       · exact compileSafe_observational_correct_modulo_arith_codegen
-          p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hArith
+          p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hArith
       · by_cases hMathByte :
             Agrees.structuralCallBodyBool
               p.methods p.properties
@@ -3005,7 +3025,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
               lastUses [] localBindings constInts
               anfM.body initialSm 0 = true
         · exact compileSafe_observational_correct_modulo_math_byte_call_codegen
-            p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hMathByte
+            p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hMathByte
         · by_cases hUpdateProp :
               Agrees.structuralUpdatePropBodyBool
                 p.methods p.properties
@@ -3013,7 +3033,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                 lastUses [] localBindings constInts
                 anfM.body initialSm 0 = true
           · exact compileSafe_observational_correct_modulo_update_prop_codegen
-              p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hUpdateProp
+              p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hUpdateProp
           · by_cases hIfVal :
                 Agrees.structuralIfValBodyBool
                   p.methods p.properties
@@ -3021,7 +3041,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                   lastUses [] localBindings constInts
                   anfM.body initialSm 0 = true
             · exact compileSafe_observational_correct_modulo_if_val_codegen
-                p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hIfVal
+                p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hIfVal
             · by_cases hLoop :
                   Agrees.structuralLoopBodyBool
                     p.methods p.properties
@@ -3029,7 +3049,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                     lastUses [] localBindings constInts
                     anfM.body initialSm 0 = true
               · exact compileSafe_observational_correct_modulo_loop_codegen
-                  p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hLoop
+                  p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hLoop
               · by_cases hMethodCall :
                     Agrees.structuralMethodCallBodyBool
                       p.methods p.properties
@@ -3037,13 +3057,13 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                       lastUses [] localBindings constInts
                       anfM.body initialSm 0 = true
                 · exact compileSafe_observational_correct_modulo_method_call_codegen
-                    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack hMethodCall
+                    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees hMethodCall
                 · -- Substrate-gap fallback: no structural classifier fires.
                   -- This is the crypto-call family (no dedicated Bool checker
                   -- until A4-crypto + Phase B per-primitive land). The
                   -- sub-omnibus hypothesis is `True`.
                   exact compileSafe_observational_correct_modulo_crypto_call_codegen
-                    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack trivial
+                    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees trivial
 
 /--
 **Capstone variant consuming `SupportedANFBody`.**
@@ -3067,12 +3087,14 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms_via_support
     (hMem : anfM ∈ p.methods) (hPublic : anfM.isPublic = true)
     (hSafe : compileSafe p = .ok bytes)
     (initialAnf : State) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap)
+    (hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
     (_hSupported : RunarVerification.Stack.Agrees.SupportedANFBody anfM.body) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf anfM.body)
       (runParsedBytes bytes initialStack) :=
   compileSafe_observational_correct_modulo_codegen_axioms
-    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack
+    p hWF anfM bytes hMem hPublic hSafe initialAnf initialStack tsm hAgrees
 
 /-! ### Multi-method capstone
 

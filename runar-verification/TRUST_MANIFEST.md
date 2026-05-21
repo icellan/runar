@@ -49,6 +49,7 @@ that are preserved by design.
 
 | Tier 1 wave 2: O1 omnibus split | 2026-05-17 | 86 | +8 | +8 (9 sub-omnibus axioms +1 omnibus theorem) | 0 |
 | Tier 1 wave 3: B1 follow-up FIPS axiom | 2026-05-17 | 87 | +1 | 0 | +1 (FIPS 180-4 §6.2 composition axiom; `runOps_sha256CompressOps_eq` / `_FinalizeOps_eq` land in Stack/HashOps.lean as theorems via the composition) |
+| Tier 1 wave 25: alignment re-statement | 2026-05-21 | 87 | 0 | 0 (9 sub-omnibus axiom *signatures* gain an alignment premise; no axiom added or retired) | 0 |
 
 **Net Tier 1 wave 2 (2026-05-17, omnibus-split inflation + Stage C widenings):** 78 → 86,
 Δ = +8 (intentional). The 9 per-family sub-omnibuses replace the single omnibus
@@ -106,6 +107,14 @@ in earlier `TODO.md` revisions referred to that 26-axiom permanent
 crypto subset, not the post-Path-2 total.
 
 ## Phase D harness integration omnibus — planned split
+
+> **Status update.** The split below LANDED in Tier 1 wave 2
+> (2026-05-17): the omnibus is now a `theorem` dispatching to the 9
+> sub-omnibus axioms. Tier 1 wave 25 (2026-05-21) then added the
+> alignment premise (`agreesTagged`) to all 9 sub-omnibuses + the
+> omnibus to make them sound (see "Phase D Harness Integration Omnibus
+> Axiom → Tier 1 wave 25" below). This section is retained as the
+> original planning record.
 
 The single omnibus axiom
 `compileSafe_observational_correct_modulo_codegen_axioms` will be
@@ -435,6 +444,77 @@ already targeted by the A3–A8 runtime-wrapper work in
 axiom; every named obligation it covers has a checked plan, an
 in-tree skeleton, or a citable reference codegen module under
 `packages/runar-compiler/src/passes/`.
+
+### Tier 1 wave 25 — alignment re-statement (soundness fix, 2026-05-21)
+
+**Wave-24 finding.** As stated through wave 24, the omnibus theorem and
+all 9 sub-omnibus axioms quantified `initialAnf : State` and
+`initialStack : StackState` **independently**, with no hypothesis
+relating them, and concluded
+`successAgrees (evalBindings initialAnf anfM.body) (runParsedBytes bytes initialStack)`
+where `successAgrees a b := a.toOption.isSome ↔ b.toOption.isSome`.
+This proposition is **false as stated**: take a body `t0 = p0 + p1`
+with `initialAnf = {p0 = 3, p1 = 4}` (ANF eval succeeds) and
+`initialStack = {}` (the script underflows). Then the success bits are
+`true ↔ false = false`. The wave-24 counterexample is preserved at
+`wave24-counterexample.lean.txt`. Because an axiom asserting a false
+proposition makes the development inconsistent, the prior form was
+unsound — not merely incomplete.
+
+**Wave-25 fix.** Each of the 9 sub-omnibus axioms (and the omnibus
+theorem `compileSafe_observational_correct_modulo_codegen_axioms`, plus
+its `_via_support` derived variant) now carries an explicit input-side
+alignment premise:
+
+```
+(tsm : Agrees.TaggedStackMap)
+(hAgrees : Agrees.agreesTagged tsm initialAnf initialStack)
+```
+
+This mirrors exactly the alignment hypothesis the discharged ref
+capstone `compileSafe_single_public_observational_correct_unconditional_ref`
+already takes. `agreesTagged tsm initialAnf initialStack` is the
+tagged-stack / ANF-state positional-alignment invariant at method
+entry: it forces `initialStack`'s stack to reflect `initialAnf`'s
+parameter / property / binding slots through the tagged stack map. It
+is an **input-side relation between the two initial states** — it does
+NOT assume either `evalBindings` or `runParsedBytes` succeeds, so it is
+not a conclusion-restating hypothesis (hypothesis-hygiene §2.1). Under
+this premise the wave-24 counterexample is excluded (an empty
+`initialStack` cannot be `agreesTagged` with a non-empty parameter
+state), and the axioms now assert a TRUE, alignment-conditioned
+proposition. The axioms remain axioms — **count is unchanged at 87**
+(this wave makes the existing axioms sound; it retires none and adds
+none). Only the 9 axiom *signatures* + the two theorems threading them
+changed.
+
+**Harness impact: none.** `tests/PipelineConformance.lean` is a purely
+syntactic classifier — it runs the per-family Bool checkers on each
+fixture body and emits a tier label. It never instantiates
+`successAgrees` and never applies a sub-omnibus, so it neither supplied
+nor relied on the (formerly false) unconditional conclusion. The
+alignment premise is a proof-time obligation discharged externally,
+exactly the status the M5/A15 runtime-witness premises already had. The
+classification logic is unchanged.
+
+**Wave-26 hand-off.** With the alignment premise present, the arith
+sub-omnibus `compileSafe_observational_correct_modulo_arith_codegen`
+can be discharged via the M2 capstone
+`runMethod_lower_public_unique_no_post_structuralArithConsumeBody_whole_isSome`
+(`Stack/AgreesA3.lean:11075`) composed with the wave-21/22 M3/M4/shape
+derivations — the same composition shape the ref capstone uses for the
+structural-ref fragment. Precise gap to close in wave 26: that capstone
+consumes a `structuralArithConsumeBody … initialStack sm' stkFinal`
+witness (the `RunChainRelP` chain built from the existing
+`agreesTagged`-conditioned per-binding Stage C wrappers — see
+`Stack/Agrees.lean` ≈ L11420–11442), not a bare `agreesTagged`
+parameter. So wave 26 still needs (a) a derivation of that
+`structuralArithConsumeBody` chain witness from the new `agreesTagged`
+alignment premise + the `structuralArithBodyBool` classifier hypothesis
+the sub-omnibus carries, and (b) the ANF-side `evalBindings … isSome`
+leg for the arith fragment. Both are the wave-21/22 substrate; the
+alignment premise added here is the missing relating hypothesis that
+makes those legs composable into the sub-omnibus conclusion.
 
 ## External Hash Backend
 
