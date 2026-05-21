@@ -12725,5 +12725,687 @@ theorem wave27_lockstep_capstone_smoke
     _ _ List.mem_cons_self rfl hUniq hArith
     wave19_noPreimage wave19_noCode wave19_noTerminalAssert wave19_noDeserialize
 
+/-! ### Wave 28 Deliverable A — general (arbitrary-length) consume-arith lockstep
+
+Wave 27's `structuralArithConsumeBody_d0d1d0_of_entry_agreesTagged` builds
+the inductive only for the EXACT 3-binding `d0d1 + d0d1 + unary-d0`
+layout.  Wave 28 generalises the ASSEMBLY to ARBITRARY-LENGTH bodies by
+induction over the body, reusing the same general substrate
+(`agreesTagged_consume_top_two` / `_one` for the transport, the
+`stageC_*_consume_core` singletons for the operational witness).
+
+**Fragment restriction (part of the predicate, documented here):**
+
+* **Emittable opcodes only.**  Each binOp is `OP_ADD` / `OP_SUB` /
+  `OP_MUL` (ops `"+"`, `"-"`, `"*"`); each unaryOp is `OP_NEGATE` (op
+  `"-"`).  These are the bigint-result arithmetic ops whose `runOpcode`
+  singletons (`runOpcode_ADD_intInt` etc.) close uniformly.  The op set
+  is pinned by the `emittableArithStep` decode below — anything else is
+  outside the fragment.
+* **No `(≥2, ≥2)` binding (linear arith chain).**  Each binOp has its
+  left operand at depth 0 and right operand at depth 1 — the
+  `structuralArithConsumeValueBool` SHAPE the wave-20 builders witness.
+  The uncovered `(≥2, ≥2)` consume hole (no `loadRefLive`-consume
+  depth-general singleton; documented at `build_consume_binOp_witness`)
+  is therefore OUT of the fragment by construction: a body carrying a
+  `(≥2, ≥2)` binding fails the SHAPE Bool and stays on the axiom.
+
+This is the generalisation that unlocks wave 29's first axiom retirement. -/
+
+/-- The per-binding result value for an emittable arith op applied to two
+bigint operands `a` (left, depth 0) and `b` (right, depth 1).  Only the
+emittable binOps (`"+"`, `"-"`, `"*"`) are defined; everything else maps
+to `0` and is never reached because the step predicate gates the op. -/
+def emittableBinOpResult (op : String) (a b : Int) : Int :=
+  match op with
+  | "+" => a + b
+  | "-" => a - b
+  | "*" => a * b
+  | _   => 0
+
+/-- The per-binding result value for an emittable unary arith op
+(`"-"` ⇒ negate). -/
+def emittableUnaryOpResult (op : String) (a : Int) : Int :=
+  match op with
+  | "-" => -a
+  | _   => 0
+
+/-- An emittable arith binOp opcode fires uniformly on a bigint stack:
+for `op ∈ {"+","-","*"}` (and `rt` not the `!==`/bytes special form,
+which these ops never are), `runOpcode (binopOpcode op rt)` on
+`b :: a :: rest` pushes `emittableBinOpResult op a b`. -/
+theorem runOpcode_emittableBinOp
+    (op : String) (rt : Option String) (s : StackState) (a b : Int)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*") :
+    Stack.Eval.runOpcode (Stack.Lower.binopOpcode op rt) s
+      = .ok ({s with stack := rest}.push (.vBigint (emittableBinOpResult op a b))) := by
+  rcases hEmit with h | h | h
+  · subst h
+    show Stack.Eval.runOpcode "OP_ADD" s = _
+    rw [Stack.Sim.runOpcode_ADD_intInt s a b rest hStk]; rfl
+  · subst h
+    show Stack.Eval.runOpcode "OP_SUB" s = _
+    rw [Stack.Sim.runOpcode_SUB_intInt s a b rest hStk]; rfl
+  · subst h
+    show Stack.Eval.runOpcode "OP_MUL" s = _
+    rw [Stack.Sim.runOpcode_MUL_intInt s a b rest hStk]; rfl
+
+/-- An emittable unary arith op (`"-"` ⇒ `OP_NEGATE`) fires uniformly on
+a bigint stack. -/
+theorem runOps_emittableUnaryOp
+    (op : String) (s : StackState) (a : Int)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hStk : s.stack = .vBigint a :: rest)
+    (hEmit : op = "-") :
+    runOps [StackOp.opcode (Stack.Lower.unaryOpcode op)] s
+      = .ok ({s with stack := rest}.push (.vBigint (emittableUnaryOpResult op a))) := by
+  subst hEmit
+  show runOps [StackOp.opcode "OP_NEGATE"] s = _
+  rw [Stack.Sim.run_OP_NEGATE_int s a rest hStk]; rfl
+
+/-- **Wave 28 — all-bigint tagged alignment.**
+
+The lockstep invariant: every slot of `tsm` resolves (under
+`lookupAnfByKind`) to a `.vBigint`.  This is the "linear arith chain"
+type-invariant — it lets each binding read its operands as bigints
+directly from the moving `agreesTagged`, and the emittable-op result
+(`emittableBinOpResult` / `emittableUnaryOpResult`, both bigint) keeps it
+true at the post-state.  Defined recursively over `tsm`, paralleling
+`taggedStackAligned`. -/
+def taggedAllBigint (anfSt : State) : TaggedStackMap → Prop
+  | []        => True
+  | s :: rest => (∃ i : Int, lookupAnfByKind anfSt s = some (.vBigint i)) ∧ taggedAllBigint anfSt rest
+
+/-- The head slot of an all-bigint alignment resolves to a bigint. -/
+theorem taggedAllBigint_head
+    (anfSt : State) (s : String × SlotKind) (rest : TaggedStackMap)
+    (h : taggedAllBigint anfSt (s :: rest)) :
+    ∃ i : Int, lookupAnfByKind anfSt s = some (.vBigint i) := h.1
+
+/-- The second slot of a two-deep all-bigint alignment resolves to a bigint. -/
+theorem taggedAllBigint_second
+    (anfSt : State) (s0 s1 : String × SlotKind) (rest : TaggedStackMap)
+    (h : taggedAllBigint anfSt (s0 :: s1 :: rest)) :
+    ∃ i : Int, lookupAnfByKind anfSt s1 = some (.vBigint i) := h.2.1
+
+/-- **Wave 28 — `taggedAllBigint` stability under a fresh `addBinding`.**
+
+If every slot of `tsm` resolves to a bigint and `bn` is fresh in the
+untagged `tsm`, then every slot still resolves to the SAME bigint after
+`addBinding bn (.vBigint i)`: params / props are untouched by
+`addBinding`, and earlier bindings keep their value at a DISTINCT name.
+This is the deeper-slot stability the consume transports need. -/
+theorem taggedAllBigint_addBinding_of_fresh
+    (anfSt : State) (bn : String) (i : Int) :
+    ∀ (tsm : TaggedStackMap), taggedAllBigint anfSt tsm → freshIn bn (untagSm tsm) →
+      taggedAllBigint (anfSt.addBinding bn (.vBigint i)) tsm := by
+  intro tsm
+  induction tsm with
+  | nil => intro _ _; exact True.intro
+  | cons hd tl ih =>
+      intro hAll hFresh
+      obtain ⟨⟨j, hj⟩, hTail⟩ := hAll
+      have hFreshHd : bn ≠ hd.fst := by
+        intro hEq; apply hFresh; unfold untagSm; rw [hEq]; exact List.mem_cons_self
+      have hFreshTl : freshIn bn (untagSm tl) := by
+        intro hMem; apply hFresh; unfold untagSm; exact List.mem_cons_of_mem _ hMem
+      refine ⟨⟨j, ?_⟩, ih hTail hFreshTl⟩
+      cases hk : hd.snd with
+      | param =>
+          have hHd2 : hd = (hd.fst, .param) := by rw [← hk]
+          rw [hHd2]
+          show (anfSt.addBinding bn (.vBigint i)).lookupParam hd.fst = some (.vBigint j)
+          unfold State.addBinding State.lookupParam
+          simp only []
+          have hp : anfSt.lookupParam hd.fst = some (.vBigint j) := by
+            have hjj := hj; rw [hHd2] at hjj
+            unfold lookupAnfByKind State.lookupParam at hjj; exact hjj
+          unfold State.lookupParam at hp; exact hp
+      | prop =>
+          have hHd2 : hd = (hd.fst, .prop) := by rw [← hk]
+          rw [hHd2]
+          show (anfSt.addBinding bn (.vBigint i)).lookupProp hd.fst = some (.vBigint j)
+          unfold State.addBinding State.lookupProp
+          simp only []
+          have hp : anfSt.lookupProp hd.fst = some (.vBigint j) := by
+            have hjj := hj; rw [hHd2] at hjj
+            unfold lookupAnfByKind State.lookupProp at hjj; exact hjj
+          unfold State.lookupProp at hp; exact hp
+      | binding =>
+          have hHd2 : hd = (hd.fst, .binding) := by rw [← hk]
+          rw [hHd2]
+          have hNe : hd.fst ≠ bn := fun hEq => hFreshHd hEq.symm
+          rw [lookupAnfByKind_addBinding_of_ne anfSt bn hd.fst (.vBigint i) hNe]
+          have hjj := hj; rw [hHd2] at hjj; exact hjj
+
+/-- The transport of `taggedAllBigint` across a `consume_top_two`: the
+consumed top two slots are gone, the new binding `bn` heads the tail with
+a bigint value, and the deeper slots are stable (above lemma). -/
+theorem taggedAllBigint_consume_top_two
+    (anfSt : State) (l r : String) (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (i : Int)
+    (hAll : taggedAllBigint anfSt ((l, k_l) :: (r, k_r) :: tsm_rest))
+    (hFresh : freshIn bn (untagSm tsm_rest)) :
+    taggedAllBigint (anfSt.addBinding bn (.vBigint i)) ((bn, .binding) :: tsm_rest) := by
+  obtain ⟨_hHead, _hSecond, hTail⟩ := hAll
+  exact ⟨⟨i, lookupAnfByKind_addBinding_self anfSt bn (.vBigint i)⟩,
+    taggedAllBigint_addBinding_of_fresh anfSt bn i tsm_rest hTail hFresh⟩
+
+/-- The unary peer transport: dropping ONE top slot of an all-bigint
+alignment and pushing a fresh bigint binding keeps it all-bigint. -/
+theorem taggedAllBigint_consume_top_one
+    (anfSt : State) (operand : String) (k_op : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (i : Int)
+    (hAll : taggedAllBigint anfSt ((operand, k_op) :: tsm_rest))
+    (hFresh : freshIn bn (untagSm tsm_rest)) :
+    taggedAllBigint (anfSt.addBinding bn (.vBigint i)) ((bn, .binding) :: tsm_rest) := by
+  obtain ⟨_hHead, hTail⟩ := hAll
+  exact ⟨⟨i, lookupAnfByKind_addBinding_self anfSt bn (.vBigint i)⟩,
+    taggedAllBigint_addBinding_of_fresh anfSt bn i tsm_rest hTail hFresh⟩
+
+/-- **Wave 28 — d0d1 consume binOp stack-map advance.**
+
+For a binOp at the d0d1 consume layout (`l@0`, `r@1`, both last-use,
+`outerProtected = []`, not the `!==`/bytes form), the threaded
+`(lowerValueP …).2.1` advances to `name :: sm.tail.tail`: both operands
+are consumed off the top, the result is bound where they sat.  Derived by
+reduction of `loadRefLive` / `bringToTop` / `popN`. -/
+theorem lowerValueP_binOp_d0d1_smOut
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name op l r : String) (rt : Option String)
+    (hDepthL : sm.depth? l = some 0)
+    (hDepthR : sm.depth? r = some 1)
+    (hLastUseL : Stack.Lower.isLastUse lastUses l currentIndex = true)
+    (hLastUseR : Stack.Lower.isLastUse lastUses r currentIndex = true) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        [] localBindings constInts sm name (.binOp op l r rt)).2.1
+      = name :: sm.tail.tail := by
+  match sm, hDepthL, hDepthR with
+  | [], hDepthL, _ => simp [Stack.Lower.StackMap.depth?] at hDepthL
+  | [_a], _, hDepthR => simp [Stack.Lower.StackMap.depth?] at hDepthR
+  | a :: b :: rest, hDepthL, hDepthR =>
+      unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLive Stack.Lower.bringToTop
+      simp only [Stack.Lower.listContains, List.any_nil, Bool.not_false, Bool.true_and,
+        hLastUseL, hLastUseR, hDepthL, hDepthR, if_true]
+      show ((Stack.Lower.StackMap.popN (b :: a :: rest) 2).push name : StackMap)
+        = name :: (a :: b :: rest).tail.tail
+      simp only [Stack.Lower.StackMap.popN, Stack.Lower.StackMap.push, List.tail_cons]
+
+/-- **Wave 28 — d0 consume unaryOp stack-map advance.**
+
+For a unaryOp at the d0 consume layout (`operand@0`, last-use,
+`outerProtected = []`), the threaded `(lowerValueP …).2.1` advances to
+`name :: sm.tail`: the single operand is consumed off the top, the result
+bound where it sat. -/
+theorem lowerValueP_unaryOp_d0_smOut
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap) (name op operand : String) (rt : Option String)
+    (hDepth : sm.depth? operand = some 0)
+    (hLastUse : Stack.Lower.isLastUse lastUses operand currentIndex = true) :
+    (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+        [] localBindings constInts sm name (.unaryOp op operand rt)).2.1
+      = name :: sm.tail := by
+  match sm, hDepth with
+  | [], hDepth => simp [Stack.Lower.StackMap.depth?] at hDepth
+  | a :: tl, hDepth =>
+      unfold Stack.Lower.lowerValueP Stack.Lower.loadRefLive Stack.Lower.bringToTop
+      simp only [Stack.Lower.listContains, List.any_nil, Bool.not_false, Bool.true_and,
+        hLastUse, hDepth, if_true]
+      show ((Stack.Lower.StackMap.popN (a :: tl) 1).push name : StackMap)
+        = name :: (a :: tl).tail
+      simp only [Stack.Lower.StackMap.popN, Stack.Lower.StackMap.push, List.tail_cons]
+
+/-- **Wave 28 — tagged-map decomposition at depths (0, 1).**
+
+If the untagged map equals `sm`, `l` is at depth 0 and `r` at depth 1
+in `sm`, then `tsm` decomposes as `(l, k_l) :: (r, k_r) :: tsm_rest` and
+`untagSm tsm_rest = sm.tail.tail`.  The head two slots are `l` and `r`
+because `depth?` is `findIdx?`: depth 0 pins the head, depth 1 pins the
+second (with the head distinct from `r`). -/
+theorem tsm_decompose_d0d1
+    (tsm : TaggedStackMap) (sm : StackMap) (l r : String)
+    (hUntag : untagSm tsm = sm)
+    (hDepthL : sm.depth? l = some 0)
+    (hDepthR : sm.depth? r = some 1) :
+    ∃ (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap),
+      tsm = (l, k_l) :: (r, k_r) :: tsm_rest ∧ untagSm tsm_rest = sm.tail.tail := by
+  match tsm, hUntag with
+  | [], hUntag =>
+      rw [← hUntag] at hDepthL; simp [untagSm, Stack.Lower.StackMap.depth?] at hDepthL
+  | [(_n0, _k0)], hUntag =>
+      rw [← hUntag] at hDepthR
+      simp [untagSm, Stack.Lower.StackMap.depth?] at hDepthR
+  | (n0, k0) :: (n1, k1) :: tsm_rest, hUntag =>
+      -- `untagSm` gives `sm = n0 :: n1 :: untagSm tsm_rest`.
+      have hsm : sm = n0 :: n1 :: untagSm tsm_rest := by
+        rw [← hUntag]; simp only [untagSm]
+      -- Depth 0 ⇒ head matches `l`.
+      have hHead : n0 = l := by
+        rw [hsm] at hDepthL
+        unfold Stack.Lower.StackMap.depth? at hDepthL
+        rw [List.findIdx?_cons] at hDepthL
+        by_cases hc : (n0 == l) = true
+        · exact (beq_iff_eq.mp hc)
+        · simp only [hc, Bool.false_eq_true, if_false, Option.map_eq_some_iff] at hDepthL
+          obtain ⟨_w, _, hEq⟩ := hDepthL
+          omega
+      -- Depth 1 ⇒ second matches `r` (head distinct from `r`).
+      have hSecond : n1 = r := by
+        rw [hsm] at hDepthR
+        unfold Stack.Lower.StackMap.depth? at hDepthR
+        rw [List.findIdx?_cons] at hDepthR
+        by_cases hc : (n0 == r) = true
+        · rw [if_pos hc] at hDepthR; exact absurd hDepthR (by decide)
+        · simp only [hc, Bool.false_eq_true, if_false, Option.map_eq_some_iff] at hDepthR
+          obtain ⟨w, hw, hEq⟩ := hDepthR
+          have hw0 : w = 0 := by omega
+          subst hw0
+          rw [List.findIdx?_cons] at hw
+          by_cases hc1 : (n1 == r) = true
+          · exact (beq_iff_eq.mp hc1)
+          · simp only [hc1, Bool.false_eq_true, if_false, Option.map_eq_some_iff] at hw
+            obtain ⟨_w2, _, hEq2⟩ := hw
+            omega
+      subst hHead; subst hSecond
+      exact ⟨k0, k1, tsm_rest, rfl, by rw [hsm]; rfl⟩
+
+/-- **Wave 28 — tagged-map decomposition at depth 0 (unary).** -/
+theorem tsm_decompose_d0
+    (tsm : TaggedStackMap) (sm : StackMap) (operand : String)
+    (hUntag : untagSm tsm = sm)
+    (hDepth : sm.depth? operand = some 0) :
+    ∃ (k_op : SlotKind) (tsm_rest : TaggedStackMap),
+      tsm = (operand, k_op) :: tsm_rest ∧ untagSm tsm_rest = sm.tail := by
+  match tsm, hUntag with
+  | [], hUntag =>
+      rw [← hUntag] at hDepth; simp [untagSm, Stack.Lower.StackMap.depth?] at hDepth
+  | (n0, k0) :: tsm_rest, hUntag =>
+      have hsm : sm = n0 :: untagSm tsm_rest := by
+        rw [← hUntag]; simp only [untagSm]
+      have hHead : n0 = operand := by
+        rw [hsm] at hDepth
+        unfold Stack.Lower.StackMap.depth? at hDepth
+        rw [List.findIdx?_cons] at hDepth
+        by_cases hc : (n0 == operand) = true
+        · exact (beq_iff_eq.mp hc)
+        · simp only [hc, Bool.false_eq_true, if_false, Option.map_eq_some_iff] at hDepth
+          obtain ⟨_w, _, hEq⟩ := hDepth
+          omega
+      subst hHead
+      exact ⟨k0, tsm_rest, rfl, by rw [hsm]; rfl⟩
+
+/-! ### Wave 28 Deliverable A — the general lockstep -/
+
+/-- **Wave 28 — emittable no-`(≥2,≥2)` arith-chain readiness.**
+
+The fragment predicate, threaded over the body like
+`structuralArithConsumeBodyBool`.  At each binding it requires:
+
+* the binding is an EMITTABLE binOp (`"+"`/`"-"`/`"*"`) at the d0d1
+  consume SHAPE, or an EMITTABLE unaryOp (`"-"`) at the d0 consume SHAPE
+  (these SHAPE checks are exactly `structuralArithConsumeValueBool`, which
+  pins l@0 / r@1 — the `(≥2,≥2)` hole is excluded by construction); and
+* the binding's NAME is SSA-fresh in the post-consume residual stack map
+  (`sm.tail.tail` for binOp, `sm.tail` for unaryOp).
+
+It threads the advanced `sm` (`name :: residual`) and `currentIndex + 1`
+to the tail.  Anything else (non-emittable op, non-arith value) is `False`
+— outside the fragment, stays on the axiom. -/
+def emittableArithChainReady
+    (lastUses : List (String × Nat)) :
+    List ANFBinding → StackMap → Nat → Prop
+  | [], _sm, _currentIndex => True
+  | (.mk name (.binOp op l r rt) _) :: rest, sm, currentIndex =>
+      (op = "+" ∨ op = "-" ∨ op = "*") ∧
+      structuralArithConsumeValueBool lastUses [] sm currentIndex (.binOp op l r rt) = true ∧
+      freshIn name sm.tail.tail ∧
+      emittableArithChainReady lastUses rest (name :: sm.tail.tail) (currentIndex + 1)
+  | (.mk name (.unaryOp op operand rt) _) :: rest, sm, currentIndex =>
+      op = "-" ∧
+      structuralArithConsumeValueBool lastUses [] sm currentIndex (.unaryOp op operand rt) = true ∧
+      freshIn name sm.tail ∧
+      emittableArithChainReady lastUses rest (name :: sm.tail) (currentIndex + 1)
+  | _ :: _, _sm, _currentIndex => False
+
+/-- **Wave 28 Deliverable A — the GENERAL (arbitrary-length) lockstep.**
+
+By induction over `body`, build the full `structuralArithConsumeBody`
+inductive from a BARE entry `agreesTagged` over `tsm` (= `untagSm`-coherent
+with the lowerer's `sm`), the all-bigint invariant `taggedAllBigint`, and
+the emittable no-`(≥2,≥2)` readiness predicate.
+
+Every per-binding INTERMEDIATE `agreesTagged`, operand bigint value, and
+opcode arithmetic fact is DERIVED inside the induction:
+
+* the moving `agreesTagged tsm` is transported across each consume by
+  `agreesTagged_consume_top_two` / `_one`;
+* the all-bigint invariant is transported by
+  `taggedAllBigint_consume_top_two` / `_one`, so both operands read off
+  as `.vBigint` from the moving alignment;
+* the opcode fact is supplied uniformly by `runOpcode_emittableBinOp` /
+  `runOps_emittableUnaryOp` (emittable arith ops only);
+* the stack-map advance is `lowerValueP_binOp_d0d1_smOut` /
+  `lowerValueP_unaryOp_d0_smOut`, keeping `untagSm tsm' = sm'`.
+
+The result value of each binding is `emittableBinOpResult` /
+`emittableUnaryOpResult` of its operands — both bigint, preserving the
+invariant.  `localBindings` is threaded unchanged (the binOp / unaryOp
+arms leave it fixed). -/
+theorem structuralArithConsumeBody_of_entry_agreesTagged
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (lastUses : List (String × Nat)) (constInts : List (String × Int)) :
+    ∀ (body : List ANFBinding) (sm : StackMap) (localBindings : List String)
+      (currentIndex : Nat) (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState),
+      untagSm tsm = sm →
+      agreesTagged tsm anfSt stkSt →
+      taggedAllBigint anfSt tsm →
+      emittableArithChainReady lastUses body sm currentIndex →
+      ∃ (sm' : StackMap) (stkFinal : StackState),
+        structuralArithConsumeBody progMethods props budget lastUses [] constInts
+          body sm currentIndex localBindings stkSt sm' stkFinal := by
+  intro body
+  induction body with
+  | nil =>
+      intro sm localBindings currentIndex tsm anfSt stkSt _hUntag _hAgrees _hAll _hReady
+      exact ⟨sm, stkSt, structuralArithConsumeBody.nil⟩
+  | cons hd rest ih =>
+      intro sm localBindings currentIndex tsm anfSt stkSt hUntag hAgrees hAll hReady
+      obtain ⟨name, v, src⟩ := hd
+      cases v with
+      | binOp op l r rt =>
+          simp only [emittableArithChainReady] at hReady
+          obtain ⟨hEmit, hShape, hFresh, hRest⟩ := hReady
+          -- Decode the SHAPE Bool's depth facts.
+          have hShapeCopy := hShape
+          simp only [structuralArithConsumeValueBool, Bool.and_eq_true] at hShapeCopy
+          obtain ⟨⟨⟨⟨⟨⟨hDl, hDr⟩, _⟩, _⟩, _⟩, _⟩, _⟩ := hShapeCopy
+          have hDl : sm.depth? l = some 0 := of_decide_eq_true hDl
+          have hDr : sm.depth? r = some 1 := of_decide_eq_true hDr
+          -- Decompose `tsm = (l,k_l)::(r,k_r)::tsm_rest`.
+          obtain ⟨k_l, k_r, tsm_rest, hTsmEq, hUntagRest⟩ :=
+            tsm_decompose_d0d1 tsm sm l r hUntag hDl hDr
+          subst hTsmEq
+          -- Operand bigint values from the all-bigint invariant.
+          obtain ⟨a, hLookupL⟩ := taggedAllBigint_head anfSt (l, k_l) _ hAll
+          obtain ⟨b, hLookupR⟩ := taggedAllBigint_second anfSt (l, k_l) (r, k_r) _ hAll
+          -- The result value and post-state.
+          let out : RunarVerification.ANF.Eval.Value :=
+            .vBigint (emittableBinOpResult op a b)
+          -- The opcode fact, uniform over emittable arith ops.
+          have hOpcode :
+              ∀ (restStk : List RunarVerification.ANF.Eval.Value),
+                stkSt.stack = .vBigint a :: .vBigint b :: restStk →
+                Stack.Eval.runOpcode (Stack.Lower.binopOpcode op rt)
+                    ({stkSt with stack := .vBigint b :: .vBigint a :: restStk})
+                  = .ok ({stkSt with stack := restStk}.push out) := by
+            intro restStk _hStk
+            exact runOpcode_emittableBinOp op rt
+              ({stkSt with stack := .vBigint b :: .vBigint a :: restStk}) a b restStk rfl hEmit
+          -- Freshness in the residual tail (rewrite `sm.tail.tail`).
+          have hFreshRest : freshIn name (untagSm tsm_rest) := by
+            rw [hUntagRest]; exact hFresh
+          -- Transport the alignment + all-bigint to the post-consume state.
+          have hAgrees1 :
+              agreesTagged ((name, .binding) :: tsm_rest) (anfSt.addBinding name out)
+                ({stkSt with stack := stkSt.stack.tail.tail}.push out) :=
+            agreesTagged_consume_top_two l r k_l k_r tsm_rest name anfSt stkSt out
+              hAgrees hFreshRest
+          have hAll1 :
+              taggedAllBigint (anfSt.addBinding name out) ((name, .binding) :: tsm_rest) :=
+            taggedAllBigint_consume_top_two anfSt l r k_l k_r tsm_rest name
+              (emittableBinOpResult op a b) hAll hFreshRest
+          -- The advanced lowerer stack map.
+          have hSmOut :
+              (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  [] localBindings constInts sm name (.binOp op l r rt)).2.1
+                = name :: sm.tail.tail :=
+            lowerValueP_binOp_d0d1_smOut progMethods props budget currentIndex lastUses
+              localBindings constInts sm name op l r rt hDl hDr
+              (by
+                have hShapeCopy2 := hShape
+                simp only [structuralArithConsumeValueBool, Bool.and_eq_true] at hShapeCopy2
+                exact hShapeCopy2.1.1.1.2)
+              (by
+                have hShapeCopy2 := hShape
+                simp only [structuralArithConsumeValueBool, Bool.and_eq_true] at hShapeCopy2
+                exact hShapeCopy2.1.2)
+          -- The coherence `untagSm ((name,.binding)::tsm_rest) = name :: sm.tail.tail`.
+          have hUntag1 : untagSm ((name, .binding) :: tsm_rest) = name :: sm.tail.tail := by
+            simp only [untagSm]; rw [hUntagRest]
+          -- Apply the IH on `rest` at the advanced state.
+          obtain ⟨sm', stkFinal, hTail⟩ :=
+            ih (name :: sm.tail.tail) localBindings (currentIndex + 1)
+              ((name, .binding) :: tsm_rest) (anfSt.addBinding name out)
+              ({stkSt with stack := stkSt.stack.tail.tail}.push out)
+              hUntag1 hAgrees1 hAll1
+              (by
+                -- `emittableArithChainReady` tail at `name :: sm.tail.tail`.
+                exact hRest)
+          -- Build the cons via the reflection lemma.
+          refine ⟨sm', stkFinal, ?_⟩
+          have hReflect :
+              structuralArithConsumeBody progMethods props budget lastUses [] constInts
+                (.mk name (.binOp op l r rt) src :: rest) sm currentIndex localBindings
+                stkSt sm' stkFinal := by
+            refine structuralArithConsumeBodyBool_reflect_consBinOp
+              progMethods props budget currentIndex lastUses localBindings constInts
+              sm name src op l r rt a b k_l k_r tsm_rest anfSt stkSt stkFinal sm' out rest
+              hShape hAgrees hLookupL hLookupR hOpcode ?_
+            -- `hTail` is over `(lowerValueP …).2.1` and the post-state; rewrite
+            -- the threaded stack map + the post-state to the reflection's shape.
+            rw [hSmOut, lowerValueP_binOp_localBindings]
+            -- The reflection's post-state is `{stkSt with stack := tail.tail}.push out`.
+            exact hTail
+          exact hReflect
+      | unaryOp op operand rt =>
+          simp only [emittableArithChainReady] at hReady
+          obtain ⟨hEmit, hShape, hFresh, hRest⟩ := hReady
+          have hShapeCopy := hShape
+          simp only [structuralArithConsumeValueBool, Bool.and_eq_true] at hShapeCopy
+          obtain ⟨⟨hD, _⟩, hLu⟩ := hShapeCopy
+          have hD : sm.depth? operand = some 0 := of_decide_eq_true hD
+          obtain ⟨k_op, tsm_rest, hTsmEq, hUntagRest⟩ :=
+            tsm_decompose_d0 tsm sm operand hUntag hD
+          subst hTsmEq
+          obtain ⟨a, hLookupOp⟩ := taggedAllBigint_head anfSt (operand, k_op) _ hAll
+          let out : RunarVerification.ANF.Eval.Value :=
+            .vBigint (emittableUnaryOpResult op a)
+          have hFreshRest : freshIn name (untagSm tsm_rest) := by
+            rw [hUntagRest]; exact hFresh
+          -- The operand value at the stack top, from the alignment.
+          have hStkTop : stkSt.stack = .vBigint a :: stkSt.stack.tail := by
+            have hAlign : taggedStackAligned ((operand, k_op) :: tsm_rest) anfSt stkSt.stack :=
+              hAgrees.1
+            match hcase : stkSt.stack with
+            | [] => rw [hcase] at hAlign; simp [taggedStackAligned] at hAlign
+            | v0 :: restStk =>
+                rw [hcase] at hAlign
+                unfold taggedStackAligned at hAlign
+                obtain ⟨hHead, _⟩ := hAlign
+                rw [hLookupOp] at hHead
+                have hv0 : v0 = .vBigint a := (Option.some.injEq _ _).mp hHead.symm
+                rw [hv0, List.tail_cons]
+          have hRun :
+              runOps [StackOp.opcode (Stack.Lower.unaryOpcode op)] stkSt
+                = .ok ({stkSt with stack := stkSt.stack.tail}.push out) :=
+            runOps_emittableUnaryOp op stkSt a stkSt.stack.tail hStkTop hEmit
+          have hAgrees1 :
+              agreesTagged ((name, .binding) :: tsm_rest) (anfSt.addBinding name out)
+                ({stkSt with stack := stkSt.stack.tail}.push out) :=
+            agreesTagged_consume_top_one operand k_op tsm_rest name anfSt stkSt out
+              hAgrees hFreshRest
+          have hAll1 :
+              taggedAllBigint (anfSt.addBinding name out) ((name, .binding) :: tsm_rest) :=
+            taggedAllBigint_consume_top_one anfSt operand k_op tsm_rest name
+              (emittableUnaryOpResult op a) hAll hFreshRest
+          have hSmOut :
+              (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                  [] localBindings constInts sm name (.unaryOp op operand rt)).2.1
+                = name :: sm.tail :=
+            lowerValueP_unaryOp_d0_smOut progMethods props budget currentIndex lastUses
+              localBindings constInts sm name op operand rt hD hLu
+          have hUntag1 : untagSm ((name, .binding) :: tsm_rest) = name :: sm.tail := by
+            simp only [untagSm]; rw [hUntagRest]
+          obtain ⟨sm', stkFinal, hTail⟩ :=
+            ih (name :: sm.tail) localBindings (currentIndex + 1)
+              ((name, .binding) :: tsm_rest) (anfSt.addBinding name out)
+              ({stkSt with stack := stkSt.stack.tail}.push out)
+              hUntag1 hAgrees1 hAll1 hRest
+          refine ⟨sm', stkFinal, ?_⟩
+          refine structuralArithConsumeBodyBool_reflect_consUnaryOp
+            progMethods props budget currentIndex lastUses localBindings constInts
+            sm name src op operand rt stkSt
+            ({stkSt with stack := stkSt.stack.tail}.push out) stkFinal sm' rest
+            hShape hRun ?_
+          rw [hSmOut, lowerValueP_unaryOp_localBindings]
+          exact hTail
+      | loadParam _ => simp only [emittableArithChainReady] at hReady
+      | loadProp _ => simp only [emittableArithChainReady] at hReady
+      | loadConst _ => simp only [emittableArithChainReady] at hReady
+      | call _ _ => simp only [emittableArithChainReady] at hReady
+      | methodCall _ _ _ => simp only [emittableArithChainReady] at hReady
+      | ifVal _ _ _ => simp only [emittableArithChainReady] at hReady
+      | loop _ _ _ => simp only [emittableArithChainReady] at hReady
+      | assert _ => simp only [emittableArithChainReady] at hReady
+      | updateProp _ _ => simp only [emittableArithChainReady] at hReady
+      | getStateScript => simp only [emittableArithChainReady] at hReady
+      | checkPreimage _ => simp only [emittableArithChainReady] at hReady
+      | deserializeState _ => simp only [emittableArithChainReady] at hReady
+      | addOutput _ _ _ => simp only [emittableArithChainReady] at hReady
+      | addRawOutput _ _ => simp only [emittableArithChainReady] at hReady
+      | addDataOutput _ _ => simp only [emittableArithChainReady] at hReady
+      | arrayLiteral _ => simp only [emittableArithChainReady] at hReady
+      | rawScript _ _ _ => simp only [emittableArithChainReady] at hReady
+
+/-! ### Wave 28 Deliverable B — MANDATORY length>3 smoke (entry-only)
+
+The anti-vacuity proof for the GENERAL assembly.  We instantiate
+Deliverable A (`structuralArithConsumeBody_of_entry_agreesTagged`) on a
+CONCRETE **5-binding** linear arith chain, mixed ADD / SUB / MUL /
+NEGATE / ADD, from a BARE entry `agreesTagged` over the FIVE params — NO
+per-binding intermediate `agreesTagged`, NO intermediate operand lookups
+supplied by hand (every intermediate is DERIVED inside the induction by
+`agreesTagged_consume_top_two` / `_one` + the all-bigint transport).  We
+obtain the full `structuralArithConsumeBody`, then fire the wave-19 M2
+capstone to conclude `runMethod … isSome`.  This proves the general
+assembly closes for length > 3.
+
+```
+method chain5 (p0 p1 p2 p3 p4 : bigint) {
+  t0 = p0 + p1     -- ADD,    consume d0d1
+  t1 = t0 - p2     -- SUB,    consume d0d1
+  t2 = t1 * p3     -- MUL,    consume d0d1
+  t3 = -t2         -- NEGATE, consume d0
+  t4 = t3 + p4     -- ADD,    consume d0d1
+}
+``` -/
+
+/-- Concrete 5-binding consume-arith chain for the wave-28 smoke. -/
+private def wave28SmokeBody : List ANFBinding :=
+  [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none,
+   ANFBinding.mk "t1" (.binOp "-" "t0" "p2" none) none,
+   ANFBinding.mk "t2" (.binOp "*" "t1" "p3" none) none,
+   ANFBinding.mk "t3" (.unaryOp "-" "t2" none) none,
+   ANFBinding.mk "t4" (.binOp "+" "t3" "p4" none) none]
+
+/-- Concrete method carrying `wave28SmokeBody`.  Params declared in
+reverse so `(params.map name).reverse = ["p0", "p1", "p2", "p3", "p4"]`. -/
+private def wave28SmokeMethod : ANFMethod :=
+  { name := "chain5"
+    params := [ANFParam.mk "p4" .bigint, ANFParam.mk "p3" .bigint,
+               ANFParam.mk "p2" .bigint, ANFParam.mk "p1" .bigint,
+               ANFParam.mk "p0" .bigint]
+    body := wave28SmokeBody
+    isPublic := true }
+
+private theorem wave28_paramsRev :
+    (wave28SmokeMethod.params.map (fun p => p.name)).reverse
+      = ["p0", "p1", "p2", "p3", "p4"] := by
+  unfold wave28SmokeMethod; rfl
+
+private theorem wave28_localBindings :
+    wave28SmokeBody.map (fun bd => bd.name) = ["t0", "t1", "t2", "t3", "t4"] := by
+  unfold wave28SmokeBody; rfl
+
+private theorem wave28_noPreimage :
+    Stack.Lower.bindingsUseCheckPreimage wave28SmokeMethod.body = false := by
+  show Stack.Lower.bindingsUseCheckPreimage wave28SmokeBody = false
+  simp only [wave28SmokeBody, Stack.Lower.bindingsUseCheckPreimage, Bool.or_false]
+
+private theorem wave28_noCode :
+    Stack.Lower.bindingsUseCodePart wave28SmokeMethod.body = false := by
+  show Stack.Lower.bindingsUseCodePart wave28SmokeBody = false
+  simp only [wave28SmokeBody, Stack.Lower.bindingsUseCodePart, Bool.or_false]
+
+private theorem wave28_noTerminalAssert :
+    Stack.Lower.bodyEndsInAssert wave28SmokeMethod.body = false := by
+  show Stack.Lower.bodyEndsInAssert wave28SmokeBody = false
+  unfold wave28SmokeBody Stack.Lower.bodyEndsInAssert; rfl
+
+private theorem wave28_noDeserialize :
+    Stack.Lower.bindingsUseDeserializeState wave28SmokeMethod.body = false := by
+  show Stack.Lower.bindingsUseDeserializeState wave28SmokeBody = false
+  simp only [wave28SmokeBody, Stack.Lower.bindingsUseDeserializeState, Bool.or_false]
+
+/-- The emittable no-`(≥2,≥2)` readiness predicate reduces to `True` on
+the 5-binding smoke body under the COMPUTED method-lowering arguments.
+Discharged by structural reduction (no `native_decide`): each binding's
+SHAPE Bool + freshness by `decide` over the threaded stack map. -/
+private theorem wave28_chainReady :
+    emittableArithChainReady (Stack.Lower.computeLastUses wave28SmokeBody)
+      wave28SmokeBody ["p0", "p1", "p2", "p3", "p4"] 0 := by
+  unfold wave28SmokeBody
+  refine ⟨Or.inl rfl, by decide, by unfold freshIn; decide, ?_⟩
+  refine ⟨Or.inr (Or.inl rfl), by decide, by unfold freshIn; decide, ?_⟩
+  refine ⟨Or.inr (Or.inr rfl), by decide, by unfold freshIn; decide, ?_⟩
+  refine ⟨rfl, by decide, by unfold freshIn; decide, ?_⟩
+  refine ⟨Or.inl rfl, by decide, by unfold freshIn; decide, ?_⟩
+  exact True.intro
+
+/-- **Wave 28 Deliverable B — the length>3 lockstep capstone smoke.**
+
+From a BARE entry `agreesTagged` over the FIVE params (plus the all-bigint
+invariant + SSA freshness — all input-side, §2.1), the general lockstep
+builds the full `structuralArithConsumeBody` for the 5-binding chain, and
+the wave-19 M2 capstone discharges `runMethod … isSome`.  Every
+per-binding intermediate is DERIVED. -/
+theorem wave28_general_lockstep_capstone_smoke
+    (contractName : String) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap) (anfSt0 : State)
+    (hUntag : untagSm tsm = ["p0", "p1", "p2", "p3", "p4"])
+    (hAgrees0 : agreesTagged tsm anfSt0 initialStack)
+    (hAllBigint : taggedAllBigint anfSt0 tsm) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := ([] : List ANFProperty),
+            methods := [wave28SmokeMethod] })
+        wave28SmokeMethod.name initialStack).toOption.isSome := by
+  -- Build the inductive from the BARE entry agreesTagged via the general lockstep.
+  obtain ⟨sm', stkFinal, hArith⟩ :=
+    structuralArithConsumeBody_of_entry_agreesTagged
+      [wave28SmokeMethod] ([] : List ANFProperty) Stack.Lower.defaultInlineBudget
+      (Stack.Lower.computeLastUses wave28SmokeBody)
+      (Stack.Lower.collectConstInts wave28SmokeBody)
+      wave28SmokeBody ["p0", "p1", "p2", "p3", "p4"]
+      (wave28SmokeBody.map (fun bd => bd.name)) 0
+      tsm anfSt0 initialStack hUntag hAgrees0 hAllBigint wave28_chainReady
+  -- Apply the wave-19 M2 capstone.
+  have hUniq :
+      ∀ m', m' ∈ [wave28SmokeMethod] → m'.isPublic = true →
+        (m'.name == wave28SmokeMethod.name) = true → m' = wave28SmokeMethod := by
+    intro m' hm' _ _
+    simp only [List.mem_singleton] at hm'
+    exact hm'
+  exact runMethod_lower_public_unique_no_post_structuralArithConsumeBody_whole_isSome
+    contractName ([] : List ANFProperty) [wave28SmokeMethod] wave28SmokeMethod initialStack
+    sm' stkFinal List.mem_cons_self rfl hUniq hArith
+    wave28_noPreimage wave28_noCode wave28_noTerminalAssert wave28_noDeserialize
+
 end Agrees
 end RunarVerification.Stack
