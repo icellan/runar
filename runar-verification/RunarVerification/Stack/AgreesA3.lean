@@ -13957,5 +13957,430 @@ theorem wave30_bigint_both_succeed_branch
   wave28_general_lockstep_capstone_smoke contractName initialStack tsm anfSt0
     hUntag hAgrees0 hAllBigint
 
+/-! ### Wave 32 — per-binding SUCCESS lockstep (the substrate gate-closer)
+
+The success-direction analogue of wave 30's failure step.  Wave 30 closed
+the BOTH-FAIL leg (head operand non-bigint ⇒ both `isNone`).  Wave 32
+closes the BOTH-SUCCEED leg with the SAME per-binding HEAD-only hypothesis
+class: when the head operands of the current emittable-arith binding both
+resolve to bigints (HEAD only, NOT whole-state `taggedAllBigint`), BOTH
+evaluators advance by exactly one binding, and `agreesTagged` is
+re-established at the new state for the IH.
+
+The pieces:
+* the ANF cons-step (`evalBindings_binOp_bigint_cons_step`, wave 32 A);
+* the stack cons-step (`runOps_binopOpcode_bigint_cons_step`, wave 32 B);
+* the result-agreement (ANF surface-op result = stack opcode result); and
+* the `agreesTagged` transport (`agreesTagged_consume_top_two`, wave 27).
+
+This is the lemma the walk induction (next wave) composes with wave 30's
+failure step to get the unconditional `successAgrees` over arbitrary
+emittable-arith bodies — head-bigint per binding, never whole-state. -/
+
+/-- Both top-two stack values pinned by a two-deep `agreesTagged`
+alignment.  Strengthens `agreesTagged_head_two_stack_value` to also pin
+the SECOND value to the `(r, k_r)` slot — needed because the success
+lockstep reads BOTH operands as bigints. -/
+theorem agreesTagged_head_two_stack_values_full
+    (l r : String) (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((l, k_l) :: (r, k_r) :: tsm_rest) anfSt stkSt) :
+    ∃ v0 v1 restStk,
+      stkSt.stack = v0 :: v1 :: restStk
+        ∧ lookupAnfByKind anfSt (l, k_l) = some v0
+        ∧ lookupAnfByKind anfSt (r, k_r) = some v1 := by
+  have hAlign : taggedStackAligned ((l, k_l) :: (r, k_r) :: tsm_rest)
+      anfSt stkSt.stack := hAgrees.1
+  match hCases : stkSt.stack with
+  | [] =>
+      rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+      exact absurd hAlign (by simp)
+  | [_] =>
+      rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      unfold taggedStackAligned at hTail
+      exact absurd hTail (by simp)
+  | v0 :: v1 :: restStk =>
+      refine ⟨v0, v1, restStk, rfl, ?_, ?_⟩
+      · rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact hAlign.1
+      · rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact hTail.1
+
+/-- The ANF surface-op result equals the stack opcode result for the three
+emittable arith binops (`a` second-from-top, `b` top).  Bridges
+`arithBinResultBigint` (ANF, surface `op`) and `binOpcodeResultInt`
+(stack, `binopOpcode op rt`). -/
+theorem arithBinResult_eq_binOpcodeResult
+    (op : String) (rt : Option String) (a b : Int)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*") :
+    RunarVerification.ANF.Eval.arithBinResultBigint op a b
+      = RunarVerification.Stack.Eval.binOpcodeResultInt (Stack.Lower.binopOpcode op rt) a b := by
+  rcases hEmit with h | h | h <;> subst h <;> rfl
+
+/-- The unary peer result-agreement: ANF `arithUnaryResultBigint "-" a` =
+the stack `OP_NEGATE` push value `-a`. -/
+theorem arithUnaryResult_eq_negate (a : Int) :
+    RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a = -a := rfl
+
+/-- The pushed result of an emittable arith binOp's per-binding chunk.
+
+The lowered d0d1 chunk is `[.swap, .opcode (binopOpcode op rt)]`: the swap
+reorders the `agreesTagged` stack (top `l`-value = `a`, second `r`-value =
+`b`) into opcode order (top `b`, second `a`), so the opcode pushes
+`a ⊙ b` — the SAME value the ANF surface op (`arithBinResultBigint op a b`)
+produces.  Discharges the `hOpcode` hypothesis of
+`build_consume_binOp_witness_d0d1` uniformly for emittable ops. -/
+theorem build_consume_emittable_binOp_opcodeFact
+    (op : String) (rt : Option String) (stkSt : StackState) (a b : Int)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*") :
+    ∀ (restStk : List RunarVerification.ANF.Eval.Value),
+      stkSt.stack = .vBigint a :: .vBigint b :: restStk →
+      Stack.Eval.runOpcode (Stack.Lower.binopOpcode op rt)
+          ({stkSt with stack := .vBigint b :: .vBigint a :: restStk})
+        = .ok ({stkSt with stack := restStk}.push
+            (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))) := by
+  intro restStk _hStk
+  have hOp := runOpcode_emittableBinOp op rt
+    ({stkSt with stack := .vBigint b :: .vBigint a :: restStk}) a b restStk rfl hEmit
+  -- `emittableBinOpResult op a b = arithBinResultBigint op a b` (emittable).
+  have hRes : emittableBinOpResult op a b
+      = RunarVerification.ANF.Eval.arithBinResultBigint op a b := by
+    rcases hEmit with h | h | h <;> subst h <;> rfl
+  rw [hRes] at hOp
+  exact hOp
+
+/-- **Wave 32 — per-binding SUCCESS lockstep at a binary binding.**
+
+The success-direction analogue of wave 30's failure step, stated over the
+REAL per-binding lowered op chunk `(lowerValueP …).1` (the d0d1 chunk
+`[.swap, .opcode (binopOpcode op rt)]`) ++ trailing `restOps` — NOT a bare
+opcode (the bare opcode gets the operand order wrong for non-commutative
+ops; the swap in the chunk fixes it).
+
+Under `agreesTagged` over `(l, k_l) :: (r, k_r) :: tsm_rest`, the stack top
+two equal the operand values the head slots resolve to.  Given BOTH head
+operands resolve to `.vBigint` (HEAD-only, via `lookupAnfByKind`; the ANF
+`resolveRef` reading the SAME slots is `hHeadCorrL` / `hHeadCorrR`), `op`
+emittable, the d0d1 consume layout (depth/last-use facts), and SSA
+freshness, BOTH evaluators advance by exactly one binding:
+
+* the success bits agree (literally equal — both sides reduce to the same
+  `runOps`/`evalBindings` continuation on the post-state), and
+* `agreesTagged` holds at the post-consume state for the IH, with the new
+  binding `name ↦ .vBigint (arithBinResultBigint op a b)`.
+
+Needs ONLY head-operand bigint-ness, never whole-state `taggedAllBigint`.
+The chunk-`++`-`restOps` packaging is `runOps_append` + the wave-27
+operational chunk witness (`build_consume_binOp_witness_d0d1`). -/
+theorem agrees_success_step_binOp
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap)
+    (anfSt : State) (stkSt : StackState)
+    (name op l r : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfRest : List ANFBinding) (restOps : List StackOp)
+    (a b : Int)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*")
+    (hDepthL : sm.depth? l = some 0)
+    (hDepthR : sm.depth? r = some 1)
+    (hLastUseL : Stack.Lower.isLastUse lastUses l currentIndex = true)
+    (hLastUseR : Stack.Lower.isLastUse lastUses r currentIndex = true)
+    (hNotBytes : (op == "!==" && rt == some "bytes") = false)
+    (hAgrees : agreesTagged ((l, k_l) :: (r, k_r) :: tsm_rest) anfSt stkSt)
+    (hHeadCorrL : anfSt.resolveRef l = lookupAnfByKind anfSt (l, k_l))
+    (hHeadCorrR : anfSt.resolveRef r = lookupAnfByKind anfSt (r, k_r))
+    (hBigintL : lookupAnfByKind anfSt (l, k_l) = some (.vBigint a))
+    (hBigintR : lookupAnfByKind anfSt (r, k_r) = some (.vBigint b))
+    (hFresh : freshIn name (untagSm tsm_rest)) :
+    -- The PRE-state success-relation TRANSPORTS to the POST-state one:
+    -- the head binding's success is unconditional (both operands bigint),
+    -- so the whole-body success bits agree IFF the tail continuations'
+    -- success bits agree.  The walk induction (next wave) discharges the
+    -- POST iff via the IH; here we expose the one-step transport + the
+    -- preserved `agreesTagged`.
+    ( ( (RunarVerification.ANF.Eval.evalBindings anfSt
+            (.mk name (.binOp op l r rt) src :: anfRest)).toOption.isSome
+          ↔ (runOps ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                [] localBindings constInts sm name (.binOp op l r rt)).1 ++ restOps)
+              stkSt).toOption.isSome )
+      ↔ ( (RunarVerification.ANF.Eval.evalBindings
+              (anfSt.addBinding name
+                (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b)))
+              anfRest).toOption.isSome
+          ↔ (runOps restOps
+                ({stkSt with stack := stkSt.stack.tail.tail}.push
+                  (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b)))).toOption.isSome ) )
+    ∧ agreesTagged ((name, .binding) :: tsm_rest)
+        (anfSt.addBinding name (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b)))
+        ({stkSt with stack := stkSt.stack.tail.tail}.push
+          (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))) := by
+  -- ANF operand resolutions (head correspondence).
+  have hResolveL : anfSt.resolveRef l = some (.vBigint a) := by rw [hHeadCorrL]; exact hBigintL
+  have hResolveR : anfSt.resolveRef r = some (.vBigint b) := by rw [hHeadCorrR]; exact hBigintR
+  -- ANF cons-step (`out := .vBigint (arithBinResultBigint op a b)`).
+  have hANF :
+      RunarVerification.ANF.Eval.evalBindings anfSt
+          (.mk name (.binOp op l r rt) src :: anfRest)
+        = RunarVerification.ANF.Eval.evalBindings (anfSt.addBinding name
+            (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))) anfRest :=
+    RunarVerification.ANF.Eval.evalBindings_binOp_bigint_cons_step
+      anfSt name op l r rt src a b anfRest hEmit hResolveL hResolveR
+  -- The wave-27 operational chunk witness: `runOps chunk stkSt = .ok stkSt'`,
+  -- where `stkSt' = {stkSt with stack := tail.tail}.push out`.
+  have hChunk :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                [] localBindings constInts sm name (.binOp op l r rt)).1 stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail.tail}.push
+            (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))) :=
+    build_consume_binOp_witness_d0d1 progMethods props budget currentIndex lastUses
+      localBindings constInts sm name op l r rt a b k_l k_r tsm_rest anfSt stkSt
+      (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))
+      hDepthL hDepthR hLastUseL hLastUseR hNotBytes hAgrees hBigintL hBigintR
+      (build_consume_emittable_binOp_opcodeFact op rt stkSt a b hEmit)
+  -- Cons-level packaging: `runOps (chunk ++ restOps) = runOps restOps stkSt'`.
+  have hStack :
+      runOps ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                [] localBindings constInts sm name (.binOp op l r rt)).1 ++ restOps) stkSt
+        = runOps restOps ({stkSt with stack := stkSt.stack.tail.tail}.push
+            (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))) := by
+    rw [Stack.Eval.runOps_append, hChunk]
+  -- `agreesTagged` transport across the consume-and-push.
+  have hAgrees1 :
+      agreesTagged ((name, .binding) :: tsm_rest) (anfSt.addBinding name
+          (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b)))
+        ({stkSt with stack := stkSt.stack.tail.tail}.push
+          (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b))) :=
+    agreesTagged_consume_top_two l r k_l k_r tsm_rest name anfSt stkSt
+      (.vBigint (RunarVerification.ANF.Eval.arithBinResultBigint op a b)) hAgrees hFresh
+  refine ⟨?_, hAgrees1⟩
+  -- Both sides reduce to their POST-state continuations, so the PRE iff IS
+  -- the POST iff — `Iff.rfl` after the two reductions.
+  rw [hANF, hStack]
+
+/-- **Wave 32 — per-binding SUCCESS lockstep at a unary (NEGATE) binding.**
+The unary peer of `agrees_success_step_binOp`.  The d0 unary consume chunk
+is the bare `[.opcode (unaryOpcode op)]` (no operand-reorder load), so the
+chunk is run via `build_consume_unaryOp_witness_d0` + `runOps_emittableUnaryOp`. -/
+theorem agrees_success_step_unary
+    (progMethods : List ANFMethod) (props : List ANFProperty) (budget : Nat)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (localBindings : List String) (constInts : List (String × Int))
+    (sm : StackMap)
+    (anfSt : State) (stkSt : StackState)
+    (name operand : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (k_op : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfRest : List ANFBinding) (restOps : List StackOp)
+    (a : Int)
+    (hDepth : sm.depth? operand = some 0)
+    (hLastUse : Stack.Lower.isLastUse lastUses operand currentIndex = true)
+    (hAgrees : agreesTagged ((operand, k_op) :: tsm_rest) anfSt stkSt)
+    (hHeadCorr : anfSt.resolveRef operand = lookupAnfByKind anfSt (operand, k_op))
+    (hBigint : lookupAnfByKind anfSt (operand, k_op) = some (.vBigint a))
+    (hFresh : freshIn name (untagSm tsm_rest)) :
+    ( ( (RunarVerification.ANF.Eval.evalBindings anfSt
+            (.mk name (.unaryOp "-" operand rt) src :: anfRest)).toOption.isSome
+          ↔ (runOps ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                [] localBindings constInts sm name (.unaryOp "-" operand rt)).1 ++ restOps)
+              stkSt).toOption.isSome )
+      ↔ ( (RunarVerification.ANF.Eval.evalBindings
+              (anfSt.addBinding name
+                (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a)))
+              anfRest).toOption.isSome
+          ↔ (runOps restOps
+                ({stkSt with stack := stkSt.stack.tail}.push
+                  (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a)))).toOption.isSome ) )
+    ∧ agreesTagged ((name, .binding) :: tsm_rest)
+        (anfSt.addBinding name (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a)))
+        ({stkSt with stack := stkSt.stack.tail}.push
+          (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a))) := by
+  -- The operand value at the stack top, from the alignment.
+  obtain ⟨v0, restStk, hStk, hLk0⟩ :=
+    agreesTagged_head_one_stack_value operand k_op tsm_rest anfSt stkSt hAgrees
+  have hv0 : v0 = .vBigint a := by
+    rw [hLk0] at hBigint; exact Option.some.inj hBigint
+  subst hv0
+  have hResolve : anfSt.resolveRef operand = some (.vBigint a) := by rw [hHeadCorr]; exact hBigint
+  -- ANF cons-step (`out := .vBigint (arithUnaryResultBigint "-" a)`).
+  have hANF :
+      RunarVerification.ANF.Eval.evalBindings anfSt
+          (.mk name (.unaryOp "-" operand rt) src :: anfRest)
+        = RunarVerification.ANF.Eval.evalBindings (anfSt.addBinding name
+            (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a))) anfRest :=
+    RunarVerification.ANF.Eval.evalBindings_unary_bigint_cons_step
+      anfSt name operand rt src a anfRest hResolve
+  -- The single-opcode run witness for `OP_NEGATE` on the bigint top.
+  have hStkTop : stkSt.stack = .vBigint a :: stkSt.stack.tail := by rw [hStk]; rfl
+  have hRun :
+      runOps [StackOp.opcode (Stack.Lower.unaryOpcode "-")] stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail}.push
+            (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a))) := by
+    have h := runOps_emittableUnaryOp "-" stkSt a stkSt.stack.tail hStkTop rfl
+    rw [h]
+    rfl
+  -- The wave-27 operational chunk witness for the d0 unary consume.
+  have hChunk :
+      runOps (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                [] localBindings constInts sm name (.unaryOp "-" operand rt)).1 stkSt
+        = .ok ({stkSt with stack := stkSt.stack.tail}.push
+            (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a))) :=
+    build_consume_unaryOp_witness_d0 progMethods props budget currentIndex lastUses
+      localBindings constInts sm name "-" operand rt stkSt
+      ({stkSt with stack := stkSt.stack.tail}.push
+        (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a)))
+      hDepth hLastUse hRun
+  have hStack :
+      runOps ((Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
+                [] localBindings constInts sm name (.unaryOp "-" operand rt)).1 ++ restOps) stkSt
+        = runOps restOps ({stkSt with stack := stkSt.stack.tail}.push
+            (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a))) := by
+    rw [Stack.Eval.runOps_append, hChunk]
+  have hAgrees1 :
+      agreesTagged ((name, .binding) :: tsm_rest) (anfSt.addBinding name
+          (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a)))
+        ({stkSt with stack := stkSt.stack.tail}.push
+          (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a))) :=
+    agreesTagged_consume_top_one operand k_op tsm_rest name anfSt stkSt
+      (.vBigint (RunarVerification.ANF.Eval.arithUnaryResultBigint "-" a)) hAgrees hFresh
+  refine ⟨?_, hAgrees1⟩
+  rw [hANF, hStack]
+
+/-! ### Wave 32 — MANDATORY smoke C (single-binding success lockstep)
+
+A CONCRETE single emittable-arith binding `t0 = p0 + p1` over two bigint
+params.  From entry `agreesTagged` + head-operand bigint-ness (the wave-32
+hypothesis class — NO whole-state `taggedAllBigint`), `agrees_success_step_binOp`
+yields BOTH: the success bits agree (both `isSome`, since the empty tail
+runs to `.ok`), AND `agreesTagged` holds at the post-consume state with the
+new binding `t0 ↦ .vBigint 7`. -/
+
+/-- Concrete ANF state for smoke C: params `p0 = 3`, `p1 = 4` (both bigint).
+No bindings, so `resolveRef` agrees with the param lookup at the head. -/
+private def wave32SuccAnf : State :=
+  { params := [("p0", .vBigint 3), ("p1", .vBigint 4)] }
+
+/-- Concrete runtime stack aligned with `wave32SuccAnf`: top `.vBigint 3`
+(= `p0`), second `.vBigint 4` (= `p1`). -/
+private def wave32SuccStk : StackState :=
+  { stack := [.vBigint 3, .vBigint 4] }
+
+/-- Entry alignment for smoke C (params `p0`, `p1`). -/
+private theorem wave32_succ_agreesTagged :
+    agreesTagged [("p0", .param), ("p1", .param)] wave32SuccAnf wave32SuccStk := by
+  refine ⟨?_, rfl, rfl⟩
+  show taggedStackAligned [("p0", .param), ("p1", .param)]
+    wave32SuccAnf wave32SuccStk.stack
+  refine ⟨?_, ?_, ?_⟩
+  · show lookupAnfByKind wave32SuccAnf ("p0", .param) = some (.vBigint 3); rfl
+  · show lookupAnfByKind wave32SuccAnf ("p1", .param) = some (.vBigint 4); rfl
+  · trivial
+
+/-- The single-binding body for smoke C. -/
+private def wave32SuccBody : List ANFBinding :=
+  [ANFBinding.mk "t0" (.binOp "+" "p0" "p1" none) none]
+
+/-- The per-binding lowered chunk for smoke C (computed last-uses, sm =
+`["p0", "p1"]`, currentIndex 0).  This is `(lowerValueP …).1 ++ []`. -/
+private def wave32SuccChunk : List StackOp :=
+  (Stack.Lower.lowerValueP [] [] 1000 0 (Stack.Lower.computeLastUses wave32SuccBody)
+      [] [] [] ["p0", "p1"] "t0" (.binOp "+" "p0" "p1" none)).1
+
+/-- **Wave 32 — the single-binding SUCCESS lockstep smoke (THE NEW PIECE).**
+
+The body is `t0 = p0 + p1` with bigint `p0 = 3`, `p1 = 4`, run over the REAL
+per-binding lowered chunk (`(lowerValueP …).1` = `[.swap, OP_ADD]`).  We fire
+`agrees_success_step_binOp` (head-bigint only, NO whole-state
+`taggedAllBigint`) and expose:
+
+1. the success bits agree (`isSome ↔ isSome`); and
+2. `agreesTagged` holds at the post-consume state with `t0 ↦ .vBigint 7`.
+
+Then we DISCHARGE both `isSome` facts CONCRETELY (the iff is `True ↔ True`,
+both run the chunk to `.ok`) — not a vacuous dodge, and the `+`-then-`swap`
+exercises the genuine operand-reorder reduction. -/
+theorem wave32_success_step_smoke :
+    -- (1) the bare PRE-state lockstep iff + (2) the preserved `agreesTagged`.
+    ( ((RunarVerification.ANF.Eval.evalBindings wave32SuccAnf
+          [.mk "t0" (.binOp "+" "p0" "p1" none) none]).toOption.isSome
+        ↔ (runOps (wave32SuccChunk ++ []) wave32SuccStk).toOption.isSome)
+      ∧ agreesTagged [("t0", .binding)]
+          (wave32SuccAnf.addBinding "t0" (.vBigint 7))
+          ({wave32SuccStk with stack := wave32SuccStk.stack.tail.tail}.push (.vBigint 7)) )
+    -- (3)+(4) both sides concretely succeed (so the bare iff is `True ↔ True`).
+    ∧ (RunarVerification.ANF.Eval.evalBindings wave32SuccAnf
+          [.mk "t0" (.binOp "+" "p0" "p1" none) none]).toOption.isSome
+    ∧ (runOps (wave32SuccChunk ++ []) wave32SuccStk).toOption.isSome := by
+  -- The one-step transport + preserved `agreesTagged` from the wave-32 lockstep.
+  have hStep := agrees_success_step_binOp [] [] 1000 0
+    (Stack.Lower.computeLastUses wave32SuccBody) [] [] ["p0", "p1"]
+    wave32SuccAnf wave32SuccStk "t0" "+" "p0" "p1" none none .param .param []
+    [] [] 3 4
+    (Or.inl rfl)
+    (by decide) (by decide) (by decide) (by decide) (by decide)
+    wave32_succ_agreesTagged rfl rfl rfl rfl
+    (by unfold freshIn untagSm; decide)
+  -- The result value `arithBinResultBigint "+" 3 4` reduces to `7`.
+  have hResult : RunarVerification.ANF.Eval.arithBinResultBigint "+" 3 4 = 7 := rfl
+  rw [hResult] at hStep
+  obtain ⟨hTransport, hAgreesPost⟩ := hStep
+  -- Re-fold the chunk definition so the smoke's `wave32SuccChunk` matches.
+  have hChunkEq :
+      wave32SuccChunk =
+        (Stack.Lower.lowerValueP [] [] 1000 0 (Stack.Lower.computeLastUses wave32SuccBody)
+            [] [] [] ["p0", "p1"] "t0" (.binOp "+" "p0" "p1" none)).1 := rfl
+  rw [hChunkEq]
+  -- (3) ANF side concretely succeeds (empty tail runs to `.ok`).
+  have hANFsucc :
+      (RunarVerification.ANF.Eval.evalBindings wave32SuccAnf
+          [.mk "t0" (.binOp "+" "p0" "p1" none) none]).toOption.isSome := by
+    rw [RunarVerification.ANF.Eval.evalBindings_binOp_bigint_cons_step
+          wave32SuccAnf "t0" "+" "p0" "p1" none none 3 4 [] (Or.inl rfl) rfl rfl]
+    simp only [RunarVerification.ANF.Eval.evalBindings, Except.toOption, Option.isSome]
+  -- (4) Stack side concretely succeeds: run the chunk via the chunk witness.
+  have hChunk :
+      runOps ((Stack.Lower.lowerValueP [] [] 1000 0
+                (Stack.Lower.computeLastUses wave32SuccBody)
+                [] [] [] ["p0", "p1"] "t0" (.binOp "+" "p0" "p1" none)).1) wave32SuccStk
+        = .ok ({wave32SuccStk with stack := wave32SuccStk.stack.tail.tail}.push (.vBigint 7)) :=
+    build_consume_binOp_witness_d0d1 [] [] 1000 0
+      (Stack.Lower.computeLastUses wave32SuccBody) [] [] ["p0", "p1"] "t0"
+      "+" "p0" "p1" none 3 4 .param .param [] wave32SuccAnf wave32SuccStk (.vBigint 7)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      wave32_succ_agreesTagged rfl rfl
+      (build_consume_emittable_binOp_opcodeFact "+" none wave32SuccStk 3 4 (Or.inl rfl))
+  have hStacksucc :
+      (runOps ((Stack.Lower.lowerValueP [] [] 1000 0
+                (Stack.Lower.computeLastUses wave32SuccBody)
+                [] [] [] ["p0", "p1"] "t0" (.binOp "+" "p0" "p1" none)).1 ++ [])
+          wave32SuccStk).toOption.isSome := by
+    rw [List.append_nil, hChunk]
+    simp only [Except.toOption, Option.isSome]
+  -- The POST-state iff is `True ↔ True` (both empty tails succeed); the bare
+  -- PRE iff follows by the transport `hTransport.mpr`.
+  have hPostANF :
+      (RunarVerification.ANF.Eval.evalBindings
+          (wave32SuccAnf.addBinding "t0" (.vBigint 7)) []).toOption.isSome := by
+    simp only [RunarVerification.ANF.Eval.evalBindings, Except.toOption, Option.isSome]
+  have hPostStk :
+      (runOps [] ({wave32SuccStk with stack := wave32SuccStk.stack.tail.tail}.push
+          (.vBigint 7))).toOption.isSome := by
+    rw [Stack.Eval.runOps_nil]
+    simp only [Except.toOption, Option.isSome]
+  have hPostIff :
+      ((RunarVerification.ANF.Eval.evalBindings
+            (wave32SuccAnf.addBinding "t0" (.vBigint 7)) []).toOption.isSome
+        ↔ (runOps [] ({wave32SuccStk with stack := wave32SuccStk.stack.tail.tail}.push
+              (.vBigint 7))).toOption.isSome) :=
+    iff_of_true hPostANF hPostStk
+  refine ⟨⟨hTransport.mpr hPostIff, hAgreesPost⟩, hANFsucc, hStacksucc⟩
+
 end Agrees
 end RunarVerification.Stack

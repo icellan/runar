@@ -1199,6 +1199,179 @@ that need the cons-step shape apply `unfold runOps` followed by
 the verify-fuse proofs in `Stack.Peephole` for the recipe.
 -/
 
+/-! ## Wave 32 Deliverable B — per-binding SUCCESS cons-step (stack side)
+
+The success-direction stack cons-step, stated at the BARE-opcode layer
+(`Stack.Lower.binopOpcode` post-dates this module — it does not import
+`Stack.Eval` — so the cons-step is keyed on the concrete emittable opcode
+strings `"OP_ADD"` / `"OP_SUB"` / `"OP_MUL"` / `"OP_NEGATE"`).  When the
+top two stack values are `.vBigint`, the opcode reduces (via `liftIntBin`)
+to a push of the result, so `runOps (.opcode code :: rest)` UNFOLDS to
+`runOps rest` on the consumed-and-pushed stack.  The per-binding op chunk
+is the swap/load prefix `++ [.opcode …]`; the chunk-level packaging
+`runOps (chunk ++ restOps) = runOps restOps stkSt'` is assembled by the
+caller via `runOps_append` (smoke B exercises that shape).
+
+These need ONLY the top-two operands' bigint-ness, not whole-state typing. -/
+
+/-- `popN _ 2` on a two-deep stack returns the top two in pop-order with
+the residual stack underneath.  In-module reduction (no `Stack.Sim`). -/
+theorem popN_two_bigint_local
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    popN s 2 = .ok ([.vBigint b, .vBigint a], { s with stack := rest }) := by
+  show (match s.pop? with
+        | none => Except.error (.unsupported "stack underflow")
+        | some (v, s') =>
+            match popN s' 1 with
+            | Except.error e => Except.error e
+            | Except.ok (vs, s'') => Except.ok (v :: vs, s''))
+      = Except.ok ([Value.vBigint b, Value.vBigint a], { s with stack := rest })
+  unfold StackState.pop?
+  rw [hStk]
+  rfl
+
+/-- `liftIntBin` on a bigint top-two reduces to a push of `f a b` (with `a`
+the second-from-top, `b` the top).  In-module. -/
+theorem liftIntBin_bigint_local
+    (s : StackState) (f : Int → Int → Value) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    liftIntBin s f = .ok ({ s with stack := rest }.push (f a b)) := by
+  unfold liftIntBin
+  rw [popN_two_bigint_local s a b rest hStk]
+  simp only [asInt?]
+
+/-- `liftIntUnary` on a bigint top reduces to a push of `f a`.  In-module. -/
+theorem liftIntUnary_bigint_local
+    (s : StackState) (f : Int → Value) (a : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint a :: rest) :
+    liftIntUnary s f = .ok ({ s with stack := rest }.push (f a)) := by
+  unfold liftIntUnary StackState.pop?
+  rw [hStk]
+  simp only [asInt?]
+
+/-- The three emittable arith opcodes each reduce to a bigint push on a
+bigint top-two (`a` second-from-top, `b` top).  The pushed result is the
+op applied with the source operand order (`a ⊙ b`). -/
+theorem runOpcode_ADD_bigint_local
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_ADD" s = .ok ({ s with stack := rest }.push (.vBigint (a + b))) := by
+  show liftIntBin s (fun a b => .vBigint (a + b)) = _
+  exact liftIntBin_bigint_local s _ a b rest hStk
+
+theorem runOpcode_SUB_bigint_local
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_SUB" s = .ok ({ s with stack := rest }.push (.vBigint (a - b))) := by
+  show liftIntBin s (fun a b => .vBigint (a - b)) = _
+  exact liftIntBin_bigint_local s _ a b rest hStk
+
+theorem runOpcode_MUL_bigint_local
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_MUL" s = .ok ({ s with stack := rest }.push (.vBigint (a * b))) := by
+  show liftIntBin s (fun a b => .vBigint (a * b)) = _
+  exact liftIntBin_bigint_local s _ a b rest hStk
+
+theorem runOpcode_NEGATE_bigint_local
+    (s : StackState) (a : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint a :: rest) :
+    runOpcode "OP_NEGATE" s = .ok ({ s with stack := rest }.push (.vBigint (-a))) := by
+  show liftIntUnary s (fun i => .vBigint (-i)) = _
+  exact liftIntUnary_bigint_local s _ a rest hStk
+
+/-- The result `Int` of an emittable arith binOpcode on a bigint top-two
+(`a` second-from-top, `b` top).  Stated on the OPCODE string so it sits in
+`Stack.Eval` (the surface-level `op` is mapped to the opcode by the caller
+via `Stack.Lower.binopOpcode`). -/
+def binOpcodeResultInt (code : String) (a b : Int) : Int :=
+  match code with
+  | "OP_ADD" => a + b
+  | "OP_SUB" => a - b
+  | "OP_MUL" => a * b
+  | _        => 0
+
+/-- An emittable arith binOpcode reduces to a push of `binOpcodeResultInt`
+on a bigint top-two.  Folds the three opcode-specific reductions. -/
+theorem runOpcode_binOpcode_bigint_local
+    (code : String) (s : StackState) (a b : Int) (rest : List Value)
+    (hCode : code = "OP_ADD" ∨ code = "OP_SUB" ∨ code = "OP_MUL")
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode code s
+      = .ok ({ s with stack := rest }.push (.vBigint (binOpcodeResultInt code a b))) := by
+  rcases hCode with h | h | h <;> subst h
+  · exact runOpcode_ADD_bigint_local s a b rest hStk
+  · exact runOpcode_SUB_bigint_local s a b rest hStk
+  · exact runOpcode_MUL_bigint_local s a b rest hStk
+
+/-- **Wave 32 Deliverable B — stack binOpcode SUCCESS cons-step.**
+
+For an emittable arith opcode `code ∈ {OP_ADD, OP_SUB, OP_MUL}` whose top
+two stack values are `.vBigint b` (top) and `.vBigint a`, `runOps` of the
+opcode cons advances by exactly one binding: it equals `runOps` of `stkRest`
+on the state with the two operands consumed and the bigint result pushed. -/
+theorem runOps_binopOpcode_bigint_cons_step
+    (code : String) (stkRest : List StackOp) (s : StackState)
+    (a b : Int) (rest : List Value)
+    (hCode : code = "OP_ADD" ∨ code = "OP_SUB" ∨ code = "OP_MUL")
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOps (.opcode code :: stkRest) s
+      = runOps stkRest
+          ({ s with stack := rest }.push (.vBigint (binOpcodeResultInt code a b))) := by
+  rw [runOps_cons_nonIf_eq (.opcode code) stkRest s
+        (fun _ _ h => StackOp.noConfusion h), stepNonIf_opcode,
+      runOpcode_binOpcode_bigint_local code s a b rest hCode hStk]
+
+/-- **Wave 32 Deliverable B (unary peer) — stack unaryOpcode SUCCESS
+cons-step (`OP_NEGATE`).** -/
+theorem runOps_unaryOpcode_bigint_cons_step
+    (stkRest : List StackOp) (s : StackState)
+    (a : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint a :: rest) :
+    runOps (.opcode "OP_NEGATE" :: stkRest) s
+      = runOps stkRest ({ s with stack := rest }.push (.vBigint (-a))) := by
+  rw [runOps_cons_nonIf_eq (.opcode "OP_NEGATE") stkRest s
+        (fun _ _ h => StackOp.noConfusion h), stepNonIf_opcode,
+      runOpcode_NEGATE_bigint_local s a rest hStk]
+
+/-- **Wave 32 — MANDATORY smoke B.** A concrete per-binding op chunk
+`[.swap, .opcode "OP_ADD"]` (a swap-prefix chunk in the wave-27/28 shape)
+followed by trailing ops, on a bigint top-two, reduces by exactly one
+binding via `runOps_append` + the cons-step.  Concretely: stack `[3, 4, 9]`
+(top `3`), the swap yields `[4, 3, 9]`, `OP_ADD` consumes the top two and
+pushes `4 + 3 = 7`, leaving `[7, 9]`; a trailing `OP_NEGATE` then negates
+to `[-7, 9]`.  This exercises the chunk-`++`-rest packaging the glue uses. -/
+theorem wave32_stack_cons_step_smoke :
+    runOps
+        ([StackOp.swap, StackOp.opcode "OP_ADD"] ++ [StackOp.opcode "OP_NEGATE"])
+        ({ stack := [.vBigint 3, .vBigint 4, .vBigint 9] } : StackState)
+      = .ok ({ stack := [.vBigint (-7), .vBigint 9] } : StackState) := by
+  rw [runOps_append]
+  -- Run the swap-prefix chunk: swap then OP_ADD.
+  have hChunk :
+      runOps [StackOp.swap, StackOp.opcode "OP_ADD"]
+          ({ stack := [.vBigint 3, .vBigint 4, .vBigint 9] } : StackState)
+        = .ok ({ stack := [.vBigint 7, .vBigint 9] } : StackState) := by
+    rw [runOps_cons_nonIf_eq StackOp.swap [StackOp.opcode "OP_ADD"]
+          ({ stack := [.vBigint 3, .vBigint 4, .vBigint 9] } : StackState)
+          (fun _ _ h => StackOp.noConfusion h), stepNonIf_swap]
+    show runOps [StackOp.opcode "OP_ADD"]
+        ({ stack := [.vBigint 4, .vBigint 3, .vBigint 9] } : StackState) = _
+    rw [runOps_binopOpcode_bigint_cons_step "OP_ADD" []
+          ({ stack := [.vBigint 4, .vBigint 3, .vBigint 9] } : StackState) 3 4 [.vBigint 9]
+          (Or.inl rfl) rfl]
+    simp only [binOpcodeResultInt, runOps_nil, StackState.push]
+    rfl
+  rw [hChunk]
+  -- Run the trailing OP_NEGATE via the unary cons-step.
+  show runOps [StackOp.opcode "OP_NEGATE"]
+      ({ stack := [.vBigint 7, .vBigint 9] } : StackState) = _
+  rw [runOps_unaryOpcode_bigint_cons_step []
+        ({ stack := [.vBigint 7, .vBigint 9] } : StackState)
+        7 [.vBigint 9] rfl]
+  simp only [runOps_nil, StackState.push]
+
 /-- Convenience: run a program's named method against an initial state. -/
 def runMethod (p : StackProgram) (methodName : String) (initial : StackState) :
     EvalResult StackState :=

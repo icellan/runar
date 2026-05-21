@@ -2247,5 +2247,116 @@ theorem callBuiltin_log2_non_positive_errors :
      | _ => false) = true := by
   native_decide
 
+/-! ### Wave 32 Deliverable A — per-binding SUCCESS cons-step (ANF side)
+
+The success-direction analogue of wave 30's failure cons-step.  When the
+HEAD operands of an emittable-arith binding both resolve to `.vBigint`,
+`evalBinOp` reduces (its `"+"`/`"-"`/`"*"` arms `return .vBigint (a ⊙ b)`),
+so the `do`-bind in `evalBindings` succeeds and the whole `evalBindings`
+of the cons UNFOLDS to `evalBindings` of `rest` on the state extended with
+the new binding.  This needs ONLY the two head operands' bigint-ness, not
+whole-state `taggedAllBigint`.
+
+`arithBinResultBigint` / `arithUnaryResultBigint` are local result helpers
+(the AgreesA3 `emittableBinOpResult` / `emittableUnaryOpResult` post-date
+this module — these are their definitional twins so the cons-step is stated
+without a forward reference). -/
+
+/-- The bigint result of an emittable arith binOp on two bigint operands. -/
+def arithBinResultBigint (op : String) (a b : Int) : Int :=
+  match op with
+  | "+" => a + b
+  | "-" => a - b
+  | "*" => a * b
+  | _   => 0
+
+/-- The bigint result of the emittable arith unaryOp (`"-"` ⇒ negate). -/
+def arithUnaryResultBigint (op : String) (a : Int) : Int :=
+  match op with
+  | "-" => -a
+  | _   => 0
+
+/-- For an emittable arith binOp on two bigint operands, `evalBinOp`
+returns the bigint result directly (the `"+"`/`"-"`/`"*"` arms). -/
+theorem evalBinOp_emittable_bigint
+    (op : String) (a b : Int) (rt : Option String)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*") :
+    evalBinOp op (.vBigint a) (.vBigint b) rt
+      = .ok (.vBigint (arithBinResultBigint op a b)) := by
+  rcases hEmit with h | h | h <;> subst h <;> rfl
+
+/-- For the emittable arith unaryOp (`"-"`) on a bigint operand,
+`evalUnaryOp` returns the negated bigint. -/
+theorem evalUnaryOp_emittable_bigint
+    (a : Int) (rt : Option String) :
+    evalUnaryOp "-" (.vBigint a) rt
+      = .ok (.vBigint (arithUnaryResultBigint "-" a)) := rfl
+
+/-- **Wave 32 Deliverable A — ANF binOp SUCCESS cons-step.**
+
+When the head operands `l`, `r` resolve (under `anfSt`) to `.vBigint a` /
+`.vBigint b` and `op` is emittable, `evalBindings` of the binding cons
+advances by exactly one binding: it equals `evalBindings` of `rest` on the
+state extended with `name ↦ .vBigint (arithBinResultBigint op a b)`. -/
+theorem evalBindings_binOp_bigint_cons_step
+    (anfSt : State) (name op l r : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (a b : Int) (rest : List ANFBinding)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*")
+    (hl : anfSt.resolveRef l = some (.vBigint a))
+    (hr : anfSt.resolveRef r = some (.vBigint b)) :
+    evalBindings anfSt (.mk name (.binOp op l r rt) src :: rest)
+      = evalBindings (anfSt.addBinding name (.vBigint (arithBinResultBigint op a b))) rest := by
+  have hVal : evalValue anfSt (.binOp op l r rt)
+      = .ok (.vBigint (arithBinResultBigint op a b), anfSt) := by
+    simp only [evalValue, lookupRef, hl, hr, bind, Except.bind,
+      evalBinOp_emittable_bigint op a b rt hEmit]
+    rfl
+  show evalBindings anfSt (.mk name (.binOp op l r rt) src :: rest) = _
+  simp only [evalBindings, hVal, bind, Except.bind]
+
+/-- **Wave 32 Deliverable A (unary peer) — ANF unaryOp SUCCESS cons-step.** -/
+theorem evalBindings_unary_bigint_cons_step
+    (anfSt : State) (name operand : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (a : Int) (rest : List ANFBinding)
+    (hOperand : anfSt.resolveRef operand = some (.vBigint a)) :
+    evalBindings anfSt (.mk name (.unaryOp "-" operand rt) src :: rest)
+      = evalBindings (anfSt.addBinding name (.vBigint (arithUnaryResultBigint "-" a))) rest := by
+  have hVal : evalValue anfSt (.unaryOp "-" operand rt)
+      = .ok (.vBigint (arithUnaryResultBigint "-" a), anfSt) := by
+    simp only [evalValue, lookupRef, hOperand, bind, Except.bind,
+      evalUnaryOp_emittable_bigint a rt]
+    rfl
+  show evalBindings anfSt (.mk name (.unaryOp "-" operand rt) src :: rest) = _
+  simp only [evalBindings, hVal, bind, Except.bind]
+
+/-- **Wave 32 — MANDATORY smoke A.** A concrete two-binding emittable-arith
+body `[t0 = p0 + p1; t1 = -t0]` with bigint params reduces by one binding
+(binOp cons-step), and then again (unary cons-step) to the empty-tail
+`.ok` state carrying the final binding.  This pins both cons-steps to the
+actual reduction (not a dodge). -/
+theorem wave32_anf_cons_step_smoke :
+    evalBindings
+        { params := [("p0", .vBigint 3), ("p1", .vBigint 4)] }
+        [.mk "t0" (.binOp "+" "p0" "p1" none) none,
+         .mk "t1" (.unaryOp "-" "t0" none) none]
+      = .ok
+          ((({ params := [("p0", .vBigint 3), ("p1", .vBigint 4)] } : State).addBinding
+              "t0" (.vBigint 7)).addBinding "t1" (.vBigint (-7))) := by
+  rw [evalBindings_binOp_bigint_cons_step
+        { params := [("p0", .vBigint 3), ("p1", .vBigint 4)] }
+        "t0" "+" "p0" "p1" none none 3 4
+        [.mk "t1" (.unaryOp "-" "t0" none) none] (Or.inl rfl) rfl rfl]
+  show evalBindings
+      (({ params := [("p0", .vBigint 3), ("p1", .vBigint 4)] } : State).addBinding
+        "t0" (.vBigint 7))
+      [.mk "t1" (.unaryOp "-" "t0" none) none] = _
+  rw [evalBindings_unary_bigint_cons_step
+        (({ params := [("p0", .vBigint 3), ("p1", .vBigint 4)] } : State).addBinding
+            "t0" (.vBigint 7))
+        "t1" "t0" none none 7 [] rfl]
+  simp only [evalBindings, arithUnaryResultBigint]
+
 end Eval
 end RunarVerification.ANF
