@@ -2390,6 +2390,60 @@ mandate.
 > rested effort, not chased at the tail of a long session, precisely
 > because the remaining steps edit core model files where a mistake is
 > expensive.
+
+### 11.5 The real blocker (wave 32/33): a `WF.ANF` type-fidelity gap
+
+Wave 32 landed the per-binding SUCCESS lockstep (both directions of the
+lockstep now exist). Wave 33 attempted the walk induction + retirement
+and found the genuine final wall — **not** more substrate, but a
+**modeling gap**:
+
+**The `.vBool`-operand divergence.** For an emittable binOp whose
+operand is `.vBool`:
+* ANF side — `evalBinOp "+"` (`ANF/Eval.lean:188`) has no `.vBool` arm,
+  so it falls through to `.error` → `evalBindings` `isNone`.
+* Stack side — `asInt? (.vBool b) = some (if b then 1 else 0)`
+  (`Stack/Eval.lean:87`): the Script VM **coerces bool to int**, so
+  `OP_ADD` succeeds → `runOps` `isSome`.
+* Hence `successAgrees` = `False ↔ True` = **FALSE**.
+
+Nothing available at the dispatch excludes a `.vBool` operand:
+`emittableArithChainReady` is structural (depths / last-uses /
+freshness, never operand values); `agreesTagged` only equates the two
+sides' values (both can be `.vBool`); and **`WF.ANF` (`ANF/WF.lean`)
+is purely structural — SSA / scope / name-uniqueness, with NO type
+information**. The real Runar type-checker rejects `bool + int`, but the
+Lean `WF.ANF` predicate does not model that rejection. So `WF.ANF` is
+**weaker than the compiler's actual acceptance criterion** (which
+includes type-checking), and the arith axiom's conclusion is genuinely
+false on the ill-typed bool-operand programs `WF.ANF` admits.
+
+This is a second false-as-stated finding (after wave 24's misalignment),
+and a deeper one: it is a real semantic divergence between the ANF
+interpreter and the Script VM on bool operands, masked only by a type
+checker the Lean model does not yet capture.
+
+**To close it — a `WF.ANF` type-fidelity extension (a distinct
+initiative, not substrate plumbing):**
+* Extend `WF.ANF` (or add a companion `WellTyped.ANF`) with a type
+  system mirroring the Runar type-checker, and prove the soundness
+  lemma "in a well-typed program, every emittable-arith operand
+  evaluates to `.vBigint`" (so `.vBool` is unreachable in reachable
+  aligned states). Then the walk's success branch is total and the
+  retirement composes.
+* This is multi-file (`ANF/WF.lean` + soundness in `ANF/Eval.lean`) and
+  categorically larger than the Stage C / lockstep substrate. It is the
+  correct next initiative for the arith retirement, and the same
+  type-fidelity invariant unblocks every other input-reading family.
+
+**Status:** the success + failure locksteps, the composer, the M2
+capstone, M3/M4/shape, and the wave-25 alignment soundness fix are all
+banked and sound. The first retirement is blocked solely on the
+`WF.ANF` type-fidelity extension above. The arith axiom remains an
+axiom precisely because its conclusion is false on the ill-typed
+inputs `WF.ANF` currently admits — retiring it requires teaching the
+model the type-checker's guarantee, not more compiler-correctness
+lemmas.
 3. **Remaining arith holes** (separate substrate, then re-flip): the
    `(≥2,≥2)` consume depth combo (needs a `loadRefLive`-consume
    depth-general singleton in `Stack/Agrees.lean`) and non-emittable
