@@ -13407,5 +13407,555 @@ theorem wave28_general_lockstep_capstone_smoke
     sm' stkFinal List.mem_cons_self rfl hUniq hArith
     wave28_noPreimage wave28_noCode wave28_noTerminalAssert wave28_noDeserialize
 
+/-! ### Wave 30 (option B) — the both-fail leg / failure lockstep
+
+Wave 28 closes the SUCCESS branch of the consume-arith fragment: under
+`taggedAllBigint` (every aligned slot a bigint) the lockstep builds the
+full `structuralArithConsumeBody` and both evaluators succeed.  The
+wave-29 BLOCK is that the M2 capstone needs `taggedAllBigint`, which the
+retirement dispatch cannot supply (not decidable on a symbolic
+`initialAnf`, not derivable from `agreesTagged` / `WF`).
+
+Option B removes the dependency by handling the NON-bigint case directly.
+`taggedAllBigint` (all SLOTS bigint) is sufficient-but-not-necessary for
+success — a non-bigint slot the body never reads is harmless — so the
+correct structure is a per-binding FAILURE LOCKSTEP: at the first binding
+whose operand value is not a bigint, BOTH evaluators fail at the same
+binding, so the success bits still match (`False ↔ False`).
+
+The three substrate pieces, all add-only:
+
+* **ANF-side failure** (`evalBindings_binOp_nonBigint_isNone` /
+  `_unary_`): an emittable arith binding whose operand resolves to a
+  non-bigint value makes `evalValue` `.error` (the `evalBinOp` /
+  `evalUnaryOp` match falls through to a catch-all `.error` on non-bigint),
+  and `evalBindings` of the whole `binding :: rest` body inherits the
+  error (`isNone`) regardless of `rest`.
+* **Stack-side failure** (`runOps_binopOpcode_nonInt_isNone` /
+  `_unaryOpcode_`): the lowered emittable arith opcode on a stack whose
+  relevant top operand is non-int makes `runOpcode` (= `liftIntBin` /
+  `liftIntUnary`) `.error`, and `runOps` of the whole op list inherits the
+  error (`isNone`) regardless of the trailing ops.
+* **The failure lockstep** (`successAgrees_arith_consume_first_binOp_fail`
+  / `_unary_`): under `agreesTagged` the top stack value equals the head
+  operand value on the ANF side; when that value is non-bigint both sides
+  fail at the first binding, so `successAgrees` holds as `False ↔ False`.
+
+The values used here are `RunarVerification.ANF.Eval.Value`; the same
+type backs both the ANF state and the runtime stack.  `.vBytes` / `.vOpaque`
+/ `.vThis` are the non-bigint, non-bool witnesses that fail BOTH
+`evalBinOp` (catch-all) and `Stack.Eval.asInt?` (`none`). -/
+
+/-- A reusable `popN s 2` reduction for a two-deep stack.  `Stack.Sim`'s
+`popN_two_local` is `private`, and `Stack.Peephole.popN_two_cons` is not
+in this module's import closure, so we prove the (one-line) reduction
+locally for the failure lemmas below. -/
+private theorem popN_two_consA3
+    (s : StackState) (b a : RunarVerification.ANF.Eval.Value)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hs : s.stack = b :: a :: rest) :
+    Stack.Eval.popN s 2 = .ok ([b, a], { s with stack := rest }) := by
+  unfold Stack.Eval.popN StackState.pop?
+  rw [hs]
+  simp only [Stack.Eval.popN, StackState.pop?]
+
+/-- A reusable `pop? s` reduction for a one-deep stack (the unary case). -/
+private theorem pop_one_consA3
+    (s : StackState) (a : RunarVerification.ANF.Eval.Value)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hs : s.stack = a :: rest) :
+    s.pop? = some (a, { s with stack := rest }) := by
+  unfold StackState.pop?
+  rw [hs]
+
+/-! #### ANF-side failure -/
+
+/-- **Wave 30 — ANF-side `binOp` failure on a non-bigint left operand.**
+
+For an emittable arith binOp (`"+"` / `"-"` / `"*"`) whose LEFT operand
+resolves to a non-bigint, non-bool value, `evalBinOp` falls through to its
+catch-all `.error` arm, so `evalValue` is `.error`, and `evalBindings` of
+the whole `binding :: rest` body is `.error` (`toOption.isNone`) — the
+error short-circuits the `do`-bind before `rest` is ever reached. -/
+theorem evalBindings_binOp_nonBigint_left_isNone
+    (anfSt : State) (name op l r : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (bl br : RunarVerification.ANF.Eval.Value)
+    (rest : List ANFBinding)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*")
+    (hl : anfSt.resolveRef l = some bl)
+    (hr : anfSt.resolveRef r = some br)
+    (hNonBigintL : ∀ i : Int, bl ≠ .vBigint i) :
+    (RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.binOp op l r rt) src :: rest)).toOption.isNone := by
+  -- The left operand is non-bigint / non-bool ⇒ `evalBinOp` catch-all `.error`.
+  have hBinOp : ∃ e, RunarVerification.ANF.Eval.evalBinOp op bl br rt = .error e := by
+    cases bl with
+    | vBigint i => exact absurd rfl (hNonBigintL i)
+    | vBool b =>
+        rcases hEmit with h | h | h <;> subst h <;>
+          (cases br <;> exact ⟨_, rfl⟩)
+    | vBytes b =>
+        rcases hEmit with h | h | h <;> subst h <;>
+          (cases br <;> exact ⟨_, rfl⟩)
+    | vOpaque b =>
+        rcases hEmit with h | h | h <;> subst h <;>
+          (cases br <;> exact ⟨_, rfl⟩)
+    | vThis =>
+        rcases hEmit with h | h | h <;> subst h <;>
+          (cases br <;> exact ⟨_, rfl⟩)
+  obtain ⟨e, hBinOp⟩ := hBinOp
+  have hVal : RunarVerification.ANF.Eval.evalValue anfSt (.binOp op l r rt) = .error e := by
+    simp only [RunarVerification.ANF.Eval.evalValue,
+      RunarVerification.ANF.Eval.lookupRef, hl, hr, bind, Except.bind, hBinOp]
+  show (RunarVerification.ANF.Eval.evalBindings anfSt
+      (.mk name (.binOp op l r rt) src :: rest)).toOption.isNone
+  simp only [RunarVerification.ANF.Eval.evalBindings, hVal, bind, Except.bind]
+  rfl
+
+/-- **Wave 30 — ANF-side `unaryOp` failure on a non-bigint operand.**
+
+For the emittable arith unaryOp (`"-"` = NEGATE) whose operand resolves
+to a non-bigint value, `evalUnaryOp` falls through to its catch-all
+`.error` arm (the `"-"` arm requires `.vBigint`), so `evalBindings` of the
+whole body is `.error` (`toOption.isNone`). -/
+theorem evalBindings_unary_nonBigint_isNone
+    (anfSt : State) (name operand : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (ov : RunarVerification.ANF.Eval.Value)
+    (rest : List ANFBinding)
+    (hOperand : anfSt.resolveRef operand = some ov)
+    (hNonBigint : ∀ i : Int, ov ≠ .vBigint i) :
+    (RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.unaryOp "-" operand rt) src :: rest)).toOption.isNone := by
+  have hUnary : ∃ e, RunarVerification.ANF.Eval.evalUnaryOp "-" ov rt = .error e := by
+    cases ov with
+    | vBigint i => exact absurd rfl (hNonBigint i)
+    | vBool b => exact ⟨_, rfl⟩
+    | vBytes b => exact ⟨_, rfl⟩
+    | vOpaque b => exact ⟨_, rfl⟩
+    | vThis => exact ⟨_, rfl⟩
+  obtain ⟨e, hUnary⟩ := hUnary
+  have hVal : RunarVerification.ANF.Eval.evalValue anfSt (.unaryOp "-" operand rt) = .error e := by
+    simp only [RunarVerification.ANF.Eval.evalValue,
+      RunarVerification.ANF.Eval.lookupRef, hOperand, bind, Except.bind, hUnary]
+  show (RunarVerification.ANF.Eval.evalBindings anfSt
+      (.mk name (.unaryOp "-" operand rt) src :: rest)).toOption.isNone
+  simp only [RunarVerification.ANF.Eval.evalBindings, hVal, bind, Except.bind]
+  rfl
+
+/-! #### Stack-side failure -/
+
+/-- The three non-bigint, non-bool stack witnesses (`.vBytes` / `.vOpaque`
+/ `.vThis`) all give `Stack.Eval.asInt? = none`, the failure trigger for
+`liftIntBin` / `liftIntUnary`.  An ANF-side non-bigint value is one of
+these three exactly when it is not a `.vBool` either; the failure-leg
+caller restricts to that case (a `.vBool` is `asInt?`-coercible on the
+stack, so it would NOT fail the stack op — it is excluded from the leg). -/
+theorem asInt_none_of_vBytes (bs : ByteArray) :
+    Stack.Eval.asInt? (.vBytes bs) = none := rfl
+theorem asInt_none_of_vOpaque (bs : ByteArray) :
+    Stack.Eval.asInt? (.vOpaque bs) = none := rfl
+theorem asInt_none_of_vThis :
+    Stack.Eval.asInt? (.vThis) = none := rfl
+
+/-- **Wave 30 — `liftIntBin` fails when the top operand is non-int.**
+
+`liftIntBin` pops two (`[b, a]`, `b` = top), then requires both
+`asInt? a` and `asInt? b` to be `some`.  When the top `b` is non-int
+(`asInt? b = none`) the inner match falls to the `.error` arm regardless
+of `a`. -/
+theorem liftIntBin_nonInt_top_isError
+    (s : StackState) (f : Int → Int → RunarVerification.ANF.Eval.Value)
+    (b a : RunarVerification.ANF.Eval.Value)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hStk : s.stack = b :: a :: rest)
+    (hNonInt : Stack.Eval.asInt? b = none) :
+    ∃ e, Stack.Eval.liftIntBin s f = .error e := by
+  unfold Stack.Eval.liftIntBin
+  rw [popN_two_consA3 s b a rest hStk]
+  simp only [hNonInt]
+  cases Stack.Eval.asInt? a <;> exact ⟨_, rfl⟩
+
+/-- **Wave 30 — `liftIntUnary` fails when the operand is non-int.** -/
+theorem liftIntUnary_nonInt_isError
+    (s : StackState) (f : Int → RunarVerification.ANF.Eval.Value)
+    (v : RunarVerification.ANF.Eval.Value)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hStk : s.stack = v :: rest)
+    (hNonInt : Stack.Eval.asInt? v = none) :
+    ∃ e, Stack.Eval.liftIntUnary s f = .error e := by
+  unfold Stack.Eval.liftIntUnary
+  rw [pop_one_consA3 s v rest hStk]
+  simp only [hNonInt]
+  exact ⟨_, rfl⟩
+
+/-- For the three emittable binops the lowered opcode is one of
+`OP_ADD` / `OP_SUB` / `OP_MUL`, each `liftIntBin`-shaped, so it fails on a
+non-int top.  Stated as a `runOpcode` error so it composes with `runOps`. -/
+theorem runOpcode_binopOpcode_emittable_nonInt_top_isError
+    (op : String) (rt : Option String) (s : StackState)
+    (b a : RunarVerification.ANF.Eval.Value)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*")
+    (hStk : s.stack = b :: a :: rest)
+    (hNonInt : Stack.Eval.asInt? b = none) :
+    ∃ e, Stack.Eval.runOpcode (Stack.Lower.binopOpcode op rt) s = .error e := by
+  rcases hEmit with h | h | h <;> subst h
+  · rw [show Stack.Lower.binopOpcode "+" rt = "OP_ADD" from rfl,
+        Stack.Sim.runOpcode_ADD_def]
+    exact liftIntBin_nonInt_top_isError s _ b a rest hStk hNonInt
+  · rw [show Stack.Lower.binopOpcode "-" rt = "OP_SUB" from rfl,
+        Stack.Sim.runOpcode_SUB_def]
+    exact liftIntBin_nonInt_top_isError s _ b a rest hStk hNonInt
+  · rw [show Stack.Lower.binopOpcode "*" rt = "OP_MUL" from rfl,
+        Stack.Sim.runOpcode_MUL_def]
+    exact liftIntBin_nonInt_top_isError s _ b a rest hStk hNonInt
+
+/-- The emittable unary opcode is `OP_NEGATE` (`liftIntUnary`-shaped). -/
+theorem runOpcode_unaryOpcode_emittable_nonInt_isError
+    (s : StackState) (v : RunarVerification.ANF.Eval.Value)
+    (rest : List RunarVerification.ANF.Eval.Value)
+    (hStk : s.stack = v :: rest)
+    (hNonInt : Stack.Eval.asInt? v = none) :
+    ∃ e, Stack.Eval.runOpcode (Stack.Lower.unaryOpcode "-") s = .error e := by
+  rw [show Stack.Lower.unaryOpcode "-" = "OP_NEGATE" from rfl,
+      Stack.Sim.runOpcode_NEGATE_def]
+  exact liftIntUnary_nonInt_isError s _ v rest hStk hNonInt
+
+/-- `runOps` short-circuits to `.error` (`isNone`) when the FIRST op is an
+opcode that errors on the current stack, regardless of the trailing ops.
+This is the stack-side dual of the ANF `do`-bind short-circuit. -/
+theorem runOps_opcode_error_head_isNone
+    (code : String) (rest : List StackOp) (s : StackState)
+    (e : RunarVerification.ANF.Eval.EvalError)
+    (hErr : Stack.Eval.runOpcode code s = .error e) :
+    (runOps (.opcode code :: rest) s).toOption.isNone := by
+  -- `.opcode code` is not an `.ifOp`, so `runOps` reduces via `stepNonIf`.
+  show (runOps (.opcode code :: rest) s).toOption.isNone
+  unfold runOps
+  rw [Stack.Eval.stepNonIf, hErr]
+  rfl
+
+/-- **Wave 30 — stack-side `binOp` failure, whole op list.**
+
+When the emittable arith op is the head opcode and the top stack operand
+is non-int, `runOps` of the full op list is `.error` (`isNone`). -/
+theorem runOps_binopOpcode_emittable_nonInt_top_isNone
+    (op : String) (rt : Option String) (rest : List StackOp) (s : StackState)
+    (b a : RunarVerification.ANF.Eval.Value)
+    (stkRest : List RunarVerification.ANF.Eval.Value)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*")
+    (hStk : s.stack = b :: a :: stkRest)
+    (hNonInt : Stack.Eval.asInt? b = none) :
+    (runOps (.opcode (Stack.Lower.binopOpcode op rt) :: rest) s).toOption.isNone := by
+  obtain ⟨e, hErr⟩ :=
+    runOpcode_binopOpcode_emittable_nonInt_top_isError op rt s b a stkRest hEmit hStk hNonInt
+  exact runOps_opcode_error_head_isNone (Stack.Lower.binopOpcode op rt) rest s e hErr
+
+/-- **Wave 30 — stack-side `unaryOp` failure, whole op list.** -/
+theorem runOps_unaryOpcode_emittable_nonInt_isNone
+    (rest : List StackOp) (s : StackState)
+    (v : RunarVerification.ANF.Eval.Value)
+    (stkRest : List RunarVerification.ANF.Eval.Value)
+    (hStk : s.stack = v :: stkRest)
+    (hNonInt : Stack.Eval.asInt? v = none) :
+    (runOps (.opcode (Stack.Lower.unaryOpcode "-") :: rest) s).toOption.isNone := by
+  obtain ⟨e, hErr⟩ :=
+    runOpcode_unaryOpcode_emittable_nonInt_isError s v stkRest hStk hNonInt
+  exact runOps_opcode_error_head_isNone (Stack.Lower.unaryOpcode "-") rest s e hErr
+
+/-! #### The failure lockstep — both sides fail at the first binding
+
+`agreesTagged` ties the stack top to the head operand's ANF value: the
+positional alignment means `stkSt.stack`'s top equals the value the head
+slot resolves to.  When the head operand is non-bigint AND non-bool, both
+evaluators fail at the first binding (the ANF `evalBinOp` catch-all and
+the stack `liftIntBin` non-int check), so `successAgrees` is `False ↔ False`.
+
+The leg restricts the non-bigint value to be ALSO non-bool: a `.vBool`
+operand fails `evalBinOp` (the `"+"`/`"-"`/`"*"` arms need `.vBigint`) but
+NOT the stack op (`Stack.Eval.asInt?` coerces `.vBool` to 0/1).  Such a
+value would make the two sides DISAGREE — but it cannot arise in the
+fragment: the consume-arith bindings only thread bigint results, and the
+entry params of an arith method are bigint-typed, so a `.vBool` operand is
+outside `emittableArithChainReady`'s reachable states.  The non-bool
+restriction is exactly the both-fail witness class (`.vBytes` / `.vOpaque`
+/ `.vThis`). -/
+
+/-- A non-bigint, non-bool ANF value gives `Stack.Eval.asInt? = none`
+(the stack-side failure trigger): the only `asInt?`-coercible non-bigint
+value is `.vBool`, which is excluded. -/
+theorem asInt_none_of_nonBigint_nonBool
+    (v : RunarVerification.ANF.Eval.Value)
+    (hNonBigint : ∀ i : Int, v ≠ .vBigint i)
+    (hNonBool : ∀ b : Bool, v ≠ .vBool b) :
+    Stack.Eval.asInt? v = none := by
+  cases v with
+  | vBigint i => exact absurd rfl (hNonBigint i)
+  | vBool b => exact absurd rfl (hNonBool b)
+  | vBytes b => rfl
+  | vOpaque b => rfl
+  | vThis => rfl
+
+/-- The head operand value pinned by `agreesTagged` on a two-deep
+alignment: the stack decomposes as `v0 :: v1 :: restStk` with `v0` the
+value the head slot `(l, k_l)` resolves to via `lookupAnfByKind`. -/
+theorem agreesTagged_head_two_stack_value
+    (l r : String) (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((l, k_l) :: (r, k_r) :: tsm_rest) anfSt stkSt) :
+    ∃ v0 v1 restStk,
+      stkSt.stack = v0 :: v1 :: restStk ∧ lookupAnfByKind anfSt (l, k_l) = some v0 := by
+  have hAlign : taggedStackAligned ((l, k_l) :: (r, k_r) :: tsm_rest)
+      anfSt stkSt.stack := hAgrees.1
+  match hCases : stkSt.stack with
+  | [] =>
+      rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+      exact absurd hAlign (by simp)
+  | [_] =>
+      rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+      obtain ⟨_, hTail⟩ := hAlign
+      unfold taggedStackAligned at hTail
+      exact absurd hTail (by simp)
+  | v0 :: v1 :: restStk =>
+      refine ⟨v0, v1, restStk, rfl, ?_⟩
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      exact hAlign.1
+
+/-- The head operand value pinned by `agreesTagged` on a one-deep
+alignment (unary case). -/
+theorem agreesTagged_head_one_stack_value
+    (operand : String) (k_op : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((operand, k_op) :: tsm_rest) anfSt stkSt) :
+    ∃ v0 restStk,
+      stkSt.stack = v0 :: restStk ∧ lookupAnfByKind anfSt (operand, k_op) = some v0 := by
+  have hAlign : taggedStackAligned ((operand, k_op) :: tsm_rest)
+      anfSt stkSt.stack := hAgrees.1
+  match hCases : stkSt.stack with
+  | [] =>
+      rw [hCases] at hAlign; unfold taggedStackAligned at hAlign
+      exact absurd hAlign (by simp)
+  | v0 :: restStk =>
+      refine ⟨v0, restStk, rfl, ?_⟩
+      rw [hCases] at hAlign
+      unfold taggedStackAligned at hAlign
+      exact hAlign.1
+
+/-- **Wave 30 — failure lockstep at the first binary binding.**
+
+Under `agreesTagged`, the stack top equals the head operand value the
+`(l, k_l)` slot resolves to via `lookupAnfByKind`.  The operand
+CORRESPONDENCE — that the ANF evaluator's `resolveRef l` reads the SAME
+slot value — is supplied as `hHeadCorr` (`resolveRef l = lookupAnfByKind
+(l, k_l)`).  This holds in the consume-arith fragment: at the binding
+where the head operand is first read, `l` is a param / earlier-temp with
+no shadowing binding, so `resolveRef` and the kind-specific lookup agree.
+When that shared value is non-bigint AND non-bool, BOTH evaluators fail at
+this first binding, so `successAgrees` holds as `False ↔ False`. -/
+theorem successAgrees_arith_consume_first_binOp_fail
+    (anfSt : State) (stkSt : StackState)
+    (name op l r : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (k_l k_r : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfRest : List ANFBinding) (stkRest : List StackOp)
+    (hEmit : op = "+" ∨ op = "-" ∨ op = "*")
+    (hAgrees : agreesTagged ((l, k_l) :: (r, k_r) :: tsm_rest) anfSt stkSt)
+    (hHeadCorr : anfSt.resolveRef l = lookupAnfByKind anfSt (l, k_l))
+    (hNonBigint : ∀ (i : Int) (v : RunarVerification.ANF.Eval.Value),
+      lookupAnfByKind anfSt (l, k_l) = some v → v ≠ .vBigint i)
+    (hNonBool : ∀ (b : Bool) (v : RunarVerification.ANF.Eval.Value),
+      lookupAnfByKind anfSt (l, k_l) = some v → v ≠ .vBool b)
+    (br : RunarVerification.ANF.Eval.Value)
+    (hResolveR : anfSt.resolveRef r = some br) :
+    -- Definitionally `successAgrees a b` (= `a.toOption.isSome ↔ b.toOption.isSome`);
+    -- `successAgrees` itself lives in `Pipeline`, which post-dates this module, so
+    -- we state the unfolded iff (the retirement dispatch consumes it through the
+    -- `successAgrees` definitional unfold).
+    ((RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.binOp op l r rt) src :: anfRest)).toOption.isSome
+      ↔ (runOps (.opcode (Stack.Lower.binopOpcode op rt) :: stkRest) stkSt).toOption.isSome) := by
+  -- Stack top = the head slot value `v0` from the alignment.
+  obtain ⟨v0, v1, restStk, hStk, hLookup⟩ :=
+    agreesTagged_head_two_stack_value l r k_l k_r tsm_rest anfSt stkSt hAgrees
+  have hResolveL : anfSt.resolveRef l = some v0 := by rw [hHeadCorr]; exact hLookup
+  have hNB : ∀ i : Int, v0 ≠ .vBigint i := fun i => hNonBigint i v0 hLookup
+  have hNBool : ∀ b : Bool, v0 ≠ .vBool b := fun b => hNonBool b v0 hLookup
+  have hNonInt : Stack.Eval.asInt? v0 = none :=
+    asInt_none_of_nonBigint_nonBool v0 hNB hNBool
+  -- ANF side fails.
+  have hANF :
+      (RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.binOp op l r rt) src :: anfRest)).toOption.isNone :=
+    evalBindings_binOp_nonBigint_left_isNone anfSt name op l r rt src v0 br anfRest
+      hEmit hResolveL hResolveR hNB
+  -- Stack side fails.
+  have hStack :
+      (runOps (.opcode (Stack.Lower.binopOpcode op rt) :: stkRest) stkSt).toOption.isNone :=
+    runOps_binopOpcode_emittable_nonInt_top_isNone op rt stkRest stkSt v0 v1 restStk
+      hEmit hStk hNonInt
+  -- Both sides `isNone`, so the iff is `False ↔ False`.
+  rw [Option.isNone_iff_eq_none] at hANF hStack
+  simp only [hANF, hStack, Option.isSome_none]
+
+/-- **Wave 30 — failure lockstep at the first unary (NEGATE) binding.**
+Conclusion is the unfolded `successAgrees` iff (see the binOp peer). -/
+theorem successAgrees_arith_consume_first_unary_fail
+    (anfSt : State) (stkSt : StackState)
+    (name operand : String) (rt : Option String)
+    (src : Option RunarVerification.ANF.SourceLoc)
+    (k_op : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfRest : List ANFBinding) (stkRest : List StackOp)
+    (hAgrees : agreesTagged ((operand, k_op) :: tsm_rest) anfSt stkSt)
+    (hHeadCorr : anfSt.resolveRef operand = lookupAnfByKind anfSt (operand, k_op))
+    (hNonBigint : ∀ (i : Int) (v : RunarVerification.ANF.Eval.Value),
+      lookupAnfByKind anfSt (operand, k_op) = some v → v ≠ .vBigint i)
+    (hNonBool : ∀ (b : Bool) (v : RunarVerification.ANF.Eval.Value),
+      lookupAnfByKind anfSt (operand, k_op) = some v → v ≠ .vBool b) :
+    ((RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.unaryOp "-" operand rt) src :: anfRest)).toOption.isSome
+      ↔ (runOps (.opcode (Stack.Lower.unaryOpcode "-") :: stkRest) stkSt).toOption.isSome) := by
+  obtain ⟨v0, restStk, hStk, hLookup⟩ :=
+    agreesTagged_head_one_stack_value operand k_op tsm_rest anfSt stkSt hAgrees
+  have hResolve : anfSt.resolveRef operand = some v0 := by rw [hHeadCorr]; exact hLookup
+  have hNB : ∀ i : Int, v0 ≠ .vBigint i := fun i => hNonBigint i v0 hLookup
+  have hNBool : ∀ b : Bool, v0 ≠ .vBool b := fun b => hNonBool b v0 hLookup
+  have hNonInt : Stack.Eval.asInt? v0 = none :=
+    asInt_none_of_nonBigint_nonBool v0 hNB hNBool
+  have hANF :
+      (RunarVerification.ANF.Eval.evalBindings anfSt
+        (.mk name (.unaryOp "-" operand rt) src :: anfRest)).toOption.isNone :=
+    evalBindings_unary_nonBigint_isNone anfSt name operand rt src v0 anfRest hResolve hNB
+  have hStack :
+      (runOps (.opcode (Stack.Lower.unaryOpcode "-") :: stkRest) stkSt).toOption.isNone :=
+    runOps_unaryOpcode_emittable_nonInt_isNone stkRest stkSt v0 restStk hStk hNonInt
+  rw [Option.isNone_iff_eq_none] at hANF hStack
+  simp only [hANF, hStack, Option.isSome_none]
+
+/-! ### Wave 30 — MANDATORY smoke tests (both branches)
+
+The NEW PIECE is the non-bigint BOTH-FAIL smoke: a concrete emittable-arith
+body with a non-bigint operand, entry `agreesTagged`, where BOTH
+`evalBindings` and the stack `runOps` are `isNone`, so the success bits
+match (`False ↔ False`).  We prove BOTH `isNone` facts CONCRETELY and then
+fire `successAgrees_arith_consume_first_binOp_fail` to assemble the iff.
+
+The bigint branch is the existing wave-28 success path
+(`wave28_general_lockstep_capstone_smoke`, both sides `isSome`); a thin
+re-statement is recorded at the end so both branches are pinned in this
+module. -/
+
+/-- Concrete ANF state for the non-bigint smoke: param `p0` is a
+NON-bigint (`.vBytes #[1]`), `p1` a bigint.  No bindings (so `resolveRef`
+agrees with the param lookup at the head). -/
+private def wave30NonBigintAnf : State :=
+  { params := [("p0", .vBytes (ByteArray.mk #[1])), ("p1", .vBigint 5)] }
+
+/-- Concrete runtime stack aligned with `wave30NonBigintAnf`: top is the
+non-bigint `.vBytes #[1]` (= `p0`), second is `.vBigint 5` (= `p1`). -/
+private def wave30NonBigintStk : StackState :=
+  { stack := [.vBytes (ByteArray.mk #[1]), .vBigint 5] }
+
+/-- Entry alignment for the non-bigint smoke (params `p0`, `p1`). -/
+private theorem wave30_nonBigint_agreesTagged :
+    agreesTagged [("p0", .param), ("p1", .param)]
+      wave30NonBigintAnf wave30NonBigintStk := by
+  refine ⟨?_, rfl, rfl⟩
+  show taggedStackAligned [("p0", .param), ("p1", .param)]
+    wave30NonBigintAnf wave30NonBigintStk.stack
+  refine ⟨?_, ?_, ?_⟩
+  · show lookupAnfByKind wave30NonBigintAnf ("p0", .param)
+        = some (.vBytes (ByteArray.mk #[1]))
+    rfl
+  · show lookupAnfByKind wave30NonBigintAnf ("p1", .param) = some (.vBigint 5)
+    rfl
+  · trivial
+
+/-- **Wave 30 — the non-bigint BOTH-FAIL smoke (THE NEW PIECE).**
+
+The concrete body is a single emittable-arith binding `t0 = p0 + p1`
+whose left operand `p0` is the non-bigint `.vBytes #[1]`.  We show:
+
+1. the ANF side `evalBindings` is `isNone` (the `evalBinOp "+"` catch-all
+   fires on the `.vBytes` operand);
+2. the stack side `runOps [OP_ADD]` is `isNone` (`liftIntBin` rejects the
+   non-int top, `Stack.Eval.asInt? (.vBytes _) = none`); and
+3. therefore the `successAgrees` iff holds as `False ↔ False`.
+
+All three are DISCHARGED CONCRETELY — (1) and (2) standalone, then (3)
+via `successAgrees_arith_consume_first_binOp_fail`. -/
+theorem wave30_nonBigint_both_fail_smoke :
+    -- (1) ANF side fails.
+    (RunarVerification.ANF.Eval.evalBindings wave30NonBigintAnf
+        [.mk "t0" (.binOp "+" "p0" "p1" none) none]).toOption.isNone
+    -- (2) Stack side fails.
+    ∧ (runOps [.opcode (Stack.Lower.binopOpcode "+" none)]
+        wave30NonBigintStk).toOption.isNone
+    -- (3) The success bits agree (`False ↔ False`).
+    ∧ ((RunarVerification.ANF.Eval.evalBindings wave30NonBigintAnf
+          [.mk "t0" (.binOp "+" "p0" "p1" none) none]).toOption.isSome
+        ↔ (runOps [.opcode (Stack.Lower.binopOpcode "+" none)]
+            wave30NonBigintStk).toOption.isSome) := by
+  have hNonBigint : ∀ i : Int,
+      (RunarVerification.ANF.Eval.Value.vBytes (ByteArray.mk #[1])) ≠ .vBigint i := by
+    intro i h; exact absurd h (by simp)
+  -- (1) ANF side: standalone failure lemma.
+  have hANF :
+      (RunarVerification.ANF.Eval.evalBindings wave30NonBigintAnf
+        [.mk "t0" (.binOp "+" "p0" "p1" none) none]).toOption.isNone :=
+    evalBindings_binOp_nonBigint_left_isNone wave30NonBigintAnf "t0" "+" "p0" "p1" none none
+      (.vBytes (ByteArray.mk #[1])) (.vBigint 5) []
+      (Or.inl rfl) rfl rfl hNonBigint
+  -- (2) Stack side: standalone failure lemma.
+  have hStack :
+      (runOps [.opcode (Stack.Lower.binopOpcode "+" none)]
+        wave30NonBigintStk).toOption.isNone :=
+    runOps_binopOpcode_emittable_nonInt_top_isNone "+" none []
+      wave30NonBigintStk (.vBytes (ByteArray.mk #[1])) (.vBigint 5) []
+      (Or.inl rfl) rfl rfl
+  refine ⟨hANF, hStack, ?_⟩
+  -- (3) Assemble via the failure lockstep theorem.
+  exact successAgrees_arith_consume_first_binOp_fail
+    wave30NonBigintAnf wave30NonBigintStk "t0" "+" "p0" "p1" none none
+    .param .param [] [] []
+    (Or.inl rfl) wave30_nonBigint_agreesTagged rfl
+    (fun i v hv => by
+      have hvEq : v = .vBytes (ByteArray.mk #[1]) := by
+        have hp : lookupAnfByKind wave30NonBigintAnf ("p0", .param)
+            = some (.vBytes (ByteArray.mk #[1])) := rfl
+        rw [hp] at hv; exact (Option.some.inj hv).symm
+      subst hvEq; exact hNonBigint i)
+    (fun b v hv => by
+      have hvEq : v = .vBytes (ByteArray.mk #[1]) := by
+        have hp : lookupAnfByKind wave30NonBigintAnf ("p0", .param)
+            = some (.vBytes (ByteArray.mk #[1])) := rfl
+        rw [hp] at hv; exact (Option.some.inj hv).symm
+      subst hvEq; intro h; exact absurd h (by simp))
+    (.vBigint 5) rfl
+
+/-- **Wave 30 — the bigint BOTH-SUCCEED branch (confirmation).**
+
+The success branch is the wave-28 capstone unchanged: from a BARE entry
+`agreesTagged` over bigint params plus `taggedAllBigint`, the lockstep
+builds `structuralArithConsumeBody` and `runMethod … isSome`.  We restate
+it here so both legs of the wave-30 dichotomy are pinned in one module.
+This is the leg the failure lockstep COMPLEMENTS: all-bigint reads ⇒ both
+succeed; first non-bigint read ⇒ both fail. -/
+theorem wave30_bigint_both_succeed_branch
+    (contractName : String) (initialStack : StackState)
+    (tsm : Agrees.TaggedStackMap) (anfSt0 : State)
+    (hUntag : untagSm tsm = ["p0", "p1", "p2", "p3", "p4"])
+    (hAgrees0 : agreesTagged tsm anfSt0 initialStack)
+    (hAllBigint : taggedAllBigint anfSt0 tsm) :
+    (Stack.Eval.runMethod
+        (Stack.Lower.lower
+          { contractName := contractName, properties := ([] : List ANFProperty),
+            methods := [wave28SmokeMethod] })
+        wave28SmokeMethod.name initialStack).toOption.isSome :=
+  wave28_general_lockstep_capstone_smoke contractName initialStack tsm anfSt0
+    hUntag hAgrees0 hAllBigint
+
 end Agrees
 end RunarVerification.Stack
