@@ -665,6 +665,9 @@ class RunarContract:
                 for i, u in enumerate(extra_contract_utxos)
             ] if extra_contract_utxos else None,
             data_outputs=resolved_data_outputs or None,
+            # Thread CallOptions.locktime so contracts asserting
+            # extractLocktime(preimage) can succeed. None → 0 (legacy).
+            locktime=opts.locktime,
         )
 
         # Sign P2PKH funding inputs (after contract inputs)
@@ -752,6 +755,9 @@ class RunarContract:
                     for i, u in enumerate(extra_contract_utxos)
                 ] if extra_contract_utxos else None,
                 data_outputs=resolved_data_outputs or None,
+                # Rebuild path must honor the override too: a preimage computed
+                # on a rebuilt tx with locktime 0 would mismatch the final tx.
+                locktime=opts.locktime,
             )
             signed_tx = tx_hex
 
@@ -1119,6 +1125,11 @@ class RunarContract:
         # Resolve funding UTXOs for terminal methods
         funding_utxos = opts.funding_utxos or []
 
+        # Terminal calls (auction close/claim/withdraw) typically assert
+        # extractLocktime(preimage) >= deadline. Default 0 preserves legacy
+        # behavior for contracts that don't check locktime.
+        terminal_locktime = opts.locktime if opts.locktime is not None else 0
+
         # Build raw terminal transaction: contract input + optional funding inputs, exact outputs
         def build_terminal_tx(unlock: str) -> str:
             num_inputs = 1 + len(funding_utxos)
@@ -1142,7 +1153,7 @@ class RunarContract:
                 tx += _to_le64(out.satoshis)
                 tx += _encode_varint(len(out.script_hex) // 2)
                 tx += out.script_hex
-            tx += _to_le32(0)  # locktime
+            tx += _to_le32(terminal_locktime)  # locktime
             return tx
 
         term_tx = build_terminal_tx(term_unlock_script)

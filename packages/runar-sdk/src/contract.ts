@@ -628,6 +628,10 @@ export class RunarContract {
 
       const buildTerminalTx = (unlock: string): BsvTransaction => {
         const ttx = new BsvTransaction();
+        // Terminal calls (auction close/claim/withdraw) typically assert
+        // `extractLocktime(preimage) >= deadline`. Default 0 preserves legacy
+        // behavior for contracts that don't check locktime.
+        ttx.lockTime = options?.locktime ?? 0;
         ttx.addInput({
           sourceTXID: contractUtxo.txid,
           sourceOutputIndex: contractUtxo.outputIndex,
@@ -877,6 +881,9 @@ export class RunarContract {
           ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlockPlaceholders[i]! }))
           : undefined,
         dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
+        // Thread CallOptions.locktime so contracts asserting
+        // extractLocktime(preimage) can succeed. Default unset → 0.
+        locktime: options?.locktime,
       },
     );
 
@@ -976,6 +983,9 @@ export class RunarContract {
             ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlocks[i]! }))
             : undefined,
           dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
+          // Rebuild path must honor the override too: a preimage computed on a
+          // rebuilt tx with locktime 0 would mismatch the final on-chain tx.
+          locktime: options?.locktime,
         },
       ));
 

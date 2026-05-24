@@ -92,6 +92,13 @@ pub struct CallOptions {
     /// on the method body (the common case). Pass a non-empty `Vec` to
     /// bypass the interpreter.
     pub data_outputs: Option<Vec<ContractDataOutput>>,
+    /// Override the call tx's nLockTime field. Defaults to `None` → SDK uses
+    /// `0` (legacy behavior, preserves existing contracts). Set to `Some(height)`
+    /// for contracts that assert `extractLocktime(preimage) >= deadline`
+    /// (e.g., auction `close`/`claim` methods). Threaded through to both the
+    /// non-terminal (`build_call_transaction_ext`) and terminal call-tx
+    /// build sites.
+    pub locktime: Option<u32>,
 }
 
 /// A data output entry — hex-encoded script + satoshis — for the

@@ -1017,6 +1017,28 @@ func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 	}
 }
 
+func TestBuildCallTransaction_LocktimeOverride(t *testing.T) {
+	// Issue #40: a caller-supplied non-zero locktime must appear in the
+	// built call tx's nLockTime field.
+	utxo := makeUtxo(100000, 0)
+	lt := uint32(800000)
+	callTxObj, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 100, &BuildCallOptions{Locktime: &lt})
+	parsed := parseTxHex(callTxObj.Hex())
+	if parsed.locktime != 800000 {
+		t.Errorf("expected locktime 800000, got %d", parsed.locktime)
+	}
+}
+
+func TestBuildCallTransaction_LocktimeDefaultZero(t *testing.T) {
+	// Default (unset) must still write 0 — back-compatible.
+	utxo := makeUtxo(100000, 0)
+	callTxObj, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 100, &BuildCallOptions{})
+	parsed := parseTxHex(callTxObj.Hex())
+	if parsed.locktime != 0 {
+		t.Errorf("expected locktime 0, got %d", parsed.locktime)
+	}
+}
+
 func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	callTxObj, _, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil, 100)

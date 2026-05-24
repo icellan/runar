@@ -37,6 +37,9 @@ module Runar
     #     +this.addDataOutput(...)+ in the method body. Each +{script:, satoshis:}+.
     #     Emitted between the contract (state) outputs and the change output, in
     #     declaration order — matching the compile-time continuation-hash layout.
+    #   - +:locktime+ [Integer, nil] override the call tx's nLockTime. nil →
+    #     defaults to 0 (legacy). Set for contracts that assert
+    #     +extractLocktime(preimage) >= deadline+ (e.g. auction close/claim).
     # @return [Array(String, Integer, Integer)] [tx_hex, input_count, change_amount]
     def build_call_transaction(
       current_utxo,
@@ -171,8 +174,9 @@ module Runar
         tx << actual_change_script
       end
 
-      # Locktime
-      tx << to_le32(0)
+      # Locktime: default 0 (legacy); overridable via options[:locktime] for
+      # contracts asserting extractLocktime(preimage) >= deadline.
+      tx << to_le32(opts[:locktime] || 0)
 
       [tx, all_utxos.length, has_change ? change : 0]
     end

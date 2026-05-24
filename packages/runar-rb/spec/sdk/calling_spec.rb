@@ -283,6 +283,30 @@ RSpec.describe 'Runar::SDK calling helpers' do
   end
 
   # ---------------------------------------------------------------------------
+  # build_call_transaction — locktime override (issue #40)
+  # ---------------------------------------------------------------------------
+  describe 'build_call_transaction with locktime override' do
+    let(:contract_utxo) { make_utxo(CONTRACT_TXID, 1_000_000) }
+
+    it 'writes a caller-supplied non-zero locktime into the tx' do
+      tx_hex, = Runar::SDK.build_call_transaction(
+        contract_utxo, '', CONTRACT_SCRIPT, 10_000, CALL_ADDRESS, '',
+        nil, options: { locktime: 800_000 }
+      )
+      # 800000 = 0x000C3500 → little-endian hex "00350c00"
+      expect(tx_hex).to end_with('00350c00')
+    end
+
+    it 'defaults to locktime 00000000 when the option is unset (back-compatible)' do
+      tx_hex, = Runar::SDK.build_call_transaction(
+        contract_utxo, '', CONTRACT_SCRIPT, 10_000, CALL_ADDRESS, '',
+        nil, options: {}
+      )
+      expect(tx_hex).to end_with('00000000')
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # insert_unlocking_script
   # ---------------------------------------------------------------------------
   describe 'insert_unlocking_script' do

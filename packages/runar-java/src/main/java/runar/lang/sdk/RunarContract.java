@@ -415,10 +415,13 @@ public final class RunarContract {
         // legacy paths and routes to the dedicated terminal builder.
         // ------------------------------------------------------------
         if (terminalOutputs != null) {
+            int terminalLocktime = (options != null && options.locktime != null)
+                ? options.locktime : 0;
             return callTerminal(
                 m, methodName, resolved, sigIndices,
                 methodNeedsChange, methodNeedsNewAmount,
-                isStateful, terminalOutputs, fundingUtxos, provider, signer
+                isStateful, terminalOutputs, fundingUtxos, provider, signer,
+                terminalLocktime
             );
         }
 
@@ -434,10 +437,12 @@ public final class RunarContract {
         // funding inputs, OP_PUSH_TX prefix, preimage push, method
         // selector.
         // ------------------------------------------------------------
+        int pushTxLocktime = (options != null && options.locktime != null)
+            ? options.locktime : 0;
         return callWithPushTx(
             m, methodName, resolved, sigIndices,
             methodNeedsChange, methodNeedsNewAmount,
-            isStateful, resolvedDataOutputs, provider, signer
+            isStateful, resolvedDataOutputs, provider, signer, pushTxLocktime
         );
     }
 
@@ -500,7 +505,8 @@ public final class RunarContract {
         boolean isStateful,
         List<TransactionBuilder.DataOutput> dataOutputs,
         Provider provider,
-        Signer signer
+        Signer signer,
+        int locktime
     ) {
         // Pre-resolve intent-intrinsic witness hex. Throws
         // WitnessValueMissingError if a `_prevOutScript_<i>` or
@@ -561,10 +567,14 @@ public final class RunarContract {
             intentWitnessHex
         );
 
+        // Thread CallOptions.locktime so contracts asserting
+        // extractLocktime(preimage) can succeed. 0 → legacy. The rebuild path
+        // below must honor the same value or its preimage would mismatch the
+        // final on-chain tx.
         TransactionBuilder.CallTxResult firstPass =
             TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, placeholderUnlock, newLockingScript, newSats,
-                dataOutputs, additional, funderAddress, feeRate
+                dataOutputs, additional, funderAddress, feeRate, locktime
             );
         long changeAmount = firstPass.changeAmount();
 
@@ -583,7 +593,7 @@ public final class RunarContract {
         TransactionBuilder.CallTxResult secondPass =
             TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, secondPassUnlock, newLockingScript, newSats,
-                dataOutputs, additional, funderAddress, feeRate
+                dataOutputs, additional, funderAddress, feeRate, locktime
             );
         long finalChangeAmount = secondPass.changeAmount();
         RawTx tx = secondPass.tx();
@@ -678,7 +688,8 @@ public final class RunarContract {
         List<CallOptions.TerminalOutput> terminalOutputs,
         List<UTXO> fundingUtxos,
         Provider provider,
-        Signer signer
+        Signer signer,
+        int locktime
     ) {
         // Pre-resolve intent-intrinsic witness hex. Throws
         // WitnessValueMissingError BEFORE any signing / broadcast.
@@ -717,6 +728,10 @@ public final class RunarContract {
         // the final tx bytes.
         java.util.function.Supplier<RawTx> buildTx = () -> {
             RawTx t = new RawTx();
+            // Terminal calls (auction close/claim/withdraw) typically assert
+            // extractLocktime(preimage) >= deadline. Default 0 preserves legacy
+            // behavior for contracts that don't check locktime.
+            t.locktime = locktime;
             t.addInput(currentUtxo.txid(), currentUtxo.outputIndex(), "");
             for (UTXO fu : fundingUtxos) {
                 t.addInput(fu.txid(), fu.outputIndex(), "");
@@ -1224,8 +1239,12 @@ public final class RunarContract {
         // change, no automatic funding selection.
         long contractSats = currentUtxo.satoshis();
         List<UTXO> fundingUtxos = options.fundingUtxos == null ? List.of() : options.fundingUtxos;
+        // Terminal calls typically assert extractLocktime(preimage) >= deadline.
+        // Default 0 preserves legacy behavior for non-locktime contracts.
+        int terminalLocktime = options.locktime != null ? options.locktime : 0;
         java.util.function.Supplier<RawTx> buildTx = () -> {
             RawTx t = new RawTx();
+            t.locktime = terminalLocktime;
             t.addInput(currentUtxo.txid(), currentUtxo.outputIndex(), "");
             for (UTXO fu : fundingUtxos) {
                 t.addInput(fu.txid(), fu.outputIndex(), "");

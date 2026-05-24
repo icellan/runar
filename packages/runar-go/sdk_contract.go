@@ -760,6 +760,11 @@ func (c *RunarContract) PrepareCall(
 	if len(resolvedDataOutputs) > 0 {
 		buildOpts.DataOutputs = resolvedDataOutputs
 	}
+	// Thread CallOptions.Locktime through so contracts asserting
+	// extractLocktime(preimage) can succeed. nil → 0 (legacy behavior).
+	if options != nil {
+		buildOpts.Locktime = options.Locktime
+	}
 	if len(extraContractUtxos) > 0 {
 		buildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))
 		for i, utxo := range extraContractUtxos {
@@ -901,6 +906,11 @@ func (c *RunarContract) PrepareCall(
 		}
 		if len(resolvedDataOutputs) > 0 {
 			rebuildOpts.DataOutputs = resolvedDataOutputs
+		}
+		// Rebuild path must honor the override too: a preimage computed on a
+		// rebuilt tx with locktime 0 would mismatch the final on-chain tx.
+		if options != nil {
+			rebuildOpts.Locktime = options.Locktime
 		}
 		if len(extraContractUtxos) > 0 {
 			rebuildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))
@@ -1661,9 +1671,18 @@ func (c *RunarContract) prepareCallTerminal(
 	}
 	termUnlockScript += witnessHex
 
+	// Terminal calls (auction close/claim/withdraw) typically assert
+	// extractLocktime(preimage) >= deadline. Default 0 preserves legacy
+	// behavior for contracts that don't check locktime.
+	var terminalLocktime uint32
+	if options.Locktime != nil {
+		terminalLocktime = *options.Locktime
+	}
+
 	// Build terminal transaction using go-sdk Transaction
 	buildTerminalTx := func(unlock string) *transaction.Transaction {
 		ttx := transaction.NewTransaction()
+		ttx.LockTime = terminalLocktime
 		unlockLS, _ := sdkscript.NewFromHex(unlock)
 		ttx.AddInput(&transaction.TransactionInput{
 			SourceTXID:       txidToChainHash(contractUtxo.Txid),

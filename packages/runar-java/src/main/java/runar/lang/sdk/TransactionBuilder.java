@@ -231,6 +231,29 @@ public final class TransactionBuilder {
         String changeAddress,
         long feeRate
     ) {
+        return buildCallTransactionFull(
+            currentUtxo, unlockingScriptHex, newLockingScriptHex, newSatoshis,
+            dataOutputs, additionalUtxos, changeAddress, feeRate, 0
+        );
+    }
+
+    /**
+     * Variant that additionally sets the tx's nLockTime field. {@code locktime}
+     * defaults to 0 (legacy) via the overloads above; pass a non-zero value
+     * for contracts that assert {@code extractLocktime(preimage) >= deadline}
+     * (e.g. auction close/claim).
+     */
+    public static CallTxResult buildCallTransactionFull(
+        UTXO currentUtxo,
+        String unlockingScriptHex,
+        String newLockingScriptHex,
+        long newSatoshis,
+        List<DataOutput> dataOutputs,
+        List<UTXO> additionalUtxos,
+        String changeAddress,
+        long feeRate,
+        int locktime
+    ) {
         long rate = feeRate > 0 ? feeRate : FeeEstimator.DEFAULT_FEE_RATE;
         if (dataOutputs == null) dataOutputs = List.of();
 
@@ -291,6 +314,9 @@ public final class TransactionBuilder {
         }
 
         RawTx tx = new RawTx();
+        // Locktime: default 0 (legacy); overridable via CallOptions.locktime
+        // for contracts asserting extractLocktime(preimage) >= deadline.
+        tx.locktime = locktime;
         tx.addInput(currentUtxo.txid(), currentUtxo.outputIndex(), unlockingScriptHex);
         for (UTXO f : selected) {
             tx.addInput(f.txid(), f.outputIndex(), "");

@@ -20,6 +20,7 @@ def build_call_transaction(
     contract_outputs: list[dict] | None = None,
     additional_contract_inputs: list[dict] | None = None,
     data_outputs: list[dict] | None = None,
+    locktime: int | None = None,
 ) -> tuple[str, int, int]:
     """Build a raw transaction that spends a contract UTXO.
 
@@ -30,6 +31,9 @@ def build_call_transaction(
         `this.addDataOutput(...)` in the method body. Emitted between
         contract (state) outputs and the change output in declaration
         order — matching the compile-time continuation-hash layout.
+    locktime: override the call tx's nLockTime. None → defaults to 0 (legacy).
+        Set for contracts that assert extractLocktime(preimage) >= deadline
+        (e.g. auction close/claim).
 
     Returns (tx_hex, input_count, change_amount).
     """
@@ -149,8 +153,9 @@ def build_call_transaction(
         tx += _encode_varint(len(actual_change_script) // 2)
         tx += actual_change_script
 
-    # Locktime
-    tx += _to_le32(0)
+    # Locktime: default 0 (legacy); overridable via locktime for contracts
+    # asserting extractLocktime(preimage) >= deadline.
+    tx += _to_le32(locktime if locktime is not None else 0)
 
     return tx, len(all_utxos), change if change > 0 else 0
 

@@ -24,6 +24,11 @@ pub const CallBuildOptions = struct {
     /// P2PKH funding inputs. Mirrors Go's `AdditionalContractInputs`
     /// inside `BuildCallOptions`.
     additional_contract_inputs: []const AdditionalContractInput = &.{},
+    /// Override the call tx's nLockTime. `null` → defaults to 0 (legacy).
+    /// Non-null writes the value into the locktime field. Required for
+    /// contracts that assert `extractLocktime(preimage) >= deadline`
+    /// (e.g. auction close/claim).
+    locktime: ?u32 = null,
 };
 
 /// AdditionalContractInput pairs an extra contract UTXO with its
@@ -120,6 +125,12 @@ pub fn buildCallTransaction(
     // Build transaction using bsvz Builder
     var builder = bsvz.transaction.Builder.init(allocator);
     defer builder.deinit();
+
+    // Locktime: default 0 (legacy); overridable via CallBuildOptions.locktime
+    // for contracts asserting extractLocktime(preimage) >= deadline.
+    if (opts) |o| {
+        if (o.locktime) |lt| builder.lock_time = lt;
+    }
 
     // Input 0: contract UTXO with unlocking script
     {
@@ -334,6 +345,66 @@ test "buildCallTransaction with stateless contract" {
 
     try std.testing.expect(result.tx_hex.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.input_count);
+}
+
+test "buildCallTransaction locktime override appears in tx (issue #40)" {
+    const allocator = std.testing.allocator;
+
+    const contract_utxo = types.UTXO{
+        .txid = "aa" ** 32,
+        .output_index = 0,
+        .satoshis = 1000,
+        .script = "5100",
+    };
+
+    // Caller-supplied non-zero locktime must appear in the tx's nLockTime
+    // (the last 4 bytes / 8 hex chars of the serialized tx).
+    const opts = CallBuildOptions{ .locktime = 800_000 };
+    var result = try buildCallTransaction(
+        allocator,
+        contract_utxo,
+        "51",
+        "",
+        0,
+        null,
+        &.{},
+        100,
+        &opts,
+    );
+    defer result.deinit(allocator);
+
+    const tail = result.tx_hex[result.tx_hex.len - 8 ..];
+    // 800000 = 0x000C3500 → little-endian hex "00350c00"
+    try std.testing.expectEqualStrings("00350c00", tail);
+}
+
+test "buildCallTransaction locktime defaults to zero (issue #40)" {
+    const allocator = std.testing.allocator;
+
+    const contract_utxo = types.UTXO{
+        .txid = "aa" ** 32,
+        .output_index = 0,
+        .satoshis = 1000,
+        .script = "5100",
+    };
+
+    // Default (unset) must still write 0 — back-compatible.
+    const opts = CallBuildOptions{};
+    var result = try buildCallTransaction(
+        allocator,
+        contract_utxo,
+        "51",
+        "",
+        0,
+        null,
+        &.{},
+        100,
+        &opts,
+    );
+    defer result.deinit(allocator);
+
+    const tail = result.tx_hex[result.tx_hex.len - 8 ..];
+    try std.testing.expectEqualStrings("00000000", tail);
 }
 
 test "estimateCallFee mirrors TS semantics" {

@@ -218,6 +218,11 @@ class CallOptions:
     # SDK resolves data outputs automatically by running the ANF interpreter.
     # Entries are {"script": hex, "satoshis": int}.
     data_outputs: list[dict] | None = None
+    # Override the call tx's nLockTime field. None → SDK uses 0 (legacy
+    # behavior, preserves existing contracts). Set for contracts that assert
+    # extractLocktime(preimage) >= deadline (e.g. auction close/claim).
+    # Threaded through both the non-terminal and terminal call-tx build sites.
+    locktime: int | None = None
 
 
 @dataclass

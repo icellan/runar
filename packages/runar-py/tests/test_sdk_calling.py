@@ -266,6 +266,39 @@ class TestBuildCallTransaction:
 
 
 # ---------------------------------------------------------------------------
+# Issue #40: caller-supplied nLockTime override
+# ---------------------------------------------------------------------------
+
+class TestBuildCallTransactionLocktime:
+    def test_locktime_override_appears_in_tx(self):
+        """A caller-supplied non-zero locktime appears in the tx's nLockTime."""
+        utxo = _make_utxo(100_000)
+        tx_hex, _, _ = build_call_transaction(
+            current_utxo=utxo,
+            unlocking_script='51',
+            new_locking_script='',
+            new_satoshis=0,
+            change_address='',
+            locktime=800_000,
+        )
+        parsed = _parse_tx(tx_hex)
+        assert parsed['locktime'] == 800_000
+
+    def test_locktime_default_is_zero(self):
+        """Default (unset) still writes 0 — back-compatible."""
+        utxo = _make_utxo(100_000)
+        tx_hex, _, _ = build_call_transaction(
+            current_utxo=utxo,
+            unlocking_script='51',
+            new_locking_script='',
+            new_satoshis=0,
+            change_address='',
+        )
+        parsed = _parse_tx(tx_hex)
+        assert parsed['locktime'] == 0
+
+
+# ---------------------------------------------------------------------------
 # insert_unlocking_script
 # ---------------------------------------------------------------------------
 

@@ -240,6 +240,7 @@ module Runar
       :terminal_outputs,
       :funding_utxos,
       :data_outputs,
+      :locktime,
       keyword_init: true
     ) do
       def initialize(
@@ -252,7 +253,11 @@ module Runar
         additional_contract_input_args: nil,
         terminal_outputs: nil,
         funding_utxos: nil,
-        data_outputs: nil
+        data_outputs: nil,
+        # Override the call tx's nLockTime field. nil → SDK uses 0 (legacy
+        # behavior). Set for contracts that assert
+        # extractLocktime(preimage) >= deadline (e.g. auction close/claim).
+        locktime: nil
       )
         super
       end

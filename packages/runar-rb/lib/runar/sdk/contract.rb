@@ -510,6 +510,9 @@ module Runar
         call_options = {}
         call_options[:contract_outputs] = contract_outputs if contract_outputs
         call_options[:data_outputs] = resolved_data_outputs if resolved_data_outputs.any?
+        # Thread CallOptions#locktime so contracts asserting
+        # extractLocktime(preimage) can succeed. nil → 0 (legacy).
+        call_options[:locktime] = opts.locktime unless opts.locktime.nil?
         if extra_contract_utxos.any?
           call_options[:additional_contract_inputs] = extra_contract_utxos.each_with_index.map do |utxo, i|
             { utxo: utxo, unlocking_script: extra_unlock_placeholders[i] }
@@ -540,7 +543,8 @@ module Runar
             extra_contract_utxos: extra_contract_utxos,
             resolved_per_input_args: resolved_per_input_args,
             prevouts_indices: prevouts_indices,
-            intent_witness_hex: intent_witness_hex
+            intent_witness_hex: intent_witness_hex,
+            locktime: opts.locktime
           )
 
         sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
@@ -889,6 +893,11 @@ module Runar
                                  intent_witness_hex
                              end
 
+        # Terminal calls (auction close/claim/withdraw) typically assert
+        # extractLocktime(preimage) >= deadline. Default 0 preserves legacy
+        # behavior for contracts that don't check locktime.
+        terminal_locktime = opts.locktime || 0
+
         # Build raw terminal transaction: single input, exact outputs, no change.
         build_terminal_tx = lambda do |unlock|
           tx = +''
@@ -905,7 +914,7 @@ module Runar
             tx << SDK.encode_varint(out.script_hex.length / 2)
             tx << out.script_hex
           end
-          tx << SDK.to_le32(0)
+          tx << SDK.to_le32(terminal_locktime)
           tx
         end
 
@@ -1090,7 +1099,8 @@ module Runar
         extra_contract_utxos: [],
         resolved_per_input_args: [],
         prevouts_indices: [],
-        intent_witness_hex: ''
+        intent_witness_hex: '',
+        locktime: nil
       )
         final_op_push_tx_sig = ''
         final_preimage       = ''
@@ -1108,7 +1118,8 @@ module Runar
               extra_contract_utxos: extra_contract_utxos,
               resolved_per_input_args: resolved_per_input_args,
               prevouts_indices: prevouts_indices,
-              intent_witness_hex: intent_witness_hex
+              intent_witness_hex: intent_witness_hex,
+              locktime: locktime
             )
 
           # Update resolved_args with final prevouts so finalize_call can rebuild
@@ -1143,7 +1154,8 @@ module Runar
         extra_contract_utxos: [],
         resolved_per_input_args: [],
         prevouts_indices: [],
-        intent_witness_hex: ''
+        intent_witness_hex: '',
+        locktime: nil
       )
         pub_key     = signer.get_public_key
         p2pkh_start = 1 + extra_contract_utxos.length
@@ -1151,6 +1163,9 @@ module Runar
         call_opts = {}
         call_opts[:contract_outputs] = contract_outputs if contract_outputs
         call_opts[:data_outputs] = data_outputs if data_outputs && !data_outputs.empty?
+        # Rebuild path must honor the override too: a preimage computed on a
+        # rebuilt tx with locktime 0 would mismatch the final on-chain tx.
+        call_opts[:locktime] = locktime unless locktime.nil?
 
         # First pass — build unlock with placeholder Sig/prevouts params.
         input0_unlock, = build_stateful_unlock(

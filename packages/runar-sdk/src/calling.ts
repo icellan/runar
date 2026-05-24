@@ -39,6 +39,10 @@ export function buildCallTransaction(
      * in declaration order — matching the compile-time continuation-hash
      * layout. */
     dataOutputs?: Array<{ script: string; satoshis: number }>;
+    /** Override the call tx's nLockTime. Unset → defaults to 0 (legacy).
+     * Set to a non-zero value for contracts that assert
+     * `extractLocktime(preimage) >= deadline` (e.g. auction close/claim). */
+    locktime?: number;
   },
 ): { tx: Transaction; inputCount: number; changeAmount: number } {
   const extraContractInputs = options?.additionalContractInputs ?? [];
@@ -87,6 +91,10 @@ export function buildCallTransaction(
 
   // Build Transaction object
   const tx = new Transaction();
+
+  // Locktime: default 0 (legacy); overridable via options.locktime for
+  // contracts asserting `extractLocktime(preimage) >= deadline`.
+  tx.lockTime = options?.locktime ?? 0;
 
   // Input 0: primary contract UTXO with unlocking script
   tx.addInput({

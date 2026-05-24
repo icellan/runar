@@ -46,14 +46,33 @@ public final class CallOptions {
      */
     public final List<UTXO> fundingUtxos;
 
+    /**
+     * Override the call tx's nLockTime field. {@code null} → SDK uses 0
+     * (legacy behavior, preserves existing contracts). Set for contracts
+     * that assert {@code extractLocktime(preimage) >= deadline} (e.g.
+     * auction {@code close}/{@code claim} methods). Threaded through both
+     * the non-terminal and terminal call-tx build sites.
+     */
+    public final Integer locktime;
+
     public CallOptions(
         Map<String, Object> newState,
         List<TerminalOutput> terminalOutputs,
         List<UTXO> fundingUtxos
     ) {
+        this(newState, terminalOutputs, fundingUtxos, null);
+    }
+
+    public CallOptions(
+        Map<String, Object> newState,
+        List<TerminalOutput> terminalOutputs,
+        List<UTXO> fundingUtxos,
+        Integer locktime
+    ) {
         this.newState = newState;
         this.terminalOutputs = terminalOutputs;
         this.fundingUtxos = fundingUtxos;
+        this.locktime = locktime;
     }
 
     /** Convenience factory for the common terminal-call case. */

@@ -154,4 +154,11 @@ export interface CallOptions {
    * the interpreter.
    */
   dataOutputs?: Array<{ script: string; satoshis: number | bigint }>;
+  /**
+   * Override the call tx's nLockTime field. Defaults to unset → SDK uses 0
+   * (legacy behavior, preserves existing contracts). Set for contracts that
+   * assert `extractLocktime(preimage) >= deadline` (e.g. auction close/claim).
+   * Threaded through both the non-terminal and terminal call-tx build sites.
+   */
+  locktime?: number;
 }

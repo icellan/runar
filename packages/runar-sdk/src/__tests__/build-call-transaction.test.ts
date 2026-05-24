@@ -480,6 +480,31 @@ describe('buildCallTransaction — stateless call', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Issue #40: caller-supplied nLockTime override
+// ---------------------------------------------------------------------------
+
+describe('buildCallTransaction — locktime override (issue #40)', () => {
+  it('writes a caller-supplied non-zero locktime into the tx', () => {
+    const utxo = makeUtxo(100000);
+    const { tx } = buildCallTransaction(
+      utxo, '51', undefined, undefined, undefined, undefined, undefined, 100,
+      { locktime: 800000 },
+    );
+    const parsed = parseTxHex(tx.toHex());
+    expect(parsed.locktime).toBe(800000);
+  });
+
+  it('defaults to locktime 0 when the option is unset (back-compatible)', () => {
+    const utxo = makeUtxo(100000);
+    const { tx } = buildCallTransaction(
+      utxo, '51', undefined, undefined, undefined, undefined, undefined, 100, {},
+    );
+    const parsed = parseTxHex(tx.toHex());
+    expect(parsed.locktime).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fix #18: P2PKH address should use Base58Check decoding, not deterministicHash20
 // ---------------------------------------------------------------------------
 

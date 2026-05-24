@@ -103,6 +103,12 @@ type CallOptions struct {
 	// knows the exact (satoshis, script) pairs and does not want the SDK
 	// to re-derive them from method arguments.
 	DataOutputs []ContractOutput `json:"dataOutputs,omitempty"`
+
+	// Locktime overrides the call tx's nLockTime field. nil → SDK uses 0
+	// (legacy behavior, preserves existing contracts). Set for contracts that
+	// assert extractLocktime(preimage) >= deadline (e.g. auction close/claim).
+	// Threaded through both the non-terminal and terminal call-tx build sites.
+	Locktime *uint32 `json:"locktime,omitempty"`
 }
 
 // TerminalOutput specifies an exact output for a terminal method call.

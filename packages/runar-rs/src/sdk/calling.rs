@@ -29,6 +29,10 @@ pub struct CallTxOptions {
     /// output, in declaration order — matching the order the compiler's
     /// auto-injected continuation-hash check expects.
     pub data_outputs: Option<Vec<ContractOutput>>,
+    /// Override the call tx's nLockTime. `None` → defaults to `0` (legacy).
+    /// `Some(N)` writes `N` as little-endian `u32` in the locktime field.
+    /// Required for contracts that assert `extractLocktime(preimage) >= deadline`.
+    pub locktime: Option<u32>,
 }
 
 /// Build a raw transaction that spends a contract UTXO (method call).
@@ -216,8 +220,13 @@ pub fn build_call_transaction_ext(
         tx.push_str(&actual_change_script);
     }
 
-    // Locktime
-    tx.push_str(&to_little_endian_32(0));
+    // Locktime: default `0` (legacy behavior); overridable via
+    // `CallTxOptions.locktime`. Contracts asserting
+    // `extractLocktime(preimage) >= deadline` (e.g. auction `close`/`claim`)
+    // require this override; the previously hardcoded `0` caused NULLFAIL
+    // on every terminal call with a non-zero deadline.
+    let locktime_value = options.and_then(|o| o.locktime).unwrap_or(0);
+    tx.push_str(&to_little_endian_32(locktime_value));
 
     let change_amount = if change > 0 { change } else { 0 };
     (tx, all_utxos.len(), change_amount)
@@ -397,6 +406,42 @@ mod tests {
         let (tx_hex, _, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.locktime, 0);
+    }
+
+    #[test]
+    fn locktime_override_appears_in_tx() {
+        // Issue #40: a caller-supplied non-zero locktime must appear in the
+        // built call tx's nLockTime field (contracts asserting
+        // `extractLocktime(preimage) >= deadline`).
+        let utxo = make_utxo(100_000, 0);
+        let options = CallTxOptions {
+            contract_outputs: None,
+            additional_contract_inputs: None,
+            data_outputs: None,
+            locktime: Some(800_000),
+        };
+        let (tx_hex, _, _) = build_call_transaction_ext(
+            &utxo, "51", None, None, None, None, None, None, Some(&options),
+        );
+        let parsed = parse_tx_hex(&tx_hex);
+        assert_eq!(parsed.locktime, 800_000);
+    }
+
+    #[test]
+    fn locktime_default_is_zero() {
+        // Default (unset) must still write 0 — back-compatible.
+        let utxo = make_utxo(100_000, 0);
+        let options = CallTxOptions {
+            contract_outputs: None,
+            additional_contract_inputs: None,
+            data_outputs: None,
+            locktime: None,
+        };
+        let (tx_hex, _, _) = build_call_transaction_ext(
+            &utxo, "51", None, None, None, None, None, None, Some(&options),
+        );
+        let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.locktime, 0);
     }
 

@@ -121,6 +121,12 @@ pub const CallOptions = struct {
     /// its own `otherBalance` value). Mirrors Go's
     /// `AdditionalContractInputArgs`.
     additional_contract_input_args: ?[]const []const StateValue = null,
+    /// Override the call tx's nLockTime field. `null` → SDK uses 0 (legacy
+    /// behavior, preserves existing contracts). Set for contracts that assert
+    /// `extractLocktime(preimage) >= deadline` (e.g. auction close/claim).
+    /// Threaded through every call-tx build site (stateless, stateful,
+    /// rebuild, terminal).
+    locktime: ?u32 = null,
 };
 
 /// OutputSpec describes one continuation output for a multi-output method.

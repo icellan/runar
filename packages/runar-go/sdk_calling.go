@@ -19,6 +19,11 @@ type BuildCallOptions struct {
 	// declaration order — matching the order the compiler's auto-injected
 	// continuation-hash check expects.
 	DataOutputs []ContractOutput
+	// Locktime overrides the call tx's nLockTime. nil → defaults to 0 (legacy).
+	// Non-nil writes the value into the locktime field. Required for contracts
+	// that assert extractLocktime(preimage) >= deadline (e.g. auction
+	// close/claim).
+	Locktime *uint32
 }
 
 // ContractOutput describes one contract continuation output.
@@ -62,10 +67,14 @@ func BuildCallTransaction(
 	var extraContractInputs []AdditionalContractInput
 	var contractOutputs []ContractOutput
 	var dataOutputs []ContractOutput
+	var locktime uint32
 	if len(opts) > 0 && opts[0] != nil {
 		extraContractInputs = opts[0].AdditionalContractInputs
 		contractOutputs = opts[0].ContractOutputs
 		dataOutputs = opts[0].DataOutputs
+		if opts[0].Locktime != nil {
+			locktime = *opts[0].Locktime
+		}
 	}
 
 	// Build full input list: primary contract, extra contract inputs, P2PKH funding
@@ -130,6 +139,10 @@ func BuildCallTransaction(
 
 	// Build Transaction object
 	tx = transaction.NewTransaction()
+
+	// Locktime: default 0 (legacy); overridable via BuildCallOptions.Locktime
+	// for contracts asserting extractLocktime(preimage) >= deadline.
+	tx.LockTime = locktime
 
 	// Input 0: primary contract UTXO with unlocking script
 	unlockLS, _ := sdkscript.NewFromHex(unlockingScript)

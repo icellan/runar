@@ -61,6 +61,45 @@ class TransactionBuilderTest {
     }
 
     @Test
+    void callTxLocktimeOverrideAppearsInTx() {
+        // Issue #40: a caller-supplied non-zero locktime must appear in the
+        // built call tx's nLockTime field.
+        UTXO contractUtxo = new UTXO("ab".repeat(32), 0, 100_000L,
+            ScriptUtils.buildP2PKHScript("00".repeat(20)));
+        UTXO funding = new UTXO("cd".repeat(32), 0, 50_000L,
+            ScriptUtils.buildP2PKHScript("11".repeat(20)));
+
+        TransactionBuilder.CallTxResult result =
+            TransactionBuilder.buildCallTransactionFull(
+                contractUtxo, "51", null, 0L, List.of(),
+                List.of(funding), "22".repeat(20),
+                100L, 800_000
+            );
+
+        RawTx parsed = RawTxParser.parse(result.tx().toHex());
+        assertEquals(800_000, parsed.locktime);
+    }
+
+    @Test
+    void callTxLocktimeDefaultsToZero() {
+        // Default (no locktime arg) must still write 0 — back-compatible.
+        UTXO contractUtxo = new UTXO("ab".repeat(32), 0, 100_000L,
+            ScriptUtils.buildP2PKHScript("00".repeat(20)));
+        UTXO funding = new UTXO("cd".repeat(32), 0, 50_000L,
+            ScriptUtils.buildP2PKHScript("11".repeat(20)));
+
+        TransactionBuilder.CallTxResult result =
+            TransactionBuilder.buildCallTransactionFull(
+                contractUtxo, "51", null, 0L, List.of(),
+                List.of(funding), "22".repeat(20),
+                100L
+            );
+
+        RawTx parsed = RawTxParser.parse(result.tx().toHex());
+        assertEquals(0, parsed.locktime);
+    }
+
+    @Test
     void deployUsesDefaultChangeAddressFromSignerWhenUnspecified() {
         LocalSigner signer = new LocalSigner(PRIV);
         MockProvider provider = new MockProvider();
