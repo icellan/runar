@@ -143,6 +143,21 @@ RSpec.describe 'Runar::SDK types' do
         expect(param.type).to eq('Ripemd160')
       end
 
+      it 'defaults parent_class to empty string when parentClass is absent' do
+        expect(artifact.parent_class).to eq('')
+      end
+
+      it 'parses parentClass when present (issue #44 trim gate)' do
+        # A StatefulSmartContract with ZERO mutable fields has empty stateFields
+        # yet still injects checkPreimage at entry; parentClass is the
+        # authoritative signal for the terminal sighash subscript trim.
+        hash_with_parent = MINIMAL_ARTIFACT_HASH.dup
+        hash_with_parent['parentClass'] = 'StatefulSmartContract'
+        art = described_class.from_hash(hash_with_parent)
+        expect(art.parent_class).to eq('StatefulSmartContract')
+        expect(art.state_fields).to eq([])
+      end
+
       it 'parses ABI methods' do
         expect(artifact.abi.methods.length).to eq(1)
         method = artifact.abi.methods.first

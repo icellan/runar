@@ -283,9 +283,12 @@ module Runar
           # find_codesep_offsets.
           # Stateless contracts: the user controls statement order and may place
           # checkSig BEFORE the codesep (e.g. CovenantVault) — those must use the
-          # FULL script, so the trim stays gated on is_stateful.
+          # FULL script, so the trim stays gated on the parent class. A stateful
+          # contract with ZERO mutable fields (empty state_fields) still injects
+          # checkPreimage at entry, so the trim is gated on parent_stateful
+          # (artifact parent_class), NOT is_stateful (issue #44).
           subscript = prepared.contract_utxo.script
-          if prepared.is_stateful && prepared.code_sep_idx >= 0
+          if prepared.parent_stateful && prepared.code_sep_idx >= 0
             trim_pos  = (prepared.code_sep_idx + 1) * 2
             subscript = subscript[trim_pos..] if trim_pos <= subscript.length
           end
@@ -324,6 +327,13 @@ module Runar
         end
 
         is_stateful = !@artifact.state_fields.empty?
+        # parent_stateful gates ONLY the issue-#42/#44 terminal sighash subscript
+        # trim. A StatefulSmartContract with zero mutable fields has empty
+        # state_fields yet still injects checkPreimage at method entry, so its
+        # user checkSig runs after the OP_CODESEPARATOR. parent_class is the
+        # authoritative signal; fall back to is_stateful for older artifacts.
+        parent_class    = @artifact.respond_to?(:parent_class) ? @artifact.parent_class.to_s : ''
+        parent_stateful = parent_class.empty? ? is_stateful : parent_class == 'StatefulSmartContract'
 
         method_needs_change     = method.params.any? { |p| p.name == '_changePKH' }
         method_needs_new_amount = method.params.any? { |p| p.name == '_newAmount' }
@@ -425,7 +435,7 @@ module Runar
         if opts.terminal_outputs && !opts.terminal_outputs.empty?
           return prepare_terminal(
             method_name, resolved_args, signer, opts,
-            is_stateful, needs_op_push_tx, method_needs_change,
+            is_stateful, parent_stateful, needs_op_push_tx, method_needs_change,
             sig_indices, preimage_index,
             method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
             intent_witness_hex
@@ -566,7 +576,8 @@ module Runar
           contract_utxo, new_locking_script, code_sep_idx,
           has_multi_output: has_multi_output,
           contract_outputs: contract_outputs || [],
-          intent_witness_hex: intent_witness_hex
+          intent_witness_hex: intent_witness_hex,
+          parent_stateful: parent_stateful
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
@@ -871,7 +882,7 @@ module Runar
       # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
       def prepare_terminal(
         method_name, resolved_args, _signer, opts,
-        is_stateful, needs_op_push_tx, method_needs_change,
+        is_stateful, parent_stateful, needs_op_push_tx, method_needs_change,
         sig_indices, preimage_index,
         method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
         intent_witness_hex = ''
@@ -999,6 +1010,7 @@ module Runar
           resolved_args: resolved_args,
           method_selector_hex: method_selector_hex,
           is_stateful: is_stateful,
+          parent_stateful: parent_stateful,
           is_terminal: true,
           needs_op_push_tx: needs_op_push_tx,
           method_needs_change: method_needs_change,
@@ -1305,8 +1317,12 @@ module Runar
         contract_utxo, new_locking_script, code_sep_idx,
         has_multi_output: false,
         contract_outputs: [],
-        intent_witness_hex: ''
+        intent_witness_hex: '',
+        parent_stateful: nil
       )
+        # parent_stateful gates the issue-#42/#44 terminal sighash subscript
+        # trim; fall back to is_stateful when not passed (older callers).
+        parent_stateful = is_stateful if parent_stateful.nil?
         PreparedCall.new(
           sighash: sighash,
           preimage: final_preimage,
@@ -1317,6 +1333,7 @@ module Runar
           resolved_args: resolved_args,
           method_selector_hex: method_selector_hex,
           is_stateful: is_stateful,
+          parent_stateful: parent_stateful,
           is_terminal: false,
           needs_op_push_tx: needs_op_push_tx,
           method_needs_change: method_needs_change,

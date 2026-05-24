@@ -17,6 +17,14 @@ public record RunarArtifact(
     String version,
     String compilerVersion,
     String contractName,
+    /**
+     * Base class the source contract extends ("SmartContract" |
+     * "StatefulSmartContract" | "UnsafeSmartContract"). Authoritative stateful
+     * signal for the issue-#42/#44 terminal sighash subscript trim: a
+     * StatefulSmartContract with zero mutable fields still needs the trim even
+     * though {@code stateFields} is empty. Older artifacts omit it (empty/null).
+     */
+    String parentClass,
     ABI abi,
     String scriptHex,
     String asm,
@@ -36,7 +44,10 @@ public record RunarArtifact(
         codeSeparatorIndices = codeSeparatorIndices == null ? List.of() : Collections.unmodifiableList(codeSeparatorIndices);
     }
 
-    /** Backwards-compatible constructor without {@code anf} (defaults to {@code null}). */
+    /**
+     * Backwards-compatible constructor without {@code parentClass} / {@code anf}
+     * (both default to {@code null}). Pre-parentClass callers keep compiling.
+     */
     public RunarArtifact(
         String version,
         String compilerVersion,
@@ -52,14 +63,50 @@ public record RunarArtifact(
         List<Integer> codeSeparatorIndices
     ) {
         this(
-            version, compilerVersion, contractName, abi, scriptHex, asm, buildTimestamp,
+            version, compilerVersion, contractName, null, abi, scriptHex, asm, buildTimestamp,
             stateFields, constructorSlots, codeSepIndexSlots,
             codeSeparatorIndex, codeSeparatorIndices, null
         );
     }
 
+    /** Backwards-compatible constructor without {@code parentClass} but with {@code anf}. */
+    public RunarArtifact(
+        String version,
+        String compilerVersion,
+        String contractName,
+        ABI abi,
+        String scriptHex,
+        String asm,
+        String buildTimestamp,
+        List<StateField> stateFields,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        Integer codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices,
+        Map<String, Object> anf
+    ) {
+        this(
+            version, compilerVersion, contractName, null, abi, scriptHex, asm, buildTimestamp,
+            stateFields, constructorSlots, codeSepIndexSlots,
+            codeSeparatorIndex, codeSeparatorIndices, anf
+        );
+    }
+
     public boolean isStateful() {
         return stateFields != null && !stateFields.isEmpty();
+    }
+
+    /**
+     * True when the contract extends {@code StatefulSmartContract} (from
+     * {@code parentClass}), independent of whether it has mutable state fields.
+     * Gates the issue-#42/#44 terminal sighash subscript trim. Falls back to
+     * {@link #isStateful()} for older artifacts that omit {@code parentClass}.
+     */
+    public boolean parentStateful() {
+        if (parentClass == null || parentClass.isEmpty()) {
+            return isStateful();
+        }
+        return "StatefulSmartContract".equals(parentClass);
     }
 
     // ------------------------------------------------------------------
@@ -85,6 +132,9 @@ public record RunarArtifact(
         String version = Json.asString(m.get("version"));
         String compilerVersion = Json.asString(m.get("compilerVersion"));
         String contractName = Json.asString(m.get("contractName"));
+        // parentClass is optional; absent on older artifacts. Gates the
+        // issue-#42/#44 terminal sighash subscript trim (see parentStateful()).
+        String parentClass = m.containsKey("parentClass") ? Json.asString(m.get("parentClass")) : null;
         ABI abi = ABI.fromMap(Json.asObject(m.get("abi")));
         String scriptHex = Json.asString(m.get("script"));
         String asm = Json.asString(m.get("asm"));
@@ -120,6 +170,7 @@ public record RunarArtifact(
             version,
             compilerVersion,
             contractName,
+            parentClass,
             abi,
             scriptHex,
             asm,

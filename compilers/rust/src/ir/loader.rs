@@ -462,6 +462,7 @@ mod tests {
     fn test_round_trip_serialize_deserialize() {
         let program = ANFProgram {
             contract_name: "RoundTrip".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "count".to_string(),
                 prop_type: "bigint".to_string(),
@@ -536,6 +537,7 @@ mod tests {
     fn test_round_trip_with_initial_value() {
         let program = ANFProgram {
             contract_name: "InitTest".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "value".to_string(),
                 prop_type: "bigint".to_string(),
@@ -576,6 +578,7 @@ mod tests {
     fn test_round_trip_if_and_loop() {
         let program = ANFProgram {
             contract_name: "Nested".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "test".to_string(),

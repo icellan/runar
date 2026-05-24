@@ -4652,6 +4652,7 @@ mod tests {
     fn p2pkh_program() -> ANFProgram {
         ANFProgram {
             contract_name: "P2PKH".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "pubKeyHash".to_string(),
                 prop_type: "Addr".to_string(),
@@ -4897,6 +4898,7 @@ mod tests {
         // Build a stateful contract that calls extractOutputHash on a preimage
         let program = ANFProgram {
             contract_name: "TestExtract".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "val".to_string(),
                 prop_type: "bigint".to_string(),
@@ -4964,6 +4966,7 @@ mod tests {
         // The terminal asserts in both branches should NOT emit OP_VERIFY.
         let program = ANFProgram {
             contract_name: "TerminalIf".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5068,6 +5071,7 @@ mod tests {
     fn test_unpack_emits_bin2num() {
         let program = ANFProgram {
             contract_name: "TestUnpack".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5128,6 +5132,7 @@ mod tests {
     fn test_pack_is_noop() {
         let program = ANFProgram {
             contract_name: "TestPack".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5184,6 +5189,7 @@ mod tests {
     fn test_to_byte_string_is_noop() {
         let program = ANFProgram {
             contract_name: "TestToByteString".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5239,6 +5245,7 @@ mod tests {
     fn test_sqrt_has_zero_guard() {
         let program = ANFProgram {
             contract_name: "TestSqrt".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5317,6 +5324,7 @@ mod tests {
         // so it should be dropped. The TS reference does this cleanup.
         let program = ANFProgram {
             contract_name: "TestLoopCleanup".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5436,6 +5444,7 @@ mod tests {
     fn test_log2_uses_bit_scanning_not_byte_approx() {
         let program = ANFProgram {
             contract_name: "TestLog2".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5526,6 +5535,7 @@ mod tests {
     fn test_reverse_bytes_uses_split_cat_not_op_reverse() {
         let program = ANFProgram {
             contract_name: "TestReverse".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5622,6 +5632,7 @@ mod tests {
     fn test_multi_method_dispatch() {
         let program = ANFProgram {
             contract_name: "Multi".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![
                 ANFMethod {
@@ -5725,6 +5736,7 @@ mod tests {
     fn test_extract_outputs_uses_offset_40() {
         let program = ANFProgram {
             contract_name: "OutputsCheck".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5784,6 +5796,7 @@ mod tests {
         // Contract: verify(a, b) { assert(a + b === target) }
         let program = ANFProgram {
             contract_name: "ArithCheck".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "target".to_string(),
                 prop_type: "bigint".to_string(),
@@ -5913,6 +5926,7 @@ mod tests {
     fn test_bytestring_concat_emits_op_cat() {
         let program = ANFProgram {
             contract_name: "CatCheck".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "verify".to_string(),
@@ -5991,6 +6005,7 @@ mod tests {
     fn test_log2_emits_64_if_ops() {
         let program = ANFProgram {
             contract_name: "TestLog2Count".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
