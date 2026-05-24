@@ -377,12 +377,12 @@ public final class StackLower {
         LoweringContext ctx = new LoweringContext(paramNames, properties, privateMethods);
         ctx.lowerBindings(method.body(), method.isPublic());
 
-        // Strip excess stack items left by deserialize_state on public methods.
-        boolean hasDeserializeState = false;
-        for (AnfBinding b : method.body()) {
-            if (b.value() instanceof DeserializeState) { hasDeserializeState = true; break; }
-        }
-        if (method.isPublic() && hasDeserializeState && ctx.sm.depth() > 1) {
+        // Strip excess stack items below the top-of-stack boolean (CLEANSTACK).
+        // Excess items can come from deserialize_state (stateful methods reading
+        // mutable fields) or from readonly-field-binding patterns in all-readonly
+        // terminal methods. The depth() > 1 guard keeps this a no-op for
+        // already-clean methods.
+        if (method.isPublic() && ctx.sm.depth() > 1) {
             int excess = ctx.sm.depth() - 1;
             for (int i = 0; i < excess; i++) {
                 ctx.emitOp(new NipOp());

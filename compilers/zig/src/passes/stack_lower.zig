@@ -4125,7 +4125,10 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         // Use body or bindings (whichever is populated)
         const bindings = if (method.body.len > 0) method.body else method.bindings;
         try ctx.lowerBindings(bindings, method.is_public);
-        if (method.is_public and methodUsesDeserializeState(bindings)) {
+        // CLEANSTACK: drop excess items left below the top-of-stack boolean.
+        // cleanupExcessStack() is a no-op when depth <= 1, so running it for
+        // every public method also fixes all-readonly stateful methods.
+        if (method.is_public) {
             try ctx.cleanupExcessStack();
         }
         if (!method.is_public or (!endsWithAssert(bindings) and !endsWithTerminalRawScript(bindings))) {
@@ -4311,23 +4314,6 @@ fn findPrivateMethod(methods: []const types.ANFMethod, name: []const u8) ?types.
     return null;
 }
 
-fn methodUsesDeserializeState(bindings: []const types.ANFBinding) bool {
-    for (bindings) |binding| {
-        switch (binding.value) {
-            .deserialize_state => return true,
-            .@"if" => |ie| {
-                if (methodUsesDeserializeState(ie.then)) return true;
-                if (methodUsesDeserializeState(ie.@"else")) return true;
-            },
-            .loop => |loop| {
-                if (methodUsesDeserializeState(loop.body)) return true;
-            },
-            else => {},
-        }
-    }
-    return false;
-}
-
 fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
     var public_indices = std.ArrayListUnmanaged(usize).empty;
     defer public_indices.deinit(ctx.allocator);
@@ -4378,7 +4364,10 @@ fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
             try ensureMethodPrelude.apply(ctx, bindings, method);
 
             try ctx.lowerBindings(bindings, method.is_public);
-            if (method.is_public and methodUsesDeserializeState(bindings)) {
+            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
+            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
+            // every public method also fixes all-readonly stateful methods.
+            if (method.is_public) {
                 try ctx.cleanupExcessStack();
             }
             if (!endsWithAssert(bindings)) {
@@ -4398,7 +4387,10 @@ fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
             try ensureMethodPrelude.apply(ctx, bindings, method);
 
             try ctx.lowerBindings(bindings, method.is_public);
-            if (method.is_public and methodUsesDeserializeState(bindings)) {
+            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
+            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
+            // every public method also fixes all-readonly stateful methods.
+            if (method.is_public) {
                 try ctx.cleanupExcessStack();
             }
             if (!endsWithAssert(bindings)) {

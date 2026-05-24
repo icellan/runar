@@ -1,0 +1,139 @@
+{
+  "contractName": "AllReadonlyCleanstack",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "owner",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "owner",
+          "type": "PubKey"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "ownerCopy",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t3"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "t4",
+              "t5"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "claim",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "owner",
+      "readonly": true,
+      "type": "PubKey"
+    }
+  ]
+}

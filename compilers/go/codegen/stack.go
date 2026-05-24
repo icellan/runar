@@ -4190,15 +4190,11 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
 
-	// Clean up excess stack items left by deserialize_state.
-	hasDeserializeState := false
-	for _, b := range method.Body {
-		if b.Value.Kind == "deserialize_state" {
-			hasDeserializeState = true
-			break
-		}
-	}
-	if method.IsPublic && hasDeserializeState && ctx.sm.depth() > 1 {
+	// Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+	// Excess items can come from deserialize_state (mutable-field methods) or
+	// from readonly-field-binding patterns in all-readonly terminal methods.
+	// The depth>1 guard keeps this a no-op for already-clean methods.
+	if method.IsPublic && ctx.sm.depth() > 1 {
 		excess := ctx.sm.depth() - 1
 		for i := 0; i < excess; i++ {
 			ctx.emitOp(StackOp{Op: "nip"})
@@ -4233,18 +4229,12 @@ func lowerMethod(method *ir.ANFMethod, properties []ir.ANFProperty) (*StackMetho
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
 
-	// Clean up excess stack items left by deserialize_state.
-	// Stateful methods that deserialize state from the preimage leave the
-	// deserialized property values on the stack. These must be removed so
-	// only the final assertion result remains (CLEANSTACK policy).
-	hasDeserializeState := false
-	for _, b := range method.Body {
-		if b.Value.Kind == "deserialize_state" {
-			hasDeserializeState = true
-			break
-		}
-	}
-	if method.IsPublic && hasDeserializeState && ctx.sm.depth() > 1 {
+	// Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+	// Excess items can come from deserialize_state (stateful methods reading
+	// mutable fields) or from readonly-field-binding patterns in all-readonly
+	// terminal methods. Only the final assertion result must remain on the
+	// stack. The depth>1 guard keeps this a no-op for already-clean methods.
+	if method.IsPublic && ctx.sm.depth() > 1 {
 		excess := ctx.sm.depth() - 1
 		for i := 0; i < excess; i++ {
 			ctx.emitOp(StackOp{Op: "nip"})

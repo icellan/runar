@@ -3987,9 +3987,12 @@ def _lower_method_with_private_methods(
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = any(b.value.kind == "deserialize_state" for b in method.body)
-    if method.is_public and has_deserialize_state and ctx.sm.depth() > 1:
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth>1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public and ctx.sm.depth() > 1:
         excess = ctx.sm.depth() - 1
         for _ in range(excess):
             ctx.emit_op(StackOp(op="nip"))
@@ -4017,9 +4020,12 @@ def _lower_method(
     ctx = _LoweringContext(param_names, properties)
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = any(b.value.kind == "deserialize_state" for b in method.body)
-    if method.is_public and has_deserialize_state and ctx.sm.depth() > 1:
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth>1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public and ctx.sm.depth() > 1:
         excess = ctx.sm.depth() - 1
         for _ in range(excess):
             ctx.emit_op(StackOp(op="nip"))

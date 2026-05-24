@@ -3502,9 +3502,12 @@ module RunarCompiler::Codegen
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = method.body.any? { |b| b.value.kind == "deserialize_state" }
-    if method.is_public && has_deserialize_state && ctx.sm.depth > 1
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth > 1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public && ctx.sm.depth > 1
       excess = ctx.sm.depth - 1
       excess.times do
         ctx.emit_op({ op: "nip" })
@@ -3531,9 +3534,12 @@ module RunarCompiler::Codegen
     ctx = LoweringContext.new(param_names, properties)
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = method.body.any? { |b| b.value.kind == "deserialize_state" }
-    if method.is_public && has_deserialize_state && ctx.sm.depth > 1
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth > 1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public && ctx.sm.depth > 1
       excess = ctx.sm.depth - 1
       excess.times do
         ctx.emit_op({ op: "nip" })
