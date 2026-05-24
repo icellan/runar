@@ -38,6 +38,14 @@ class ANFProgram:
     contract_name: str = ""
     properties: list[ANFProperty] = field(default_factory=list)
     methods: list[ANFMethod] = field(default_factory=list)
+    # Base class the source contract extends. In-memory carrier ONLY: it is
+    # excluded from the emitted ANF IR JSON (see _IR_EXCLUDED_FIELDS in
+    # __main__.py) so it never affects cross-tier conformance parity. The
+    # artifact assembler copies it to the top-level artifact field so SDKs can
+    # gate the issue-#42/#44 terminal sighash subscript trim on the parent
+    # class (a StatefulSmartContract with zero mutable fields still needs the
+    # trim even though state_fields is empty).
+    parent_class: str = ""
 
 
 @dataclass

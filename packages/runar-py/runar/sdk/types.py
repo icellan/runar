@@ -106,6 +106,11 @@ class RunarArtifact:
     version: str = ''
     compiler_version: str = ''
     contract_name: str = ''
+    # Base class the source contract extends. Authoritative stateful signal
+    # for the issue-#42/#44 terminal sighash subscript trim: a
+    # StatefulSmartContract with zero mutable fields still needs the trim even
+    # though state_fields is empty. Older artifacts leave it empty.
+    parent_class: str = ''
     abi: Abi = field(default_factory=Abi)
     script: str = ''
     asm: str = ''
@@ -163,6 +168,7 @@ class RunarArtifact:
             version=d.get('version', ''),
             compiler_version=d.get('compilerVersion', ''),
             contract_name=d.get('contractName', ''),
+            parent_class=d.get('parentClass', ''),
             abi=Abi(constructor_params=ctor_params, methods=methods),
             script=d.get('script', ''),
             asm=d.get('asm', ''),
@@ -240,6 +246,10 @@ class PreparedCall:
     resolved_args: list = field(default_factory=list)
     method_selector_hex: str = ''
     is_stateful: bool = False
+    # True when the contract extends StatefulSmartContract (from artifact
+    # parent_class), independent of mutable state fields. Gates the
+    # issue-#42/#44 terminal sighash subscript trim.
+    parent_stateful: bool = False
     is_terminal: bool = False
     needs_op_push_tx: bool = False
     method_needs_change: bool = False

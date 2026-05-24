@@ -34,6 +34,16 @@ pub struct ANFProgram {
     pub contract_name: String,
     pub properties: Vec<ANFProperty>,
     pub methods: Vec<ANFMethod>,
+    /// Base class the source contract extends ("SmartContract" |
+    /// "StatefulSmartContract" | "UnsafeSmartContract"). In-memory carrier
+    /// ONLY (`#[serde(skip)]`) so it never appears in the emitted ANF IR JSON
+    /// that the conformance suite compares cross-tier. The artifact assembler
+    /// copies it to the top-level artifact field so SDKs can gate the
+    /// issue-#42/#44 terminal sighash subscript trim on the authoritative
+    /// parent class (a StatefulSmartContract with zero mutable fields still
+    /// needs the trim even though state_fields is empty).
+    #[serde(skip, default)]
+    pub parent_class: String,
 }
 
 /// One level of a synthetic-array chain attached to expanded leaf

@@ -145,6 +145,13 @@ export interface RunarArtifact {
   /** Name of the compiled contract */
   contractName: string;
 
+  /**
+   * The base class the contract extends. Authoritative stateful signal for
+   * the issue-#42 terminal sighash subscript trim (a StatefulSmartContract
+   * with zero mutable fields still needs the trim).
+   */
+  parentClass?: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
+
   /** Public ABI (constructor + methods) */
   abi: ABI;
 

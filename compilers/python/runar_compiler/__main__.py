@@ -217,6 +217,9 @@ _IR_EXCLUDED_FIELDS = frozenset({
     # Python-only metadata used internally by expand_fixed_arrays.
     # Other compilers don't emit this field in --emit-ir output.
     "synthetic_array_chain",
+    # In-memory carrier for the artifact's top-level parentClass field.
+    # Excluded from --emit-ir so it never affects cross-tier ANF parity.
+    "parent_class",
 })
 
 

@@ -84,6 +84,10 @@ class Artifact:
     version: str = ""
     compiler_version: str = ""
     contract_name: str = ""
+    # Base class the source contract extends. Authoritative stateful signal
+    # for the issue-#42/#44 terminal sighash subscript trim (a
+    # StatefulSmartContract with zero mutable fields still needs the trim).
+    parent_class: str = ""
     abi: ABI = field(default_factory=ABI)
     script: str = ""
     asm: str = ""
@@ -588,6 +592,7 @@ def _assemble_artifact(
         version=SCHEMA_VERSION,
         compiler_version=COMPILER_VERSION,
         contract_name=program.contract_name,
+        parent_class=program.parent_class,
         abi=ABI(
             constructor=ABIConstructor(params=constructor_params),
             methods=methods,
@@ -634,6 +639,9 @@ def artifact_to_json(artifact: Artifact) -> str:
         "version": artifact.version,
         "compilerVersion": artifact.compiler_version,
         "contractName": artifact.contract_name,
+        # parentClass (when present) is inserted here so it sits right after
+        # contractName, matching the other tiers' artifact field order.
+        **({"parentClass": artifact.parent_class} if artifact.parent_class else {}),
         "abi": {
             "constructor": {
                 "params": [

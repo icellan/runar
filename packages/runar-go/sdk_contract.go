@@ -401,9 +401,12 @@ func (c *RunarContract) Call(
 		// which getCodeSepIndex now recovers via findCodesepOffsets.
 		// Stateless contracts: the user controls statement order and may place
 		// checkSig BEFORE the codesep (e.g. CovenantVault) — those must use the
-		// FULL script, so the trim stays gated on isStateful.
+		// FULL script, so the trim stays gated on the parent class. A stateful
+		// contract with ZERO mutable fields (empty StateFields) still injects
+		// checkPreimage at entry, so the trim is gated on parentStateful
+		// (artifact ParentClass), NOT isStateful (issue #44).
 		subscript := prepared.contractUtxo.Script
-		if prepared.isStateful && prepared.codeSepIdx >= 0 {
+		if prepared.parentStateful && prepared.codeSepIdx >= 0 {
 			subscript = subscript[(prepared.codeSepIdx+1)*2:]
 		}
 		sig, sigErr := signer.Sign(prepared.TxHex, 0, subscript, prepared.contractUtxo.Satoshis, nil)
@@ -451,6 +454,15 @@ func (c *RunarContract) PrepareCall(
 	}
 
 	isStateful := len(c.Artifact.StateFields) > 0
+	// parentStateful gates ONLY the issue-#42/#44 terminal sighash subscript
+	// trim. A StatefulSmartContract with zero mutable fields has empty
+	// StateFields yet still auto-injects checkPreimage at method entry, so its
+	// user checkSig runs after the OP_CODESEPARATOR. ParentClass is the
+	// authoritative signal; fall back to isStateful for older artifacts.
+	parentStateful := isStateful
+	if c.Artifact.ParentClass != "" {
+		parentStateful = c.Artifact.ParentClass == "StatefulSmartContract"
+	}
 	methodNeedsChange := false
 	methodNeedsNewAmount := false
 	for _, p := range method.Params {
@@ -607,7 +619,7 @@ func (c *RunarContract) PrepareCall(
 	if options != nil && len(options.TerminalOutputs) > 0 {
 		return c.prepareCallTerminal(
 			methodName, resolvedArgs, signer, options,
-			isStateful, needsOpPushTx, methodNeedsChange,
+			isStateful, parentStateful, needsOpPushTx, methodNeedsChange,
 			sigIndices, prevoutsIndices, preimageIndex,
 			methodSelectorHex, changePKHHex, contractUtxo, witnessHex,
 		)
@@ -1044,6 +1056,7 @@ func (c *RunarContract) PrepareCall(
 		resolvedArgs:      resolvedArgs,
 		methodSelectorHex: methodSelectorHex,
 		isStateful:        isStateful,
+		parentStateful:    parentStateful,
 		isTerminal:        false,
 		needsOpPushTx:     needsOpPushTx,
 		methodNeedsChange: methodNeedsChange,
@@ -1738,6 +1751,7 @@ func (c *RunarContract) prepareCallTerminal(
 	signer Signer,
 	options *CallOptions,
 	isStateful bool,
+	parentStateful bool,
 	needsOpPushTx bool,
 	methodNeedsChange bool,
 	sigIndices []int,
@@ -1918,6 +1932,7 @@ func (c *RunarContract) prepareCallTerminal(
 		resolvedArgs:      resolvedArgs,
 		methodSelectorHex: methodSelectorHex,
 		isStateful:        isStateful,
+		parentStateful:    parentStateful,
 		isTerminal:        true,
 		needsOpPushTx:     needsOpPushTx,
 		methodNeedsChange: methodNeedsChange,

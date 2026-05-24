@@ -499,6 +499,7 @@ pub fn fold_constants(program: &ANFProgram) -> ANFProgram {
         contract_name: program.contract_name.clone(),
         properties: program.properties.clone(),
         methods: program.methods.iter().map(|m| fold_method(m)).collect(),
+        parent_class: program.parent_class.clone(),
     }
 }
 
@@ -518,6 +519,7 @@ mod tests {
             contract_name: "Test".to_string(),
             properties: vec![],
             methods,
+            parent_class: String::new(),
         }
     }
 

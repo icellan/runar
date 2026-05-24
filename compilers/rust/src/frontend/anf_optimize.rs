@@ -589,6 +589,7 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         contract_name: program.contract_name,
         properties: program.properties,
         methods: cleaned_methods,
+        parent_class: program.parent_class,
     }
 }
 

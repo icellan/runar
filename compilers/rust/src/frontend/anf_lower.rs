@@ -49,6 +49,7 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
         contract_name: contract.name.clone(),
         properties,
         methods,
+        parent_class: contract.parent_class.clone(),
     }
 }
 

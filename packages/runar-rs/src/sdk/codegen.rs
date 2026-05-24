@@ -913,6 +913,7 @@ mod tests {
         RunarArtifact {
             version: "0.1.0".to_string(),
             contract_name: name.to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: ctor_params,

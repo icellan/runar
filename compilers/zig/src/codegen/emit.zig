@@ -540,6 +540,15 @@ pub fn emitArtifact(
     try writeJsonString(w, stack_program.contract_name);
     try w.writeByte(',');
 
+    // parentClass — authoritative stateful signal for the issue-#42/#44
+    // terminal sighash subscript trim (a StatefulSmartContract with zero
+    // mutable fields still needs the trim). Sourced from the ANF program; it
+    // is deliberately NOT part of the emitted ANF IR JSON, so cross-tier
+    // conformance parity is unaffected.
+    try w.writeAll("\"parentClass\":");
+    try writeJsonString(w, anf_program.parent_class.toTsString());
+    try w.writeByte(',');
+
     // abi
     try w.writeAll("\"abi\":{");
 

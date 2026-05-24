@@ -509,16 +509,19 @@ export class RunarContract {
     // getSubscriptForSigning's byte-walker).
     // Stateless contracts: the user controls statement order and may place
     // checkSig BEFORE the codesep (e.g. CovenantVault) — those must use the
-    // FULL script, so the trim stays gated on `_isStateful`.
+    // FULL script, so the trim stays gated on the parent class. A stateful
+    // contract with ZERO mutable fields (empty stateFields) still injects
+    // checkPreimage at entry, so the trim is gated on `_parentStateful`
+    // (artifact.parentClass), NOT `_isStateful` (issue #44).
     let mIdx = 0;
-    if (prepared._isStateful) {
+    if (prepared._parentStateful) {
       const pubMethods = this.artifact.abi.methods.filter((m) => m.isPublic);
       if (pubMethods.length > 1) {
         const idx = pubMethods.findIndex((m) => m.name === methodName);
         if (idx >= 0) mIdx = idx;
       }
     }
-    const sigSubscript = prepared._isStateful
+    const sigSubscript = prepared._parentStateful
       ? this.getSubscriptForSigning(prepared._contractUtxo.script, mIdx)
       : prepared._contractUtxo.script;
 
@@ -564,6 +567,17 @@ export class RunarContract {
     const isStateful =
       this.artifact.stateFields !== undefined &&
       this.artifact.stateFields.length > 0;
+    // `isStateful` (derived from non-empty stateFields) drives continuation
+    // params, op_push_tx, change outputs, etc. But a StatefulSmartContract
+    // with ZERO mutable fields has empty stateFields yet STILL auto-injects
+    // checkPreimage at method entry — so its user checkSig runs AFTER the
+    // OP_CODESEPARATOR and needs the issue-#42 subscript trim. The parentClass
+    // is the authoritative signal for the trim gate (issue #44). Fall back to
+    // `isStateful` for older artifacts that predate the parentClass field.
+    const parentStateful =
+      this.artifact.parentClass !== undefined
+        ? this.artifact.parentClass === 'StatefulSmartContract'
+        : isStateful;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
     // Drop auto-injected continuation params AND intent-intrinsic witness
@@ -786,6 +800,7 @@ export class RunarContract {
         _resolvedArgs: resolvedArgs,
         _methodSelectorHex: methodSelectorHex,
         _isStateful: isStateful,
+        _parentStateful: parentStateful,
         _isTerminal: true,
         _needsOpPushTx: needsOpPushTx,
         _methodNeedsChange: methodNeedsChange,
@@ -1140,6 +1155,7 @@ export class RunarContract {
       _resolvedArgs: resolvedArgs,
       _methodSelectorHex: methodSelectorHex,
       _isStateful: isStateful,
+      _parentStateful: parentStateful,
       _isTerminal: false,
       _needsOpPushTx: needsOpPushTx,
       _methodNeedsChange: methodNeedsChange,

@@ -71,6 +71,15 @@ export interface PreparedCall {
   /** @internal */ _resolvedArgs: unknown[];
   /** @internal */ _methodSelectorHex: string;
   /** @internal */ _isStateful: boolean;
+  /**
+   * @internal
+   * True when the contract extends StatefulSmartContract (from artifact
+   * `parentClass`), independent of whether it has mutable state fields.
+   * Gates the issue-#42/#44 terminal sighash subscript trim: a stateful
+   * contract with ZERO mutable fields still auto-injects checkPreimage at
+   * method entry, so its user checkSig runs after the OP_CODESEPARATOR.
+   */
+  _parentStateful: boolean;
   /** @internal */ _isTerminal: boolean;
   /** @internal */ _needsOpPushTx: boolean;
   /** @internal */ _methodNeedsChange: boolean;

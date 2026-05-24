@@ -338,9 +338,12 @@ class RunarContract:
             # _find_codesep_offsets.
             # Stateless contracts: the user controls statement order and may
             # place checkSig BEFORE the codesep (e.g. CovenantVault) — those must
-            # use the FULL script, so the trim stays gated on is_stateful.
+            # use the FULL script, so the trim stays gated on the parent class.
+            # A stateful contract with ZERO mutable fields (empty state_fields)
+            # still injects checkPreimage at entry, so the trim is gated on
+            # parent_stateful (artifact parent_class), NOT is_stateful (issue #44).
             subscript = prepared.contract_utxo.script
-            if prepared.is_stateful and prepared.code_sep_idx >= 0:
+            if prepared.parent_stateful and prepared.code_sep_idx >= 0:
                 trim_pos = (prepared.code_sep_idx + 1) * 2
                 if trim_pos <= len(subscript):
                     subscript = subscript[trim_pos:]
@@ -387,6 +390,16 @@ class RunarContract:
             )
 
         is_stateful = bool(self.artifact.state_fields)
+        # parent_stateful gates ONLY the issue-#42/#44 terminal sighash subscript
+        # trim. A StatefulSmartContract with zero mutable fields has empty
+        # state_fields yet still injects checkPreimage at entry, so its user
+        # checkSig runs after the OP_CODESEPARATOR. parent_class is the
+        # authoritative signal; fall back to is_stateful for older artifacts.
+        parent_stateful = (
+            self.artifact.parent_class == 'StatefulSmartContract'
+            if self.artifact.parent_class
+            else is_stateful
+        )
 
         # For stateful contracts, the compiler injects implicit params into every
         # public method's ABI (SigHashPreimage, and for state-mutating methods:
@@ -501,7 +514,7 @@ class RunarContract:
         if opts.terminal_outputs:
             return self._prepare_terminal(
                 method_name, resolved_args, signer, opts,
-                is_stateful, needs_op_push_tx, method_needs_change,
+                is_stateful, parent_stateful, needs_op_push_tx, method_needs_change,
                 sig_indices, prevouts_indices, preimage_index,
                 method_selector_hex, change_pkh_hex, contract_utxo, witness_hex,
             )
@@ -853,6 +866,7 @@ class RunarContract:
             resolved_args=resolved_args,
             method_selector_hex=method_selector_hex,
             is_stateful=is_stateful,
+            parent_stateful=parent_stateful,
             is_terminal=False,
             needs_op_push_tx=needs_op_push_tx,
             method_needs_change=method_needs_change,
@@ -1095,6 +1109,7 @@ class RunarContract:
         signer: Signer,
         opts: CallOptions,
         is_stateful: bool,
+        parent_stateful: bool,
         needs_op_push_tx: bool,
         method_needs_change: bool,
         sig_indices: list[int],
@@ -1242,6 +1257,7 @@ class RunarContract:
             resolved_args=resolved_args,
             method_selector_hex=method_selector_hex,
             is_stateful=is_stateful,
+            parent_stateful=parent_stateful,
             is_terminal=True,
             needs_op_push_tx=needs_op_push_tx,
             method_needs_change=method_needs_change,

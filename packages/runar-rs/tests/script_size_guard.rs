@@ -23,6 +23,7 @@ fn make_artifact(script: &str, contract_name: &str, methods: Vec<AbiMethod>) -> 
     RunarArtifact {
         version: "runar-v0.1.0".to_string(),
         contract_name: contract_name.to_string(),
+        parent_class: None,
         abi: Abi {
             constructor: AbiConstructor { params: vec![] },
             methods,

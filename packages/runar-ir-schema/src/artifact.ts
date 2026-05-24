@@ -157,6 +157,18 @@ export interface RunarArtifact {
   /** Name of the compiled contract */
   contractName: string;
 
+  /**
+   * The base class the contract extends. Distinguishes stateful contracts
+   * (which auto-inject `checkPreimage` at method entry, placing the user
+   * `checkSig` AFTER the OP_CODESEPARATOR) from stateless / unsafe contracts.
+   *
+   * This is the authoritative stateful signal for the issue-#42 terminal
+   * sighash subscript trim: a `StatefulSmartContract` with zero mutable
+   * fields still needs the trim, even though its `stateFields` array is
+   * empty. Older artifacts that predate this field omit it.
+   */
+  parentClass?: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
+
   /** Public ABI (constructor + methods) */
   abi: ABI;
 

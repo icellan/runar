@@ -104,6 +104,7 @@ type Artifact struct {
 	Version                string            `json:"version"`
 	CompilerVersion        string            `json:"compilerVersion"`
 	ContractName           string            `json:"contractName"`
+	ParentClass            string            `json:"parentClass,omitempty"`
 	ABI                    ABI               `json:"abi"`
 	Script                 string            `json:"script"`
 	ASM                    string            `json:"asm"`
@@ -321,6 +322,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		Version:         schemaVersion,
 		CompilerVersion: compilerVersion,
 		ContractName:    program.ContractName,
+		ParentClass:     program.ParentClass,
 		ABI: ABI{
 			Constructor: ABIConstructor{Params: constructorParams},
 			Methods:     methods,
