@@ -6,6 +6,7 @@ mod escrow;
 mod fungible_token;
 mod nft;
 mod auction;
+mod all_readonly_cleanstack;
 mod covenant_vault;
 mod oracle_price_feed;
 mod function_patterns;
