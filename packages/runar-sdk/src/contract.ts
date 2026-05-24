@@ -32,6 +32,57 @@ function invalidateTxCache(tx: BsvTransaction): void {
 }
 
 /**
+ * Walk a hex-encoded script and return the byte offsets of every
+ * OP_CODESEPARATOR (0xab) that sits at a real opcode boundary (i.e. not inside
+ * push-data). Correctly skips all BSV push opcodes (0x01..0x4b,
+ * OP_PUSHDATA1/2/4).
+ *
+ * Used by getSubscriptForSigning to recover the true on-chain byte offsets when
+ * the in-memory constructor args don't reflect what was actually baked into the
+ * locking script (e.g. after fromTxid populates dummy placeholders).
+ */
+export function findCodesepOffsets(scriptHex: string): number[] {
+  const out: number[] = [];
+  let off = 0;
+  const n = scriptHex.length;
+  const b = (i: number): number => {
+    const v = parseInt(scriptHex.slice(i, i + 2), 16);
+    return Number.isNaN(v) ? 0 : v;
+  };
+  while (off + 2 <= n) {
+    const op = b(off);
+    const bytePos = off / 2;
+    if (op === 0xab) {
+      out.push(bytePos);
+      off += 2;
+    } else if (op >= 0x01 && op <= 0x4b) {
+      off += 2 + op * 2;
+    } else if (op === 0x4c) {
+      if (off + 4 > n) break;
+      const pushLen = b(off + 2);
+      off += 4 + pushLen * 2;
+    } else if (op === 0x4d) {
+      if (off + 6 > n) break;
+      const lo = b(off + 2);
+      const hi = b(off + 4);
+      const pushLen = lo | (hi << 8);
+      off += 6 + pushLen * 2;
+    } else if (op === 0x4e) {
+      if (off + 10 > n) break;
+      const b0 = b(off + 2);
+      const b1 = b(off + 4);
+      const b2 = b(off + 6);
+      const b3 = b(off + 8);
+      const pushLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+      off += 10 + pushLen * 2;
+    } else {
+      off += 2;
+    }
+  }
+  return out;
+}
+
+/**
  * Runtime wrapper for a compiled Runar contract.
  *
  * Handles deployment, method invocation, state tracking, and script
@@ -451,9 +502,14 @@ export class RunarContract {
     const prepared = await this.prepareCall(methodName, args, options);
     const signer = this._signer!;
 
-    // In stateful contracts, user checkSig executes AFTER OP_CODESEPARATOR
-    // (checkPreimage is auto-injected at method entry), so use trimmed script.
-    // In stateless contracts, user checkSig is BEFORE OP_CODESEPARATOR, so use full script.
+    // Stateful contracts: checkPreimage is auto-injected at method entry, so
+    // the user checkSig executes AFTER the OP_CODESEPARATOR — the sighash must
+    // be computed over the subscript trimmed at that separator (issue #42: the
+    // trim must land at the *real* on-chain codesep byte position, recovered by
+    // getSubscriptForSigning's byte-walker).
+    // Stateless contracts: the user controls statement order and may place
+    // checkSig BEFORE the codesep (e.g. CovenantVault) — those must use the
+    // FULL script, so the trim stays gated on `_isStateful`.
     let mIdx = 0;
     if (prepared._isStateful) {
       const pubMethods = this.artifact.abi.methods.filter((m) => m.isPublic);
@@ -1480,10 +1536,39 @@ export class RunarContract {
 
   /**
    * Get the subscript trimmed at the OP_CODESEPARATOR for a given method.
-   * Used for BIP-143 sighash computation for user CHECKSIG in stateful contracts
-   * (where checkSig executes AFTER OP_CODESEPARATOR).
+   * Used for BIP-143 sighash computation for the user CHECKSIG whenever the
+   * script contains an OP_CODESEPARATOR before it (per BIP-143 / BSV consensus,
+   * for stateful AND terminal methods alike). Returns the full script unchanged
+   * when no OP_CODESEPARATOR is present.
+   *
+   * When `_codeScript` is set (the contract is loaded from chain, or the deploy
+   * script has already been built from real constructor args), walk the actual
+   * script and trim at the true on-chain byte position. This is required
+   * because `fromTxid` populates constructorArgs with dummy placeholders — the
+   * real arg bytes are already baked into the on-chain locking script — so
+   * `adjustCodeSepOffset` computes a shift of zero and returns the wrong offset
+   * whenever the OP_CODESEPARATOR sits after constructor slots that expand at
+   * deploy time. The symptom of using the wrong offset is NULLFAIL at
+   * OP_CHECKSIG for terminal methods.
    */
   private getSubscriptForSigning(fullScript: string, methodIndex?: number): string {
+    if (this._codeScript !== null) {
+      const realOffsets = findCodesepOffsets(this._codeScript);
+      if (realOffsets.length > 0) {
+        const indices = this.artifact.codeSeparatorIndices;
+        let off: number | undefined;
+        if (indices && methodIndex !== undefined && methodIndex < indices.length
+            && methodIndex < realOffsets.length) {
+          off = realOffsets[methodIndex];
+        } else if (this.artifact.codeSeparatorIndex !== undefined) {
+          off = realOffsets[0];
+        }
+        if (off !== undefined) {
+          return fullScript.slice((off + 1) * 2);
+        }
+      }
+    }
+
     const indices = this.artifact.codeSeparatorIndices;
     let codeSepIdx: number | undefined;
     if (indices && methodIndex !== undefined && methodIndex < indices.length) {

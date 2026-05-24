@@ -330,8 +330,15 @@ class RunarContract:
         prepared = self.prepare_call(method_name, args, provider, signer, options)
         signatures: dict[int, str] = {}
         for idx in prepared.sig_indices:
-            # Stateful: user checkSig is AFTER OP_CODESEPARATOR — trim subscript
-            # Stateless: user checkSig is BEFORE — use full script
+            # Stateful contracts: checkPreimage is auto-injected at method entry,
+            # so the user checkSig executes AFTER the OP_CODESEPARATOR — the
+            # sighash must be computed over the subscript trimmed at that
+            # separator. Issue #42: the trim must land at the *real* on-chain
+            # codesep byte position, which _get_code_sep_index now recovers via
+            # _find_codesep_offsets.
+            # Stateless contracts: the user controls statement order and may
+            # place checkSig BEFORE the codesep (e.g. CovenantVault) — those must
+            # use the FULL script, so the trim stays gated on is_stateful.
             subscript = prepared.contract_utxo.script
             if prepared.is_stateful and prepared.code_sep_idx >= 0:
                 trim_pos = (prepared.code_sep_idx + 1) * 2
@@ -1303,7 +1310,32 @@ class RunarContract:
         return result
 
     def _get_code_sep_index(self, method_index: int) -> int:
-        """Get the adjusted code separator index for a method, or -1 if none."""
+        """Get the byte offset of an OP_CODESEPARATOR for a method, or -1 if none.
+
+        When ``_code_script`` is set (the contract is loaded from chain, or the
+        deploy script has already been built from real constructor args), walk
+        the actual script and return the true on-chain byte position. This is
+        required because ``from_txid`` populates constructor args with dummy
+        placeholders — the real arg bytes are already baked into the on-chain
+        locking script — so ``_adjust_code_sep_offset`` computes a shift of zero
+        and returns the wrong offset whenever the OP_CODESEPARATOR sits after
+        constructor slots that expand at deploy time (e.g. PubKey args = 1 → 34
+        bytes). The symptom of using the wrong offset is NULLFAIL at OP_CHECKSIG
+        for terminal methods.
+
+        Falls back to the legacy template-adjusted offset for synthetic /
+        unit-test paths that have no ``_code_script`` available.
+        """
+        if self._code_script:
+            if self.artifact.code_separator_indices:
+                real_offsets = _find_codesep_offsets(self._code_script)
+                if 0 <= method_index < len(self.artifact.code_separator_indices) and method_index < len(real_offsets):
+                    return real_offsets[method_index]
+            if self.artifact.code_separator_index is not None:
+                real_offsets = _find_codesep_offsets(self._code_script)
+                if real_offsets:
+                    return real_offsets[0]
+
         if self.artifact.code_separator_indices and 0 <= method_index < len(self.artifact.code_separator_indices):
             return self._adjust_code_sep_offset(self.artifact.code_separator_indices[method_index])
         if self.artifact.code_separator_index is not None:
@@ -1576,6 +1608,61 @@ def _build_named_args(user_params: list, resolved_args: list) -> dict:
         if i < len(resolved_args):
             result[param.name] = resolved_args[i]
     return result
+
+
+def _find_codesep_offsets(script_hex: str) -> list[int]:
+    """Walk a hex-encoded script and return the byte offsets of every
+    OP_CODESEPARATOR (0xab) that sits at a real opcode boundary (i.e. not inside
+    push-data). Correctly skips all BSV push opcodes (0x01..0x4b,
+    OP_PUSHDATA1/2/4).
+
+    Used by ``_get_code_sep_index`` to recover the true on-chain byte offsets
+    when the in-memory constructor args don't reflect what was actually baked
+    into the locking script (e.g. after ``from_txid`` populates dummy
+    placeholders).
+    """
+    out: list[int] = []
+    off = 0
+    n = len(script_hex)
+
+    def _b(i: int) -> int:
+        try:
+            return int(script_hex[i:i + 2], 16)
+        except ValueError:
+            return 0
+
+    while off + 2 <= n:
+        op = _b(off)
+        byte_pos = off // 2
+        if op == 0xAB:
+            out.append(byte_pos)
+            off += 2
+        elif 0x01 <= op <= 0x4B:
+            off += 2 + op * 2
+        elif op == 0x4C:
+            if off + 4 > n:
+                break
+            push_len = _b(off + 2)
+            off += 4 + push_len * 2
+        elif op == 0x4D:
+            if off + 6 > n:
+                break
+            lo = _b(off + 2)
+            hi = _b(off + 4)
+            push_len = lo | (hi << 8)
+            off += 6 + push_len * 2
+        elif op == 0x4E:
+            if off + 10 > n:
+                break
+            b0 = _b(off + 2)
+            b1 = _b(off + 4)
+            b2 = _b(off + 6)
+            b3 = _b(off + 8)
+            push_len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            off += 10 + push_len * 2
+        else:
+            off += 2
+    return out
 
 
 def _encode_script_number(n: int) -> str:

@@ -2582,7 +2582,35 @@ pub const RunarContract = struct {
 
     /// getCodeSepIndex returns the adjusted code separator byte offset for a
     /// given method index, or null if no OP_CODESEPARATOR is present.
+    /// getCodeSepIndex returns the byte offset of an OP_CODESEPARATOR for the
+    /// given method index, or null if none is present.
+    ///
+    /// When code_script is set (the contract is loaded from chain, or the deploy
+    /// script has already been built from real constructor args), walk the
+    /// actual script and return the true on-chain byte position. This is
+    /// required because fromTxid populates constructor args with dummy
+    /// placeholders — the real arg bytes are already baked into the on-chain
+    /// locking script — so adjustCodeSepOffset computes a shift of zero and
+    /// returns the wrong offset whenever the OP_CODESEPARATOR sits after
+    /// constructor slots that expand at deploy time (issue #42: NULLFAIL at
+    /// OP_CHECKSIG for terminal methods).
+    ///
+    /// Falls back to the legacy template-adjusted offset for synthetic /
+    /// unit-test paths that have no code_script available.
     pub fn getCodeSepIndex(self: *const RunarContract, method_index: usize) !?i32 {
+        if (self.code_script) |cs| {
+            const real_offsets = try findCodesepOffsets(self.allocator, cs);
+            defer self.allocator.free(real_offsets);
+            if (self.artifact.code_separator_indices.len > 0) {
+                if (method_index < self.artifact.code_separator_indices.len and method_index < real_offsets.len) {
+                    return real_offsets[method_index];
+                }
+            }
+            if (self.artifact.code_separator_index != null and real_offsets.len > 0) {
+                return real_offsets[0];
+            }
+        }
+
         if (self.artifact.code_separator_indices.len > 0 and method_index < self.artifact.code_separator_indices.len) {
             return try self.adjustCodeSepOffset(self.artifact.code_separator_indices[method_index]);
         }
@@ -2888,6 +2916,52 @@ fn hexNibble(c: u8) u4 {
     };
 }
 
+/// Walk a hex-encoded script and return the byte offsets of every
+/// OP_CODESEPARATOR (0xab) that sits at a real opcode boundary (i.e. not inside
+/// push-data). Correctly skips all BSV push opcodes (0x01..0x4b,
+/// OP_PUSHDATA1/2/4). Caller owns the returned slice.
+///
+/// Used by getCodeSepIndex to recover the true on-chain byte offsets when the
+/// in-memory constructor args don't reflect what was actually baked into the
+/// locking script (e.g. after fromTxid populates dummy placeholders).
+pub fn findCodesepOffsets(allocator: std.mem.Allocator, script_hex: []const u8) ![]i32 {
+    var out: std.ArrayListUnmanaged(i32) = .empty;
+    errdefer out.deinit(allocator);
+    var off: usize = 0;
+    const n = script_hex.len;
+    while (off + 2 <= n) {
+        const op = hexByteAt(script_hex, off);
+        const byte_pos: i32 = @intCast(off / 2);
+        if (op == 0xab) {
+            try out.append(allocator, byte_pos);
+            off += 2;
+        } else if (op >= 0x01 and op <= 0x4b) {
+            off += 2 + op * 2;
+        } else if (op == 0x4c) {
+            if (off + 4 > n) break;
+            const push_len = hexByteAt(script_hex, off + 2);
+            off += 4 + push_len * 2;
+        } else if (op == 0x4d) {
+            if (off + 6 > n) break;
+            const lo = hexByteAt(script_hex, off + 2);
+            const hi = hexByteAt(script_hex, off + 4);
+            const push_len = lo | (hi << 8);
+            off += 6 + push_len * 2;
+        } else if (op == 0x4e) {
+            if (off + 10 > n) break;
+            const b0 = hexByteAt(script_hex, off + 2);
+            const b1 = hexByteAt(script_hex, off + 4);
+            const b2 = hexByteAt(script_hex, off + 6);
+            const b3 = hexByteAt(script_hex, off + 8);
+            const push_len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+            off += 10 + push_len * 2;
+        } else {
+            off += 2;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2909,6 +2983,39 @@ test "RunarContract.init and getLockingScript for stateless contract" {
     defer allocator.free(ls);
     // Stateless with no constructor slots appends args: "76a914" + push("aabbccdd") = "76a914" + "04aabbccdd"
     try std.testing.expect(std.mem.startsWith(u8, ls, "76a914"));
+}
+
+// Issue #42: terminal-method sighash subscript byte-walker.
+test "findCodesepOffsets returns real byte position, skipping push-data" {
+    const allocator = std.testing.allocator;
+    // 51            OP_1
+    // 02 ab cd      push 2 bytes (0xab inside push-data, must be ignored)
+    // ab            OP_CODESEPARATOR  <- real, byte offset 4
+    // ac            OP_CHECKSIG
+    const offsets = try findCodesepOffsets(allocator, "5102abcdabac");
+    defer allocator.free(offsets);
+    try std.testing.expectEqual(@as(usize, 1), offsets.len);
+    try std.testing.expectEqual(@as(i32, 4), offsets[0]);
+}
+
+test "findCodesepOffsets handles OP_PUSHDATA1" {
+    const allocator = std.testing.allocator;
+    // 4c (OP_PUSHDATA1) 02 (len) abab (data, contains 0xab) ab (real codesep)
+    const offsets = try findCodesepOffsets(allocator, "4c02ababab");
+    defer allocator.free(offsets);
+    try std.testing.expectEqual(@as(usize, 1), offsets.len);
+    try std.testing.expectEqual(@as(i32, 4), offsets[0]);
+}
+
+test "findCodesepOffsets trims subscript at real codesep byte position" {
+    const allocator = std.testing.allocator;
+    const full_script = "5102abcdabac"; // real codesep at byte index 4
+    const offsets = try findCodesepOffsets(allocator, full_script);
+    defer allocator.free(offsets);
+    try std.testing.expectEqual(@as(i32, 4), offsets[0]);
+    const hex_offset: usize = @intCast((@as(usize, @intCast(offsets[0])) + 1) * 2);
+    const subscript = full_script[hex_offset..];
+    try std.testing.expectEqualStrings("ac", subscript);
 }
 
 test "RunarContract.init and getLockingScript for stateful contract" {

@@ -920,7 +920,37 @@ public final class RunarContract {
         return -1;
     }
 
+    /**
+     * Returns the byte offset of an {@code OP_CODESEPARATOR} for the given
+     * method index, or -1 if none is present.
+     *
+     * <p>When the contract has a live on-chain script ({@code currentUtxo} set),
+     * walk the actual script and return the true on-chain byte position. This is
+     * required because a contract reconnected from chain (or deployed from real
+     * constructor args) carries args already baked into the locking script — so
+     * {@link #adjustCodeSepOffset} computes a shift of zero and returns the
+     * wrong offset whenever the {@code OP_CODESEPARATOR} sits after constructor
+     * slots that expand at deploy time (issue #42: NULLFAIL at OP_CHECKSIG for
+     * terminal methods).
+     *
+     * <p>Falls back to the legacy template-adjusted offset for synthetic /
+     * unit-test paths that have no live script available.
+     */
     private int getCodeSepIndex(int methodIndex) {
+        if (currentUtxo != null && currentUtxo.scriptHex() != null) {
+            java.util.List<Integer> realOffsets =
+                findCodesepOffsets(currentUtxo.scriptHex());
+            if (artifact.codeSeparatorIndices() != null
+                && methodIndex >= 0
+                && methodIndex < artifact.codeSeparatorIndices().size()
+                && methodIndex < realOffsets.size()) {
+                return realOffsets.get(methodIndex);
+            }
+            if (artifact.codeSeparatorIndex() != null && !realOffsets.isEmpty()) {
+                return realOffsets.get(0);
+            }
+        }
+
         if (artifact.codeSeparatorIndices() != null
             && methodIndex >= 0
             && methodIndex < artifact.codeSeparatorIndices().size()) {
@@ -930,6 +960,62 @@ public final class RunarContract {
             return adjustCodeSepOffset(artifact.codeSeparatorIndex());
         }
         return -1;
+    }
+
+    /**
+     * Walks a hex-encoded script and returns the byte offsets of every
+     * {@code OP_CODESEPARATOR} (0xab) that sits at a real opcode boundary
+     * (i.e. not inside push-data). Correctly skips all BSV push opcodes
+     * (0x01..0x4b, OP_PUSHDATA1/2/4).
+     *
+     * <p>Used by {@link #getCodeSepIndex} to recover the true on-chain byte
+     * offsets when the in-memory constructor args don't reflect what was
+     * actually baked into the locking script.
+     */
+    static java.util.List<Integer> findCodesepOffsets(String scriptHex) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        int off = 0;
+        int n = scriptHex.length();
+        while (off + 2 <= n) {
+            int op = byteAt(scriptHex, off);
+            int bytePos = off / 2;
+            if (op == 0xab) {
+                out.add(bytePos);
+                off += 2;
+            } else if (op >= 0x01 && op <= 0x4b) {
+                off += 2 + op * 2;
+            } else if (op == 0x4c) {
+                if (off + 4 > n) break;
+                int pushLen = byteAt(scriptHex, off + 2);
+                off += 4 + pushLen * 2;
+            } else if (op == 0x4d) {
+                if (off + 6 > n) break;
+                int lo = byteAt(scriptHex, off + 2);
+                int hi = byteAt(scriptHex, off + 4);
+                int pushLen = lo | (hi << 8);
+                off += 6 + pushLen * 2;
+            } else if (op == 0x4e) {
+                if (off + 10 > n) break;
+                int b0 = byteAt(scriptHex, off + 2);
+                int b1 = byteAt(scriptHex, off + 4);
+                int b2 = byteAt(scriptHex, off + 6);
+                int b3 = byteAt(scriptHex, off + 8);
+                int pushLen = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                off += 10 + pushLen * 2;
+            } else {
+                off += 2;
+            }
+        }
+        return out;
+    }
+
+    private static int byteAt(String hex, int pos) {
+        if (pos + 2 > hex.length()) return 0;
+        try {
+            return Integer.parseInt(hex.substring(pos, pos + 2), 16);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**

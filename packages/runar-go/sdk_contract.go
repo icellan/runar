@@ -394,10 +394,14 @@ func (c *RunarContract) Call(
 
 	signatures := make(map[int]string)
 	for _, idx := range prepared.SigIndices {
-		// In stateful contracts, user checkSig executes AFTER OP_CODESEPARATOR
-		// (checkPreimage is auto-injected at method entry), so use trimmed script.
-		// In stateless contracts, user checkSig executes BEFORE OP_CODESEPARATOR,
-		// so use the full locking script.
+		// Stateful contracts: checkPreimage is auto-injected at method entry, so
+		// the user checkSig executes AFTER the OP_CODESEPARATOR — the sighash
+		// must be computed over the subscript trimmed at that separator. Issue
+		// #42: the trim must land at the *real* on-chain codesep byte position,
+		// which getCodeSepIndex now recovers via findCodesepOffsets.
+		// Stateless contracts: the user controls statement order and may place
+		// checkSig BEFORE the codesep (e.g. CovenantVault) — those must use the
+		// FULL script, so the trim stays gated on isStateful.
 		subscript := prepared.contractUtxo.Script
 		if prepared.isStateful && prepared.codeSepIdx >= 0 {
 			subscript = subscript[(prepared.codeSepIdx+1)*2:]
@@ -1543,9 +1547,37 @@ func (c *RunarContract) resolvedCodeSepSlotValues() []struct {
 	return out
 }
 
-// getCodeSepIndex returns the adjusted code separator byte offset for a
-// given method index, or -1 if no OP_CODESEPARATOR is present.
+// getCodeSepIndex returns the byte offset of an OP_CODESEPARATOR for the given
+// method index, or -1 if no OP_CODESEPARATOR is present.
+//
+// When codeScript is set (i.e. the contract is loaded from chain, or the deploy
+// script has already been built from real constructor args), we walk the actual
+// script and return the true on-chain byte position. This is required because
+// FromTxid populates constructor args with dummy placeholders — the real arg
+// bytes are already baked into the on-chain locking script — so
+// adjustCodeSepOffset computes a shift of zero and returns the wrong offset
+// whenever the OP_CODESEPARATOR sits after constructor slots that expand at
+// deploy time (e.g. PubKey args = 1 → 34 bytes). The symptom of using the wrong
+// offset is NULLFAIL at OP_CHECKSIG for terminal methods.
+//
+// Falls back to the legacy template-adjusted offset for synthetic / unit-test
+// paths that have no codeScript available.
 func (c *RunarContract) getCodeSepIndex(methodIndex int) int {
+	if c.codeScript != "" {
+		if c.Artifact.CodeSeparatorIndices != nil {
+			realOffsets := findCodesepOffsets(c.codeScript)
+			if methodIndex >= 0 && methodIndex < len(c.Artifact.CodeSeparatorIndices) && methodIndex < len(realOffsets) {
+				return realOffsets[methodIndex]
+			}
+		}
+		if c.Artifact.CodeSeparatorIndex != nil {
+			realOffsets := findCodesepOffsets(c.codeScript)
+			if len(realOffsets) > 0 {
+				return realOffsets[0]
+			}
+		}
+	}
+
 	if c.Artifact.CodeSeparatorIndices != nil && methodIndex >= 0 && methodIndex < len(c.Artifact.CodeSeparatorIndices) {
 		return c.adjustCodeSepOffset(c.Artifact.CodeSeparatorIndices[methodIndex])
 	}
@@ -1553,6 +1585,65 @@ func (c *RunarContract) getCodeSepIndex(methodIndex int) int {
 		return c.adjustCodeSepOffset(*c.Artifact.CodeSeparatorIndex)
 	}
 	return -1
+}
+
+// findCodesepOffsets walks a hex-encoded script and returns the byte offsets of
+// every OP_CODESEPARATOR (0xab) that sits at a real opcode boundary (i.e. not
+// inside push-data). Correctly skips all BSV push opcodes (0x01..0x4b,
+// OP_PUSHDATA1/2/4).
+//
+// Used by getCodeSepIndex to recover the true on-chain byte offsets when the
+// in-memory constructor args don't reflect what was actually baked into the
+// locking script (e.g. after FromTxid populates dummy placeholders).
+func findCodesepOffsets(scriptHex string) []int {
+	out := []int{}
+	off := 0
+	n := len(scriptHex)
+	parseByte := func(i int) int {
+		v, err := strconv.ParseUint(scriptHex[i:i+2], 16, 16)
+		if err != nil {
+			return 0
+		}
+		return int(v)
+	}
+	for off+2 <= n {
+		op := parseByte(off)
+		bytePos := off / 2
+		switch {
+		case op == 0xab:
+			out = append(out, bytePos)
+			off += 2
+		case op >= 0x01 && op <= 0x4b:
+			off += 2 + op*2
+		case op == 0x4c:
+			if off+4 > n {
+				return out
+			}
+			pushLen := parseByte(off + 2)
+			off += 4 + pushLen*2
+		case op == 0x4d:
+			if off+6 > n {
+				return out
+			}
+			lo := parseByte(off + 2)
+			hi := parseByte(off + 4)
+			pushLen := lo | (hi << 8)
+			off += 6 + pushLen*2
+		case op == 0x4e:
+			if off+10 > n {
+				return out
+			}
+			b0 := parseByte(off + 2)
+			b1 := parseByte(off + 4)
+			b2 := parseByte(off + 6)
+			b3 := parseByte(off + 8)
+			pushLen := b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+			off += 10 + pushLen*2
+		default:
+			off += 2
+		}
+	}
+	return out
 }
 
 // hasCodeSeparator returns true if the artifact has OP_CODESEPARATOR support.
