@@ -57,6 +57,12 @@ const TEST_SPECS: TestSpec[] = [
   // ===== Example contracts (examples/ts/) =====
 
   {
+    name: 'all-readonly-cleanstack',
+    constructorArgs: [
+      { type: 'PubKey', value: PK },
+    ],
+  },
+  {
     name: 'auction',
     source: 'examples/ts/auction/Auction.runar.ts',
     constructorArgs: [
