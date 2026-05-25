@@ -1,58 +1,70 @@
-//! AllReadonlyCleanstack integration test — regression for issue #44.
+//! AllReadonlyCleanstack integration test — issue #44 / parentClass pipeline.
 //!
-//! A StatefulSmartContract with ZERO mutable fields plus a readonly-binding in a
-//! terminal method leaves an excess stack item. Before the cleanupExcessStack
-//! gate fix (#48) the compiler skipped the cleanup (it was gated on
-//! `hasDeserializeState`, never true here), so the script violated BSV's
-//! CLEANSTACK rule and the spend was rejected on mainnet ARC with "Script did
-//! not clean its stack". With the fix the compiler emits the trailing OP_NIP.
+//! ## What this proves
 //!
-//! Under the now-strict CI oracle (acceptnonstdtxn=0, #49) the terminal claim()
-//! spend must be ACCEPTED — this test fails if either the codegen fix regresses
-//! or the oracle stops enforcing CLEANSTACK, so the gap from #44 cannot silently
-//! reopen.
+//! `AllReadonlyCleanstack` is a `StatefulSmartContract` with ZERO mutable
+//! fields (only a `readonly owner`). Its `claim(sig)` method is terminal: the
+//! contract is fully spent, the user `checkSig` runs AFTER the auto-injected
+//! `checkPreimage` / OP_CODESEPARATOR.
 //!
-//! Gating: the on-chain test requires a local regtest node
-//! (cargo test --features regtest). The compile test runs by default.
+//! Before the parentClass fix, the SDK derived `is_stateful` purely from
+//! non-empty `state_fields`. With zero mutable fields, `state_fields` is empty,
+//! so the SDK mistook the contract for stateless and SKIPPED the issue-#42/#44
+//! terminal sighash subscript trim. The user `sig` was then signed over the
+//! FULL locking script instead of the codesep-trimmed subscript, so the spend
+//! NULLFAILed on a strict node (`acceptnonstdtxn=0`).
+//!
+//! The fix carries `parentClass` in the artifact and gates the trim on
+//! `parent_class == "StatefulSmartContract"`. This test deploys the contract
+//! and spends its terminal `claim()`, asserting the spend is ACCEPTED.
+//!
+//! `claim(sig)` has the `sig` user param plus the compiler-injected
+//! `txPreimage` (SigHashPreimage). A zero-mutable-field stateful contract has
+//! `is_stateful == false`, so the SDK does NOT strip `txPreimage` from the
+//! user-facing params — hence the call passes two `Auto` args (sig, txPreimage).
+//!
+//! **Gating**: the on-chain test is gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. It requires a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 
-const CONTRACT: &str = "examples/ts/all-readonly-cleanstack/AllReadonlyCleanstack.runar.ts";
+const SOURCE: &str = "examples/ts/all-readonly-cleanstack/AllReadonlyCleanstack.runar.ts";
 
 #[test]
 fn test_all_readonly_cleanstack_compile() {
-    // Guards the CLEANSTACK codegen path without needing a node.
-    let _artifact = compile_contract(CONTRACT);
+    let artifact = compile_contract(SOURCE);
+    assert_eq!(artifact.contract_name, "AllReadonlyCleanstack");
+    // parentClass must be carried so the SDK can gate the terminal trim even
+    // though there are no mutable state fields.
+    assert_eq!(
+        artifact.parent_class.as_deref(),
+        Some("StatefulSmartContract"),
+        "artifact must carry parentClass=StatefulSmartContract"
+    );
+    assert!(
+        artifact.state_fields.as_ref().map_or(true, |f| f.is_empty()),
+        "AllReadonlyCleanstack has zero mutable state fields"
+    );
 }
 
-// KNOWN FAILURE — do not un-ignore until the residual sighash gap is fixed.
-//
-// Under the strict oracle (acceptnonstdtxn=0) this spend is rejected with
-// NULLFAIL ("Signature must be zero for failed CHECK(MULTI)SIG operation").
-// Root cause (confirmed locally against the regtest node): the SDK derives
-// `is_stateful` from "has mutable state_fields" (contract.rs ~L481), so a
-// StatefulSmartContract with ZERO mutable fields is treated as stateless. The
-// #42 terminal-sighash subscript trim is gated on `is_stateful`, so it never
-// fires for this shape and the user checkSig is signed over the untrimmed
-// script. The contract compiles, passes conformance, and is CLEANSTACK-clean
-// (#44) — but cannot be spent. The fix is to gate the trim on the presence of an
-// auto-injected OP_CODESEPARATOR (parent class = StatefulSmartContract), not on
-// the mutable-field heuristic. Tracked separately (see report / new issue).
 #[test]
-#[ignore = "known NULLFAIL: zero-mutable-field StatefulSmartContract → is_stateful=false → #42 trim skipped; needs codesep-based gate"]
-fn test_all_readonly_cleanstack_claim() {
+#[cfg_attr(not(feature = "regtest"), ignore)]
+fn test_all_readonly_cleanstack_claim_accepted() {
     skip_if_no_node();
 
-    let artifact = compile_contract(CONTRACT);
+    let artifact = compile_contract(SOURCE);
     let mut provider = create_provider();
+    // The funded wallet's pubkey IS the contract owner, so checkSig passes.
     let (signer, owner_wallet) = create_funded_wallet(&mut provider);
 
-    // Constructor: owner (PubKey). The terminal claim() binds the readonly owner
-    // (the excess stack item) then checkSig — exactly the CLEANSTACK shape of #44.
-    let mut contract = RunarContract::new(artifact, vec![
-        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-    ]);
+    // Constructor: (owner: PubKey)
+    let mut contract = RunarContract::new(
+        artifact,
+        vec![SdkValue::Bytes(owner_wallet.pub_key_hex.clone())],
+    );
 
     contract
         .deploy(&mut provider, &*signer, &DeployOptions {
@@ -61,10 +73,19 @@ fn test_all_readonly_cleanstack_claim() {
         })
         .expect("deploy failed");
 
-    // Accepted only if the compiler emitted the cleanup OP_NIP (#48); pre-fix the
-    // strict oracle (#49) returns "Script did not clean its stack".
+    // Terminal claim(sig). Two Auto args: the declared `sig` plus the
+    // compiler-injected `txPreimage` (not stripped for a zero-mutable-field
+    // stateful contract). Before the parentClass fix this NULLFAILed under
+    // strict policy; it MUST now be accepted.
     let (claim_txid, _tx) = contract
-        .call("claim", &[SdkValue::Auto, SdkValue::Auto], &mut provider, &*signer, None)
-        .expect("claim failed — CLEANSTACK regression (issue #44)");
+        .call(
+            "claim",
+            &[SdkValue::Auto, SdkValue::Auto],
+            &mut provider,
+            &*signer,
+            None,
+        )
+        .expect("claim spend must be accepted by a strict node");
     assert!(!claim_txid.is_empty());
+    assert_eq!(claim_txid.len(), 64, "expected a 64-hex-char txid");
 }

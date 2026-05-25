@@ -21,6 +21,7 @@ import RunarVerification.Stack.AgreesA8
 import RunarVerification.Stack.AgreesD1
 import RunarVerification.Stack.AgreesD2
 import RunarVerification.Stack.AgreesCrypto
+import RunarVerification.Stack.AgreesEC
 import RunarVerification.Stack.OutputTrace
 import RunarVerification.Stack.Peephole
 import RunarVerification.Stack.TxContext

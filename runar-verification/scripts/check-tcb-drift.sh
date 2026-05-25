@@ -20,7 +20,51 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=82        # Breakdown (2026-05-24, Tier 1 wave 66 —
+TARGET_AXIOMS=81        # Breakdown (2026-05-24, Tier 1 wave 69 —
+                        # SIXTH TCB axiom retirement — D1 DISPATCH SELECTION):
+                        # −1 in Pipeline.lean — the Phase D multi-method
+                        #     Merkle-dispatch selection axiom
+                        #     `merkle_dispatch_selection_correct` RETIRED. It is
+                        #     now a THEOREM proved from the wave-69a substrate:
+                        #     `Parse.parseScript_emitDispatch_eq_dispatchReconL`
+                        #     (the production dispatch bytes parse back to the
+                        #     `dispatchReconL` op-list cascade) glued via the
+                        #     add-only cross-file bridge
+                        #     `dispatchReconL_eq_dispatchReconOps` to
+                        #     `AgreesD1.dispatchReconOps_select_branch` (witness
+                        #     `i` selects branch `i`, popping the dispatch index).
+                        #     The bytes identity rides the add-only helpers
+                        #     `emit_multi_eq_emitDispatch` +
+                        #     `emitFast_multi_eq_emitDispatch` (multi-public
+                        #     `emitFast` = `emitDispatch (publicMethodsOf …)` via
+                        #     the verified `Emit.emit_eq_emitFast`). The
+                        #     conversion strengthens the original axiom's `hOps`
+                        #     (selected-method emittability) to `hAllEmit` (all
+                        #     public methods) + the `≤ 17` dispatch-length bound
+                        #     `hLen17` — both consumed by the substrate parse
+                        #     lemma. The axiom had NO proof-term consumers (only
+                        #     doc references), so the stronger hypothesis set is
+                        #     harmless and removes it cleanly from the TCB.
+                        #     `#print axioms merkle_dispatch_selection_correct`
+                        #     confirms NO sorryAx, NO new axiom: only propext /
+                        #     Classical.choice / Quot.sound + the pre-existing
+                        #     crypto backends. The sub-omnibus
+                        #     `compileSafe_observational_correct_modulo_dispatch_codegen`
+                        #     remains an axiom (deliverable-2 BLOCKED): it is
+                        #     fully general (arbitrary method, arbitrary
+                        #     pre-dispatch stack, no structural preconditions,
+                        #     conclusion at `initialStack` via `evalBindingsP`),
+                        #     whereas the capstone
+                        #     `compileSafe_multi_public_observational_correct`
+                        #     proves a single dispatched-branch result at the
+                        #     POST-drop `dispatchedStack` via `evalBindings`
+                        #     under a heavy M2/M3/M4 precondition bundle + a
+                        #     dispatch witness — the sub-omnibus carries neither
+                        #     the witness nor the preconditions, so no
+                        #     axiom-free bridge exists.
+                        # Net delta: −1, 82 → 81.
+                        #
+                        # Breakdown (2026-05-24, Tier 1 wave 66 —
                         # FIFTH TCB axiom retirement):
                         # −1 in Pipeline.lean — the method_call sub-omnibus
                         #     `compileSafe_observational_correct_modulo_method_call_codegen`

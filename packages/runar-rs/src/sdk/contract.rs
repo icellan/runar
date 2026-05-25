@@ -432,9 +432,13 @@ impl RunarContract {
             // `find_codesep_offsets`.
             // Stateless contracts: the user controls statement order and may
             // place checkSig BEFORE the codesep (e.g. CovenantVault) — those
-            // must use the FULL script, so the trim stays gated on `is_stateful`.
+            // must use the FULL script, so the trim stays gated on the parent
+            // class. A stateful contract with ZERO mutable fields (empty
+            // state_fields) still injects checkPreimage at entry, so the trim
+            // is gated on `parent_stateful` (artifact parent_class), NOT
+            // `is_stateful` (issue #44).
             let mut subscript = contract_utxo.script.clone();
-            if prepared.is_stateful && prepared.code_sep_idx >= 0 {
+            if prepared.parent_stateful && prepared.code_sep_idx >= 0 {
                 let trim_pos = ((prepared.code_sep_idx as usize) + 1) * 2;
                 if trim_pos <= subscript.len() {
                     subscript = subscript[trim_pos..].to_string();
@@ -483,6 +487,15 @@ impl RunarContract {
             .state_fields
             .as_ref()
             .map_or(false, |f| !f.is_empty());
+        // parent_stateful gates ONLY the issue-#42/#44 terminal sighash
+        // subscript trim. A StatefulSmartContract with zero mutable fields has
+        // empty state_fields yet still injects checkPreimage at method entry,
+        // so its user checkSig runs after the OP_CODESEPARATOR. parent_class is
+        // the authoritative signal; fall back to is_stateful for older artifacts.
+        let parent_stateful = match self.artifact.parent_class.as_deref() {
+            Some(pc) => pc == "StatefulSmartContract",
+            None => is_stateful,
+        };
 
         // For stateful contracts, the compiler injects implicit params into every
         // public method's ABI (SigHashPreimage, and for state-mutating methods:
@@ -612,7 +625,7 @@ impl RunarContract {
             return self.prepare_call_terminal(
                 method_name, &mut resolved_args, signer,
                 options, terminal_outputs, &current_utxo,
-                is_stateful, needs_op_push_tx, method_needs_change,
+                is_stateful, parent_stateful, needs_op_push_tx, method_needs_change,
                 &sig_indices, &prevouts_indices, preimage_index,
                 &method_selector_hex, &change_pkh_hex, &witness_hex,
             );
@@ -1092,6 +1105,7 @@ impl RunarContract {
             resolved_args,
             method_selector_hex,
             is_stateful,
+            parent_stateful,
             is_terminal: false,
             needs_op_push_tx,
             method_needs_change,
@@ -1224,6 +1238,7 @@ impl RunarContract {
         terminal_outputs: &[TerminalOutput],
         current_utxo: &Utxo,
         is_stateful: bool,
+        parent_stateful: bool,
         needs_op_push_tx: bool,
         method_needs_change: bool,
         sig_indices: &[usize],
@@ -1383,6 +1398,7 @@ impl RunarContract {
             resolved_args: resolved_args.clone(),
             method_selector_hex: method_selector_hex.to_string(),
             is_stateful,
+            parent_stateful,
             is_terminal: true,
             needs_op_push_tx,
             method_needs_change,
@@ -2165,6 +2181,7 @@ mod tests {
         RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi,
             script: script.to_string(),
             state_fields: None,
@@ -2216,6 +2233,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
@@ -2246,6 +2264,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "P2PKH".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
@@ -2288,6 +2307,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "TwoKeys".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![
@@ -2325,6 +2345,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
@@ -2360,6 +2381,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
@@ -2390,6 +2412,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
@@ -2821,6 +2844,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![
@@ -2900,6 +2924,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam { name: "count".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
@@ -2934,6 +2959,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![
@@ -3160,6 +3186,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Counter".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -3187,6 +3214,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Counter".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -3214,6 +3242,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Counter".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -3241,6 +3270,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Counter".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -3287,6 +3317,7 @@ mod tests {
         RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Counter".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![AbiParam { name: "count".to_string(), param_type: "bigint".to_string(), fixed_array: None }],

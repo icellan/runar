@@ -589,6 +589,7 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         contract_name: program.contract_name,
         properties: program.properties,
         methods: cleaned_methods,
+        parent_class: program.parent_class,
     }
 }
 
@@ -608,6 +609,7 @@ mod tests {
     fn make_program(bindings: Vec<ANFBinding>) -> ANFProgram {
         ANFProgram {
             contract_name: "Test".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "test".to_string(),
@@ -1052,6 +1054,7 @@ mod tests {
     fn test_contract_name_preserved() {
         let program = ANFProgram {
             contract_name: "MyContract".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "x".to_string(),
                 prop_type: "bigint".to_string(),
@@ -1086,6 +1089,7 @@ mod tests {
     fn test_multiple_methods_all_optimized() {
         let program = ANFProgram {
             contract_name: "Test".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![
                 ANFMethod {

@@ -619,6 +619,175 @@ theorem dispatchN_select_branch0_n3_smoke :
   rw [hStep]
   simp only [runOps_nil]
 
+/-! ## Deliverable 3 — selection for the *parser-output* op shape
+
+`Script.Parse.dispatchReconL` (the exact op-list the real `parseScript`
+reconstructs) is byte-for-byte the same cascade as `dispatchChainOps`
+EXCEPT the IF-then body uses the short-form `.drop` (parser byte `0x75`)
+instead of `.opcode "OP_DROP"`. Both run `applyDrop` under `runOps`, so
+the two op-lists are *operationally equal*.
+
+`dispatchReconOps` below mirrors `dispatchReconL` exactly (it is defeq to
+it — same constructor shape — so a Pipeline-level wave that sees both
+files can bridge them by `rfl`). We prove its branch-`k` selection here
+by reducing to `dispatchN_select_branch` through the `.drop`/`OP_DROP`
+congruence. This is the `runOps`-side of the
+`hDispatchToOps` obligation the capstone needs; the only remaining step
+(BLOCKED here — needs a file importing both `Parse` and `AgreesD1`) is
+`dispatchReconL = dispatchReconOps` (`rfl`) glued to Deliverable 2's
+`parseScript … = .ok (dispatchReconL …)`. -/
+
+/-- Parser-output mirror of `dispatchChainOps`: identical cascade but with
+the short-form `.drop` in the IF-then body (matching
+`Script.Parse.dispatchReconL`). -/
+def dispatchReconOps (i : Nat) : List (List StackOp) → List StackOp
+  | []        => []
+  | [body]    =>
+      .push (.bigint (Int.ofNat i))
+        :: .opcode "OP_NUMEQUALVERIFY"
+        :: body
+  | body :: rest =>
+      [ .dup,
+        .push (.bigint (Int.ofNat i)),
+        .opcode "OP_NUMEQUAL",
+        .ifOp (.drop :: body)
+          (some (dispatchReconOps (i + 1) rest)) ]
+
+/-- `OP_DROP` (opcode form) and `.drop` (short form) step identically:
+both run `applyDrop`, so `runOps` of the two thn-bodies agrees. -/
+private theorem runOps_drop_cons_eq_OP_DROP_cons
+    (body : List StackOp) (s : StackState) :
+    runOps (.drop :: body) s = runOps (.opcode "OP_DROP" :: body) s := by
+  rw [runOps_cons_nonIf_eq .drop _ _ (by intro _ _ h; exact StackOp.noConfusion h)]
+  rw [runOps_cons_nonIf_eq (.opcode "OP_DROP") _ _ dropOp_not_if]
+  rw [stepNonIf_drop]
+  have hOpcode : stepNonIf (.opcode "OP_DROP") s = applyDrop s := by
+    rw [stepNonIf_opcode]; rfl
+  rw [hOpcode]
+
+/-- IF-frame congruence: if two then-bodies and two else-bodies agree
+under `runOps` (pointwise), the single-`.ifOp` op-lists agree. -/
+private theorem runOps_ifOp_some_cong
+    (thn1 thn2 els1 els2 : List StackOp) (s : StackState)
+    (hThn : ∀ t, runOps thn1 t = runOps thn2 t)
+    (hEls : ∀ t, runOps els1 t = runOps els2 t) :
+    runOps [.ifOp thn1 (some els1)] s = runOps [.ifOp thn2 (some els2)] s := by
+  rw [runOps, runOps]
+  cases hp : s.pop? with
+  | none => simp only [hp]
+  | some vs =>
+      obtain ⟨v, s'⟩ := vs
+      simp only [hp]
+      cases hb : asBool? v with
+      | none => simp only [hb]
+      | some b =>
+          cases b with
+          | true =>
+              simp only [hb]
+              rw [hThn s']
+          | false =>
+              simp only [hb]
+              rw [hEls s']
+
+/-- **Congruence: the parser-output cascade runs exactly like
+`dispatchChainOps`.** Induction on `bodies`; the singleton case is
+definitionally identical, the cons-cons case differs only in the IF
+then-body (`.drop` vs `OP_DROP`, equal by
+`runOps_drop_cons_eq_OP_DROP_cons`) and recurses on the ELSE chain. -/
+theorem runOps_dispatchReconOps_eq_dispatchChainOps :
+    ∀ (bodies : List (List StackOp)) (i : Nat) (s : StackState),
+      runOps (dispatchReconOps i bodies) s = runOps (dispatchChainOps i bodies) s := by
+  intro bodies
+  induction bodies with
+  | nil => intro i s; rfl
+  | cons body rest ih =>
+      intro i s
+      cases rest with
+      | nil => rfl
+      | cons body' rest' =>
+          show runOps [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+              .ifOp (.drop :: body) (some (dispatchReconOps (i + 1) (body' :: rest')))] s
+            = runOps [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+                .ifOp (.opcode "OP_DROP" :: body)
+                  (some (dispatchChainOps (i + 1) (body' :: rest')))] s
+          rw [show [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+                .ifOp (.drop :: body)
+                  (some (dispatchReconOps (i + 1) (body' :: rest')))]
+                = [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL"]
+                    ++ [.ifOp (.drop :: body)
+                        (some (dispatchReconOps (i + 1) (body' :: rest')))] from rfl]
+          rw [show [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+                .ifOp (.opcode "OP_DROP" :: body)
+                  (some (dispatchChainOps (i + 1) (body' :: rest')))]
+                = [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL"]
+                    ++ [.ifOp (.opcode "OP_DROP" :: body)
+                        (some (dispatchChainOps (i + 1) (body' :: rest')))] from rfl]
+          rw [runOps_append, runOps_append]
+          cases runOps [StackOp.dup, .push (.bigint (Int.ofNat i)),
+              .opcode "OP_NUMEQUAL"] s with
+          | error e => rfl
+          | ok s' =>
+              simp only []
+              exact runOps_ifOp_some_cong _ _ _ _ s'
+                (fun t => runOps_drop_cons_eq_OP_DROP_cons body t)
+                (fun t => ih (i + 1) t)
+
+/-- **Deliverable 3 (substrate) — branch-`k` selection for the parser
+output.** For the `dispatchReconOps` cascade (the exact op shape
+`Script.Parse.dispatchReconL` produces), witness `w = i + k` selects
+`bodies[k]` and discards the witness. Proven from the congruence above
+plus `dispatchN_select_branch`. -/
+theorem dispatchReconOps_select_branch
+    (bodies : List (List StackOp)) (i k : Nat) (body : List StackOp)
+    (initial : StackState) (rest : List Value)
+    (hIdx : bodies[k]? = some body)
+    (hWitness : initial.stack = Value.vBigint (Int.ofNat (i + k)) :: rest) :
+    runOps (dispatchReconOps i bodies) initial
+      = runOps body { initial with stack := rest } := by
+  rw [runOps_dispatchReconOps_eq_dispatchChainOps bodies i initial]
+  exact dispatchN_select_branch bodies i k body initial rest hIdx hWitness
+
+/-! ### Deliverable 3 smokes — selection on the parser-output cascade -/
+
+/-- n=3 branch-2 selection on `dispatchReconOps` (the `.drop`-form
+cascade): witness `2` on `[2, 5]` selects `OP_2MUL` → `[10]`. Mirrors the
+`dispatchChainOps` smoke; confirms the parser-output selection is not
+vacuous. -/
+theorem dispatchReconOps_select_branch2_smoke :
+    runOps
+        (dispatchReconOps 0
+          [[.opcode "OP_1ADD"], [.opcode "OP_NEGATE"], [.opcode "OP_2MUL"]])
+        ({ stack := [Value.vBigint (Int.ofNat 2), Value.vBigint 5] } : StackState)
+      = .ok ({ stack := [Value.vBigint 10] } : StackState) := by
+  rw [dispatchReconOps_select_branch
+        [[.opcode "OP_1ADD"], [.opcode "OP_NEGATE"], [.opcode "OP_2MUL"]]
+        0 2 [.opcode "OP_2MUL"]
+        ({ stack := [Value.vBigint (Int.ofNat 2), Value.vBigint 5] } : StackState)
+        [Value.vBigint 5] rfl (by simp)]
+  exact run_2mul_on_5
+
+/-- n=2 branch-0 selection on `dispatchReconOps`: witness `0` on `[0, 5]`
+selects the first body `OP_1ADD` → `[6]`. Exercises the matching non-last
+head whose thn uses the short-form `.drop`. -/
+theorem dispatchReconOps_select_branch0_n2_smoke :
+    runOps
+        (dispatchReconOps 0 [[.opcode "OP_1ADD"], [.opcode "OP_2MUL"]])
+        ({ stack := [Value.vBigint (Int.ofNat 0), Value.vBigint 5] } : StackState)
+      = .ok ({ stack := [Value.vBigint 6] } : StackState) := by
+  rw [dispatchReconOps_select_branch
+        [[.opcode "OP_1ADD"], [.opcode "OP_2MUL"]]
+        0 0 [.opcode "OP_1ADD"]
+        ({ stack := [Value.vBigint (Int.ofNat 0), Value.vBigint 5] } : StackState)
+        [Value.vBigint 5] rfl rfl]
+  rw [runOps_cons_nonIf_eq (.opcode "OP_1ADD") _ _
+    (by intro _ _ h; exact StackOp.noConfusion h)]
+  have hStep : stepNonIf (.opcode "OP_1ADD")
+      ({ stack := [Value.vBigint 5] } : StackState)
+      = .ok ({ stack := [Value.vBigint 6] } : StackState) := by
+    rw [stepNonIf_opcode]; rfl
+  rw [hStep]
+  simp only [runOps_nil]
+
 end AgreesD1
 end Stack
 end RunarVerification

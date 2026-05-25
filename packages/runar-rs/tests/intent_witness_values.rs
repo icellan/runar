@@ -44,6 +44,7 @@ fn make_intent_artifact(prev_out_inputs: &[usize], serialised: bool) -> RunarArt
     RunarArtifact {
         version: "runar-v0.1.0".to_string(),
         contract_name: "IntentWitnessTest".to_string(),
+        parent_class: None,
         abi: Abi {
             constructor: AbiConstructor {
                 params: vec![AbiParam {

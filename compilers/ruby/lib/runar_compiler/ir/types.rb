@@ -26,9 +26,18 @@ module RunarCompiler
     # Program structure
     # -------------------------------------------------------------------
 
-    ANFProgram = Struct.new(:contract_name, :properties, :methods, keyword_init: true) do
-      def initialize(contract_name: "", properties: [], methods: [])
-        super(contract_name: contract_name, properties: properties, methods: methods)
+    # +parent_class+ is the base class the source contract extends
+    # ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract"). It is
+    # an in-memory carrier ONLY -- it is never written into the emitted ANF IR
+    # JSON that the conformance suite compares cross-tier (see
+    # +_serialize_anf_program+ in compiler.rb, which omits it). The artifact
+    # assembler copies it to the top-level artifact field so SDKs can gate the
+    # issue-#42/#44 terminal sighash subscript trim on the authoritative parent
+    # class (a StatefulSmartContract with zero mutable fields still needs the
+    # trim even though stateFields is empty).
+    ANFProgram = Struct.new(:contract_name, :properties, :methods, :parent_class, keyword_init: true) do
+      def initialize(contract_name: "", properties: [], methods: [], parent_class: "")
+        super(contract_name: contract_name, properties: properties, methods: methods, parent_class: parent_class)
       end
     end
 

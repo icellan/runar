@@ -66,7 +66,8 @@ module RunarCompiler
         IR::ANFProgram.new(
           contract_name: program.contract_name,
           properties: program.properties.map(&:dup),
-          methods: program.methods.map { |m| deep_copy_method(m) }
+          methods: program.methods.map { |m| deep_copy_method(m) },
+          parent_class: program.parent_class
         )
       end
       private_class_method :deep_copy_program

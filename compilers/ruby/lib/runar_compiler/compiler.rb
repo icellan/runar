@@ -65,6 +65,7 @@ module RunarCompiler
     :version,
     :compiler_version,
     :contract_name,
+    :parent_class,
     :abi,
     :script,
     :asm,
@@ -84,6 +85,7 @@ module RunarCompiler
       version: "",
       compiler_version: "",
       contract_name: "",
+      parent_class: "",
       abi: ABI.new,
       script: "",
       asm: "",
@@ -699,6 +701,10 @@ module RunarCompiler
       version: SCHEMA_VERSION,
       compiler_version: COMPILER_VERSION,
       contract_name: program.contract_name,
+      # Base class the source contract extends. Authoritative stateful signal
+      # for the issue-#42/#44 terminal sighash subscript trim (a
+      # StatefulSmartContract with zero mutable fields still needs the trim).
+      parent_class: program.parent_class,
       abi: ABI.new(
         constructor: ABIConstructor.new(params: constructor_params),
         methods: methods
@@ -749,6 +755,11 @@ module RunarCompiler
       "version" => artifact.version,
       "compilerVersion" => artifact.compiler_version,
       "contractName" => artifact.contract_name,
+    }
+    # parentClass (when present) sits right after contractName, matching the
+    # other tiers' artifact field order. Omitted when empty (older fixtures).
+    d["parentClass"] = artifact.parent_class if artifact.parent_class && !artifact.parent_class.empty?
+    d.merge!({
       "abi" => {
         "constructor" => {
           "params" => artifact.abi.constructor.params.map(&abi_param_to_hash),
@@ -765,7 +776,7 @@ module RunarCompiler
       },
       "script" => artifact.script,
       "asm" => artifact.asm,
-    }
+    })
 
     if artifact.source_map && !artifact.source_map.empty?
       require_relative "codegen/emit"

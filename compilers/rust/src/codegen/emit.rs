@@ -823,6 +823,7 @@ mod tests {
 
         let program = ANFProgram {
             contract_name: "Multi".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![
                 ANFMethod {
@@ -991,6 +992,7 @@ mod tests {
 
         let program = ANFProgram {
             contract_name: "P2PKH".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "pubKeyHash".to_string(),
                 prop_type: "Addr".to_string(),
@@ -1140,6 +1142,7 @@ mod tests {
 
         let program = ANFProgram {
             contract_name: "Sha256Test".to_string(),
+            parent_class: String::new(),
             properties: vec![],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -1260,6 +1263,7 @@ mod tests {
         // A program with a single public method (plus constructor) — no method dispatch needed
         let program = ANFProgram {
             contract_name: "Single".to_string(),
+            parent_class: String::new(),
             properties: vec![ANFProperty {
                 name: "x".to_string(),
                 prop_type: "bigint".to_string(),

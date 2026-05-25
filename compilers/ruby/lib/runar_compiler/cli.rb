@@ -39,6 +39,7 @@ module RunarCompiler
     IR_EXCLUDED_FIELDS = Set.new(%w[
       const_string const_big_int const_bool const_int
       source_loc
+      parent_class
     ]).freeze
 
     module_function

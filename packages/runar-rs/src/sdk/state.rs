@@ -957,6 +957,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: super::super::types::Abi {
                 constructor: super::super::types::AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -978,6 +979,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: super::super::types::Abi {
                 constructor: super::super::types::AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -1000,6 +1002,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: super::super::types::Abi {
                 constructor: super::super::types::AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -1031,6 +1034,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: super::super::types::Abi {
                 constructor: super::super::types::AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -1068,6 +1072,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: super::super::types::Abi {
                 constructor: super::super::types::AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -1098,6 +1103,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "runar-v0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: super::super::types::Abi {
                 constructor: super::super::types::AbiConstructor { params: vec![] },
                 methods: vec![],

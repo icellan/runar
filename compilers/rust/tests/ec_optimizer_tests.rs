@@ -27,6 +27,7 @@ fn some_point_hex() -> String {
 fn make_program(bindings: Vec<ANFBinding>) -> ANFProgram {
     ANFProgram {
         contract_name: "Test".to_string(),
+        parent_class: String::new(),
         properties: vec![],
         methods: vec![ANFMethod {
             name: "test".to_string(),
@@ -494,6 +495,7 @@ fn test_contract_metadata_preserved() {
 
     let program = ANFProgram {
         contract_name: "P2PKH".to_string(),
+        parent_class: String::new(),
         properties: vec![
             ANFProperty {
                 name: "pubKeyHash".to_string(),
@@ -542,6 +544,7 @@ fn test_multiple_methods_all_optimized() {
     ];
     let program = ANFProgram {
         contract_name: "TwoMethods".to_string(),
+        parent_class: String::new(),
         properties: vec![],
         methods: vec![
             ANFMethod {
@@ -593,6 +596,7 @@ fn test_multiple_methods_all_optimized() {
 fn test_empty_method_body_unchanged() {
     let program = ANFProgram {
         contract_name: "Empty".to_string(),
+        parent_class: String::new(),
         properties: vec![],
         methods: vec![ANFMethod {
             name: "check".to_string(),

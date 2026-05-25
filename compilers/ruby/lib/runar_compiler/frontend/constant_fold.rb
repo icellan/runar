@@ -579,7 +579,8 @@ module RunarCompiler
         IR::ANFProgram.new(
           contract_name: program.contract_name,
           properties: program.properties.dup,
-          methods: program.methods.map { |m| fold_method(m) }
+          methods: program.methods.map { |m| fold_method(m) },
+          parent_class: program.parent_class
         )
       end
     end

@@ -85,7 +85,7 @@ module Runar
     # Use RunarArtifact.from_hash to load from a JSON-parsed Hash, or
     # RunarArtifact.from_json to parse a raw JSON string.
     class RunarArtifact
-      attr_reader :version, :compiler_version, :contract_name, :abi,
+      attr_reader :version, :compiler_version, :contract_name, :parent_class, :abi,
                   :script, :asm, :state_fields, :constructor_slots,
                   :code_sep_index_slots,
                   :build_timestamp, :code_separator_index, :code_separator_indices,
@@ -95,6 +95,11 @@ module Runar
         version: '',
         compiler_version: '',
         contract_name: '',
+        # Base class the source contract extends. Authoritative stateful signal
+        # for the issue-#42/#44 terminal sighash subscript trim: a
+        # StatefulSmartContract with zero mutable fields still needs the trim
+        # even though state_fields is empty. Older artifacts leave it empty.
+        parent_class: '',
         abi: ABI.new,
         script: '',
         asm: '',
@@ -109,6 +114,7 @@ module Runar
         @version                = version
         @compiler_version       = compiler_version
         @contract_name          = contract_name
+        @parent_class           = parent_class
         @abi                    = abi
         @script                 = script
         @asm                    = asm
@@ -186,6 +192,7 @@ module Runar
           version:                hash.fetch('version', ''),
           compiler_version:       hash.fetch('compilerVersion', ''),
           contract_name:          hash.fetch('contractName', ''),
+          parent_class:           hash.fetch('parentClass', ''),
           abi:                    ABI.new(constructor_params: ctor_params, methods: methods),
           script:                 hash.fetch('script', ''),
           asm:                    hash.fetch('asm', ''),
@@ -282,6 +289,10 @@ module Runar
       :resolved_args,
       :method_selector_hex,
       :is_stateful,
+      # True when the contract extends StatefulSmartContract (from artifact
+      # parent_class), independent of mutable state fields. Gates the
+      # issue-#42/#44 terminal sighash subscript trim.
+      :parent_stateful,
       :is_terminal,
       :needs_op_push_tx,
       :method_needs_change,
@@ -313,6 +324,7 @@ module Runar
         resolved_args: [],
         method_selector_hex: '',
         is_stateful: false,
+        parent_stateful: false,
         is_terminal: false,
         needs_op_push_tx: false,
         method_needs_change: false,

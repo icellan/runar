@@ -9,6 +9,7 @@ import RunarVerification.Stack.AgreesA4
 import RunarVerification.Stack.AgreesA5
 import RunarVerification.Stack.AgreesA6
 import RunarVerification.Stack.AgreesA8
+import RunarVerification.Stack.AgreesD1
 import RunarVerification.Stack.Peephole
 import RunarVerification.Stack.Eval
 import RunarVerification.Stack.TxContext
@@ -2441,7 +2442,81 @@ This axiom remains stated (rather than discharged) pending the
 multi-thousand-line byte-level proof composing `parseDispatchN_emit_round_trip`
 with the `OP_DUP / OP_NUMEQUAL / OP_IF` runtime cascade. See
 `PATH2_PLAN.md` §5.17. -/
-axiom merkle_dispatch_selection_correct (p : ANFProgram) (bytes : ByteArray)
+/-- **D1 bridge (add-only) — parser-output reconstruction agrees across files.**
+
+`Script.Parse.dispatchReconL` and `Stack.AgreesD1.dispatchReconOps` have
+identical defining equations (same constructor cascade). They are not
+definitionally `rfl`-equal across the two separate `def`s, so we bridge
+them by structural induction on the body list. -/
+private theorem dispatchReconL_eq_dispatchReconOps :
+    ∀ (bodies : List (List StackOp)) (i : Nat),
+      Parse.dispatchReconL i bodies = AgreesD1.dispatchReconOps i bodies := by
+  intro bodies
+  induction bodies with
+  | nil => intro i; rfl
+  | cons body rest ih =>
+      intro i
+      cases rest with
+      | nil => rfl
+      | cons body' rest' =>
+          show
+            [ StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+              .ifOp (.drop :: body)
+                (some (Parse.dispatchReconL (i + 1) (body' :: rest'))) ]
+              =
+            [ StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+              .ifOp (.drop :: body)
+                (some (AgreesD1.dispatchReconOps (i + 1) (body' :: rest'))) ]
+          rw [ih (i + 1)]
+
+/-- **D1 bridge (add-only) — multi-method `emit` reduces to `emitDispatch`.**
+
+For a program whose public-method list has the explicit ≥ 2 shape
+`m :: m' :: rest'`, the structural emitter `Emit.emit` produces exactly
+`Emit.emitDispatch (Emit.publicMethodsOf p)`. Direct `match`-unfold of
+`Emit.emit` on the cons-cons public list. -/
+private theorem emit_multi_eq_emitDispatch
+    (p : StackProgram) (m m' : StackMethod) (rest' : List StackMethod)
+    (hPublic : Emit.publicMethodsOf p = m :: m' :: rest') :
+    Emit.emit p = Emit.emitDispatch (Emit.publicMethodsOf p) := by
+  unfold Emit.emit
+  rw [hPublic]
+
+/-- **D1 bridge (add-only) — multi-method `emitFast` reduces to `emitDispatch`.**
+
+Combines `emit_multi_eq_emitDispatch` with the verified
+`Emit.emit_eq_emitFast` byte-identity. -/
+private theorem emitFast_multi_eq_emitDispatch
+    (p : StackProgram) (m m' : StackMethod) (rest' : List StackMethod)
+    (hPublic : Emit.publicMethodsOf p = m :: m' :: rest') :
+    Emit.emitFast p = Emit.emitDispatch (Emit.publicMethodsOf p) := by
+  rw [← Emit.emit_eq_emitFast p]
+  exact emit_multi_eq_emitDispatch p m m' rest' hPublic
+
+/-- **D1 — multi-method Merkle dispatch selection (CONVERTED axiom → theorem,
+wave 69).**
+
+The deployed bytes of a multi-public program (`≥ 2` public methods),
+parsed and run under a dispatch witness `i` on top of the stack, execute
+exactly as the selected public method `stackM = publicMethodsOf …[i]`
+on the witness-popped stack.
+
+Proof is the cross-file glue the 69a substrate was built for:
+`Parse.parseScript_emitDispatch_eq_dispatchReconL` reconstructs the
+parser output as `dispatchReconL 0 (ms.map (·.ops))`, which is defeq to
+`AgreesD1.dispatchReconOps 0 (ms.map (·.ops))`; then
+`AgreesD1.dispatchReconOps_select_branch` (witness `i = 0 + i`) selects
+branch `i`, whose body is `stackM.ops` (`hIdx` lifted through
+`List.getElem?_map`).
+
+This conversion strengthens the original axiom's `hOps` (emittability of
+the *selected* method only) to `hAllEmit` (emittability of *every*
+public method) plus the dispatch-length bound `hLen17` — both consumed by
+the substrate parse lemma. The original `hOps` is kept on the signature
+(now redundant: it follows from `hAllEmit` + `hIdx`) for source-level
+compatibility; the axiom had no proof-term consumers, so the stronger
+hypothesis set is harmless. -/
+theorem merkle_dispatch_selection_correct (p : ANFProgram) (bytes : ByteArray)
     (stackM : StackMethod) (initialStack : StackState)
     (i : Nat) (rest : List RunarVerification.ANF.Eval.Value)
     (hSafe : compileSafe p = .ok bytes)
@@ -2451,9 +2526,74 @@ axiom merkle_dispatch_selection_correct (p : ANFProgram) (bytes : ByteArray)
     (hWitness :
       initialStack.stack
         = RunarVerification.ANF.Eval.Value.vBigint (Int.ofNat i) :: rest)
-    (hOps : Parse.AreRunarEmittable stackM.ops) :
+    (hOps : Parse.AreRunarEmittable stackM.ops)
+    (hAllEmit :
+      ∀ m ∈ Emit.publicMethodsOf (peepholeProgram (Lower.lower p)),
+        Parse.AreRunarEmittable m.ops)
+    (hLen2 :
+      (Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).length ≥ 2)
+    (hLen17 :
+      (Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).length ≤ 17) :
     runParsedBytes bytes initialStack
+      = runOps stackM.ops { initialStack with stack := rest } := by
+  -- `≥ 2` gives the explicit cons-cons shape needed by the emit bridge.
+  have hShape :
+      ∃ a b r,
+        Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) = a :: b :: r := by
+    revert hLen2
+    cases hcase : Emit.publicMethodsOf (peepholeProgram (Lower.lower p)) with
+    | nil => intro hLen2; exact absurd hLen2 (by simp)
+    | cons a tail =>
+        cases tail with
+        | nil => intro hLen2; exact absurd hLen2 (by simp)
+        | cons b r => intro _; exact ⟨a, b, r, rfl⟩
+  obtain ⟨a, b, r0, hShapeEq⟩ := hShape
+  -- `bytes` are the production fast-emitted bytes, which equal the
+  -- structural `emitDispatch (publicMethodsOf …)` for the multi-public shape.
+  have hBytes := compileSafe_ok_implies_emitFast p bytes hSafe
+  have hDispatchBytes :
+      bytes
+        = Emit.emitDispatch (Emit.publicMethodsOf (peepholeProgram (Lower.lower p))) := by
+    rw [hBytes]
+    exact emitFast_multi_eq_emitDispatch (peepholeProgram (Lower.lower p)) a b r0 hShapeEq
+  -- Substrate parse lemma: parsing those bytes yields `dispatchReconL`.
+  have hLen1 :
+      (Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).length ≥ 1 :=
+    Nat.le_trans (by decide) hLen2
+  have hParse :
+      Parse.parseScript
+          (Emit.emitDispatch (Emit.publicMethodsOf (peepholeProgram (Lower.lower p))))
+        = .ok (Parse.dispatchReconL 0
+            ((Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).map (·.ops))) :=
+    Parse.parseScript_emitDispatch_eq_dispatchReconL
+      (Emit.publicMethodsOf (peepholeProgram (Lower.lower p))) hAllEmit hLen1 hLen17
+  -- `dispatchReconL = dispatchReconOps` (identical constructor shape; bridged
+  -- by structural induction across the two files).
+  have hRecon :
+      Parse.dispatchReconL 0
+          ((Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).map (·.ops))
+        = AgreesD1.dispatchReconOps 0
+            ((Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).map (·.ops)) :=
+    dispatchReconL_eq_dispatchReconOps _ 0
+  -- The selected branch body is `stackM.ops` (map of `hIdx`).
+  have hBody :
+      ((Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).map (·.ops))[i]?
+        = some stackM.ops := by
+    rw [List.getElem?_map, hIdx]; rfl
+  -- Run the parsed ops; the dispatch chain selects branch `i`.
+  have hSel :=
+    AgreesD1.dispatchReconOps_select_branch
+      ((Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).map (·.ops)) 0 i stackM.ops
+      initialStack rest hBody (by simpa using hWitness)
+  unfold runParsedBytes
+  rw [hDispatchBytes, hParse, hRecon]
+  show
+    runOps
+        (AgreesD1.dispatchReconOps 0
+          ((Emit.publicMethodsOf (peepholeProgram (Lower.lower p))).map (·.ops)))
+        initialStack
       = runOps stackM.ops { initialStack with stack := rest }
+  rw [hSel]
 
 /-! ### D2 — Stateful contract continuation
 

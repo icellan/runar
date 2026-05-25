@@ -30,6 +30,7 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 		ContractName: contract.Name,
 		Properties:   properties,
 		Methods:      methods,
+		ParentClass:  contract.ParentClass,
 	}
 }
 

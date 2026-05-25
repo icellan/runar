@@ -544,4 +544,5 @@ def fold_constants(program: ANFProgram) -> ANFProgram:
         contract_name=program.contract_name,
         properties=list(program.properties),
         methods=[_fold_method(m) for m in program.methods],
+        parent_class=program.parent_class,
     )

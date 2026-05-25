@@ -97,6 +97,11 @@ pub struct RunarArtifact {
     pub compiler_version: String,
     #[serde(rename = "contractName")]
     pub contract_name: String,
+    /// Base class the source contract extends. Authoritative stateful signal
+    /// for the issue-#42/#44 terminal sighash subscript trim (a
+    /// StatefulSmartContract with zero mutable fields still needs the trim).
+    #[serde(rename = "parentClass", skip_serializing_if = "String::is_empty", default)]
+    pub parent_class: String,
     pub abi: ABI,
     pub script: String,
     pub asm: String,
@@ -258,6 +263,7 @@ pub fn assemble_artifact(
         version: SCHEMA_VERSION.to_string(),
         compiler_version: COMPILER_VERSION.to_string(),
         contract_name: program.contract_name.clone(),
+        parent_class: program.parent_class.clone(),
         abi: ABI {
             constructor: ABIConstructor {
                 params: constructor_params,

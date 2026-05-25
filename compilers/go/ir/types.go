@@ -18,6 +18,15 @@ type ANFProgram struct {
 	ContractName string        `json:"contractName"`
 	Properties   []ANFProperty `json:"properties"`
 	Methods      []ANFMethod   `json:"methods"`
+	// ParentClass is the base class the source contract extends
+	// ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract").
+	// It is an in-memory carrier ONLY (json:"-") so it never appears in the
+	// emitted ANF IR JSON that the conformance suite compares cross-tier.
+	// The artifact assembler copies it to the top-level artifact field so
+	// SDKs can gate the issue-#42/#44 terminal sighash subscript trim on the
+	// authoritative parent class (a StatefulSmartContract with zero mutable
+	// fields still needs the trim even though stateFields is empty).
+	ParentClass string `json:"-"`
 }
 
 // ANFSyntheticArrayLevel is one level of the synthetic FixedArray chain

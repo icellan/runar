@@ -4659,6 +4659,358 @@ bytes). The general-`n` inductive round-trip is honest-BLOCKED:
 The n=2/n=3 smokes confirm the target shape (`dispatchReconL` with the
 short-form `.drop`) IS what the production parser produces. -/
 
+/-! ### Deliverable 1 — the general-`n` dispatch parse round-trip
+
+The wave-68 BLOCK is resolved below. `parseDispatchReconL_round_trip_stop`
+is the general-`n` inductive parse round-trip for the dispatch cascade,
+in `stopAtElse = true` mode (so the recursive ELSE chain is consumed as
+the else-arm of the enclosing `.ifOp`). The composition follows the
+wave-68 recipe exactly:
+
+* **last head** (`ms = [body]`): `push(i)` (tail begins with `0x9d`, not
+  pick/roll — `restNotPickOrRoll_numequalverify`), then
+  `parseStackOpFuel_OP_NUMEQUALVERIFY`, then `body` via
+  `parseOpsFuel_emit_round_trip_with_stop_byte`.
+* **non-last head** (`ms = body :: body' :: rest'`): `parseStackOpFuel_dup`,
+  `push(i)` (tail begins with `0x9c` — `restNotPickOrRoll_numequal`),
+  `parseStackOpFuel_OP_NUMEQUAL`, then the `.ifOp` frame via
+  `parseStackOpFuel_dispatch_ifOp` whose ELSE-arm parse hypothesis is the
+  induction hypothesis at index `i + 1`.
+
+Fuel bookkeeping: the lemma is stated with a single lower bound
+`(emitOpsL (dispatchReconL i ms)).length ≤ fuel`; each chain link's
+emitted byte length strictly exceeds its body's op-count
+(`emitOpsL_dispatchReconL_length_ge_body` + the head bytes), so the per-op
+`parseStackOpFuel` / nested-`.ifOp` fuel obligations all discharge by
+`omega` after unfolding the reconstruction byte layout. The index range
+`Int.ofNat i ≤ 16` is threaded from `i + ms.length ≤ 17`. -/
+
+/-! ### Deliverable 1 helper — empty tail after the final `.ifOp` -/
+
+/-- After the last dispatch `.ifOp` consumes through to the trailing stop
+byte `s`, the remaining `parseOpsFuel _ (s :: rest) true` returns
+`([], s :: rest)` (the stop byte fires). -/
+private theorem parseOpsFuel_nil_after_ifOp_stop
+    (fuel : Nat) (s : UInt8) (hStop : s = 0x67 ∨ s = 0x68) (rest : List UInt8) :
+    parseOpsFuel (fuel + 1) (s :: rest) true = .ok ([], s :: rest) := by
+  rcases hStop with h | h <;> subst h <;> rfl
+
+/-- **Deliverable 1 — general-`n` dispatch parse round-trip (stop mode).**
+
+The real `parseOps` driver recovers `dispatchReconL i ms` from its
+emitted bytes when run in `stopAtElse = true` mode with a trailing stop
+byte `s ∈ {0x67, 0x68}`. Induction on `ms`, composing the per-link
+primitives (see the doc note above). -/
+theorem parseDispatchReconL_round_trip_stop
+    (ms : List (List StackOp)) (hMs : AllAreRunarEmittable ms)
+    (hLen : ms.length ≥ 1) (i : Nat) (hI : i + ms.length ≤ 17)
+    (fuel : Nat) (hFuel : (emitOpsL (dispatchReconL i ms)).length ≤ fuel)
+    (s : UInt8) (hStop : s = 0x67 ∨ s = 0x68) (rest : List UInt8) :
+    parseOpsFuel (fuel + 1) (emitOpsL (dispatchReconL i ms) ++ (s :: rest)) true
+      = .ok (dispatchReconL i ms, s :: rest) := by
+  induction ms generalizing i fuel s rest hStop with
+  | nil => exact absurd hLen (by simp)
+  | cons body restMs ih =>
+      have hIle16 : Int.ofNat i ≤ 16 := by
+        have hi17 : i + 1 ≤ 17 := by
+          have h1 : 1 ≤ (body :: restMs).length := by simp [List.length_cons]
+          omega
+        have : (i : Int) ≤ 16 := by exact_mod_cast (by omega : i ≤ 16)
+        simpa using this
+      have hPushSmall : Int.ofNat i = -1 ∨ (0 ≤ Int.ofNat i ∧ Int.ofNat i ≤ 16) :=
+        Or.inr ⟨Int.natCast_nonneg i, hIle16⟩
+      have hBody : AreRunarEmittable body := AllAreRunarEmittable_head hMs
+      cases restMs with
+      | nil =>
+          -- Last head: dispatchReconL i [body] = push(i) :: OP_NUMEQUALVERIFY :: body.
+          show parseOpsFuel (fuel + 1)
+              (emitOpsL (.push (.bigint (Int.ofNat i))
+                :: .opcode "OP_NUMEQUALVERIFY" :: body) ++ (s :: rest)) true
+            = .ok (.push (.bigint (Int.ofNat i))
+                :: .opcode "OP_NUMEQUALVERIFY" :: body, s :: rest)
+          have hReconLen :
+              (emitOpsL (dispatchReconL i [body])).length
+              = (emitStackOpL (.push (.bigint (Int.ofNat i)))).length
+                + (1 + (emitOpsL body).length) := by
+            show (emitStackOpL (.push (.bigint (Int.ofNat i)))
+                ++ (emitStackOpL (.opcode "OP_NUMEQUALVERIFY") ++ emitOpsL body)).length = _
+            rw [show emitStackOpL (.opcode "OP_NUMEQUALVERIFY") = [0x9d] from rfl]
+            simp [List.length_append]; omega
+          rw [hReconLen] at hFuel
+          obtain ⟨pb, pt, hPushHead⟩ :=
+            emitStackOpL_push_bigint_small_cons (Int.ofNat i) hPushSmall
+          have hPushNotStop : pb ≠ 0x67 ∧ pb ≠ 0x68 :=
+            head_not_stop_push_bigint_small (Int.ofNat i) hPushSmall pb pt hPushHead
+          have hPushLen1 : 1 ≤ (emitStackOpL (.push (.bigint (Int.ofNat i)))).length := by
+            rw [hPushHead]; simp [List.length_cons]
+          -- Whole byte stream: pb :: (pt ++ [0x9d] ++ emitOpsL body ++ (s :: rest)).
+          have hAll :
+              emitOpsL (.push (.bigint (Int.ofNat i))
+                :: .opcode "OP_NUMEQUALVERIFY" :: body) ++ (s :: rest)
+              = pb :: (pt ++ ([0x9d] ++ emitOpsL body ++ (s :: rest))) := by
+            show emitStackOpL (.push (.bigint (Int.ofNat i)))
+                ++ (emitStackOpL (.opcode "OP_NUMEQUALVERIFY") ++ emitOpsL body)
+                ++ (s :: rest) = _
+            rw [hPushHead, show emitStackOpL (.opcode "OP_NUMEQUALVERIFY") = [0x9d] from rfl]
+            simp [List.cons_append, List.append_assoc]
+          rw [hAll]
+          -- fuel ≥ 2 because the push (≥1 byte) plus OP_NUMEQUALVERIFY (1 byte)
+          -- are within the reconstruction byte length bound.
+          obtain ⟨f0, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+          -- Unfold the push op: parseOpsFuel ((f0+1)+1) → parseStackOpFuel (f0+1) ...
+          rw [parseOpsFuel_cons_unfold_stop (f0 + 1)
+                pb (pt ++ ([0x9d] ++ emitOpsL body ++ (s :: rest))) hPushNotStop]
+          have hPushBack :
+              pb :: (pt ++ ([0x9d] ++ emitOpsL body ++ (s :: rest)))
+              = emitStackOpL (.push (.bigint (Int.ofNat i)))
+                  ++ ((0x9d : UInt8) :: (emitOpsL body ++ (s :: rest))) := by
+            rw [hPushHead]; simp [List.cons_append]
+          rw [hPushBack]
+          rw [parseStackOpFuel_push_bigint_small_normalized f0
+                ((0x9d : UInt8) :: (emitOpsL body ++ (s :: rest)))
+                (Int.ofNat i) hPushSmall
+                (restNotPickOrRoll_numequalverify (emitOpsL body ++ (s :: rest)))]
+          dsimp only
+          -- Parse OP_NUMEQUALVERIFY (byte 0x9d), then body, in `true` mode.
+          -- Residual driver call is parseOpsFuel (f0+1) (0x9d :: ...) true.
+          rw [parseOpsFuel_cons_unfold_stop f0 0x9d
+                (emitOpsL body ++ (s :: rest)) (⟨by decide, by decide⟩)]
+          rw [show (0x9d : UInt8) :: (emitOpsL body ++ (s :: rest))
+                = emitStackOpL (.opcode "OP_NUMEQUALVERIFY") ++ (emitOpsL body ++ (s :: rest))
+              from rfl]
+          obtain ⟨f1, rfl⟩ : ∃ k, f0 = k + 1 := ⟨f0 - 1, by omega⟩
+          rw [parseStackOpFuel_OP_NUMEQUALVERIFY f1 (emitOpsL body ++ (s :: rest))]
+          dsimp only
+          have hBodyFuel2 : body.length ≤ f1 := by
+            have hBodyLe : body.length ≤ (emitOpsL body).length :=
+              emitOpsL_length_ge_ops_length body hBody
+            omega
+          rw [parseOpsFuel_emit_round_trip_with_stop_byte body hBody f1 hBodyFuel2
+                s hStop rest]
+      | cons body' rest' =>
+          -- Non-last head.
+          have hRestE : AllAreRunarEmittable (body' :: rest') :=
+            AllAreRunarEmittable_tail hMs
+          obtain ⟨eh, et, hRecon⟩ := dispatchReconL_cons_ne_nil (i + 1) body' rest'
+          show parseOpsFuel (fuel + 1)
+              (emitOpsL [StackOp.dup, .push (.bigint (Int.ofNat i)),
+                  .opcode "OP_NUMEQUAL",
+                  .ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest')))]
+                ++ (s :: rest)) true
+            = .ok ([StackOp.dup, .push (.bigint (Int.ofNat i)),
+                  .opcode "OP_NUMEQUAL",
+                  .ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest')))], s :: rest)
+          -- Fuel bound: expand recon byte length, including the ifOp expansion.
+          rw [show (dispatchReconL i (body :: body' :: rest'))
+                = [StackOp.dup, .push (.bigint (Int.ofNat i)), .opcode "OP_NUMEQUAL",
+                    .ifOp (.drop :: body)
+                      (some (dispatchReconL (i + 1) (body' :: rest')))] from rfl] at hFuel
+          have hIfBytes :
+              (emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL (i + 1) (body' :: rest'))))).length
+              = 1 + ((1 + (emitOpsL body).length)
+                  + (1 + ((emitOpsL (dispatchReconL (i + 1)
+                      (body' :: rest'))).length + 1))) := by
+            rw [emitStackOpL_dispatch_ifOp_eq]
+            simp [List.length_append, List.length_cons]
+            omega
+          have hReconLenNL :
+              (emitOpsL [StackOp.dup, .push (.bigint (Int.ofNat i)),
+                  .opcode "OP_NUMEQUAL",
+                  .ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest')))]).length
+              = 1 + ((emitStackOpL (.push (.bigint (Int.ofNat i)))).length
+                  + (1 + (emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL (i + 1) (body' :: rest'))))).length)) := by
+            simp only [emitOpsL, List.length_append, List.length_nil, Nat.add_zero,
+              show (emitStackOpL StackOp.dup).length = 1 from rfl,
+              show (emitStackOpL (StackOp.opcode "OP_NUMEQUAL")).length = 1 from rfl]
+          rw [hReconLenNL, hIfBytes] at hFuel
+          have hPushLen1 : 1 ≤ (emitStackOpL (.push (.bigint (Int.ofNat i)))).length := by
+            obtain ⟨pb0, pt0, h0⟩ :=
+              emitStackOpL_push_bigint_small_cons (Int.ofNat i) hPushSmall
+            rw [h0]; simp [List.length_cons]
+          -- Unfold .dup (byte 0x76).
+          obtain ⟨f0, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+          have hAllDup :
+              emitOpsL [StackOp.dup, .push (.bigint (Int.ofNat i)),
+                  .opcode "OP_NUMEQUAL",
+                  .ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest')))]
+                ++ (s :: rest)
+              = (0x76 : UInt8) :: (emitStackOpL (.push (.bigint (Int.ofNat i)))
+                  ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                  ++ emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL (i + 1) (body' :: rest'))))
+                  ++ (s :: rest)) := by
+            show emitStackOpL StackOp.dup
+                ++ (emitStackOpL (.push (.bigint (Int.ofNat i)))
+                  ++ (emitStackOpL (.opcode "OP_NUMEQUAL")
+                  ++ (emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL (i + 1) (body' :: rest')))) ++ emitOpsL [])))
+              ++ (s :: rest) = _
+            rw [show emitStackOpL StackOp.dup = [0x76] from rfl]
+            simp [emitOpsL, List.cons_append, List.append_assoc]
+          rw [hAllDup]
+          rw [parseOpsFuel_cons_unfold_stop (f0 + 1) 0x76 _ (⟨by decide, by decide⟩)]
+          rw [show (0x76 : UInt8) :: (emitStackOpL (.push (.bigint (Int.ofNat i)))
+                  ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                  ++ emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL (i + 1) (body' :: rest'))))
+                  ++ (s :: rest))
+                = emitStackOpL StackOp.dup
+                    ++ (emitStackOpL (.push (.bigint (Int.ofNat i)))
+                      ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                      ++ emitStackOpL (.ifOp (.drop :: body)
+                          (some (dispatchReconL (i + 1) (body' :: rest'))))
+                      ++ (s :: rest)) by
+              rw [show emitStackOpL StackOp.dup = [0x76] from rfl]; rfl]
+          rw [parseStackOpFuel_dup f0 _]
+          dsimp only
+          -- Unfold push(i): driver call is parseOpsFuel (f0+1) ... true.
+          obtain ⟨pb, pt, hPushHead⟩ :=
+            emitStackOpL_push_bigint_small_cons (Int.ofNat i) hPushSmall
+          have hPushNotStop : pb ≠ 0x67 ∧ pb ≠ 0x68 :=
+            head_not_stop_push_bigint_small (Int.ofNat i) hPushSmall pb pt hPushHead
+          have hAllPush :
+              emitStackOpL (.push (.bigint (Int.ofNat i)))
+                ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                ++ emitStackOpL (.ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest'))))
+                ++ (s :: rest)
+              = pb :: (pt ++ ((0x9c : UInt8) :: (emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL (i + 1) (body' :: rest'))))
+                  ++ (s :: rest)))) := by
+            rw [hPushHead, show emitStackOpL (.opcode "OP_NUMEQUAL") = [0x9c] from rfl]
+            simp [List.cons_append, List.append_assoc]
+          rw [hAllPush]
+          rw [parseOpsFuel_cons_unfold_stop f0 pb _ hPushNotStop]
+          have hPushBack :
+              pb :: (pt ++ ((0x9c : UInt8) :: (emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL (i + 1) (body' :: rest'))))
+                  ++ (s :: rest))))
+              = emitStackOpL (.push (.bigint (Int.ofNat i)))
+                  ++ ((0x9c : UInt8) :: (emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL (i + 1) (body' :: rest'))))
+                      ++ (s :: rest))) := by
+            rw [hPushHead]; simp [List.cons_append]
+          rw [hPushBack]
+          obtain ⟨f1, rfl⟩ : ∃ k, f0 = k + 1 := ⟨f0 - 1, by omega⟩
+          rw [parseStackOpFuel_push_bigint_small_normalized f1
+                ((0x9c : UInt8) :: (emitStackOpL (.ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest'))))
+                    ++ (s :: rest)))
+                (Int.ofNat i) hPushSmall
+                (restNotPickOrRoll_numequal _)]
+          dsimp only
+          -- Parse OP_NUMEQUAL (byte 0x9c). Driver call is parseOpsFuel (f1+1) (0x9c :: ...) true.
+          rw [parseOpsFuel_cons_unfold_stop f1 0x9c _ (⟨by decide, by decide⟩)]
+          rw [show (0x9c : UInt8) :: (emitStackOpL (.ifOp (.drop :: body)
+                    (some (dispatchReconL (i + 1) (body' :: rest'))))
+                    ++ (s :: rest))
+                = emitStackOpL (.opcode "OP_NUMEQUAL")
+                    ++ (emitStackOpL (.ifOp (.drop :: body)
+                        (some (dispatchReconL (i + 1) (body' :: rest'))))
+                        ++ (s :: rest)) from rfl]
+          obtain ⟨f2, rfl⟩ : ∃ k, f1 = k + 1 := ⟨f1 - 1, by omega⟩
+          rw [parseStackOpFuel_OP_NUMEQUAL f2 _]
+          dsimp only
+          -- Unfold the `.ifOp` op: driver call is parseOpsFuel (f2+1) ... true.
+          -- The ifOp head byte is 0x63 (OP_IF), not a stop byte.
+          have hIfCons :
+              emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL (i + 1) (body' :: rest'))))
+                ++ (s :: rest)
+              = (0x63 : UInt8)
+                  :: (((0x75 : UInt8) :: emitOpsL body)
+                      ++ (0x67 :: emitOpsL (dispatchReconL (i + 1) (body' :: rest'))
+                          ++ [0x68])
+                      ++ (s :: rest)) := by
+            rw [emitStackOpL_dispatch_ifOp_eq]
+            simp [List.cons_append, List.append_assoc]
+          rw [hIfCons]
+          rw [parseOpsFuel_cons_unfold_stop f2 0x63 _ (⟨by decide, by decide⟩)]
+          rw [← hIfCons]
+          -- Parse the `.ifOp` frame via parseStackOpFuel_dispatch_ifOp at (f4 + 2).
+          obtain ⟨f4, rfl⟩ : ∃ k, f2 = k + 2 := ⟨f2 - 2, by omega⟩
+          rw [hRecon]
+          have hThn : AreRunarEmittable (.drop :: body) :=
+            AreRunarEmittable_drop_cons body hBody
+          have hThnFuel : (.drop :: body).length ≤ f4 := by
+            have hBodyLe : body.length ≤ (emitOpsL body).length :=
+              emitOpsL_length_ge_ops_length body hBody
+            simp only [List.length_cons]
+            omega
+          have hElsParse : ∀ (rr : List UInt8),
+              parseOpsFuel (f4 + 1)
+                (emitOpsL (eh :: et) ++ (0x68 :: rr)) true
+                = .ok (eh :: et, 0x68 :: rr) := by
+            intro rr
+            rw [← hRecon]
+            have hLenRec : (i + 1) + (body' :: rest').length ≤ 17 := by
+              simp only [List.length_cons] at hI ⊢
+              omega
+            have hFuelRec :
+                (emitOpsL (dispatchReconL (i + 1) (body' :: rest'))).length ≤ f4 := by
+              omega
+            exact ih hRestE (by simp [List.length_cons]) (i + 1) hLenRec f4 hFuelRec
+              0x68 (by right; rfl) rr
+          rw [parseStackOpFuel_dispatch_ifOp f4 (.drop :: body) eh et hThn hThnFuel
+                hElsParse (s :: rest)]
+          dsimp only
+          rw [parseOpsFuel_nil_after_ifOp_stop (f4 + 1) s hStop rest]
+
+/-! ### Deliverable 1 smokes — concrete `n = 2` / `n = 3` stop-mode round-trips
+
+These instantiate `parseDispatchReconL_round_trip_stop` at the same
+fixtures as the `parseScript` smokes (two / three single-op methods),
+confirming the *general-`n` theorem* fires on concrete bodies and yields
+exactly the `dispatchReconL`-shaped op-list with the trailing stop byte
+preserved. They are NOT `native_decide` — they exercise the real proof
+term, ruling out any vacuity. -/
+
+private theorem allEmittable_dup_swap :
+    AllAreRunarEmittable [[StackOp.dup], [StackOp.swap]] := by
+  intro m hm
+  rcases List.mem_cons.mp hm with h | h
+  · subst h; decide
+  · rcases List.mem_cons.mp h with h2 | h2
+    · subst h2; decide
+    · exact absurd h2 (by simp)
+
+private theorem allEmittable_dup_swap_nip :
+    AllAreRunarEmittable [[StackOp.dup], [StackOp.swap], [StackOp.nip]] := by
+  intro m hm
+  rcases List.mem_cons.mp hm with h | h
+  · subst h; decide
+  · rcases List.mem_cons.mp h with h2 | h2
+    · subst h2; decide
+    · rcases List.mem_cons.mp h2 with h3 | h3
+      · subst h3; decide
+      · exact absurd h3 (by simp)
+
+theorem parseDispatchReconL_round_trip_stop_n2_smoke :
+    parseOpsFuel ((emitOpsL (dispatchReconL 0 [[StackOp.dup], [StackOp.swap]])).length + 1)
+        (emitOpsL (dispatchReconL 0 [[StackOp.dup], [StackOp.swap]]) ++ [0x68]) true
+      = .ok (dispatchReconL 0 [[StackOp.dup], [StackOp.swap]], [0x68]) :=
+  parseDispatchReconL_round_trip_stop [[StackOp.dup], [StackOp.swap]]
+    allEmittable_dup_swap (by decide) 0 (by decide)
+    (emitOpsL (dispatchReconL 0 [[StackOp.dup], [StackOp.swap]])).length
+    (Nat.le_refl _) 0x68 (Or.inr rfl) []
+
+theorem parseDispatchReconL_round_trip_stop_n3_smoke :
+    parseOpsFuel
+        ((emitOpsL (dispatchReconL 0 [[StackOp.dup], [StackOp.swap], [StackOp.nip]])).length + 1)
+        (emitOpsL (dispatchReconL 0 [[StackOp.dup], [StackOp.swap], [StackOp.nip]]) ++ [0x67])
+        true
+      = .ok (dispatchReconL 0 [[StackOp.dup], [StackOp.swap], [StackOp.nip]], [0x67]) :=
+  parseDispatchReconL_round_trip_stop [[StackOp.dup], [StackOp.swap], [StackOp.nip]]
+    allEmittable_dup_swap_nip (by decide) 0 (by decide)
+    (emitOpsL (dispatchReconL 0 [[StackOp.dup], [StackOp.swap], [StackOp.nip]])).length
+    (Nat.le_refl _) 0x67 (Or.inl rfl) []
+
 /-! Structural Bool equality on the dispatch-reconstruction op shapes
 (no `BEq StackOp` is available because `.push (.bytes _)` / `.rawBytes`
 carry a `ByteArray`; the reconstruction never uses those). Returns
@@ -4712,6 +5064,409 @@ theorem parseScript_emitDispatch_n3_smoke :
            { name := "c", ops := [.nip] }]))
         (dispatchReconL 0 [[.dup], [.swap], [.nip]]) = true := by
   native_decide
+
+/-! ### Deliverable 2 — bridge to ByteArray and the top-level `parseScript`
+
+`parseDispatchReconL_round_trip_stop` (Deliverable 1) is in stop mode (it
+consumes a trailing stop byte). The genuine top-level driver `parseOps`
+runs in `false` mode and must consume the *entire* byte stream
+(`tail = []`). We package the top-level result in two steps:
+
+1. `parseDispatchReconL_round_trip_false` — the `false`-mode top-level
+   round-trip for the whole reconstruction. It is NOT recursive: the
+   only `false`-mode driver call is the outermost one; the recursive ELSE
+   chain inside the head `.ifOp` is consumed by the `true`-mode
+   Deliverable 1 lemma (the chain stops at the inner `OP_ENDIF`).
+2. `parseScript_emitDispatch_eq_dispatchReconL` — bridges the
+   ByteArray `Emit.emitDispatch` to the `dispatchReconL` op-list via the
+   byte-identity lemma `emitDispatchNL_eq_emitOpsL_dispatchReconL` and a
+   `(Emit.emitDispatch ms).toList = emitDispatchNL (ms.map (·.ops))`
+   bridge. -/
+
+/-- **Deliverable 2a — top-level `false`-mode dispatch parse round-trip.**
+
+`parseOps (emitOpsL (dispatchReconL 0 ms))` recovers the reconstruction
+for any non-empty `AllAreRunarEmittable` body list with `ms.length ≤ 17`.
+The head `.ifOp`'s ELSE chain is parsed by the `true`-mode Deliverable 1
+lemma; the outermost driver is `false` mode. -/
+theorem parseDispatchReconL_round_trip_false
+    (ms : List (List StackOp)) (hMs : AllAreRunarEmittable ms)
+    (hLen : ms.length ≥ 1) (hI : ms.length ≤ 17) :
+    parseOps (emitOpsL (dispatchReconL 0 ms)) = .ok (dispatchReconL 0 ms) := by
+  have hPushSmall : Int.ofNat 0 = -1 ∨ (0 ≤ Int.ofNat 0 ∧ Int.ofNat 0 ≤ 16) := by decide
+  unfold parseOps
+  -- The fuel `parseOps` chooses is `(emitOpsL (dispatchReconL 0 ms)).length + 1`.
+  cases ms with
+  | nil => exact absurd hLen (by simp)
+  | cons body restMs =>
+      have hBody0 : AreRunarEmittable body := AllAreRunarEmittable_head hMs
+      cases restMs with
+      | nil =>
+          -- Singleton: push(0) :: OP_NUMEQUALVERIFY :: body, false mode, empty tail.
+          have hReconLen :
+              (emitOpsL (dispatchReconL 0 [body])).length
+              = (emitStackOpL (.push (.bigint (Int.ofNat 0)))).length
+                + (1 + (emitOpsL body).length) := by
+            show (emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                ++ (emitStackOpL (.opcode "OP_NUMEQUALVERIFY") ++ emitOpsL body)).length = _
+            rw [show emitStackOpL (.opcode "OP_NUMEQUALVERIFY") = [0x9d] from rfl]
+            simp [List.length_append]; omega
+          obtain ⟨pb, pt, hPushHead⟩ :=
+            emitStackOpL_push_bigint_small_cons (Int.ofNat 0) hPushSmall
+          have hPushLen1 : 1 ≤ (emitStackOpL (.push (.bigint (Int.ofNat 0)))).length := by
+            rw [hPushHead]; simp [List.length_cons]
+          have hBodyLe : body.length ≤ (emitOpsL body).length :=
+            emitOpsL_length_ge_ops_length body hBody0
+          -- Rewrite the chosen fuel length into the push-head form, then peel +1.
+          rw [hReconLen]
+          have hAll :
+              emitOpsL (dispatchReconL 0 [body])
+              = pb :: (pt ++ ((0x9d : UInt8) :: emitOpsL body)) := by
+            show emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                ++ (emitStackOpL (.opcode "OP_NUMEQUALVERIFY") ++ emitOpsL body) = _
+            rw [hPushHead, show emitStackOpL (.opcode "OP_NUMEQUALVERIFY") = [0x9d] from rfl]
+            simp [List.cons_append]
+          rw [hAll]
+          obtain ⟨f0, hFeq⟩ : ∃ k,
+              (emitStackOpL (.push (.bigint (Int.ofNat 0)))).length
+                + (1 + (emitOpsL body).length) = k + 1 :=
+            ⟨(emitStackOpL (.push (.bigint (Int.ofNat 0)))).length + (emitOpsL body).length,
+              by omega⟩
+          rw [hFeq]
+          rw [parseOpsFuel_cons_unfold (f0 + 1) pb (pt ++ ((0x9d : UInt8) :: emitOpsL body))]
+          have hPushBack :
+              pb :: (pt ++ ((0x9d : UInt8) :: emitOpsL body))
+              = emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                  ++ ((0x9d : UInt8) :: emitOpsL body) := by
+            rw [hPushHead]; simp [List.cons_append]
+          rw [hPushBack]
+          rw [parseStackOpFuel_push_bigint_small_normalized f0
+                ((0x9d : UInt8) :: emitOpsL body) (Int.ofNat 0) hPushSmall
+                (restNotPickOrRoll_numequalverify (emitOpsL body))]
+          dsimp only
+          rw [parseOpsFuel_cons_unfold (f0) 0x9d (emitOpsL body)]
+          rw [show (0x9d : UInt8) :: emitOpsL body
+                = emitStackOpL (.opcode "OP_NUMEQUALVERIFY") ++ emitOpsL body from rfl]
+          obtain ⟨f1, rfl⟩ : ∃ k, f0 = k + 1 := ⟨f0 - 1, by
+            have : 1 ≤ (emitStackOpL (.push (.bigint (Int.ofNat 0)))).length := hPushLen1
+            omega⟩
+          rw [parseStackOpFuel_OP_NUMEQUALVERIFY f1 (emitOpsL body)]
+          dsimp only
+          have hBodyFuel : body.length ≤ f1 := by
+            have : 1 ≤ (emitStackOpL (.push (.bigint (Int.ofNat 0)))).length := hPushLen1
+            omega
+          rw [parseOpsFuel_emit_round_trip body hBody0 f1 hBodyFuel]
+          rfl
+      | cons body' rest' =>
+          -- Non-last top head: dup, push(0), OP_NUMEQUAL, ifOp(... else = chain),
+          -- false mode, empty tail. The ELSE chain uses the Deliverable 1 lemma.
+          have hRestE : AllAreRunarEmittable (body' :: rest') :=
+            AllAreRunarEmittable_tail hMs
+          obtain ⟨eh, et, hRecon⟩ := dispatchReconL_cons_ne_nil 1 body' rest'
+          have hIfBytes :
+              (emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL 1 (body' :: rest'))))).length
+              = 1 + ((1 + (emitOpsL body).length)
+                  + (1 + ((emitOpsL (dispatchReconL 1 (body' :: rest'))).length + 1))) := by
+            rw [emitStackOpL_dispatch_ifOp_eq]
+            simp [List.length_append, List.length_cons]
+            omega
+          have hReconLenNL :
+              (emitOpsL (dispatchReconL 0 (body :: body' :: rest'))).length
+              = 1 + ((emitStackOpL (.push (.bigint (Int.ofNat 0)))).length
+                  + (1 + (emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL 1 (body' :: rest'))))).length)) := by
+            rw [show (dispatchReconL 0 (body :: body' :: rest'))
+                  = [StackOp.dup, .push (.bigint (Int.ofNat 0)), .opcode "OP_NUMEQUAL",
+                      .ifOp (.drop :: body)
+                        (some (dispatchReconL 1 (body' :: rest')))] from rfl]
+            simp only [emitOpsL, List.length_append, List.length_nil, Nat.add_zero,
+              show (emitStackOpL StackOp.dup).length = 1 from rfl,
+              show (emitStackOpL (StackOp.opcode "OP_NUMEQUAL")).length = 1 from rfl]
+          obtain ⟨pb, pt, hPushHead⟩ :=
+            emitStackOpL_push_bigint_small_cons (Int.ofNat 0) hPushSmall
+          have hPushLen1 : 1 ≤ (emitStackOpL (.push (.bigint (Int.ofNat 0)))).length := by
+            rw [hPushHead]; simp [List.length_cons]
+          have hBodyLe : body.length ≤ (emitOpsL body).length :=
+            emitOpsL_length_ge_ops_length body hBody0
+          have hFexp :
+              (emitOpsL (dispatchReconL 0 (body :: body' :: rest'))).length
+              = 1 + ((emitStackOpL (.push (.bigint (Int.ofNat 0)))).length
+                + (1 + (1 + ((1 + (emitOpsL body).length)
+                    + (1 + ((emitOpsL (dispatchReconL 1 (body' :: rest'))).length + 1)))))) := by
+            rw [hReconLenNL, hIfBytes]
+          -- Peel +1 off the fuel (length) BEFORE expanding the byte list.
+          obtain ⟨f0, hFeq⟩ : ∃ k,
+              (emitOpsL (dispatchReconL 0 (body :: body' :: rest'))).length = k + 1 :=
+            ⟨(emitOpsL (dispatchReconL 0 (body :: body' :: rest'))).length - 1, by omega⟩
+          rw [hFeq]
+          rw [show (dispatchReconL 0 (body :: body' :: rest'))
+                = [StackOp.dup, .push (.bigint (Int.ofNat 0)), .opcode "OP_NUMEQUAL",
+                    .ifOp (.drop :: body)
+                      (some (dispatchReconL 1 (body' :: rest')))] from rfl]
+          have hAllDup :
+              emitOpsL [StackOp.dup, .push (.bigint (Int.ofNat 0)),
+                  .opcode "OP_NUMEQUAL",
+                  .ifOp (.drop :: body)
+                    (some (dispatchReconL 1 (body' :: rest')))]
+              = (0x76 : UInt8) :: (emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                  ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                  ++ emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL 1 (body' :: rest'))))) := by
+            show emitStackOpL StackOp.dup
+                ++ (emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                  ++ (emitStackOpL (.opcode "OP_NUMEQUAL")
+                  ++ (emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL 1 (body' :: rest')))) ++ emitOpsL []))) = _
+            rw [show emitStackOpL StackOp.dup = [0x76] from rfl]
+            simp [emitOpsL, List.cons_append, List.append_assoc]
+          rw [hAllDup]
+          rw [parseOpsFuel_cons_unfold (f0 + 1) 0x76 _]
+          rw [show (0x76 : UInt8) :: (emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                  ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                  ++ emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL 1 (body' :: rest')))))
+                = emitStackOpL StackOp.dup
+                    ++ (emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                      ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                      ++ emitStackOpL (.ifOp (.drop :: body)
+                          (some (dispatchReconL 1 (body' :: rest'))))) by
+              rw [show emitStackOpL StackOp.dup = [0x76] from rfl]; rfl]
+          rw [parseStackOpFuel_dup f0 _]
+          dsimp only
+          have hAllPush :
+              emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                ++ emitStackOpL (.opcode "OP_NUMEQUAL")
+                ++ emitStackOpL (.ifOp (.drop :: body)
+                    (some (dispatchReconL 1 (body' :: rest'))))
+              = pb :: (pt ++ ((0x9c : UInt8) :: emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL 1 (body' :: rest')))))) := by
+            rw [hPushHead, show emitStackOpL (.opcode "OP_NUMEQUAL") = [0x9c] from rfl]
+            simp [List.cons_append, List.append_assoc]
+          rw [hAllPush]
+          rw [parseOpsFuel_cons_unfold f0 pb _]
+          have hPushBack :
+              pb :: (pt ++ ((0x9c : UInt8) :: emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL 1 (body' :: rest'))))))
+              = emitStackOpL (.push (.bigint (Int.ofNat 0)))
+                  ++ ((0x9c : UInt8) :: emitStackOpL (.ifOp (.drop :: body)
+                      (some (dispatchReconL 1 (body' :: rest'))))) := by
+            rw [hPushHead]; simp [List.cons_append]
+          rw [hPushBack]
+          obtain ⟨f1, rfl⟩ : ∃ k, f0 = k + 1 := ⟨f0 - 1, by omega⟩
+          rw [parseStackOpFuel_push_bigint_small_normalized f1
+                ((0x9c : UInt8) :: emitStackOpL (.ifOp (.drop :: body)
+                    (some (dispatchReconL 1 (body' :: rest'))))
+                ) (Int.ofNat 0) hPushSmall (restNotPickOrRoll_numequal _)]
+          dsimp only
+          rw [parseOpsFuel_cons_unfold f1 0x9c _]
+          rw [show (0x9c : UInt8) :: emitStackOpL (.ifOp (.drop :: body)
+                    (some (dispatchReconL 1 (body' :: rest'))))
+                = emitStackOpL (.opcode "OP_NUMEQUAL")
+                    ++ emitStackOpL (.ifOp (.drop :: body)
+                        (some (dispatchReconL 1 (body' :: rest')))) from rfl]
+          obtain ⟨f2, rfl⟩ : ∃ k, f1 = k + 1 := ⟨f1 - 1, by omega⟩
+          rw [parseStackOpFuel_OP_NUMEQUAL f2 _]
+          dsimp only
+          have hIfCons :
+              emitStackOpL (.ifOp (.drop :: body)
+                  (some (dispatchReconL 1 (body' :: rest'))))
+              = (0x63 : UInt8)
+                  :: (((0x75 : UInt8) :: emitOpsL body)
+                      ++ (0x67 :: emitOpsL (dispatchReconL 1 (body' :: rest'))
+                          ++ [0x68])) := by
+            rw [emitStackOpL_dispatch_ifOp_eq]
+          rw [hIfCons]
+          rw [parseOpsFuel_cons_unfold f2 0x63 _]
+          rw [← hIfCons]
+          obtain ⟨f4, rfl⟩ : ∃ k, f2 = k + 2 := ⟨f2 - 2, by omega⟩
+          rw [hRecon]
+          have hThn : AreRunarEmittable (.drop :: body) :=
+            AreRunarEmittable_drop_cons body hBody0
+          have hThnFuel : (.drop :: body).length ≤ f4 := by
+            simp only [List.length_cons]; omega
+          have hElsParse : ∀ (rr : List UInt8),
+              parseOpsFuel (f4 + 1)
+                (emitOpsL (eh :: et) ++ (0x68 :: rr)) true
+                = .ok (eh :: et, 0x68 :: rr) := by
+            intro rr
+            rw [← hRecon]
+            have hLenRec : 1 + (body' :: rest').length ≤ 17 := by
+              simp only [List.length_cons] at hI ⊢; omega
+            have hFuelRec :
+                (emitOpsL (dispatchReconL 1 (body' :: rest'))).length ≤ f4 := by omega
+            exact parseDispatchReconL_round_trip_stop (body' :: rest') hRestE
+              (by simp [List.length_cons]) 1 hLenRec f4 hFuelRec 0x68 (by right; rfl) rr
+          rw [← List.append_nil (emitStackOpL (.ifOp (.drop :: body) (some (eh :: et))))]
+          rw [parseStackOpFuel_dispatch_ifOp f4 (.drop :: body) eh et hThn hThnFuel
+                hElsParse []]
+          dsimp only
+          rw [← hRecon]
+          rfl
+
+/-! ### Deliverable 2 — ByteArray `toList` bridges for the dispatch emitters -/
+
+/-- The dispatch non-last head byte array (`OP_DUP push(i) OP_NUMEQUAL
+OP_IF OP_DROP`) for a small index `i ∈ [0..16]` agrees with its
+list-level emitter after `toList`. -/
+private theorem emitDispatchHeadNonLast_toList_eq (i : Nat)
+    (hI : Int.ofNat i = -1 ∨ (0 ≤ Int.ofNat i ∧ Int.ofNat i ≤ 16)) :
+    (Emit.emitDispatchHeadNonLast i).toList = emitDispatchHeadNonLastL i := by
+  have hPush : (Emit.encodePushBigInt (Int.ofNat i)).toList
+      = encodePushBigIntL (Int.ofNat i) := by
+    have := emitStackOp_toList_push_bigint_small (Int.ofNat i) hI
+    simpa [Emit.emitStackOp, Emit.encodePushVal, emitStackOpL, encodePushValL] using this
+  show (ByteArray.mk #[0x76] ++ Emit.encodePushBigInt (Int.ofNat i)
+      ++ ByteArray.mk #[0x9c, 0x63, 0x75]).toList = _
+  rw [ByteArray.toList_append, ByteArray.toList_append, hPush,
+    ByteArray.toList_mk_singleton]
+  show [0x76] ++ encodePushBigIntL (Int.ofNat i)
+      ++ (ByteArray.mk #[0x9c, 0x63, 0x75]).toList = emitDispatchHeadNonLastL i
+  rw [show (ByteArray.mk #[0x9c, 0x63, 0x75]).toList = [0x9c, 0x63, 0x75] by
+    rw [ByteArray.toList_eq_data_toList]]
+  show (0x76 : UInt8) :: encodePushBigIntL (Int.ofNat i) ++ [0x9c, 0x63, 0x75]
+      = emitDispatchHeadNonLastL i
+  rfl
+
+/-- The dispatch last head byte array (`push(i) OP_NUMEQUALVERIFY`) for a
+small index agrees with its list-level emitter after `toList`. -/
+private theorem emitDispatchHeadLast_toList_eq (i : Nat)
+    (hI : Int.ofNat i = -1 ∨ (0 ≤ Int.ofNat i ∧ Int.ofNat i ≤ 16)) :
+    (Emit.emitDispatchHeadLast i).toList = emitDispatchHeadLastL i := by
+  have hPush : (Emit.encodePushBigInt (Int.ofNat i)).toList
+      = encodePushBigIntL (Int.ofNat i) := by
+    have := emitStackOp_toList_push_bigint_small (Int.ofNat i) hI
+    simpa [Emit.emitStackOp, Emit.encodePushVal, emitStackOpL, encodePushValL] using this
+  show (Emit.encodePushBigInt (Int.ofNat i) ++ ByteArray.mk #[0x9d]).toList = _
+  rw [ByteArray.toList_append, hPush, ByteArray.toList_mk_singleton]
+  show encodePushBigIntL (Int.ofNat i) ++ [0x9d] = emitDispatchHeadLastL i
+  rfl
+
+/-- `Emit.emitEndifs` agrees with `emitEndifsL` after `toList`. -/
+private theorem emitEndifs_toList_eq (n : Nat) :
+    (Emit.emitEndifs n).toList = emitEndifsL n := by
+  induction n with
+  | zero => exact ByteArray.toList_empty
+  | succ k ih =>
+      show (ByteArray.mk #[0x68] ++ Emit.emitEndifs k).toList = (0x68 : UInt8) :: emitEndifsL k
+      rw [ByteArray.toList_append, ByteArray.toList_mk_singleton, ih]
+      rfl
+
+/-- `Emit.emitElse` agrees with `emitElseL` after `toList`. -/
+private theorem emitElse_toList_eq : (Emit.emitElse).toList = emitElseL := by
+  show (ByteArray.mk #[0x67]).toList = emitElseL
+  rw [ByteArray.toList_mk_singleton]; rfl
+
+/-- `Emit.emitDispatchChain` agrees with `emitDispatchChainL` (over the
+method bodies) after `toList`, for indices that stay within `[0..16]`
+(`i + ms.length ≤ 17`). All bodies must be `AreRunarEmittable`. -/
+private theorem emitDispatchChain_toList_eq :
+    ∀ (ms : List RunarVerification.Stack.StackMethod) (i : Nat),
+      (∀ m ∈ ms, AreRunarEmittable m.ops) → i + ms.length ≤ 17 →
+      (Emit.emitDispatchChain i ms).toList = emitDispatchChainL i (ms.map (·.ops)) := by
+  intro ms
+  induction ms with
+  | nil => intro i _ _; exact ByteArray.toList_empty
+  | cons m rest ih =>
+      intro i hEmit hI
+      have hMops : AreRunarEmittable m.ops := hEmit m (List.Mem.head _)
+      have hIle16 : Int.ofNat i = -1 ∨ (0 ≤ Int.ofNat i ∧ Int.ofNat i ≤ 16) := by
+        have hi16 : i ≤ 16 := by simp [List.length_cons] at hI; omega
+        have hub : Int.ofNat i ≤ 16 := by
+          have : (i : Int) ≤ 16 := by exact_mod_cast hi16
+          simpa using this
+        exact Or.inr ⟨Int.natCast_nonneg i, hub⟩
+      cases rest with
+      | nil =>
+          show (Emit.emitDispatchHeadLast i ++ Emit.emitOps m.ops).toList
+              = emitDispatchHeadLastL i ++ emitOpsL m.ops
+          rw [ByteArray.toList_append, emitDispatchHeadLast_toList_eq i hIle16,
+            emitOps_toList_of_AreRunarEmittable m.ops hMops]
+      | cons m' rest' =>
+          have hRestEmit : ∀ mm ∈ (m' :: rest'), AreRunarEmittable mm.ops := by
+            intro mm hmm; exact hEmit mm (List.Mem.tail _ hmm)
+          have hRestI : (i + 1) + (m' :: rest').length ≤ 17 := by
+            simp [List.length_cons] at hI ⊢; omega
+          show (Emit.emitDispatchHeadNonLast i ++ Emit.emitOps m.ops ++ Emit.emitElse
+              ++ Emit.emitDispatchChain (i + 1) (m' :: rest')).toList
+              = emitDispatchHeadNonLastL i ++ emitOpsL m.ops ++ emitElseL
+                  ++ emitDispatchChainL (i + 1) ((m' :: rest').map (·.ops))
+          rw [ByteArray.toList_append, ByteArray.toList_append, ByteArray.toList_append,
+            emitDispatchHeadNonLast_toList_eq i hIle16,
+            emitOps_toList_of_AreRunarEmittable m.ops hMops,
+            emitElse_toList_eq,
+            ih (i + 1) hRestEmit hRestI]
+
+/-- **Deliverable 2b — `Emit.emitDispatch` `toList` bridge.** The
+production dispatch bytes equal `emitDispatchNL` over the method bodies. -/
+private theorem emitDispatch_toList_eq (ms : List RunarVerification.Stack.StackMethod)
+    (hEmit : ∀ m ∈ ms, AreRunarEmittable m.ops) (hI : ms.length ≤ 17) :
+    (Emit.emitDispatch ms).toList = emitDispatchNL (ms.map (·.ops)) := by
+  show (Emit.emitDispatchChain 0 ms ++ Emit.emitEndifs (ms.length - 1)).toList
+      = emitDispatchChainL 0 (ms.map (·.ops)) ++ emitEndifsL ((ms.map (·.ops)).length - 1)
+  rw [ByteArray.toList_append, emitEndifs_toList_eq,
+    emitDispatchChain_toList_eq ms 0 hEmit (by omega)]
+  rw [List.length_map]
+
+/-- **Deliverable 2 — top-level `parseScript` over production dispatch
+bytes.** The real `parseScript` recovers the `dispatchReconL`-shaped
+nested-`.ifOp` op-list from `Emit.emitDispatch`'s bytes, for any non-empty
+method list with `AreRunarEmittable` bodies and `ms.length ≤ 17`. -/
+theorem parseScript_emitDispatch_eq_dispatchReconL (ms : List RunarVerification.Stack.StackMethod)
+    (hEmit : ∀ m ∈ ms, AreRunarEmittable m.ops)
+    (hLen : ms.length ≥ 1) (hI : ms.length ≤ 17) :
+    parseScript (Emit.emitDispatch ms)
+      = .ok (dispatchReconL 0 (ms.map (·.ops))) := by
+  unfold parseScript
+  rw [emitDispatch_toList_eq ms hEmit hI]
+  have hMs : AllAreRunarEmittable (ms.map (·.ops)) := by
+    intro m hm
+    obtain ⟨sm, hsm, rfl⟩ := List.mem_map.mp hm
+    exact hEmit sm hsm
+  have hMapLen : (ms.map (·.ops)).length ≥ 1 := by rw [List.length_map]; exact hLen
+  have hMapLen17 : (ms.map (·.ops)).length ≤ 17 := by rw [List.length_map]; exact hI
+  rw [emitDispatchNL_eq_emitOpsL_dispatchReconL (ms.map (·.ops)) hMapLen]
+  exact parseDispatchReconL_round_trip_false (ms.map (·.ops)) hMs hMapLen hMapLen17
+
+/-! ### Deliverable 2 smokes — concrete `n = 2` / `n = 3` `parseScript` -/
+
+theorem parseScript_emitDispatch_eq_dispatchReconL_n2_smoke :
+    parseScript (Emit.emitDispatch
+        [{ name := "a", ops := [StackOp.dup] },
+         { name := "b", ops := [StackOp.swap] }])
+      = .ok (dispatchReconL 0 [[StackOp.dup], [StackOp.swap]]) := by
+  have := parseScript_emitDispatch_eq_dispatchReconL
+      [{ name := "a", ops := [StackOp.dup] },
+       { name := "b", ops := [StackOp.swap] }]
+      (by intro m hm
+          rcases List.mem_cons.mp hm with h | h
+          · subst h; decide
+          · rcases List.mem_cons.mp h with h2 | h2
+            · subst h2; decide
+            · exact absurd h2 (by simp))
+      (by decide) (by decide)
+  simpa using this
+
+theorem parseScript_emitDispatch_eq_dispatchReconL_n3_smoke :
+    parseScript (Emit.emitDispatch
+        [{ name := "a", ops := [StackOp.dup] },
+         { name := "b", ops := [StackOp.swap] },
+         { name := "c", ops := [StackOp.nip] }])
+      = .ok (dispatchReconL 0 [[StackOp.dup], [StackOp.swap], [StackOp.nip]]) := by
+  have := parseScript_emitDispatch_eq_dispatchReconL
+      [{ name := "a", ops := [StackOp.dup] },
+       { name := "b", ops := [StackOp.swap] },
+       { name := "c", ops := [StackOp.nip] }]
+      (by intro m hm
+          rcases List.mem_cons.mp hm with h | h
+          · subst h; decide
+          · rcases List.mem_cons.mp h with h2 | h2
+            · subst h2; decide
+            · rcases List.mem_cons.mp h2 with h3 | h3
+              · subst h3; decide
+              · exact absurd h3 (by simp))
+      (by decide) (by decide)
+  simpa using this
 
 /-! ## `AreRunarEmittableWithIfAndPatches` — wider predicate for C1
 

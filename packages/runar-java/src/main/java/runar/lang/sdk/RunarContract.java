@@ -340,6 +340,13 @@ public final class RunarContract {
         }
 
         boolean isStateful = artifact.isStateful();
+        // parentStateful gates ONLY the issue-#42/#44 terminal sighash subscript
+        // trim (the OP_PUSH_TX / codesep-aware path). A StatefulSmartContract
+        // with zero mutable fields has empty stateFields yet still injects
+        // checkPreimage at method entry, so its user checkSig runs after the
+        // OP_CODESEPARATOR and must sign the trimmed subscript. parentClass is
+        // the authoritative signal; falls back to isStateful for older artifacts.
+        boolean parentStateful = artifact.parentStateful();
 
         // Identify the "user" params — every formal param except those the
         // compiler injects implicitly for stateful contracts. The args list
@@ -407,7 +414,10 @@ public final class RunarContract {
         // [user params...] [_changePKH] [_changeAmount] [_newAmount] [txPreimage].
         boolean methodNeedsChange = hasParam(m, "_changePKH");
         boolean methodNeedsNewAmount = hasParam(m, "_newAmount");
-        boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
+        // parentStateful pulls a zero-mutable-field StatefulSmartContract into
+        // the OP_PUSH_TX / codesep-aware path so its user checkSig signs the
+        // trimmed subscript (issue #44). stateful+ txPreimage covers the rest.
+        boolean needsOpPushTx = parentStateful || isStateful || hasParam(m, "txPreimage");
 
         // ------------------------------------------------------------
         // Terminal call: contract fully spent into caller-supplied
@@ -420,7 +430,7 @@ public final class RunarContract {
             return callTerminal(
                 m, methodName, resolved, sigIndices,
                 methodNeedsChange, methodNeedsNewAmount,
-                isStateful, terminalOutputs, fundingUtxos, provider, signer,
+                isStateful, parentStateful, terminalOutputs, fundingUtxos, provider, signer,
                 terminalLocktime
             );
         }
@@ -442,7 +452,7 @@ public final class RunarContract {
         return callWithPushTx(
             m, methodName, resolved, sigIndices,
             methodNeedsChange, methodNeedsNewAmount,
-            isStateful, resolvedDataOutputs, provider, signer, pushTxLocktime
+            isStateful, parentStateful, resolvedDataOutputs, provider, signer, pushTxLocktime
         );
     }
 
@@ -503,6 +513,7 @@ public final class RunarContract {
         boolean methodNeedsChange,
         boolean methodNeedsNewAmount,
         boolean isStateful,
+        boolean parentStateful,
         List<TransactionBuilder.DataOutput> dataOutputs,
         Provider provider,
         Signer signer,
@@ -685,6 +696,7 @@ public final class RunarContract {
         boolean methodNeedsChange,
         boolean methodNeedsNewAmount,
         boolean isStateful,
+        boolean parentStateful,
         List<CallOptions.TerminalOutput> terminalOutputs,
         List<UTXO> fundingUtxos,
         Provider provider,
@@ -695,7 +707,10 @@ public final class RunarContract {
         // WitnessValueMissingError BEFORE any signing / broadcast.
         String intentWitnessHex = buildIntentWitnessHex(m);
 
-        boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
+        // parentStateful pulls a zero-mutable-field StatefulSmartContract into
+        // the OP_PUSH_TX / codesep-aware path so the terminal user checkSig
+        // signs the trimmed subscript (issue #44).
+        boolean needsOpPushTx = parentStateful || isStateful || hasParam(m, "txPreimage");
         long contractSats = currentUtxo.satoshis();
 
         // Resolve user-facing outputs into hex-encoded scripts. Throws if
@@ -1300,7 +1315,10 @@ public final class RunarContract {
         boolean isStateful = artifact.isStateful();
         boolean methodNeedsChange = hasParam(m, "_changePKH");
         boolean methodNeedsNewAmount = hasParam(m, "_newAmount");
-        boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
+        // parentStateful pulls a zero-mutable-field StatefulSmartContract into
+        // the OP_PUSH_TX / codesep-aware path so the prepared terminal sighash
+        // is computed over the trimmed subscript (issue #44).
+        boolean needsOpPushTx = artifact.parentStateful() || isStateful || hasParam(m, "txPreimage");
 
         // Pre-resolve intent-intrinsic witness hex (throws
         // WitnessValueMissingError if any auto-injected param wasn't set).

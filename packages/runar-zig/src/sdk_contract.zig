@@ -330,6 +330,14 @@ pub const RunarContract = struct {
         _ = method;
 
         const is_stateful = self.artifact.state_fields.len > 0;
+        // parent_stateful gates the issue-#42/#44 terminal sighash subscript
+        // trim AND the stateful-vs-stateless code path: a StatefulSmartContract
+        // with zero mutable fields has empty state_fields yet still injects
+        // checkPreimage at method entry (so it needs OP_PUSH_TX and the
+        // subscript trim). It is the authoritative signal; is_stateful still
+        // exclusively drives state-continuation output construction (a
+        // zero-mutable contract has no state to continue).
+        const parent_stateful = self.artifact.parentStateful();
 
         // Determine method index for method selector
         const public_methods = try self.getPublicMethods();
@@ -542,6 +550,14 @@ pub const RunarContract = struct {
         const has_multi_output =
             multi_output_specs != null and multi_output_specs.?.len > 0 and
             !is_terminal_call;
+
+        // A StatefulSmartContract with zero mutable fields (parent_stateful but
+        // !is_stateful) still routes through the OP_PUSH_TX stateful path (it
+        // needs op_push_tx + the issue-#44 subscript trim) but produces NO
+        // state-continuation output — it spends fully, exactly like a terminal
+        // call. Fold it into the terminal-suppression logic below.
+        const no_state_continuation = parent_stateful and !is_stateful;
+        const suppress_continuation = is_terminal_call or no_state_continuation;
 
         if (is_stateful and !is_terminal_call) {
             new_satoshis = contract_utxo.satoshis;
@@ -778,7 +794,11 @@ pub const RunarContract = struct {
         // ---------------------------------------------------------------
         // Stateless path
         // ---------------------------------------------------------------
-        if (!is_stateful) {
+        // Gated on parent_stateful (NOT is_stateful): a StatefulSmartContract
+        // with zero mutable fields routes through the OP_PUSH_TX stateful path
+        // below so its auto-injected checkPreimage gets a preimage AND its user
+        // checkSig is signed over the trimmed subscript (issue #44).
+        if (!parent_stateful) {
             // Build unlocking script: args + method selector
             const unlock = try self.buildUnlockingScript(method_name, resolved_args);
             defer self.allocator.free(unlock);
@@ -939,13 +959,13 @@ pub const RunarContract = struct {
             break :blk &.{};
         };
         const stateful_data_outputs: []const types.ContractOutput =
-            if (is_terminal_call) &.{} else data_outputs_hex.items;
+            if (suppress_continuation) &.{} else data_outputs_hex.items;
         const stateful_change_address: ?[]const u8 =
             if (is_terminal_call) null else change_address;
         const stateful_new_locking_script: []const u8 =
-            if (is_terminal_call or has_multi_output) "" else new_locking_script;
+            if (suppress_continuation or has_multi_output) "" else new_locking_script;
         const stateful_new_satoshis: i64 =
-            if (is_terminal_call or has_multi_output) 0 else new_satoshis;
+            if (suppress_continuation or has_multi_output) 0 else new_satoshis;
 
         const build_opts: call_mod.CallBuildOptions = .{
             .contract_outputs = stateful_contract_outputs,
@@ -1259,7 +1279,9 @@ pub const RunarContract = struct {
             var mu = old.*;
             mu.deinit(self.allocator);
         }
-        if (is_terminal_call) {
+        if (suppress_continuation) {
+            // Terminal call or zero-mutable stateful spend: fully spent, no
+            // continuation UTXO to track.
             self.current_utxo = null;
         } else {
             self.current_utxo = .{

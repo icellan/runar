@@ -38,7 +38,8 @@ module RunarCompiler
       IR::ANFProgram.new(
         contract_name: contract.name,
         properties: properties,
-        methods: methods
+        methods: methods,
+        parent_class: contract.parent_class
       )
     end
 
