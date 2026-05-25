@@ -17,14 +17,22 @@ import "testing"
 //	}
 //
 // The reference compilers emit `OVER ROT NUMEQUAL` for the body (dup b,
-// rotate, compare). The Go compiler instead emits `0 0 0 NOT` — it throws
-// the parameter references away and succeeds unconditionally on three push-0s.
+// rotate, compare). The Go compiler instead emits `0 0 0 NOT` — it threw
+// the parameter references away and succeeded unconditionally on three push-0s.
 //
-// Expected hex (confirmed identical across ts / rust / python / zig / ruby
-// via the IR differential fuzzer):
+// Since issue #44 / PR #48, cleanupExcessStack() runs for *every* public
+// method (not just stateful methods that deserialize mutable fields), so the
+// two unconsumed parameters (`a` and `c`) left below the assertion result in
+// method9 are now balanced off with `OP_NIP OP_NIP` to satisfy CLEANSTACK.
 //
-//	76009c6375787b9c67519d9168
-//	|dispatch|method9|method7|
+// Expected hex (re-confirmed byte-identical across ts / rust / python on the
+// current tree; see PR diagnosis):
+//
+//	76009c6375787b9c777767519d9168
+//	|dispatch|----method9----|method7|
+//
+// where method9 body = OVER ROT NUMEQUAL NIP NIP (compare b===b, then clean
+// the two leftover params), and method7 body = 1 NUMEQUALVERIFY NOT.
 func TestAliasBindingMultipleMethods_MatchesReference(t *testing.T) {
 	source := `import { SmartContract, assert } from 'runar-lang';
 
@@ -48,7 +56,7 @@ class Repro extends SmartContract {
 }
 `
 
-	const expectedHex = "76009c6375787b9c67519d9168"
+	const expectedHex = "76009c6375787b9c777767519d9168"
 
 	result := CompileFromSourceStrWithResult(source, "Repro.runar.ts", CompileOptions{DisableConstantFolding: true})
 	if !result.Success {
