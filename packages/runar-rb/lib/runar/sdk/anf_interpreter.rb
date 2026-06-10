@@ -501,16 +501,24 @@ module Runar
           # regexes match).
           strict_method = Thread.current[:runar_strict_method]
           if strict_method
-            # The compiler auto-emits a final continuation-hash check on
-            # every stateful-contract method (hash256(stateOutput ‖
-            # changeOutput) == extractOutputHash(preimage)). Under
-            # +execute_strict_with_witness+, +computeStateOutput+ /
-            # +get_state_script+ / +buildChangeOutput+ are not modelled
-            # off-chain, so this assert is unenforceable — skip it. User
-            # asserts are still enforced.
+            # Marker-based skip: the compiler auto-emits the final
+            # continuation-hash check on every stateful-contract method
+            # (hash256(stateOutput ‖ changeOutput) ==
+            # extractOutputHash(preimage)). The lowering pass in
+            # +compilers/ruby/lib/runar_compiler/frontend/anf_lower.rb+
+            # tags ONLY that assert with +isAutoInjectedStateCheck:
+            # true+. Under +execute_strict_with_witness+,
+            # +computeStateOutput+ / +get_state_script+ /
+            # +buildChangeOutput+ are not modelled off-chain so the assert
+            # is unenforceable — skip it. Developer-written covenant
+            # asserts with the identical IR shape carry no marker and ARE
+            # enforced (the previous structural recognizer misfired on
+            # them; see BUG-002).
+            if value['isAutoInjectedStateCheck'] == true
+              return nil
+            end
             if Thread.current[:runar_witness_bytes] &&
-               (continuation_hash_assert?(value['value']) ||
-                check_preimage_assert?(value['value']))
+               check_preimage_assert?(value['value'])
               return nil
             end
 

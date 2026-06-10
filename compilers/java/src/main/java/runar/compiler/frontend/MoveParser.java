@@ -25,6 +25,7 @@ import runar.compiler.ir.ast.MemberExpr;
 import runar.compiler.ir.ast.MethodNode;
 import runar.compiler.ir.ast.ParamNode;
 import runar.compiler.ir.ast.ParentClass;
+import runar.compiler.ir.ast.FixedArrayType;
 import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PrimitiveTypeName;
 import runar.compiler.ir.ast.PropertyAccessExpr;
@@ -644,8 +645,7 @@ public final class MoveParser {
                     && tokens.get(pos + 1).kind() == Kind.IDENT
                     && tokens.get(pos + 1).value().equals("mut");
 
-                String typeName = parseTypeName();
-                TypeNode typeNode = mapType(typeName);
+                TypeNode typeNode = parseTypeNode();
 
                 boolean readonly = !isMut;
 
@@ -686,13 +686,119 @@ public final class MoveParser {
             if (match(Kind.LT)) {
                 int depth = 1;
                 while (depth > 0 && !check(Kind.EOF)) {
-                    if (check(Kind.LT)) depth++;
-                    if (check(Kind.GT)) depth--;
+                    if (check(Kind.LT)) {
+                        depth++;
+                        advance();
+                        continue;
+                    }
+                    if (check(Kind.GT)) {
+                        depth--;
+                        advance();
+                        continue;
+                    }
+                    if (check(Kind.SHR)) {
+                        // `>>` closes two nested generic argument lists.
+                        depth -= 2;
+                        if (depth < 0) depth = 0;
+                        advance();
+                        continue;
+                    }
                     advance();
                 }
             }
 
             return name;
+        }
+
+        /**
+         * Move-style type parser that returns a TypeNode, with full nested
+         * {@code FixedArray<T, N>} support. The lexer eagerly forms
+         * {@code >>} as a shift token; {@link #consumeGenericClose()}
+         * splits it back into two {@code >} when closing a nested
+         * generic argument list.
+         */
+        TypeNode parseTypeNode() {
+            if (match(Kind.AMP)) {
+                matchIdent("mut");
+            }
+
+            Token nameTok = expect(Kind.IDENT);
+            String name = nameTok.value();
+
+            while (match(Kind.COLONCOLON)) {
+                Token nxt = expect(Kind.IDENT);
+                name = nxt.value();
+            }
+
+            if (name.equals("FixedArray") && check(Kind.LT)) {
+                advance(); // <
+                TypeNode inner = parseTypeNode();
+                expect(Kind.COMMA);
+                Token sizeTok = expect(Kind.NUMBER);
+                int length;
+                try {
+                    length = Integer.parseInt(sizeTok.value());
+                    if (length < 0) throw new NumberFormatException();
+                } catch (NumberFormatException ex) {
+                    errors.add("FixedArray length must be a non-negative integer literal, got '"
+                        + sizeTok.value() + "'");
+                    length = 0;
+                }
+                consumeGenericClose();
+                return new FixedArrayType(inner, length);
+            }
+
+            if (name.equals("vector") && check(Kind.LT)) {
+                advance();
+                parseTypeNode();
+                consumeGenericClose();
+                return new PrimitiveType(PrimitiveTypeName.BYTE_STRING);
+            }
+
+            // Other generic types: skip args
+            if (match(Kind.LT)) {
+                int depth = 1;
+                while (depth > 0 && !check(Kind.EOF)) {
+                    if (check(Kind.LT)) {
+                        depth++;
+                        advance();
+                        continue;
+                    }
+                    if (check(Kind.GT)) {
+                        depth--;
+                        advance();
+                        continue;
+                    }
+                    if (check(Kind.SHR)) {
+                        depth -= 2;
+                        if (depth < 0) depth = 0;
+                        advance();
+                        continue;
+                    }
+                    advance();
+                }
+            }
+
+            return mapType(name);
+        }
+
+        /**
+         * Close a generic-argument list. Accepts either a plain {@code >}
+         * or splits a {@code >>} shift token in place into two {@code >}
+         * so an enclosing close can consume the remaining half.
+         */
+        private void consumeGenericClose() {
+            if (check(Kind.GT)) {
+                advance();
+                return;
+            }
+            if (check(Kind.SHR)) {
+                // Rewrite the current `>>` to `>` in place.
+                Token tok = tokens.get(pos);
+                tokens.set(pos, new Token(Kind.GT, ">", tok.line(), tok.column() + 1));
+                return;
+            }
+            expect(Kind.GT);
         }
 
         // -- function --------------------------------------------------------

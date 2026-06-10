@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from runar_compiler.compiler import (
@@ -23,6 +24,25 @@ from runar_compiler.compiler import (
     compile_from_source,
     compile_source_to_ir,
 )
+
+
+# GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
+# goldens stay stable across worktree paths and developer machines. Walk up
+# from the source file looking for pnpm-workspace.yaml (the canonical repo
+# root marker); fall back to the basename if no marker is found. Strings
+# that aren't absolute paths are returned unchanged.
+def _repo_relative_file_name(src_path: str) -> str:
+    if not os.path.isabs(src_path):
+        return src_path
+    d = os.path.dirname(src_path)
+    while True:
+        if os.path.exists(os.path.join(d, "pnpm-workspace.yaml")):
+            return os.path.relpath(src_path, d).replace(os.sep, "/")
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return os.path.basename(src_path)
 
 
 def main() -> None:
@@ -84,6 +104,12 @@ def main() -> None:
         "--disable-constant-folding",
         action="store_true",
         help="Disable the ANF constant folding pass",
+    )
+    parser.add_argument(
+        "--emit-source-map",
+        dest="emit_source_map",
+        metavar="PATH",
+        help="After a successful compile, write artifact.sourceMap JSON to this path",
     )
 
     args = parser.parse_args()
@@ -186,6 +212,34 @@ def main() -> None:
     else:
         output = artifact_to_json(artifact)
 
+    # --emit-source-map: write the artifact's sourceMap field as canonical
+    # JSON ({"mappings":[...]}) to the requested path. Always emit the
+    # wrapper object so downstream tooling sees a uniform shape even when
+    # the underlying mapping table is empty.
+    if args.emit_source_map:
+        sm = artifact.source_map  # list of SourceMapping or None
+        if sm:
+            from runar_compiler.codegen.emit import SourceMapping
+            mappings = [
+                {
+                    "opcodeIndex": m.opcode_index,
+                    # GAP-011: normalize sourceFile to repo-relative POSIX.
+                    "sourceFile": _repo_relative_file_name(m.source_file),
+                    "line": m.line,
+                    "column": m.column,
+                }
+                if isinstance(m, SourceMapping)
+                else {**m, "sourceFile": _repo_relative_file_name(m.get("sourceFile", ""))}
+                for m in sm
+            ]
+        else:
+            mappings = []
+        os.makedirs(os.path.dirname(os.path.abspath(args.emit_source_map)) or ".", exist_ok=True)
+        with open(args.emit_source_map, "w") as f:
+            json.dump({"mappings": mappings}, f, indent=2)
+            f.write("\n")
+        print(f"Source map written to {args.emit_source_map}", file=sys.stderr)
+
     # Write output
     if args.output:
         with open(args.output, "w") as f:
@@ -203,6 +257,7 @@ _SNAKE_TO_CAMEL = {
     "initial_value": "initialValue",
     "script_bytes": "scriptBytes",
     "else_": "else",
+    "is_auto_injected_state_check": "isAutoInjectedStateCheck",
     # These stay as snake_case to match Go/TS IR format
     "result_type": "result_type",
     # Both raw_value and value_ref map to "value" in Go JSON (they never coexist)
@@ -217,6 +272,9 @@ _IR_EXCLUDED_FIELDS = frozenset({
     # Python-only metadata used internally by expand_fixed_arrays.
     # Other compilers don't emit this field in --emit-ir output.
     "synthetic_array_chain",
+    # In-memory carrier for the artifact's top-level parentClass field.
+    # Excluded from --emit-ir so it never affects cross-tier ANF parity.
+    "parent_class",
 })
 
 
@@ -231,6 +289,7 @@ def _anf_to_camel_dict(obj: object) -> object:
     if is_dataclass(obj) and not isinstance(obj, type):
         d: dict = {}
         has_raw_value = False
+        kind_val = getattr(obj, "kind", None)
         for f in fields(obj):
             if f.name in _IR_EXCLUDED_FIELDS:
                 continue
@@ -248,6 +307,12 @@ def _anf_to_camel_dict(obj: object) -> object:
             # Skip value_ref if raw_value was already emitted as "value"
             if f.name == "value_ref" and has_raw_value:
                 continue
+            # Auto-injected stateful-continuation marker: emit only on
+            # `assert` nodes and only when True so checked-in fold-OFF
+            # goldens stay stable for developer asserts.
+            if f.name == "is_auto_injected_state_check":
+                if not v or kind_val != "assert":
+                    continue
             key = _snake_key(f.name)
             d[key] = _anf_to_camel_dict(v)
         return d

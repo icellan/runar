@@ -599,12 +599,14 @@ pub fn execute_with_witness(
     // preimage.outputHash` check fires a spurious assertion failure (we
     // have no realistic continuation hash in simulation).
     //
-    // The pattern is recognisable: the last top-level binding is
-    // `assert(X)` where X is bound to a `bin_op {op:'===',result_type:
-    // 'bytes'}` whose right operand traces back (one hop in env-order)
-    // to a `call {func:'extractOutputHash'}`. Strip both the assert and
-    // the bin_op + hash chain that feeds it isn't necessary — the
-    // dependent bindings just become dead code and are evaluated harmlessly.
+    // Marker-based recognition: the lowering pass
+    // (`compilers/rust/src/frontend/anf_lower.rs`) sets
+    // `isAutoInjectedStateCheck=true` on the compiler-emitted assert and
+    // only on that assert. Developer-written covenant asserts with the
+    // identical IR shape (`assert(hash256(...) === extractOutputHash(...))`)
+    // carry the absent/false marker and are preserved. Strip the
+    // dependent bin_op + hash chain isn't necessary — those bindings
+    // become dead code and are evaluated harmlessly.
     let mut anf_clone = anf.clone();
     if let Some(m) = anf_clone
         .methods
@@ -612,55 +614,15 @@ pub fn execute_with_witness(
         .find(|mm| mm.name == method_name && mm.is_public)
     {
         if let Some(last) = m.body.last() {
-            if last.value.get("kind").and_then(|k| k.as_str()) == Some("assert") {
-                let pred_ref = last
-                    .value
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let pred_binding = m.body.iter().find(|b| b.name == pred_ref);
-                let is_continuation_pattern = pred_binding
-                    .map(|b| {
-                        if b.value.get("kind").and_then(|k| k.as_str()) != Some("bin_op") {
-                            return false;
-                        }
-                        let op = b.value.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                        if op != "===" && op != "==" {
-                            return false;
-                        }
-                        let result_type = b
-                            .value
-                            .get("result_type")
-                            .or_else(|| b.value.get("resultType"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if result_type != "bytes" {
-                            return false;
-                        }
-                        // Right operand should resolve to a call(extractOutputHash).
-                        let right_ref = b
-                            .value
-                            .get("right")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        m.body
-                            .iter()
-                            .find(|bb| bb.name == right_ref)
-                            .map(|bb| {
-                                bb.value.get("kind").and_then(|k| k.as_str()) == Some("call")
-                                    && bb
-                                        .value
-                                        .get("func")
-                                        .and_then(|v| v.as_str())
-                                        == Some("extractOutputHash")
-                            })
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                if is_continuation_pattern {
-                    m.body.pop();
-                }
+            let kind_is_assert =
+                last.value.get("kind").and_then(|k| k.as_str()) == Some("assert");
+            let marker_set = last
+                .value
+                .get("isAutoInjectedStateCheck")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if kind_is_assert && marker_set {
+                m.body.pop();
             }
         }
     }

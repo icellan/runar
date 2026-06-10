@@ -341,18 +341,23 @@ class SolParser {
   private parseType(): TypeNode {
     const name = this.expect('ident').value;
     const mapped = mapSolType(name);
-    // Check for FixedArray<T, N> — would be Type[N] in Solidity style
-    if (this.current().type === '[') {
+    let result: TypeNode = this.makePrimitiveOrCustom(mapped);
+    // Solidity native fixed-array suffixes: T[N], T[N][M], ...
+    // Per Solidity convention, `T[N][M]` is read left-to-right when
+    // *declaring* but the outer dimension grows leftmost when *indexing*:
+    // `T[N][M]` means "M arrays of (N of T)". So each successive `[L]`
+    // wraps the type seen so far as `FixedArray<previous, L>`.
+    while (this.current().type === '[') {
       this.advance();
       const length = parseInt(this.expect('number').value, 10);
       this.expect(']');
-      return {
+      result = {
         kind: 'fixed_array_type',
-        element: this.makePrimitiveOrCustom(mapped),
+        element: result,
         length,
       };
     }
-    return this.makePrimitiveOrCustom(mapped);
+    return result;
   }
 
   private makePrimitiveOrCustom(name: string): TypeNode {

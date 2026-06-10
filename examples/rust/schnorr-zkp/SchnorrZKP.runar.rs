@@ -15,6 +15,12 @@ use runar::prelude::*;
 ///
 /// The challenge is derived deterministically from the commitment and
 /// public key, preventing the prover from choosing a convenient e.
+///
+/// WARNING — nonce reuse is fatal. Two proofs (s1, s2) over different
+/// challenges (e1, e2) that share the same nonce r leak the secret key:
+///     k = (e1 - e2)^{-1} * (s1 - s2) mod n
+/// The contract cannot detect cross-proof nonce reuse; the prover MUST
+/// sample a fresh, uniformly random r for every proof.
 #[runar::contract]
 pub struct SchnorrZKP {
     #[readonly]
@@ -27,6 +33,13 @@ impl SchnorrZKP {
     /// - `r_point` - The commitment R = r*G (prover's nonce point)
     /// - `s` - The response s = r + e*k (mod n)
     pub fn verify(&self, r_point: &Point, s: Bigint) {
+        // Bound s to the canonical range [1, n) where n is the secp256k1
+        // group order (malleability gate). Inlined as a decimal literal so
+        // every frontend lowers it to the same bigint_literal ANF node
+        // (sol/move/go/rust/zig all lex 0x... as a ByteString literal).
+        // Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        assert!(within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337));
+
         // Verify R is on the curve
         assert!(ec_on_curve(r_point));
 

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { emitVerifyRabinSig } from '../passes/rabin-codegen.js';
+import { emitVerifyRabinSig, RABIN_PADDING_LIMIT } from '../passes/rabin-codegen.js';
 import type { StackOp } from '../ir/index.js';
 import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
@@ -35,10 +35,16 @@ const ORACLE_GOLDEN = join(
   'expected-script.hex',
 );
 
-// The fixed Rabin verification opcode sequence:
-// (sig^2 + padding) mod pubKey == SHA256(msg)
-const RABIN_OPCODES = [
+// The fixed Rabin verification opcode sequence (post BUG-010, 15 ops total):
+// (sig^2 + padding) mod pubKey == SHA256(msg) AND 0 <= padding < 65536.
+// `null` at position 3 marks a push of RABIN_PADDING_LIMIT (65536), not an opcode.
+const RABIN_OPCODES: (string | null)[] = [
   'OP_SWAP',
+  'OP_DUP',
+  'OP_0',
+  null, // push 65536 (BUG-010 padding limit)
+  'OP_WITHIN',
+  'OP_VERIFY',
   'OP_ROT',
   'OP_DUP',
   'OP_MUL',
@@ -55,15 +61,23 @@ describe('rabin-codegen module extraction (GAP-M1)', () => {
     expect(typeof emitVerifyRabinSig).toBe('function');
   });
 
-  it('emits exactly the 10-opcode Rabin verification sequence', () => {
+  it('emits exactly the 15-opcode Rabin verification sequence (BUG-010)', () => {
     const ops: StackOp[] = [];
     emitVerifyRabinSig((op) => ops.push(op));
-    expect(ops).toHaveLength(10);
-    const codes = ops.map((o) => {
-      expect(o.op).toBe('opcode');
-      return (o as Extract<StackOp, { op: 'opcode' }>).code;
-    });
-    expect(codes).toEqual(RABIN_OPCODES);
+    expect(ops).toHaveLength(15);
+    for (let i = 0; i < ops.length; i++) {
+      const expected = RABIN_OPCODES[i];
+      const op = ops[i]!;
+      if (expected === null) {
+        expect(op.op).toBe('push');
+        expect((op as Extract<StackOp, { op: 'push' }>).value).toBe(
+          RABIN_PADDING_LIMIT,
+        );
+      } else {
+        expect(op.op).toBe('opcode');
+        expect((op as Extract<StackOp, { op: 'opcode' }>).code).toBe(expected);
+      }
+    }
   });
 
   it('compiling the oracle-price fixture produces byte-identical hex to the conformance golden', () => {

@@ -17,6 +17,7 @@
 //! Point representation: 64 bytes (x[32] || y[32], big-endian unsigned).
 //! Internal arithmetic uses Jacobian coordinates for scalar multiplication.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 // ===========================================================================
@@ -124,7 +125,7 @@ impl<'a> BN254Tracker<'a> {
     }
 
     pub(crate) fn push_int(&mut self, n: &str, v: i128) {
-        (self.e)(StackOp::Push(PushValue::Int(v)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v))));
         self.nm.push(n.to_string());
     }
 
@@ -196,7 +197,7 @@ impl<'a> BN254Tracker<'a> {
             self.rot();
             return;
         }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Roll { depth: d });
         self.nm.pop();
@@ -214,7 +215,7 @@ impl<'a> BN254Tracker<'a> {
             self.over(n);
             return;
         }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Pick { depth: d });
         self.nm.pop();
@@ -516,7 +517,7 @@ pub(crate) fn bn254_field_mul_const(
         if c == 2 {
             e(StackOp::Opcode("OP_2MUL".into()));
         } else {
-            e(StackOp::Push(PushValue::Int(c as i128)));
+            e(StackOp::Push(PushValue::Int(BigInt::from(c as i128))));
             e(StackOp::Opcode("OP_MUL".into()));
         }
     });
@@ -564,7 +565,7 @@ fn emit_reverse_32(e: &mut dyn FnMut(StackOp)) {
     e(StackOp::Swap);
     // 32 iterations: peel first byte, prepend to accumulator
     for _i in 0..32 {
-        e(StackOp::Push(PushValue::Int(1)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(1))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Rot);
         e(StackOp::Rot);
@@ -586,7 +587,7 @@ pub(crate) fn bn254_decompose_point(
     t.to_top(point_name);
     // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
     t.raw_block(&[point_name], None, |e| {
-        e(StackOp::Push(PushValue::Int(32)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
     // Manually track the two new items
@@ -624,10 +625,10 @@ pub(crate) fn bn254_compose_point(
     // Convert x to 32-byte big-endian
     t.to_top(x_name);
     t.raw_block(&[x_name], Some("_cp_xb"), |e| {
-        e(StackOp::Push(PushValue::Int(33)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(33))));
         e(StackOp::Opcode("OP_NUM2BIN".into()));
         // Drop the sign byte (last byte) -- split at 32, keep left
-        e(StackOp::Push(PushValue::Int(32)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
         emit_reverse_32(e);
@@ -636,9 +637,9 @@ pub(crate) fn bn254_compose_point(
     // Convert y to 32-byte big-endian
     t.to_top(y_name);
     t.raw_block(&[y_name], Some("_cp_yb"), |e| {
-        e(StackOp::Push(PushValue::Int(33)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(33))));
         e(StackOp::Opcode("OP_NUM2BIN".into()));
-        e(StackOp::Push(PushValue::Int(32)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
         emit_reverse_32(e);

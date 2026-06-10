@@ -26,9 +26,18 @@ module RunarCompiler
     # Program structure
     # -------------------------------------------------------------------
 
-    ANFProgram = Struct.new(:contract_name, :properties, :methods, keyword_init: true) do
-      def initialize(contract_name: "", properties: [], methods: [])
-        super(contract_name: contract_name, properties: properties, methods: methods)
+    # +parent_class+ is the base class the source contract extends
+    # ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract"). It is
+    # an in-memory carrier ONLY -- it is never written into the emitted ANF IR
+    # JSON that the conformance suite compares cross-tier (see
+    # +_serialize_anf_program+ in compiler.rb, which omits it). The artifact
+    # assembler copies it to the top-level artifact field so SDKs can gate the
+    # issue-#42/#44 terminal sighash subscript trim on the authoritative parent
+    # class (a StatefulSmartContract with zero mutable fields still needs the
+    # trim even though stateFields is empty).
+    ANFProgram = Struct.new(:contract_name, :properties, :methods, :parent_class, keyword_init: true) do
+      def initialize(contract_name: "", properties: [], methods: [], parent_class: "")
+        super(contract_name: contract_name, properties: properties, methods: methods, parent_class: parent_class)
       end
     end
 
@@ -122,7 +131,14 @@ module RunarCompiler
                     #    stack arity (emitted by the asm() intrinsic).
                     :bytes,
                     :in_arity,
-                    :out_arity
+                    :out_arity,
+                    # -- assert (auto-injected stateful-continuation marker) --
+                    # +true+ only on the compiler-emitted
+                    # +hash256(continuationOutputs) === extractOutputHash(txPreimage)+
+                    # assert. Off-chain SDK interpreters skip this assert via a
+                    # direct marker lookup instead of structural / taint
+                    # heuristics that misfire on developer covenant asserts.
+                    :is_auto_injected_state_check
 
       def initialize(kind: "", **_opts)
         @kind = kind
@@ -156,6 +172,7 @@ module RunarCompiler
         @bytes = nil
         @in_arity = nil
         @out_arity = nil
+        @is_auto_injected_state_check = false
       end
     end
 
@@ -210,6 +227,24 @@ module RunarCompiler
     end
     private_class_method :_decode_value
 
+    # True if +s+ is a JS-style decimal BigInt literal: optional leading
+    # +-+, one or more ASCII digits, and a REQUIRED trailing +n+ marker.
+    # Mirrors the discriminator used by compilers/go/ir/types.go and
+    # compilers/python/runar_compiler/ir/types.py. The trailing +n+ is the
+    # discriminator that separates a decimal-encoded BigInt from a hex-
+    # encoded ByteString literal (which never carries the suffix), so a
+    # hex string like "3030" is not mis-decoded as the integer 3030.
+    def self.decimal_bigint_literal?(s)
+      return false unless s.is_a?(String)
+      return false if s.length < 2 || s[-1] != "n"
+
+      start = s[0] == "-" ? 1 : 0
+      body = s[start..-2]
+      return false if body.empty?
+
+      body.each_char.all? { |c| c >= "0" && c <= "9" }
+    end
+
     def self._decode_const_value(v, method_name, binding_name)
       if v.raw_value.nil?
         raise ArgumentError,
@@ -225,8 +260,18 @@ module RunarCompiler
         return
       end
 
-      # String (hex-encoded bytes)
+      # String. Either a JS-style oversize BigInt literal ('123...n' with the
+      # canonical 'n' suffix) or a hex-encoded ByteString literal. The 'n'
+      # suffix is the discriminator -- without it the two cases are
+      # indistinguishable when the literal is all-digit (e.g. '3030' is
+      # both a valid decimal integer AND a valid hex bytestring).
       if raw.is_a?(String)
+        if decimal_bigint_literal?(raw)
+          int_val = raw[0..-2].to_i
+          v.const_big_int = int_val
+          v.const_int = int_val
+          return
+        end
         v.const_string = raw
         return
       end
@@ -274,6 +319,7 @@ module RunarCompiler
       v.bytes       = d["bytes"]
       v.in_arity    = d["in_arity"]
       v.out_arity   = d["out_arity"]
+      v.is_auto_injected_state_check = d["isAutoInjectedStateCheck"] == true
 
       # Nested bindings
       if d.key?("then") && !d["then"].nil?

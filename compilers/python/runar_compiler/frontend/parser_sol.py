@@ -449,6 +449,7 @@ class _SolParser:
             return None
 
         type_name = type_tok.value
+        prop_type = self._parse_sol_fixed_array_suffix(_parse_sol_type(type_name))
 
         # Check for immutable keyword
         is_readonly = False
@@ -469,11 +470,33 @@ class _SolParser:
 
         return PropertyNode(
             name=prop_name,
-            type=_parse_sol_type(type_name),
+            type=prop_type,
             readonly=is_readonly,
             initializer=initializer,
             source_location=location,
         )
+
+    def _parse_sol_fixed_array_suffix(self, base: TypeNode) -> TypeNode:
+        """Consume any trailing ``[N]`` brackets, wrapping the base type as
+        nested ``FixedArrayType``. Per Solidity declaration convention
+        ``T[A][B]`` reads outer-to-inner left-to-right, i.e. outer B of
+        inner A of T."""
+        result = base
+        while self.check(TOK_LBRACKET):
+            self.advance()
+            len_tok = self.expect(TOK_NUMBER)
+            try:
+                length = int(len_tok.value)
+                if length < 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                self.add_error(
+                    f"FixedArray length must be a non-negative integer literal, got {len_tok.value!r}"
+                )
+                length = 0
+            self.expect(TOK_RBRACKET)
+            result = FixedArrayType(element=result, length=length)
+        return result
 
     # -- Constructor parsing: constructor(Type _name, ...) { ... } ----------
 
@@ -587,6 +610,7 @@ class _SolParser:
         while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
             type_tok = self.expect(TOK_IDENT)
             type_name = type_tok.value
+            param_type = self._parse_sol_fixed_array_suffix(_parse_sol_type(type_name))
 
             # Skip memory/storage/calldata qualifiers
             while (
@@ -603,7 +627,7 @@ class _SolParser:
                 param_name = param_name[1:]
 
             params.append(
-                ParamNode(name=param_name, type=_parse_sol_type(type_name))
+                ParamNode(name=param_name, type=param_type)
             )
 
             if not self.match(TOK_COMMA):

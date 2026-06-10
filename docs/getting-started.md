@@ -17,6 +17,7 @@ Before you begin, make sure you have the following installed:
 | **Python** | 3.13+           | Only needed if you want to build/use the Python compiler |
 | **Zig** | 0.15.x           | Only needed if you want to build/use the Zig compiler |
 | **Ruby** | 3.2+            | Only needed if you want to build/use the Ruby compiler |
+| **Java** | 17+             | Only needed if you want to build/use the Java compiler (Gradle wrapper pinned at 8.5 is committed and downloads automatically on first run) |
 
 Verify your installations:
 
@@ -25,6 +26,7 @@ node --version   # v20.x.x or higher
 pnpm --version   # 9.x.x or higher
 go version       # go1.26.x or higher (optional)
 zig version      # 0.15.x (optional)
+java --version   # 17 or higher (optional)
 ```
 
 ---
@@ -133,6 +135,16 @@ runar compile P2PKH.runar.ts --ir
 # Print the assembly to stdout
 runar compile P2PKH.runar.ts --asm
 ```
+
+### Stepping Through a Compiled Contract
+
+The `runar debug <artifact>` subcommand opens an interactive REPL that runs the compiled script one Bitcoin Script opcode at a time, with breakpoints and a source-map link back to the original Rúnar source line:
+
+```bash
+runar debug ./artifacts/P2PKH.json --method unlock --args '{"sig":"3044...","pubKey":"02abc..."}'
+```
+
+`runar debug` is available in the **TypeScript, Go, Rust, and Python** compilers. It is **not** available in the Zig, Ruby, or Java compilers — those tiers do not ship an off-chain Bitcoin Script VM (no canonical upstream BSV SDK script interpreter is usable for them). For step-level inspection on Zig / Ruby / Java contracts, use the ANF-interpreter harness in the native `runar` package plus a regtest integration test; see the [Testing Guide → `runar debug`](./testing-guide.md#interactive-step-through-debugger-runar-debug) for the full workflow and the underlying ScriptVM policy.
 
 ---
 

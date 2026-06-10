@@ -229,7 +229,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
           const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
           const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef2] });
           const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
-          methodCtx.emit({ kind: 'assert', value: eqRef });
+          methodCtx.emit({ kind: 'assert', value: eqRef, isAutoInjectedStateCheck: true });
         } else {
           // Single-output continuation: build raw output bytes, then splice in
           // any declared data outputs, then concat with change, then hash.
@@ -246,7 +246,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
           const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
           const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
           const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
-          methodCtx.emit({ kind: 'assert', value: eqRef });
+          methodCtx.emit({ kind: 'assert', value: eqRef, isAutoInjectedStateCheck: true });
         }
       }
 

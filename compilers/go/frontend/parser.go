@@ -21,6 +21,11 @@ import (
 type ParseResult struct {
 	Contract *ContractNode
 	Errors   []Diagnostic
+	// SourceSizeErr is non-nil iff ParseSource rejected the input via the
+	// DoS-bound source-size guard. Callers wanting typed detection can
+	// check `result.SourceSizeErr != nil` (or `errors.As`) instead of
+	// string-matching the diagnostic message. BUG-008 follow-up.
+	SourceSizeErr *SourceSizeExceededError
 }
 
 // ErrorStrings returns error messages as strings (for backward compatibility).
@@ -43,6 +48,19 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.java -> ParseJava
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard. Reject oversized source BEFORE any
+	// format-specific parser touches the input. BUG-008 follow-up.
+	if err := assertSourceBytesUnderLimit(source); err != nil {
+		sse := err.(*SourceSizeExceededError)
+		return &ParseResult{
+			Errors: []Diagnostic{{
+				Message:  sse.Error(),
+				Severity: SeverityError,
+			}},
+			SourceSizeErr: sse,
+		}
+	}
+
 	lower := strings.ToLower(fileName)
 	switch {
 	case strings.HasSuffix(lower, ".runar.sol"):

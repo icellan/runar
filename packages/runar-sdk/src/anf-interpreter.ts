@@ -420,6 +420,17 @@ function evalValue(
 
     case 'assert': {
       if (strict) {
+        // Marker-based skip: the auto-injected stateful-continuation
+        // `assert(hash256(_) === extractOutputHash(_))` carries
+        // `isAutoInjectedStateCheck: true` (set in
+        // `packages/runar-compiler/src/passes/04-anf-lower.ts`). The
+        // on-chain VM is authoritative for that check; off-chain we
+        // have no realistic continuation hash. Developer-written
+        // covenant asserts with the identical IR shape carry no
+        // marker and ARE enforced (see BUG-002).
+        if ((value as { isAutoInjectedStateCheck?: boolean }).isAutoInjectedStateCheck === true) {
+          return undefined;
+        }
         const predicate = env[value.value];
         if (!isTruthy(predicate)) {
           throw new AssertionFailureError(strict.methodName, bindingName);

@@ -131,7 +131,7 @@ fn emit_reverse_48(e: &mut dyn FnMut(StackOp)) {
     e(StackOp::Opcode("OP_0".into()));
     e(StackOp::Swap);
     for _ in 0..48 {
-        e(StackOp::Push(PushValue::Int(1)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(1))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Rot);
         e(StackOp::Rot);
@@ -187,7 +187,7 @@ impl<'a> ECTracker<'a> {
     }
 
     fn push_int(&mut self, n: &str, v: i128) {
-        (self.e)(StackOp::Push(PushValue::Int(v)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v))));
         self.nm.push(n.to_string());
     }
 
@@ -241,7 +241,7 @@ impl<'a> ECTracker<'a> {
         if d == 0 { return; }
         if d == 1 { self.swap(); return; }
         if d == 2 { self.rot(); return; }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Opcode("OP_ROLL".into()));
         self.nm.pop();
@@ -253,7 +253,7 @@ impl<'a> ECTracker<'a> {
     fn pick(&mut self, d: usize, n: &str) {
         if d == 0 { self.dup(n); return; }
         if d == 1 { self.over(n); return; }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Opcode("OP_PICK".into()));
         self.nm.pop();
@@ -358,7 +358,7 @@ fn c_field_mul_const(t: &mut ECTracker, a_name: &str, cv: i128, result_name: &st
         if cv == 2 {
             e(StackOp::Opcode("OP_2MUL".into()));
         } else {
-            e(StackOp::Push(PushValue::Int(cv)));
+            e(StackOp::Push(PushValue::Int(BigInt::from(cv))));
             e(StackOp::Opcode("OP_MUL".into()));
         }
     });
@@ -458,7 +458,7 @@ fn c_group_inv(t: &mut ECTracker, a_name: &str, result_name: &str, g: &NistGroup
 fn c_decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &str, c: &NistCurveParams) {
     t.to_top(point_name);
     t.raw_block(&[point_name], None, |e| {
-        e(StackOp::Push(PushValue::Int(c.coord_bytes as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(c.coord_bytes as i128))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
     t.nm.push("_dp_xb".to_string());
@@ -493,9 +493,9 @@ fn c_compose_point(t: &mut ECTracker, x_name: &str, y_name: &str, result_name: &
     let rev_fn = c.reverse_bytes;
     let cb = c.coord_bytes as i128;
     t.raw_block(&[x_name], Some("_cp_xb"), |e| {
-        e(StackOp::Push(PushValue::Int(num_bin_size)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(num_bin_size))));
         e(StackOp::Opcode("OP_NUM2BIN".into()));
-        e(StackOp::Push(PushValue::Int(cb)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(cb))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
         rev_fn(e);
@@ -504,9 +504,9 @@ fn c_compose_point(t: &mut ECTracker, x_name: &str, y_name: &str, result_name: &
     // Convert y to coordBytes big-endian
     t.to_top(y_name);
     t.raw_block(&[y_name], Some("_cp_yb"), |e| {
-        e(StackOp::Push(PushValue::Int(num_bin_size)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(num_bin_size))));
         e(StackOp::Opcode("OP_NUM2BIN".into()));
-        e(StackOp::Push(PushValue::Int(cb)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(cb))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
         rev_fn(e);
@@ -830,7 +830,7 @@ fn c_decompress_pub_key(
 
     // Split: [prefix_byte, x_bytes]
     t.raw_block(&[pk_name], None, |e| {
-        e(StackOp::Push(PushValue::Int(1)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(1))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
     t.nm.push("_dk_prefix".to_string());
@@ -840,7 +840,7 @@ fn c_decompress_pub_key(
     t.to_top("_dk_prefix");
     t.raw_block(&["_dk_prefix"], Some("_dk_parity"), |e| {
         e(StackOp::Opcode("OP_BIN2NUM".into()));
-        e(StackOp::Push(PushValue::Int(2)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(2))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 
@@ -877,7 +877,7 @@ fn c_decompress_pub_key(
     // Check if candidate y has the right parity
     t.copy_to_top("_dk_y_cand", "_dk_y_check");
     t.raw_block(&["_dk_y_check"], Some("_dk_y_par"), |e| {
-        e(StackOp::Push(PushValue::Int(2)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(2))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 
@@ -948,7 +948,7 @@ fn c_emit_verify_ecdsa(
     let cb = c.coord_bytes as i128;
     t.to_top("_sig");
     t.raw_block(&["_sig"], None, |e| {
-        e(StackOp::Push(PushValue::Int(cb)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(cb))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
     t.nm.push("_r_bytes".to_string());
@@ -1138,16 +1138,16 @@ pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
 /// p256EncodeCompressed: encode a P-256 point as 33-byte compressed pubkey.
 pub fn emit_p256_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     // Split at 32: [x_bytes, y_bytes]
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     // Get last byte of y for parity
     emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(1)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
     emit(StackOp::Opcode("OP_SUB".into()));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     // Stack: [x_bytes, y_prefix, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
-    emit(StackOp::Push(PushValue::Int(2)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
     // Stack: [x_bytes, y_prefix, parity]
     emit(StackOp::Swap);
@@ -1233,16 +1233,16 @@ pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
 /// p384EncodeCompressed: encode a P-384 point as 49-byte compressed pubkey.
 pub fn emit_p384_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     // Split at 48: [x_bytes, y_bytes]
-    emit(StackOp::Push(PushValue::Int(48)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(48))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     // Get last byte of y for parity
     emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(1)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
     emit(StackOp::Opcode("OP_SUB".into()));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     // Stack: [x_bytes, y_prefix, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
-    emit(StackOp::Push(PushValue::Int(2)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
     // Stack: [x_bytes, y_prefix, parity]
     emit(StackOp::Swap);

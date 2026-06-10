@@ -10,6 +10,7 @@ require "json"
 require "set"
 require_relative "types"
 require_relative "unknown_anf_kind_error"
+require_relative "input_limits"
 
 module RunarCompiler
   module IR
@@ -55,7 +56,18 @@ module RunarCompiler
     #
     # Parses the JSON, decodes typed constant values, and validates the
     # structure. Raises +ArgumentError+ on any error.
+    #
+    # Rejects oversized (>MAX_IR_BYTES) or deeply-nested (>MAX_IR_NESTING)
+    # payloads with the typed IR::InputLimits::IRSizeExceededError /
+    # IR::InputLimits::IRNestingExceededError BEFORE JSON.parse runs.
+    # BUG-008 follow-up.
     def self.load_ir(source)
+      # DoS-bound guards run before JSON.parse so a malicious payload
+      # cannot exhaust memory (size) or the Ruby fiber stack (nesting)
+      # inside the deserializer.
+      InputLimits.assert_ir_bytes_under_limit(source)
+      InputLimits.assert_ir_nesting_under_limit(source)
+
       begin
         d = JSON.parse(source)
       rescue JSON::ParserError => e

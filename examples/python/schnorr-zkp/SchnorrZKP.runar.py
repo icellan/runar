@@ -13,13 +13,20 @@ The challenge is derived deterministically from the commitment and
 public key, preventing the prover from choosing a convenient e.
 """
 from runar import (
-    SmartContract, Point, Bigint, public, assert_,
+    SmartContract, Point, Bigint, public, assert_, within,
     ec_add, ec_mul, ec_mul_gen, ec_point_x, ec_point_y, ec_on_curve,
     hash256, cat, bin2num,
 )
 
 class SchnorrZKP(SmartContract):
-    """Verifies Schnorr ZKP proofs on-chain."""
+    """Verifies Schnorr ZKP proofs on-chain.
+
+    WARNING -- nonce reuse is fatal. Two proofs (s1, s2) over different
+    challenges (e1, e2) that share the same nonce r leak the secret key:
+        k = (e1 - e2)^-1 * (s1 - s2) mod n
+    The contract cannot detect cross-proof nonce reuse; the prover MUST
+    sample a fresh, uniformly random r for every proof.
+    """
 
     pub_key: Point
 
@@ -35,6 +42,12 @@ class SchnorrZKP(SmartContract):
             r_point: The commitment R = r*G (prover's nonce point).
             s: The response s = r + e*k (mod n).
         """
+        # Bound s to the canonical range [1, n) where n is the secp256k1
+        # group order (malleability gate). Inlined as a decimal literal so
+        # every frontend lowers it to the same bigint_literal ANF node.
+        # Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        assert_(within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337))
+
         # Verify R is on the curve
         assert_(ec_on_curve(r_point))
 

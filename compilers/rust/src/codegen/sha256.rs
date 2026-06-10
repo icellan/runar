@@ -11,6 +11,7 @@
 //!   - Batched addN for T1 (5 addends) converts all to numeric once, adds, converts back.
 //!   - BE<->LE conversion only at input unpack / output pack.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 use std::sync::OnceLock;
@@ -73,7 +74,7 @@ impl Emitter {
     }
 
     fn push_i(&mut self, v: i128) {
-        self.ops.push(StackOp::Push(PushValue::Int(v)));
+        self.ops.push(StackOp::Push(PushValue::Int(BigInt::from(v))));
         self.depth += 1;
     }
 

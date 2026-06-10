@@ -275,8 +275,20 @@ module Runar
         prepared   = prepare_call(method_name, args, provider, signer, options)
         signatures = {}
         prepared.sig_indices.each do |idx|
+          # Stateful contracts: checkPreimage is auto-injected at method entry,
+          # so the user checkSig executes AFTER the OP_CODESEPARATOR — the
+          # sighash must be computed over the subscript trimmed at that
+          # separator. Issue #42: the trim must land at the *real* on-chain
+          # codesep byte position, which get_code_sep_index now recovers via
+          # find_codesep_offsets.
+          # Stateless contracts: the user controls statement order and may place
+          # checkSig BEFORE the codesep (e.g. CovenantVault) — those must use the
+          # FULL script, so the trim stays gated on the parent class. A stateful
+          # contract with ZERO mutable fields (empty state_fields) still injects
+          # checkPreimage at entry, so the trim is gated on parent_stateful
+          # (artifact parent_class), NOT is_stateful (issue #44).
           subscript = prepared.contract_utxo.script
-          if prepared.is_stateful && prepared.code_sep_idx >= 0
+          if prepared.parent_stateful && prepared.code_sep_idx >= 0
             trim_pos  = (prepared.code_sep_idx + 1) * 2
             subscript = subscript[trim_pos..] if trim_pos <= subscript.length
           end
@@ -315,6 +327,13 @@ module Runar
         end
 
         is_stateful = !@artifact.state_fields.empty?
+        # parent_stateful gates ONLY the issue-#42/#44 terminal sighash subscript
+        # trim. A StatefulSmartContract with zero mutable fields has empty
+        # state_fields yet still injects checkPreimage at method entry, so its
+        # user checkSig runs after the OP_CODESEPARATOR. parent_class is the
+        # authoritative signal; fall back to is_stateful for older artifacts.
+        parent_class    = @artifact.respond_to?(:parent_class) ? @artifact.parent_class.to_s : ''
+        parent_stateful = parent_class.empty? ? is_stateful : parent_class == 'StatefulSmartContract'
 
         method_needs_change     = method.params.any? { |p| p.name == '_changePKH' }
         method_needs_new_amount = method.params.any? { |p| p.name == '_newAmount' }
@@ -416,7 +435,7 @@ module Runar
         if opts.terminal_outputs && !opts.terminal_outputs.empty?
           return prepare_terminal(
             method_name, resolved_args, signer, opts,
-            is_stateful, needs_op_push_tx, method_needs_change,
+            is_stateful, parent_stateful, needs_op_push_tx, method_needs_change,
             sig_indices, preimage_index,
             method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
             intent_witness_hex
@@ -557,7 +576,8 @@ module Runar
           contract_utxo, new_locking_script, code_sep_idx,
           has_multi_output: has_multi_output,
           contract_outputs: contract_outputs || [],
-          intent_witness_hex: intent_witness_hex
+          intent_witness_hex: intent_witness_hex,
+          parent_stateful: parent_stateful
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
@@ -862,7 +882,7 @@ module Runar
       # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
       def prepare_terminal(
         method_name, resolved_args, _signer, opts,
-        is_stateful, needs_op_push_tx, method_needs_change,
+        is_stateful, parent_stateful, needs_op_push_tx, method_needs_change,
         sig_indices, preimage_index,
         method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx,
         intent_witness_hex = ''
@@ -990,6 +1010,7 @@ module Runar
           resolved_args: resolved_args,
           method_selector_hex: method_selector_hex,
           is_stateful: is_stateful,
+          parent_stateful: parent_stateful,
           is_terminal: true,
           needs_op_push_tx: needs_op_push_tx,
           method_needs_change: method_needs_change,
@@ -1296,8 +1317,12 @@ module Runar
         contract_utxo, new_locking_script, code_sep_idx,
         has_multi_output: false,
         contract_outputs: [],
-        intent_witness_hex: ''
+        intent_witness_hex: '',
+        parent_stateful: nil
       )
+        # parent_stateful gates the issue-#42/#44 terminal sighash subscript
+        # trim; fall back to is_stateful when not passed (older callers).
+        parent_stateful = is_stateful if parent_stateful.nil?
         PreparedCall.new(
           sighash: sighash,
           preimage: final_preimage,
@@ -1308,6 +1333,7 @@ module Runar
           resolved_args: resolved_args,
           method_selector_hex: method_selector_hex,
           is_stateful: is_stateful,
+          parent_stateful: parent_stateful,
           is_terminal: false,
           needs_op_push_tx: needs_op_push_tx,
           method_needs_change: method_needs_change,
@@ -1448,7 +1474,30 @@ module Runar
         end
       end
 
+      # Get the byte offset of an OP_CODESEPARATOR for a method, or -1 if none.
+      #
+      # When @code_script is set (the contract is loaded from chain, or the
+      # deploy script has already been built from real constructor args), walk
+      # the actual script and return the true on-chain byte position. This is
+      # required because from_txid populates constructor args with dummy
+      # placeholders — the real arg bytes are already baked into the on-chain
+      # locking script — so adjust_code_sep_offset computes a shift of zero and
+      # returns the wrong offset whenever the OP_CODESEPARATOR sits after
+      # constructor slots that expand at deploy time (issue #42: NULLFAIL at
+      # OP_CHECKSIG for terminal methods).
+      #
+      # Falls back to the legacy template-adjusted offset for synthetic /
+      # unit-test paths that have no @code_script available.
       def get_code_sep_index(method_index)
+        unless @code_script.nil? || @code_script.empty?
+          indices = @artifact.code_separator_indices
+          real_offsets = find_codesep_offsets(@code_script)
+          if indices && method_index >= 0 && method_index < indices.length && method_index < real_offsets.length
+            return real_offsets[method_index]
+          end
+          return real_offsets.first if !@artifact.code_separator_index.nil? && !real_offsets.empty?
+        end
+
         indices = @artifact.code_separator_indices
         if indices && method_index >= 0 && method_index < indices.length
           return adjust_code_sep_offset(indices[method_index])
@@ -1458,6 +1507,58 @@ module Runar
         return -1 if base.nil?
 
         adjust_code_sep_offset(base)
+      end
+
+      # Walk a hex-encoded script and return the byte offsets of every
+      # OP_CODESEPARATOR (0xab) that sits at a real opcode boundary (i.e. not
+      # inside push-data). Correctly skips all BSV push opcodes (0x01..0x4b,
+      # OP_PUSHDATA1/2/4).
+      #
+      # Used by get_code_sep_index to recover the true on-chain byte offsets
+      # when the in-memory constructor args don't reflect what was actually
+      # baked into the locking script (e.g. after from_txid populates dummy
+      # placeholders).
+      def find_codesep_offsets(script_hex)
+        out = []
+        off = 0
+        n = script_hex.length
+        byte_at = lambda do |i|
+          (script_hex[i, 2] || '').to_i(16)
+        end
+        while off + 2 <= n
+          op = byte_at.call(off)
+          byte_pos = off / 2
+          if op == 0xAB
+            out << byte_pos
+            off += 2
+          elsif op >= 0x01 && op <= 0x4B
+            off += 2 + op * 2
+          elsif op == 0x4C
+            break if off + 4 > n
+
+            push_len = byte_at.call(off + 2)
+            off += 4 + push_len * 2
+          elsif op == 0x4D
+            break if off + 6 > n
+
+            lo = byte_at.call(off + 2)
+            hi = byte_at.call(off + 4)
+            push_len = lo | (hi << 8)
+            off += 6 + push_len * 2
+          elsif op == 0x4E
+            break if off + 10 > n
+
+            b0 = byte_at.call(off + 2)
+            b1 = byte_at.call(off + 4)
+            b2 = byte_at.call(off + 6)
+            b3 = byte_at.call(off + 8)
+            push_len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            off += 10 + push_len * 2
+          else
+            off += 2
+          end
+        end
+        out
       end
 
       def has_code_separator?

@@ -1,0 +1,35 @@
+{
+  "script": "76009c63757c00ad00ac67519d7c00ad00ac68",
+  "scriptSize": 19,
+  "findings": [],
+  "paths": [
+    {
+      "id": 0,
+      "description": "IF[false] at 3",
+      "branchChoices": [
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -1
+    },
+    {
+      "id": 1,
+      "description": "IF[true] at 3",
+      "branchChoices": [
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -1
+    }
+  ],
+  "summary": {
+    "totalPaths": 2,
+    "reachablePaths": 2,
+    "pathsWithCheckSig": 2,
+    "pathsWithoutCheckSig": 0,
+    "maxStackDepth": 0,
+    "scriptSizeBytes": 19
+  }
+}

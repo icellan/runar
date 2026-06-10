@@ -12,11 +12,27 @@ require 'runar_compiler/codegen/rabin'
 class TestRabinCodegen < Minitest::Test
   include CodegenTestHelpers
 
-  # Byte-frozen golden: the fixed 10-opcode Rabin verification sequence
-  # (sig^2 + padding) mod pubKey == SHA256(msg). Mirrored across all 7 tiers.
-  RABIN_GOLDEN = %w[
-    OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD
-    OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+  # Byte-frozen golden: the fixed 15-opcode Rabin verification sequence
+  # (sig^2 + padding) mod pubKey == SHA256(msg) AND 0 <= padding < 65536.
+  # Mirrored across all 7 tiers. Position 3 is a push of 65536 (the BUG-010
+  # padding limit), not an opcode — nil here means "skip opcode-code check,
+  # validate as push below".
+  RABIN_GOLDEN = [
+    'OP_SWAP',
+    'OP_DUP',
+    'OP_0',
+    nil, # push 65536
+    'OP_WITHIN',
+    'OP_VERIFY',
+    'OP_ROT',
+    'OP_DUP',
+    'OP_MUL',
+    'OP_ADD',
+    'OP_SWAP',
+    'OP_MOD',
+    'OP_SWAP',
+    'OP_SHA256',
+    'OP_EQUAL'
   ].freeze
 
   def test_rabin_module_emits_byte_frozen_golden
@@ -25,8 +41,15 @@ class TestRabinCodegen < Minitest::Test
 
     assert_equal RABIN_GOLDEN.length, ops.length
     ops.each_with_index do |op, i|
-      assert_equal 'opcode', op[:op], "op #{i}: expected opcode"
-      assert_equal RABIN_GOLDEN[i], op[:code], "op #{i}"
+      expected = RABIN_GOLDEN[i]
+      if expected.nil?
+        assert_equal 'push', op[:op], "op #{i}: expected push"
+        assert_equal 'bigint', op[:value][:kind], "op #{i}: push kind"
+        assert_equal 65_536, op[:value][:big_int], "op #{i}: BUG-010 padding limit"
+      else
+        assert_equal 'opcode', op[:op], "op #{i}: expected opcode"
+        assert_equal expected, op[:code], "op #{i}"
+      end
     end
   end
 

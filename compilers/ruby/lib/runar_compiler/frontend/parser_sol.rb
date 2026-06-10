@@ -588,10 +588,13 @@ module RunarCompiler
       # -- Type parsing -----------------------------------------------------
 
       def parse_sol_type_from_name(name)
-        mapped = Frontend.parse_sol_type_name(name)
+        result = Frontend.parse_sol_type_name(name)
 
-        # Check for array type: Type[N]
-        if check(TOK_LBRACKET)
+        # Trailing `[N]` brackets nest as FixedArray. Per Solidity's
+        # outer-to-inner declaration order `T[A][B]` reads as outer B
+        # of inner A of T, so each successive `[L]` wraps the type
+        # seen so far as FixedArray<previous, L>.
+        while check(TOK_LBRACKET)
           advance # [
           size_tok = expect(TOK_NUMBER)
           size = begin
@@ -601,10 +604,10 @@ module RunarCompiler
             0
           end
           expect(TOK_RBRACKET)
-          return FixedArrayType.new(element: mapped, length: size)
+          result = FixedArrayType.new(element: result, length: size)
         end
 
-        mapped
+        result
       end
 
       # -- Constructor parsing: constructor(Type _name, ...) { ... } --------

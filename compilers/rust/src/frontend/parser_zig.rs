@@ -43,6 +43,8 @@
 //! - `.{ ... }` -> ArrayLiteral
 //! - Compound assignment desugaring (`+=`, `-=`, etc.)
 
+use num_bigint::BigInt;
+use num_traits::{Num, ToPrimitive};
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -71,7 +73,7 @@ pub fn parse_zig(source: &str, file_name: Option<&str>) -> ParseResult {
         .map(|msg| Diagnostic::error(msg, None))
         .collect();
 
-    ParseResult { contract, errors }
+    ParseResult { contract, errors, source_size_err: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +138,7 @@ enum Token {
 
     // Identifiers and literals
     Ident(String),
-    NumberLit(i128),
+    NumberLit(BigInt),
     StringLit(String),
 
     // Operators
@@ -316,9 +318,11 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
             }
             let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                i128::from_str_radix(&num_str[2..], 16).unwrap_or(0)
+                <BigInt as Num>::from_str_radix(&num_str[2..], 16)
+                    .unwrap_or_else(|_| BigInt::from(0))
             } else {
-                num_str.parse::<i128>().unwrap_or(0)
+                <BigInt as Num>::from_str_radix(&num_str, 10)
+                    .unwrap_or_else(|_| BigInt::from(0))
             };
             tokens.push(Token::NumberLit(val));
             continue;
@@ -712,7 +716,7 @@ impl<'a> ZigParser<'a> {
         if *self.peek() == Token::LBracket {
             self.advance(); // [
             let length = match self.advance() {
-                Token::NumberLit(n) => n as usize,
+                Token::NumberLit(n) => n.to_usize().unwrap_or(0),
                 _ => {
                     self.errors.push("Expected array length".to_string());
                     0
@@ -1257,7 +1261,7 @@ impl<'a> ZigParser<'a> {
         } else {
             // No continue expression -- synthesize a no-op
             update = Statement::ExpressionStatement {
-                expression: Expression::BigIntLiteral { value: 0 },
+                expression: Expression::BigIntLiteral { value: BigInt::from(0) },
                 source_location: self.loc(),
             };
         }
@@ -1271,7 +1275,7 @@ impl<'a> ZigParser<'a> {
                 name: "__while_no_init".to_string(),
                 var_type: None,
                 mutable: true,
-                init: Expression::BigIntLiteral { value: 0 },
+                init: Expression::BigIntLiteral { value: BigInt::from(0) },
                 source_location: self.loc(),
             }),
             condition,
@@ -1729,7 +1733,7 @@ impl<'a> ZigParser<'a> {
 
         // Fallback
         self.advance();
-        Expression::BigIntLiteral { value: 0 }
+        Expression::BigIntLiteral { value: BigInt::from(0) }
     }
 
     fn parse_at_builtin(&mut self, name: &str) -> Expression {

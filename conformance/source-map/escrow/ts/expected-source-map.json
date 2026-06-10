@@ -1,0 +1,52 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 48,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 48,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 49,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 49,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 57,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 57,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 58,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/ts/escrow/Escrow.runar.ts",
+      "line": 58,
+      "column": 4
+    }
+  ]
+}

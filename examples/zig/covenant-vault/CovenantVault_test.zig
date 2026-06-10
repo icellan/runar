@@ -51,3 +51,29 @@ test "CovenantVault spend rejects the wrong output hash" {
 test "CovenantVault spend rejects the wrong signature" {
     try root.expectAssertFailure("covenant-vault-wrong-sig");
 }
+
+// -- Adversarial: wrong output count --------------------------------------
+
+test "CovenantVault spend rejects a transaction that commits zero outputs" {
+    try root.expectAssertFailure("covenant-vault-zero-outputs");
+}
+
+test "CovenantVault spend rejects a transaction that commits an extra output" {
+    try root.expectAssertFailure("covenant-vault-extra-output");
+}
+
+// -- Adversarial: swapped output order ------------------------------------
+
+test "CovenantVault spend rejects a transaction with the required output reordered" {
+    try root.expectAssertFailure("covenant-vault-reordered");
+}
+
+// -- Adversarial: value at boundary ---------------------------------------
+
+test "CovenantVault spend rejects an output one satoshi below minAmount" {
+    try root.expectAssertFailure("covenant-vault-amount-minus-one");
+}
+
+test "CovenantVault spend rejects an output one satoshi above minAmount" {
+    try root.expectAssertFailure("covenant-vault-amount-plus-one");
+}

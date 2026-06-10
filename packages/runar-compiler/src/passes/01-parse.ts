@@ -46,6 +46,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
 import { parseMoveSource } from './01-parse-move.js';
 import { parsePythonSource } from './01-parse-python.js';
@@ -79,6 +80,20 @@ export interface ParseResult {
 export function parse(source: string, fileName?: string): ParseResult {
   const errors: CompilerDiagnostic[] = [];
   const file = fileName ?? 'contract.ts';
+
+  // DoS-bound size guard. Reject oversized source BEFORE any tokenizer /
+  // AST builder touches the input — those passes are linear-or-worse in
+  // input size and a pathological 100 MB blob would otherwise pin the
+  // event loop. Mirrors the same guard in the other six tier compilers.
+  // BUG-008 follow-up.
+  const sourceBytes = Buffer.byteLength(source, 'utf8');
+  if (sourceBytes > InputLimits.MAX_SOURCE_BYTES) {
+    throw new CanonicalJsonError(
+      'bytes',
+      `parse: source exceeds MAX_SOURCE_BYTES (limit=${InputLimits.MAX_SOURCE_BYTES}, actual=${sourceBytes})`,
+      { limit: InputLimits.MAX_SOURCE_BYTES, actual: sourceBytes },
+    );
+  }
 
   // Multi-format dispatch based on file extension
   if (file.endsWith('.runar.sol')) {

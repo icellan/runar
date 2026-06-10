@@ -145,6 +145,12 @@ Hybrid contracts whose method bodies call EVM/STARK primitives also fall under t
 |---|---|---|
 | `state-covenant` | `["go"]` | Uses `bbFieldMul` (BabyBear field) and `merkleRootSha256` (4-deep Merkle proof). Both are EVM/STARK primitives — Go is the canonical reference; partial ports in TS/Rust/Python/Zig/Ruby exist for historical reasons but are not conformance targets, and Java is not exempt due to a deferred port — it is exempt because the entire family is Go-only. |
 
+##### Oversize bigint literals (256-bit secp256k1 group order)
+
+| Fixture | Allowlist | Rationale |
+|---|---|---|
+| `schnorr-zkp` | `["ts", "go", "python"]` | BUG-001 — embeds the secp256k1 group order (256 bits) as an inline bigint literal in `assert(within(s, 1, n))`. Only TS, Go, and Python carry an arbitrary-precision integer through parse → ANF → codegen; Rust / Zig / Ruby / Java tiers truncate to their native int width (i128 / i64) and emit `OP_0` instead of the 32-byte little-endian push. Widening the remaining tiers to a decimal-string-backed `BigIntLiteral` is a separate cross-tier refactor. Parser-only coverage stays universal — all 7 tiers parse all 9 formats cleanly. |
+
 ### Fold-ON allowlist (`conformance/fold-on-allowlist.json`)
 
 CI runs the multi-format conformance suite **twice**: once with `--disable-constant-folding` passed to every compiler (matching the byte-stable goldens checked into each fixture) and once with `RUNAR_DISABLE_CONSTANT_FOLDING=0` so every compiler runs its end-user default (folding ON). The second run enforces cross-tier hex + ANF parity across all 7 tiers but skips the golden-file comparison (because the goldens were stamped fold-OFF).

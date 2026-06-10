@@ -1,0 +1,64 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 23,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 23,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 15,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 23,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 24,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/ruby/escrow/Escrow.runar.rb",
+      "line": 24,
+      "column": 5
+    }
+  ]
+}

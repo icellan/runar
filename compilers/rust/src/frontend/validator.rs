@@ -311,7 +311,8 @@ fn ends_with_terminal_asm(body: &[Statement]) -> bool {
             // (body, in_arity, out_arity).
             if args.len() == 3 {
                 if let Expression::BigIntLiteral { value } = &args[2] {
-                    return *value == 1;
+                    use num_traits::One;
+                    return value.is_one();
                 }
             }
         }
@@ -407,16 +408,17 @@ fn validate_asm_usage(
             }
         }
 
+        use num_traits::{Signed, ToPrimitive};
         match &args[1] {
-            Expression::BigIntLiteral { value } if *value >= 0 => {}
+            Expression::BigIntLiteral { value } if !value.is_negative() => {}
             _ => errors.push(Diagnostic::error(
                 "asm() in_arity must be a non-negative integer literal",
                 None,
             )),
         }
 
-        let out_arity_val = match &args[2] {
-            Expression::BigIntLiteral { value } if *value >= 0 => Some(*value),
+        let out_arity_val: Option<i128> = match &args[2] {
+            Expression::BigIntLiteral { value } if !value.is_negative() => value.to_i128(),
             _ => {
                 errors.push(Diagnostic::error(
                     "asm() out_arity must be a non-negative integer literal",

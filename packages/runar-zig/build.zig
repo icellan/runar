@@ -86,4 +86,18 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run runar-zig tests");
     test_step.dependOn(&run_tests.step);
+
+    // ── Analyzer CLI executable (used by tools/analyzer-runner/zig.sh) ──
+    const analyzer_cli_module = b.createModule(.{
+        .root_source_file = b.path("src/analyzer_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const analyzer_exe = b.addExecutable(.{
+        .name = "runar-analyzer",
+        .root_module = analyzer_cli_module,
+    });
+    const install_analyzer = b.addInstallArtifact(analyzer_exe, .{});
+    const analyzer_step = b.step("analyzer", "Build the runar-analyzer CLI executable");
+    analyzer_step.dependOn(&install_analyzer.step);
 }

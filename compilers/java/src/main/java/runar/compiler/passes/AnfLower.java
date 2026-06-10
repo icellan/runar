@@ -236,7 +236,7 @@ public final class AnfLower {
                         String preimageRef2 = ctx.emit(new LoadParam("txPreimage"));
                         String outputHashRef = ctx.emit(new Call("extractOutputHash", List.of(preimageRef2)));
                         String eqRef = ctx.emit(new BinOp("===", hashRef, outputHashRef, "bytes"));
-                        ctx.emit(new Assert(eqRef));
+                        ctx.emit(new Assert(eqRef, true));
                     } else {
                         String stateScriptRef = ctx.emit(new GetStateScript());
                         String preimageRef2 = ctx.emit(new LoadParam("txPreimage"));
@@ -251,7 +251,7 @@ public final class AnfLower {
                         String preimageRef4 = ctx.emit(new LoadParam("txPreimage"));
                         String outputHashRef = ctx.emit(new Call("extractOutputHash", List.of(preimageRef4)));
                         String eqRef = ctx.emit(new BinOp("===", hashRef, outputHashRef, "bytes"));
-                        ctx.emit(new Assert(eqRef));
+                        ctx.emit(new Assert(eqRef, true));
                     }
                 }
 
@@ -341,6 +341,10 @@ public final class AnfLower {
         final List<String> addDataOutputRefs = new ArrayList<>();
         final Map<String, String> localAliases = new HashMap<>();
         final Set<String> localByteVars = new HashSet<>();
+        // GAP-002: source location of the AST statement currently being
+        // lowered. Stamped onto every AnfBinding the helpers below emit so
+        // the artifact's sourceMap survives all the way to Emit.
+        runar.compiler.ir.ast.SourceLocation currentSourceLoc = null;
         // Param substitution stack used when inlining a private method's body
         // directly into this context. While the inlined body lowers, identifier
         // references to that param resolve to the caller's arg ref instead of
@@ -453,12 +457,12 @@ public final class AnfLower {
 
         String emit(AnfValue value) {
             String name = freshTemp();
-            bindings.add(new AnfBinding(name, value, null));
+            bindings.add(new AnfBinding(name, value, currentSourceLoc));
             return name;
         }
 
         void emitNamed(String name, AnfValue value) {
-            bindings.add(new AnfBinding(name, value, null));
+            bindings.add(new AnfBinding(name, value, currentSourceLoc));
         }
 
         void addLocal(String name) { localNames.add(name); }
@@ -523,6 +527,10 @@ public final class AnfLower {
             // inside if/else branches or ternaries register their
             // auto-injected witness params on the parent method's ABI.
             sub.methodScope = this.methodScope;
+            // GAP-002: inherit the outer statement's source location so
+            // bindings emitted inside an if/else / loop branch are still
+            // mapped back to the originating AST statement.
+            sub.currentSourceLoc = this.currentSourceLoc;
             return sub;
         }
 
@@ -558,26 +566,37 @@ public final class AnfLower {
         }
 
         void lowerStatement(Statement stmt) {
-            if (stmt instanceof VariableDeclStatement v) {
-                lowerVariableDecl(v);
-            } else if (stmt instanceof AssignmentStatement a) {
-                lowerAssignment(a);
-            } else if (stmt instanceof IfStatement i) {
-                lowerIfStatement(i);
-            } else if (stmt instanceof ForStatement f) {
-                lowerForStatement(f);
-            } else if (stmt instanceof ExpressionStatement e) {
-                lowerExprToRef(e.expression());
-            } else if (stmt instanceof ReturnStatement r) {
-                if (r.value() != null) {
-                    String ref = lowerExprToRef(r.value());
-                    // If the returned ref is not the name of the last emitted
-                    // binding, emit an explicit load so the return value is
-                    // the last (top-of-stack) binding.
-                    if (!bindings.isEmpty() && !bindings.get(bindings.size() - 1).name().equals(ref)) {
-                        emit(makeLoadConstString("@ref:" + ref));
+            // GAP-002: pick up the statement's source location so every
+            // AnfBinding emitted during the lowering of this statement
+            // carries it forward.
+            runar.compiler.ir.ast.SourceLocation prevLoc = currentSourceLoc;
+            try {
+                if (stmt.sourceLocation() != null) {
+                    currentSourceLoc = stmt.sourceLocation();
+                }
+                if (stmt instanceof VariableDeclStatement v) {
+                    lowerVariableDecl(v);
+                } else if (stmt instanceof AssignmentStatement a) {
+                    lowerAssignment(a);
+                } else if (stmt instanceof IfStatement i) {
+                    lowerIfStatement(i);
+                } else if (stmt instanceof ForStatement f) {
+                    lowerForStatement(f);
+                } else if (stmt instanceof ExpressionStatement e) {
+                    lowerExprToRef(e.expression());
+                } else if (stmt instanceof ReturnStatement r) {
+                    if (r.value() != null) {
+                        String ref = lowerExprToRef(r.value());
+                        // If the returned ref is not the name of the last emitted
+                        // binding, emit an explicit load so the return value is
+                        // the last (top-of-stack) binding.
+                        if (!bindings.isEmpty() && !bindings.get(bindings.size() - 1).name().equals(ref)) {
+                            emit(makeLoadConstString("@ref:" + ref));
+                        }
                     }
                 }
+            } finally {
+                currentSourceLoc = prevLoc;
             }
         }
 

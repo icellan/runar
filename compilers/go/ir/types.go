@@ -18,6 +18,15 @@ type ANFProgram struct {
 	ContractName string        `json:"contractName"`
 	Properties   []ANFProperty `json:"properties"`
 	Methods      []ANFMethod   `json:"methods"`
+	// ParentClass is the base class the source contract extends
+	// ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract").
+	// It is an in-memory carrier ONLY (json:"-") so it never appears in the
+	// emitted ANF IR JSON that the conformance suite compares cross-tier.
+	// The artifact assembler copies it to the top-level artifact field so
+	// SDKs can gate the issue-#42/#44 terminal sighash subscript trim on the
+	// authoritative parent class (a StatefulSmartContract with zero mutable
+	// fields still needs the trim even though stateFields is empty).
+	ParentClass string `json:"-"`
 }
 
 // ANFSyntheticArrayLevel is one level of the synthetic FixedArray chain
@@ -153,6 +162,16 @@ type ANFValue struct {
 	Bytes    string `json:"bytes,omitempty"`
 	InArity  int    `json:"in_arity,omitempty"`
 	OutArity int    `json:"out_arity,omitempty"`
+
+	// assert (auto-injected stateful-continuation marker).
+	// True only on the compiler-emitted
+	// `hash256(continuationOutputs) === extractOutputHash(txPreimage)`
+	// assert. Off-chain SDK interpreters use this to skip the equality
+	// check without resorting to structural / taint heuristics that
+	// misfire on developer covenant asserts whose IR shape is identical.
+	// Custom MarshalJSON elides this when false to keep fold-OFF goldens
+	// stable for developer asserts.
+	IsAutoInjectedStateCheck bool `json:"isAutoInjectedStateCheck,omitempty"`
 }
 
 // MarshalJSON emits only the fields relevant to v.Kind so the byte-level
@@ -234,6 +253,9 @@ func (v ANFValue) MarshalJSON() ([]byte, error) {
 			out["value"] = v.RawValue
 		} else {
 			out["value"] = ""
+		}
+		if v.IsAutoInjectedStateCheck {
+			out["isAutoInjectedStateCheck"] = true
 		}
 	case "update_prop":
 		out["name"] = v.Name
@@ -365,9 +387,38 @@ func decodeConstValue(v *ANFValue) error {
 		}
 	}
 
-	// Try string (hex-encoded bytes)
+	// Try string. Strings in the load_const value can be either:
+	//   1. A reference (e.g. "@ref:tN" or "@this") — these flow through as
+	//      ConstString and downstream codegen treats them specially.
+	//   2. A hex-encoded ByteString literal.
+	//   3. A decimal-string-encoded BigInt — the canonical encoding for
+	//      values that exceed int64 range. Cross-tier IR producers (TS,
+	//      Python) emit oversize bigints as quoted decimal strings to
+	//      sidestep JSON-number precision loss; Go must distinguish those
+	//      from hex-encoded bytestrings or it will silently push the ASCII
+	//      digits as a literal byte string.
 	var str string
 	if err := json.Unmarshal(raw, &str); err == nil {
+		// Distinguish a decimal-encoded BigInt from a hex bytestring:
+		// look-ahead refs ("@..." / "@ref:..." / "@this") flow through
+		// as ConstString; an all-ASCII-digit string (with optional `-`
+		// sign and `n` suffix) is a BigInt literal; anything else is
+		// treated as a hex-encoded ByteString.
+		if isDecimalBigIntLiteral(str) {
+			decimalText := str
+			if len(decimalText) > 0 && decimalText[len(decimalText)-1] == 'n' {
+				decimalText = decimalText[:len(decimalText)-1]
+			}
+			bi := new(big.Int)
+			if _, ok := bi.SetString(decimalText, 10); ok {
+				v.ConstBigInt = bi
+				if bi.IsInt64() {
+					i := bi.Int64()
+					v.ConstInt = &i
+				}
+				return nil
+			}
+		}
 		v.ConstString = &str
 		return nil
 	}
@@ -391,4 +442,32 @@ func decodeConstValue(v *ANFValue) error {
 	}
 
 	return fmt.Errorf("unable to decode constant value: %s", string(raw))
+}
+
+// isDecimalBigIntLiteral reports whether `s` is a JS-style decimal BigInt
+// literal: optional leading `-`, one or more ASCII digits, and a REQUIRED
+// trailing `n` marker (matching the TS canonical IR encoding for oversize
+// bigints, e.g. "115792089237316195...n"). The trailing `n` is the
+// discriminator that separates a decimal-encoded BigInt from a hex-encoded
+// ByteString literal (which never carries the suffix), so a hex string
+// like "3030" is not mis-decoded as the integer 3030.
+func isDecimalBigIntLiteral(s string) bool {
+	if len(s) < 2 || s[len(s)-1] != 'n' {
+		return false
+	}
+	start := 0
+	if s[0] == '-' {
+		start = 1
+	}
+	body := s[start : len(s)-1]
+	if len(body) == 0 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

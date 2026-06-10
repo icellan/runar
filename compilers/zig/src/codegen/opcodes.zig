@@ -493,6 +493,84 @@ fn encodeScriptInt(n: i64, buf: *[9]u8) usize {
     return i;
 }
 
+/// Encode a Bitcoin Script integer given as a decimal-string literal (optional
+/// leading `-`, ASCII digits 0-9, no underscores, no `n` suffix). Mirrors
+/// `encodeScriptNumber` but accepts arbitrary precision so values that
+/// overflow `i64` (e.g. the 256-bit secp256k1 group order used in
+/// schnorr-zkp) round-trip byte-identically to the reference TS / Go /
+/// Python emitters.
+///
+/// Always emits as a push-data sequence — the small-integer opcodes
+/// (OP_0, OP_1..OP_16, OP_1NEGATE) are still handled by the caller via the
+/// existing `encodeScriptNumber` fast path for `i64`-fit values; this helper
+/// assumes the caller has already determined the value is oversize.
+///
+/// Implementation: in-place decimal-string short division by 256 collects the
+/// little-endian magnitude bytes one at a time. No big-integer library is
+/// required (each "limb" is a `u32` accumulator over ASCII digits 0-9) which
+/// keeps the dependency surface and allocator footprint to a single scratch
+/// digit buffer plus the output byte list.
+pub fn encodeScriptNumberFromDecimal(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    decimal: []const u8,
+) !void {
+    if (decimal.len == 0) return error.InvalidDecimal;
+
+    var rest = decimal;
+    const negative = rest[0] == '-';
+    if (negative) rest = rest[1..];
+    if (rest.len == 0) return error.InvalidDecimal;
+    for (rest) |c| {
+        if (c < '0' or c > '9') return error.InvalidDecimal;
+    }
+
+    // Strip leading zeros so the "all-zero" short-circuit is correct.
+    var start: usize = 0;
+    while (start < rest.len - 1 and rest[start] == '0') : (start += 1) {}
+    rest = rest[start..];
+
+    if (rest.len == 1 and rest[0] == '0') {
+        // Zero — empty push payload, OP_0 (0x00 single byte).
+        try writer.writeByte(0x00);
+        return;
+    }
+
+    // Work buffer of digit values (0-9). Short division divides this in-place;
+    // when the buffer becomes all zeros we're done extracting bytes.
+    var digits = try allocator.alloc(u8, rest.len);
+    defer allocator.free(digits);
+    for (rest, 0..) |c, i| digits[i] = c - '0';
+
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    // Repeatedly divide the digit buffer by 256, collecting remainders LE.
+    var lead: usize = 0;
+    while (lead < digits.len) {
+        var carry: u32 = 0;
+        var i: usize = lead;
+        while (i < digits.len) : (i += 1) {
+            const cur = carry * 10 + digits[i];
+            digits[i] = @intCast(cur / 256);
+            carry = cur % 256;
+        }
+        try bytes.append(allocator, @intCast(carry));
+        // Advance past freshly-zeroed leading digits.
+        while (lead < digits.len and digits[lead] == 0) : (lead += 1) {}
+    }
+
+    // Apply sign bit (Bitcoin Script sign-magnitude, MSB of the highest byte).
+    const last = bytes.items[bytes.items.len - 1];
+    if (last & 0x80 != 0) {
+        try bytes.append(allocator, if (negative) 0x80 else 0x00);
+    } else if (negative) {
+        bytes.items[bytes.items.len - 1] = last | 0x80;
+    }
+
+    try encodePushData(writer, bytes.items);
+}
+
 // ============================================================================
 // Hex Utilities
 // ============================================================================

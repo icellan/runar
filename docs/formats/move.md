@@ -90,6 +90,22 @@ resource struct BoundedCounter {
 
 Properties with initializers are excluded from the auto-generated constructor. Only properties without defaults need to be passed as constructor arguments. Initializers must be literal values (`0`, `true`, `false`, hex byte strings).
 
+### Fixed-Size Arrays
+
+Real Move's `vector<T>` is a dynamic-length type that has no direct fixed-size analogue. Rúnar's Move-like frontend instead uses a synthetic generic `FixedArray<T, N>` to declare statically-sized arrays. The form is nestable: `FixedArray<FixedArray<T, A>, B>` declares an outer array of `B` rows each holding `A` elements of `T`. The parser splits the lexer's eager `>>` shift token back into two `>` when closing nested generic argument lists.
+
+```move
+resource struct Grid2x2 {
+    grid: &mut FixedArray<FixedArray<bigint, 2>, 2> = [[0, 0], [0, 0]],
+}
+
+public fun set00(contract: &mut Grid2x2, v: bigint) {
+    contract.grid[0][0] = v;
+}
+```
+
+`FixedArray` is the only generic the Move-like frontend models. All other parameterised types are tolerated syntactically (the parser balances the angle brackets) but their type arguments are discarded — they degrade to a custom type or to `ByteString` (in the case of `vector<T>`).
+
 **snake_case convention:** Move uses snake_case for identifiers. The parser automatically converts snake_case field names and function names to camelCase for the AST:
 
 | Move (snake_case) | AST (camelCase) |
@@ -405,11 +421,11 @@ module SimpleNFT {
 | Borrow checker | Full ownership and borrowing model | No borrow checker; references stripped |
 | Abilities | `key`, `store`, `copy`, `drop` | Not supported |
 | Module system | Multi-module packages | Single module per file = one contract |
-| Generic types | Full generics | Not supported (except FixedArray) |
+| Generic types | Full generics | Not supported (except `FixedArray<T, N>`, nestable) |
 | `object::new` / `transfer` | Sui object creation | Not applicable; UTXO model |
 | Events | `event::emit` | Not supported |
 | Dynamic fields | `dynamic_field` | Not supported |
-| `vector<T>` | Dynamic-length vectors | Not supported; use fixed arrays |
+| `vector<T>` | Dynamic-length vectors | Not supported; use `FixedArray<T, N>` (statically sized, nestable) |
 | Entry functions | `entry fun` | `public fun` = entry point |
 | Test functions | `#[test]` | Separate test files |
 | Storage model | Global object store | UTXO-based; state in transaction outputs |

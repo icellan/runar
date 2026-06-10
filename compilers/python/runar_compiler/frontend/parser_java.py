@@ -1455,15 +1455,18 @@ class _JavaParser:
 
     def _parse_new(self) -> Expression:
         self.expect(TOK_NEW, "'new'")
-        # new T[]{ a, b, c }
+        # `new T[]{ a, b, c }` array literal OR
+        # `new BigInteger("decimal" [, radix])` oversize-bigint escape hatch.
         type_tok = self.peek()
         if type_tok.kind == TOK_IDENT or \
                 type_tok.kind in (TOK_BOOLEAN_KW, TOK_INT_KW, TOK_LONG_KW):
             self.advance()
-            # qualified type name
+            final_name = type_tok.value
+            # qualified type name — track the final segment for BigInteger detection.
             while self.check(TOK_DOT):
                 self.advance()
-                self.expect(TOK_IDENT, "qualified type segment")
+                seg = self.expect(TOK_IDENT, "qualified type segment")
+                final_name = seg.value
             # generic parameters
             if self.check(TOK_LT):
                 self.advance()
@@ -1477,6 +1480,46 @@ class _JavaParser:
                             self.advance()
                             break
                     self.advance()
+            # `new BigInteger("decimal" [, radix])` — oversize-bigint literal.
+            if final_name == "BigInteger" and self.check(TOK_LPAREN):
+                self.advance()
+                str_tok = self.peek()
+                if str_tok.kind == TOK_STRING:
+                    self.advance()
+                    radix = 10
+                    if self.match_tok(TOK_COMMA):
+                        num_tok = self.peek()
+                        if num_tok.kind == TOK_NUMBER:
+                            self.advance()
+                            try:
+                                radix = int(num_tok.value, 0)
+                            except ValueError:
+                                radix = 10
+                    self.match_tok(TOK_RPAREN)
+                    cleaned = str_tok.value.replace("_", "")
+                    try:
+                        value = int(cleaned, radix)
+                    except ValueError as exc:
+                        raise _JavaParseError(
+                            f"line {type_tok.line}:{type_tok.col}: cannot parse "
+                            f"'new BigInteger(\"{str_tok.value}\", {radix})': {exc}"
+                        ) from exc
+                    return BigIntLiteral(value=value)
+                # Skip to matching `)` for diagnostic purposes.
+                depth = 1
+                while depth > 0 and not self.check(TOK_EOF):
+                    if self.check(TOK_LPAREN):
+                        depth += 1
+                    elif self.check(TOK_RPAREN):
+                        depth -= 1
+                        if depth == 0:
+                            self.advance()
+                            break
+                    self.advance()
+                raise _JavaParseError(
+                    f"line {type_tok.line}:{type_tok.col}: `new BigInteger(...)` only "
+                    f"supports string-literal forms in {self.file_name}"
+                )
             if self.check(TOK_LBRACKET):
                 self.advance()
                 self.expect(TOK_RBRACKET, "']'")

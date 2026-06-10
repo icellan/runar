@@ -674,7 +674,19 @@ func anfEvalValue(
 		// Lenient mode: skip; the on-chain script enforces.
 		// Strict mode: enforce — falsy predicate panics with
 		// *AssertionFailureError, recovered in runMethod.
+		//
+		// Marker-based skip: the auto-injected stateful-continuation
+		// assert (`hash256(continuationOutputs) === extractOutputHash(
+		// preimage)`) carries `isAutoInjectedStateCheck: true` (set in
+		// `compilers/go/frontend/anf_lower.go`). The on-chain VM is
+		// authoritative for that check; off-chain we have no realistic
+		// continuation hash. Developer-written covenant asserts with
+		// the identical IR shape carry no marker and ARE enforced
+		// (see BUG-002).
 		if strict != nil {
+			if marker, ok := value["isAutoInjectedStateCheck"].(bool); ok && marker {
+				return nil
+			}
 			predRef, _ := value["value"].(string)
 			pred := env[predRef]
 			if !anfIsTruthy(pred) {

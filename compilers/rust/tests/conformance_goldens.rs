@@ -98,9 +98,36 @@ fn canonicalize_json_str(s: &str) -> Result<String, String> {
 enum FixtureOutcome {
     Pass,
     MissingSource,
+    OptedOut,
     CompileError(String),
     IrMismatch { expected: String, actual: String },
     ScriptMismatch { expected: String, actual: String },
+}
+
+/// Honor the per-fixture compiler allowlist in `source.json`. If `compilers`
+/// is present and does not include "rust", the fixture is intentionally
+/// opted out of Rust Stack-IR / hex parity (parser coverage is universal and
+/// enforced elsewhere). See `conformance/README.md` ⇒ "Per-fixture compiler
+/// allowlist".
+fn fixture_allowlisted_for_rust(test_dir: &Path) -> bool {
+    let config_path = test_dir.join("source.json");
+    if !config_path.exists() {
+        return true;
+    }
+    let raw = match fs::read_to_string(&config_path) {
+        Ok(r) => r,
+        Err(_) => return true,
+    };
+    let cfg: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    match cfg.get("compilers") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .any(|v| v.as_str().map(|s| s == "rust").unwrap_or(false)),
+        _ => true,
+    }
 }
 
 fn run_one_fixture(test_dir: &Path) -> FixtureOutcome {
@@ -226,14 +253,20 @@ fn test_conformance_goldens_rust() {
 
     let mut pass: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
+    let mut opted_out: Vec<String> = Vec::new();
     let mut failures: Vec<(String, FixtureOutcome)> = Vec::new();
 
     for dir in &dirs {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        if !fixture_allowlisted_for_rust(dir) {
+            opted_out.push(name);
+            continue;
+        }
         let outcome = run_one_fixture(dir);
         match &outcome {
             FixtureOutcome::Pass => pass.push(name),
             FixtureOutcome::MissingSource => missing.push(name),
+            FixtureOutcome::OptedOut => opted_out.push(name),
             _ => failures.push((name, outcome)),
         }
     }
@@ -243,9 +276,10 @@ fn test_conformance_goldens_rust() {
     let pass_count = pass.len();
     let miss_count = missing.len();
     let fail_count = failures.len();
+    let opt_count = opted_out.len();
     println!(
-        "\n=== Rust conformance-goldens summary: {} pass / {} fail / {} missing-source (of {} fixtures) ===",
-        pass_count, fail_count, miss_count, total
+        "\n=== Rust conformance-goldens summary: {} pass / {} fail / {} missing-source / {} opted-out (of {} fixtures) ===",
+        pass_count, fail_count, miss_count, opt_count, total
     );
     if !missing.is_empty() {
         println!("Missing .runar.rs source files:");

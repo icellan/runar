@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EnvelopeTest {
@@ -86,6 +87,33 @@ class EnvelopeTest {
         assertEquals(
             "{\"b\":true,\"list\":[{\"x\":2,\"y\":1}],\"n\":null,\"outer\":{\"a\":[3,2,1],\"z\":1},\"s\":\"hi\"}",
             got);
+    }
+
+    @Test
+    void canonicalJsonRejectsLoneSurrogate() {
+        // Audit D6. Java strings are UTF-16; a high surrogate without a low
+        // partner must be rejected, not emitted as a bare 0xD800..0xDBFF code
+        // unit. Same for an unpaired low surrogate.
+        IllegalArgumentException hi = assertThrows(IllegalArgumentException.class,
+            () -> Envelope.canonicalJson("\uD800"));
+        assertTrue(hi.getMessage().toLowerCase().contains("surrogate"),
+            "expected surrogate error, got: " + hi.getMessage());
+        IllegalArgumentException lo = assertThrows(IllegalArgumentException.class,
+            () -> Envelope.canonicalJson("\uDC00"));
+        assertTrue(lo.getMessage().toLowerCase().contains("surrogate"),
+            "expected surrogate error, got: " + lo.getMessage());
+        // Valid surrogate pair must round-trip.
+        assertEquals("\"😀\"", Envelope.canonicalJson("😀"));
+    }
+
+    @Test
+    void canonicalJsonFormatsFloatsPerEcma262() {
+        // Audit D5. Double.toString emits "1.0E21" / "1.0E-300"; ES emits
+        // "1e+21" / "1e-300". formatEcma262Double bridges the gap.
+        assertEquals("{\"v\":0.1}", Envelope.canonicalJson(Map.of("v", 0.1)));
+        assertEquals("{\"v\":1e+21}", Envelope.canonicalJson(Map.of("v", 1e21)));
+        assertEquals("{\"v\":1e-7}", Envelope.canonicalJson(Map.of("v", 1e-7)));
+        assertEquals("{\"v\":1e-300}", Envelope.canonicalJson(Map.of("v", 1e-300)));
     }
 
     // -------------------------------------------------------------------
@@ -194,6 +222,61 @@ class EnvelopeTest {
         Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
         vo.envelope = env;
         vo.expectedKeys = Arrays.asList(env.pubkey);
+        vo.nowMs = 1_000_000_000_500L;
+        Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+        assertTrue(r.ok);
+    }
+
+    // -------------------------------------------------------------------
+    // BUG-008 size guards: oversized payload / sig / pubkey return TOO_LARGE
+    // BEFORE any JSON parse or ECDSA verify work runs.
+    // -------------------------------------------------------------------
+
+    @Test
+    void sizeGuardOversizedPayload() {
+        StringBuilder big = new StringBuilder(Envelope.MAX_ENVELOPE_PAYLOAD_BYTES + 1);
+        for (int i = 0; i < Envelope.MAX_ENVELOPE_PAYLOAD_BYTES + 1; i++) big.append('x');
+        Envelope.SignedEnvelope env = new Envelope.SignedEnvelope(
+            big.toString(), "deadbeef", pubkeyHex(ALICE_PRIV), 1L, 2L);
+        Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+        vo.envelope = env; vo.nowMs = 1_000_000_000_500L;
+        Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+        assertFalse(r.ok);
+        assertEquals(Envelope.VerifyEnvelopeReason.TOO_LARGE, r.reason);
+    }
+
+    @Test
+    void sizeGuardOversizedSig() {
+        StringBuilder bigSig = new StringBuilder(Envelope.MAX_ENVELOPE_FIELD_BYTES + 1);
+        for (int i = 0; i < Envelope.MAX_ENVELOPE_FIELD_BYTES + 1; i++) bigSig.append('a');
+        Envelope.SignedEnvelope env = new Envelope.SignedEnvelope(
+            "{}", bigSig.toString(), pubkeyHex(ALICE_PRIV), 1L, 2L);
+        Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+        vo.envelope = env; vo.nowMs = 1_000_000_000_500L;
+        Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+        assertFalse(r.ok);
+        assertEquals(Envelope.VerifyEnvelopeReason.TOO_LARGE, r.reason);
+    }
+
+    @Test
+    void sizeGuardOversizedPubkey() {
+        StringBuilder bigPk = new StringBuilder(Envelope.MAX_ENVELOPE_FIELD_BYTES + 1);
+        for (int i = 0; i < Envelope.MAX_ENVELOPE_FIELD_BYTES + 1; i++) bigPk.append('b');
+        Envelope.SignedEnvelope env = new Envelope.SignedEnvelope(
+            "{}", "deadbeef", bigPk.toString(), 1L, 2L);
+        Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+        vo.envelope = env; vo.nowMs = 1_000_000_000_500L;
+        Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+        assertFalse(r.ok);
+        assertEquals(Envelope.VerifyEnvelopeReason.TOO_LARGE, r.reason);
+    }
+
+    @Test
+    void sizeGuardNormalSizedEnvelopeNotTrigerred() {
+        Map<String, Object> data = new LinkedHashMap<>(); data.put("ok", 1);
+        Envelope.SignedEnvelope env = sign(ALICE_PRIV, data, 1_000_000_000_000L);
+        Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+        vo.envelope = env;
         vo.nowMs = 1_000_000_000_500L;
         Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
         assertTrue(r.ok);

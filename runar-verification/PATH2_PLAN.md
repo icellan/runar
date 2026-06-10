@@ -2475,7 +2475,7 @@ lemmas.
   *prove* it (wave 24). Any new sub-omnibus must carry the
   `agreesTagged` premise from the start.
 
-### 11.6 Retirement status (through wave 66)
+### 11.6 Retirement status (through wave 70)
 
 **Retired (verified via `#print axioms`, removed from the omnibus's
 sub-omnibus list):**
@@ -2495,6 +2495,16 @@ sub-omnibus list):**
   dispatch W66b. NB wave 65 corrected the wave-55 fear: NO core
   `evalMethodCall` change was needed (W55 was a Stack-substrate gap). The
   const-leaf shape + all other method_call bodies fall through to crypto_call.
+* `merkle_dispatch_selection_correct` — wave 69 (82→81). NOT a sub-omnibus, a
+  SUPPORTING axiom: the dispatch branch-selection fact (`runParsedBytes bytes =
+  runOps body_i {stack:=rest}` given the method-index witness `i` on top).
+  Converted axiom→theorem via the wave-69a parse round-trip
+  (`parseDispatchReconL_round_trip_stop` + `parseScript_emitDispatch_eq_dispatchReconL`)
+  composed with `dispatchReconOps_select_branch`. The general-n if-cascade parse
+  round-trip (wave-65's blocker — `.ifOp` is outside `AreRunarEmittable`) was
+  closed via a dedicated `dispatchReconL`/`dispatchReconOps` model + per-link
+  `parseStackOpFuel_dispatch_ifOp`. The dispatch SELECTION is now proven; the
+  dispatch SUB-OMNIBUS remains an axiom (see below).
 
 **Soundness fixes (the axioms were false-as-stated; now sound):**
 * wave 24/25 — independent-input `successAgrees` false → added the
@@ -2523,64 +2533,102 @@ is FALSE (`applyPushPushAdd: [push 10, push 10, OP_ADD] → [push 20]`,
 20∉[-1,16]) — the consume theorem instead enumerates the post-peephole
 image over the finite admissible range.
 
-**Remaining 4 sub-omnibus axioms (after the wave-66 method_call retirement):
-`crypto_call`, `dispatch`, `loop`, `stateful` — all BLOCKED on a precise gap.**
+**81 is the sound floor for this campaign.** The 4 remaining sub-omnibus
+axioms (`crypto_call`, `dispatch`, `loop`, `stateful`) are each DEFINITIVELY
+blocked — no further sound axiom removal is possible without (a) a
+trust-footprint decision, (b) accepting an irreducible residual, or (c)
+multi-thousand-line Stage-C / Parse substrate. The wave-68/69/70 sweep mapped
++ advanced each and proved the obstruction precise.
 
-* `loop` — **BLOCKED (wave-67a finding; my wave-65 "reachable" call was
-  wrong).** Wave 65 landed only the RUNTIME half of the loop walk
-  (`runOps_lowerValueP_loop_allCopyBody_isSome`); two independent blockers
-  stop a retirement:
-  1. **M4 fails for the all-copy fragment.** The unrolled image's `loadRef`
-     emits `pickStruct` for depth ≥ 2 (not `AreRunarEmittablePush`); even
-     depth-1 bodies (`over, over`) peephole-fuse into a non-emittable op. The
-     ONLY all-copy body surviving both `AreRunarEmittablePush RAW` and
-     `AreRunarEmittablePush (peephole RAW)` is `t = i + i` (count ≤ 17, so
-     push-indices stay in `[-1,16]`) — a loop that reads neither state nor
-     params and DROPS its result, i.e. **dead-code loops**. Not meaningful.
-  2. **No ANF-side M2 walk.** There is no `runLoop`/`evalBindings` loop-success
-     `successAgrees` lemma anywhere (the AgreesA7 header says the ANF `Prop`
-     half is undischarged). The retirement needs a new count-induction loop
-     walk (peer of `successAgrees_updateProp_consume_unconditional`).
-  The meaningful (consuming) loop case additionally needs the deferred
-  final-iteration-discriminating recursor (two consume-path loads) — and its
-  image must then pass a FRESH Step-0 emittability check (likely needs
-  `pickStruct` added to `AreRunarEmittablePush` round-trip in Parse.lean, or a
-  depth≤1 classifier restriction + a peephole-stability proof). A multi-wave
-  effort; NOT a clean near-term retirement.
-* `dispatch` (D1) — **BLOCKED on the if-cascade parse round-trip.** Full
-  lowering map + `dispatch2_select_branch0` selection PoC landed (AgreesD1).
-  M2/M3/M4 are 100% reusable from the single-public retirements; the only new
-  leg is branch-selection. The blocker: a multi-public program compiles to an
-  `OP_DUP/push/OP_NUMEQUAL/OP_IF` cascade that parses back into a nested
-  `.ifOp` tree, which is OUTSIDE the proven `AreRunarEmittable` round-trip
-  subset (no `.ifOp` constructor). Needs a `parseDispatchN_emit_round_trip`
-  lemma (composing the structural `parseStackOpFuel_ifOp_*` helpers per chain
-  link) — a substantial byte-level proof.
-* `stateful` (D2) — **BLOCKED on an open trust gap.** Full lowering map +
-  the genuine prologue transport `evalBindingsP_statefulPrologue_reduces`
-  landed (AgreesD2). CRITICAL FINDING: the ANF `checkPreimage` step routes
-  through `Crypto.preimageBackend` (returns a bool, never aborts) while the
-  Stack prologue routes through `Crypto.authBackend` (`OP_CHECKSIGVERIFY` /
-  `checkSig`, aborts on false) — DIFFERENT backends with different abort
-  semantics. The existing D2.a theorem's docstring claim of a "shared
-  backend" is FALSE. A genuine retirement needs a NEW verified
-  `checkSig(G, _opPushTxSig) ⟷ checkPreimage(preimage)` bridge under a
-  `ValidTxContext` (BIP-143) — a new shared-spec axiom/lemma, i.e. a real
-  trust-footprint decision, not a free discharge.
-* `crypto_call` — **the residual universal fallback; not wholesale-retirable.**
-  Hypothesis `True`; every body not matching a retired classifier (incl. all
-  crypto-builtin calls + the residual/non-canonical bodies of the retired
-  families) lands here. Scope map + the formalized M2 obstruction
-  `crypto_call_M2_disagreement` landed (AgreesCrypto). The most tractable
-  peel-off (`sha256`/`hash160`: single allowlisted opcode + Stack-side
-  codegen-to-spec already proven via `HashOps`) is BLOCKED at M2: the ANF
-  `callBuiltin?` deliberately returns `.unsupported` for crypto builtins, so
-  only the Stack side hits `Crypto.hashBackend` (`False ↔ True`). Unblock =
-  extend `ANF.Eval.callBuiltin?` with the hash arms (a shared-file model
-  change) so both sides hit the same backend; then a single-opcode crypto
-  fragment becomes retirable on the update_prop operational-M3 template.
-  Sound for methodCall bodies (wave 54). crypto_call stays as the catch-all
-  regardless of any peel-off.
+* `loop` — **BLOCKED at M4.** Wave 68 CLOSED the wave-67a gap: the ANF-side
+  loop walk now exists (`runLoopP_isSome_of_{bodySucceeds,iterBodySucceeds}` +
+  `evalBindingsP_loop_isSome` + the body-level `successAgrees_loop_allCopyBody_unconditional`,
+  AgreesA7) — both all-copy and consuming bodies on the ANF side. The remaining
+  wall is M4: the unrolled image's `loadRef` emits `pickStruct` for depth ≥ 2
+  (not `AreRunarEmittablePush`), and depth-1 bodies peephole-fuse into a
+  non-emittable op; the only all-copy body surviving M4 is the dead-code
+  `t = i + i` (count ≤ 17). The meaningful (consuming) case needs the
+  final-iteration-discriminating runtime recursor AND a `pickStruct`
+  round-trip extension to `AreRunarEmittablePush` in Parse.lean (or a depth≤1
+  classifier restriction + peephole-stability proof) — a multi-wave Parse +
+  runtime effort, uncertain whether the meaningful image is emittable at all.
+* `dispatch` — **BLOCKED: needs the full multi-public Stage-C widening.** Wave
+  69 RESOLVED the if-cascade parse round-trip (the wave-65 blocker) and
+  converted `merkle_dispatch_selection_correct` to a theorem (the dispatch
+  SELECTION is proven; 82→81). But wave 70 proved the SUB-OMNIBUS itself
+  cannot be retired: it is FALSE-AS-STATED (arbitrary `initialStack`, no
+  witness → ANF succeeds while the Stack dispatch fails on a bad witness), so
+  it needs a witness-alignment re-statement; and even re-stated, the only
+  discharge substrate (merkle theorem + the capstone
+  `compileSafe_multi_public_observational_correct`) is **structural-const-ONLY**
+  (`hConst : structuralConstBody`), while the omnibus dispatch branch must
+  cover EVERY ≥2-public body (arith/crypto/loop/if_val). The non-const
+  per-branch `successAgrees` IS exactly the deferred A3–A8 Stage-C runtime-walk
+  content — packaging it as a premise restates the conclusion (§2.1), and no
+  sound axiom-free fallback exists. Retiring dispatch ⇔ redoing the whole
+  single-public Stage-C widening for the multi-public (dispatched-stack) case.
+  Secondary finding: the omnibus's `agreesTagged` wiring puts the reversed
+  params on top, not the method-index witness — only nullary methods admit a
+  clean witness, so a faithful dispatch discharge also needs a dispatched-stack
+  alignment premise.
+* `stateful` (D2) — **BLOCKED: false-as-stated; needs a valid-path
+  re-statement + full leg composition (NOT just the BIP-143 axiom).** The
+  BIP-143 decision IS made (accept `bip143_opPushTx_checkSig_iff_checkPreimage`
+  as a named scoped crypto axiom). A wave-71 probe LANDED that axiom + the
+  proved, axiom-free prologue agreement (`statefulPrologue_successAgrees_of_bridge`)
+  — but it also PROVED the deeper blocker: the omnibus stateful branch fires
+  UNCONDITIONALLY on `bindingsUseCheckPreimage = true`, and `successAgrees` is
+  genuinely FALSE on the invalid-spend path (ANF `checkPreimage` is value-only,
+  ALWAYS succeeds; Stack `OP_CHECKSIGVERIFY` ABORTS on a bad sig) —
+  `statefulPrologue_successAgrees_false_on_invalid` is the mechanical witness.
+  So, exactly like `dispatch`, the sub-omnibus is false without a valid-path
+  (`ValidTxContext`/valid-witness) alignment premise (the wave-24/25 pattern).
+  The epilogue is NOT the blocker: `successAgrees` is success-bit only, so
+  output emission is irrelevant to it. Retiring stateful needs: (1) the BIP-143
+  axiom [done in probe], (2) a keyed valid-path premise threaded through the
+  omnibus signature (soundness fix), (3) the full prologue+body+epilogue
+  M2/M3/M4 leg composition for a canonical stateful fragment. A large multi-wave
+  effort (peer of the dispatch sub-omnibus), net codegen-axiom −1 at the end.
+  The probe was NOT integrated (it added the axiom without retiring → +1 count);
+  it re-lands as part of the full retirement.
+* `EC` (secp256k1, IN SCOPE) — **sizing (wave 71): 8 of 10 ops tractable,
+  `ecMul`/`ecMulGen` are a research-grade WALL.** EC currently falls through to
+  `crypto_call` (the ANF `callBuiltin?` has NO `ec*` arm — same pre-wave-68
+  situation as hashes; the Lean Stack codegen is `Stack/Ec.lean`, the spec is
+  `Crypto/Secp256k1.lean`, the codegen-to-spec targets are the 10
+  `emitEc*_runOps_eq` axioms in `Crypto/Spec.lean §7`). Shared prerequisites for
+  ANY EC discharge: (a) extend `isAllowedOpcodeName` with the EC opcodes
+  (OP_2DUP/OP_MOD/OP_NUM2BIN/OP_0/OP_2MUL/OP_2DIV/OP_RSHIFTNUM/OP_TOALTSTACK/
+  OP_FROMALTSTACK), each with a byte-non-collision round-trip proof (the wave-49/60
+  pattern) — without this NO EC op passes M4; (b) wire `ec*` into ANF
+  `callBuiltin?` (wave-68 hash pattern); (c) fix the `m ≠ 0`/divByZero gap in the
+  field-arithmetic axioms (Stack `OP_MOD` errors at 0; affects every OP_MOD op).
+  Tiers: **EASY** — `ecModReduce` (PoC `ecModReduce_step_transport` LANDED in
+  `Stack/AgreesEC.lean`, 8-op transport, axiom-clean), `ecEncodeCompressed`;
+  **MEDIUM** (need a reusable `reverse32` loop lemma) — `ecPointX/Y`,
+  `ecMakePoint`, `ecNegate`, `ecOnCurve`; **HARD bounded** — `ecAdd` (256-bit
+  modular-inverse correctness, ~8k ops); **WALL/research-grade** —
+  `ecMul`/`ecMulGen` (~60k ops; the Stack codegen is Jacobian/257-iter/`k+3n`
+  while the spec is affine/256-iter — proving them equal is a Jacobian≡affine
+  group-law equivalence in Script semantics). The `ecMul` wall collapses to
+  "merely large" ONLY if the EC-mul **codegen is rewritten to affine-256-iter**
+  to match the spec (changes the real compiler + goldens across all 7 tiers) —
+  otherwise `ecMul`/`ecMulGen` must be scoped out (axiomatized with the
+  documented structural-mismatch justification, like the Go-only families).
+* `crypto_call` — **the IRREDUCIBLE residual universal fallback; cannot be
+  removed.** Hypothesis `True`; every body not matching a retired classifier
+  (incl. all crypto-builtin calls + the residual/non-canonical bodies of the
+  retired families + all non-const ≥2-public dispatch + all non-fragment loop /
+  update_prop / method_call bodies) lands here. It can only disappear when
+  NOTHING falls through — i.e. when every family above it is fully retired
+  (Phase B per-primitive + the full Stage-C widening) — which is precisely the
+  work the other 3 blockers represent. Wave 68 PEELED OFF the clean crypto
+  fragment: `ANF.Eval.callBuiltin?` was extended with `sha256`/`hash160`/
+  `ripemd160`/`hash256` arms routing through the pre-existing shared
+  `Crypto.hashBackend` (so the interpreter now COMPUTES hashes instead of
+  erroring), the wave-65 M2-disagreement became `crypto_call_M2_agreement`, and
+  `single_sha256_body_successAgrees` is the peel-off substrate. But this only
+  shrinks crypto_call's EFFECTIVE scope — the axiom stays as the catch-all.
 
 ---
 

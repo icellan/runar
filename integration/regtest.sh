@@ -97,6 +97,14 @@ maxtxsizepolicy=0
 genesisactivationheight=1
 chronicleactivationheight=1
 minminingtxfee=0.00000001
+# Oracle hardening (issues #40/#42/#44): enforce post-Genesis script-verify
+# standardness at mempool acceptance so sendrawtransaction rejects exactly what
+# mainnet ARC broadcasters reject — CLEANSTACK, NULLFAIL, NULLDUMMY,
+# minimal-push. bitcoin-sv defaults acceptnonstdtxn to TRUE on regtest, which
+# let CLEANSTACK/NULLFAIL bugs (#42, #44) pass green CI while failing on mainnet.
+# genesisactivationheight=1 (above) keeps post-Genesis rules, so large scripts
+# (SLH-DSA/Schnorr) remain acceptable while the script-verify flags are enforced.
+acceptnonstdtxn=0
 zmqpubhashblock=tcp://*:$ZMQ_PORT
 zmqpubhashtx=tcp://*:$ZMQ_PORT
 zmqpubdiscardedfrommempool=tcp://*:$ZMQ_PORT

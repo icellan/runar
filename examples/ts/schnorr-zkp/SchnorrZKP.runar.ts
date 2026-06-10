@@ -1,7 +1,7 @@
 import {
-  SmartContract, assert,
+  SmartContract, assert, within,
   ecAdd, ecMul, ecMulGen, ecPointX, ecPointY, ecOnCurve, ecModReduce,
-  EC_N, hash256, cat, bin2num,
+  hash256, cat, bin2num,
 } from 'runar-lang';
 import type { Point } from 'runar-lang';
 
@@ -19,6 +19,16 @@ import type { Point } from 'runar-lang';
  *
  * The challenge is derived deterministically from the commitment and
  * public key, preventing the prover from choosing a convenient e.
+ *
+ * WARNING — nonce reuse is fatal. The contract verifies a single
+ * non-interactive proof; it cannot detect that two proofs (sig1, sig2)
+ * over different challenges (e1, e2) reuse the same nonce r. When a
+ * prover reuses r across two proofs the secret key is recoverable by
+ * any observer as k = (e1 - e2)^{-1} * (s1 - s2) mod n. The prover MUST
+ * sample a fresh, uniformly random r for every proof. This is a
+ * use-the-API-correctly responsibility of the proof generator; see
+ * SchnorrZKP.test.ts ("nonce reuse off-chain key recovery") for the
+ * canonical demonstration.
  */
 class SchnorrZKP extends SmartContract {
   readonly pubKey: Point;
@@ -35,6 +45,21 @@ class SchnorrZKP extends SmartContract {
    * @param s      - The response s = r + e*k (mod n)
    */
   public verify(rPoint: Point, s: bigint) {
+    // Bound s to the canonical range [1, n) where n is the secp256k1 group
+    // order. EC scalars are intentionally not reduced mod n inside the
+    // primitives (k*G == (k + n)*G), so without this bound `s` and `s + n`
+    // would both verify, opening a malleability surface where any forwarded
+    // valid proof can be silently rewritten. The group order is inlined
+    // here as a decimal literal so every frontend (sol/move/go/rust/zig all
+    // lex `0x...` as a ByteString literal, not a bigint) lowers it to the
+    // same `bigint_literal` ANF node and produces byte-identical hex.
+    // Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    assert(within(
+      s,
+      1n,
+      115792089237316195423570985008687907852837564279074904382605163141518161494337n,
+    ));
+
     // Verify R is on the curve
     assert(ecOnCurve(rPoint));
 

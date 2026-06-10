@@ -403,7 +403,7 @@ fn walkExprForAsm(
         .array_literal => |al| {
             for (al) |e| try walkExprForAsm(allocator, e, contract, errors);
         },
-        .literal_int, .literal_bool, .literal_bytes, .identifier, .property_access => {},
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier, .property_access => {},
     }
 }
 
@@ -642,7 +642,7 @@ fn walkExprForPreimage(
         },
         .increment => |inc| try walkExprForPreimage(allocator, inc.operand, method_name, warnings),
         .decrement => |dec| try walkExprForPreimage(allocator, dec.operand, method_name, warnings),
-        .literal_int, .literal_bool, .literal_bytes, .identifier,
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
         .property_access, .array_literal,
         => {},
     }
@@ -786,7 +786,7 @@ fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *Stri
         },
         .increment => |inc| try collectMethodCallsInExpr(allocator, inc.operand, calls),
         .decrement => |dec| try collectMethodCallsInExpr(allocator, dec.operand, calls),
-        .literal_int, .literal_bool, .literal_bytes, .identifier,
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
         .property_access, .array_literal,
         => {},
     }

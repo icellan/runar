@@ -1,0 +1,60 @@
+{
+  "script": "007c637c0093677c00946800a077",
+  "scriptSize": 14,
+  "findings": [
+    {
+      "severity": "warning",
+      "code": "UNCONDITIONALLY_SUCCEEDS",
+      "message": "Execution path has no verification opcode — any unlocking input will satisfy it",
+      "path": "IF[false] at 2"
+    },
+    {
+      "severity": "warning",
+      "code": "UNCONDITIONALLY_SUCCEEDS",
+      "message": "Execution path has no verification opcode — any unlocking input will satisfy it",
+      "path": "IF[true] at 2"
+    },
+    {
+      "severity": "warning",
+      "code": "NO_SIG_CHECK",
+      "message": "Execution path has no signature verification (OP_CHECKSIG/OP_CHECKMULTISIG)",
+      "path": "IF[false] at 2"
+    },
+    {
+      "severity": "warning",
+      "code": "NO_SIG_CHECK",
+      "message": "Execution path has no signature verification (OP_CHECKSIG/OP_CHECKMULTISIG)",
+      "path": "IF[true] at 2"
+    }
+  ],
+  "paths": [
+    {
+      "id": 0,
+      "description": "IF[false] at 2",
+      "branchChoices": [
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": false,
+      "stackDepthAtEnd": 0
+    },
+    {
+      "id": 1,
+      "description": "IF[true] at 2",
+      "branchChoices": [
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": false,
+      "stackDepthAtEnd": 0
+    }
+  ],
+  "summary": {
+    "totalPaths": 2,
+    "reachablePaths": 2,
+    "pathsWithCheckSig": 0,
+    "pathsWithoutCheckSig": 2,
+    "maxStackDepth": 0,
+    "scriptSizeBytes": 14
+  }
+}

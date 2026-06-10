@@ -115,6 +115,15 @@ export interface Loop {
 export interface Assert {
   kind: 'assert';
   value: string; // reference to a temp name
+  // Optional marker: set to `true` only on the auto-injected
+  // `hash256(continuationOutputs) === extractOutputHash(txPreimage)` assert
+  // emitted by the StatefulSmartContract lowering (04-anf-lower.ts).
+  // Off-chain SDK interpreters use this to skip the equality check
+  // (which has no way to hold without script-bytes-aware codegen) without
+  // resorting to positional or structural heuristics that misfire on
+  // developer-written covenant asserts whose IR shape is identical.
+  // Absent => developer code.
+  isAutoInjectedStateCheck?: boolean;
 }
 
 export interface UpdateProp {

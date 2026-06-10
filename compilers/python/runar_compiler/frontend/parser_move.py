@@ -579,8 +579,7 @@ class _MoveParser:
                 and self.tokens[self.pos + 1].kind == TOK_IDENT
                 and self.tokens[self.pos + 1].value == "mut"
             )
-            type_name = self._parse_move_type_name()
-            type_node = _move_map_type(type_name)
+            type_node = self._parse_move_type_node()
 
             # &mut fields are mutable; all others are readonly
             readonly = not is_mut
@@ -617,17 +616,102 @@ class _MoveParser:
             next_tok = self.expect(TOK_IDENT)
             name = next_tok.value  # use the final component
 
-        # Handle generic types: Type<T>
+        # Handle generic types: Type<T> — balance nested generics, accepting
+        # `>>` as a two-`>` close so `FixedArray<FixedArray<T, N>, M>` parses
+        # via the legacy name-only path too.
         if self.match(TOK_LT):
             depth = 1
             while depth > 0 and not self.check(TOK_EOF):
                 if self.check(TOK_LT):
                     depth += 1
+                    self.advance()
+                    continue
                 if self.check(TOK_GT):
                     depth -= 1
+                    self.advance()
+                    continue
+                if self.check(TOK_SHR):
+                    depth -= 2
+                    if depth < 0:
+                        depth = 0
+                    self.advance()
+                    continue
                 self.advance()
 
         return name
+
+    def _parse_move_type_node(self) -> TypeNode:
+        """Move-style type parser that returns a TypeNode, with full nested
+        ``FixedArray<T, N>`` support. The lexer eagerly forms ``>>`` as a
+        shift token; ``_consume_move_generic_close`` splits it back into
+        two ``>`` when closing a nested generic argument list."""
+        if self.match(TOK_AMP):
+            self.match_ident("mut")
+
+        name_tok = self.expect(TOK_IDENT)
+        name = name_tok.value
+
+        while self.match(TOK_COLONCOLON):
+            next_tok = self.expect(TOK_IDENT)
+            name = next_tok.value
+
+        if name == "FixedArray" and self.check(TOK_LT):
+            self.advance()  # <
+            inner = self._parse_move_type_node()
+            self.expect(TOK_COMMA)
+            len_tok = self.expect(TOK_NUMBER)
+            try:
+                length = int(len_tok.value)
+                if length < 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                self.add_error(
+                    f"FixedArray length must be a non-negative integer literal, got {len_tok.value!r}"
+                )
+                length = 0
+            self._consume_move_generic_close()
+            return FixedArrayType(element=inner, length=length)
+
+        if name == "vector" and self.check(TOK_LT):
+            self.advance()
+            self._parse_move_type_node()  # discard inner type
+            self._consume_move_generic_close()
+            return PrimitiveType(name="ByteString")
+
+        # Generic type we don't model: skip the arg list, balancing generics.
+        if self.match(TOK_LT):
+            depth = 1
+            while depth > 0 and not self.check(TOK_EOF):
+                if self.check(TOK_LT):
+                    depth += 1
+                    self.advance()
+                    continue
+                if self.check(TOK_GT):
+                    depth -= 1
+                    self.advance()
+                    continue
+                if self.check(TOK_SHR):
+                    depth -= 2
+                    if depth < 0:
+                        depth = 0
+                    self.advance()
+                    continue
+                self.advance()
+
+        return _move_map_type(name)
+
+    def _consume_move_generic_close(self) -> None:
+        """Close a generic argument list, splitting ``>>`` into two ``>``."""
+        if self.check(TOK_GT):
+            self.advance()
+            return
+        if self.check(TOK_SHR):
+            # Rewrite the current `>>` token to `>` in place so the outer
+            # close can consume the remaining half.
+            tok = self.tokens[self.pos]
+            self.tokens[self.pos] = Token(TOK_GT, ">", tok.line, tok.col + 1)
+            return
+        self.expect(TOK_GT)
 
     # -- Function parsing ----------------------------------------------------
 

@@ -194,3 +194,53 @@ contract TwoProps is SmartContract {
 		t.Errorf("expected second property key, got %s", c.Properties[1].Name)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: Nested fixed-array property type `T[N][M]`
+// ---------------------------------------------------------------------------
+
+func TestParseSolidity_NestedFixedArray(t *testing.T) {
+	source := `
+pragma runar ^0.1.0;
+
+contract Grid2x2 is StatefulSmartContract {
+    bigint[2][2] grid = [[0, 0], [0, 0]];
+
+    constructor() {}
+
+    function set00(bigint v) public {
+        this.grid[0][0] = v;
+        require(true);
+    }
+}
+`
+	result := ParseSource([]byte(source), "Grid2x2.runar.sol")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if c == nil {
+		t.Fatal("expected non-nil contract")
+	}
+	if len(c.Properties) != 1 {
+		t.Fatalf("expected 1 property, got %d", len(c.Properties))
+	}
+	outer, ok := c.Properties[0].Type.(FixedArrayType)
+	if !ok {
+		t.Fatalf("expected outer FixedArrayType, got %T", c.Properties[0].Type)
+	}
+	if outer.Length != 2 {
+		t.Errorf("expected outer length 2, got %d", outer.Length)
+	}
+	inner, ok := outer.Element.(FixedArrayType)
+	if !ok {
+		t.Fatalf("expected inner FixedArrayType, got %T", outer.Element)
+	}
+	if inner.Length != 2 {
+		t.Errorf("expected inner length 2, got %d", inner.Length)
+	}
+	leaf, ok := inner.Element.(PrimitiveType)
+	if !ok || leaf.Name != "bigint" {
+		t.Errorf("expected innermost element bigint, got %#v", inner.Element)
+	}
+}

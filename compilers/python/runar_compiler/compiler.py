@@ -84,6 +84,10 @@ class Artifact:
     version: str = ""
     compiler_version: str = ""
     contract_name: str = ""
+    # Base class the source contract extends. Authoritative stateful signal
+    # for the issue-#42/#44 terminal sighash subscript trim (a
+    # StatefulSmartContract with zero mutable fields still needs the trim).
+    parent_class: str = ""
     abi: ABI = field(default_factory=ABI)
     script: str = ""
     asm: str = ""
@@ -199,6 +203,17 @@ def _optimize_ec(program: ANFProgram) -> ANFProgram:
     return optimize_ec(program)
 
 
+def _eliminate_dead_code(program: ANFProgram) -> ANFProgram:
+    """Dead Code Elimination (Pass 4.75) -- discrete named pass.
+
+    See frontend/dce.py. Idempotent w.r.t. the EC optimizer's internal DCE;
+    runs as a safety net for any post-EC residual dead bindings and to
+    mirror the standalone DCE pass shape used by the Zig reference compiler.
+    """
+    from runar_compiler.frontend.dce import eliminate_dead_code
+    return eliminate_dead_code(program)
+
+
 def _lower_to_stack(program: ANFProgram) -> list[Any]:
     """Stack lowering: ANF -> Stack IR."""
     from runar_compiler.codegen.stack import lower_to_stack
@@ -261,7 +276,8 @@ def compile_from_program(program: ANFProgram, disable_constant_folding: bool = F
     if not disable_constant_folding:
         program = _fold_constants(program)
 
-    # Pass 4.5: EC optimization
+    # Pass 4.5: EC optimization. Delegates internally to frontend/dce.py for
+    # dead-binding cleanup -- see anf_optimize._eliminate_dead_bindings.
     program = _optimize_ec(program)
 
     # Pass 5: Stack lowering
@@ -370,7 +386,7 @@ def compile_source_to_ir(
     if not disable_constant_folding:
         program = _fold_constants(program)
 
-    # Pass 4.5: EC optimization
+    # Pass 4.5: EC optimization (delegates internally to frontend/dce.py).
     program = _optimize_ec(program)
 
     return program
@@ -588,6 +604,7 @@ def _assemble_artifact(
         version=SCHEMA_VERSION,
         compiler_version=COMPILER_VERSION,
         contract_name=program.contract_name,
+        parent_class=program.parent_class,
         abi=ABI(
             constructor=ABIConstructor(params=constructor_params),
             methods=methods,
@@ -634,6 +651,9 @@ def artifact_to_json(artifact: Artifact) -> str:
         "version": artifact.version,
         "compilerVersion": artifact.compiler_version,
         "contractName": artifact.contract_name,
+        # parentClass (when present) is inserted here so it sits right after
+        # contractName, matching the other tiers' artifact field order.
+        **({"parentClass": artifact.parent_class} if artifact.parent_class else {}),
         "abi": {
             "constructor": {
                 "params": [
@@ -766,6 +786,8 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
             d["body"] = [_ser_binding(b) for b in v.body]
         if v.value_ref is not None:
             d["value"] = v.value_ref
+        if v.kind == "assert" and v.is_auto_injected_state_check:
+            d["isAutoInjectedStateCheck"] = True
         if v.preimage is not None:
             d["preimage"] = v.preimage
         if v.satoshis is not None:
@@ -1072,7 +1094,7 @@ def _compile_from_source_str_with_result(
             )
             return result
 
-    # Pass 4.5: EC optimization
+    # Pass 4.5: EC optimization (delegates internally to frontend/dce.py).
     try:
         result.anf = _optimize_ec(result.anf)
     except Exception as e:

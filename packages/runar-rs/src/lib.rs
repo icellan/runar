@@ -8,6 +8,7 @@
 //! use runar::prelude::*;
 //! ```
 
+pub mod analyzer;
 pub mod ec;
 pub mod ecdsa;
 pub mod p256;

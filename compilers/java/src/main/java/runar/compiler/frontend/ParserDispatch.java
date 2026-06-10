@@ -22,6 +22,12 @@ public final class ParserDispatch {
      * {@code .runar.{ts,sol,move,py,go,rs,zig,rb,java}}.
      */
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard. Reject oversized source BEFORE any
+        // format-specific parser touches the input. Raises
+        // InputLimits.SourceSizeExceededException (a ParseException
+        // subclass) on rejection. BUG-008 follow-up.
+        InputLimits.assertSourceBytesUnderLimit(source);
+
         String lower = filename == null ? "" : filename.toLowerCase();
         try {
             if (lower.endsWith(".runar.java")) {
@@ -77,8 +83,10 @@ public final class ParserDispatch {
             + " (expected .runar.{ts,sol,move,py,go,rs,zig,rb,java})");
     }
 
-    /** Unified parse-error type that adapts the per-parser exceptions. */
-    public static final class ParseException extends Exception {
+    /** Unified parse-error type that adapts the per-parser exceptions.
+     *  Non-final so {@link InputLimits.SourceSizeExceededException} can
+     *  extend it for typed DoS-bound rejection (BUG-008 follow-up). */
+    public static class ParseException extends Exception {
         public ParseException(String message) {
             super(message);
         }

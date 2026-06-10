@@ -715,16 +715,23 @@ public final class AnfInterpreter {
             }
             case "assert": {
                 if (strict) {
-                    String predRef = (String) value.get("value");
-                    // Skip asserts whose predicate transitively derives from
-                    // the auto-injected continuation-hash subgraph
-                    // (computeStateOutput / get_state_script). The on-chain
-                    // VM is the authoritative source for that check; we have
-                    // no script bytes off-chain to make hash256(continuation)
-                    // === extractOutputHash(preimage) hold.
-                    if (predRef != null && continuationTaint.contains(predRef)) {
+                    // Marker-based skip: the compiler auto-emits the final
+                    // continuation-hash check on every stateful-contract
+                    // method (hash256(continuationOutputs) ===
+                    // extractOutputHash(preimage)). The lowering pass
+                    // (compilers/java/.../passes/AnfLower.java) tags ONLY
+                    // that assert with isAutoInjectedStateCheck: true.
+                    // The on-chain VM is the authoritative source for the
+                    // check; we have no script bytes off-chain to make
+                    // hash256(continuation) === extractOutputHash(preimage)
+                    // hold. Developer-written covenant asserts with the
+                    // identical IR shape carry no marker and ARE enforced
+                    // (the previous taint heuristic misfired on them; see
+                    // BUG-002).
+                    if (Boolean.TRUE.equals(value.get("isAutoInjectedStateCheck"))) {
                         return null;
                     }
+                    String predRef = (String) value.get("value");
                     Object cond = env.get(predRef);
                     if (!isTruthy(cond)) {
                         throw new AssertionFailureException(methodName, bindingName);

@@ -164,6 +164,11 @@ pub const RunarArtifact = struct {
     version: []const u8 = &.{},
     compiler_version: []const u8 = &.{},
     contract_name: []const u8 = &.{},
+    // Base class the source contract extends. Authoritative stateful signal
+    // for the issue-#42/#44 terminal sighash subscript trim: a
+    // StatefulSmartContract with zero mutable fields still needs the trim even
+    // though state_fields is empty. Empty for older artifacts.
+    parent_class: []const u8 = &.{},
     abi: ABI = .{},
     script: []const u8 = &.{},
     asm_text: []const u8 = &.{},
@@ -179,11 +184,23 @@ pub const RunarArtifact = struct {
         return self.state_fields.len > 0;
     }
 
+    /// True when the contract extends StatefulSmartContract (from
+    /// `parent_class`), independent of whether it has mutable state fields.
+    /// Gates the issue-#42/#44 terminal sighash subscript trim. Falls back to
+    /// `isStateful()` for older artifacts that predate the parentClass field.
+    pub fn parentStateful(self: *const RunarArtifact) bool {
+        if (self.parent_class.len > 0) {
+            return std.mem.eql(u8, self.parent_class, "StatefulSmartContract");
+        }
+        return self.isStateful();
+    }
+
     pub fn deinit(self: *RunarArtifact) void {
         const a = self.allocator;
         if (self.version.len > 0) a.free(self.version);
         if (self.compiler_version.len > 0) a.free(self.compiler_version);
         if (self.contract_name.len > 0) a.free(self.contract_name);
+        if (self.parent_class.len > 0) a.free(self.parent_class);
         if (self.script.len > 0) a.free(self.script);
         if (self.asm_text.len > 0) a.free(self.asm_text);
         if (self.build_timestamp.len > 0) a.free(self.build_timestamp);
@@ -209,6 +226,9 @@ pub const RunarArtifact = struct {
 
         if (root.get("contractName")) |v| {
             if (v == .string) artifact.contract_name = try allocator.dupe(u8, v.string);
+        }
+        if (root.get("parentClass")) |v| {
+            if (v == .string) artifact.parent_class = try allocator.dupe(u8, v.string);
         }
         if (root.get("version")) |v| {
             if (v == .string) artifact.version = try allocator.dupe(u8, v.string);

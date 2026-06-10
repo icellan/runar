@@ -38,6 +38,14 @@ class ANFProgram:
     contract_name: str = ""
     properties: list[ANFProperty] = field(default_factory=list)
     methods: list[ANFMethod] = field(default_factory=list)
+    # Base class the source contract extends. In-memory carrier ONLY: it is
+    # excluded from the emitted ANF IR JSON (see _IR_EXCLUDED_FIELDS in
+    # __main__.py) so it never affects cross-tier conformance parity. The
+    # artifact assembler copies it to the top-level artifact field so SDKs can
+    # gate the issue-#42/#44 terminal sighash subscript trim on the parent
+    # class (a StatefulSmartContract with zero mutable fields still needs the
+    # trim even though state_fields is empty).
+    parent_class: str = ""
 
 
 @dataclass
@@ -144,6 +152,14 @@ class ANFValue:
     # -- assert, update_prop (value ref), check_preimage -------------------
     value_ref: str | None = None
 
+    # -- assert (auto-injected stateful-continuation marker) ---------------
+    # ``True`` only on the compiler-emitted
+    # ``hash256(continuationOutputs) === extractOutputHash(txPreimage)``
+    # assert in 04-anf-lower. Off-chain SDK interpreters skip this assert
+    # without resorting to structural / taint heuristics that misfire on
+    # developer-written covenant asserts whose IR shape is identical.
+    is_auto_injected_state_check: bool = False
+
     # -- check_preimage, deserialize_state ---------------------------------
     preimage: str | None = None
 
@@ -213,6 +229,20 @@ def _decode_value(v: ANFValue, method_name: str, binding_name: str) -> None:
             pass
 
 
+def _is_decimal_bigint_literal(s: str) -> bool:
+    """True if ``s`` is a JS-style decimal BigInt literal: optional ``-``,
+    one or more ASCII digits, and a required trailing ``n``. Mirrors the
+    discriminator used by the Go IR decoder (compilers/go/ir/types.go).
+    """
+    if len(s) < 2 or s[-1] != "n":
+        return False
+    start = 1 if s[0] == "-" else 0
+    body = s[start:-1]
+    if not body:
+        return False
+    return all("0" <= c <= "9" for c in body)
+
+
 def _decode_const_value(
     v: ANFValue, method_name: str, binding_name: str
 ) -> None:
@@ -228,8 +258,17 @@ def _decode_const_value(
         v.const_bool = raw
         return
 
-    # String (hex-encoded bytes)
+    # String. Either a JS-style oversize BigInt literal ('123...n' with the
+    # canonical 'n' suffix) or a hex-encoded ByteString literal. The 'n'
+    # suffix is the discriminator — without it the two cases are
+    # indistinguishable when the literal is all-digit (e.g. '3030' is
+    # both a valid decimal integer AND a valid hex bytestring).
     if isinstance(raw, str):
+        if _is_decimal_bigint_literal(raw):
+            int_val = int(raw[:-1])
+            v.const_big_int = int_val
+            v.const_int = int_val
+            return
         v.const_string = raw
         return
 
@@ -276,6 +315,7 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
     v.bytes = d.get("bytes")
     v.in_arity = d.get("in_arity")
     v.out_arity = d.get("out_arity")
+    v.is_auto_injected_state_check = bool(d.get("isAutoInjectedStateCheck", False))
 
     # Nested bindings
     if "then" in d and d["then"] is not None:

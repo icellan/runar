@@ -455,6 +455,7 @@
         {
           "name": "t42",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t41"
           }

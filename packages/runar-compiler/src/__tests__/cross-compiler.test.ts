@@ -343,7 +343,11 @@ function anfToJson(anf: ANFProgram): string {
       if (value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER) {
         return Number(value);
       }
-      return value.toString();
+      // Oversize bigints get the canonical JS BigInt suffix `n` so the Go
+      // IR decoder can distinguish them from hex-encoded ByteString
+      // literals (which never carry a trailing `n`). Matches the IR
+      // encoding the TS reference compiler ships in compiled artifacts.
+      return value.toString() + 'n';
     }
     return value;
   }, 2);
@@ -742,9 +746,34 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler: TS IR -> Rust Scri
 // Test compilation of all example contracts through TS + Go pipeline
 // ---------------------------------------------------------------------------
 
-function findExampleContracts(): { name: string; source: string }[] {
+function findExampleContracts(targetTier?: string): { name: string; source: string }[] {
   const examplesDir = join(__dirname, '..', '..', '..', '..', 'examples', 'ts');
   const contracts: { name: string; source: string }[] = [];
+
+  // Build a lookup of conformance fixture name → allowed tiers, so that
+  // examples whose conformance fixture explicitly opts a tier out are
+  // also skipped here (e.g. schnorr-zkp is ts/go/python-only by BUG-001).
+  const fixtureAllowlists = new Map<string, string[]>();
+  try {
+    const dirs = readdirSync(CONFORMANCE_DIR, { withFileTypes: true });
+    for (const dir of dirs) {
+      if (!dir.isDirectory()) continue;
+      const configFile = join(CONFORMANCE_DIR, dir.name, 'source.json');
+      if (!existsSync(configFile)) continue;
+      try {
+        const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
+          compilers?: string[];
+        };
+        if (config.compilers) {
+          fixtureAllowlists.set(dir.name, config.compilers);
+        }
+      } catch {
+        // ignore malformed source.json — surfaced by other tests
+      }
+    }
+  } catch {
+    // conformance dir missing — leave map empty
+  }
 
   try {
     const dirs = readdirSync(examplesDir, { withFileTypes: true });
@@ -754,6 +783,13 @@ function findExampleContracts(): { name: string; source: string }[] {
       const files = readdirSync(dirPath);
       for (const file of files) {
         if (file.endsWith('.runar.ts')) {
+          // examples/ts/{name}/ contracts map 1:1 to conformance fixtures of
+          // the same name (by directory). Skip if the fixture's allowlist
+          // excludes the target tier.
+          if (targetTier) {
+            const allowlist = fixtureAllowlists.get(dir.name);
+            if (allowlist && !allowlist.includes(targetTier)) continue;
+          }
           const source = readFileSync(join(dirPath, file), 'utf-8');
           contracts.push({ name: file.replace('.runar.ts', ''), source });
         }
@@ -781,7 +817,7 @@ describe.skipIf(!hasGo)('Cross-compiler: all examples TS IR -> Go', () => {
     }
   });
 
-  const examples = findExampleContracts();
+  const examples = findExampleContracts('go');
 
   for (const example of examples) {
     it(`compiles ${example.name} through TS -> Go pipeline`, () => {
@@ -813,7 +849,7 @@ describe.skipIf(!hasGo)('Cross-compiler: all examples TS IR -> Go', () => {
 // Conformance golden file tests: Go output must match expected-script.hex
 // ---------------------------------------------------------------------------
 
-function findConformanceTests(): { name: string; sourceFile: string; hexFile: string }[] {
+function findConformanceTests(targetTier?: string): { name: string; sourceFile: string; hexFile: string }[] {
   const tests: { name: string; sourceFile: string; hexFile: string }[] = [];
 
   // Input-format priority when a fixture only ships non-TS sources. The TS
@@ -835,12 +871,15 @@ function findConformanceTests(): { name: string; sourceFile: string; hexFile: st
       // any other supported source format so go-only / sol-only fixtures are
       // still exercised through the TS compiler's multi-format parser.
       let sourceFile: string | undefined;
+      let fixtureAllowlist: string[] | undefined;
       const configFile = join(dirPath, 'source.json');
       if (existsSync(configFile)) {
         const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
           path?: string;
           sources?: Record<string, string>;
+          compilers?: string[];
         };
+        fixtureAllowlist = config.compilers;
         if (config.sources) {
           for (const ext of EXT_PRIORITY) {
             if (config.sources[ext]) {
@@ -861,6 +900,13 @@ function findConformanceTests(): { name: string; sourceFile: string; hexFile: st
         }
       }
       if (!sourceFile) continue;
+
+      // Honour the per-fixture compiler allowlist (e.g. Go-only crypto
+      // fixtures, BUG-001 schnorr-zkp which is scoped to ts/go/python
+      // because the other tiers truncate 256-bit literals).
+      if (targetTier && fixtureAllowlist && !fixtureAllowlist.includes(targetTier)) {
+        continue;
+      }
 
       tests.push({
         name: dir.name,
@@ -890,7 +936,7 @@ describe.skipIf(!hasGo)('Cross-compiler conformance: Go output vs golden hex', (
     }
   });
 
-  const conformanceTests = findConformanceTests();
+  const conformanceTests = findConformanceTests('go');
 
   for (const test of conformanceTests) {
     it(`${test.name}: Go hex output matches expected-script.hex`, () => {
@@ -944,7 +990,7 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler: all examples TS IR
     }
   });
 
-  const examples = findExampleContracts();
+  const examples = findExampleContracts('rust');
 
   for (const example of examples) {
     it(`compiles ${example.name} through TS -> Rust pipeline`, () => {
@@ -988,7 +1034,7 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler conformance: Rust o
     }
   });
 
-  const conformanceTests = findConformanceTests();
+  const conformanceTests = findConformanceTests('rust');
 
   for (const test of conformanceTests) {
     it(`${test.name}: Rust hex output matches expected-script.hex`, () => {

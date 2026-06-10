@@ -162,6 +162,10 @@ const LowerCtx = struct {
     /// consumers like checkMultiSig can emit the count push. Mirrors TS
     /// `arrayLengths` in `05-stack-lower.ts`.
     array_lengths: std.StringHashMapUnmanaged(usize),
+    /// Tracks the element refs of array literal bindings so that consumers
+    /// like checkMultiSig can bring each element to TOS at the use site.
+    /// Mirrors TS `arrayElements` in `05-stack-lower.ts`.
+    array_elements: std.StringHashMapUnmanaged([]const []const u8),
     owned_push_data: std.ArrayListUnmanaged([]u8),
     scope_bindings: []const types.ANFBinding,
     copy_ref_aliases: bool,
@@ -187,6 +191,7 @@ const LowerCtx = struct {
             .local_bindings = .empty,
             .force_copy_bindings = .empty,
             .array_lengths = .empty,
+            .array_elements = .empty,
             .owned_push_data = .empty,
             .scope_bindings = &.{},
             .copy_ref_aliases = false,
@@ -205,6 +210,13 @@ const LowerCtx = struct {
         self.local_bindings.deinit(self.allocator);
         self.force_copy_bindings.deinit(self.allocator);
         self.array_lengths.deinit(self.allocator);
+        // Free the element slice arrays (the inner []const u8 strings are
+        // owned by the ANF program, not by us).
+        var it_ae = self.array_elements.iterator();
+        while (it_ae.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.array_elements.deinit(self.allocator);
         for (self.owned_push_data.items) |data| self.allocator.free(data);
         self.owned_push_data.deinit(self.allocator);
         self.updated_props.deinit(self.allocator);
@@ -240,6 +252,13 @@ const LowerCtx = struct {
 
     fn emitPushInt(self: *LowerCtx, n: i64) !void {
         try self.emit(.{ .push_int = n });
+    }
+
+    /// Emit a push for a decimal-string-encoded big integer (overflows `i64`).
+    /// The decoder side handles converting the canonical decimal text into
+    /// little-endian sign-magnitude bytes; see `encodeScriptNumberFromDecimal`.
+    fn emitPushBigIntDecimal(self: *LowerCtx, decimal: []const u8) !void {
+        try self.emit(.{ .push_big_int_decimal = decimal });
     }
 
     fn emitPushBool(self: *LowerCtx, b: bool) !void {
@@ -497,111 +516,152 @@ const LowerCtx = struct {
 
     fn computeLastUses(self: *LowerCtx, bindings: []const types.ANFBinding) !void {
         self.last_uses.clearRetainingCapacity();
+        // Pre-scan: map each array_literal binding to its element refs. Used
+        // to propagate last-use across the array indirection (the array
+        // binding is pure metadata in lowerArrayLiteral — its elements must
+        // remain live until the array's consumer, not until the array_literal
+        // binding itself). Stored on the lowering context for scanValueForRefs.
+        var array_elems = std.StringHashMapUnmanaged([]const []const u8){};
+        defer array_elems.deinit(self.allocator);
+        for (bindings) |binding| {
+            switch (binding.value) {
+                .array_literal => |al| {
+                    try array_elems.put(self.allocator, binding.name, al.elements);
+                },
+                else => {},
+            }
+        }
         for (bindings, 0..) |binding, idx| {
-            self.scanValueForRefs(binding.value, idx);
+            // array_literal is metadata-only — do NOT advance its elements'
+            // last-use to here; defer to the array's consumer.
+            switch (binding.value) {
+                .array_literal => continue,
+                else => {},
+            }
+            self.scanValueForRefs(binding.value, idx, &array_elems);
         }
     }
 
-    fn scanValueForRefs(self: *LowerCtx, value: types.ANFValue, idx: usize) void {
+    fn putLastUseExpanding(
+        self: *LowerCtx,
+        name: []const u8,
+        idx: usize,
+        array_elems: *const std.StringHashMapUnmanaged([]const []const u8),
+    ) void {
+        self.last_uses.put(self.allocator, name, idx) catch return;
+        if (array_elems.get(name)) |elems| {
+            for (elems) |e| {
+                self.last_uses.put(self.allocator, e, idx) catch return;
+            }
+        }
+    }
+
+    fn scanValueForRefs(
+        self: *LowerCtx,
+        value: types.ANFValue,
+        idx: usize,
+        array_elems: *const std.StringHashMapUnmanaged([]const []const u8),
+    ) void {
         switch (value) {
             .load_param => |lp| {
-                self.last_uses.put(self.allocator, lp.name, idx) catch return;
+                self.putLastUseExpanding(lp.name, idx, array_elems);
             },
             .load_prop, .get_state_script => {},
             .load_const => |lc| {
                 switch (lc.value) {
                     .string => |s| {
                         if (std.mem.startsWith(u8, s, "@ref:")) {
-                            self.last_uses.put(self.allocator, s[5..], idx) catch return;
+                            self.putLastUseExpanding(s[5..], idx, array_elems);
                         }
                     },
                     else => {},
                 }
             },
             .bin_op => |bop| {
-                self.last_uses.put(self.allocator, bop.left, idx) catch return;
-                self.last_uses.put(self.allocator, bop.right, idx) catch return;
+                self.putLastUseExpanding(bop.left, idx, array_elems);
+                self.putLastUseExpanding(bop.right, idx, array_elems);
             },
             .unary_op => |uop| {
-                self.last_uses.put(self.allocator, uop.operand, idx) catch return;
+                self.putLastUseExpanding(uop.operand, idx, array_elems);
             },
             .call => |c| {
                 for (c.args) |arg| {
-                    self.last_uses.put(self.allocator, arg, idx) catch return;
+                    self.putLastUseExpanding(arg, idx, array_elems);
                 }
             },
             .method_call => |mc| {
                 if (mc.object.len > 0) {
-                    self.last_uses.put(self.allocator, mc.object, idx) catch return;
+                    self.putLastUseExpanding(mc.object, idx, array_elems);
                 }
                 for (mc.args) |arg| {
-                    self.last_uses.put(self.allocator, arg, idx) catch return;
+                    self.putLastUseExpanding(arg, idx, array_elems);
                 }
             },
             .@"if" => |ie| {
-                self.last_uses.put(self.allocator, ie.cond, idx) catch return;
+                self.putLastUseExpanding(ie.cond, idx, array_elems);
                 for (ie.then) |binding| {
-                    self.scanValueForRefs(binding.value, idx);
+                    self.scanValueForRefs(binding.value, idx, array_elems);
                 }
                 for (ie.@"else") |binding| {
-                    self.scanValueForRefs(binding.value, idx);
+                    self.scanValueForRefs(binding.value, idx, array_elems);
                 }
             },
             .loop => |lp| {
                 for (lp.body) |binding| {
-                    self.scanValueForRefs(binding.value, idx);
+                    self.scanValueForRefs(binding.value, idx, array_elems);
                 }
             },
             .assert => |a| {
-                self.last_uses.put(self.allocator, a.value, idx) catch return;
+                self.putLastUseExpanding(a.value, idx, array_elems);
             },
             .update_prop => |up| {
-                self.last_uses.put(self.allocator, up.value, idx) catch return;
+                self.putLastUseExpanding(up.value, idx, array_elems);
             },
             .check_preimage => |cp| {
-                self.last_uses.put(self.allocator, cp.preimage, idx) catch return;
+                self.putLastUseExpanding(cp.preimage, idx, array_elems);
             },
             .deserialize_state => |ds| {
-                self.last_uses.put(self.allocator, ds.preimage, idx) catch return;
+                self.putLastUseExpanding(ds.preimage, idx, array_elems);
             },
             .add_output => |ao| {
                 if (ao.satoshis.len > 0) {
-                    self.last_uses.put(self.allocator, ao.satoshis, idx) catch return;
+                    self.putLastUseExpanding(ao.satoshis, idx, array_elems);
                 }
                 if (ao.preimage.len > 0) {
-                    self.last_uses.put(self.allocator, ao.preimage, idx) catch return;
+                    self.putLastUseExpanding(ao.preimage, idx, array_elems);
                 }
                 for (ao.state_values) |sv| {
                     if (sv.len > 0) {
-                        self.last_uses.put(self.allocator, sv, idx) catch return;
+                        self.putLastUseExpanding(sv, idx, array_elems);
                     }
                 }
                 for (ao.state_refs) |sr| {
                     if (sr.len > 0) {
-                        self.last_uses.put(self.allocator, sr, idx) catch return;
+                        self.putLastUseExpanding(sr, idx, array_elems);
                     }
                 }
             },
             .add_raw_output => |aro| {
                 if (aro.satoshis.len > 0) {
-                    self.last_uses.put(self.allocator, aro.satoshis, idx) catch return;
+                    self.putLastUseExpanding(aro.satoshis, idx, array_elems);
                 }
                 if (aro.script_bytes.len > 0) {
-                    self.last_uses.put(self.allocator, aro.script_bytes, idx) catch return;
+                    self.putLastUseExpanding(aro.script_bytes, idx, array_elems);
                 }
             },
             .add_data_output => |ado| {
                 if (ado.satoshis.len > 0) {
-                    self.last_uses.put(self.allocator, ado.satoshis, idx) catch return;
+                    self.putLastUseExpanding(ado.satoshis, idx, array_elems);
                 }
                 if (ado.script_bytes.len > 0) {
-                    self.last_uses.put(self.allocator, ado.script_bytes, idx) catch return;
+                    self.putLastUseExpanding(ado.script_bytes, idx, array_elems);
                 }
             },
-            .array_literal => |al| {
-                for (al.elements) |elem| {
-                    self.last_uses.put(self.allocator, elem, idx) catch return;
-                }
+            .array_literal => {
+                // array_literal is metadata-only — skip; computeLastUses
+                // pre-screens these out so scanValueForRefs never receives a
+                // top-level array_literal, and nested ones (if-branches etc.)
+                // are similarly metadata-only.
             },
             .raw_script => {
                 // Opaque byte span — no SSA operand refs. Stack effect is
@@ -889,25 +949,20 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
-    /// Lower an array literal to stack. Each element is brought to the top in
-    /// declaration order; the elements are then consumed from the stack map
-    /// (their slots are now occupied by raw values, not by named refs) and
-    /// the binding name is pushed once to represent the N-element block.
-    /// The element count is recorded in `array_lengths` so consumers like
-    /// `lowerCheckMultiSig` can emit the count push. Mirrors TS
-    /// `lowerArrayLiteral` in `05-stack-lower.ts:1473`.
+    /// Metadata-only. Array literals in Rúnar today only feed into
+    /// `checkMultiSig`. Pre-laying the elements onto the runtime stack here
+    /// would desync the stack-map from the runtime stack (the map can only
+    /// model one slot per binding, but an array binding spans N runtime
+    /// slots). `lowerCheckMultiSig` pulls each element to TOS at the use site.
+    /// Mirrors TS `lowerArrayLiteral` in `05-stack-lower.ts`.
     fn lowerArrayLiteral(self: *LowerCtx, bind_name: []const u8, elements: []const []const u8) !void {
-        for (elements) |elem| {
-            const consume = self.isLastUse(elem);
-            try self.bringToTop(elem, consume);
-        }
-        // Pop all elements from the stack map (consumed into the array block).
-        for (0..elements.len) |_| {
-            _ = self.stack.pop();
-        }
-        try self.stack.push(self.allocator, bind_name);
         try self.array_lengths.put(self.allocator, bind_name, elements.len);
-        self.trackDepth();
+        // Duplicate the slice so it survives even if the source ANF buffer
+        // is freed (it's owned by the program, but defensive copying keeps
+        // the lifetime contract local).
+        const copy = try self.allocator.alloc([]const u8, elements.len);
+        @memcpy(copy, elements);
+        try self.array_elements.put(self.allocator, bind_name, copy);
     }
 
     // ========================================================================
@@ -1048,9 +1103,24 @@ const LowerCtx = struct {
         switch (value) {
             .boolean => |b| try self.emitPushBool(b),
             .integer => |n| try self.emitPushInt(@intCast(n)),
+            .big_integer => |s| try self.emitPushBigIntDecimal(s),
             .string => |s| {
                 if (std.mem.startsWith(u8, s, "@ref:")) {
                     const ref_name = s[5..];
+                    // Special case: if the referenced binding is an
+                    // array_literal (metadata-only — no physical stack slot),
+                    // alias the array metadata into the new binding name and
+                    // emit nothing. The downstream checkMultiSig consumer will
+                    // read elements via array_elements.
+                    if (self.array_elements.get(ref_name)) |elems| {
+                        const copy = try self.allocator.alloc([]const u8, elems.len);
+                        @memcpy(copy, elems);
+                        try self.array_elements.put(self.allocator, bind_name, copy);
+                        if (self.array_lengths.get(ref_name)) |len| {
+                            try self.array_lengths.put(self.allocator, bind_name, len);
+                        }
+                        return;
+                    }
                     // Match TS reference compiler: consume only if ref target is
                     // a local binding in the current scope and this is the last
                     // use. No force-copy tracking — TS does not have it.
@@ -1093,6 +1163,7 @@ const LowerCtx = struct {
                     switch (iv) {
                         .boolean => |b| try self.emitPushBool(b),
                         .integer => |n| try self.emitPushInt(@intCast(n)),
+                        .big_integer => |s| try self.emitPushBigIntDecimal(s),
                         .string => |s| try self.emitPushHexString(s),
                     }
                     try self.stack.push(self.allocator, bind_name);
@@ -2069,46 +2140,51 @@ const LowerCtx = struct {
     }
 
     fn lowerCheckMultiSig(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
-        // Lower checkMultiSig([sig1, sig2, ...], [pk1, pk2, ...]) to Bitcoin Script.
+        // Lower checkMultiSig([sig1..sigN], [pk1..pkM]) to Bitcoin Script.
         //
-        // OP_CHECKMULTISIG expects the stack layout:
-        //   OP_0 <sig1> <sig2> ... <nSigs> <pk1> <pk2> ... <nPKs> OP_CHECKMULTISIG
+        // OP_CHECKMULTISIG expects the stack (bottom -> top):
+        //   <dummy=OP_0> <sig1> ... <sigN> <N> <pk1> ... <pkM> <M>
         //
-        // args[0] is the sigs array binding, args[1] is the pubkeys array
-        // binding. Each was lowered as an array_literal so the individual
-        // elements are already on the stack — we only need to insert the OP_0
-        // dummy, the count pushes, and the opcode. Mirrors TS
-        // `lowerCheckMultiSig` in `05-stack-lower.ts:1507`.
+        // args[0] and args[1] are bindings produced by array_literal. Those
+        // bindings are NOT physical stack slots — their element refs live on
+        // the stack-map as individual named bindings. We pull each element to
+        // TOS via bringToTop. computeLastUses propagates each element's
+        // last-use through the array indirection to THIS binding. Mirrors
+        // TS `lowerCheckMultiSig` in `05-stack-lower.ts`.
         if (args.len != 2) return LowerError.InvalidBuiltin;
 
         const sigs_ref = args[0];
         const pks_ref = args[1];
-        const n_sigs = self.array_lengths.get(sigs_ref) orelse 1;
-        const n_pks = self.array_lengths.get(pks_ref) orelse 1;
+        const sig_elems = self.array_elements.get(sigs_ref) orelse return LowerError.InvalidBuiltin;
+        const pk_elems = self.array_elements.get(pks_ref) orelse return LowerError.InvalidBuiltin;
 
-        // Push OP_0 dummy (required by the OP_CHECKMULTISIG off-by-one quirk).
+        // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         try self.emitPushInt(0);
         try self.stack.push(self.allocator, null);
 
-        // Bring sigs array to top (its individual elements are treated as one item).
-        const sigs_consume = self.isLastUse(sigs_ref);
-        try self.bringToTop(sigs_ref, sigs_consume);
+        // Bring each sig element to TOS in declaration order.
+        for (sig_elems) |sig| {
+            const consume = self.isLastUse(sig);
+            try self.bringToTop(sig, consume);
+        }
 
-        // Push nSigs count.
-        try self.emitPushInt(@intCast(n_sigs));
+        // Push nSigs.
+        try self.emitPushInt(@intCast(sig_elems.len));
         try self.stack.push(self.allocator, null);
 
-        // Bring pubkeys array to top.
-        const pks_consume = self.isLastUse(pks_ref);
-        try self.bringToTop(pks_ref, pks_consume);
+        // Bring each pubkey element to TOS in declaration order.
+        for (pk_elems) |pk| {
+            const consume = self.isLastUse(pk);
+            try self.bringToTop(pk, consume);
+        }
 
-        // Push nPKs count.
-        try self.emitPushInt(@intCast(n_pks));
+        // Push nPKs.
+        try self.emitPushInt(@intCast(pk_elems.len));
         try self.stack.push(self.allocator, null);
 
-        // Stack-map slots consumed by the opcode: OP_0(null), sigsRef,
-        // nSigs(null), pksRef, nPKs(null) = 5 slots.
-        for (0..5) |_| {
+        // OP_CHECKMULTISIG consumes: dummy + N sigs + nSigs + M pks + nPKs.
+        const consumed = 1 + sig_elems.len + 1 + pk_elems.len + 1;
+        for (0..consumed) |_| {
             _ = self.stack.pop();
         }
 
@@ -2763,6 +2839,7 @@ const LowerCtx = struct {
                 switch (iv) {
                     .boolean => |b| try self.emitPushBool(b),
                     .integer => |n| try self.emitPushInt(@intCast(n)),
+                    .big_integer => |s| try self.emitPushBigIntDecimal(s),
                     .string => |s| try self.emitPushData(s),
                 }
                 try self.stack.push(self.allocator, null);
@@ -4125,7 +4202,10 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         // Use body or bindings (whichever is populated)
         const bindings = if (method.body.len > 0) method.body else method.bindings;
         try ctx.lowerBindings(bindings, method.is_public);
-        if (method.is_public and methodUsesDeserializeState(bindings)) {
+        // CLEANSTACK: drop excess items left below the top-of-stack boolean.
+        // cleanupExcessStack() is a no-op when depth <= 1, so running it for
+        // every public method also fixes all-readonly stateful methods.
+        if (method.is_public) {
             try ctx.cleanupExcessStack();
         }
         if (!method.is_public or (!endsWithAssert(bindings) and !endsWithTerminalRawScript(bindings))) {
@@ -4311,23 +4391,6 @@ fn findPrivateMethod(methods: []const types.ANFMethod, name: []const u8) ?types.
     return null;
 }
 
-fn methodUsesDeserializeState(bindings: []const types.ANFBinding) bool {
-    for (bindings) |binding| {
-        switch (binding.value) {
-            .deserialize_state => return true,
-            .@"if" => |ie| {
-                if (methodUsesDeserializeState(ie.then)) return true;
-                if (methodUsesDeserializeState(ie.@"else")) return true;
-            },
-            .loop => |loop| {
-                if (methodUsesDeserializeState(loop.body)) return true;
-            },
-            else => {},
-        }
-    }
-    return false;
-}
-
 fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
     var public_indices = std.ArrayListUnmanaged(usize).empty;
     defer public_indices.deinit(ctx.allocator);
@@ -4378,7 +4441,10 @@ fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
             try ensureMethodPrelude.apply(ctx, bindings, method);
 
             try ctx.lowerBindings(bindings, method.is_public);
-            if (method.is_public and methodUsesDeserializeState(bindings)) {
+            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
+            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
+            // every public method also fixes all-readonly stateful methods.
+            if (method.is_public) {
                 try ctx.cleanupExcessStack();
             }
             if (!endsWithAssert(bindings)) {
@@ -4398,7 +4464,10 @@ fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
             try ensureMethodPrelude.apply(ctx, bindings, method);
 
             try ctx.lowerBindings(bindings, method.is_public);
-            if (method.is_public and methodUsesDeserializeState(bindings)) {
+            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
+            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
+            // every public method also fixes all-readonly stateful methods.
+            if (method.is_public) {
                 try ctx.cleanupExcessStack();
             }
             if (!endsWithAssert(bindings)) {

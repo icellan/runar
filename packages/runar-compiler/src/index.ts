@@ -36,6 +36,7 @@ export { emit } from './passes/06-emit.js';
 export { optimizeStackIR } from './optimizer/peephole.js';
 export { optimizeEC } from './optimizer/anf-ec.js';
 export { foldConstants } from './optimizer/constant-fold.js';
+export { eliminateDeadBindings } from './optimizer/dce.js';
 export { assembleArtifact } from './artifact/assembler.js';
 
 export type { CompilerDiagnostic, Severity } from './errors.js';
@@ -337,7 +338,11 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     anf = foldConstants(anf);
   }
 
-  // Pass 4.5: ANF EC Optimizer (always-on by default; opt-out for strict-roundtrip)
+  // Pass 4.5: ANF EC Optimizer (always-on by default; opt-out for strict-roundtrip).
+  // Note: DCE is invoked from within the EC optimizer (`optimizer/anf-ec.ts`) and
+  // delegates to the discrete `optimizer/dce.ts` module — see "Pass 4.75: DCE" there.
+  // Calling DCE unconditionally here would diverge from the checked-in fold-OFF
+  // goldens (which were stamped under the EC-optimizer-gated DCE policy).
   onProgress?.('EC optimization', 50);
   const optimizedAnf = opts.disableEcOptimizer ? anf : optimizeEC(anf);
 
@@ -461,6 +466,7 @@ export function compileFromANF(
     anf = foldConstants(anf);
   }
 
+  // EC optimizer delegates internally to optimizer/dce.ts for dead-binding cleanup.
   const optimizedAnf = opts.disableEcOptimizer ? anf : optimizeEC(anf);
 
   const stackProgram = lowerToStack(optimizedAnf);

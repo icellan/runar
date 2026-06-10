@@ -17,10 +17,11 @@ const max_iterations = 100;
 // Matching helpers
 // ============================================================================
 
-/// Returns true if the instruction is any push variant (push_int, push_data, push_bool).
+/// Returns true if the instruction is any push variant (push_int, push_data,
+/// push_bool, push_big_int_decimal).
 fn isPush(inst: Inst) bool {
     return switch (inst) {
-        .push_int, .push_data, .push_bool, .push_codesep_index, .placeholder => true,
+        .push_int, .push_data, .push_bool, .push_big_int_decimal, .push_codesep_index, .placeholder => true,
         .op, .raw_bytes => false,
     };
 }
@@ -71,6 +72,7 @@ fn instEql(a: Inst, b: Inst) bool {
         .push_int => |va| va == b.push_int,
         .push_bool => |ba| ba == b.push_bool,
         .push_data => |da| std.mem.eql(u8, da, b.push_data),
+        .push_big_int_decimal => |sa| std.mem.eql(u8, sa, b.push_big_int_decimal),
         .push_codesep_index => true,
         .placeholder => |pa| pa.param_index == b.placeholder.param_index,
         // raw_bytes is opaque; we never compare or rewrite across it, so
@@ -94,18 +96,140 @@ fn sliceEql(a: []const Inst, b: []const Inst) bool {
 // ============================================================================
 
 /// Optimize all methods in a StackMethod slice. Returns a new slice (caller owns).
+///
+/// GAP-002: also carries `instruction_source_locs` through the optimizer so
+/// the artifact's sourceMap survives the pass. Each collapsed window keeps
+/// the source location of its HEAD input instruction; pass-through
+/// instructions copy their loc verbatim.
 pub fn optimize(allocator: Allocator, methods: []const types.StackMethod) ![]types.StackMethod {
     const result = try allocator.alloc(types.StackMethod, methods.len);
     for (methods, 0..) |method, i| {
-        const optimized_insts = try optimizeOps(allocator, method.instructions);
+        const opt = try optimizeOpsAndLocs(allocator, method.instructions, method.instruction_source_locs);
         result[i] = .{
             .name = method.name,
-            .instructions = optimized_insts,
+            .instructions = opt.insts,
+            .instruction_source_locs = opt.locs,
             .ops = method.ops,
             .max_stack_depth = method.max_stack_depth,
         };
     }
     return result;
+}
+
+const OptOut = struct {
+    insts: []Inst,
+    locs: []?types.SourceLocation,
+};
+
+/// Run the iterative peephole pass while keeping a parallel
+/// source-location array aligned with the instruction stream.
+fn optimizeOpsAndLocs(
+    allocator: Allocator,
+    ops: []const Inst,
+    src_locs: []const ?types.SourceLocation,
+) !OptOut {
+    var buf_a_insts = std.ArrayListUnmanaged(Inst).empty;
+    defer buf_a_insts.deinit(allocator);
+    var buf_a_locs = std.ArrayListUnmanaged(?types.SourceLocation).empty;
+    defer buf_a_locs.deinit(allocator);
+    var buf_b_insts = std.ArrayListUnmanaged(Inst).empty;
+    defer buf_b_insts.deinit(allocator);
+    var buf_b_locs = std.ArrayListUnmanaged(?types.SourceLocation).empty;
+    defer buf_b_locs.deinit(allocator);
+
+    try buf_a_insts.ensureTotalCapacity(allocator, ops.len);
+    try buf_a_locs.ensureTotalCapacity(allocator, ops.len);
+    buf_a_insts.appendSliceAssumeCapacity(ops);
+    // Initial loc array — pad to ops.len if the stack-lower output array is
+    // shorter / empty (defensive: should already match in practice).
+    var k: usize = 0;
+    while (k < ops.len) : (k += 1) {
+        const loc = if (k < src_locs.len) src_locs[k] else null;
+        buf_a_locs.appendAssumeCapacity(loc);
+    }
+
+    var iteration: usize = 0;
+    while (iteration < max_iterations) : (iteration += 1) {
+        const changed = try runOnePassWithLocs(allocator, buf_a_insts.items, buf_a_locs.items, &buf_b_insts, &buf_b_locs);
+        if (!changed) break;
+        const tmp_i = buf_a_insts;
+        buf_a_insts = buf_b_insts;
+        buf_b_insts = tmp_i;
+        const tmp_l = buf_a_locs;
+        buf_a_locs = buf_b_locs;
+        buf_b_locs = tmp_l;
+    }
+
+    const insts = try allocator.alloc(Inst, buf_a_insts.items.len);
+    @memcpy(insts, buf_a_insts.items);
+    const locs = try allocator.alloc(?types.SourceLocation, buf_a_locs.items.len);
+    @memcpy(locs, buf_a_locs.items);
+    return .{ .insts = insts, .locs = locs };
+}
+
+fn runOnePassWithLocs(
+    allocator: Allocator,
+    ops: []const Inst,
+    src_locs: []const ?types.SourceLocation,
+    out_insts: *std.ArrayListUnmanaged(Inst),
+    out_locs: *std.ArrayListUnmanaged(?types.SourceLocation),
+) !bool {
+    out_insts.clearRetainingCapacity();
+    out_locs.clearRetainingCapacity();
+    var changed = false;
+
+    var i: usize = 0;
+    while (i < ops.len) {
+        const head_loc = if (i < src_locs.len) src_locs[i] else null;
+        // Window 4
+        if (i + 4 <= ops.len) {
+            if (tryWindow4(ops[i..][0..4])) |replacement| {
+                for (replacement) |inst| {
+                    if (inst) |r| {
+                        try out_insts.append(allocator, r);
+                        try out_locs.append(allocator, head_loc);
+                    }
+                }
+                i += 4;
+                changed = true;
+                continue;
+            }
+        }
+        // Window 3
+        if (i + 3 <= ops.len) {
+            if (tryWindow3(ops[i..][0..3])) |replacement| {
+                for (replacement) |inst| {
+                    if (inst) |r| {
+                        try out_insts.append(allocator, r);
+                        try out_locs.append(allocator, head_loc);
+                    }
+                }
+                i += 3;
+                changed = true;
+                continue;
+            }
+        }
+        // Window 2
+        if (i + 2 <= ops.len) {
+            if (tryWindow2(ops[i..][0..2])) |replacement| {
+                for (replacement) |inst| {
+                    if (inst) |r| {
+                        try out_insts.append(allocator, r);
+                        try out_locs.append(allocator, head_loc);
+                    }
+                }
+                i += 2;
+                changed = true;
+                continue;
+            }
+        }
+        // No rule matched — emit instruction as-is, keep its loc
+        try out_insts.append(allocator, ops[i]);
+        try out_locs.append(allocator, head_loc);
+        i += 1;
+    }
+
+    return changed;
 }
 
 /// Optimize a single instruction sequence. Returns a new slice (caller owns).
@@ -787,7 +911,13 @@ test "optimize methods" {
 
     const result = try optimize(alloc, &methods);
     defer {
-        for (result) |m| alloc.free(m.instructions);
+        for (result) |m| {
+            alloc.free(m.instructions);
+            // GAP-002: optimize now allocates a parallel
+            // instruction_source_locs slice — free it too to avoid the
+            // test-runner leak detector flagging it as a leak.
+            if (m.instruction_source_locs.len > 0) alloc.free(m.instruction_source_locs);
+        }
         alloc.free(result);
     }
 

@@ -10,6 +10,7 @@
 //!   - Total rounds: 28
 //!   - Digest: first 8 elements of the output state
 
+use num_bigint::BigInt;
 use super::koalabear::{
     kb_field_add, kb_field_add_unreduced, kb_field_mul, kb_field_mul_const, kb_field_sqr,
     KBTracker,

@@ -104,6 +104,7 @@ type Artifact struct {
 	Version                string            `json:"version"`
 	CompilerVersion        string            `json:"compilerVersion"`
 	ContractName           string            `json:"contractName"`
+	ParentClass            string            `json:"parentClass,omitempty"`
 	ABI                    ABI               `json:"abi"`
 	Script                 string            `json:"script"`
 	ASM                    string            `json:"asm"`
@@ -164,7 +165,9 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		program = frontend.FoldConstants(program)
 	}
 
-	// EC optimization — algebraic simplification of EC calls
+	// EC optimization — algebraic simplification of EC calls.
+	// Delegates internally to frontend/dce.go for dead-binding cleanup
+	// after any EC rewrite (see eliminateDeadBindings in anf_optimize.go).
 	program = frontend.OptimizeEC(program)
 
 	// Mode 3: when CompileOptions.Groth16WAVKey is set, load the SP1
@@ -321,6 +324,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		Version:         schemaVersion,
 		CompilerVersion: compilerVersion,
 		ContractName:    program.ContractName,
+		ParentClass:     program.ParentClass,
 		ABI: ABI{
 			Constructor: ABIConstructor{Params: constructorParams},
 			Methods:     methods,

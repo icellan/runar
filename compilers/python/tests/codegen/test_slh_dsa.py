@@ -25,12 +25,15 @@ SUPPORTED_KEYS = [
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("key,expected", [
-    ("SHA2_128s",  29559),
-    ("SHA2_128f",  85761),
-    ("SHA2_192s",  41899),
-    ("SHA2_192f", 121708),
-    ("SHA2_256s",  61123),
-    ("SHA2_256f", 122993),
+    # BUG-011: each verifySLHDSA_* prologue now emits an OP_SIZE exact-length
+    # guard (5 additional ops per parameter set) before the existing FORS /
+    # Merkle path expansion.
+    ("SHA2_128s",  29564),
+    ("SHA2_128f",  85766),
+    ("SHA2_192s",  41904),
+    ("SHA2_192f", 121713),
+    ("SHA2_256s",  61128),
+    ("SHA2_256f", 122998),
 ])
 def test_op_count(key, expected):
     ops: list[StackOp] = []

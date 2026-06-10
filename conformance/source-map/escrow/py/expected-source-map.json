@@ -1,0 +1,64 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 52,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 52,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 52,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 53,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 53,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 65,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 65,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 15,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 65,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 66,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/python/escrow/Escrow.runar.py",
+      "line": 66,
+      "column": 8
+    }
+  ]
+}

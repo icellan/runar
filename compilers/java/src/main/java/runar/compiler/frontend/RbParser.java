@@ -1486,7 +1486,7 @@ public final class RbParser {
             switch (k) {
                 case NUMBER -> {
                     advance();
-                    return new BigIntLiteral(BigInteger.valueOf(parseLongLiteral(t.value)));
+                    return new BigIntLiteral(parseBigIntLiteral(t.value));
                 }
                 case TRUE -> { advance(); return new BoolLiteral(true); }
                 case FALSE -> { advance(); return new BoolLiteral(false); }
@@ -1549,6 +1549,16 @@ public final class RbParser {
                 return Long.parseLong(raw.substring(2), 16);
             }
             return Long.parseLong(raw, 10);
+        }
+
+        /** Parse a numeric literal as a BigInteger so 256-bit constants (e.g.
+         *  the secp256k1 group order) compile cleanly even when they overflow
+         *  a Java long. */
+        BigInteger parseBigIntLiteral(String raw) {
+            if (raw.startsWith("0x") || raw.startsWith("0X")) {
+                return new BigInteger(raw.substring(2), 16);
+            }
+            return new BigInteger(raw, 10);
         }
 
         int parseIntLiteral(String raw) {

@@ -139,6 +139,10 @@ type PreparedCall struct {
 	resolvedArgs      []interface{}
 	methodSelectorHex string
 	isStateful        bool
+	// parentStateful is true when the contract extends StatefulSmartContract
+	// (from artifact ParentClass), independent of whether it has mutable
+	// state fields. Gates the issue-#42/#44 terminal sighash subscript trim.
+	parentStateful    bool
 	isTerminal        bool
 	needsOpPushTx     bool
 	methodNeedsChange bool
@@ -196,6 +200,12 @@ type RunarArtifact struct {
 	Version                string             `json:"version"`
 	CompilerVersion        string             `json:"compilerVersion"`
 	ContractName           string             `json:"contractName"`
+	// ParentClass is the base class the source contract extends. It is the
+	// authoritative stateful signal for the issue-#42/#44 terminal sighash
+	// subscript trim: a StatefulSmartContract with zero mutable fields still
+	// needs the trim even though StateFields is empty. Older artifacts that
+	// predate this field leave it empty.
+	ParentClass            string             `json:"parentClass,omitempty"`
 	ABI                    ABI                `json:"abi"`
 	Script                 string             `json:"script"`
 	ASM                    string             `json:"asm"`

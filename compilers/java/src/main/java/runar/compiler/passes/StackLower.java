@@ -146,33 +146,14 @@ public final class StackLower {
         "~", List.of("OP_INVERT")
     );
 
-    // Builtins whose Stack-IR codegen ships in the Go tier ONLY by design.
-    // These power Mode-3 STARK / FRI / Groth16 verification flows that have
-    // not been ported to the other six compiler tiers. The Java stack lowerer
-    // intentionally rejects them — see CLAUDE.md ("Go-only crypto codegen
-    // modules") and conformance/README.md ("Per-fixture compiler allowlist").
-    private static final Set<String> GO_ONLY_BUILTINS = Set.of(
-        // BabyBear field
-        "bbFieldAdd", "bbFieldSub", "bbFieldMul", "bbFieldInv",
-        "bbExt4Mul0", "bbExt4Mul1", "bbExt4Mul2", "bbExt4Mul3",
-        "bbExt4Inv0", "bbExt4Inv1", "bbExt4Inv2", "bbExt4Inv3",
-        // KoalaBear field
-        "kbFieldAdd", "kbFieldSub", "kbFieldMul", "kbFieldInv",
-        "kbExt4Mul0", "kbExt4Mul1", "kbExt4Mul2", "kbExt4Mul3",
-        "kbExt4Inv0", "kbExt4Inv1", "kbExt4Inv2", "kbExt4Inv3",
-        // Poseidon2 + Merkle (Poseidon2-KB)
-        "merkleRootPoseidon2KB",
-        // BN254 field + curve + pairing
-        "bn254FieldAdd", "bn254FieldSub", "bn254FieldMul",
-        "bn254FieldInv", "bn254FieldNeg",
-        "bn254G1Add", "bn254G1ScalarMul", "bn254G1Negate", "bn254G1OnCurve",
-        "bn254Pairing", "bn254MultiPairing3", "bn254MultiPairing4",
-        // Groth16 witness-assisted helpers
-        "assertGroth16WitnessAssisted", "assertGroth16WitnessAssistedWithMSM",
-        "groth16PublicInput",
-        // SP1 FRI verifier
-        "verifySP1FRI"
-    );
+    // Go-only Mode-3 STARK / FRI / Groth16 verifier builtins are now routed
+    // through dedicated stub codegen modules (BabyBear, KoalaBear,
+    // Poseidon2KoalaBear, Poseidon2Merkle, Bn254, Merkle, FiatShamirKb) in
+    // runar.compiler.codegen — each module's dispatch() throws
+    // UnsupportedOperationException with a CLAUDE.md pointer. See the
+    // dispatch chain in lowerBuiltinCall(). The old GO_ONLY_BUILTINS Set
+    // was removed in favour of module-presence parity with the other 5
+    // non-Go tiers (TS / Rust / Python / Zig / Ruby).
 
     // ------------------------------------------------------------------
     // StackMap: tracks named values on the stack
@@ -266,9 +247,31 @@ public final class StackLower {
 
     static Map<String, Integer> computeLastUses(List<AnfBinding> bindings) {
         Map<String, Integer> lastUse = new HashMap<>();
+        // Pre-scan: map each array_literal binding to its element refs. Used to
+        // propagate last-use across the array indirection (the array binding is
+        // pure metadata in lowerArrayLiteral — its elements must remain live
+        // until the array's consumer, not until the array_literal binding itself).
+        Map<String, List<String>> arrayElems = new HashMap<>();
+        for (AnfBinding b : bindings) {
+            if (b.value() instanceof ArrayLiteral al) {
+                arrayElems.put(b.name(), new ArrayList<>(al.elements()));
+            }
+        }
         for (int i = 0; i < bindings.size(); i++) {
-            for (String r : collectRefs(bindings.get(i).value())) {
+            AnfValue v = bindings.get(i).value();
+            // array_literal is metadata-only — do NOT advance its elements'
+            // last-use to here; defer to the array's consumer.
+            if (v instanceof ArrayLiteral) {
+                continue;
+            }
+            for (String r : collectRefs(v)) {
                 lastUse.put(r, i);
+                List<String> elems = arrayElems.get(r);
+                if (elems != null) {
+                    for (String e : elems) {
+                        lastUse.put(e, i);
+                    }
+                }
             }
         }
         return lastUse;
@@ -377,12 +380,12 @@ public final class StackLower {
         LoweringContext ctx = new LoweringContext(paramNames, properties, privateMethods);
         ctx.lowerBindings(method.body(), method.isPublic());
 
-        // Strip excess stack items left by deserialize_state on public methods.
-        boolean hasDeserializeState = false;
-        for (AnfBinding b : method.body()) {
-            if (b.value() instanceof DeserializeState) { hasDeserializeState = true; break; }
-        }
-        if (method.isPublic() && hasDeserializeState && ctx.sm.depth() > 1) {
+        // Strip excess stack items below the top-of-stack boolean (CLEANSTACK).
+        // Excess items can come from deserialize_state (stateful methods reading
+        // mutable fields) or from readonly-field-binding patterns in all-readonly
+        // terminal methods. The depth() > 1 guard keeps this a no-op for
+        // already-clean methods.
+        if (method.isPublic() && ctx.sm.depth() > 1) {
             int excess = ctx.sm.depth() - 1;
             for (int i = 0; i < excess; i++) {
                 ctx.emitOp(new NipOp());
@@ -462,6 +465,12 @@ public final class StackLower {
         boolean insideBranch;
         // Element counts for array_literal bindings (used by checkMultiSig).
         Map<String, Integer> arrayLengths = new HashMap<>();
+        // Element refs for array_literal bindings (used by checkMultiSig).
+        Map<String, List<String>> arrayElements = new HashMap<>();
+        // GAP-002: current AnfBinding's sourceLoc, threaded onto every
+        // StackOp emitted while that binding lowers. The Emit pass walks
+        // op.sourceLoc() to build the artifact's sourceMap.
+        runar.compiler.ir.ast.SourceLocation currentSourceLoc;
 
         LoweringContext(List<String> params, List<AnfProperty> properties) {
             this.sm = new StackMap(params);
@@ -479,14 +488,88 @@ public final class StackLower {
         }
 
         void emitOp(StackOp op) {
-            ops.add(op);
+            // GAP-002: re-stamp the op with the current source loc so the
+            // Emit pass can read it back. Only re-stamp ops that don't
+            // already carry one (e.g. those produced by upstream passes
+            // before this LoweringContext was active).
+            ops.add(stampSourceLoc(op, currentSourceLoc));
             trackDepth();
+        }
+
+        private static runar.compiler.ir.stack.StackOp stampSourceLoc(
+            runar.compiler.ir.stack.StackOp op,
+            runar.compiler.ir.ast.SourceLocation loc
+        ) {
+            if (loc == null) return op;
+            runar.compiler.ir.stack.StackSourceLoc sl =
+                new runar.compiler.ir.stack.StackSourceLoc(loc.file(), loc.line(), loc.column());
+            if (op instanceof runar.compiler.ir.stack.OpcodeOp o) {
+                if (o.sourceLoc() != null) return o;
+                return new runar.compiler.ir.stack.OpcodeOp(o.code(), sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.DupOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.DupOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.SwapOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.SwapOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.DropOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.DropOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.NipOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.NipOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.OverOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.OverOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.RotOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.RotOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.TuckOp d) {
+                if (d.sourceLoc() != null) return d;
+                return new runar.compiler.ir.stack.TuckOp(sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.PushOp p) {
+                if (p.sourceLoc() != null) return p;
+                return new runar.compiler.ir.stack.PushOp(p.value(), sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.PickOp p) {
+                if (p.sourceLoc() != null) return p;
+                return new runar.compiler.ir.stack.PickOp(p.depth(), sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.RollOp p) {
+                if (p.sourceLoc() != null) return p;
+                return new runar.compiler.ir.stack.RollOp(p.depth(), sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.IfOp i) {
+                if (i.sourceLoc() != null) return i;
+                return new runar.compiler.ir.stack.IfOp(i.thenBranch(), i.elseBranch(), sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.PlaceholderOp p) {
+                if (p.sourceLoc() != null) return p;
+                return new runar.compiler.ir.stack.PlaceholderOp(p.paramIndex(), p.paramName(), sl);
+            }
+            if (op instanceof runar.compiler.ir.stack.PushCodeSepIndexOp p) {
+                if (p.sourceLoc() != null) return p;
+                return new runar.compiler.ir.stack.PushCodeSepIndexOp(sl);
+            }
+            // RawBytesOp has no sourceLoc field — skip.
+            return op;
         }
 
         LoweringContext subContext() {
             LoweringContext c = new LoweringContext(null, properties);
             c.sm.slots.addAll(this.sm.slots);
             c.privateMethods = this.privateMethods;
+            // GAP-002: nested branches keep the outer statement's loc by
+            // default; the inner binding loop will override on each step.
+            c.currentSourceLoc = this.currentSourceLoc;
             return c;
         }
 
@@ -621,12 +704,25 @@ public final class StackLower {
 
             for (int i = 0; i < bindings.size(); i++) {
                 AnfBinding b = bindings.get(i);
-                if (b.value() instanceof Assert a && i == lastAssertIdx) {
-                    lowerAssert(a.value(), i, lastUses, true);
-                } else if (b.value() instanceof If iv && i == terminalIfIdx) {
-                    lowerIf(b.name(), iv.cond(), iv.thenBranch(), iv.elseBranch(), i, lastUses, true);
-                } else {
-                    lowerBinding(b, i, lastUses);
+                // GAP-002: stamp the binding's sourceLoc onto every StackOp
+                // emitted while it lowers. We deliberately keep the loc
+                // sticky AFTER the binding closes — nothing reads it until
+                // the next binding overwrites it — so peephole-survivable
+                // ops get a deterministic anchor.
+                runar.compiler.ir.ast.SourceLocation prev = currentSourceLoc;
+                if (b.sourceLoc() != null) {
+                    currentSourceLoc = b.sourceLoc();
+                }
+                try {
+                    if (b.value() instanceof Assert a && i == lastAssertIdx) {
+                        lowerAssert(a.value(), i, lastUses, true);
+                    } else if (b.value() instanceof If iv && i == terminalIfIdx) {
+                        lowerIf(b.name(), iv.cond(), iv.thenBranch(), iv.elseBranch(), i, lastUses, true);
+                    } else {
+                        lowerBinding(b, i, lastUses);
+                    }
+                } finally {
+                    currentSourceLoc = prev;
                 }
             }
         }
@@ -740,6 +836,16 @@ public final class StackLower {
                 String raw = bc.hex();
                 if (raw != null && raw.length() > 5 && raw.startsWith("@ref:")) {
                     String refName = raw.substring(5);
+                    // Special case: aliasing an array_literal (metadata-only
+                    // binding, not present in the stack-map). Copy the array
+                    // metadata under the new binding name and emit no stack moves.
+                    List<String> refElems = arrayElements.get(refName);
+                    if (refElems != null) {
+                        arrayElements.put(bindingName, new ArrayList<>(refElems));
+                        Integer refLen = arrayLengths.get(refName);
+                        if (refLen != null) arrayLengths.put(bindingName, refLen);
+                        return;
+                    }
                     if (sm.has(refName)) {
                         boolean consume = Boolean.TRUE.equals(localBindings.get(refName))
                             && isLastUse(refName, idx, lastUses);
@@ -898,6 +1004,45 @@ public final class StackLower {
             }
 
             // ------------------------------------------------------------------
+            // Go-only Mode-3 STARK / FRI / Groth16 verifier families:
+            // BabyBear, KoalaBear, Poseidon2-KB, Poseidon2-Merkle, BN254/Groth16,
+            // sha256-Merkle, FiatShamir-KB. Java tier carries presence-only stubs
+            // for parity with the other 5 non-Go tiers; the dispatch methods
+            // throw UnsupportedOperationException with a CLAUDE.md pointer.
+            // Fixtures that exercise these primitives MUST carry a
+            // "compilers": ["go"] allowlist in source.json. See CLAUDE.md
+            // ("Go-only crypto codegen modules") and conformance/README.md.
+            // ------------------------------------------------------------------
+            if (runar.compiler.codegen.BabyBear.isBabyBearBuiltin(funcName)) {
+                runar.compiler.codegen.BabyBear.dispatch(funcName, this::emitOp);
+                return; // unreachable — dispatch always throws
+            }
+            if (runar.compiler.codegen.KoalaBear.isKoalaBearBuiltin(funcName)) {
+                runar.compiler.codegen.KoalaBear.dispatch(funcName, this::emitOp);
+                return; // unreachable
+            }
+            if (runar.compiler.codegen.Poseidon2KoalaBear.isPoseidon2KoalaBearBuiltin(funcName)) {
+                runar.compiler.codegen.Poseidon2KoalaBear.dispatch(funcName, this::emitOp);
+                return; // unreachable
+            }
+            if (runar.compiler.codegen.Poseidon2Merkle.isPoseidon2MerkleBuiltin(funcName)) {
+                runar.compiler.codegen.Poseidon2Merkle.dispatch(funcName, this::emitOp);
+                return; // unreachable
+            }
+            if (runar.compiler.codegen.Bn254.isBn254Builtin(funcName)) {
+                runar.compiler.codegen.Bn254.dispatch(funcName, this::emitOp);
+                return; // unreachable
+            }
+            if (runar.compiler.codegen.Merkle.isMerkleBuiltin(funcName)) {
+                runar.compiler.codegen.Merkle.dispatch(funcName, this::emitOp);
+                return; // unreachable
+            }
+            if (runar.compiler.codegen.FiatShamirKb.isFiatShamirKbBuiltin(funcName)) {
+                runar.compiler.codegen.FiatShamirKb.dispatch(funcName, this::emitOp);
+                return; // unreachable
+            }
+
+            // ------------------------------------------------------------------
             // Math + ByteString builtins: substr, safediv, safemod, percentOf.
             // Each emits a small fixed opcode sequence; mirror Python/Rust exactly.
             // ------------------------------------------------------------------
@@ -954,15 +1099,11 @@ public final class StackLower {
 
             List<String> opcodes = BUILTIN_OPCODES.get(funcName);
             if (opcodes == null) {
-                if (GO_ONLY_BUILTINS.contains(funcName)) {
-                    throw new IllegalStateException(
-                        "builtin '" + funcName + "' is Go-tier only by design — "
-                        + "its Stack-IR codegen ships in the Go compiler only "
-                        + "(BabyBear/KoalaBear/Poseidon2/BN254/Groth16/SP1-FRI/FiatShamir-KB modules). "
-                        + "Compile this contract with the Go compiler, or opt the fixture out of the Java tier "
-                        + "via source.json's \"compilers\" allowlist. "
-                        + "See CLAUDE.md (\"Go-only crypto codegen modules\") and conformance/README.md.");
-                }
+                // Go-only builtins are intercepted above via the BabyBear /
+                // KoalaBear / Poseidon2KoalaBear / Poseidon2Merkle / Bn254 /
+                // Merkle / FiatShamirKb dispatch chain, which throws
+                // UnsupportedOperationException with a CLAUDE.md pointer.
+                // Anything that reaches here is a genuinely unknown builtin.
                 throw new IllegalStateException(
                     "unknown builtin: '" + funcName + "' is not a known Rúnar builtin. "
                     + "If this is a Rúnar built-in function, add it to StackLower.BUILTIN_OPCODES "
@@ -1133,35 +1274,51 @@ public final class StackLower {
             trackDepth();
         }
 
-        // checkMultiSig(sigs, pks):
-        //   OP_0 <sig1> ... <sigN> <nSigs> <pk1> ... <pkM> <nPKs> OP_CHECKMULTISIG
-        // Element counts come from arrayLengths, populated by lowerArrayLiteral.
+        // Lower checkMultiSig([sig1..sigN], [pk1..pkM]).
+        //
+        // OP_CHECKMULTISIG expects the stack (bottom -> top):
+        //   <dummy=OP_0> <sig1> ... <sigN> <N> <pk1> ... <pkM> <M>
+        //
+        // args[0] and args[1] are bindings produced by array_literal. Those
+        // bindings are NOT physical stack slots — their element refs live on
+        // the stack-map as individual named bindings. We pull each element to
+        // TOS via bringToTop. computeLastUses propagates each element's
+        // last-use through the array indirection to THIS binding.
         void lowerCheckMultiSig(String bindingName, List<String> args, int idx, Map<String, Integer> lastUses) {
             String sigsRef = args.get(0);
             String pksRef = args.get(1);
-            int nSigs = arrayLengths.getOrDefault(sigsRef, 1);
-            int nPks = arrayLengths.getOrDefault(pksRef, 1);
+            List<String> sigElems = arrayElements.get(sigsRef);
+            List<String> pkElems = arrayElements.get(pksRef);
+            if (sigElems == null || pkElems == null) {
+                throw new RuntimeException(
+                    "checkMultiSig: array_literal metadata missing (sigs=" + sigsRef + ", pks=" + pksRef + ")");
+            }
 
-            // Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
+            // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
             emitOp(new PushOp(PushValue.of(0)));
             sm.push("");
 
-            // Bring sigs array ref to top (the individual elements are treated as one item)
-            bringToTop(sigsRef, isLastUse(sigsRef, idx, lastUses));
+            // Bring each sig element to TOS in declaration order.
+            for (String sig : sigElems) {
+                bringToTop(sig, isLastUse(sig, idx, lastUses));
+            }
 
-            // Push nSigs count
-            emitOp(new PushOp(PushValue.of(nSigs)));
+            // Push nSigs.
+            emitOp(new PushOp(PushValue.of(sigElems.size())));
             sm.push("");
 
-            // Bring pubkeys array ref to top
-            bringToTop(pksRef, isLastUse(pksRef, idx, lastUses));
+            // Bring each pubkey element to TOS in declaration order.
+            for (String pk : pkElems) {
+                bringToTop(pk, isLastUse(pk, idx, lastUses));
+            }
 
-            // Push nPKs count
-            emitOp(new PushOp(PushValue.of(nPks)));
+            // Push nPKs.
+            emitOp(new PushOp(PushValue.of(pkElems.size())));
             sm.push("");
 
-            // Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
-            for (int i = 0; i < 5; i++) {
+            // OP_CHECKMULTISIG consumes: dummy + N sigs + nSigs + M pks + nPKs.
+            int consumed = 1 + sigElems.size() + 1 + pkElems.size() + 1;
+            for (int i = 0; i < consumed; i++) {
                 sm.pop();
             }
 
@@ -2917,22 +3074,14 @@ public final class StackLower {
         // ---------------- array_literal ----------------
 
         void lowerArrayLiteral(String bindingName, List<String> elements, int idx, Map<String, Integer> lastUses) {
-            // Bring each element to TOS in order; on the stack-map collapse the
-            // N entries into a single logical slot labelled with the binding
-            // name. Consumers (e.g. checkMultiSig) treat the whole array as
-            // one stack item and read the element count from arrayLengths.
-            for (String el : elements) {
-                bringToTop(el, isLastUse(el, idx, lastUses));
-            }
-            // Pop all elements from the stack map (consumed into the array)
-            for (int i = 0; i < elements.size(); i++) {
-                sm.pop();
-            }
-            // Push a single entry representing the whole array
-            sm.push(bindingName);
-            // Record the array length so checkMultiSig can emit nSigs/nPKs.
+            // Metadata-only. Array literals in Rúnar today only feed into
+            // checkMultiSig. Pre-laying the elements onto the runtime stack
+            // here would desync the stack-map from the runtime stack (the
+            // map can only model one slot per binding, but an array binding
+            // spans N runtime slots). lowerCheckMultiSig pulls each element
+            // to TOS at the use site.
             arrayLengths.put(bindingName, elements.size());
-            trackDepth();
+            arrayElements.put(bindingName, new ArrayList<>(elements));
         }
 
         // ---------------- helpers: varint encoding, push-data encoding ----------------

@@ -1,0 +1,64 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 13,
+      "column": 2
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 14,
+      "column": 2
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 15,
+      "column": 3
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 15,
+      "column": 3
+    },
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 15,
+      "column": 3
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 17,
+      "column": 3
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 17,
+      "column": 3
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 17,
+      "column": 3
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 19,
+      "column": 2
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 19,
+      "column": 2
+    }
+  ]
+}

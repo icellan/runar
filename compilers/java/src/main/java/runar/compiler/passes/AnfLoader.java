@@ -48,6 +48,12 @@ public final class AnfLoader {
     private AnfLoader() {}
 
     public static AnfProgram parse(String json) {
+        // DoS-bound guards run before the hand-rolled JSON parser so a
+        // malicious payload cannot exhaust memory (size) or the JVM
+        // thread stack (nesting). BUG-008 follow-up.
+        IRInputLimits.assertIRBytesUnderLimit(json);
+        IRInputLimits.assertIRNestingUnderLimit(json);
+
         JsonParser p = new JsonParser(json);
         Object root = p.parseValue();
         p.skipWs();
@@ -109,8 +115,20 @@ public final class AnfLoader {
     private static AnfBinding toBinding(Map<?, ?> obj) {
         String name = asString(obj.get("name"));
         AnfValue v = toValue(asObject(obj.get("value")));
-        return new AnfBinding(name, v, null);
+        // GAP-002: round-trip the optional `sourceLoc` field. Used for
+        // source-map plumbing; omitted (null) for legacy / hand-written
+        // ANF inputs.
+        runar.compiler.ir.ast.SourceLocation loc = null;
+        Object locRaw = obj.get("sourceLoc");
+        if (locRaw instanceof Map<?, ?> locObj) {
+            String file = asString(locObj.get("file"));
+            int line = asInt(locObj.get("line"));
+            int col = asInt(locObj.get("column"));
+            loc = new runar.compiler.ir.ast.SourceLocation(file, line, col);
+        }
+        return new AnfBinding(name, v, loc);
     }
+
 
     private static AnfValue toValue(Map<?, ?> obj) {
         String kind = asString(obj.get("kind"));
@@ -145,7 +163,11 @@ public final class AnfLoader {
                 toBindingList(obj.get("body")),
                 asString(obj.get("iterVar"))
             );
-            case "assert" -> new Assert(asString(obj.get("value")));
+            case "assert" -> new Assert(
+                asString(obj.get("value")),
+                obj.containsKey("isAutoInjectedStateCheck")
+                    && Boolean.TRUE.equals(obj.get("isAutoInjectedStateCheck"))
+            );
             case "update_prop" -> new UpdateProp(asString(obj.get("name")), asString(obj.get("value")));
             case "get_state_script" -> new GetStateScript();
             case "check_preimage" -> new CheckPreimage(asString(obj.get("preimage")));
@@ -219,8 +241,47 @@ public final class AnfLoader {
         if (v instanceof BigInteger bi) return new BigIntConst(bi);
         if (v instanceof Long l) return new BigIntConst(BigInteger.valueOf(l));
         if (v instanceof Integer i) return new BigIntConst(BigInteger.valueOf(i));
-        if (v instanceof String s) return new BytesConst(s);
+        if (v instanceof String s) {
+            // A JSON string in the load_const value position is either:
+            //   1. A decimal-encoded BigInt with the canonical JS BigInt
+            //      `n` suffix (e.g. "115792...41n") — the only way to
+            //      round-trip oversize 256-bit constants through JSON
+            //      without losing precision.
+            //   2. A hex-encoded ByteString literal (never carries the
+            //      `n` suffix; an `n` would not be a hex character).
+            // The trailing `n` is the discriminator — matches the rule
+            // in compilers/go/ir/types.go::isDecimalBigIntLiteral and
+            // packages/runar-compiler/src/__tests__/cross-compiler.test.ts.
+            if (isDecimalBigIntLiteral(s)) {
+                String body = s.substring(0, s.length() - 1);
+                return new BigIntConst(new BigInteger(body, 10));
+            }
+            return new BytesConst(s);
+        }
         throw new RuntimeException("unexpected const type: " + (v == null ? "null" : v.getClass()));
+    }
+
+    /**
+     * Returns whether {@code s} is a JS-style decimal BigInt literal:
+     * optional leading {@code -}, one or more ASCII digits, REQUIRED
+     * trailing {@code n} marker. Mirrors Go's
+     * {@code isDecimalBigIntLiteral} so the IR round-trips losslessly
+     * across tiers. Without the {@code n} discriminator a hex string
+     * like {@code "3030"} would be ambiguously decodable as either the
+     * integer 3030 or the 2-byte bytestring {@code 0x30 0x30}.
+     */
+    static boolean isDecimalBigIntLiteral(String s) {
+        if (s == null || s.length() < 2) return false;
+        if (s.charAt(s.length() - 1) != 'n') return false;
+        int start = 0;
+        if (s.charAt(0) == '-') start = 1;
+        int body = s.length() - 1;
+        if (body - start < 1) return false;
+        for (int i = start; i < body; i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
     }
 
     private static List<AnfBinding> toBindingList(Object v) {

@@ -1323,16 +1323,20 @@ class JavaParser {
 
   private parseNewExpression(): Expression {
     this.expect('new');
-    // Only `new T[]{...}` is supported: a typed array literal.
+    // Only `new T[]{...}` (array literals) and `new BigInteger("decimal")`
+    // (oversize-bigint literal escape hatch) are supported.
     const typeTok = this.current();
     if (typeTok.type !== 'ident' && typeTok.type !== 'boolean') {
       this.errorAt(typeTok, `expected type after 'new'`);
       return { kind: 'array_literal', elements: [] };
     }
     // Consume type name (possibly qualified) plus optional generic args.
+    const baseType = typeTok.value;
     this.advance();
+    let finalType = baseType;
     while (this.current().type === '.' && this.lookahead(1).type === 'ident') {
-      this.advance(); this.advance();
+      this.advance();
+      finalType = this.advance().value;
     }
     if (this.current().type === '<') this.skipBalanced('<', '>');
 
@@ -1349,8 +1353,62 @@ class JavaParser {
       return { kind: 'array_literal', elements };
     }
 
+    // `new BigInteger("decimal")` / `new BigInteger("hex", 16)` — escape hatch
+    // for bigint constants whose magnitude exceeds Long.MAX_VALUE (a Java
+    // decimal literal of that magnitude is not a valid `long`, so Rúnar Java
+    // sources cannot express the secp256k1 group order any other way and
+    // still compile under `javac`). The TS-side `Bigint.of(...)` /
+    // `BigInteger.valueOf(...)` paths only handle small literals because
+    // they delegate to a (long) factory. This branch parses the radix-aware
+    // string-arg ctor and folds it into a `bigint_literal` at parse time.
+    if (finalType === 'BigInteger' && this.current().type === '(') {
+      this.advance(); // '('
+      const arg0Tok = this.current();
+      if (arg0Tok.type === 'string') {
+        this.advance();
+        let radix = 10;
+        if (this.current().type === ',') {
+          this.advance();
+          const radixTok = this.current();
+          if (radixTok.type === 'number') {
+            this.advance();
+            radix = Number(radixTok.value);
+          }
+        }
+        if (this.current().type === ')') this.advance();
+        try {
+          // Strip a possible '+' sign and parse radix-N decimal/hex.
+          const raw = arg0Tok.value.replace(/_/g, '');
+          let value: bigint;
+          if (radix === 10) {
+            value = BigInt(raw);
+          } else if (radix === 16) {
+            value = BigInt('0x' + raw);
+          } else {
+            // Fallback: manual radix decode.
+            value = 0n;
+            const r = BigInt(radix);
+            for (const ch of raw.toLowerCase()) {
+              const d = '0123456789abcdefghijklmnopqrstuvwxyz'.indexOf(ch);
+              if (d < 0 || d >= radix) throw new Error(`invalid digit '${ch}'`);
+              value = value * r + BigInt(d);
+            }
+          }
+          return { kind: 'bigint_literal', value };
+        } catch (err) {
+          this.errorAt(
+            arg0Tok,
+            `cannot parse 'new BigInteger("${arg0Tok.value}", ${radix})': ${(err as Error).message}`,
+          );
+          return { kind: 'bigint_literal', value: 0n };
+        }
+      }
+      // Unknown shape — fall through to the generic error path below.
+      if (this.current().type === '(') this.skipBalanced('(', ')');
+    }
+
     // `new Foo(...)` — constructor call. Not part of the Rúnar subset.
-    this.errorAt(typeTok, '`new` expressions other than array literals (new T[]{...}) are unsupported');
+    this.errorAt(typeTok, '`new` expressions other than array literals (new T[]{...}) and `new BigInteger("...")` literals are unsupported');
     // attempt to consume a balanced '(...)'
     if (this.current().type === '(') this.skipBalanced('(', ')');
     return { kind: 'bigint_literal', value: 0n };

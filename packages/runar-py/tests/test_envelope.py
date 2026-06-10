@@ -68,6 +68,15 @@ class TestCanonicalJson:
         assert canonical_json(42) == "42"
         assert canonical_json("hi") == '"hi"'
 
+    # Audit D6 — Python `str` may legally contain lone surrogates; the
+    # canonical serializer must reject them rather than emit invalid UTF-8.
+    def test_rejects_lone_surrogate(self):
+        import pytest
+        with pytest.raises(ValueError, match="lone surrogate"):
+            canonical_json("\ud800")
+        with pytest.raises(ValueError, match="lone surrogate"):
+            canonical_json({"\udcff": 1})
+
 
 # ---------------------------------------------------------------------------
 # Round-trip + rejection ladder

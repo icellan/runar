@@ -156,6 +156,30 @@ pub const EmitContext = struct {
         }
     }
 
+    /// Emit a Bitcoin Script number whose magnitude exceeds `i64` range,
+    /// given as a decimal-string literal (optional leading `-`, ASCII
+    /// digits 0-9, no underscores, no `n` suffix). The bytes are encoded
+    /// little-endian sign-magnitude with a length-prefixed push, matching
+    /// the reference Go / TS / Python emitters byte-for-byte for the 256-bit
+    /// constants exercised by the schnorr-zkp fixture. Callers that hold a
+    /// value already known to fit `i64` must use `emitScriptNumber` instead
+    /// so the existing small-int OP_N / OP_1NEGATE shortcuts are honoured.
+    pub fn emitScriptNumberFromDecimal(self: *EmitContext, decimal: []const u8) !void {
+        try self.recordSourceMapping();
+        const start = self.script_bytes.items.len;
+        const sn_writer = opcodes.ArrayListWriter{ .list = &self.script_bytes, .allocator = self.allocator };
+        try opcodes.encodeScriptNumberFromDecimal(self.allocator, sn_writer, decimal);
+        const bytes_written: u32 = @intCast(self.script_bytes.items.len - start);
+        self.byte_offset += bytes_written;
+        self.opcode_index += 1;
+
+        // ASM: just show the decimal representation verbatim (the value is
+        // oversize by construction; small-int OP_N is unreachable here).
+        const num_str = try self.allocator.dupe(u8, decimal);
+        try self.owned_asm_parts.append(self.allocator, num_str);
+        try self.asm_parts.append(self.allocator, num_str);
+    }
+
     /// Emit a push bool: true -> OP_TRUE (OP_1), false -> OP_FALSE (OP_0).
     /// Note: delegates to emitOpcode which handles recordSourceMapping + opcode_index.
     pub fn emitPushBool(self: *EmitContext, b: bool) !void {
@@ -239,6 +263,7 @@ pub fn emitStackOp(ctx: *EmitContext, op: types.StackOp) !void {
             .bytes => |data| try ctx.emitPushData(data),
             .integer => |n| try ctx.emitScriptNumber(n),
             .boolean => |b| try ctx.emitPushBool(b),
+            .big_int_decimal => |s| try ctx.emitScriptNumberFromDecimal(s),
         },
         .dup => try ctx.emitOpcode(.op_dup),
         .swap => try ctx.emitOpcode(.op_swap),
@@ -284,6 +309,7 @@ pub fn emitStackInstruction(ctx: *EmitContext, inst: types.StackInstruction) !vo
         .push_data => |data| try ctx.emitPushData(data),
         .push_int => |n| try ctx.emitScriptNumber(n),
         .push_bool => |b| try ctx.emitPushBool(b),
+        .push_big_int_decimal => |s| try ctx.emitScriptNumberFromDecimal(s),
         .push_codesep_index => {
             // Emit an OP_0 placeholder that the SDK will replace with the
             // adjusted codeSeparatorIndex at runtime.
@@ -540,6 +566,15 @@ pub fn emitArtifact(
     try writeJsonString(w, stack_program.contract_name);
     try w.writeByte(',');
 
+    // parentClass — authoritative stateful signal for the issue-#42/#44
+    // terminal sighash subscript trim (a StatefulSmartContract with zero
+    // mutable fields still needs the trim). Sourced from the ANF program; it
+    // is deliberately NOT part of the emitted ANF IR JSON, so cross-tier
+    // conformance parity is unaffected.
+    try w.writeAll("\"parentClass\":");
+    try writeJsonString(w, anf_program.parent_class.toTsString());
+    try w.writeByte(',');
+
     // abi
     try w.writeAll("\"abi\":{");
 
@@ -665,9 +700,11 @@ pub fn emitArtifact(
         try w.writeAll("]");
     }
 
-    // sourceMap — opcode-to-source-location mappings
+    // sourceMap — opcode-to-source-location mappings.
+    // Wrapped in {"mappings":[...]} to match the canonical schema declared
+    // in packages/runar-ir-schema/src/schemas/artifact.schema.json#SourceMap.
     if (ctx.source_map.items.len > 0) {
-        try w.writeAll(",\"sourceMap\":[");
+        try w.writeAll(",\"sourceMap\":{\"mappings\":[");
         for (ctx.source_map.items, 0..) |mapping, i| {
             if (i > 0) try w.writeByte(',');
             try w.writeAll("{\"opcodeIndex\":");
@@ -680,7 +717,7 @@ pub fn emitArtifact(
             try w.print("{d}", .{mapping.column});
             try w.writeByte('}');
         }
-        try w.writeAll("]");
+        try w.writeAll("]}");
     }
 
     // anf — full ANF IR for SDK auto-state computation
@@ -943,6 +980,15 @@ fn emitConstValueJson(w: anytype, cv: types.ConstValue) !void {
     switch (cv) {
         .boolean => |b| try w.writeAll(if (b) "true" else "false"),
         .integer => |n| try w.print("{d}", .{n}),
+        .big_integer => |s| {
+            // Canonical JS-BigInt encoding: quoted decimal string with `n`
+            // suffix. Matches Go's `makeLoadConstInt` and Python's
+            // `_make_load_const_int` so the ANF JSON round-trips byte-identically
+            // across tiers for oversize literals.
+            try w.writeByte('"');
+            try w.writeAll(s);
+            try w.writeAll("n\"");
+        },
         .string => |s| try writeJsonString(w, s),
     }
 }
@@ -1001,6 +1047,66 @@ test "emitStackInstruction — push_int large" {
     // 1000 = 0x03E8 LE -> e8 03, push: 02 e8 03
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xe8, 0x03 }, ctx.script_bytes.items);
     try std.testing.expectEqualStrings("1000", ctx.asm_parts.items[0]);
+}
+
+test "emitStackInstruction — push_big_int_decimal secp256k1 group order" {
+    // 256-bit constant from schnorr-zkp's s-bound assert.
+    // Hex: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    // Expected push: OP_PUSHBYTES_33 (0x21) followed by 33 magnitude bytes:
+    //   value bytes in LE order, then a 0x00 sign byte (MSB of LE-last byte
+    //   is 0xff so a 33rd zero byte is required to keep the value positive
+    //   under Bitcoin Script's sign-magnitude convention).
+    const allocator = std.testing.allocator;
+    var ctx = EmitContext.init(allocator);
+    defer ctx.deinit();
+
+    const decimal: []const u8 = "115792089237316195423570985008687907852837564279074904382605163141518161494337";
+    try emitStackInstruction(&ctx, .{ .push_big_int_decimal = decimal });
+
+    const expected = [_]u8{
+        0x21, // OP_PUSHBYTES_33
+        0x41, 0x41, 0x36, 0xd0, 0x8c, 0x5e, 0xd2, 0xbf,
+        0x3b, 0xa0, 0x48, 0xaf, 0xe6, 0xdc, 0xae, 0xba,
+        0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, // positive sign byte
+    };
+    try std.testing.expectEqualSlices(u8, &expected, ctx.script_bytes.items);
+}
+
+test "emitStackInstruction — push_big_int_decimal small positive" {
+    // Verify the helper also handles small in-range values correctly. The
+    // caller is supposed to route these through `push_int` for the OP_N
+    // shortcut, but the path itself must still emit a valid push.
+    const allocator = std.testing.allocator;
+    var ctx = EmitContext.init(allocator);
+    defer ctx.deinit();
+
+    try emitStackInstruction(&ctx, .{ .push_big_int_decimal = "1000" });
+    // 1000 = 0x03E8 LE -> e8 03, push: 02 e8 03
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xe8, 0x03 }, ctx.script_bytes.items);
+}
+
+test "emitStackInstruction — push_big_int_decimal negative oversize" {
+    // Sanity-check the negative path: a value whose magnitude already has
+    // MSB set still gets a sign-extension byte, with the high bit flipped
+    // by the caller.
+    const allocator = std.testing.allocator;
+    var ctx = EmitContext.init(allocator);
+    defer ctx.deinit();
+
+    // -((1 << 256) - 1) — magnitude is 32 bytes of 0xff; needs a 33rd 0x80 byte.
+    const decimal: []const u8 = "-115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    try emitStackInstruction(&ctx, .{ .push_big_int_decimal = decimal });
+    try std.testing.expectEqual(@as(usize, 34), ctx.script_bytes.items.len);
+    try std.testing.expectEqual(@as(u8, 0x21), ctx.script_bytes.items[0]);
+    // All 32 magnitude bytes are 0xff …
+    var i: usize = 1;
+    while (i <= 32) : (i += 1) {
+        try std.testing.expectEqual(@as(u8, 0xff), ctx.script_bytes.items[i]);
+    }
+    // … and the trailing sign byte is 0x80.
+    try std.testing.expectEqual(@as(u8, 0x80), ctx.script_bytes.items[33]);
 }
 
 test "emitStackInstruction — push_bool true" {

@@ -10,6 +10,7 @@
 //! All values fit in a single BSV script number (31-bit prime).
 //! No multi-limb arithmetic needed.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 // ===========================================================================
@@ -65,7 +66,7 @@ impl<'a> KBTracker<'a> {
     }
 
     pub(crate) fn push_int(&mut self, n: &str, v: i64) {
-        (self.e)(StackOp::Push(PushValue::Int(v as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v as i128))));
         self.nm.push(n.to_string());
     }
 
@@ -120,7 +121,7 @@ impl<'a> KBTracker<'a> {
             self.over(n);
             return;
         }
-        (self.e)(StackOp::Push(PushValue::Int(depth as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(depth as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Pick { depth });
         self.nm.pop();
@@ -139,7 +140,7 @@ impl<'a> KBTracker<'a> {
             self.rot();
             return;
         }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Roll { depth: d });
         self.nm.pop();
@@ -191,7 +192,7 @@ impl<'a> KBTracker<'a> {
     /// Push the KoalaBear prime to the alt-stack for caching.
     /// All subsequent field operations will use the cached prime instead of pushing fresh.
     pub(crate) fn push_prime_cache(&mut self) {
-        (self.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (self.e)(StackOp::Opcode("OP_TOALTSTACK".into()));
         self.prime_cache_active = true;
     }
@@ -211,7 +212,7 @@ impl<'a> KBTracker<'a> {
             (self.e)(StackOp::Dup);
             (self.e)(StackOp::Opcode("OP_TOALTSTACK".into()));
         } else {
-            (self.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+            (self.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         }
     }
 }
@@ -244,11 +245,11 @@ pub(crate) fn kb_field_mod(t: &mut KBTracker, a_name: &str, result_name: &str) {
         (t.e)(StackOp::Opcode("OP_TOALTSTACK".into()));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     } else {
-        (t.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
-        (t.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (t.e)(StackOp::Opcode("OP_ADD".into()));
-        (t.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     }
     t.nm.push(result_name.to_string());
@@ -284,7 +285,7 @@ pub(crate) fn kb_field_add(t: &mut KBTracker, a_name: &str, b_name: &str, result
         (t.e)(StackOp::Opcode("OP_TOALTSTACK".into()));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     } else {
-        (t.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     }
     t.nm.push(result_name.to_string());
@@ -321,7 +322,7 @@ pub(crate) fn kb_field_mul(t: &mut KBTracker, a_name: &str, b_name: &str, result
         (t.e)(StackOp::Opcode("OP_TOALTSTACK".into()));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     } else {
-        (t.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     }
     t.nm.push(result_name.to_string());
@@ -377,12 +378,12 @@ pub(crate) fn kb_field_mul_const(t: &mut KBTracker, a_name: &str, c: i64, result
         let shift = c.trailing_zeros();
         let len = t.nm.len();
         if len > 0 { t.nm.pop(); }
-        (t.e)(StackOp::Push(PushValue::Int(shift as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(shift as i128))));
         (t.e)(StackOp::Opcode("OP_LSHIFTNUM".into()));
         t.nm.push("_kb_mc".to_string());
     } else {
         t.raw_block(&[a_name], Some("_kb_mc"), |e| {
-            e(StackOp::Push(PushValue::Int(c as i128)));
+            e(StackOp::Push(PushValue::Int(BigInt::from(c as i128))));
             e(StackOp::Opcode("OP_MUL".into()));
         });
     }
@@ -397,7 +398,7 @@ pub(crate) fn kb_field_mul_const(t: &mut KBTracker, a_name: &str, c: i64, result
         (t.e)(StackOp::Opcode("OP_TOALTSTACK".into()));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     } else {
-        (t.e)(StackOp::Push(PushValue::Int(KB_P as i128)));
+        (t.e)(StackOp::Push(PushValue::Int(BigInt::from(KB_P as i128))));
         (t.e)(StackOp::Opcode("OP_MOD".into()));
     }
     t.nm.push(result_name.to_string());

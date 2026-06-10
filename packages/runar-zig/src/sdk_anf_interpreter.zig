@@ -107,6 +107,13 @@ pub const ANFNode = union(enum) {
         // so the strict path also tolerates an empty ref by treating the
         // most recent binding as the predicate via `strict_ctx`).
         value: []const u8 = "",
+        // Marker: `true` only on the compiler-emitted
+        // `assert(hash256(continuationOutputs) === extractOutputHash(
+        // preimage))` (see `compilers/zig/src/passes/anf_lower.zig`).
+        // Strict-mode SDK execution skips this assert via the marker
+        // instead of structural heuristics that misfire on developer
+        // covenant asserts whose IR shape is identical.
+        is_auto_injected_state_check: bool = false,
     },
     update_prop: struct {
         name: []const u8 = "",
@@ -776,7 +783,17 @@ fn evalNode(
             // `error.AssertionFailure` if it is falsy. Lenient mode skips
             // (the on-chain script handles enforcement). Crypto built-ins
             // remain mocked even in strict mode — see `executeStrict` doc.
+            //
+            // Marker-based skip: the auto-injected stateful-continuation
+            // assert (`hash256(continuationOutputs) === extractOutputHash(
+            // preimage)`) carries `is_auto_injected_state_check = true`
+            // (set in `compilers/zig/src/passes/anf_lower.zig`). The
+            // on-chain VM is authoritative for that check; off-chain we
+            // have no realistic continuation hash. Developer-written
+            // covenant asserts with the identical IR shape carry no
+            // marker and ARE enforced (see BUG-002).
             if (strict_ctx != null) {
+                if (an.is_auto_injected_state_check) return anf_none;
                 if (an.value.len > 0) {
                     const predicate = env.get(an.value) orelse anf_none;
                     if (!isTruthy(predicate)) return error.AssertionFailure;
@@ -1872,7 +1889,8 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     }
     if (std.mem.eql(u8, kind, "assert")) {
         const value_ref = if (obj.get("value")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        return .{ .assert_node = .{ .value = value_ref } };
+        const marker = if (obj.get("isAutoInjectedStateCheck")) |v| (v == .bool and v.bool) else false;
+        return .{ .assert_node = .{ .value = value_ref, .is_auto_injected_state_check = marker } };
     }
     if (std.mem.eql(u8, kind, "check_preimage")) return .{ .check_preimage = .{} };
     if (std.mem.eql(u8, kind, "deserialize_state")) return .{ .deserialize_state = .{} };

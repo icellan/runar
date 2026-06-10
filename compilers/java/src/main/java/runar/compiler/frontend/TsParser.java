@@ -1771,12 +1771,13 @@ public final class TsParser {
         } catch (NumberFormatException ex) {
             val = BigInteger.ZERO;
         }
-        // Match Python: clamp to int64 range; otherwise emit 0.
-        BigInteger maxInt64 = BigInteger.valueOf(9223372036854775807L);
-        BigInteger minInt64 = BigInteger.valueOf(-9223372036854775808L);
-        if (val.compareTo(maxInt64) > 0 || val.compareTo(minInt64) < 0) {
-            return new BigIntLiteral(BigInteger.ZERO);
-        }
+        // BigIntLiteral now carries arbitrary precision (see BUG-001 / the
+        // 256-bit `EC_N` constant used by examples/ts/schnorr-zkp). Earlier
+        // revisions clamped to int64 and silently emitted OP_0 for oversize
+        // literals — that's why this tier was previously allowlisted out of
+        // schnorr-zkp byte parity. The IR JSON serializer encodes oversize
+        // values as quoted decimal strings with the JS BigInt `n` suffix,
+        // and codegen pushes them via {@link Emit#encodePushBigIntHex}.
         return new BigIntLiteral(val);
     }
 }

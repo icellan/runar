@@ -15,6 +15,7 @@ describe('InputLimits', () => {
     expect(InputLimits.MAX_SCRIPT_BYTES).toBe(4 * 1024 * 1024);
     expect(InputLimits.MAX_NESTING).toBe(512);
     expect(InputLimits.MAX_STRING_BYTES).toBe(4 * 1024 * 1024);
+    expect(InputLimits.MAX_SOURCE_BYTES).toBe(4 * 1024 * 1024);
   });
 
   it('is frozen at the type level (readonly literal values)', () => {
@@ -25,6 +26,7 @@ describe('InputLimits', () => {
       'MAX_SCRIPT_BYTES',
       'MAX_NESTING',
       'MAX_STRING_BYTES',
+      'MAX_SOURCE_BYTES',
     ];
     for (const k of keys) {
       expect(typeof InputLimits[k]).toBe('number');
@@ -42,6 +44,7 @@ describe('InputLimits', () => {
     expect(snapshot.MAX_SCRIPT_BYTES).toBe(4 * 1024 * 1024);
     expect(snapshot.MAX_NESTING).toBe(512);
     expect(snapshot.MAX_STRING_BYTES).toBe(4 * 1024 * 1024);
+    expect(snapshot.MAX_SOURCE_BYTES).toBe(4 * 1024 * 1024);
   });
 });
 

@@ -1032,6 +1032,19 @@ public final class SlhDsa {
 
         Tracker t = new Tracker(Arrays.asList("msg", "sig", "pubkey"), emit);
 
+        // ---- 0. BUG-011: enforce exact signature length on-chain ----
+        // Each parameter set has a canonical sig length:
+        //   n + k*(1+a)*n + d*(len+hp)*n.
+        // Without this guard the d xmss-layer split loop silently dropped
+        // trailing bytes past layer d-1.
+        long expectedSigLen = (long) n + forsSigLen + (long) d * xmssSigLen;
+        t.toTop("sig");
+        t.rawBlock(List.of("sig"), "sig", e -> {
+            e.accept(new OpcodeOp("OP_SIZE"));
+            e.accept(pushInt(expectedSigLen));
+            e.accept(new OpcodeOp("OP_EQUALVERIFY"));
+        });
+
         // ---- 1. Parse pubkey -> pkSeed, pkRoot ----
         t.toTop("pubkey");
         t.pushIntNamed("", n);

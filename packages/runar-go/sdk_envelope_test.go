@@ -68,6 +68,39 @@ func TestCanonicalJSON_InsertionOrderIndependent(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSON_Ecma262FloatFormatting(t *testing.T) {
+	// ECMA-262 §6.1.6.1.13 Number::toString. These vectors mirror the
+	// cross-tier float reference cases (audit D5). The Go tier previously
+	// used strconv.FormatFloat 'g' which diverged on the 1e21 boundary and
+	// for small-exponent values.
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{0.1, "0.1"},
+		{0.5, "0.5"},
+		{1e21, "1e+21"},
+		{1e22, "1e+22"},
+		{1.5e-5, "0.000015"},
+		{1e-6, "0.000001"},
+		{1e-7, "1e-7"},
+		{1e-300, "1e-300"},
+		{-0.1, "-0.1"},
+		{1.5e21, "1.5e+21"},
+	}
+	for _, tc := range cases {
+		got, err := CanonicalJSON(map[string]any{"v": tc.in})
+		if err != nil {
+			t.Errorf("CanonicalJSON(%v): unexpected error %v", tc.in, err)
+			continue
+		}
+		want := `{"v":` + tc.want + `}`
+		if got != want {
+			t.Errorf("float %v: got %q want %q", tc.in, got, want)
+		}
+	}
+}
+
 func TestCanonicalJSON_NestedAndPrimitives(t *testing.T) {
 	got, err := CanonicalJSON(map[string]any{
 		"outer": map[string]any{"z": 1, "a": []any{3, 2, 1}},

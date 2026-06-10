@@ -582,6 +582,7 @@ const TypeChecker = struct {
     fn inferExprType(self: *TypeChecker, expr: Expression, env: *TypeEnv) RunarType {
         return switch (expr) {
             .literal_int => .bigint,
+            .literal_bigint => .bigint,
             .literal_bool => .boolean,
             .literal_bytes => .byte_string,
             .identifier => |name| {
@@ -1353,6 +1354,7 @@ fn collectReturnTypesInto(stmts: []const Statement, buf: *ReturnTypeBuf) void {
 fn inferExprTypeStatic(expr: Expression) RunarType {
     return switch (expr) {
         .literal_int => .bigint,
+        .literal_bigint => .bigint,
         .literal_bool => .boolean,
         .literal_bytes => .byte_string,
         .identifier => .unknown,

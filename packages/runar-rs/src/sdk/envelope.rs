@@ -273,6 +273,10 @@ pub enum VerifyEnvelopeReason {
     EnvelopeMismatch,
     BadSig,
     PubkeyNotAllowed,
+    /// Mirrors the TS 'too-large' reason. Returned BEFORE any JSON parse /
+    /// ECDSA verify work when an envelope string field exceeds its
+    /// InputLimits cap (DoS-bound). BUG-008 follow-up.
+    TooLarge,
 }
 
 impl VerifyEnvelopeReason {
@@ -284,9 +288,15 @@ impl VerifyEnvelopeReason {
             Self::EnvelopeMismatch => "envelope-mismatch",
             Self::BadSig => "bad-sig",
             Self::PubkeyNotAllowed => "pubkey-not-allowed",
+            Self::TooLarge => "too-large",
         }
     }
 }
+
+/// Envelope DoS-bound caps. Mirror InputLimits.{MAX_IR_BYTES,
+/// MAX_STRING_BYTES} from the TS schema package. BUG-008 follow-up.
+pub const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct VerifyEnvelopeOpts<'a> {
     pub envelope: &'a SignedEnvelope,
@@ -308,6 +318,19 @@ pub fn verify_envelope(opts: VerifyEnvelopeOpts<'_>) -> VerifyEnvelopeResult {
     let env = opts.envelope;
     let clock_skew = opts.clock_skew_ms.unwrap_or(5_000);
     let now = opts.now_ms.unwrap_or_else(now_ms);
+
+    // 0. DoS-bound size guard. Reject envelopes whose string fields exceed
+    //    their InputLimits cap BEFORE running JSON parse, hashing, or
+    //    ECDSA verify — those operations are linear in input size and a
+    //    pathological 100 MB payload would otherwise pin the thread.
+    //    Mirrors the TS 'too-large' rejection at sdk/envelope.ts:104.
+    //    BUG-008 follow-up.
+    if env.payload.len() > MAX_ENVELOPE_PAYLOAD_BYTES
+        || env.sig.len() > MAX_ENVELOPE_FIELD_BYTES
+        || env.pubkey.len() > MAX_ENVELOPE_FIELD_BYTES
+    {
+        return reject(VerifyEnvelopeReason::TooLarge, None);
+    }
 
     // 1. Field presence.
     if env.payload.is_empty() || env.sig.is_empty() || env.pubkey.is_empty()
@@ -455,6 +478,18 @@ mod tests {
         let b = canonical_json(&json!({"b": 2, "a": 1})).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, r#"{"a":1,"b":2}"#);
+    }
+
+    #[test]
+    fn canonical_json_formats_floats_per_ecma262() {
+        // Audit D5. serde_json::Value::from(f64) preserves the int-vs-float
+        // distinction; the canonical serializer must run the ECMA-262 §6.1.6.1.13
+        // Number::toString algorithm rather than relying on Rust's default
+        // Display impl.
+        assert_eq!(canonical_json(&json!({"v": 0.1})).unwrap(), r#"{"v":0.1}"#);
+        assert_eq!(canonical_json(&json!({"v": 1e21})).unwrap(), r#"{"v":1e+21}"#);
+        assert_eq!(canonical_json(&json!({"v": 1e-7})).unwrap(), r#"{"v":1e-7}"#);
+        assert_eq!(canonical_json(&json!({"v": 1e-300})).unwrap(), r#"{"v":1e-300}"#);
     }
 
     #[test]

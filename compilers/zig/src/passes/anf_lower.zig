@@ -201,12 +201,21 @@ fn lowerProperties(allocator: Allocator, contract: ContractNode) LowerError![]AN
 fn extractLiteralValue(expr: Expression) ?ConstValue {
     switch (expr) {
         .literal_int => |v| return .{ .integer = v },
+        .literal_bigint => |s| return .{ .big_integer = s },
         .literal_bool => |v| return .{ .boolean = v },
         .literal_bytes => |v| return .{ .string = v },
         .unary_op => |uop| {
             if (uop.op == .negate) {
                 switch (uop.operand) {
                     .literal_int => |v| return .{ .integer = -v },
+                    // Negate of a literal_bigint is preserved as a
+                    // prefixed-`-` decimal so the value remains a single
+                    // canonical text token through ANF / JSON / codegen.
+                    // Producing `-` + bigint text avoids any per-tier
+                    // ambiguity around two's-complement vs sign-magnitude.
+                    // Allocation-free: we'd need an allocator to prepend the
+                    // `-`, so leave this path to the lowerExprToRef pipeline
+                    // (which emits load_const(0) and a unary-op binding).
                     else => {},
                 }
             }
@@ -476,7 +485,7 @@ fn lowerStatefulPublicMethod(
                 .right = output_hash_ref,
                 .result_type = "bytes",
             } });
-            _ = try ctx.emit(.{ .assert = .{ .value = eq_ref } });
+            _ = try ctx.emit(.{ .assert = .{ .value = eq_ref, .is_auto_injected_state_check = true } });
         } else {
             // Single-output continuation: build raw state output bytes, then
             // splice in declared data outputs, then concat with change,
@@ -514,7 +523,7 @@ fn lowerStatefulPublicMethod(
                 .right = output_hash_ref,
                 .result_type = "bytes",
             } });
-            _ = try ctx.emit(.{ .assert = .{ .value = eq_ref } });
+            _ = try ctx.emit(.{ .assert = .{ .value = eq_ref, .is_auto_injected_state_check = true } });
         }
     }
 }
@@ -950,6 +959,9 @@ fn lowerExprToRef(ctx: *LowerCtx, expr: Expression) LowerError![]const u8 {
     switch (expr) {
         .literal_int => |v| {
             return try ctx.emit(makeLoadConstInt(v));
+        },
+        .literal_bigint => |s| {
+            return try ctx.emit(makeLoadConstBigInt(s));
         },
         .literal_bool => |v| {
             return try ctx.emit(makeLoadConstBool(v));
@@ -1595,6 +1607,16 @@ fn lowerArgs(ctx: *LowerCtx, args: []const Expression) LowerError![]const []cons
 
 fn makeLoadConstInt(val: i64) ANFValue {
     return .{ .load_const = .{ .value = .{ .integer = val } } };
+}
+
+/// Wrap an oversize decimal-text integer literal (already validated by the
+/// frontend parser as ASCII digits with optional leading `-`, no `n`
+/// suffix) in a `load_const` ANF node. Mirrors Go's `makeLoadConstInt` and
+/// Python's `_make_load_const_int` for the overflow path. The text is held
+/// by reference: the parser owns the backing buffer (its arena outlives
+/// ANF lowering), so we don't dupe here.
+fn makeLoadConstBigInt(decimal: []const u8) ANFValue {
+    return .{ .load_const = .{ .value = .{ .big_integer = decimal } } };
 }
 
 fn makeLoadConstBool(val: bool) ANFValue {

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/all-readonly-cleanstack/AllReadonlyCleanstack.runar.ts",
+    ".runar.sol": "../../../examples/sol/all-readonly-cleanstack/AllReadonlyCleanstack.runar.sol",
+    ".runar.move": "../../../examples/move/all-readonly-cleanstack/AllReadonlyCleanstack.runar.move",
+    ".runar.go": "../../../examples/go/all-readonly-cleanstack/AllReadonlyCleanstack.runar.go",
+    ".runar.rs": "../../../examples/rust/all-readonly-cleanstack/AllReadonlyCleanstack.runar.rs",
+    ".runar.py": "../../../examples/python/all-readonly-cleanstack/AllReadonlyCleanstack.runar.py",
+    ".runar.zig": "../../../examples/zig/all-readonly-cleanstack/AllReadonlyCleanstack.runar.zig",
+    ".runar.rb": "../../../examples/ruby/all-readonly-cleanstack/AllReadonlyCleanstack.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/all-readonly-cleanstack/AllReadonlyCleanstack.runar.java"
+  }
+}

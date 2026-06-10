@@ -596,9 +596,14 @@ describe('Pass 5: Stack Lower', () => {
       expect(opcodes).toContain('OP_DUP');
       expect(opcodes).toContain('OP_MUL');
 
-      // Verify the sig-squaring sequence: OP_DUP immediately followed by OP_MUL
-      const dupIdx = opcodes.indexOf('OP_DUP');
-      expect(opcodes[dupIdx + 1]).toBe('OP_MUL');
+      // Verify the sig-squaring sequence: OP_DUP immediately followed by OP_MUL.
+      // Post BUG-010, the emitter also has an earlier OP_DUP for the padding
+      // range check (OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY), so we look
+      // for ANY OP_DUP immediately followed by OP_MUL — that's the sig-square.
+      const sigSquareIdx = opcodes.findIndex(
+        (op, i) => op === 'OP_DUP' && opcodes[i + 1] === 'OP_MUL',
+      );
+      expect(sigSquareIdx).toBeGreaterThanOrEqual(0);
     });
   });
 

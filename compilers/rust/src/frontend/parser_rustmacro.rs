@@ -3,6 +3,8 @@
 //! Parses Rust-style contract definitions using a hand-written tokenizer
 //! and recursive descent parser. Produces the same AST as the TypeScript parser.
 
+use num_bigint::BigInt;
+use num_traits::Num;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -378,7 +380,7 @@ impl RustDslParser {
 
         if contract_name.is_empty() {
             self.errors.push(Diagnostic::error("No Rúnar contract struct found", None));
-            return ParseResult { contract: None, errors: self.errors };
+            return ParseResult { contract: None, errors: self.errors, source_size_err: None };
         }
 
         // Extract init() method as property initializers, if present.
@@ -454,7 +456,7 @@ impl RustDslParser {
             source_file: self.file.clone(),
         };
 
-        ParseResult { contract: Some(contract), errors: self.errors }
+        ParseResult { contract: Some(contract), errors: self.errors, source_size_err: None }
     }
 
     /// Parse a bare `impl ContractName { ... }` block and return its methods.
@@ -1055,7 +1057,8 @@ impl RustDslParser {
         match self.current().typ.clone() {
             TokenType::Number(val) => {
                 self.advance_clone();
-                let n: i128 = val.parse().unwrap_or(0);
+                let n = <BigInt as Num>::from_str_radix(&val, 10)
+                    .unwrap_or_else(|_| BigInt::from(0));
                 Expression::BigIntLiteral { value: n }
             }
             TokenType::HexString(val) => {

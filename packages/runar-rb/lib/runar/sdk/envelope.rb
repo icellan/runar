@@ -12,8 +12,17 @@ module Runar
   module SDK
     module Envelope
       VERIFY_REASONS = %w[
-        missing-fields expired bad-json envelope-mismatch bad-sig pubkey-not-allowed
+        missing-fields expired bad-json envelope-mismatch bad-sig pubkey-not-allowed too-large
       ].freeze
+
+      # Envelope DoS-bound caps. Mirror InputLimits.{MAX_IR_BYTES,
+      # MAX_STRING_BYTES} from the TS schema package. Reject envelopes
+      # whose string fields exceed their InputLimits cap BEFORE running
+      # JSON parse / hashing / ECDSA verify — those operations are linear
+      # in input size and a pathological 100 MB payload would otherwise
+      # pin the worker. BUG-008 follow-up.
+      MAX_ENVELOPE_PAYLOAD_BYTES = 16 * 1024 * 1024  # 16 MiB
+      MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024     # 4 MiB
 
       # ---------------------------------------------------------------------
       # CanonicalJSON
@@ -232,6 +241,21 @@ module Runar
       # :reason (one of VERIFY_REASONS or nil), and :data (parsed payload
       # or nil).
       def self.verify_envelope(envelope:, expected_keys: nil, clock_skew_ms: 5_000, now_ms: nil)
+        # 0. DoS-bound size guard. Mirrors the TS 'too-large' rejection at
+        #    sdk/envelope.ts:104. BUG-008 follow-up.
+        if envelope.is_a?(SignedEnvelope)
+          payload_bytes = envelope.payload.is_a?(String) ? envelope.payload.bytesize : 0
+          if payload_bytes > MAX_ENVELOPE_PAYLOAD_BYTES
+            return { ok: false, reason: 'too-large', data: nil }
+          end
+          if envelope.sig.is_a?(String) && envelope.sig.bytesize > MAX_ENVELOPE_FIELD_BYTES
+            return { ok: false, reason: 'too-large', data: nil }
+          end
+          if envelope.pubkey.is_a?(String) && envelope.pubkey.bytesize > MAX_ENVELOPE_FIELD_BYTES
+            return { ok: false, reason: 'too-large', data: nil }
+          end
+        end
+
         # 1. Field presence.
         unless envelope.is_a?(SignedEnvelope) &&
                envelope.payload && !envelope.payload.empty? &&

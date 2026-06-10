@@ -34,6 +34,8 @@
 //! - `for i in range(n):` -> ForStatement
 //! - snake_case identifiers -> camelCase in AST
 
+use num_bigint::BigInt;
+use num_traits::{Num, ToPrimitive};
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -55,7 +57,7 @@ pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
 
     let contract = parser.parse_contract();
 
-    ParseResult { contract, errors }
+    ParseResult { contract, errors, source_size_err: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +228,7 @@ enum Token {
 
     // Identifiers and literals
     Ident(String),
-    NumberLit(i128),
+    NumberLit(BigInt),
     HexStringLit(String),
     StringLit(String),
 
@@ -683,9 +685,11 @@ fn tokenize(source: &str) -> Vec<Token> {
                     }
                 }
                 let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    i128::from_str_radix(&num_str[2..], 16).unwrap_or(0)
+                    <BigInt as Num>::from_str_radix(&num_str[2..], 16)
+                        .unwrap_or_else(|_| BigInt::from(0))
                 } else {
-                    num_str.parse::<i128>().unwrap_or(0)
+                    <BigInt as Num>::from_str_radix(&num_str, 10)
+                        .unwrap_or_else(|_| BigInt::from(0))
                 };
                 tokens.push(Token::NumberLit(val));
                 continue;
@@ -1042,7 +1046,7 @@ impl<'a> PyParser<'a> {
             let element = self.parse_type();
             self.expect(&Token::Comma);
             let length = match self.advance() {
-                Token::NumberLit(n) => n as usize,
+                Token::NumberLit(n) => n.to_usize().unwrap_or(0),
                 _ => {
                     self.errors
                         .push(Diagnostic::error("FixedArray requires numeric length", None));
@@ -1312,7 +1316,7 @@ impl<'a> PyParser<'a> {
             let second_arg = self.parse_expression();
             (first_arg, second_arg)
         } else {
-            (Expression::BigIntLiteral { value: 0 }, first_arg)
+            (Expression::BigIntLiteral { value: BigInt::from(0) }, first_arg)
         };
 
         self.expect(&Token::RParen);
@@ -1528,7 +1532,7 @@ impl<'a> PyParser<'a> {
             let init = if self.match_tok(&Token::Eq) {
                 self.parse_expression()
             } else {
-                Expression::BigIntLiteral { value: 0 }
+                Expression::BigIntLiteral { value: BigInt::from(0) }
             };
 
             return Statement::VariableDecl {
@@ -2042,7 +2046,7 @@ impl<'a> PyParser<'a> {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
-            Token::NoneLit => Expression::BigIntLiteral { value: 0 },
+            Token::NoneLit => Expression::BigIntLiteral { value: BigInt::from(0) },
             Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
             Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
             Token::SelfKw => {
@@ -2105,7 +2109,7 @@ impl<'a> PyParser<'a> {
             other => {
                 self.errors
                     .push(Diagnostic::error(format!("Unexpected token in expression: {:?}", other), None));
-                Expression::BigIntLiteral { value: 0 }
+                Expression::BigIntLiteral { value: BigInt::from(0) }
             }
         }
     }

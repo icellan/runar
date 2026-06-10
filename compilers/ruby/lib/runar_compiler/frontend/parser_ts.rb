@@ -1759,19 +1759,18 @@ module RunarCompiler
 
       # -- Number parsing ---------------------------------------------------
 
-      INT64_MAX = 9_223_372_036_854_775_807
-      INT64_MIN = -9_223_372_036_854_775_808
-
       def self.parse_number(s)
         val = begin
           Integer(s, 0)
         rescue ArgumentError
           0
         end
-        # Check int64 overflow
-        if val > INT64_MAX || val < INT64_MIN
-          return BigIntLiteral.new(value: 0)
-        end
+        # No int64 clamp: BigIntLiteral carries arbitrary-precision Integer
+        # values end-to-end. The IR JSON encoder in _make_load_const_int
+        # promotes oversize values to the `"...n"` decimal-string discriminator
+        # so cross-tier consumers (Go encoding/json, Python json) can round-
+        # trip 256-bit constants like the secp256k1 group order used by
+        # schnorr-zkp's s-bound assert without precision loss.
         BigIntLiteral.new(value: val)
       end
     end

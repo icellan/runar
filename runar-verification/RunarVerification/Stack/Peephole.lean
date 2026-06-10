@@ -575,13 +575,39 @@ theorem runOpcode_EQUALVERIFY_def (s : StackState) :
                if eq then .ok s' else .error .assertFailed
            | _ => .error (.unsupported "OP_EQUALVERIFY popN bug")) := rfl
 
+/-- `OP_EQUAL`'s coercion cascade, specialized to two `vBigint` operands, still
+collapses to `decide (a = b)` under the Bitcoin-faithful `asBytes? (vBigint 0) =
+some empty` coercion.  When both are `0` the leading bytes branch compares
+`empty = empty` (`= decide (0 = 0)`); when exactly one is `0` the other operand's
+`asBytes?` is `none`, so control falls straight to the `asInt?, asInt?` branch
+(the `encodeMinimalLE` mixed branches never fire for two ints). -/
+theorem equal_int_eq_cascade (a b : Int) :
+    (match asBytes? (.vBigint a), asBytes? (.vBigint b) with
+     | some ab, some bb => decide (ab.toList = bb.toList)
+     | _, _ =>
+         match asInt? (.vBigint a), asInt? (.vBigint b) with
+         | some ai, some bi => decide (ai = bi)
+         | _, _ =>
+             match asInt? (.vBigint a), asBytes? (.vBigint b) with
+             | some ai, some bb =>
+                 decide ((encodeMinimalLE ai).toList = bb.toList)
+             | _, _ =>
+                 match asBytes? (.vBigint a), asInt? (.vBigint b) with
+                 | some ab, some bi =>
+                     decide (ab.toList = (encodeMinimalLE bi).toList)
+                 | _, _ => false)
+    = decide (a = b) := by
+  by_cases ha : a = 0 <;> by_cases hb : b = 0 <;>
+    simp [asBytes?, asInt?, ha, hb, ByteArray.toList_empty]
+
 theorem runOpcode_equal_int
     (s : StackState) (a b : Int) (rest : List ANF.Eval.Value)
     (hs : s.stack = .vBigint b :: .vBigint a :: rest) :
     runOpcode "OP_EQUAL" s
     = .ok (({ s with stack := rest } : StackState).push (.vBool (decide (a = b)))) := by
   rw [runOpcode_EQUAL_def, popN_two_cons s (.vBigint b) (.vBigint a) rest hs]
-  simp [asBytes?, asInt?]
+  simp only []
+  rw [equal_int_eq_cascade a b]
 
 theorem runOpcode_equalVerify_int
     (s : StackState) (a b : Int) (rest : List ANF.Eval.Value)
@@ -590,7 +616,8 @@ theorem runOpcode_equalVerify_int
     = if decide (a = b) then .ok ({ s with stack := rest } : StackState)
                         else .error .assertFailed := by
   rw [runOpcode_EQUALVERIFY_def, popN_two_cons s (.vBigint b) (.vBigint a) rest hs]
-  simp [asBytes?, asInt?]
+  simp only []
+  rw [equal_int_eq_cascade a b]
 
 private theorem run_equal_then_verify_int_aux
     (s : StackState) (a b : Int) (rest : List ANF.Eval.Value)

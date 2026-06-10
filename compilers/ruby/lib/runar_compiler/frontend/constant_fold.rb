@@ -303,15 +303,28 @@ module RunarCompiler
       def self.const_to_anf_value(cv)
         tag, val = cv
         v = IR::ANFValue.new(kind: "load_const")
-        v.raw_value = JSON.generate(val)
 
         case tag
         when "int"
+          # Mirror _make_load_const_int: oversize bigints get the canonical
+          # JS BigInt `"...n"` decimal-string discriminator so cross-tier
+          # JSON consumers (Go encoding/json) round-trip without precision
+          # loss. Without this, fold-collapsed 256-bit values (e.g. an
+          # `EC_N - 1` constant from the optimizer) would be silently
+          # truncated by the consumer.
+          v.raw_value = if val.is_a?(Integer) &&
+                           (val > INT64_MAX_LOAD_CONST || val < INT64_MIN_LOAD_CONST)
+                          JSON.generate("#{val}n")
+                        else
+                          JSON.generate(val)
+                        end
           v.const_big_int = val
           v.const_int = val
         when "bool"
+          v.raw_value = JSON.generate(val)
           v.const_bool = val
         when "str"
+          v.raw_value = JSON.generate(val)
           v.const_string = val
         end
 
@@ -579,7 +592,8 @@ module RunarCompiler
         IR::ANFProgram.new(
           contract_name: program.contract_name,
           properties: program.properties.dup,
-          methods: program.methods.map { |m| fold_method(m) }
+          methods: program.methods.map { |m| fold_method(m) },
+          parent_class: program.parent_class
         )
       end
     end

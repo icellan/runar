@@ -3,6 +3,7 @@
 //! Uses SWC to parse a TypeScript source file and extract the SmartContract
 //! subclass into a Rúnar AST.
 
+use num_bigint::BigInt;
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
 use swc_ecma_ast as swc;
@@ -27,9 +28,15 @@ use super::diagnostic::Diagnostic;
 // ---------------------------------------------------------------------------
 
 /// Result of parsing a source file.
+#[derive(Default)]
 pub struct ParseResult {
     pub contract: Option<ContractNode>,
     pub errors: Vec<Diagnostic>,
+    /// Non-`None` iff [`parse_source`]/[`parse`] rejected the input via the
+    /// DoS-bound source-size guard. Callers wanting typed detection can
+    /// inspect this field instead of string-matching the diagnostic
+    /// message. BUG-008 follow-up.
+    pub source_size_err: Option<super::input_limits::SourceSizeExceededError>,
 }
 
 impl ParseResult {
@@ -41,6 +48,15 @@ impl ParseResult {
 
 /// Parse a TypeScript source string and extract the Rúnar contract AST.
 pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard. Reject oversized source BEFORE the tokenizer
+    // touches the input. BUG-008 follow-up.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
     let mut errors: Vec<Diagnostic> = Vec::new();
     let file = file_name.unwrap_or("contract.ts");
 
@@ -63,10 +79,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         Ok(m) => m,
         Err(e) => {
             errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
-            return ParseResult {
-                contract: None,
-                errors,
-            };
+            return ParseResult { contract: None, errors, source_size_err: None };
         }
     };
 
@@ -118,10 +131,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         Some(c) => c,
         None => {
             errors.push(Diagnostic::error("No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", None));
-            return ParseResult {
-                contract: None,
-                errors,
-            };
+            return ParseResult { contract: None, errors, source_size_err: None };
         }
     };
 
@@ -146,10 +156,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         source_file: file.to_string(),
     };
 
-    ParseResult {
-        contract: Some(contract),
-        errors,
-    }
+    ParseResult { contract: Some(contract), errors, source_size_err: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -564,7 +571,7 @@ fn parse_variable_statement(
         parse_expression(init_expr, file, errors)
     } else {
         errors.push(Diagnostic::error(format!("Variable '{}' must have an initializer", name), None));
-        Expression::BigIntLiteral { value: 0 }
+        Expression::BigIntLiteral { value: BigInt::from(0) }
     };
 
     let var_type = if let Pat::Ident(ident) = &decl.name {
@@ -759,7 +766,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnost
     } else {
         errors.push(Diagnostic::error("For loop must have an update expression", None));
         Statement::ExpressionStatement {
-            expression: Expression::BigIntLiteral { value: 0 },
+            expression: Expression::BigIntLiteral { value: BigInt::from(0) },
             source_location: default_loc(file),
         }
     };
@@ -832,7 +839,7 @@ fn make_default_for_init(file: &str) -> Statement {
         name: "_i".to_string(),
         var_type: None,
         mutable: true,
-        init: Expression::BigIntLiteral { value: 0 },
+        init: Expression::BigIntLiteral { value: BigInt::from(0) },
         source_location: default_loc(file),
     }
 }
@@ -877,15 +884,21 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
         },
 
         Expr::Lit(Lit::BigInt(bigint)) => {
-            // Parse the BigInt value -- SWC gives the numeric part
-            let val = bigint_to_i128(bigint);
-            Expression::BigIntLiteral { value: val }
+            // SWC parses the BigInt literal into a `num_bigint::BigInt`
+            // with arbitrary precision — use it as-is so 256-bit constants
+            // (e.g. the secp256k1 group order in schnorr-zkp's s-bound
+            // assert) survive intact. The previous funnel through
+            // `i128::from_str` truncated to 0 for any value outside i128
+            // range.
+            Expression::BigIntLiteral {
+                value: (*bigint.value).clone(),
+            }
         }
 
         Expr::Lit(Lit::Num(num)) => {
             // Plain numeric literal -- treat as bigint for Rúnar
             Expression::BigIntLiteral {
-                value: num.value as i128,
+                value: BigInt::from(num.value as i128),
             }
         }
 
@@ -975,7 +988,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
 
         _ => {
             errors.push(Diagnostic::error(format!("Unsupported expression: {:?}", expr), None));
-            Expression::BigIntLiteral { value: 0 }
+            Expression::BigIntLiteral { value: BigInt::from(0) }
         }
     }
 }
@@ -1228,12 +1241,12 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
             },
             "in_arity" => {
                 if let Some(v) = parse_arity_literal(&kv.value, "in_arity", errors) {
-                    in_arity_expr = Some(Expression::BigIntLiteral { value: v });
+                    in_arity_expr = Some(Expression::BigIntLiteral { value: BigInt::from(v) });
                 }
             }
             "out_arity" => {
                 if let Some(v) = parse_arity_literal(&kv.value, "out_arity", errors) {
-                    out_arity_expr = Some(Expression::BigIntLiteral { value: v });
+                    out_arity_expr = Some(Expression::BigIntLiteral { value: BigInt::from(v) });
                 }
             }
             other => {
@@ -1259,8 +1272,8 @@ fn parse_asm_call(call: &CallExpr, file: &str, errors: &mut Vec<Diagnostic>) -> 
     });
     // Defaults: in_arity=0, out_arity=1. The out_arity=1 default reflects the
     // public-method-must-terminate-truthy invariant.
-    let in_arity_expr = in_arity_expr.unwrap_or(Expression::BigIntLiteral { value: 0 });
-    let out_arity_expr = out_arity_expr.unwrap_or(Expression::BigIntLiteral { value: 1 });
+    let in_arity_expr = in_arity_expr.unwrap_or(Expression::BigIntLiteral { value: BigInt::from(0) });
+    let out_arity_expr = out_arity_expr.unwrap_or(Expression::BigIntLiteral { value: BigInt::from(1) });
 
     let _ = file;
     Expression::CallExpr {
@@ -1411,23 +1424,23 @@ fn encode_asm_push_literal(expr: &Expr, errors: &mut Vec<Diagnostic>) -> Option<
     use crate::codegen::emit::encode_push_int;
     match expr {
         Expr::Lit(Lit::Num(num)) => {
-            let (h, _) = encode_push_int(num.value as i128);
+            let (h, _) = encode_push_int(&BigInt::from(num.value as i128));
             Some(h)
         }
         Expr::Lit(Lit::BigInt(bi)) => {
-            let v = bigint_to_i128(bi);
-            let (h, _) = encode_push_int(v);
+            let v: BigInt = (*bi.value).clone();
+            let (h, _) = encode_push_int(&v);
             Some(h)
         }
         Expr::Unary(unary) if unary.op == swc::UnaryOp::Minus => {
             match unary.arg.as_ref() {
                 Expr::Lit(Lit::Num(num)) => {
-                    let (h, _) = encode_push_int(-(num.value as i128));
+                    let (h, _) = encode_push_int(&BigInt::from(-(num.value as i128)));
                     Some(h)
                 }
                 Expr::Lit(Lit::BigInt(bi)) => {
-                    let v = bigint_to_i128(bi);
-                    let (h, _) = encode_push_int(-v);
+                    let v: BigInt = (*bi.value).clone();
+                    let (h, _) = encode_push_int(&(-v));
                     Some(h)
                 }
                 _ => {
@@ -1619,6 +1632,15 @@ fn bigint_to_i128(bigint_lit: &swc::BigInt) -> i128 {
 /// - `.runar.java` -> Java parser
 /// - anything else (including `.runar.ts`) -> TypeScript parser (default)
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard. Reject oversized source BEFORE any
+    // format-specific parser touches the input. BUG-008 follow-up.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
     let name = file_name.unwrap_or("contract.ts");
     if name.ends_with(".runar.sol") {
         return super::parser_sol::parse_solidity(source, file_name);

@@ -38,7 +38,8 @@ module RunarCompiler
       IR::ANFProgram.new(
         contract_name: contract.name,
         properties: properties,
-        methods: methods
+        methods: methods,
+        parent_class: contract.parent_class
       )
     end
 
@@ -253,7 +254,7 @@ module RunarCompiler
                 v.right = output_hash_ref
                 v.result_type = "bytes"
               end)
-              method_ctx.emit(_make_assert(eq_ref))
+              method_ctx.emit(_make_auto_injected_state_check_assert(eq_ref))
             else
               # Single-output continuation: build raw output bytes, then
               # splice in any declared data outputs, then concat with
@@ -276,7 +277,7 @@ module RunarCompiler
                 v.right = output_hash_ref
                 v.result_type = "bytes"
               end)
-              method_ctx.emit(_make_assert(eq_ref))
+              method_ctx.emit(_make_auto_injected_state_check_assert(eq_ref))
             end
           end
 
@@ -1416,8 +1417,25 @@ module RunarCompiler
 
     # @param val [Integer]
     # @return [IR::ANFValue]
+    INT64_MAX_LOAD_CONST = 9_223_372_036_854_775_807
+    INT64_MIN_LOAD_CONST = -9_223_372_036_854_775_808
+
     def self._make_load_const_int(val)
-      raw = JSON.generate(val)
+      # JSON numbers in JavaScript are IEEE-754 doubles (~53 bits of integer
+      # precision), and Go's encoding/json silently degrades JSON numbers
+      # above 2^53 into scientific notation. Emit values that exceed the
+      # int64 range as a quoted decimal string with the canonical JS BigInt
+      # `n` suffix so 256-bit constants (e.g. the secp256k1 group order
+      # used in schnorr-zkp's s-bound assert) survive the JSON round-trip
+      # losslessly AND so consuming IR decoders can distinguish a decimal-
+      # encoded big integer from a hex-encoded ByteString literal. Mirrors
+      # compilers/python/runar_compiler/frontend/anf_lower.py::_make_load_const_int
+      # and compilers/go/frontend/anf_lower.go::makeLoadConstInt.
+      raw = if val > INT64_MAX_LOAD_CONST || val < INT64_MIN_LOAD_CONST
+              JSON.generate("#{val}n")
+            else
+              JSON.generate(val)
+            end
       IR::ANFValue.new(kind: "load_const").tap do |v|
         v.raw_value = raw
         v.const_big_int = val
@@ -1482,6 +1500,22 @@ module RunarCompiler
       IR::ANFValue.new(kind: "assert").tap do |v|
         v.raw_value = raw
         v.value_ref = value_ref
+      end
+    end
+
+    # Build the auto-injected stateful-continuation hash-equality assert.
+    # Carries +is_auto_injected_state_check = true+ so off-chain SDK
+    # interpreters can skip the equality check via a direct marker lookup
+    # instead of structural / taint heuristics that misfire on developer
+    # code with identical IR shape (covenant rules).
+    # @param value_ref [String]
+    # @return [IR::ANFValue]
+    def self._make_auto_injected_state_check_assert(value_ref)
+      raw = JSON.generate(value_ref)
+      IR::ANFValue.new(kind: "assert").tap do |v|
+        v.raw_value = raw
+        v.value_ref = value_ref
+        v.is_auto_injected_state_check = true
       end
     end
 

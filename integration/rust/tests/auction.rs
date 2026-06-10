@@ -10,7 +10,7 @@
 //! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
-use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
+use runar_lang::sdk::{CallOptions, DeployOptions, RunarContract, SdkValue};
 
 #[test]
 fn test_auction_compile() {
@@ -113,13 +113,18 @@ fn test_auction_close() {
     let (signer, auctioneer_wallet) = create_funded_wallet(&mut provider);
     let bidder = create_wallet();
 
-    // Constructor: auctioneer, highestBidder, highestBid, deadline
-    // deadline=0 so extractLocktime(txPreimage) >= deadline passes with nLocktime=0
+    // Constructor: auctioneer, highestBidder, highestBid, deadline.
+    // Follow-up to #40/#42: exercise a real non-zero block-height deadline with a
+    // matching CallOptions.locktime, so the terminal close() path actually runs
+    // extractLocktime(txPreimage) >= deadline (the old deadline=0 + nLockTime=0
+    // workaround masked both the locktime gap #40 and the terminal-sighash bug
+    // #42). nLockTime=1 is safely in the past, so the tx is mineable under the
+    // now-strict CI oracle (acceptnonstdtxn=0).
     let mut contract = RunarContract::new(artifact, vec![
         SdkValue::Bytes(auctioneer_wallet.pub_key_hex.clone()),
         SdkValue::Bytes(bidder.pub_key_hex),
         SdkValue::Int(100),
-        SdkValue::Int(0),  // deadline=0 so auction deadline has passed
+        SdkValue::Int(1),  // non-zero block-height deadline
     ]);
 
     contract
@@ -129,13 +134,14 @@ fn test_auction_close() {
         })
         .expect("deploy failed");
 
+    let close_opts = CallOptions { locktime: Some(1), ..Default::default() };
     let (call_txid, _tx) = contract
         .call(
             "close",
             &[SdkValue::Auto],
             &mut provider,
             &*signer,
-            None,
+            Some(&close_opts),
         )
         .expect("close failed");
     assert!(!call_txid.is_empty());
@@ -156,7 +162,7 @@ fn test_auction_wrong_signer_rejected() {
         SdkValue::Bytes(auctioneer_wallet.pub_key_hex.clone()),
         SdkValue::Bytes(bidder.pub_key_hex),
         SdkValue::Int(100),
-        SdkValue::Int(0), // deadline=0 so auction deadline has passed
+        SdkValue::Int(1), // non-zero block-height deadline (see test_auction_close)
     ]);
 
     contract
@@ -166,14 +172,17 @@ fn test_auction_wrong_signer_rejected() {
         })
         .expect("deploy failed");
 
-    // Call close with a different signer — should be rejected
+    // Call close with a different signer — should be rejected. locktime is set so
+    // the ONLY reason for rejection is the wrong signer, not a future-deadline /
+    // missing-locktime failure.
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
+    let close_opts = CallOptions { locktime: Some(1), ..Default::default() };
     let result = contract.call(
         "close",
         &[SdkValue::Auto],
         &mut provider,
         &*signer_b,
-        None,
+        Some(&close_opts),
     );
     assert!(result.is_err(), "close with wrong signer should be rejected");
 }

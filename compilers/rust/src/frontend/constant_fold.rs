@@ -6,6 +6,9 @@
 
 use std::collections::HashMap;
 
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive, Zero};
+
 use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
 
 // ---------------------------------------------------------------------------
@@ -26,11 +29,11 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
     // Arithmetic/bitwise/comparison on ints
     if let (ConstValue::Int(a), ConstValue::Int(b)) = (left, right) {
         return match op {
-            "+" => a.checked_add(*b).map(ConstValue::Int),
-            "-" => a.checked_sub(*b).map(ConstValue::Int),
-            "*" => a.checked_mul(*b).map(ConstValue::Int),
+            "+" => Some(ConstValue::Int(a + b)),
+            "-" => Some(ConstValue::Int(a - b)),
+            "*" => Some(ConstValue::Int(a * b)),
             "/" => {
-                if *b == 0 {
+                if b.is_zero() {
                     None
                 } else {
                     // Truncated division (toward zero), matching JS BigInt semantics
@@ -38,7 +41,7 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
                 }
             }
             "%" => {
-                if *b == 0 {
+                if b.is_zero() {
                     None
                 } else {
                     // Remainder matching JS BigInt (sign follows dividend)
@@ -55,22 +58,24 @@ fn eval_bin_op(op: &str, left: &ConstValue, right: &ConstValue) -> Option<ConstV
             "|" => Some(ConstValue::Int(a | b)),
             "^" => Some(ConstValue::Int(a ^ b)),
             "<<" => {
-                if *a < 0 {
+                if a.is_negative() {
                     return None; // skip for negative left operand (BSV shifts are logical)
                 }
-                if *b < 0 || *b > 128 {
+                let shift = b.to_u32()?;
+                if shift > 128 {
                     return None;
                 }
-                a.checked_shl(*b as u32).map(ConstValue::Int)
+                Some(ConstValue::Int(a << shift))
             }
             ">>" => {
-                if *a < 0 {
+                if a.is_negative() {
                     return None; // skip for negative left operand (BSV shifts are logical)
                 }
-                if *b < 0 || *b > 128 {
+                let shift = b.to_u32()?;
+                if shift > 128 {
                     return None;
                 }
-                Some(ConstValue::Int(a >> (*b as u32)))
+                Some(ConstValue::Int(a >> shift))
             }
             _ => None,
         };
@@ -131,7 +136,7 @@ fn eval_unary_op(op: &str, operand: &ConstValue) -> Option<ConstValue> {
         ConstValue::Int(n) => match op {
             "-" => Some(ConstValue::Int(-n)),
             "~" => Some(ConstValue::Int(!n)),
-            "!" => Some(ConstValue::Bool(*n == 0)),
+            "!" => Some(ConstValue::Bool(n.is_zero())),
             _ => None,
         },
         _ => None,
@@ -144,10 +149,10 @@ fn eval_unary_op(op: &str, operand: &ConstValue) -> Option<ConstValue> {
 
 fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue> {
     // Only fold pure math builtins with int arguments
-    let int_args: Vec<i128> = args
+    let int_args: Vec<&BigInt> = args
         .iter()
         .map(|a| match a {
-            ConstValue::Int(n) => Some(*n),
+            ConstValue::Int(n) => Some(n),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
@@ -163,22 +168,22 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             if int_args.len() != 2 {
                 return None;
             }
-            Some(ConstValue::Int(int_args[0].min(int_args[1])))
+            Some(ConstValue::Int(std::cmp::min(int_args[0], int_args[1]).clone()))
         }
         "max" => {
             if int_args.len() != 2 {
                 return None;
             }
-            Some(ConstValue::Int(int_args[0].max(int_args[1])))
+            Some(ConstValue::Int(std::cmp::max(int_args[0], int_args[1]).clone()))
         }
         "safediv" => {
-            if int_args.len() != 2 || int_args[1] == 0 {
+            if int_args.len() != 2 || int_args[1].is_zero() {
                 return None;
             }
             Some(ConstValue::Int(int_args[0] / int_args[1]))
         }
         "safemod" => {
-            if int_args.len() != 2 || int_args[1] == 0 {
+            if int_args.len() != 2 || int_args[1].is_zero() {
                 return None;
             }
             Some(ConstValue::Int(int_args[0] % int_args[1]))
@@ -188,59 +193,65 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
                 return None;
             }
             let (val, lo, hi) = (int_args[0], int_args[1], int_args[2]);
-            Some(ConstValue::Int(val.max(lo).min(hi)))
+            let clamped = std::cmp::min(std::cmp::max(val, lo), hi).clone();
+            Some(ConstValue::Int(clamped))
         }
         "sign" => {
             if int_args.len() != 1 {
                 return None;
             }
-            Some(ConstValue::Int(int_args[0].signum()))
+            let s: i32 = match int_args[0].sign() {
+                num_bigint::Sign::Plus => 1,
+                num_bigint::Sign::Minus => -1,
+                num_bigint::Sign::NoSign => 0,
+            };
+            Some(ConstValue::Int(BigInt::from(s)))
         }
         "pow" => {
             if int_args.len() != 2 {
                 return None;
             }
             let (base, exp) = (int_args[0], int_args[1]);
-            if exp < 0 || exp > 256 {
+            let exp_u32 = exp.to_u32()?;
+            if exp_u32 > 256 {
                 return None;
             }
-            let mut result: i128 = 1;
-            for _ in 0..exp {
-                result = result.checked_mul(base)?;
-            }
-            Some(ConstValue::Int(result))
+            use num_traits::Pow;
+            Some(ConstValue::Int(base.clone().pow(exp_u32)))
         }
         "mulDiv" => {
-            if int_args.len() != 3 || int_args[2] == 0 {
+            if int_args.len() != 3 || int_args[2].is_zero() {
                 return None;
             }
-            let tmp = int_args[0].checked_mul(int_args[1])?;
+            let tmp = int_args[0] * int_args[1];
             Some(ConstValue::Int(tmp / int_args[2]))
         }
         "percentOf" => {
             if int_args.len() != 2 {
                 return None;
             }
-            let tmp = int_args[0].checked_mul(int_args[1])?;
-            Some(ConstValue::Int(tmp / 10000))
+            let tmp = int_args[0] * int_args[1];
+            Some(ConstValue::Int(tmp / BigInt::from(10000)))
         }
         "sqrt" => {
             if int_args.len() != 1 {
                 return None;
             }
             let n = int_args[0];
-            if n < 0 {
+            if n.is_negative() {
                 return None;
             }
-            if n == 0 {
-                return Some(ConstValue::Int(0));
+            if n.is_zero() {
+                return Some(ConstValue::Int(BigInt::from(0)));
             }
             // Integer square root via Newton's method
-            let mut x = n;
-            let mut y = (x + 1) / 2;
+            let two = BigInt::from(2);
+            let one = BigInt::from(1);
+            let mut x = n.clone();
+            let mut y = (&x + &one) / &two;
             while y < x {
-                x = y;
-                y = (x + n / x) / 2;
+                x = y.clone();
+                y = (&x + n / &x) / &two;
             }
             Some(ConstValue::Int(x))
         }
@@ -250,15 +261,15 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             }
             let mut a = int_args[0].abs();
             let mut b = int_args[1].abs();
-            while b != 0 {
-                let t = b;
-                b = a % b;
+            while !b.is_zero() {
+                let t = b.clone();
+                b = &a % &b;
                 a = t;
             }
             Some(ConstValue::Int(a))
         }
         "divmod" => {
-            if int_args.len() != 2 || int_args[1] == 0 {
+            if int_args.len() != 2 || int_args[1].is_zero() {
                 return None;
             }
             Some(ConstValue::Int(int_args[0] / int_args[1]))
@@ -268,16 +279,18 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
                 return None;
             }
             let n = int_args[0];
-            if n <= 0 {
-                return Some(ConstValue::Int(0));
+            if !n.is_positive() {
+                return Some(ConstValue::Int(BigInt::from(0)));
             }
-            Some(ConstValue::Int(127 - n.leading_zeros() as i128))
+            // bits() returns the minimum number of bits to represent |n|;
+            // floor(log2(n)) = bits - 1 for n > 0.
+            Some(ConstValue::Int(BigInt::from(n.bits() - 1)))
         }
         "bool" => {
             if int_args.len() != 1 {
                 return None;
             }
-            Some(ConstValue::Bool(int_args[0] != 0))
+            Some(ConstValue::Bool(!int_args[0].is_zero()))
         }
         _ => None,
     }
@@ -305,7 +318,7 @@ fn anf_value_to_const(value: &ANFValue) -> Option<ConstValue> {
 fn const_to_anf_value(cv: &ConstValue) -> ANFValue {
     match cv {
         ConstValue::Int(n) => ANFValue::LoadConst {
-            value: serde_json::Value::Number(serde_json::Number::from(*n as i64)),
+            value: bigint_to_json(n),
         },
         ConstValue::Bool(b) => ANFValue::LoadConst {
             value: serde_json::Value::Bool(*b),
@@ -313,6 +326,19 @@ fn const_to_anf_value(cv: &ConstValue) -> ANFValue {
         ConstValue::Str(s) => ANFValue::LoadConst {
             value: serde_json::Value::String(s.clone()),
         },
+    }
+}
+
+/// Serialise a `BigInt` to `serde_json::Value` for IR-JSON. Mirrors
+/// `anf_lower::bigint_to_json` — small values become JSON numbers,
+/// oversize values become quoted decimal strings with a trailing `n`
+/// suffix so the IR loader can discriminate them from hex-encoded
+/// `ByteString` literals.
+fn bigint_to_json(v: &BigInt) -> serde_json::Value {
+    if let Some(i) = v.to_i64() {
+        serde_json::Value::Number(serde_json::Number::from(i))
+    } else {
+        serde_json::Value::String(format!("{}n", v))
     }
 }
 
@@ -499,6 +525,7 @@ pub fn fold_constants(program: &ANFProgram) -> ANFProgram {
         contract_name: program.contract_name.clone(),
         properties: program.properties.clone(),
         methods: program.methods.iter().map(|m| fold_method(m)).collect(),
+        parent_class: program.parent_class.clone(),
     }
 }
 
@@ -518,6 +545,7 @@ mod tests {
             contract_name: "Test".to_string(),
             properties: vec![],
             methods,
+            parent_class: String::new(),
         }
     }
 
@@ -1040,7 +1068,7 @@ mod tests {
     fn test_assert_unchanged() {
         let p = make_program(vec![make_method("m", vec![
             b("t0", mk_bool(true)),
-            b("t1", ANFValue::Assert { value: "t0".to_string() }),
+            b("t1", ANFValue::Assert { value: "t0".to_string(), is_auto_injected_state_check: false }),
         ])]);
         let r = fold_constants_only(&p);
         match &r.methods[0].body[1].value {

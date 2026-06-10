@@ -582,6 +582,7 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 		return nil
 	}
 	typeName := typeTok.value
+	propType := p.parseSolFixedArraySuffix(parseSolType(typeName))
 
 	// Check for immutable keyword
 	isReadonly := false
@@ -604,7 +605,7 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 
 	return &PropertyNode{
 		Name:           propName,
-		Type:           parseSolType(typeName),
+		Type:           propType,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
 		SourceLocation: loc,
@@ -628,6 +629,30 @@ func parseSolType(name string) TypeNode {
 		}
 		return CustomType{Name: name}
 	}
+}
+
+// parseSolFixedArraySuffix consumes any number of trailing `[N]` brackets
+// after a base type name and wraps the result as nested FixedArrayType.
+// Per Solidity declaration convention `T[A][B]` reads as outer B of
+// inner A of T — i.e. each `[L]` wraps the current type as
+// FixedArray<previous, L>, matching the TS reference parser.
+func (p *solParser) parseSolFixedArraySuffix(base TypeNode) TypeNode {
+	result := base
+	for p.check(solTokLBracket) {
+		p.advance() // [
+		lenTok := p.expect(solTokNumber)
+		length := 0
+		if bi := new(big.Int); bi != nil {
+			if _, ok := bi.SetString(lenTok.value, 0); ok && bi.IsInt64() && bi.Sign() >= 0 {
+				length = int(bi.Int64())
+			} else {
+				p.addError(fmt.Sprintf("FixedArray length must be a non-negative integer literal, got %q", lenTok.value))
+			}
+		}
+		p.expect(solTokRBracket)
+		result = FixedArrayType{Element: result, Length: length}
+	}
+	return result
 }
 
 // ---------------------------------------------------------------------------
@@ -986,6 +1011,7 @@ func (p *solParser) parseSolParams() []ParamNode {
 	for !p.check(solTokRParen) && !p.check(solTokEOF) {
 		typeTok := p.expect(solTokIdent)
 		typeName := typeTok.value
+		paramType := p.parseSolFixedArraySuffix(parseSolType(typeName))
 
 		// Skip memory/storage/calldata qualifiers
 		for p.checkIdent("memory") || p.checkIdent("storage") || p.checkIdent("calldata") {
@@ -999,7 +1025,7 @@ func (p *solParser) parseSolParams() []ParamNode {
 
 		params = append(params, ParamNode{
 			Name: cleanName,
-			Type: parseSolType(typeName),
+			Type: paramType,
 		})
 
 		if !p.match(solTokComma) {

@@ -280,24 +280,43 @@ export function analyzePaths(
     // Enumerate all 2^n combinations (up to MAX_PATHS). When we truncate,
     // emit a finding so callers aren't silently looking at an incomplete
     // analysis.
-    const requestedCombinations = 1 << numBranches;
-    const totalCombinations = Math.min(requestedCombinations, MAX_PATHS);
-    if (requestedCombinations > MAX_PATHS) {
+    //
+    // For `numBranches >= 53`, 2^numBranches overflows JS's safe-integer
+    // range, so the message renders the count symbolically as `more than
+    // 2^53 paths`. For `numBranches < 53` we render the exact count.
+    // Prior versions used `1 << numBranches`, which silently wrapped via
+    // JS's 5-bit shift-count mask and printed nonsense (e.g. 2^785 = 131072).
+    const LARGE_BRANCH_THRESHOLD = 53;
+    const useExactCount = numBranches < LARGE_BRANCH_THRESHOLD;
+    const exactCombinations = useExactCount ? 2 ** numBranches : Number.POSITIVE_INFINITY;
+    const totalCombinations = useExactCount
+      ? Math.min(exactCombinations, MAX_PATHS)
+      : MAX_PATHS;
+    if (exactCombinations > MAX_PATHS) {
+      const pathsClause = useExactCount
+        ? `2^${numBranches} = ${exactCombinations} paths`
+        : `more than 2^${LARGE_BRANCH_THRESHOLD} paths`;
       findings.push({
         severity: 'warning',
         code: 'PATHS_TRUNCATED',
         message:
-          `Script has ${numBranches} branch points (2^${numBranches} = ${requestedCombinations} paths); ` +
+          `Script has ${numBranches} branch points (${pathsClause}); ` +
           `analysis truncated to the first ${MAX_PATHS}. Consider reducing branching or ` +
           `splitting the contract into smaller spending paths.`,
       });
     }
 
     for (let combo = 0; combo < totalCombinations; combo++) {
-      // Build choices array from bit pattern
+      // Build choices array from bit pattern. `combo` is bounded by
+      // `MAX_PATHS = 256`, so bits at positions >= 8 are mathematically
+      // always 0. We must explicitly clamp here because JS `>>` masks the
+      // shift count to 5 bits — without the clamp, bit positions >= 32
+      // would silently wrap (`combo >> 32` becomes `combo >> 0`) and
+      // produce incorrect choices for branches beyond position 31.
       const choices: boolean[] = [];
       for (let b = 0; b < numBranches; b++) {
-        choices.push(((combo >> b) & 1) === 1);
+        const bit = b < 31 ? (combo >> b) & 1 : 0;
+        choices.push(bit === 1);
       }
 
       const pathOpcodes = collectPathOpcodes(opcodes, choices, branchLookup);

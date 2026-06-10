@@ -23,6 +23,12 @@ class ParseResult:
 
 def parse_source(source: str, file_name: str) -> ParseResult:
     """Dispatch to the appropriate parser based on file extension."""
+    # DoS-bound size guard. Reject oversized source BEFORE any
+    # format-specific parser touches the input. Raises
+    # :class:`SourceSizeExceededError` on rejection. BUG-008 follow-up.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
+
     lower = file_name.lower()
 
     if lower.endswith(".runar.py"):

@@ -19,6 +19,7 @@ import runar.compiler.ir.ast.CustomType;
 import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.Expression;
 import runar.compiler.ir.ast.ExpressionStatement;
+import runar.compiler.ir.ast.FixedArrayType;
 import runar.compiler.ir.ast.ForStatement;
 import runar.compiler.ir.ast.Identifier;
 import runar.compiler.ir.ast.IfStatement;
@@ -602,6 +603,7 @@ public final class SolParser {
             }
 
             String typeName = typeTok.value;
+            TypeNode propType = parseSolFixedArraySuffix(parseSolType(typeName));
 
             boolean isReadonly = false;
             if (checkIdent("immutable")) {
@@ -621,12 +623,38 @@ public final class SolParser {
 
             return new PropertyNode(
                 propName,
-                parseSolType(typeName),
+                propType,
                 isReadonly,
                 initializer,
                 location,
                 null
             );
+        }
+
+        /**
+         * Wrap a base type with any trailing {@code [N]} bracket suffixes,
+         * producing nested {@code FixedArrayType} per Solidity's
+         * outer-to-inner declaration order: {@code T[A][B]} ⇒ outer B of
+         * inner A of T.
+         */
+        private TypeNode parseSolFixedArraySuffix(TypeNode base) {
+            TypeNode result = base;
+            while (check(TOK_LBRACKET)) {
+                advance(); // [
+                Token sizeTok = expect(TOK_NUMBER);
+                int length;
+                try {
+                    length = Integer.parseInt(sizeTok.value);
+                    if (length < 0) throw new NumberFormatException();
+                } catch (NumberFormatException ex) {
+                    addError("FixedArray length must be a non-negative integer literal, got '"
+                        + sizeTok.value + "'");
+                    length = 0;
+                }
+                expect(TOK_RBRACKET);
+                result = new FixedArrayType(result, length);
+            }
+            return result;
         }
 
         // ---- Constructor: constructor(Type _name, ...) { ... } -------
@@ -736,6 +764,7 @@ public final class SolParser {
             while (!check(TOK_RPAREN) && !check(TOK_EOF)) {
                 Token typeTok = expect(TOK_IDENT);
                 String typeName = typeTok.value;
+                TypeNode paramType = parseSolFixedArraySuffix(parseSolType(typeName));
 
                 while (checkIdent("memory") || checkIdent("storage") || checkIdent("calldata")) {
                     advance();
@@ -747,7 +776,7 @@ public final class SolParser {
                     paramName = paramName.substring(1);
                 }
 
-                params.add(new ParamNode(paramName, parseSolType(typeName)));
+                params.add(new ParamNode(paramName, paramType));
 
                 if (!match(TOK_COMMA)) {
                     break;

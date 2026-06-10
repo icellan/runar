@@ -17,6 +17,7 @@
 
 #![allow(dead_code)]
 
+use num_bigint::BigInt;
 use super::koalabear::KBTracker;
 use super::poseidon2_koalabear::{p2kb_permute, p2kb_state_name, p2kb_state_names};
 use super::stack::{PushValue, StackOp};
@@ -247,7 +248,7 @@ pub(crate) fn emit_sample_bits(fs: &mut FiatShamirState, t: &mut KBTracker, n: u
     // _fs_squeezed is on top. Mask to low n bits: val % (2^n).
     let mask: i64 = 1i64 << n;
     t.raw_block(&["_fs_squeezed"], Some("_fs_bits"), |e| {
-        e(StackOp::Push(PushValue::Int(mask as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(mask as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 }
@@ -278,7 +279,7 @@ pub(crate) fn emit_check_witness(fs: &mut FiatShamirState, t: &mut KBTracker, bi
     // Extract low `bits` bits and assert they are zero.
     let mask: i64 = 1i64 << bits;
     t.raw_block(&["_fs_squeezed"], Some("_fs_pow_check"), |e| {
-        e(StackOp::Push(PushValue::Int(mask as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(mask as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
     // Assert _fs_pow_check == 0: push 0, check equal, assert.

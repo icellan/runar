@@ -1003,7 +1003,14 @@ jobs:
             'maxscriptnumlengthpolicy=0' 'maxstackmemoryusagepolicy=100000000' \
             'maxtxsizepolicy=0' 'genesisactivationheight=1' 'chronicleactivationheight=1' \
             'minminingtxfee=0.00000001' \
+            'acceptnonstdtxn=0' \
             > integration/regtest-data/n1/bitcoin.conf
+          # acceptnonstdtxn=0 hardens the CI oracle (issues #40/#42/#44): with
+          # genesisactivationheight=1 the node enforces post-Genesis script-verify
+          # standardness (CLEANSTACK, NULLFAIL, NULLDUMMY, minimal-push) at
+          # sendrawtransaction acceptance — matching mainnet ARC. Large post-Genesis
+          # scripts (SLH-DSA/Schnorr) stay acceptable. Keep in sync with
+          # integration/regtest.sh.
 
       - name: Start BSV regtest node
         run: cd integration && ./regtest.sh start

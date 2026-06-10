@@ -4,6 +4,7 @@
 //! opcodes that were disabled in BTC but re-enabled in BSV (OP_CAT, OP_SPLIT,
 //! OP_MUL, OP_DIV, OP_MOD, OP_LSHIFT, OP_RSHIFT, OP_AND, OP_OR, OP_XOR).
 
+use num_bigint::BigInt;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 

@@ -314,11 +314,25 @@ public final class Envelope {
         BAD_JSON("bad-json"),
         ENVELOPE_MISMATCH("envelope-mismatch"),
         BAD_SIG("bad-sig"),
-        PUBKEY_NOT_ALLOWED("pubkey-not-allowed");
+        PUBKEY_NOT_ALLOWED("pubkey-not-allowed"),
+        /**
+         * Mirrors the TS 'too-large' reason. Returned BEFORE any JSON parse /
+         * ECDSA verify work when an envelope string field exceeds its
+         * InputLimits cap (DoS-bound). BUG-008 follow-up.
+         */
+        TOO_LARGE("too-large");
 
         public final String wire;
         VerifyEnvelopeReason(String wire) { this.wire = wire; }
     }
+
+    /**
+     * Envelope DoS-bound caps. Mirror {@code InputLimits.MAX_IR_BYTES} and
+     * {@code InputLimits.MAX_STRING_BYTES} from the TS schema package.
+     * BUG-008 follow-up.
+     */
+    public static final int MAX_ENVELOPE_PAYLOAD_BYTES = 16 * 1024 * 1024; // 16 MiB
+    public static final int MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024;    // 4 MiB
 
     public static final class VerifyEnvelopeOpts {
         public SignedEnvelope envelope;
@@ -344,6 +358,27 @@ public final class Envelope {
 
     public static VerifyEnvelopeResult verify(VerifyEnvelopeOpts opts) {
         SignedEnvelope env = opts.envelope;
+
+        // 0. DoS-bound size guard. Reject envelopes whose string fields exceed
+        //    their InputLimits cap BEFORE running JSON parse, hashing, or
+        //    ECDSA verify -- those operations are linear in input size and a
+        //    pathological 100 MB payload would otherwise pin the worker.
+        //    Mirrors the TS 'too-large' rejection at sdk/envelope.ts:104.
+        //    BUG-008 follow-up.
+        if (env != null) {
+            if (env.payload != null) {
+                int payloadBytes = env.payload.getBytes(StandardCharsets.UTF_8).length;
+                if (payloadBytes > MAX_ENVELOPE_PAYLOAD_BYTES) {
+                    return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.TOO_LARGE, null);
+                }
+            }
+            if (env.sig != null && env.sig.length() > MAX_ENVELOPE_FIELD_BYTES) {
+                return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.TOO_LARGE, null);
+            }
+            if (env.pubkey != null && env.pubkey.length() > MAX_ENVELOPE_FIELD_BYTES) {
+                return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.TOO_LARGE, null);
+            }
+        }
 
         // 1. Field presence + types.
         if (env == null || env.payload == null || env.payload.isEmpty()

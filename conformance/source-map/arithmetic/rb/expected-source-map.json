@@ -1,0 +1,172 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 2,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 14,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 14,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 14,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 14,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 14,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 15,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 15,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 15,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 10,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 15,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 15,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 16,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 16,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 16,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 15,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 16,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 16,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 18,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 19,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 20,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 21,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 22,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 23,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 24,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 25,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 17,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 26,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 27,
+      "sourceFile": "examples/ruby/arithmetic/Arithmetic.runar.rb",
+      "line": 18,
+      "column": 5
+    }
+  ]
+}

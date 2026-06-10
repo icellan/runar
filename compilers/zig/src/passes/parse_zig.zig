@@ -65,6 +65,15 @@ pub fn parseZig(allocator: Allocator, source: []const u8, file_name: []const u8)
     return parser.parse();
 }
 
+/// True if every byte in `s` is an ASCII digit (0-9).
+fn isAllAsciiDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
 // ============================================================================
 // Token Types
 // ============================================================================
@@ -1170,7 +1179,20 @@ const Parser = struct {
                 _ = self.expect(.rbrace);
                 break :blk .{ .array_literal = elems.items };
             },
-            .number => blk: { const tok = self.bump(); break :blk Expression{ .literal_int = std.fmt.parseInt(i64, tok.text, 10) catch { self.addErrorFmt("invalid integer: '{s}'", .{tok.text}); break :blk null; } }; },
+            .number => blk: {
+                const tok = self.bump();
+                if (std.fmt.parseInt(i64, tok.text, 10)) |val| {
+                    break :blk Expression{ .literal_int = val };
+                } else |_| {
+                    // Oversize decimal literal — carry as `literal_bigint`.
+                    if (isAllAsciiDigits(tok.text)) {
+                        const decimal = self.allocator.dupe(u8, tok.text) catch break :blk null;
+                        break :blk Expression{ .literal_bigint = decimal };
+                    }
+                    self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
+                    break :blk null;
+                }
+            },
             .kw_true => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = true }; },
             .kw_false => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = false }; },
             .string_literal => blk: { const tok = self.bump(); break :blk Expression{ .literal_bytes = tok.text }; },

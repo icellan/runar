@@ -732,7 +732,7 @@ test "e2e MultiSig2of3: zig compiler produces canonical hex for array_literal + 
     // to byte-identical output: any drift in array_literal lowering or
     // lowerCheckMultiSig (count pushes + OP_0 dummy + stack discipline) fires
     // here immediately.
-    const expected_hex = "0000007b7b7b007b52537a53ae";
+    const expected_hex = "00000000557a557a52567a567a567a53ae";
     try std.testing.expectEqualStrings(expected_hex, zig_hex);
 }
 

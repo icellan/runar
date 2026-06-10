@@ -79,11 +79,14 @@ public final class Peephole {
         boolean changed = false;
         int i = 0;
         while (i < ops.size()) {
+            // GAP-002: head loc — every collapsed window's outputs are stamped
+            // with the source loc of the FIRST input op in the window.
+            runar.compiler.ir.stack.StackSourceLoc headLoc = extractLoc(ops.get(i));
             // Widest window first: 4, 3, then 2.
             if (i + 4 <= ops.size()) {
                 List<StackOp> r = matchWindow4(ops.get(i), ops.get(i + 1), ops.get(i + 2), ops.get(i + 3));
                 if (r != null) {
-                    out.addAll(r);
+                    for (StackOp ro : r) out.add(stampIfMissing(ro, headLoc));
                     i += 4;
                     changed = true;
                     continue;
@@ -92,7 +95,7 @@ public final class Peephole {
             if (i + 3 <= ops.size()) {
                 List<StackOp> r = matchWindow3(ops.get(i), ops.get(i + 1), ops.get(i + 2));
                 if (r != null) {
-                    out.addAll(r);
+                    for (StackOp ro : r) out.add(stampIfMissing(ro, headLoc));
                     i += 3;
                     changed = true;
                     continue;
@@ -101,7 +104,7 @@ public final class Peephole {
             if (i + 2 <= ops.size()) {
                 List<StackOp> r = matchWindow2(ops.get(i), ops.get(i + 1));
                 if (r != null) {
-                    out.addAll(r);
+                    for (StackOp ro : r) out.add(stampIfMissing(ro, headLoc));
                     i += 2;
                     changed = true;
                     continue;
@@ -111,6 +114,52 @@ public final class Peephole {
             i++;
         }
         return new Pass(out, changed);
+    }
+
+    /**
+     * GAP-002: pull the source loc off a StackOp variant (or return null
+     * when the op has none / doesn't carry the field).
+     */
+    private static runar.compiler.ir.stack.StackSourceLoc extractLoc(StackOp op) {
+        if (op instanceof OpcodeOp o) return o.sourceLoc();
+        if (op instanceof DupOp o) return o.sourceLoc();
+        if (op instanceof SwapOp o) return o.sourceLoc();
+        if (op instanceof RollOp o) return o.sourceLoc();
+        if (op instanceof PickOp o) return o.sourceLoc();
+        if (op instanceof DropOp o) return o.sourceLoc();
+        if (op instanceof runar.compiler.ir.stack.NipOp o) return o.sourceLoc();
+        if (op instanceof OverOp o) return o.sourceLoc();
+        if (op instanceof RotOp o) return o.sourceLoc();
+        if (op instanceof runar.compiler.ir.stack.TuckOp o) return o.sourceLoc();
+        if (op instanceof PushOp o) return o.sourceLoc();
+        if (op instanceof IfOp o) return o.sourceLoc();
+        if (op instanceof runar.compiler.ir.stack.PlaceholderOp o) return o.sourceLoc();
+        if (op instanceof runar.compiler.ir.stack.PushCodeSepIndexOp o) return o.sourceLoc();
+        return null;
+    }
+
+    /**
+     * GAP-002: re-clone a StackOp with the given source loc when the op's
+     * existing sourceLoc field is null. Pass-through when the op already
+     * carries a loc (e.g. when the matcher copies an input op verbatim).
+     */
+    private static StackOp stampIfMissing(StackOp op, runar.compiler.ir.stack.StackSourceLoc loc) {
+        if (loc == null) return op;
+        if (op instanceof OpcodeOp o)  return o.sourceLoc() != null ? o : new OpcodeOp(o.code(), loc);
+        if (op instanceof DupOp o)     return o.sourceLoc() != null ? o : new DupOp(loc);
+        if (op instanceof SwapOp o)    return o.sourceLoc() != null ? o : new SwapOp(loc);
+        if (op instanceof RollOp o)    return o.sourceLoc() != null ? o : new RollOp(o.depth(), loc);
+        if (op instanceof PickOp o)    return o.sourceLoc() != null ? o : new PickOp(o.depth(), loc);
+        if (op instanceof DropOp o)    return o.sourceLoc() != null ? o : new DropOp(loc);
+        if (op instanceof runar.compiler.ir.stack.NipOp o)  return o.sourceLoc() != null ? o : new runar.compiler.ir.stack.NipOp(loc);
+        if (op instanceof OverOp o)    return o.sourceLoc() != null ? o : new OverOp(loc);
+        if (op instanceof RotOp o)     return o.sourceLoc() != null ? o : new RotOp(loc);
+        if (op instanceof runar.compiler.ir.stack.TuckOp o) return o.sourceLoc() != null ? o : new runar.compiler.ir.stack.TuckOp(loc);
+        if (op instanceof PushOp o)    return o.sourceLoc() != null ? o : new PushOp(o.value(), loc);
+        if (op instanceof IfOp o)      return o.sourceLoc() != null ? o : new IfOp(o.thenBranch(), o.elseBranch(), loc);
+        if (op instanceof runar.compiler.ir.stack.PlaceholderOp o) return o.sourceLoc() != null ? o : new runar.compiler.ir.stack.PlaceholderOp(o.paramIndex(), o.paramName(), loc);
+        if (op instanceof runar.compiler.ir.stack.PushCodeSepIndexOp o) return o.sourceLoc() != null ? o : new runar.compiler.ir.stack.PushCodeSepIndexOp(loc);
+        return op;
     }
 
     /**

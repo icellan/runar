@@ -309,6 +309,7 @@ mod tests {
         RunarArtifact {
             version: "0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: constructor_params },
                 methods: vec![AbiMethod {
@@ -368,6 +369,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -462,6 +464,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],
@@ -499,6 +502,7 @@ mod tests {
         let artifact = RunarArtifact {
             version: "0.1.0".to_string(),
             contract_name: "Test".to_string(),
+            parent_class: None,
             abi: Abi {
                 constructor: AbiConstructor { params: vec![] },
                 methods: vec![],

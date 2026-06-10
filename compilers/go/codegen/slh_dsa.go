@@ -1245,6 +1245,18 @@ func EmitVerifySLHDSA(emit func(StackOp), paramKey string) {
 
 	t := NewSLHTracker([]string{"msg", "sig", "pubkey"}, emit)
 
+	// ---- 0. BUG-011: enforce exact signature length on-chain ----
+	// Each parameter set has a canonical sig length: n + k*(1+a)*n + d*(len+hp)*n.
+	// Without this guard the d xmss-layer split loop silently dropped trailing
+	// bytes past layer d-1.
+	expectedSigLen := n + forsSigLen + d*xmssSigLen
+	t.toTop("sig")
+	t.rawBlock([]string{"sig"}, "sig", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(expectedSigLen))})
+		e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+	})
+
 	// ---- 1. Parse pubkey -> pkSeed, pkRoot ----
 	t.toTop("pubkey")
 	t.pushInt("", int64(n))

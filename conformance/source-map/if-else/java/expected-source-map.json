@@ -1,0 +1,12 @@
+{
+  "mappings": [
+    {"opcodeIndex": 0, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 1, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 3, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 4, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 6, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 7, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 9, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 10, "sourceFile": "examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java", "line": 0, "column": 0}
+  ]
+}

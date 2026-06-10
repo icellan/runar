@@ -70,7 +70,18 @@ def _canonical_append(out: List[str], value: Any) -> None:
         return
     if isinstance(value, dict):
         # Sort keys by UTF-16 code-unit order to match JS default sort().
-        keys = sorted(value.keys(), key=lambda k: k.encode("utf-16-be"))
+        # `.encode('utf-16-be')` raises UnicodeEncodeError on lone surrogates;
+        # surface that as the typed canonical-JSON ValueError so callers can
+        # catch a single error class (RFC 8785 §3.2.2.2 / audit D6).
+        def _utf16be(k: str) -> bytes:
+            try:
+                return k.encode("utf-16-be")
+            except UnicodeEncodeError as e:
+                raise ValueError(
+                    f"canonical JSON: lone surrogate in object key ({e})"
+                ) from e
+
+        keys = sorted(value.keys(), key=_utf16be)
         out.append("{")
         first = True
         for k in keys:
@@ -198,6 +209,16 @@ class VerifyEnvelopeReason(str, Enum):
     ENVELOPE_MISMATCH = "envelope-mismatch"
     BAD_SIG = "bad-sig"
     PUBKEY_NOT_ALLOWED = "pubkey-not-allowed"
+    # TOO_LARGE mirrors the TS 'too-large' reason. Returned BEFORE any
+    # JSON parse / ECDSA verify work when an envelope string field
+    # exceeds its InputLimits cap (DoS-bound).
+    TOO_LARGE = "too-large"
+
+
+# Envelope DoS-bound caps. Mirror InputLimits.{MAX_IR_BYTES, MAX_STRING_BYTES}
+# from the TS schema package.
+MAX_ENVELOPE_PAYLOAD_BYTES = 16 * 1024 * 1024  # 16 MiB — matches MAX_IR_BYTES
+MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024     # 4 MiB — matches MAX_STRING_BYTES
 
 
 @dataclass
@@ -215,6 +236,22 @@ def verify_envelope(
 ) -> VerifyEnvelopeResult:
     """Verify a signed envelope against the same six rejection reasons every
     other SDK tier uses."""
+    # 0. DoS-bound size guard. Reject envelopes whose string fields exceed
+    #    their InputLimits cap BEFORE running JSON parse, hashing, or
+    #    ECDSA verify -- those operations are linear in input size and a
+    #    pathological 100 MB payload would otherwise pin the worker.
+    #    Mirrors the TS 'too-large' rejection at sdk/envelope.ts:104.
+    if isinstance(envelope, SignedEnvelope):
+        if (
+            isinstance(envelope.payload, str)
+            and len(envelope.payload.encode("utf-8")) > MAX_ENVELOPE_PAYLOAD_BYTES
+        ):
+            return VerifyEnvelopeResult(False, VerifyEnvelopeReason.TOO_LARGE, None)
+        if isinstance(envelope.sig, str) and len(envelope.sig) > MAX_ENVELOPE_FIELD_BYTES:
+            return VerifyEnvelopeResult(False, VerifyEnvelopeReason.TOO_LARGE, None)
+        if isinstance(envelope.pubkey, str) and len(envelope.pubkey) > MAX_ENVELOPE_FIELD_BYTES:
+            return VerifyEnvelopeResult(False, VerifyEnvelopeReason.TOO_LARGE, None)
+
     # 1. Field presence + types.
     if (
         not isinstance(envelope, SignedEnvelope)

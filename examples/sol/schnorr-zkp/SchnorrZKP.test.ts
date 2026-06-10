@@ -168,4 +168,42 @@ describe('SchnorrZKP (Solidity)', () => {
     const result = c.call('verify', { rPoint: rHex, s });
     expect(result.success).toBe(true);
   });
+
+  // BUG-001 adversarial tests — see examples/ts/schnorr-zkp/SchnorrZKP.test.ts
+  // for the canonical commentary; this is the .runar.sol mirror.
+  it('rejects_s_at_n: s = secp256k1 group order is rejected', () => {
+    const privKey = 42n;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex }, FILE_NAME);
+    const result = c.call('verify', { rPoint: makePointHex(GX, GY), s: EC_N });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects_s_zero: s = 0 is rejected', () => {
+    const privKey = 42n;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex }, FILE_NAME);
+    const result = c.call('verify', { rPoint: makePointHex(GX, GY), s: 0n });
+    expect(result.success).toBe(false);
+  });
+
+  it('nonce_reuse_recovers_key: reusing r across proofs leaks the private key off-chain', () => {
+    const privKey = 0xC0FFEEn;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+    const r = 12345n;
+    const [rX, rY] = scalarMul(GX, GY, r);
+    const rHex = makePointHex(rX, rY);
+    const e1 = deriveChallenge(rHex, pubKeyHex);
+    const s1 = mod(r + e1 * privKey, EC_N);
+    const e2 = mod(e1 + 1n, EC_N);
+    const s2 = mod(r + e2 * privKey, EC_N);
+    const recovered = mod((s1 - s2) * modInv(e1 - e2, EC_N), EC_N);
+    expect(recovered).toBe(privKey);
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex }, FILE_NAME);
+    const v1 = c.call('verify', { rPoint: rHex, s: s1 });
+    expect(v1.success).toBe(true);
+  });
 });

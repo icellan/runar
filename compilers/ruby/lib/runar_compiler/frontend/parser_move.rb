@@ -595,15 +595,50 @@ module RunarCompiler
         name_tok = expect(TOK_IDENT)
         name = name_tok.value
 
+        # FixedArray<T, N> — nestable. The lexer forms `>>` as a shift
+        # token; `consume_generic_close` splits it back into two `>` so
+        # `FixedArray<FixedArray<bigint, 2>, 2>` closes cleanly.
+        if name == "FixedArray" && check(TOK_LT)
+          advance # <
+          inner = parse_move_type
+          expect(TOK_COMMA)
+          size_tok = expect(TOK_NUMBER)
+          size = begin
+            Integer(size_tok.value, 0)
+          rescue ArgumentError
+            add_error("line #{size_tok.line}: FixedArray length must be a non-negative integer literal")
+            0
+          end
+          consume_generic_close
+          return FixedArrayType.new(element: inner, length: size)
+        end
+
         # vector<T> => treat as ByteString
         if name == "vector" && check(TOK_LT)
           advance # <
           _inner = parse_move_type
-          expect(TOK_GT)
+          consume_generic_close
           return PrimitiveType.new(name: "ByteString")
         end
 
         Frontend.move_map_type(name)
+      end
+
+      # Close a generic-argument list. Accepts either a plain `>` or splits
+      # a `>>` shift token in place into two `>` so an enclosing close can
+      # consume the remaining half.
+      def consume_generic_close
+        if check(TOK_GT)
+          advance
+          return
+        end
+        if check(TOK_SHR)
+          # Rewrite the current `>>` to `>` so the outer close consumes it.
+          tok = @tokens[@pos]
+          @tokens[@pos] = MoveToken.new(kind: TOK_GT, value: ">", line: tok.line, col: tok.col + 1)
+          return
+        end
+        expect(TOK_GT)
       end
 
       # -- Function parsing -------------------------------------------------

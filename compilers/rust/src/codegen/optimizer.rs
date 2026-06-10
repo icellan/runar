@@ -4,6 +4,7 @@
 //! fewer or cheaper opcodes. Applies rules iteratively until a fixed point
 //! is reached. Mirrors the TypeScript peephole optimizer.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 const MAX_ITERATIONS: usize = 100;
@@ -22,6 +23,101 @@ pub fn optimize_stack_ops(ops: &[StackOp]) -> Vec<StackOp> {
     }
 
     current
+}
+
+/// Peephole-optimize a parallel `(ops, source_locs)` pair, preserving the
+/// source location of the FIRST input op in every collapsed window. The
+/// returned `source_locs` is the same length as the returned ops — callers
+/// can drop the old `method.source_locs` and replace it wholesale.
+///
+/// GAP-002: previously the source_locs array was wiped to all-`None` after
+/// the peephole pass because there was no parallel-tracking variant of
+/// `optimize_stack_ops`. The wipe meant `artifact.sourceMap` was always
+/// empty on the Rust tier. This wrapper restores that mapping.
+pub fn optimize_stack_ops_with_locs(
+    ops: &[StackOp],
+    source_locs: &[Option<crate::ir::SourceLocation>],
+) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>) {
+    // Recursive nested-if optimization: inside an If, we keep the outer
+    // location for the IfOp itself; nested ops are optimised without their
+    // own locs (the analyzer treats nested-if peephole as best-effort).
+    let mut current_ops: Vec<StackOp> = ops.iter().map(optimize_nested_if).collect();
+    let mut current_locs: Vec<Option<crate::ir::SourceLocation>> =
+        if source_locs.len() == ops.len() { source_locs.to_vec() } else { vec![None; ops.len()] };
+
+    for _ in 0..MAX_ITERATIONS {
+        let (result_ops, result_locs, changed) = apply_one_pass_with_locs(&current_ops, &current_locs);
+        if !changed {
+            break;
+        }
+        current_ops = result_ops;
+        current_locs = result_locs;
+    }
+
+    (current_ops, current_locs)
+}
+
+fn apply_one_pass_with_locs(
+    ops: &[StackOp],
+    source_locs: &[Option<crate::ir::SourceLocation>],
+) -> (Vec<StackOp>, Vec<Option<crate::ir::SourceLocation>>, bool) {
+    let mut result_ops = Vec::new();
+    let mut result_locs = Vec::new();
+    let mut changed = false;
+    let mut i = 0;
+
+    while i < ops.len() {
+        // 4-op window
+        if i + 3 < ops.len() {
+            if let Some(replacement) =
+                match_window_4(&ops[i], &ops[i + 1], &ops[i + 2], &ops[i + 3])
+            {
+                let head_loc = source_locs.get(i).cloned().flatten();
+                let n = replacement.len();
+                result_ops.extend(replacement);
+                for _ in 0..n {
+                    result_locs.push(head_loc.clone());
+                }
+                i += 4;
+                changed = true;
+                continue;
+            }
+        }
+        // 3-op window
+        if i + 2 < ops.len() {
+            if let Some(replacement) = match_window_3(&ops[i], &ops[i + 1], &ops[i + 2]) {
+                let head_loc = source_locs.get(i).cloned().flatten();
+                let n = replacement.len();
+                result_ops.extend(replacement);
+                for _ in 0..n {
+                    result_locs.push(head_loc.clone());
+                }
+                i += 3;
+                changed = true;
+                continue;
+            }
+        }
+        // 2-op window
+        if i + 1 < ops.len() {
+            if let Some(replacement) = match_window_2(&ops[i], &ops[i + 1]) {
+                let head_loc = source_locs.get(i).cloned().flatten();
+                let n = replacement.len();
+                result_ops.extend(replacement);
+                for _ in 0..n {
+                    result_locs.push(head_loc.clone());
+                }
+                i += 2;
+                changed = true;
+                continue;
+            }
+        }
+
+        result_ops.push(ops[i].clone());
+        result_locs.push(source_locs.get(i).cloned().flatten());
+        i += 1;
+    }
+
+    (result_ops, result_locs, changed)
 }
 
 fn optimize_nested_if(op: &StackOp) -> StackOp {
@@ -295,7 +391,8 @@ fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
 }
 
 fn is_push_int(op: &StackOp, n: i128) -> bool {
-    matches!(op, StackOp::Push(PushValue::Int(v)) if *v == n)
+    use num_traits::ToPrimitive;
+    matches!(op, StackOp::Push(PushValue::Int(v)) if v.to_i128() == Some(n))
 }
 
 fn is_opcode(op: &StackOp, code: &str) -> bool {
@@ -309,6 +406,12 @@ fn is_opcode(op: &StackOp, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test matcher: true if `op` is `PushValue::Int(n)` holding the given i128.
+    fn is_push_int_eq(op: &StackOp, n: i128) -> bool {
+        use num_traits::ToPrimitive;
+        matches!(op, StackOp::Push(PushValue::Int(v)) if v.to_i128() == Some(n))
+    }
 
     // -----------------------------------------------------------------------
     // 2-op optimizations
@@ -330,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_push_drop_removed() {
-        let ops = vec![StackOp::Push(PushValue::Int(42)), StackOp::Drop];
+        let ops = vec![StackOp::Push(PushValue::Int(BigInt::from(42))), StackOp::Drop];
         let result = optimize_stack_ops(&ops);
         assert!(result.is_empty(), "PUSH DROP should be eliminated, got {:?}", result);
     }
@@ -391,7 +494,7 @@ mod tests {
     #[test]
     fn test_push1_add_becomes_1add() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(1)),
+            StackOp::Push(PushValue::Int(BigInt::from(1))),
             StackOp::Opcode("OP_ADD".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -402,7 +505,7 @@ mod tests {
     #[test]
     fn test_push1_sub_becomes_1sub() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(1)),
+            StackOp::Push(PushValue::Int(BigInt::from(1))),
             StackOp::Opcode("OP_SUB".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -413,7 +516,7 @@ mod tests {
     #[test]
     fn test_push0_add_removed() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_ADD".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -423,7 +526,7 @@ mod tests {
     #[test]
     fn test_push0_sub_removed() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_SUB".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -460,7 +563,7 @@ mod tests {
     #[test]
     fn test_push0_numequal_becomes_not() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_NUMEQUAL".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -475,7 +578,7 @@ mod tests {
     #[test]
     fn test_push0_roll_struct_removed() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Roll { depth: 0 },
         ];
         let result = optimize_stack_ops(&ops);
@@ -485,7 +588,7 @@ mod tests {
     #[test]
     fn test_push1_roll_struct_becomes_swap() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(1)),
+            StackOp::Push(PushValue::Int(BigInt::from(1))),
             StackOp::Roll { depth: 1 },
         ];
         let result = optimize_stack_ops(&ops);
@@ -496,7 +599,7 @@ mod tests {
     #[test]
     fn test_push2_roll_struct_becomes_rot() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(2)),
+            StackOp::Push(PushValue::Int(BigInt::from(2))),
             StackOp::Roll { depth: 2 },
         ];
         let result = optimize_stack_ops(&ops);
@@ -507,7 +610,7 @@ mod tests {
     #[test]
     fn test_push0_pick_struct_becomes_dup() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Pick { depth: 0 },
         ];
         let result = optimize_stack_ops(&ops);
@@ -518,7 +621,7 @@ mod tests {
     #[test]
     fn test_push1_pick_struct_becomes_over() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(1)),
+            StackOp::Push(PushValue::Int(BigInt::from(1))),
             StackOp::Pick { depth: 1 },
         ];
         let result = optimize_stack_ops(&ops);
@@ -533,7 +636,7 @@ mod tests {
     #[test]
     fn test_push0_opcode_roll_string_removed() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_ROLL".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -543,7 +646,7 @@ mod tests {
     #[test]
     fn test_push1_opcode_roll_string_becomes_swap() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(1)),
+            StackOp::Push(PushValue::Int(BigInt::from(1))),
             StackOp::Opcode("OP_ROLL".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -554,7 +657,7 @@ mod tests {
     #[test]
     fn test_push2_opcode_roll_string_becomes_rot() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(2)),
+            StackOp::Push(PushValue::Int(BigInt::from(2))),
             StackOp::Opcode("OP_ROLL".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -565,7 +668,7 @@ mod tests {
     #[test]
     fn test_push0_opcode_pick_string_becomes_dup() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_PICK".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -576,7 +679,7 @@ mod tests {
     #[test]
     fn test_push1_opcode_pick_string_becomes_over() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(1)),
+            StackOp::Push(PushValue::Int(BigInt::from(1))),
             StackOp::Opcode("OP_PICK".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -591,37 +694,37 @@ mod tests {
     #[test]
     fn test_constant_fold_add() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(3)),
-            StackOp::Push(PushValue::Int(7)),
+            StackOp::Push(PushValue::Int(BigInt::from(3))),
+            StackOp::Push(PushValue::Int(BigInt::from(7))),
             StackOp::Opcode("OP_ADD".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0], StackOp::Push(PushValue::Int(10))));
+        assert!(is_push_int_eq(&result[0], 10));
     }
 
     #[test]
     fn test_constant_fold_sub() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(10)),
-            StackOp::Push(PushValue::Int(3)),
+            StackOp::Push(PushValue::Int(BigInt::from(10))),
+            StackOp::Push(PushValue::Int(BigInt::from(3))),
             StackOp::Opcode("OP_SUB".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0], StackOp::Push(PushValue::Int(7))));
+        assert!(is_push_int_eq(&result[0], 7));
     }
 
     #[test]
     fn test_constant_fold_mul() {
         let ops = vec![
-            StackOp::Push(PushValue::Int(4)),
-            StackOp::Push(PushValue::Int(5)),
+            StackOp::Push(PushValue::Int(BigInt::from(4))),
+            StackOp::Push(PushValue::Int(BigInt::from(5))),
             StackOp::Opcode("OP_MUL".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0], StackOp::Push(PushValue::Int(20))));
+        assert!(is_push_int_eq(&result[0], 20));
     }
 
     // -----------------------------------------------------------------------
@@ -633,15 +736,15 @@ mod tests {
         // x PUSH(3) ADD PUSH(7) ADD -> x PUSH(10) ADD
         let ops = vec![
             StackOp::Dup, // stand-in for some value on stack
-            StackOp::Push(PushValue::Int(3)),
+            StackOp::Push(PushValue::Int(BigInt::from(3))),
             StackOp::Opcode("OP_ADD".to_string()),
-            StackOp::Push(PushValue::Int(7)),
+            StackOp::Push(PushValue::Int(BigInt::from(7))),
             StackOp::Opcode("OP_ADD".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 3, "expected DUP PUSH(10) ADD, got {:?}", result);
         assert!(matches!(&result[0], StackOp::Dup));
-        assert!(matches!(&result[1], StackOp::Push(PushValue::Int(10))));
+        assert!(is_push_int_eq(&result[1], 10));
         assert!(matches!(&result[2], StackOp::Opcode(c) if c == "OP_ADD"));
     }
 
@@ -649,14 +752,14 @@ mod tests {
     fn test_chain_fold_sub_sub() {
         let ops = vec![
             StackOp::Dup,
-            StackOp::Push(PushValue::Int(2)),
+            StackOp::Push(PushValue::Int(BigInt::from(2))),
             StackOp::Opcode("OP_SUB".to_string()),
-            StackOp::Push(PushValue::Int(3)),
+            StackOp::Push(PushValue::Int(BigInt::from(3))),
             StackOp::Opcode("OP_SUB".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
         assert_eq!(result.len(), 3, "expected DUP PUSH(5) SUB, got {:?}", result);
-        assert!(matches!(&result[1], StackOp::Push(PushValue::Int(5))));
+        assert!(is_push_int_eq(&result[1], 5));
         assert!(matches!(&result[2], StackOp::Opcode(c) if c == "OP_SUB"));
     }
 
@@ -692,7 +795,7 @@ mod tests {
     fn test_large_push_with_roll_not_simplified() {
         // PUSH(5) + OP_ROLL should NOT be simplified (only 0/1/2 are special-cased)
         let ops = vec![
-            StackOp::Push(PushValue::Int(5)),
+            StackOp::Push(PushValue::Int(BigInt::from(5))),
             StackOp::Opcode("OP_ROLL".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
@@ -740,7 +843,7 @@ mod tests {
         // removed on the second pass
         let ops = vec![
             StackOp::Dup,
-            StackOp::Push(PushValue::Int(0)),
+            StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_ADD".to_string()),
             StackOp::Drop,
         ];

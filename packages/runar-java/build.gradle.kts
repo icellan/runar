@@ -1,5 +1,6 @@
 plugins {
     `java-library`
+    application
 }
 
 group = "build.runar"
@@ -11,6 +12,23 @@ java {
     }
     withSourcesJar()
     withJavadocJar()
+}
+
+application {
+    // Default entry point: the static-analyzer CLI. Other entry points
+    // (CompileCheck, etc.) ship as library APIs and are not invoked via
+    // `gradle run`.
+    mainClass.set("runar.lang.analyzer.AnalyzerCli")
+    applicationName = "runar-analyzer"
+}
+
+// Convenience task: `gradle runAnalyzer --args="<hex-path>"` invokes the
+// analyzer CLI. Used by tools/analyzer-runner/java.sh.
+tasks.register<JavaExec>("runAnalyzer") {
+    description = "Run the Bitcoin Script static analyzer on a hex-encoded script file."
+    group = "application"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("runar.lang.analyzer.AnalyzerCli")
 }
 
 repositories {

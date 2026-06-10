@@ -1,0 +1,34 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/ruby/p2pkh/P2PKH.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/ruby/p2pkh/P2PKH.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 2,
+      "sourceFile": "examples/ruby/p2pkh/P2PKH.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/ruby/p2pkh/P2PKH.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/ruby/p2pkh/P2PKH.runar.rb",
+      "line": 14,
+      "column": 5
+    }
+  ]
+}

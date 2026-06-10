@@ -3,6 +3,8 @@
 //! These types mirror the TypeScript `runar-ast.ts` definitions. They represent
 //! the parsed contract structure before ANF lowering.
 
+use num_bigint::BigInt;
+
 // ---------------------------------------------------------------------------
 // Source locations
 // ---------------------------------------------------------------------------
@@ -301,7 +303,14 @@ pub enum Expression {
         name: String,
     },
     BigIntLiteral {
-        value: i128,
+        /// Arbitrary-precision integer literal.
+        ///
+        /// Widened from `i128` so 256-bit constants (e.g. the secp256k1 group
+        /// order used in schnorr-zkp's s-bound assert) round-trip losslessly
+        /// from the SWC parser's `num_bigint::BigInt` token through ANF /
+        /// Stack IR and into the final push-encoded Bitcoin Script bytes.
+        /// Mirrors Go's `*big.Int`-backed `BigIntLit` AST node.
+        value: BigInt,
     },
     BoolLiteral {
         value: bool,

@@ -135,6 +135,12 @@ pub struct OutputSpec {
 pub struct RunarArtifact {
     pub version: String,
     pub contract_name: String,
+    /// Base class the source contract extends. Authoritative stateful signal
+    /// for the issue-#42/#44 terminal sighash subscript trim: a
+    /// StatefulSmartContract with zero mutable fields still needs the trim
+    /// even though `state_fields` is empty. Older artifacts omit it.
+    #[serde(default)]
+    pub parent_class: Option<String>,
     pub abi: Abi,
     pub script: String,
     #[serde(default)]
@@ -582,6 +588,10 @@ pub struct PreparedCall {
     pub(crate) resolved_args: Vec<SdkValue>,
     pub(crate) method_selector_hex: String,
     pub(crate) is_stateful: bool,
+    /// True when the contract extends StatefulSmartContract (from artifact
+    /// `parent_class`), independent of whether it has mutable state fields.
+    /// Gates the issue-#42/#44 terminal sighash subscript trim.
+    pub(crate) parent_stateful: bool,
     pub(crate) is_terminal: bool,
     pub(crate) needs_op_push_tx: bool,
     pub(crate) method_needs_change: bool,

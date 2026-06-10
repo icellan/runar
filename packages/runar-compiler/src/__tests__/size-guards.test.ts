@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { loadANFFromJSON } from '../index.js';
+import { parse } from '../passes/01-parse.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 
 describe('loadANFFromJSON size guards', () => {
@@ -58,5 +59,42 @@ describe('loadANFFromJSON size guards', () => {
       methods: [],
     });
     expect(() => loadANFFromJSON(minimal)).not.toThrow();
+  });
+});
+
+describe('parse() source size guard', () => {
+  it('rejects source over MAX_SOURCE_BYTES with CanonicalJsonError(bytes)', () => {
+    // Build a string just over the cap. Content does not need to be
+    // valid TS source — the size guard runs before the tokenizer.
+    const oversized = 'x'.repeat(InputLimits.MAX_SOURCE_BYTES + 1);
+    try {
+      parse(oversized, 'contract.runar.ts');
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CanonicalJsonError);
+      const cje = err as CanonicalJsonError;
+      expect(cje.code).toBe('bytes');
+      expect(cje.limit).toBe(InputLimits.MAX_SOURCE_BYTES);
+      expect(cje.actual).toBe(InputLimits.MAX_SOURCE_BYTES + 1);
+    }
+  });
+
+  it('rejects oversized source independent of extension dispatch', () => {
+    // The byte cap fires before extension dispatch, so an obviously-
+    // wrong extension still gets caught.
+    const oversized = 'x'.repeat(InputLimits.MAX_SOURCE_BYTES + 1);
+    expect(() => parse(oversized, 'contract.runar.py')).toThrow(CanonicalJsonError);
+  });
+
+  it('accepts a minimal well-formed source under the cap', () => {
+    const minimal =
+      'class Counter extends SmartContract {\n' +
+      '  public readonly x: bigint;\n' +
+      '  constructor(x: bigint) { super(); this.x = x; }\n' +
+      '  public unlock() {}\n' +
+      '}\n';
+    // parse() does not throw on syntactic errors; it returns errors in the
+    // ParseResult. We only assert the size guard does NOT trip.
+    expect(() => parse(minimal, 'Counter.runar.ts')).not.toThrow(CanonicalJsonError);
   });
 });

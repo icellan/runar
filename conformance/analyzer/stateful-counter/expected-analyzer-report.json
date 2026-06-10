@@ -1,0 +1,2078 @@
+{
+  "script": "76009c637576ab557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad697601687f7782012c947f758258947f758258947f7781768b77547a547a041976a9147b7e0288ac7e7c58807c7e7c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877767519d76ab557a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad697601687f7782012c947f758258947f758258947f77817600a069768c77547a547a041976a9147b7e0288ac7e7c58807c7e7c58805279547a7c7558806b5379016a7e7c7e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e6c7c7e7c7eaa7c820128947f7701207f75877768",
+  "scriptSize": 385,
+  "findings": [
+    {
+      "severity": "info",
+      "code": "CODESEPARATOR_PRESENT",
+      "message": "OP_CODESEPARATOR found — expected for stateful contracts, unusual otherwise",
+      "offset": 6,
+      "opcode": "OP_CODESEPARATOR"
+    },
+    {
+      "severity": "info",
+      "code": "CODESEPARATOR_PRESENT",
+      "message": "OP_CODESEPARATOR found — expected for stateful contracts, unusual otherwise",
+      "offset": 195,
+      "opcode": "OP_CODESEPARATOR"
+    }
+  ],
+  "paths": [
+    {
+      "id": 0,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 1,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 2,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 3,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 4,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 5,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 6,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 7,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 8,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 9,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 10,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 11,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 12,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 13,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 14,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 15,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 16,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 17,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 18,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 19,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 20,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 21,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 22,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 23,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 24,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 25,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 26,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 27,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 28,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 29,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 30,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 31,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 32,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 33,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 34,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 35,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 36,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 37,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 38,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 39,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 40,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 41,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 42,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 43,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 44,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 45,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 46,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 47,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 48,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 49,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 50,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 51,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 52,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 53,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 54,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 55,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 56,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 57,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 58,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 59,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 60,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 61,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 62,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 63,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[false] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 64,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 65,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 66,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 67,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 68,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 69,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 70,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 71,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 72,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 73,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 74,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 75,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 76,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 77,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 78,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 79,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        false,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 80,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 81,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 82,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 83,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 84,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 85,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 86,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 87,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 88,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 89,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 90,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 91,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 92,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 93,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 94,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 95,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[false] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 96,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 97,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 98,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 99,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 100,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 101,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 102,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 103,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 104,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 105,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 106,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 107,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 108,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 109,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 110,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 111,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[false] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 112,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 113,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 114,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 115,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 116,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 117,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 118,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 119,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[false] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 120,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 121,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -2
+    },
+    {
+      "id": 122,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 123,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[false] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 124,
+      "description": "IF[false] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 125,
+      "description": "IF[true] at 3 -> IF[false] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -3
+    },
+    {
+      "id": 126,
+      "description": "IF[false] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    },
+    {
+      "id": 127,
+      "description": "IF[true] at 3 -> IF[true] at 115 -> IF[true] at 128 -> IF[true] at 147 -> IF[true] at 308 -> IF[true] at 321 -> IF[true] at 340",
+      "branchChoices": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -4
+    }
+  ],
+  "summary": {
+    "totalPaths": 128,
+    "reachablePaths": 128,
+    "pathsWithCheckSig": 128,
+    "pathsWithoutCheckSig": 0,
+    "maxStackDepth": 0,
+    "scriptSizeBytes": 385
+  }
+}

@@ -270,10 +270,33 @@ class StackMap {
 function computeLastUses(bindings: ANFBinding[]): Map<string, number> {
   const lastUse = new Map<string, number>();
 
+  // Pre-scan: map each array_literal binding to its element refs. Used to
+  // propagate last-use across the array indirection (the array binding is
+  // pure metadata in the stack-lowerer — see lowerArrayLiteral — so its
+  // elements must remain live until the array's consumer, not until the
+  // array_literal binding itself).
+  const arrayElems = new Map<string, string[]>();
+  for (const b of bindings) {
+    if (b.value.kind === 'array_literal') {
+      arrayElems.set(b.name, [...b.value.elements]);
+    }
+  }
+
   for (let i = 0; i < bindings.length; i++) {
     const refs = collectRefs(bindings[i]!.value);
+    // If this binding is itself an array_literal, do NOT advance its
+    // elements' last-use to here — defer to the array's consumer.
+    if (bindings[i]!.value.kind === 'array_literal') {
+      continue;
+    }
     for (const ref of refs) {
       lastUse.set(ref, i);
+      const elems = arrayElems.get(ref);
+      if (elems) {
+        for (const e of elems) {
+          lastUse.set(e, i);
+        }
+      }
     }
   }
 
@@ -384,6 +407,8 @@ class LoweringContext {
   private currentSourceLoc: { file: string; line: number; column: number } | undefined;
   /** Tracks the number of elements in array literal bindings for checkMultiSig. */
   private arrayLengths: Map<string, number> = new Map();
+  /** Tracks the element refs of array literal bindings for checkMultiSig. */
+  private arrayElements: Map<string, string[]> = new Map();
   /** Tracks constant values by binding name (for compile-time constant extraction). */
   private constValues: Map<string, bigint | string | boolean> = new Map();
 
@@ -1046,7 +1071,7 @@ class LoweringContext {
         this.lowerAddRawOutput(name, value.satoshis, value.scriptBytes, bindingIndex, lastUses);
         break;
       case 'array_literal':
-        this.lowerArrayLiteral(name, value.elements, bindingIndex, lastUses);
+        this.lowerArrayLiteral(name, value.elements);
         break;
       case 'raw_script':
         this.lowerRawScript(name, value.bytes, value.in_arity, value.out_arity);
@@ -1159,6 +1184,18 @@ class LoweringContext {
     // Handle @ref: aliases (ANF variable aliasing)
     if (typeof value === 'string' && value.startsWith('@ref:')) {
       const refName = value.slice(5);
+      // Special case: aliasing an array_literal (metadata-only binding,
+      // not present in the stack-map). Copy the array metadata under the
+      // new binding name and emit no stack moves.
+      const refElems = this.arrayElements.get(refName);
+      if (refElems !== undefined) {
+        this.arrayElements.set(bindingName, [...refElems]);
+        const refLen = this.arrayLengths.get(refName);
+        if (refLen !== undefined) {
+          this.arrayLengths.set(bindingName, refLen);
+        }
+        return;
+      }
       if (this.stackMap.has(refName)) {
         // Only consume (ROLL) if the ref target is a local binding in the
         // current scope. Outer-scope refs must be copied (PICK) so that the
@@ -1586,44 +1623,45 @@ class LoweringContext {
   }
 
   /**
-   * Lower an array literal to stack. Each element is brought to the top
-   * in order. The binding name represents the array as a whole on the stack.
-   * The element count is recorded in `arrayLengths` so that consumers
-   * (like checkMultiSig) can emit the count push.
+   * Lower an array literal — a metadata-only operation.
+   *
+   * Array literals in Rúnar today only feed into `checkMultiSig`. Pre-laying
+   * the elements onto the runtime stack here would desync the stack-map from
+   * the runtime stack (the map can only model one slot per binding, but an
+   * array binding spans N runtime slots). Instead we record the element refs
+   * and the length and emit nothing — `lowerCheckMultiSig` will pull each
+   * element to the top at the use site, producing a layout the stack-map can
+   * faithfully describe.
+   *
+   * NOTE: this means `bindingName` never appears in the stack-map. Last-use
+   * analysis for the array's element refs is patched in `computeLastUses` so
+   * the elements stay live past this binding through to `checkMultiSig`.
    */
   private lowerArrayLiteral(
     bindingName: string,
     elements: string[],
-    bindingIndex: number,
-    lastUses: Map<string, number>,
   ): void {
-    // Bring each element to the top in order
-    for (const elem of elements) {
-      const isLast = this.isLastUse(elem, bindingIndex, lastUses);
-      this.bringToTop(elem, isLast);
-    }
-
-    // Pop all elements from the stack map (they're consumed into the array)
-    for (let i = 0; i < elements.length; i++) {
-      this.stackMap.pop();
-    }
-
-    // Push the array binding name — represents the N elements now on stack
-    this.stackMap.push(bindingName);
-    // Record the array length for checkMultiSig
     this.arrayLengths.set(bindingName, elements.length);
-    this.trackDepth();
+    this.arrayElements.set(bindingName, [...elements]);
   }
 
   /**
-   * Lower checkMultiSig([sig1, sig2, ...], [pk1, pk2, ...]) to Bitcoin Script.
+   * Lower checkMultiSig([sig1, ..., sigN], [pk1, ..., pkM]) to Bitcoin Script.
    *
-   * OP_CHECKMULTISIG expects the stack layout:
-   *   OP_0 <sig1> <sig2> ... <nSigs> <pk1> <pk2> ... <nPKs> OP_CHECKMULTISIG
+   * OP_CHECKMULTISIG expects the stack (bottom -> top):
+   *   <dummy=OP_0> <sig1> <sig2> ... <sigN> <N> <pk1> <pk2> ... <pkM> <M>
    *
-   * The args[0] is the sigs array binding, args[1] is the pubkeys array binding.
-   * Each was lowered as an array_literal, so the individual elements are already
-   * on the stack. We need to insert the OP_0 dummy, counts, and the opcode.
+   * OP_CHECKMULTISIG then pops M, then M pubkeys (top first => pkM..pk1),
+   * then N, then N sigs (top first => sigN..sig1), then the dummy, then
+   * pushes the result.
+   *
+   * `args[0]` and `args[1]` are bindings produced by `array_literal`. Those
+   * bindings are NOT physical stack slots (see `lowerArrayLiteral`); their
+   * element refs live on the stack-map as individual named bindings. We pull
+   * each element to TOS via `bringToTop` in the order required by the layout
+   * above. Last-use for each element is determined relative to THIS binding
+   * (the checkMultiSig site) — `computeLastUses` patches lastUses for array
+   * elements so they survive past their owning `array_literal` binding.
    */
   private lowerCheckMultiSig(
     bindingName: string,
@@ -1637,32 +1675,42 @@ class LoweringContext {
 
     const sigsRef = args[0]!;
     const pksRef = args[1]!;
-    const nSigs = this.arrayLengths.get(sigsRef) ?? 1;
-    const nPKs = this.arrayLengths.get(pksRef) ?? 1;
+    const sigElems = this.arrayElements.get(sigsRef);
+    const pkElems = this.arrayElements.get(pksRef);
+    if (!sigElems || !pkElems) {
+      throw new Error(
+        `checkMultiSig: array_literal metadata missing (sigs='${sigsRef}', pks='${pksRef}')`,
+      );
+    }
 
-    // Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
+    // Dummy OP_0 — required by the historical OP_CHECKMULTISIG off-by-one
+    // (consumed from below the sigs).
     this.emitOp({ op: 'push', value: 0n });
     this.stackMap.push(null);
 
-    // Bring sigs array to top (the individual elements are treated as one item)
-    const sigsLast = this.isLastUse(sigsRef, bindingIndex, lastUses);
-    this.bringToTop(sigsRef, sigsLast);
+    // Bring each sig element to TOS in declaration order (sig1, sig2, ...).
+    for (const sig of sigElems) {
+      const isLast = this.isLastUse(sig, bindingIndex, lastUses);
+      this.bringToTop(sig, isLast);
+    }
 
-    // Push nSigs count
-    this.emitOp({ op: 'push', value: BigInt(nSigs) });
+    // Push nSigs.
+    this.emitOp({ op: 'push', value: BigInt(sigElems.length) });
     this.stackMap.push(null);
 
-    // Bring pubkeys array to top
-    const pksLast = this.isLastUse(pksRef, bindingIndex, lastUses);
-    this.bringToTop(pksRef, pksLast);
+    // Bring each pubkey element to TOS in declaration order (pk1, pk2, ...).
+    for (const pk of pkElems) {
+      const isLast = this.isLastUse(pk, bindingIndex, lastUses);
+      this.bringToTop(pk, isLast);
+    }
 
-    // Push nPKs count
-    this.emitOp({ op: 'push', value: BigInt(nPKs) });
+    // Push nPKs.
+    this.emitOp({ op: 'push', value: BigInt(pkElems.length) });
     this.stackMap.push(null);
 
-    // Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 2 + nSigs + nPKs + 2 items
-    // But on our stack map they're: null(OP_0), sigsRef, null(nSigs), pksRef, null(nPKs)
-    for (let i = 0; i < 5; i++) {
+    // OP_CHECKMULTISIG consumes: dummy + N sigs + nSigs + M pks + nPKs.
+    const consumed = 1 + sigElems.length + 1 + pkElems.length + 1;
+    for (let i = 0; i < consumed; i++) {
       this.stackMap.pop();
     }
 
@@ -4825,10 +4873,21 @@ function lowerMethod(
   // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
   ctx.lowerBindings(method.body, method.isPublic);
 
-  // Clean up excess stack items left by deserialize_state.
-  // Only needed for stateful methods that deserialize state from the preimage.
-  const hasDeserializeState = method.body.some(b => b.value.kind === 'deserialize_state');
-  if (method.isPublic && hasDeserializeState) {
+  // Clean up excess stack items below the top-of-stack boolean.
+  //
+  // Bitcoin Script's CLEANSTACK rule requires exactly one item on the stack
+  // at end-of-script. Excess items can come from `deserialize_state` (stateful
+  // methods reading mutable fields), from readonly-field-binding patterns in
+  // the method body (force-embedding readonly fields by referencing them),
+  // or from any other mid-method binding whose value isn't consumed by an
+  // assert. The previous gate of `hasDeserializeState` missed the readonly-
+  // only path, causing all-readonly terminal methods to emit a script that
+  // failed CLEANSTACK on mainnet — "Script did not clean its stack".
+  //
+  // `cleanupExcessStack()` is idempotent (no-op when `stackMap.depth === 1`),
+  // so running it unconditionally for public methods is safe — it adds
+  // appropriate `OP_NIP` opcodes only when the stack genuinely needs cleanup.
+  if (method.isPublic) {
     ctx.cleanupExcessStack();
   }
 

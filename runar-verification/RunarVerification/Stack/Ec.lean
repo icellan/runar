@@ -84,16 +84,29 @@ namespace Tracker
 
 @[inline] def depth (t : Tracker) : Nat := t.nm.size
 
-/-- Find depth-from-TOS of `name` (rightmost match, mirrors TS `findDepth`).
-Returns `0` if absent (TS would throw, but we keep total). -/
-def findDepth (t : Tracker) (name : String) : Nat := Id.run do
-  let n := t.nm.size
-  let mut i : Nat := n
-  while i > 0 do
-    i := i - 1
-    if t.nm[i]! == some name then
-      return n - 1 - i
-  return 0
+/-- Structural scan of a TOP-first name list: `some d` where `d` is the index of
+the FIRST matching slot, `none` if no slot is named `name`.  Kernel-reducible
+(plain structural recursion — no `Loop.forIn`), so it admits equational lemmas and
+`rfl`/induction, unlike the previous `Id.run do … while …` form. -/
+def findDepthAux (name : String) : List (Option String) → Option Nat
+  | []      => none
+  | x :: xs =>
+    if x == some name then some 0
+    else (findDepthAux name xs).map (· + 1)
+
+/-- Find depth-from-TOS of `name` (topmost match, mirrors TS `findDepth`).
+Returns `0` if absent (TS would throw, but we keep total).
+
+Refactored from the previous `Id.run do … while …` while-loop to a
+structural-recursive scan over the TOP-first name list (`t.nm.toList.reverse`).
+Computes the IDENTICAL depth: the while-loop scanned `i` from `size-1` down to `0`
+and returned `size-1-i` at the first (= topmost) match, i.e. the depth-from-TOS of
+the topmost matching slot, else `0`.  The structural scan over `t.nm.toList.reverse`
+(top-first) returns the index of its first match (= same topmost slot) or `0` when
+absent — byte-identical output, but now kernel-reducible (see `Stack/AgreesEC.lean`
+Part 9 bridge). -/
+def findDepth (t : Tracker) (name : String) : Nat :=
+  (findDepthAux name t.nm.toList.reverse).getD 0
 
 @[inline] def pushBytes (t : Tracker) (n : String) (v : ByteArray) : Tracker :=
   let t := t.emit (.push (.bytes v))

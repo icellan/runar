@@ -65,6 +65,7 @@ module RunarCompiler
     :version,
     :compiler_version,
     :contract_name,
+    :parent_class,
     :abi,
     :script,
     :asm,
@@ -84,6 +85,7 @@ module RunarCompiler
       version: "",
       compiler_version: "",
       contract_name: "",
+      parent_class: "",
       abi: ABI.new,
       script: "",
       asm: "",
@@ -119,6 +121,12 @@ module RunarCompiler
   #
   # Returns a ParseResult-like object (from the frontend package).
   def self._parse_source(source, file_name)
+    # DoS-bound size guard. Reject oversized source BEFORE any
+    # format-specific parser touches the input. Raises
+    # InputLimits::SourceSizeExceededError on rejection. BUG-008 follow-up.
+    require_relative "frontend/input_limits"
+    Frontend::InputLimits.assert_source_bytes_under_limit(source)
+
     lower = file_name.downcase
     if lower.end_with?(".runar.py")
       require_relative "frontend/parser_python"
@@ -224,6 +232,16 @@ module RunarCompiler
   end
   private_class_method :_optimize_ec
 
+  # Dead Code Elimination -- discrete named pass (Pass 4.75).
+  # See frontend/dce.rb. Idempotent w.r.t. the EC optimizer's internal DCE;
+  # runs as a safety net for any post-EC residual dead bindings and to
+  # mirror the standalone DCE pass shape used by the Zig reference compiler.
+  def self._eliminate_dead_code(program)
+    require_relative "frontend/dce"
+    Frontend::DCE.eliminate_dead_code(program)
+  end
+  private_class_method :_eliminate_dead_code
+
   # Stack lowering: ANF -> Stack IR.
   def self._lower_to_stack(program)
     require_relative "codegen/stack"
@@ -303,7 +321,8 @@ module RunarCompiler
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
-    # Pass 4.5: EC optimization
+    # Pass 4.5: EC optimization (delegates internally to frontend/dce.rb
+    # for dead-binding cleanup — see Frontend::ANFOptimize.eliminate_dead_bindings).
     program = _optimize_ec(program)
 
     # Pass 5: Stack lowering
@@ -423,7 +442,8 @@ module RunarCompiler
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
-    # Pass 4.5: EC optimization
+    # Pass 4.5: EC optimization (delegates internally to frontend/dce.rb
+    # for dead-binding cleanup).
     program = _optimize_ec(program)
 
     program
@@ -699,6 +719,10 @@ module RunarCompiler
       version: SCHEMA_VERSION,
       compiler_version: COMPILER_VERSION,
       contract_name: program.contract_name,
+      # Base class the source contract extends. Authoritative stateful signal
+      # for the issue-#42/#44 terminal sighash subscript trim (a
+      # StatefulSmartContract with zero mutable fields still needs the trim).
+      parent_class: program.parent_class,
       abi: ABI.new(
         constructor: ABIConstructor.new(params: constructor_params),
         methods: methods
@@ -749,6 +773,11 @@ module RunarCompiler
       "version" => artifact.version,
       "compilerVersion" => artifact.compiler_version,
       "contractName" => artifact.contract_name,
+    }
+    # parentClass (when present) sits right after contractName, matching the
+    # other tiers' artifact field order. Omitted when empty (older fixtures).
+    d["parentClass"] = artifact.parent_class if artifact.parent_class && !artifact.parent_class.empty?
+    d.merge!({
       "abi" => {
         "constructor" => {
           "params" => artifact.abi.constructor.params.map(&abi_param_to_hash),
@@ -765,7 +794,7 @@ module RunarCompiler
       },
       "script" => artifact.script,
       "asm" => artifact.asm,
-    }
+    })
 
     if artifact.source_map && !artifact.source_map.empty?
       require_relative "codegen/emit"
@@ -884,6 +913,7 @@ module RunarCompiler
       d["iterVar"] = v.iter_var unless v.iter_var.nil?
       d["body"] = v.body.map { |b| ser_binding.call(b) } unless v.body.nil?
       d["value"] = v.value_ref unless v.value_ref.nil?
+      d["isAutoInjectedStateCheck"] = true if v.kind == "assert" && v.is_auto_injected_state_check
       d["preimage"] = v.preimage unless v.preimage.nil?
       d["satoshis"] = v.satoshis unless v.satoshis.nil?
       d["stateValues"] = v.state_values unless v.state_values.nil?

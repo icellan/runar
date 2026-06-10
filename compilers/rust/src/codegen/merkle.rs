@@ -20,6 +20,7 @@
 //!   3. If direction=1: hash(sibling || current), else hash(current || sibling)
 //!   4. Result becomes current for next level
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 /// Compute Merkle root using SHA-256.
@@ -69,7 +70,7 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
 
         // Split proof at 32 to get sibling
         // Stack: [current, index, proof]
-        emit(StackOp::Push(PushValue::Int(32)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
         emit(StackOp::Opcode("OP_SPLIT".into()));
         // Stack: [current, index, sibling(32B), rest_proof]
 
@@ -89,10 +90,10 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
         if i == 1 {
             emit(StackOp::Opcode("OP_2DIV".into()));
         } else if i > 1 {
-            emit(StackOp::Push(PushValue::Int(i as i128)));
+            emit(StackOp::Push(PushValue::Int(BigInt::from(i as i128))));
             emit(StackOp::Opcode("OP_RSHIFTNUM".into()));
         }
-        emit(StackOp::Push(PushValue::Int(2)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
         emit(StackOp::Opcode("OP_MOD".into()));
         // Stack: [current, sibling, index, direction_bit]
 

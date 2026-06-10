@@ -74,7 +74,8 @@ For a Maven build:
 ### Requirements
 
 - **JDK 17** (compile target). JDK 21 LTS recommended for development.
-- **Gradle 8.5+** when building from source.
+- **Gradle wrapper (`./gradlew`)** is committed at Gradle 8.5, so no
+  system `gradle` install is required when building from source.
 - **BouncyCastle (`bcprov-jdk18on:1.78`)** is pulled in transitively and
   provides ECDSA + RIPEMD-160 + DER encoding.
 

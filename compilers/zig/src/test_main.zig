@@ -3,6 +3,9 @@ test {
     _ = @import("ir/json.zig");
     _ = @import("ir/unknown_anf_kind.zig");
     _ = @import("ir/unknown_anf_kind_test.zig");
+    _ = @import("ir/json_size_guard_test.zig");
+    _ = @import("frontend/input_limits.zig");
+    _ = @import("frontend/input_limits_test.zig");
     _ = @import("codegen/opcodes.zig");
     _ = @import("codegen/emit.zig");
     _ = @import("passes/stack_lower.zig");

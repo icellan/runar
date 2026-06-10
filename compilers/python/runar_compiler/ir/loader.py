@@ -71,7 +71,24 @@ def load_ir(source: str) -> ANFProgram:
 
     Parses the JSON, decodes typed constant values, and validates the
     structure.  Raises ``ValueError`` on any error.
+
+    Rejects oversized (>MAX_IR_BYTES) or deeply-nested (>MAX_IR_NESTING)
+    payloads with a typed
+    :class:`runar_compiler.ir.input_limits.IRSizeExceededError` /
+    :class:`runar_compiler.ir.input_limits.IRNestingExceededError`
+    BEFORE :func:`json.loads` runs. BUG-008 follow-up.
     """
+    from .input_limits import (
+        assert_ir_bytes_under_limit,
+        assert_ir_nesting_under_limit,
+    )
+
+    # DoS-bound guards run before json.loads so a malicious payload
+    # cannot exhaust memory (size) or the Python interpreter recursion
+    # stack (nesting) inside the deserializer.
+    assert_ir_bytes_under_limit(source)
+    assert_ir_nesting_under_limit(source)
+
     try:
         d = json.loads(source)
     except json.JSONDecodeError as exc:

@@ -638,13 +638,23 @@ export function slhVerify(params: SLHParams, msg: Uint8Array, sig: Uint8Array, p
   const { n, d, hp, k, a, len } = params;
 
   if (pk.length !== 2 * n) return false;
+
+  // BUG-011: exact-length guard. Without this, signatures with trailing bytes
+  // past the d-th hypertree layer verify as true because the parsing loop only
+  // consumes the canonical layout and silently drops the tail. FIPS-205 mandates
+  // rejecting any signature whose byte length isn't exactly:
+  //   n + k*(1+a)*n + d*(len+hp)*n
+  const forsSigLen = k * (1 + a) * n;
+  const xmssSigLen = (len + hp) * n;
+  const expectedSigLen = n + forsSigLen + d * xmssSigLen;
+  if (sig.length !== expectedSigLen) return false;
+
   const pkSeed = pk.slice(0, n);
   const pkRoot = pk.slice(n, 2 * n);
 
   // Parse signature
   let offset = 0;
   const R = sig.slice(offset, offset + n); offset += n;
-  const forsSigLen = k * (1 + a) * n;
   const forsSig = sig.slice(offset, offset + forsSigLen); offset += forsSigLen;
 
   // Compute message digest
@@ -678,7 +688,6 @@ export function slhVerify(params: SLHParams, msg: Uint8Array, sig: Uint8Array, p
   let currentTreeIdx = treeIdx;
   let currentLeafIdx = leafIdx;
 
-  const xmssSigLen = (len + hp) * n;
   for (let layer = 0; layer < d; layer++) {
     const xmssSig = sig.slice(offset, offset + xmssSigLen); offset += xmssSigLen;
 

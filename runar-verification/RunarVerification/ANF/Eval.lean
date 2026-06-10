@@ -1656,6 +1656,117 @@ def callBuiltin? (func : String) (args : List Value) : EvalResult (Option Value)
       | [.vBigint i] => return some (.vBool (decide (i ≠ 0)))
       | [.vBool b]   => return some (.vBool b)
       | _ => return none
+  | "sha256" =>
+      -- Single-arg hash, routed through the SHARED `Crypto.hashBackend`.
+      -- Lowers to the single allowlisted opcode `OP_SHA256` (Stack-side
+      -- transport `Stack.HashOps.runOps_sha256Ops_eq`, M4 allowlist
+      -- `Script.Parse.isAllowedOpcodeName "OP_SHA256" = true`). Wiring this
+      -- arm makes ANF `sha256` SUCCEED on a bytes argument, so both the ANF
+      -- interpreter and the deployed Script bytes hit the same backend — the
+      -- M2 agreement leg that peels a single-`sha256`-call fragment off the
+      -- residual `crypto_call` fallback. Uses the pre-existing TCB axiom
+      -- `Crypto.hashBackend`; introduces NO new axiom.
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some b => return some (.vBytes (Crypto.sha256 b))
+          | none => return none
+      | _ => return none
+  | "hash160" =>
+      -- Single-arg hash → single allowlisted opcode `OP_HASH160`
+      -- (`Stack.HashOps.runOps_hash160Ops_eq`; allowlisted in
+      -- `isAllowedOpcodeName`). `Crypto.hash160 = ripemd160 ∘ sha256`, both
+      -- legs of the shared backend. No new axiom.
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some b => return some (.vBytes (Crypto.hash160 b))
+          | none => return none
+      | _ => return none
+  | "ripemd160" =>
+      -- Single-arg hash routed through the shared `Crypto.hashBackend`
+      -- (`Crypto.ripemd160`). Stack transport exists
+      -- (`Stack.HashOps.runOps_ripemd160Ops_eq`), but `OP_RIPEMD160` is NOT in
+      -- `Script.Parse.isAllowedOpcodeName`, so this arm is NOT (yet) part of a
+      -- round-trippable M4 fragment — it is included only for ANF-side model
+      -- completeness (both sides compute the same backend digest). No new axiom.
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some b => return some (.vBytes (Crypto.ripemd160 b))
+          | none => return none
+      | _ => return none
+  | "hash256" =>
+      -- Single-arg hash routed through the shared backend
+      -- (`Crypto.hash256 = sha256 ∘ sha256`). Stack transport exists
+      -- (`Stack.HashOps.runOps_hash256Ops_eq`), but `OP_HASH256` is NOT in the
+      -- M4 allowlist, so — like `ripemd160` — this arm is ANF-side model
+      -- completeness only, not a round-trippable fragment. No new axiom.
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some b => return some (.vBytes (Crypto.hash256 b))
+          | none => return none
+      | _ => return none
+  -- secp256k1 EC primitives (in-scope wave-71/72). Each arm routes through
+  -- the concrete `Crypto.Secp256k1.*` backend defs already exposed at the top
+  -- of this file (`ecAdd` … `ecPointY`, lines ~400-432). Wiring these makes
+  -- ANF `call ec*(args)` SUCCEED instead of falling through to `.ok none` →
+  -- `crypto_call`, exactly as the hash arms did in wave 68. Arities and return
+  -- types match each op's spec def. Introduces NO new axiom — the backend defs
+  -- are concrete `def`s. `ecMul` / `ecMulGen` are deliberately NOT wired: they
+  -- are SCOPED OUT this wave (kept as named codegen-discharge axioms), so their
+  -- ANF calls intentionally keep falling through to the `crypto_call` residual.
+  | "ecAdd" =>
+      match args with
+      | [pv, qv] =>
+          match pv.asBytes?, qv.asBytes? with
+          | some p, some q => return some (.vBytes (Crypto.ecAdd p q))
+          | _, _ => return none
+      | _ => return none
+  | "ecNegate" =>
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some p => return some (.vBytes (Crypto.ecNegate p))
+          | none => return none
+      | _ => return none
+  | "ecOnCurve" =>
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some p => return some (.vBool (Crypto.ecOnCurve p))
+          | none => return none
+      | _ => return none
+  | "ecModReduce" =>
+      match args with
+      | [.vBigint a, .vBigint m] => return some (.vBigint (Crypto.ecModReduce a m))
+      | _ => return none
+  | "ecEncodeCompressed" =>
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some p => return some (.vBytes (Crypto.ecEncodeCompressed p))
+          | none => return none
+      | _ => return none
+  | "ecMakePoint" =>
+      match args with
+      | [.vBigint x, .vBigint y] => return some (.vBytes (Crypto.ecMakePoint x y))
+      | _ => return none
+  | "ecPointX" =>
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some p => return some (.vBigint (Crypto.ecPointX p))
+          | none => return none
+      | _ => return none
+  | "ecPointY" =>
+      match args with
+      | [v] =>
+          match v.asBytes? with
+          | some p => return some (.vBigint (Crypto.ecPointY p))
+          | none => return none
+      | _ => return none
   | _ => return none
 
 /-! ## The (skeleton) evaluator -/
@@ -1708,10 +1819,11 @@ Concrete cases handled (all non-cryptographic constructors):
 * `assert` — fails with `.assertFailed` if the operand is `false`.
 * `update_prop` — writes the property slot; returns the assigned value.
 * `call` — dispatches the cheap built-ins (`cat`, `len`, `super`,
-  `bool`), byte-string slicing, script-number conversions, and numeric
-  helpers (`abs`, `min`, `max`, `within`);
-  everything else returns `.error .unsupported` for the Phase 3 lead
-  to wire to `Crypto`.
+  `bool`), byte-string slicing, script-number conversions, numeric
+  helpers (`abs`, `min`, `max`, `within`), and the single-arg hashes
+  (`sha256`, `hash160`, `ripemd160`, `hash256`) routed through the shared
+  `Crypto.hashBackend`; everything else returns `.error .unsupported` for
+  the Phase 3 lead to wire to `Crypto`.
 * `getStateScript`, `deserializeState` — opaque framework intrinsics
   returning `.vOpaque ByteArray.empty`.
 * `addOutput`, `addRawOutput`, `addDataOutput` — append to
@@ -1721,8 +1833,12 @@ Concrete cases handled (all non-cryptographic constructors):
 * `methodCall` — `.error .unsupported`; per-program method-resolution
   table is Phase 3 work.
 
-Cryptographic primitives still return `.error .unsupported` and are
-listed as axioms in `Eval.Crypto`.
+The single-arg single-opcode hashes (`sha256`, `hash160`, `ripemd160`,
+`hash256`) now evaluate through the shared `Crypto.hashBackend` (so both the
+ANF interpreter and the deployed Script bytes hit the same backend digest).
+The remaining cryptographic primitives (signature verification, partial-block
+SHA-256, EC, …) still return `.error .unsupported` and are listed as axioms in
+`Eval.Crypto`.
 -/
 def evalValue (s : State) : ANFValue → EvalResult (Value × State)
   | .loadParam name =>

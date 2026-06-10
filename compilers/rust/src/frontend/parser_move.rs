@@ -27,6 +27,8 @@
 //! - snake_case identifiers -> camelCase in AST
 //! - Move builtins mapped: `check_sig` -> `checkSig`, `hash160` -> `hash160`, etc.
 
+use num_bigint::BigInt;
+use num_traits::{Num, ToPrimitive};
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -51,6 +53,7 @@ pub fn parse_move(source: &str, file_name: Option<&str>) -> ParseResult {
     ParseResult {
         contract,
         errors,
+        source_size_err: None,
     }
 }
 
@@ -168,7 +171,7 @@ enum Token {
 
     // Identifiers and literals
     Ident(String),
-    NumberLit(i128),
+    NumberLit(BigInt),
     StringLit(String),
 
     // Operators
@@ -409,7 +412,8 @@ fn tokenize(source: &str) -> Vec<Token> {
                 .iter()
                 .filter(|c| **c != '_' && **c != 'n')
                 .collect();
-            let val = num_str.parse::<i128>().unwrap_or(0);
+            let val = <BigInt as Num>::from_str_radix(&num_str, 10)
+                .unwrap_or_else(|_| BigInt::from(0));
             tokens.push(Token::NumberLit(val));
             continue;
         }
@@ -495,6 +499,27 @@ impl<'a> MoveParser<'a> {
         let t = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
         self.pos += 1;
         t
+    }
+
+    /// Close a generic-argument list. Accepts either a plain `>` or splits
+    /// a `>>` shift token in place into two `>` so an enclosing close can
+    /// consume the remaining half.
+    fn consume_generic_close(&mut self) {
+        match self.peek() {
+            Token::Gt => {
+                self.advance();
+            }
+            Token::Shr => {
+                // Replace the current `>>` with a single `>` without
+                // advancing — the outer close will then consume it.
+                if let Some(slot) = self.tokens.get_mut(self.pos) {
+                    *slot = Token::Gt;
+                }
+            }
+            _ => {
+                self.expect(&Token::Gt);
+            }
+        }
     }
 
     fn expect(&mut self, expected: &Token) -> bool {
@@ -806,21 +831,23 @@ impl<'a> MoveParser<'a> {
         let name = self.expect_ident();
         let mapped = map_type_name(&name);
 
-        // Check for FixedArray<T, N>
+        // Check for FixedArray<T, N>. The lexer eagerly forms `>>` as a
+        // shift token, so we split it back into two `>` when closing a
+        // nested generic argument list (see consume_generic_close).
         if mapped == "FixedArray" || name == "FixedArray" {
             if *self.peek() == Token::Lt {
                 self.advance();
                 let element = self.parse_type();
                 self.expect(&Token::Comma);
                 let length = match self.advance() {
-                    Token::NumberLit(n) => n as usize,
+                    Token::NumberLit(n) => n.to_usize().unwrap_or(0),
                     _ => {
                         self.errors
                             .push(Diagnostic::error("FixedArray requires numeric length", None));
                         0
                     }
                 };
-                self.expect(&Token::Gt);
+                self.consume_generic_close();
                 return TypeNode::FixedArray {
                     element: Box::new(element),
                     length,
@@ -1262,12 +1289,12 @@ impl<'a> MoveParser<'a> {
                 name: "_w".to_string(),
                 var_type: None,
                 mutable: true,
-                init: Expression::BigIntLiteral { value: 0 },
+                init: Expression::BigIntLiteral { value: BigInt::from(0) },
                 source_location: self.loc(),
             }),
             condition,
             update: Box::new(Statement::ExpressionStatement {
-                expression: Expression::BigIntLiteral { value: 0 },
+                expression: Expression::BigIntLiteral { value: BigInt::from(0) },
                 source_location: self.loc(),
             }),
             body,
@@ -1714,7 +1741,7 @@ impl<'a> MoveParser<'a> {
             other => {
                 self.errors
                     .push(Diagnostic::error(format!("Unexpected token in expression: {:?}", other), None));
-                Expression::BigIntLiteral { value: 0 }
+                Expression::BigIntLiteral { value: BigInt::from(0) }
             }
         }
     }

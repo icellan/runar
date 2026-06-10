@@ -15,6 +15,7 @@ interface CompileOptions {
   fromIr?: string;
   hex?: boolean;
   parseOnly?: boolean;
+  emitSourceMap?: string;
 }
 
 interface CompilerDiagnosticLike {
@@ -40,6 +41,26 @@ function jsonWithBigInt(value: unknown): string {
     },
     2,
   );
+}
+
+// GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
+// goldens stay stable across worktree paths and developer machines. Walk up
+// from the source file looking for pnpm-workspace.yaml (the canonical repo
+// root marker); fall back to the basename if no marker is found. Strings
+// that aren't absolute paths (e.g. already-basename "Counter.runar.ts") are
+// returned unchanged.
+function repoRelativeFileName(absSourcePath: string): string {
+  if (!path.isAbsolute(absSourcePath)) return absSourcePath;
+  let dir = path.dirname(absSourcePath);
+  while (true) {
+    if (fs.existsSync(path.join(dir, 'pnpm-workspace.yaml'))) {
+      return path.relative(dir, absSourcePath).split(path.sep).join('/');
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.basename(absSourcePath);
 }
 
 /**
@@ -313,6 +334,32 @@ export async function compileCommand(
       jsonWithBigInt(artifact) + '\n',
     );
     console.log(`  Artifact written: ${artifactPath}`);
+
+    // --emit-source-map: write artifact.sourceMap to the requested path.
+    // Emits the canonical {"mappings":[...]} object; if the artifact has
+    // no sourceMap (e.g. fold-on path with no source-loc tracking), emit
+    // an empty {"mappings":[]} object so downstream tooling can rely on a
+    // uniform shape.
+    if (options.emitSourceMap) {
+      const smPath = path.resolve(process.cwd(), options.emitSourceMap);
+      fs.mkdirSync(path.dirname(smPath), { recursive: true });
+      const sm = (artifact as { sourceMap?: unknown }).sourceMap;
+      const payload: { mappings: Array<{ sourceFile: string; [k: string]: unknown }> } =
+        sm && typeof sm === 'object' && 'mappings' in (sm as Record<string, unknown>)
+          ? (sm as { mappings: Array<{ sourceFile: string; [k: string]: unknown }> })
+          : { mappings: [] };
+      // GAP-011: normalize sourceFile to a repo-relative path (POSIX) so
+      // goldens stay stable across worktree paths and developer machines.
+      const normalized = {
+        ...payload,
+        mappings: payload.mappings.map((m) => ({
+          ...m,
+          sourceFile: repoRelativeFileName(m.sourceFile),
+        })),
+      };
+      fs.writeFileSync(smPath, JSON.stringify(normalized, null, 2) + '\n');
+      console.log(`  Source map written: ${smPath}`);
+    }
 
     // Print ASM if requested
     if (options.asm && typeof artifact['asm'] === 'string') {

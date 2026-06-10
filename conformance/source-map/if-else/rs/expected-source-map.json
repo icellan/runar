@@ -1,0 +1,88 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 11,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 2,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 10,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 17,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 17,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/rust/if-else/IfElse.runar.rs",
+      "line": 17,
+      "column": 9
+    }
+  ]
+}

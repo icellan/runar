@@ -11,7 +11,7 @@ pub mod ir;
 
 use artifact::{assemble_artifact, RunarArtifact};
 use codegen::emit::emit;
-use codegen::optimizer::optimize_stack_ops;
+use codegen::optimizer::{optimize_stack_ops, optimize_stack_ops_with_locs};
 use codegen::stack::lower_to_stack;
 use ir::loader::{load_ir, load_ir_from_str};
 
@@ -211,7 +211,8 @@ pub fn compile_from_source_str_with_options(
         anf_program = frontend::constant_fold::fold_constants(&anf_program);
     }
 
-    // Pass 4.5: EC optimization
+    // Pass 4.5: EC optimization. Delegates internally to frontend::dce
+    // for dead-binding cleanup after any EC rewrite.
     let anf_program = frontend::anf_optimize::optimize_ec(anf_program);
 
     // Passes 5-6: Backend (stack lowering + emit)
@@ -332,21 +333,21 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
         program = frontend::constant_fold::fold_constants(&program);
     }
 
-    // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR)
+    // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR).
+    // Delegates internally to frontend::dce for dead-binding cleanup.
     let optimized = frontend::anf_optimize::optimize_ec(program);
 
     // Pass 5: Stack lowering
     let mut stack_methods = lower_to_stack(&optimized)?;
 
-    // Peephole optimization — runs on Stack IR before emission.
-    // Note: source_locs must be resized to match the new ops length since the
-    // peephole optimizer may combine adjacent ops (reducing the count).
+    // Peephole optimization — runs on Stack IR before emission. Uses the
+    // source-loc-preserving variant so the artifact's sourceMap survives
+    // the pass: each collapsed peephole window keeps the source location of
+    // its head input op.
     for method in &mut stack_methods {
-        let new_ops = optimize_stack_ops(&method.ops);
-        // After optimization the ops array may have a different length, so rebuild
-        // source_locs with the same length (None for new/merged ops).
-        method.source_locs = vec![None; new_ops.len()];
+        let (new_ops, new_locs) = optimize_stack_ops_with_locs(&method.ops, &method.source_locs);
         method.ops = new_ops;
+        method.source_locs = new_locs;
     }
 
     // Pass 6: Emit
@@ -459,7 +460,7 @@ pub fn compile_from_source_str_with_result(
         anf_program = frontend::constant_fold::fold_constants(&anf_program);
     }
 
-    // Pass 4.5: EC optimization
+    // Pass 4.5: EC optimization (delegates internally to frontend::dce)
     anf_program = frontend::anf_optimize::optimize_ec(anf_program);
     result.anf = Some(anf_program.clone());
 
@@ -490,10 +491,14 @@ pub fn compile_from_source_str_with_result(
         }
     };
 
-    // Peephole optimization
+    // Peephole optimization — same source_locs preservation rule as the
+    // primary path above: preserve 1:1 when the count is unchanged, fall
+    // back to all-None when the optimizer shrank the op stream.
     for method in &mut stack_methods {
         let new_ops = optimize_stack_ops(&method.ops);
-        method.source_locs = vec![None; new_ops.len()];
+        if new_ops.len() != method.source_locs.len() {
+            method.source_locs = vec![None; new_ops.len()];
+        }
         method.ops = new_ops;
     }
 

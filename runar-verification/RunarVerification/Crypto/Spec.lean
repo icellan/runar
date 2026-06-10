@@ -652,31 +652,77 @@ and the output is `vBytes (Crypto.ecAdd pa pb) :: rest`.
 
 ### TCB impact
 
-This section adds **10** new axioms (one per emit builder):
+This section carries **2** axioms (one per still-axiomatized emit builder):
 
-* `emitEcAdd_runOps_eq`
 * `emitEcMul_runOps_eq`
 * `emitEcMulGen_runOps_eq`
-* `emitEcNegate_runOps_eq`
-* `emitEcOnCurve_runOps_eq`
-* `emitEcModReduce_runOps_eq`
-* `emitEcEncodeCompressed_runOps_eq`
-* `emitEcMakePoint_runOps_eq`
-* `emitEcPointX_runOps_eq`
-* `emitEcPointY_runOps_eq`
+
+**Discharged** (moved to theorems in `Stack/AgreesEC.lean`, no longer axioms):
+
+* `emitEcModReduce_runOps_eq` — `Stack.AgreesEC.emitEcModReduce_runOps_eq`
+  (added `m ≠ 0`).
+* `emitEcEncodeCompressed_runOps_eq` —
+  `Stack.AgreesEC.emitEcEncodeCompressed_runOps_eq` (added split-range + canonical
+  -encoding wf hypotheses).
+* `emitEcPointX_runOps_eq` — `Stack.AgreesEC.emitEcPointX_runOps_eq`
+  (split-range `32 ≤ p.size` + canonical-decode bridge `hDec`).
+* `emitEcPointY_runOps_eq` — `Stack.AgreesEC.emitEcPointY_runOps_eq`
+  (split-range `64 ≤ p.size` + canonical-decode bridge `hDec`).
+* `emitEcMakePoint_runOps_eq` — `Stack.AgreesEC.emitEcMakePoint_runOps_eq`
+  (two `num2binEncode? · 33` hypotheses + size guards + the BE-encoding bridges
+  `hBeX`/`hBeY`).
+* `emitEcOnCurve_runOps_eq` — `Stack.AgreesEC.emitEcOnCurve_runOps_eq`
+  (split-range `64 ≤ pt.size` + the two canonical-decode bridges `hDecX`/`hDecY`).
+  The whole-program discharge: op-list-equals-determined-concatenation
+  (`emitEcOnCurve_ops`, folding the codegen `findDepth`s via the wave-77 bridge) +
+  runtime threading through the tail-general `TrackerSim` per-field-helper composed
+  sims off the `decomposePoint_runOps` base.
+* `emitEcNegate_runOps_eq` — `Stack.AgreesEC.emitEcNegate_runOps_eq`
+  (the SAME `decomposePoint` decode bridges `hDecX`/`hDecY` + `64 ≤ pt.size`, PLUS the
+  two `composePoint` `num2binEncode? · 33` + size + BE-encode bridges `hBeX`/`hBeNegY`
+  the build-back needs, at the coordinates `pointX pt` / `fieldSub FIELD_P (pointY pt)`).
+  The whole-program discharge (Part 14): op-list-equals-determined-concatenation
+  (`emitEcNegate_ops`, the `decomposePoint` → `pushFieldP` → `fieldSub` → `composePoint`
+  chain) + runtime threading `decomposePoint_runOps_neg` → `fieldSub_runOps_sim` →
+  `composePoint_runOps_sim`, reduced to `Crypto.Secp256k1.ecNegate` via the spec bridge
+  `ecNegate_eq_makePoint` (`fieldSub p y ≡ fieldSub 0 y` under the canonical `fieldMod`
+  `intToBE32` applies).
+* `emitEcAdd_runOps_eq` — `Stack.AgreesEC.emitEcAdd_runOps_eq` (Part 18 + Part 19).  The
+  whole-program discharge: op-list-equals-determined-concatenation (`emitEcAdd_ops` =
+  `ecaDp2.ops ++ affineAddInc ++ composeRxRyInc`) + runtime threading the two `decomposePoint`
+  bases (`ecaDp2_runOps`) → the 24-step affineAdd field chain (`affineAddInc_runOps`, via the
+  depth-general `fieldBinop_runOps_simT` / `fieldSqr_runOps_simT` sims + the proven
+  `fieldInv_runOps_sim` at the modular-inverse step) → `composePoint_runOps_sim`, reduced to
+  `Crypto.Secp256k1.ecAdd`'s non-degenerate branch via `aaRx_aaRy_eq_affineAdd`.  Carries the
+  four `decomposePoint` decode bridges + the two `composePoint` encode/BE bridges + the two
+  non-sentinel guards + the non-degenerate case split `fieldMod (pointX pa) ≠ fieldMod (pointX pb)`.
+
+**Still axiomatized** — `emitEcMul_runOps_eq` / `emitEcMulGen_runOps_eq` remain axioms.
+`emitEcMul`/`emitEcMulGen` need the 257-iteration Jacobian double-and-add loop sim (out of
+scope for the EC straight-line ops).  See `Stack/AgreesEC.lean` Part 18-19.
 -/
 
 open RunarVerification.Stack
 open RunarVerification.Stack.Eval (StackState runOps)
 open RunarVerification.ANF.Eval (Value)
 
-/-- `Stack.Ec.emitEcAdd`: stack in `[pa, pb]` (pb on TOS) → `[ecAdd pa pb]`.
-Mirrors `emitEcAdd` in `ec-codegen.ts:583-591`. -/
-axiom emitEcAdd_runOps_eq (stkSt : StackState) (pa pb : ByteArray)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBytes pb :: .vBytes pa :: rest) :
-    runOps Stack.Ec.emitEcAdd stkSt
-      = .ok { stkSt with stack := .vBytes (Crypto.ecAdd pa pb) :: rest }
+/- `Stack.Ec.emitEcAdd`: stack in `[pa, pb]` (pb on TOS) → `[ecAdd pa pb]`.
+**DISCHARGED** (no longer an axiom): proved as a theorem in `Stack/AgreesEC.lean` as
+`RunarVerification.Stack.AgreesEC.emitEcAdd_runOps_eq` (Part 18 + Part 19).  The codegen
+op-list is `expectedEcAdd = ecaDp2.ops ++ affineAddInc ++ composeRxRyInc`; the discharge
+(a) proves the op-list equals that determined concatenation (`emitEcAdd_ops`), then (b) threads
+the runtime through the two `decomposePoint` bases (`ecaDp2_runOps`), the 24-step affineAdd field
+chain (`affineAddInc_runOps`, via the depth-general `fieldBinop_runOps_simT` /
+`fieldSqr_runOps_simT` sims + the proven `fieldInv_runOps_sim` at the `_s_den` site), and the
+`composePoint_runOps_sim` build-back, reduced to `Crypto.Secp256k1.ecAdd`'s non-degenerate branch
+via `aaRx_aaRy_eq_affineAdd`.  Carries INPUT-side wf hypotheses the bare axiom lacked: both points
+64-byte + the four `decomposePoint` decode bridges, the two `composePoint` `num2binEncode? · 33` +
+BE bridges at the result coords, the two non-sentinel guards, and the non-degenerate case split
+`fieldMod (pointX pa) ≠ fieldMod (pointX pb)` (the `pxm ≠ qxm` branch; the `P = ±Q` / doubling case
+routes through `Crypto.Secp256k1.affineDouble`, a separate codegen path NOT exercised by
+`emitEcAdd`'s straight-line affine-add).  `#print axioms` confirms: `propext` / `Classical.choice`
+/ `Quot.sound` + the inherited backend opaques only — no `sorryAx`, no `Lean.ofReduceBool`, no new
+axiom.  Mirrors `emitEcAdd` in `ec-codegen.ts:583-591`. -/
 
 /-- `Stack.Ec.emitEcMul`: stack in `[pt, k]` (k on TOS) → `[ecMul pt k]`.
 Mirrors `emitEcMul` in `ec-codegen.ts:601-665` (257-iter MSB-first
@@ -696,71 +742,91 @@ axiom emitEcMulGen_runOps_eq (stkSt : StackState) (k : Int)
     runOps Stack.Ec.emitEcMulGen stkSt
       = .ok { stkSt with stack := .vBytes (Crypto.ecMulGen k) :: rest }
 
-/-- `Stack.Ec.emitEcNegate`: `(x, y) → (x, p - y)`.
-Mirrors `emitEcNegate` in `ec-codegen.ts:678-685`. -/
-axiom emitEcNegate_runOps_eq (stkSt : StackState) (pt : ByteArray)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBytes pt :: rest) :
-    runOps Stack.Ec.emitEcNegate stkSt
-      = .ok { stkSt with stack := .vBytes (Crypto.ecNegate pt) :: rest }
+/- `Stack.Ec.emitEcNegate`: `(x, y) → (x, p - y)`.  **DISCHARGED** (no longer an
+axiom): proved as a theorem in `Stack/AgreesEC.lean` as
+`RunarVerification.Stack.AgreesEC.emitEcNegate_runOps_eq`.  The codegen op-list is
+`t.ops.toList` after the `decomposePoint "_nx" "_ny"` → `pushFieldP "_fp"` →
+`fieldSub "_fp" "_ny" "_neg_y"` → `composePoint "_nx" "_neg_y" "_result"` Tracker
+chain; the discharge threads `decomposePoint_runOps_neg` → `fieldSub_runOps_sim` →
+`composePoint_runOps_sim` and reduces to `Crypto.Secp256k1.ecNegate` via
+`ecNegate_eq_makePoint`.  Carries the `decomposePoint` decode bridges + the
+`composePoint` encode/BE bridges as INPUT-side wf hypotheses. -/
 
-/-- `Stack.Ec.emitEcOnCurve`: check `y² ≡ x³ + 7 mod p`. Output is a
-bool. The Stack VM models the boolean as a script number (`OP_EQUAL`'s
-result), but we expose it as a `vBool` for downstream proofs since the
-spec axiom returns `Bool`.
+/- `Stack.Ec.emitEcOnCurve`: check `y² ≡ x³ + 7 mod p`. Output is a
+bool (the Stack VM models the boolean as `OP_EQUAL`'s `vBool` result).
 
-Mirrors `emitEcOnCurve` in `ec-codegen.ts:687-703`. -/
-axiom emitEcOnCurve_runOps_eq (stkSt : StackState) (pt : ByteArray)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBytes pt :: rest) :
-    runOps Stack.Ec.emitEcOnCurve stkSt
-      = .ok { stkSt with stack := .vBool (Crypto.ecOnCurve pt) :: rest }
+**DISCHARGED** (no longer an axiom): proved as a theorem in
+`Stack/AgreesEC.lean` as `RunarVerification.Stack.AgreesEC.emitEcOnCurve_runOps_eq`.
+The codegen op-list is `t.ops.toList` after the 10-step `decomposePoint` →
+`fieldSqr`/`fieldSqr`/`fieldMul`/`fieldAdd` → `OP_EQUAL` Tracker chain; the discharge
+(a) proves the op-list equals a determined concatenation (`emitEcOnCurve_ops`, folding
+the codegen `findDepth`s via the wave-77 bridge), then (b) threads the runtime through
+the tail-general `TrackerSim` per-field-helper composed sims (`fieldSqr_runOps_sim`,
+`fieldSqrX_runOps_sim`, `fieldMul_runOps_sim`, `fieldAdd_runOps_sim`) off the
+`decomposePoint_runOps` base, reducing to `Crypto.Secp256k1.ecOnCurve`'s closed form.
+It carries the SAME INPUT-side wf hypotheses the discharged `emitEcPointX/Y_runOps_eq`
+carry (`64 ≤ pt.size` + the two canonical-decode bridges `hDecX`/`hDecY`), which the
+bare axiom lacked.  `#print axioms` confirms: `propext` / `Classical.choice` /
+`Quot.sound` + the inherited backend opaques only — no `sorryAx`, no `Lean.ofReduceBool`,
+no new axiom.  Mirrors `emitEcOnCurve` in `ec-codegen.ts:687-703`. -/
 
-/-- `Stack.Ec.emitEcModReduce`: `((value % mod) + mod) % mod`.
+/- `Stack.Ec.emitEcModReduce`: `((value % mod) + mod) % mod`.
 Stack `[value, mod]` (mod on TOS) → `[result]`. Mirrors
-`emitEcModReduce` in `ec-codegen.ts:705-715`. -/
-axiom emitEcModReduce_runOps_eq (stkSt : StackState) (value m : Int)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBigint m :: .vBigint value :: rest) :
-    runOps Stack.Ec.emitEcModReduce stkSt
-      = .ok { stkSt with
-              stack := .vBigint (Crypto.ecModReduce value m) :: rest }
+`emitEcModReduce` in `ec-codegen.ts:705-715`.
 
-/-- `Stack.Ec.emitEcEncodeCompressed`: 64-byte point → 33-byte
+**DISCHARGED** (no longer an axiom): proved as a theorem in
+`Stack/AgreesEC.lean` as `RunarVerification.Stack.AgreesEC.emitEcModReduce_runOps_eq`,
+off the wave-71 `ecModReduce_step_transport`.  The axiom was FALSE at `m = 0`
+(Stack `OP_MOD` errors with `divByZero`; the spec returns `0`), so the discharged
+theorem carries the honest extra hypothesis `m ≠ 0` (harmless: the axiom had no
+consumers). -/
+
+/- `Stack.Ec.emitEcEncodeCompressed`: 64-byte point → 33-byte
 compressed pubkey. Mirrors `emitEcEncodeCompressed` in
-`ec-codegen.ts:717-738`. -/
-axiom emitEcEncodeCompressed_runOps_eq (stkSt : StackState) (pt : ByteArray)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBytes pt :: rest) :
-    runOps Stack.Ec.emitEcEncodeCompressed stkSt
-      = .ok { stkSt with
-              stack := .vBytes (Crypto.ecEncodeCompressed pt) :: rest }
+`ec-codegen.ts:717-738`.
 
-/-- `Stack.Ec.emitEcMakePoint`: `(x : Int, y : Int) → Point`. Stack
+**DISCHARGED** (no longer an axiom): proved as a theorem in
+`Stack/AgreesEC.lean` as
+`RunarVerification.Stack.AgreesEC.emitEcEncodeCompressed_runOps_eq` by an honest
+14-op step-chain (`ec_encode_op_transport`) lifted to the spec under input-level
+canonical-encoding well-formedness (`hX` round-trips the x-half; `hPar` ties the
+last y-byte parity to `pointY p % 2`) plus the two `OP_SPLIT` range guards
+(`32 ≤ p.size`, `1 ≤ (p.extract 32 p.size).size`).  The bare axiom carried none
+of these and was therefore not dischargeable verbatim. -/
+
+/- `Stack.Ec.emitEcMakePoint`: `(x : Int, y : Int) → Point`. Stack
 `[x, y]` (y on TOS) → `[point_bytes]`. Mirrors `emitEcMakePoint` in
-`ec-codegen.ts:740-760`. -/
-axiom emitEcMakePoint_runOps_eq (stkSt : StackState) (x y : Int)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBigint y :: .vBigint x :: rest) :
-    runOps Stack.Ec.emitEcMakePoint stkSt
-      = .ok { stkSt with
-              stack := .vBytes (Crypto.ecMakePoint x y) :: rest }
+`ec-codegen.ts:740-760`.
 
-/-- `Stack.Ec.emitEcPointX`: extract x-coordinate (Int) from Point.
-Mirrors `emitEcPointX` in `ec-codegen.ts:762-770`. -/
-axiom emitEcPointX_runOps_eq (stkSt : StackState) (pt : ByteArray)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBytes pt :: rest) :
-    runOps Stack.Ec.emitEcPointX stkSt
-      = .ok { stkSt with stack := .vBigint (Crypto.ecPointX pt) :: rest }
+**DISCHARGED** (no longer an axiom): proved as a theorem in
+`Stack/AgreesEC.lean` as
+`RunarVerification.Stack.AgreesEC.emitEcMakePoint_runOps_eq` by an honest op-by-op
+step-chain composing the wave-74 `reverse32_ops_transport` on each coordinate
+half, under input-level well-formedness: both coordinates `OP_NUM2BIN`-encode at
+width 33 (`num2binEncode? x 33 = some encX`, idem y), the encodings are ≥32 bytes,
+and each byte-reversed low-32 half equals the spec's big-endian `intToBE32`
+(`hBeX`/`hBeY`). The bare axiom carried none of these and was therefore not
+dischargeable verbatim. -/
 
-/-- `Stack.Ec.emitEcPointY`: extract y-coordinate (Int) from Point.
-Mirrors `emitEcPointY` in `ec-codegen.ts:772-781`. -/
-axiom emitEcPointY_runOps_eq (stkSt : StackState) (pt : ByteArray)
-    (rest : List Value)
-    (hStk : stkSt.stack = .vBytes pt :: rest) :
-    runOps Stack.Ec.emitEcPointY stkSt
-      = .ok { stkSt with stack := .vBigint (Crypto.ecPointY pt) :: rest }
+/- `Stack.Ec.emitEcPointX`: extract x-coordinate (Int) from Point.
+Mirrors `emitEcPointX` in `ec-codegen.ts:762-770`.
+
+**DISCHARGED** (no longer an axiom): proved as a theorem in
+`Stack/AgreesEC.lean` as
+`RunarVerification.Stack.AgreesEC.emitEcPointX_runOps_eq` (compose
+`reverse32_ops_transport` on the 32-byte x-half + `OP_BIN2NUM`), under the
+split-range guard `32 ≤ p.size` plus the canonical-decode bridge `hDec`
+(the byte-reversed x-half decodes to `ecPointX p`). -/
+
+/- `Stack.Ec.emitEcPointY`: extract y-coordinate (Int) from Point.
+Mirrors `emitEcPointY` in `ec-codegen.ts:772-781`.
+
+**DISCHARGED** (no longer an axiom): proved as a theorem in
+`Stack/AgreesEC.lean` as
+`RunarVerification.Stack.AgreesEC.emitEcPointY_runOps_eq` (compose
+`reverse32_ops_transport` on the 32-byte y-half + `OP_BIN2NUM`), under the
+split-range guard `64 ≤ p.size` plus the canonical-decode bridge `hDec`
+(the byte-reversed y-half decodes to `ecPointY p`). -/
 
 /-! ## 8. BabyBear prime field + degree-4 extension specifications
    (Phase B6, 2026-05-16)

@@ -223,6 +223,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }
@@ -500,6 +501,7 @@
         {
           "name": "t28",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t27"
           }
@@ -720,6 +722,7 @@
         {
           "name": "t22",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t21"
           }
@@ -924,6 +927,7 @@
         {
           "name": "t20",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t19"
           }
@@ -1128,6 +1132,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }
@@ -1328,6 +1333,7 @@
         {
           "name": "t20",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t19"
           }
@@ -1532,6 +1538,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }
@@ -1748,6 +1755,7 @@
         {
           "name": "t22",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t21"
           }
@@ -1952,6 +1960,7 @@
         {
           "name": "t20",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t19"
           }
@@ -2148,6 +2157,7 @@
         {
           "name": "t20",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t19"
           }
@@ -2352,6 +2362,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }
@@ -2560,6 +2571,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }
@@ -2863,6 +2875,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }
@@ -3071,6 +3084,7 @@
         {
           "name": "t21",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t20"
           }

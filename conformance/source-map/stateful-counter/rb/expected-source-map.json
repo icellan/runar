@@ -1,0 +1,64 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 32,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 33,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 34,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 13,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 164,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 165,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 166,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 167,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 18,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 168,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 19,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 169,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 19,
+      "column": 5
+    },
+    {
+      "opcodeIndex": 170,
+      "sourceFile": "examples/ruby/stateful-counter/Counter.runar.rb",
+      "line": 19,
+      "column": 5
+    }
+  ]
+}

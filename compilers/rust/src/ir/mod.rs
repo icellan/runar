@@ -4,6 +4,7 @@
 //! Rúnar compiler produces byte-identical ANF IR (when serialised with canonical
 //! JSON), so these types serve as the universal interchange format.
 
+pub mod input_limits;
 pub mod loader;
 pub mod unknown_anf_kind_error;
 
@@ -34,6 +35,16 @@ pub struct ANFProgram {
     pub contract_name: String,
     pub properties: Vec<ANFProperty>,
     pub methods: Vec<ANFMethod>,
+    /// Base class the source contract extends ("SmartContract" |
+    /// "StatefulSmartContract" | "UnsafeSmartContract"). In-memory carrier
+    /// ONLY (`#[serde(skip)]`) so it never appears in the emitted ANF IR JSON
+    /// that the conformance suite compares cross-tier. The artifact assembler
+    /// copies it to the top-level artifact field so SDKs can gate the
+    /// issue-#42/#44 terminal sighash subscript trim on the authoritative
+    /// parent class (a StatefulSmartContract with zero mutable fields still
+    /// needs the trim even though state_fields is empty).
+    #[serde(skip, default)]
+    pub parent_class: String,
 }
 
 /// One level of a synthetic-array chain attached to expanded leaf
@@ -161,7 +172,22 @@ pub enum ANFValue {
     },
 
     #[serde(rename = "assert")]
-    Assert { value: String },
+    Assert {
+        value: String,
+        // Optional marker: set to `true` only on the auto-injected
+        // `hash256(continuationOutputs) === extractOutputHash(txPreimage)`
+        // assert emitted by the StatefulSmartContract lowering. Off-chain
+        // SDK interpreters use this to skip the equality check without
+        // resorting to positional or structural heuristics that misfire on
+        // developer-written covenant asserts whose IR shape is identical.
+        // Absent => developer code.
+        #[serde(
+            rename = "isAutoInjectedStateCheck",
+            default,
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        is_auto_injected_state_check: bool,
+    },
 
     #[serde(rename = "update_prop")]
     UpdateProp { name: String, value: String },
@@ -231,7 +257,14 @@ pub enum ANFValue {
 #[derive(Debug, Clone)]
 pub enum ConstValue {
     Bool(bool),
-    Int(i128),
+    /// Arbitrary-precision integer constant.
+    ///
+    /// Widened from `i128` to `num_bigint::BigInt` so 256-bit constants
+    /// (e.g. the secp256k1 group order in schnorr-zkp's s-bound assert)
+    /// round-trip through the IR JSON ↔ stack-IR boundary without
+    /// truncation. Mirrors Go's `ConstBigInt *big.Int` field on
+    /// `ANFValue`.
+    Int(num_bigint::BigInt),
     Str(String),
 }
 
@@ -245,21 +278,71 @@ impl ANFValue {
     }
 }
 
+/// Reports whether `s` is a JS-style decimal `BigInt` literal: an optional
+/// leading `-`, one or more ASCII digits, and a required trailing `n`.
+///
+/// Mirrors:
+///   - Go: `compilers/go/ir/types.go::isDecimalBigIntLiteral` — the
+///     discriminator the Go IR decoder uses to distinguish a decimal
+///     `BigInt` from a hex-encoded `ByteString` in `load_const` JSON
+///     strings.
+///   - Python: `_is_decimal_bigint_literal`
+///   - TS: the conformance runner's BigInt canonicalisation
+///
+/// Without the `n` suffix the two cases are indistinguishable when the
+/// literal is all-digit (e.g. `"3030"` is both a valid decimal integer
+/// AND a valid hex bytestring).
+pub fn is_decimal_bigint_literal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 || *bytes.last().unwrap() != b'n' {
+        return false;
+    }
+    let start = if bytes[0] == b'-' { 1 } else { 0 };
+    let body = &bytes[start..bytes.len() - 1];
+    if body.is_empty() {
+        return false;
+    }
+    body.iter().all(|c| c.is_ascii_digit())
+}
+
 /// Parse a `serde_json::Value` into a `ConstValue`.
+///
+/// `load_const` values arrive in one of four shapes:
+/// - `true` / `false`                       → `ConstValue::Bool`
+/// - JSON number (any precision)            → `ConstValue::Int(BigInt)`
+/// - JSON string with trailing `n` suffix   → `ConstValue::Int(BigInt)`
+///   (JS-style decimal BigInt; cross-tier oversize-int encoding)
+/// - JSON string otherwise                  → `ConstValue::Str` (hex bytes)
 pub fn parse_const_value(v: &serde_json::Value) -> Option<ConstValue> {
+    use num_bigint::BigInt;
+    use std::str::FromStr;
     match v {
         serde_json::Value::Bool(b) => Some(ConstValue::Bool(*b)),
         serde_json::Value::Number(n) => {
-            // Try i64 first (covers most values), then fall back to f64 for larger numbers
-            if let Some(i) = n.as_i64() {
-                Some(ConstValue::Int(i as i128))
+            // serde_json preserves integer JSON-number precision through
+            // its string repr; parse via BigInt::from_str so 256-bit
+            // values survive without truncation. JSON floats (e.g.
+            // `1e20`) round-trip through a fractional string that
+            // BigInt rejects; fall back to f64 → i128 in that case for
+            // parity with the pre-widening behaviour.
+            let s = n.to_string();
+            if let Ok(bi) = BigInt::from_str(&s) {
+                Some(ConstValue::Int(bi))
             } else if let Some(f) = n.as_f64() {
-                Some(ConstValue::Int(f as i128))
+                Some(ConstValue::Int(BigInt::from(f as i128)))
             } else {
                 None
             }
         }
-        serde_json::Value::String(s) => Some(ConstValue::Str(s.clone())),
+        serde_json::Value::String(s) => {
+            if is_decimal_bigint_literal(s) {
+                // Strip the trailing 'n' and parse the digits as BigInt.
+                let body = &s[..s.len() - 1];
+                BigInt::from_str(body).ok().map(ConstValue::Int)
+            } else {
+                Some(ConstValue::Str(s.clone()))
+            }
+        }
         _ => None,
     }
 }

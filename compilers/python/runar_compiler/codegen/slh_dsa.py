@@ -986,6 +986,20 @@ def emit_verify_slh_dsa(emit: Callable, param_key: str) -> None:
 
     t = SLHTracker(["msg", "sig", "pubkey"], emit)
 
+    # ---- 0. BUG-011: enforce exact signature length on-chain ----
+    # Each parameter set has a canonical sig length: n + k*(1+a)*n + d*(len+hp)*n.
+    # Without this guard the d xmss-layer split loop silently dropped trailing
+    # bytes past layer d-1.
+    expected_sig_len = n + fors_sig_len + d * xmss_sig_len
+    t.to_top("sig")
+
+    def _emit_size_check(e: Callable) -> None:
+        e(_make_stack_op(op="opcode", code="OP_SIZE"))
+        e(_make_stack_op(op="push", value=_big_int_push(expected_sig_len)))
+        e(_make_stack_op(op="opcode", code="OP_EQUALVERIFY"))
+
+    t.raw_block(["sig"], "sig", _emit_size_check)
+
     # ---- 1. Parse pubkey -> pkSeed, pkRoot ----
     t.to_top("pubkey")
     t.push_int("", n)

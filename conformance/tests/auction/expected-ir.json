@@ -403,6 +403,7 @@
         {
           "name": "t34",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t33"
           }

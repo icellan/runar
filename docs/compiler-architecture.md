@@ -355,7 +355,7 @@ The final output of compilation is a JSON artifact (specified in `spec/artifact-
   },
   "script": "76a914<pubKeyHash>88ac",
   "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
-  "sourceMap": { "file": "P2PKH.ts", "mappings": [...] },
+  "sourceMap": { "mappings": [{ "opcodeIndex": 0, "sourceFile": "P2PKH.runar.ts", "line": 43, "column": 4 }] },
   "stateFields": [],
   "constructorSlots": [{ "paramIndex": 0, "byteOffset": 3 }],
   "buildTimestamp": "2025-06-15T10:30:00Z"
@@ -363,6 +363,29 @@ The final output of compilation is a JSON artifact (specified in `spec/artifact-
 ```
 
 Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-readable opcodes), `abi` (method signatures for the SDK), `stateFields` (mutable property descriptors for stateful contracts), `constructorSlots` (byte offsets where the SDK splices constructor arguments into the script template).
+
+### Source maps
+
+Every tier supports an opt-in `--emit-source-map=<path>` CLI flag (GAP-002). When passed, after a successful compile the tier writes the artifact's `sourceMap` field as a canonical `{"mappings":[...]}` JSON object to the given path. The default behaviour (no flag) is unchanged across all tiers.
+
+The schema is defined once in `packages/runar-ir-schema/src/artifact.ts`:
+
+```ts
+interface SourceMapping { opcodeIndex: number; sourceFile: string; line: number; column: number; }
+interface SourceMap     { mappings: SourceMapping[]; }
+```
+
+`opcodeIndex` is a 0-based sequential index over the emitted opcode stream — NOT a byte offset. The `sourceFile`, `line`, and `column` fields point back at the source file each tier compiled (TS reads `.runar.ts`, Go reads `.runar.go`, etc.), so the line/column numbers are tier-local by design and the per-tier goldens in `conformance/source-map/<fixture>/<tier>/expected-source-map.json` differ by design too.
+
+`sourceFile` is normalized to a **repo-relative POSIX path** at serialization time (GAP-011). Each CLI walks up from the source file looking for `pnpm-workspace.yaml` (the repo-root marker); if found, the emitted path is `<rel-to-repo-root>` (e.g. `examples/ts/p2pkh/P2PKH.runar.ts`); otherwise it falls back to the basename. The in-memory IR keeps whatever path the parser stored — only the JSON emitted by `--emit-source-map` is normalized. This keeps goldens stable across worktree paths and developer machines.
+
+Structural invariants (enforced by `conformance/source-map/run.ts`):
+
+- Top-level shape is `{ mappings: SourceMapping[] }`.
+- `mappings.length <= opcodeCount` (tiers may emit mappings only for ops with a tracked source location).
+- `mappings` is sorted ascending by `opcodeIndex`, no duplicates, no out-of-range indices.
+- Each mapping has `sourceFile` non-empty, `line >= 0`, `column >= 0`. The JSON schema declares `line >= 1`; the floor is relaxed to `0` because Java's surface-format parsers default to `line=0` for AST nodes whose tokens don't carry a position.
+- `sourceFile` is NOT an absolute path (GAP-011) — must be either repo-relative POSIX or a basename.
 
 ---
 

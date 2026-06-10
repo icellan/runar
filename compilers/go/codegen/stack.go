@@ -264,10 +264,32 @@ func (s *stackMap) namedSlots() map[string]bool {
 
 func computeLastUses(bindings []ir.ANFBinding) map[string]int {
 	lastUse := make(map[string]int)
+	// Pre-scan: map each array_literal binding to its element refs. Used to
+	// propagate last-use across the array indirection (the array binding is
+	// pure metadata in lowerArrayLiteral, so its elements must remain live
+	// until the array's consumer, not until the array_literal binding itself).
+	arrayElems := make(map[string][]string)
+	for _, b := range bindings {
+		if b.Value.Kind == "array_literal" {
+			elems := make([]string, len(b.Value.Elements))
+			copy(elems, b.Value.Elements)
+			arrayElems[b.Name] = elems
+		}
+	}
 	for i, binding := range bindings {
+		// array_literal is metadata-only — do NOT advance its elements'
+		// last-use to here; defer to the array's consumer.
+		if binding.Value.Kind == "array_literal" {
+			continue
+		}
 		refs := collectRefs(&binding.Value)
 		for _, ref := range refs {
 			lastUse[ref] = i
+			if elems, ok := arrayElems[ref]; ok {
+				for _, e := range elems {
+					lastUse[e] = i
+				}
+			}
 		}
 	}
 	return lastUse
@@ -361,6 +383,7 @@ type loweringContext struct {
 	currentSourceLoc   *ir.SourceLocation // Debug: source location to attach to next emitted StackOps
 	constValues        map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
 	arrayLengths       map[string]int      // element counts for array_literal bindings (used by checkMultiSig)
+	arrayElements      map[string][]string // element refs for array_literal bindings (used by checkMultiSig)
 
 	// Mode 3: when true, calls to assertGroth16WitnessAssisted in the
 	// method body are treated as no-ops by lowerCall. The actual verifier
@@ -382,6 +405,7 @@ func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringC
 		localBindings:  make(map[string]bool),
 		constValues:    make(map[string]*big.Int),
 		arrayLengths:   make(map[string]int),
+		arrayElements:  make(map[string][]string),
 	}
 	ctx.trackDepth()
 	return ctx
@@ -1034,6 +1058,20 @@ func (ctx *loweringContext) lowerLoadConst(bindingName string, value *ir.ANFValu
 	// unless this is the last use, in which case we consume it via ROLL.
 	if value.ConstString != nil && len(*value.ConstString) > 5 && (*value.ConstString)[:5] == "@ref:" {
 		refName := (*value.ConstString)[5:]
+		// Special case: aliasing an array_literal (metadata-only binding,
+		// not present in the stack-map). Copy the array metadata under the
+		// new binding name and emit no stack moves.
+		if refElems, ok := ctx.arrayElements[refName]; ok {
+			copy := make([]string, len(refElems))
+			for i, e := range refElems {
+				copy[i] = e
+			}
+			ctx.arrayElements[bindingName] = copy
+			if refLen, ok2 := ctx.arrayLengths[refName]; ok2 {
+				ctx.arrayLengths[bindingName] = refLen
+			}
+			return
+		}
 		if ctx.sm.has(refName) {
 			// Only consume (ROLL) if the ref target is a local binding in the
 			// current scope. Outer-scope refs must be copied (PICK) so that the
@@ -2757,24 +2795,17 @@ func (ctx *loweringContext) lowerAddRawOutput(bindingName, satoshis, scriptBytes
 }
 
 func (ctx *loweringContext) lowerArrayLiteral(bindingName string, elements []string, bindingIndex int, lastUses map[string]int) {
-	// An array_literal brings each element to the top of the stack in order.
-	// On the stack-map we collapse the N elements into a single logical slot
-	// labelled with the binding name; consumers (e.g. checkMultiSig) treat the
-	// whole array as one stack item so depths line up with the TS reference.
-	for _, elem := range elements {
-		isLast := ctx.isLastUse(elem, bindingIndex, lastUses)
-		ctx.bringToTop(elem, isLast)
-	}
-	// Pop all elements from the stack map (they're consumed into the array)
-	for i := 0; i < len(elements); i++ {
-		ctx.sm.pop()
-	}
-	// Push a single entry representing the whole array
-	ctx.sm.push(bindingName)
-	// Record the array length so checkMultiSig can emit the correct nSigs/nPKs
-	// count pushes between bringing the sigs and pks arrays to the top.
+	// Metadata-only. Array literals in Rúnar today only feed into
+	// checkMultiSig. Pre-laying the elements onto the runtime stack here
+	// would desync the stack-map from the runtime stack (the map can only
+	// model one slot per binding, but an array binding spans N runtime
+	// slots). lowerCheckMultiSig pulls each element to TOS at the use site.
+	_ = bindingIndex
+	_ = lastUses
+	elems := make([]string, len(elements))
+	copy(elems, elements)
 	ctx.arrayLengths[bindingName] = len(elements)
-	ctx.trackDepth()
+	ctx.arrayElements[bindingName] = elems
 }
 
 // lowerRawScript lowers a raw_script ANF node to a single opaque raw_bytes
@@ -2810,52 +2841,52 @@ func (ctx *loweringContext) lowerRawScript(bindingName, bytesHex string, inArity
 }
 
 func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
-	// checkMultiSig(sigs, pks) — emits the OP_CHECKMULTISIG sequence.
-	// Bitcoin Script stack layout:
-	//   OP_0 <sig1> ... <sigN> <nSigs> <pk1> ... <pkM> <nPKs> OP_CHECKMULTISIG
+	// Lower checkMultiSig([sig1, ..., sigN], [pk1, ..., pkM]) to Bitcoin Script.
 	//
-	// The two args reference array_literal bindings. Each array_literal has
-	// already placed its individual elements on the stack. Here we:
-	// 1. Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
-	// 2. Bring the sigs ref to top
-	// 3. Push <nSigs>
-	// 4. Bring the pks ref to top
-	// 5. Push <nPKs>
-	// 6. Emit OP_CHECKMULTISIG
-
+	// OP_CHECKMULTISIG expects the stack (bottom -> top):
+	//   <dummy=OP_0> <sig1> <sig2> ... <sigN> <N> <pk1> <pk2> ... <pkM> <M>
+	//
+	// args[0] and args[1] are bindings produced by array_literal. Those
+	// bindings are NOT physical stack slots (see lowerArrayLiteral); their
+	// element refs live on the stack-map as individual named bindings. We
+	// pull each element to TOS via bringToTop in the order required by the
+	// layout above. computeLastUses propagates each element's last-use
+	// through the array indirection to THIS binding.
 	sigsRef := args[0]
 	pksRef := args[1]
-	nSigs, ok := ctx.arrayLengths[sigsRef]
-	if !ok {
-		nSigs = 1
-	}
-	nPKs, ok := ctx.arrayLengths[pksRef]
-	if !ok {
-		nPKs = 1
+	sigElems, ok1 := ctx.arrayElements[sigsRef]
+	pkElems, ok2 := ctx.arrayElements[pksRef]
+	if !ok1 || !ok2 {
+		panic(fmt.Sprintf("checkMultiSig: array_literal metadata missing (sigs=%q, pks=%q)", sigsRef, pksRef))
 	}
 
-	// Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
+	// Dummy OP_0 (historical CHECKMULTISIG off-by-one).
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
 	ctx.sm.push("")
 
-	// Bring sigs array ref to top (the individual elements are treated as one item)
-	sigsIsLast := ctx.isLastUse(sigsRef, bindingIndex, lastUses)
-	ctx.bringToTop(sigsRef, sigsIsLast)
+	// Bring each sig element to TOS in declaration order.
+	for _, sig := range sigElems {
+		isLast := ctx.isLastUse(sig, bindingIndex, lastUses)
+		ctx.bringToTop(sig, isLast)
+	}
 
-	// Push nSigs count
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(nSigs))})
+	// Push nSigs.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(len(sigElems)))})
 	ctx.sm.push("")
 
-	// Bring pubkeys array ref to top
-	pksIsLast := ctx.isLastUse(pksRef, bindingIndex, lastUses)
-	ctx.bringToTop(pksRef, pksIsLast)
+	// Bring each pubkey element to TOS in declaration order.
+	for _, pk := range pkElems {
+		isLast := ctx.isLastUse(pk, bindingIndex, lastUses)
+		ctx.bringToTop(pk, isLast)
+	}
 
-	// Push nPKs count
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(nPKs))})
+	// Push nPKs.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(len(pkElems)))})
 	ctx.sm.push("")
 
-	// Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
-	for i := 0; i < 5; i++ {
+	// OP_CHECKMULTISIG consumes: dummy + N sigs + nSigs + M pks + nPKs.
+	consumed := 1 + len(sigElems) + 1 + len(pkElems) + 1
+	for i := 0; i < consumed; i++ {
 		ctx.sm.pop()
 	}
 
@@ -4190,15 +4221,11 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
 
-	// Clean up excess stack items left by deserialize_state.
-	hasDeserializeState := false
-	for _, b := range method.Body {
-		if b.Value.Kind == "deserialize_state" {
-			hasDeserializeState = true
-			break
-		}
-	}
-	if method.IsPublic && hasDeserializeState && ctx.sm.depth() > 1 {
+	// Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+	// Excess items can come from deserialize_state (mutable-field methods) or
+	// from readonly-field-binding patterns in all-readonly terminal methods.
+	// The depth>1 guard keeps this a no-op for already-clean methods.
+	if method.IsPublic && ctx.sm.depth() > 1 {
 		excess := ctx.sm.depth() - 1
 		for i := 0; i < excess; i++ {
 			ctx.emitOp(StackOp{Op: "nip"})
@@ -4233,18 +4260,12 @@ func lowerMethod(method *ir.ANFMethod, properties []ir.ANFProperty) (*StackMetho
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
 
-	// Clean up excess stack items left by deserialize_state.
-	// Stateful methods that deserialize state from the preimage leave the
-	// deserialized property values on the stack. These must be removed so
-	// only the final assertion result remains (CLEANSTACK policy).
-	hasDeserializeState := false
-	for _, b := range method.Body {
-		if b.Value.Kind == "deserialize_state" {
-			hasDeserializeState = true
-			break
-		}
-	}
-	if method.IsPublic && hasDeserializeState && ctx.sm.depth() > 1 {
+	// Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+	// Excess items can come from deserialize_state (stateful methods reading
+	// mutable fields) or from readonly-field-binding patterns in all-readonly
+	// terminal methods. Only the final assertion result must remain on the
+	// stack. The depth>1 guard keeps this a no-op for already-clean methods.
+	if method.IsPublic && ctx.sm.depth() > 1 {
 		excess := ctx.sm.depth() - 1
 		for i := 0; i < excess; i++ {
 			ctx.emitOp(StackOp{Op: "nip"})

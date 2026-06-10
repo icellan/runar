@@ -1460,8 +1460,8 @@ const Parser = struct {
         return switch (self.current.kind) {
             .number => blk: {
                 const tok = self.bump();
-                const val = parseNumberLiteral(tok.text);
-                break :blk Expression{ .literal_int = val };
+                if (self.parseNumberExpr(tok.text)) |expr| break :blk expr;
+                break :blk null;
             },
             .hex_string => blk: {
                 const tok = self.bump();
@@ -1529,6 +1529,34 @@ const Parser = struct {
 
     // ---- Helpers ----
 
+    /// Strip underscores + Rust type suffix from a numeric token, then route
+    /// to either `literal_int` (fits `i64`) or `literal_bigint` (overflows).
+    /// Used by parsePrimary's `.number` arm so the 256-bit secp256k1 group
+    /// order survives the Rust DSL frontend with full precision.
+    fn parseNumberExpr(self: *Parser, text: []const u8) ?Expression {
+        var stripped_buf: [128]u8 = undefined;
+        var stripped_len: usize = 0;
+        for (text) |ch| {
+            if ((ch == 'i' or ch == 'u') and stripped_len > 0) break;
+            if (ch != '_' and stripped_len < stripped_buf.len) {
+                stripped_buf[stripped_len] = ch;
+                stripped_len += 1;
+            }
+        }
+        const stripped = stripped_buf[0..stripped_len];
+        if (std.fmt.parseInt(i64, stripped, 0)) |val| {
+            return Expression{ .literal_int = val };
+        } else |_| {
+            // Oversize decimal literal — carry as `literal_bigint`.
+            if (isAllAsciiDigitsRust(stripped)) {
+                const decimal = self.allocator.dupe(u8, stripped) catch return null;
+                return Expression{ .literal_bigint = decimal };
+            }
+            self.addErrorFmt("invalid integer: '{s}'", .{text});
+            return null;
+        }
+    }
+
     fn isCompoundAssignOp(k: TokenKind) bool {
         return k == .plus_eq or k == .minus_eq or k == .star_eq or k == .slash_eq or k == .percent_eq;
     }
@@ -1544,6 +1572,17 @@ const Parser = struct {
         };
     }
 };
+
+/// True if every byte in `s` is an ASCII digit (0-9). Used to identify
+/// decimal integer literals that overflow `i64` and need to be routed to
+/// the `literal_bigint` AST node instead.
+fn isAllAsciiDigitsRust(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
 
 /// Parse a number literal, stripping underscores and type suffixes.
 fn parseNumberLiteral(text: []const u8) i64 {

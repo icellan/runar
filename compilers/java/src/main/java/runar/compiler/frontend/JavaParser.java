@@ -19,6 +19,7 @@ import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.ModifiersTree;
 import com.sun.source.tree.NewArrayTree;
+import com.sun.source.tree.NewClassTree;
 import com.sun.source.tree.ParameterizedTypeTree;
 import com.sun.source.tree.ParenthesizedTree;
 import com.sun.source.tree.PrimitiveTypeTree;
@@ -556,6 +557,44 @@ public final class JavaParser {
                 elements.add(convertExpression(el, filename, cu));
             }
             return new ArrayLiteralExpr(elements);
+        }
+        if (e instanceof NewClassTree nc) {
+            // `new BigInteger("decimalstring")` / `new BigInteger("hex", 16)` —
+            // escape hatch for bigint constants whose magnitude exceeds
+            // Long.MAX_VALUE. The BigInteger.valueOf(...) path only handles
+            // values that fit in a `long` because the JDK factory's signature
+            // is `valueOf(long)`; for the secp256k1 group order (256 bits)
+            // there is no other way to express the constant in Java source
+            // that still compiles under javac. Folded into a BigIntLiteral at
+            // parse time; emits the same ANF as a TS `0xFF...n` literal.
+            ExpressionTree identTree = nc.getIdentifier();
+            String typeName = null;
+            if (identTree instanceof IdentifierTree it) {
+                typeName = it.getName().toString();
+            } else if (identTree instanceof MemberSelectTree ms) {
+                typeName = ms.getIdentifier().toString();
+            }
+            if ("BigInteger".equals(typeName) && !nc.getArguments().isEmpty()
+                && nc.getArguments().get(0) instanceof LiteralTree litTree
+                && litTree.getValue() instanceof String decStr) {
+                int radix = 10;
+                if (nc.getArguments().size() >= 2
+                    && nc.getArguments().get(1) instanceof LiteralTree radixLit
+                    && radixLit.getValue() instanceof Number radixNum) {
+                    radix = radixNum.intValue();
+                }
+                try {
+                    return new BigIntLiteral(new BigInteger(decStr, radix));
+                } catch (NumberFormatException nfe) {
+                    throw new ParseException(
+                        "cannot parse `new BigInteger(\"" + decStr + "\", " + radix + ")` in " + filename
+                        + ": " + nfe.getMessage()
+                    );
+                }
+            }
+            throw new ParseException(
+                "`new` is only supported for array literals (new T[]{...}) and `new BigInteger(\"...\")` literals in " + filename
+            );
         }
         if (e instanceof AssignmentTree at) {
             throw new ParseException(

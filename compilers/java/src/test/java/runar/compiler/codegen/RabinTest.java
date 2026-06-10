@@ -5,25 +5,30 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import runar.compiler.ir.stack.OpcodeOp;
+import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.StackOp;
 
 /**
- * Direct unit tests for the Rabin signature verifier codegen. The reference
- * is the fixed 10-opcode sequence in
- * {@code compilers/python/runar_compiler/codegen/stack.py:_lower_verify_rabin_sig}
- * and {@code compilers/rust/src/codegen/stack.rs::lower_verify_rabin_sig}:
+ * Direct unit tests for the Rabin signature verifier codegen.
+ *
+ * <p>The reference is the fixed 15-opcode sequence (post BUG-010) in
+ * {@code packages/runar-compiler/src/passes/rabin-codegen.ts}:
  *
  * <pre>
- *   OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+ *   OP_SWAP
+ *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536
+ *   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
  * </pre>
  *
- * The Java emitter must produce that exact sequence to remain byte-identical
+ * <p>The Java emitter must produce that exact sequence to remain byte-identical
  * with the other 6 compilers. The conformance runner exercises this via
  * end-to-end fixtures, but a direct unit test catches a regression instantly.
+ * See {@code _review/BUG-010-rfc.md}.
  */
 class RabinTest {
 
@@ -34,25 +39,42 @@ class RabinTest {
     }
 
     @Test
-    void emitsExactly10Ops() {
+    void emitsExactly15Ops() {
         List<StackOp> ops = capture();
-        assertEquals(10, ops.size(),
-            "Rabin verifier must emit exactly 10 opcodes (cross-compiler reference)");
+        assertEquals(15, ops.size(),
+            "Rabin verifier must emit exactly 15 opcodes (cross-compiler reference; "
+                + "10 original + 5 BUG-010 range-check ops)");
     }
 
     @Test
-    void allOpsAreOpcodeOps() {
-        for (StackOp op : capture()) {
-            assertTrue(op instanceof OpcodeOp,
-                "Rabin emits only OpcodeOps; got " + op.getClass().getSimpleName());
+    void allOpsAreOpcodeOpsExceptPaddingLimitPush() {
+        List<StackOp> ops = capture();
+        for (int i = 0; i < ops.size(); i++) {
+            StackOp op = ops.get(i);
+            if (i == 3) {
+                assertTrue(op instanceof PushOp,
+                    "Rabin op 3 must be the BUG-010 padding-limit push; got "
+                        + op.getClass().getSimpleName());
+            } else {
+                assertTrue(op instanceof OpcodeOp,
+                    "Rabin op " + i + " must be OpcodeOp; got "
+                        + op.getClass().getSimpleName());
+            }
         }
     }
 
     @Test
     void exactOpcodeSequenceMatchesReference() {
         List<StackOp> ops = capture();
-        List<String> expected = List.of(
+        // Position 3 is the padding-limit push (65536); marked with null below
+        // so the loop body verifies it separately.
+        List<String> expected = java.util.Arrays.asList(
             "OP_SWAP",
+            "OP_DUP",
+            "OP_0",
+            null, // push 65536
+            "OP_WITHIN",
+            "OP_VERIFY",
             "OP_ROT",
             "OP_DUP",
             "OP_MUL",
@@ -65,10 +87,17 @@ class RabinTest {
         );
         assertEquals(expected.size(), ops.size());
         for (int i = 0; i < expected.size(); i++) {
-            OpcodeOp actual = (OpcodeOp) ops.get(i);
-            assertEquals(expected.get(i), actual.code(),
-                "Opcode at offset " + i + " diverges from reference; "
-                    + "Java emits " + actual.code() + " but Go/Rust/Python emit " + expected.get(i));
+            String want = expected.get(i);
+            if (want == null) {
+                PushOp p = (PushOp) ops.get(i);
+                assertEquals(BigInteger.valueOf(Rabin.RABIN_PADDING_LIMIT),
+                    p.value().raw(),
+                    "Rabin op " + i + " must push the BUG-010 padding limit");
+            } else {
+                OpcodeOp actual = (OpcodeOp) ops.get(i);
+                assertEquals(want, actual.code(),
+                    "Opcode at offset " + i + " diverges from reference");
+            }
         }
     }
 
@@ -88,7 +117,7 @@ class RabinTest {
     void dispatchRoutesKnownName() {
         List<StackOp> ops = new ArrayList<>();
         Rabin.dispatch("verifyRabinSig", ops::add);
-        assertEquals(10, ops.size());
+        assertEquals(15, ops.size());
     }
 
     @Test
@@ -97,16 +126,23 @@ class RabinTest {
     }
 
     @Test
-    void byteEncodingTotalsExactly10Bytes() {
-        // Each Rabin opcode is a single-byte BSV opcode. Therefore the
-        // encoded byte length equals the op count.
+    void emitterContainsBug010PaddingLimitPush() {
+        // Defensive: an emitter that drops the BUG-010 push (e.g. via a botched
+        // refactor) would re-introduce the forgery exploit. This is a targeted
+        // regression test for that scenario.
         List<StackOp> ops = capture();
-        // (Sanity: each op is a known BSV opcode in Emit's table; if the
-        // emitter ever emits a multi-byte push, this test catches it.)
+        boolean foundPush = false;
         for (StackOp op : ops) {
-            assertNotNull(op);
-            assertTrue(op instanceof OpcodeOp);
+            if (op instanceof PushOp p
+                && p.value().raw() instanceof BigInteger bi
+                && bi.equals(BigInteger.valueOf(Rabin.RABIN_PADDING_LIMIT))) {
+                foundPush = true;
+                break;
+            }
         }
-        assertEquals(10, ops.size());
+        assertNotNull(ops);
+        assertTrue(foundPush,
+            "Rabin emitter MUST push the BUG-010 padding limit (65536); "
+                + "without it, an attacker can forge signatures by choosing arbitrary padding.");
     }
 }

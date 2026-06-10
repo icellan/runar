@@ -228,9 +228,26 @@ module RunarCompiler::Codegen
   # @return [Hash{String => Integer}]
   def self.compute_last_uses(bindings)
     last_use = {}
+    # Pre-scan: map each array_literal binding to its element refs. Used to
+    # propagate last-use across the array indirection (the array binding is
+    # pure metadata in _lower_array_literal -- its elements must remain live
+    # until the array's consumer, not until the array_literal binding itself).
+    array_elems = {}
+    bindings.each do |b|
+      array_elems[b.name] = Array(b.value.elements).dup if b.value.kind == "array_literal"
+    end
     bindings.each_with_index do |binding, i|
+      # array_literal is metadata-only -- do NOT advance its elements'
+      # last-use to here; defer to the array's consumer.
+      next if binding.value.kind == "array_literal"
+
       refs = collect_refs(binding.value)
-      refs.each { |ref| last_use[ref] = i }
+      refs.each do |ref|
+        last_use[ref] = i
+        if array_elems.key?(ref)
+          array_elems[ref].each { |e| last_use[e] = i }
+        end
+      end
     end
     last_use
   end
@@ -465,6 +482,7 @@ module RunarCompiler::Codegen
       @private_methods = {}
       @local_bindings = {}
       @array_lengths = {}
+      @array_elements = {}
       @const_values = {}
       @outer_protected_refs = nil
       @inside_branch = false
@@ -1188,6 +1206,14 @@ module RunarCompiler::Codegen
       # Handle @ref: aliases (ANF variable aliasing)
       if value.const_string && value.const_string.length > 5 && value.const_string[0, 5] == "@ref:"
         ref_name = value.const_string[5..]
+        # Special case: aliasing an array_literal (metadata-only binding,
+        # not present in the stack-map). Copy the array metadata under the
+        # new binding name and emit no stack moves.
+        if @array_elements.key?(ref_name)
+          @array_elements[binding_name] = @array_elements[ref_name].dup
+          @array_lengths[binding_name] = @array_lengths[ref_name] if @array_lengths.key?(ref_name)
+          return
+        end
         if @sm.has?(ref_name)
           # CRITICAL: Only consume (ROLL) if the ref target is a local binding
           # in the current scope.  Outer-scope refs must be copied (PICK) so
@@ -2014,29 +2040,39 @@ module RunarCompiler::Codegen
 
       sigs_ref = args[0]
       pks_ref = args[1]
-      n_sigs = @array_lengths[sigs_ref] || 1
-      n_pks = @array_lengths[pks_ref] || 1
+      sig_elems = @array_elements[sigs_ref]
+      pk_elems = @array_elements[pks_ref]
+      if sig_elems.nil? || pk_elems.nil?
+        raise "checkMultiSig: array_literal metadata missing (sigs=#{sigs_ref.inspect}, pks=#{pks_ref.inspect})"
+      end
 
-      # Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
+      # Dummy OP_0 (historical CHECKMULTISIG off-by-one).
       emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(0) })
       @sm.push(nil)
 
-      # Bring sigs array to top
-      bring_to_top(sigs_ref, _is_last_use(sigs_ref, binding_index, last_uses))
+      # Bring each sig element to TOS in declaration order.
+      sig_elems.each do |sig|
+        is_last = _is_last_use(sig, binding_index, last_uses)
+        bring_to_top(sig, is_last)
+      end
 
-      # Push nSigs count
-      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(n_sigs) })
+      # Push nSigs.
+      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(sig_elems.length) })
       @sm.push(nil)
 
-      # Bring pubkeys array to top
-      bring_to_top(pks_ref, _is_last_use(pks_ref, binding_index, last_uses))
+      # Bring each pubkey element to TOS in declaration order.
+      pk_elems.each do |pk|
+        is_last = _is_last_use(pk, binding_index, last_uses)
+        bring_to_top(pk, is_last)
+      end
 
-      # Push nPKs count
-      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(n_pks) })
+      # Push nPKs.
+      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(pk_elems.length) })
       @sm.push(nil)
 
-      # Pop everything: OP_0 + sigs + nSigs + pks + nPKs
-      5.times { @sm.pop }
+      # OP_CHECKMULTISIG consumes: dummy + N sigs + nSigs + M pks + nPKs.
+      consumed = 1 + sig_elems.length + 1 + pk_elems.length + 1
+      consumed.times { @sm.pop }
 
       emit_opcode("OP_CHECKMULTISIG")
       @sm.push(binding_name)
@@ -3218,22 +3254,14 @@ module RunarCompiler::Codegen
     # array_literal
     # -----------------------------------------------------------------
 
-    def _lower_array_literal(binding_name, elements, binding_index, last_uses)
-      # Bring each element to TOS in order; on the stack-map collapse the
-      # N entries into a single logical slot labelled with the binding name.
-      # Consumers (e.g. checkMultiSig) treat the whole array as one stack
-      # item and read the element count from @array_lengths.
-      elements.each do |elem|
-        is_last = _is_last_use(elem, binding_index, last_uses)
-        bring_to_top(elem, is_last)
-      end
-      # Pop all elements from the stack map (consumed into the array)
-      elements.length.times { @sm.pop }
-      # Push a single entry representing the whole array
-      @sm.push(binding_name)
-      # Record the array length for checkMultiSig
+    def _lower_array_literal(binding_name, elements, _binding_index, _last_uses)
+      # Metadata-only. Array literals in Rúnar today only feed into
+      # checkMultiSig. Pre-laying the elements onto the runtime stack here
+      # would desync the stack-map from the runtime stack (the map can only
+      # model one slot per binding, but an array binding spans N runtime
+      # slots). _lower_check_multi_sig pulls each element to TOS at the use site.
       @array_lengths[binding_name] = elements.length
-      _track_depth
+      @array_elements[binding_name] = elements.dup
     end
 
     # -----------------------------------------------------------------
@@ -3502,9 +3530,12 @@ module RunarCompiler::Codegen
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = method.body.any? { |b| b.value.kind == "deserialize_state" }
-    if method.is_public && has_deserialize_state && ctx.sm.depth > 1
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth > 1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public && ctx.sm.depth > 1
       excess = ctx.sm.depth - 1
       excess.times do
         ctx.emit_op({ op: "nip" })
@@ -3531,9 +3562,12 @@ module RunarCompiler::Codegen
     ctx = LoweringContext.new(param_names, properties)
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = method.body.any? { |b| b.value.kind == "deserialize_state" }
-    if method.is_public && has_deserialize_state && ctx.sm.depth > 1
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth > 1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public && ctx.sm.depth > 1
       excess = ctx.sm.depth - 1
       excess.times do
         ctx.emit_op({ op: "nip" })

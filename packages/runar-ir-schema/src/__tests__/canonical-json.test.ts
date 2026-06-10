@@ -291,3 +291,37 @@ describe('empty structures', () => {
     expect(canonicalJsonStringify({ a: [], b: {} })).toBe('{"a":[],"b":{}}');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Lone-surrogate rejection (RFC 8785 §3.2.2.2 / audit D6)
+// ---------------------------------------------------------------------------
+
+describe('lone-surrogate rejection', () => {
+  it('rejects a string containing a lone high surrogate', () => {
+    expect(() => canonicalJsonStringify('\uD800')).toThrowError(/lone .* surrogate/i);
+  });
+
+  it('rejects a string containing a lone low surrogate', () => {
+    expect(() => canonicalJsonStringify('\uDC00')).toThrowError(/lone .* surrogate/i);
+  });
+
+  it('rejects an object key with a lone surrogate', () => {
+    expect(() => canonicalJsonStringify({ '\uD800': 1 })).toThrowError(/lone .* surrogate/i);
+  });
+
+  it('accepts a valid surrogate pair (U+1F600 😀)', () => {
+    expect(canonicalJsonStringify('😀')).toBe('"😀"');
+  });
+
+  it('throws CanonicalJsonError with code lone-surrogate', () => {
+    try {
+      canonicalJsonStringify('\uD800');
+      throw new Error('expected throw');
+    } catch (e) {
+      // Should be a CanonicalJsonError with the typed code; importing the
+      // class would couple the tests to a deep path. Detect via duck-typing
+      // on the public `code` field.
+      expect((e as { code?: string }).code).toBe('lone-surrogate');
+    }
+  });
+});

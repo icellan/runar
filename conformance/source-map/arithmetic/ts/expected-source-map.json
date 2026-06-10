@@ -1,0 +1,166 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 12,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 2,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 13,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 13,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 13,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 13,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 13,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 14,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 14,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 14,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 10,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 14,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 14,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 15,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 15,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 15,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 15,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 15,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 15,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 18,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 19,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 20,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 21,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 22,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 23,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 24,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 25,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 16,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 26,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 17,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 27,
+      "sourceFile": "examples/ts/arithmetic/Arithmetic.runar.ts",
+      "line": 17,
+      "column": 4
+    }
+  ]
+}

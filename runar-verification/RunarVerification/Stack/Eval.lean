@@ -96,7 +96,29 @@ def asBool? : Value → Option Bool
 def asBytes? : Value → Option ByteArray
   | .vBytes b  => some b
   | .vOpaque b => some b
+  -- Bitcoin faithfulness: on a real Script stack every element is a byte vector;
+  -- the number 0 IS the empty byte vector (its minimal sign-magnitude little-endian
+  -- encoding `encodeMinimalLE 0 = ByteArray.empty`).  `OP_0` pushes that empty vector
+  -- and `OP_CAT(empty, x) = x`.  Our parser turns the wire byte `0x00` (the `OP_0`
+  -- encoding) into `vBigint 0`, so for the byte-oriented ops to behave as on real
+  -- Script we must coerce `vBigint 0` to the empty byte vector here.  This is the
+  -- NARROW slice of full numeric→bytes coercion: only the zero literal, which is the
+  -- only int value the EC `reverse32` accumulator initialization (`OP_0`) produces.
+  -- Non-zero `vBigint` is left rejected to avoid disturbing the existing typed-VM
+  -- semantics of `OP_EQUAL` / `OP_SIZE` / `OP_CHECKSIG` proofs (a full
+  -- `vBigint n → encodeMinimalLE n` total form is faithful too but cascades).
+  | .vBigint 0 => some ByteArray.empty
   | _          => none
+
+/-- The Bitcoin-faithful `asBytes?` of the zero literal is the empty byte vector. -/
+@[simp] theorem asBytes?_vBigint_zero : asBytes? (.vBigint 0) = some ByteArray.empty := rfl
+
+/-- A non-zero integer value has no byte coercion (only the zero literal does). -/
+theorem asBytes?_vBigint_ne_zero {x : Int} (hx : x ≠ 0) : asBytes? (.vBigint x) = none := by
+  match x, hx with
+  | (0 : Int), hx => exact absurd rfl hx
+  | (n + 1 : Nat), _ => rfl
+  | Int.negSucc n, _ => rfl
 
 def asNonNegativeNat? (v : Value) : Option Nat :=
   match asInt? v with

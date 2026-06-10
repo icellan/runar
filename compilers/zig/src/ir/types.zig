@@ -181,6 +181,14 @@ pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = nu
 
 pub const Expression = union(enum) {
     literal_int: i64, literal_bool: bool, literal_bytes: []const u8, identifier: []const u8,
+    /// Oversize decimal integer literal — produced by frontend parsers when the
+    /// source text is a base-10 integer that overflows `i64`. The payload is the
+    /// raw decimal text (optionally leading `-`, no `n` suffix, no underscores)
+    /// so the value survives the AST → ANF → IR JSON → codegen pipeline without
+    /// any width loss. Small values continue to use `literal_int`; this variant
+    /// is reserved for the cases (e.g. the 256-bit secp256k1 group order) where
+    /// `i64` truncation would silently corrupt the script bytes.
+    literal_bigint: []const u8,
     property_access: PropertyAccess, binary_op: *BinaryOp, unary_op: *UnaryOp,
     call: *CallExpr, method_call: *MethodCall, ternary: *Ternary, index_access: *IndexAccess,
     increment: *IncrementExpr, decrement: *DecrementExpr, array_literal: []const Expression,
@@ -278,11 +286,23 @@ pub const ANFMethod = struct {
 pub const ANFBinding = struct { name: []const u8, value: ANFValue, source_loc: ?SourceLocation = null };
 
 pub const ConstValue = union(enum) {
-    boolean: bool, integer: i128, string: []const u8,
+    boolean: bool,
+    integer: i128,
+    /// Arbitrary-precision integer carried as its canonical decimal text
+    /// (optionally leading `-`, no `n` suffix, no underscores). Used for
+    /// literals that overflow `i128` — primarily 256-bit constants such as
+    /// the secp256k1 group order in the schnorr-zkp fixture. Values that
+    /// fit `i128` MUST be stored in the `integer` variant so the existing
+    /// constant-fold / ec-optimizer / cross-tier JSON paths remain
+    /// byte-identical for ordinary inputs; `big_integer` is reserved
+    /// exclusively for the overflow case.
+    big_integer: []const u8,
+    string: []const u8,
     pub fn eql(self: ConstValue, other: ConstValue) bool {
         return switch (self) {
             .boolean => |b| switch (other) { .boolean => |ob| b == ob, else => false },
             .integer => |i| switch (other) { .integer => |oi| i == oi, else => false },
+            .big_integer => |s| switch (other) { .big_integer => |os| std.mem.eql(u8, s, os), else => false },
             .string => |s| switch (other) { .string => |os| std.mem.eql(u8, s, os), else => false },
         };
     }
@@ -336,7 +356,16 @@ pub const ANFCall = struct { func: []const u8, args: []const []const u8 };
 pub const ANFMethodCall = struct { object: []const u8, method: []const u8, args: []const []const u8 };
 pub const ANFIf = struct { cond: []const u8, then: []ANFBinding, @"else": []ANFBinding };
 pub const ANFLoop = struct { count: u32, body: []ANFBinding, iter_var: []const u8 };
-pub const ANFAssert = struct { value: []const u8 };
+pub const ANFAssert = struct {
+    value: []const u8,
+    /// Optional marker: `true` only on the auto-injected
+    /// `hash256(continuationOutputs) === extractOutputHash(txPreimage)`
+    /// assert emitted by the StatefulSmartContract lowering. Off-chain
+    /// SDK interpreters use this to skip the equality check without
+    /// resorting to structural / taint heuristics that misfire on
+    /// developer covenant asserts whose IR shape is identical.
+    is_auto_injected_state_check: bool = false,
+};
 pub const UpdateProp = struct { name: []const u8, value: []const u8 };
 pub const CheckPreimage = struct { preimage: []const u8 };
 pub const DeserializeState = struct { preimage: []const u8 };
@@ -415,13 +444,25 @@ pub const StackOp = union(enum) {
 };
 pub const StackIf = struct { then: []StackOp, @"else": ?[]StackOp = null };
 pub const Placeholder = struct { param_index: u32, param_name: []const u8 };
-pub const PushValue = union(enum) { bytes: []const u8, integer: i64, boolean: bool };
+pub const PushValue = union(enum) {
+    bytes: []const u8,
+    integer: i64,
+    boolean: bool,
+    /// Decimal-string-encoded big integer push for values that overflow `i64`.
+    /// Payload is the canonical decimal text (optional leading `-`, ASCII
+    /// digits, no `n` suffix, no underscores). The emitter converts it to a
+    /// little-endian sign-magnitude push-data sequence — the small-int
+    /// opcode shortcuts are unreachable here by construction.
+    big_int_decimal: []const u8,
+};
 
 pub const StackInstruction = union(enum) {
     op: Opcode,
     push_data: []const u8,
     push_int: i64,
     push_bool: bool,
+    /// Decimal-string-encoded big integer push (mirrors PushValue.big_int_decimal).
+    push_big_int_decimal: []const u8,
     push_codesep_index: void,
     placeholder: Placeholder,
     /// Opaque opcode-byte span emitted verbatim by a raw_script ANF node.

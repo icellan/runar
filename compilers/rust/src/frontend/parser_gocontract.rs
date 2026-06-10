@@ -36,6 +36,8 @@
 //! - `:=` -> VariableDecl (mutable)
 //! - standalone functions (no receiver) -> private helper methods
 
+use num_bigint::BigInt;
+use num_traits::{Num, ToPrimitive};
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -57,7 +59,7 @@ pub fn parse_go_contract(source: &str, file_name: Option<&str>) -> ParseResult {
 
     let contract = parser.parse();
 
-    ParseResult { contract, errors }
+    ParseResult { contract, errors, source_size_err: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +236,7 @@ enum TokenType {
     MinusMinus, // --
     // Literals
     Ident(String),
-    Number(i128),
+    Number(BigInt),
     StringLit(String), // backtick or double-quoted
     // End
     Eof,
@@ -449,7 +451,8 @@ fn tokenize(source: &str) -> Vec<Token> {
                 pos += 1;
                 col += 1;
             }
-            let n: i128 = val.parse().unwrap_or(0);
+            let n = <BigInt as Num>::from_str_radix(&val, 10)
+                .unwrap_or_else(|_| BigInt::from(0));
             tokens.push(Token { typ: TokenType::Number(n), line: l, col: c });
             continue;
         }
@@ -922,7 +925,7 @@ impl<'a> GoParser<'a> {
             // Fixed-size array [N]T
             let size = if let TokenType::Number(n) = self.current().typ.clone() {
                 self.advance();
-                n as usize
+                n.to_usize().unwrap_or(0)
             } else {
                 0
             };
@@ -1430,7 +1433,7 @@ impl<'a> GoParser<'a> {
                 name: "_i".to_string(),
                 var_type: None,
                 mutable: true,
-                init: Expression::BigIntLiteral { value: 0 },
+                init: Expression::BigIntLiteral { value: BigInt::from(0) },
                 source_location: loc.clone(),
             };
             let dummy_update = Statement::ExpressionStatement {

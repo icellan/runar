@@ -146,11 +146,115 @@ func appendFloat(out []byte, f float64) ([]byte, error) {
 	if f == float64(int64(f)) && f >= -9007199254740992 && f <= 9007199254740992 {
 		return strconv.AppendInt(out, int64(f), 10), nil
 	}
-	// strconv.FormatFloat with 'g' prec=-1 matches ES Number.prototype.toString
-	// for typical finite floats. Edge cases (1e21 transition) are documented
-	// divergences but unused by the envelope wire protocol (only ms-timestamps
-	// and small ints appear in practice).
-	return strconv.AppendFloat(out, f, 'g', -1, 64), nil
+	// ECMA-262 §6.1.6.1.13 Number::toString. strconv.FormatFloat 'g' diverges
+	// from JS for the 1e21 transition and emits "1e+21" with implicit lowercase
+	// while ES emits "1e+21" plus or "1e-300" without an extra .0 — and a few
+	// other edge cases. Re-derive (digits, k) from Go's shortest-roundtrip
+	// surface form and re-emit per the spec rules (audit D5).
+	return appendEcma262Double(out, f), nil
+}
+
+// appendEcma262Double formats a finite, non-zero, positive-or-negative double
+// per ECMA-262 §6.1.6.1.13 Number::toString. Output is byte-identical to JS
+// `String(x)` / `JSON.stringify(x)` for any finite x. Mirrors the TS reference
+// in packages/runar-ir-schema/src/canonical-json.ts (via JSON.stringify) and
+// the Rust/Python/Zig/Ruby/Java ports of the same algorithm.
+func appendEcma262Double(out []byte, x float64) []byte {
+	if x < 0 {
+		out = append(out, '-')
+		return appendEcma262Double(out, -x)
+	}
+	// Go's 'g'/-1 prints the shortest round-trip decimal string (Ryu-style).
+	// For values like 1e21 it emits "1e+21"; for 1.5e10 it emits "1.5e+10";
+	// for 0.5 it emits "0.5". We re-derive (digits, k) from the formatted
+	// string and re-emit per the ECMA rules so the output is independent of
+	// Go's chosen surface form.
+	s := strconv.FormatFloat(x, 'g', -1, 64)
+	// Split into mantissa and explicit exponent.
+	ePos := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == 'e' || s[i] == 'E' {
+			ePos = i
+			break
+		}
+	}
+	mantissa := s
+	expPart := 0
+	if ePos >= 0 {
+		mantissa = s[:ePos]
+		e, err := strconv.Atoi(s[ePos+1:])
+		if err == nil {
+			expPart = e
+		}
+	}
+	// Split mantissa into integer and fractional parts.
+	intPart := mantissa
+	fracPart := ""
+	for i := 0; i < len(mantissa); i++ {
+		if mantissa[i] == '.' {
+			intPart = mantissa[:i]
+			fracPart = mantissa[i+1:]
+			break
+		}
+	}
+	// Collect digits, strip leading and trailing zeros to land on the
+	// significant digit string. leading_zeros shift k down; trailing zeros
+	// are absorbed into k via the int-part length.
+	rawDigits := intPart + fracPart
+	leadingZeros := 0
+	for leadingZeros < len(rawDigits) && rawDigits[leadingZeros] == '0' {
+		leadingZeros++
+	}
+	trimmed := rawDigits[leadingZeros:]
+	end := len(trimmed)
+	for end > 0 && trimmed[end-1] == '0' {
+		end--
+	}
+	digits := trimmed[:end]
+	if len(digits) == 0 {
+		return append(out, '0')
+	}
+	k := len(intPart) - leadingZeros + expPart
+	sLen := len(digits)
+	// ECMA-262 §6.1.6.1.13.
+	if k >= sLen && k <= 21 {
+		out = append(out, digits...)
+		for i := 0; i < k-sLen; i++ {
+			out = append(out, '0')
+		}
+		return out
+	}
+	if k > 0 && k <= 21 {
+		out = append(out, digits[:k]...)
+		out = append(out, '.')
+		out = append(out, digits[k:]...)
+		return out
+	}
+	if k > -6 && k <= 0 {
+		out = append(out, '0', '.')
+		for i := 0; i < -k; i++ {
+			out = append(out, '0')
+		}
+		out = append(out, digits...)
+		return out
+	}
+	// Scientific notation.
+	exp := k - 1
+	if sLen == 1 {
+		out = append(out, digits...)
+	} else {
+		out = append(out, digits[0])
+		out = append(out, '.')
+		out = append(out, digits[1:]...)
+	}
+	if exp < 0 {
+		out = append(out, 'e', '-')
+		out = strconv.AppendInt(out, int64(-exp), 10)
+	} else {
+		out = append(out, 'e', '+')
+		out = strconv.AppendInt(out, int64(exp), 10)
+	}
+	return out
 }
 
 // utf16Less compares two strings by UTF-16 code-unit order, matching
@@ -384,6 +488,18 @@ const (
 	ReasonEnvelopeMismatch VerifyEnvelopeReason = "envelope-mismatch"
 	ReasonBadSig          VerifyEnvelopeReason = "bad-sig"
 	ReasonPubkeyNotAllowed VerifyEnvelopeReason = "pubkey-not-allowed"
+	// ReasonTooLarge mirrors the TS 'too-large' reason. Returned BEFORE
+	// any JSON parse / ECDSA verify work when an envelope string field
+	// exceeds its InputLimits cap (DoS-bound).
+	ReasonTooLarge VerifyEnvelopeReason = "too-large"
+)
+
+// Envelope DoS-bound caps. Mirror InputLimits.{MAX_IR_BYTES, MAX_STRING_BYTES}
+// from the TS schema package. Public so callers and tests can reference
+// them directly.
+const (
+	MaxEnvelopePayloadBytes = MaxScriptBytes * 4 // 16 MiB — matches MAX_IR_BYTES
+	MaxEnvelopeFieldBytes   = MaxScriptBytes     // 4 MiB — matches MAX_STRING_BYTES
 )
 
 // VerifyEnvelopeOpts captures the input to VerifyEnvelope.
@@ -413,6 +529,21 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	now := opts.NowMs
 	if now == 0 {
 		now = time.Now().UnixMilli()
+	}
+
+	// 0. DoS-bound size guard. Reject envelopes whose string fields exceed
+	//    their InputLimits cap BEFORE running JSON parse, hashing, or
+	//    ECDSA verify — those operations are linear in input size and a
+	//    pathological 100 MB payload would otherwise pin the goroutine.
+	//    Mirrors the TS 'too-large' rejection at sdk/envelope.ts:104.
+	if len(env.Payload) > MaxEnvelopePayloadBytes {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonTooLarge}
+	}
+	if len(env.Sig) > MaxEnvelopeFieldBytes {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonTooLarge}
+	}
+	if len(env.Pubkey) > MaxEnvelopeFieldBytes {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonTooLarge}
 	}
 
 	// 1. Field presence + types.

@@ -943,7 +943,7 @@ const Ctx = struct {
 
     fn cloneExpr(self: *Ctx, expr: Expression) ExpandError!Expression {
         switch (expr) {
-            .literal_int, .literal_bool, .literal_bytes, .identifier, .property_access => return expr,
+            .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier, .property_access => return expr,
             .binary_op => |bo| {
                 const new_bo = try self.allocator.create(BinaryOp);
                 new_bo.* = .{
@@ -1025,7 +1025,7 @@ fn asLiteralIndex(expr: Expression) ?i64 {
 
 fn isPureReference(expr: Expression) bool {
     return switch (expr) {
-        .literal_int, .literal_bool, .literal_bytes, .identifier, .property_access => true,
+        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier, .property_access => true,
         .unary_op => |uo| uo.op == .negate and uo.operand == .literal_int,
         else => false,
     };

@@ -1939,9 +1939,10 @@ func (p *javaParser) parsePrimary() Expression {
 	}
 }
 
-// parseNewExpression parses `new T[] { e1, e2, ... }` and returns an
-// ArrayLiteralExpr. Other `new` forms (constructor invocations) are not
-// part of the Rúnar subset and produce an error.
+// parseNewExpression parses `new T[] { e1, e2, ... }` (array literals) and
+// `new BigInteger("decimal" [, radix])` (oversize-bigint literal escape
+// hatch). Other `new` forms (constructor invocations) are not part of the
+// Rúnar subset and produce an error.
 func (p *javaParser) parseNewExpression() Expression {
 	newTok := p.current()
 	p.expect(javaTokNew)
@@ -1954,13 +1955,13 @@ func (p *javaParser) parseNewExpression() Expression {
 		p.addErrorAt("expected type after 'new'", newTok)
 		return Identifier{Name: "unknown"}
 	}
-	for p.current().kind == javaTokIdent {
-		p.advance()
-		if p.current().kind == javaTokDot {
-			p.advance()
-			continue
-		}
-		break
+	// Track the final type-name segment so we can detect `new BigInteger(...)`.
+	finalType := p.current().value
+	p.advance()
+	for p.current().kind == javaTokDot && p.peekAt(1).kind == javaTokIdent {
+		p.advance() // consume '.'
+		finalType = p.current().value
+		p.advance() // consume ident
 	}
 	// Optional generic args on the element type
 	if p.current().kind == javaTokLt {
@@ -1975,6 +1976,53 @@ func (p *javaParser) parseNewExpression() Expression {
 			}
 			p.advance()
 		}
+	}
+
+	// `new BigInteger("decimal" [, radix])` — escape hatch for bigint
+	// constants whose magnitude exceeds Long.MAX_VALUE (a Java decimal
+	// literal of that magnitude is not a valid `long`). Fold into a
+	// BigIntLiteral at parse time so the ANF matches the canonical TS
+	// source.
+	if finalType == "BigInteger" && p.current().kind == javaTokLParen {
+		p.advance() // '('
+		if p.current().kind == javaTokString {
+			raw := p.current().value
+			p.advance()
+			radix := 10
+			if p.current().kind == javaTokComma {
+				p.advance()
+				if p.current().kind == javaTokNumber {
+					if r, ok := new(big.Int).SetString(p.current().value, 0); ok {
+						radix = int(r.Int64())
+					}
+					p.advance()
+				}
+			}
+			if p.current().kind == javaTokRParen {
+				p.advance()
+			}
+			bi := new(big.Int)
+			cleaned := strings.ReplaceAll(raw, "_", "")
+			if _, ok := bi.SetString(cleaned, radix); !ok {
+				p.addErrorAt(fmt.Sprintf("cannot parse 'new BigInteger(%q, %d)'", raw, radix), newTok)
+				return BigIntLiteral{Value: big.NewInt(0)}
+			}
+			return BigIntLiteral{Value: bi}
+		}
+		// Unknown shape — fall through to the generic error path below.
+		// Skip a balanced '(...)'.
+		depth := 1
+		for depth > 0 && p.current().kind != javaTokEOF {
+			switch p.current().kind {
+			case javaTokLParen:
+				depth++
+			case javaTokRParen:
+				depth--
+			}
+			p.advance()
+		}
+		p.addErrorAt("`new BigInteger(...)` only supports string-literal forms (`new BigInteger(\"decimal\")` or `new BigInteger(\"hex\", 16)`)", newTok)
+		return BigIntLiteral{Value: big.NewInt(0)}
 	}
 
 	// Expect [] pair — unsized

@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Ruby-tier analyzer wrapper. Reads a hex file from argv[0] and writes
+# the canonical JSON report to stdout per spec §3.5.
+
+$LOAD_PATH.unshift File.expand_path('../lib', __dir__)
+require 'runar/analyzer'
+
+if ARGV.empty?
+  warn 'usage: runar_analyzer <hex-file>'
+  exit 2
+end
+
+hex = File.read(ARGV[0]).strip
+result = Runar::Analyzer.analyze_script(hex)
+STDOUT.write(Runar::Analyzer.to_canonical_json(result))

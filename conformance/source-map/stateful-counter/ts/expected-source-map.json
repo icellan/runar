@@ -1,0 +1,52 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 32,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 39,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 34,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 39,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 164,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 47,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 165,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 47,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 166,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 47,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 167,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 47,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 168,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 48,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 170,
+      "sourceFile": "examples/ts/stateful-counter/Counter.runar.ts",
+      "line": 48,
+      "column": 4
+    }
+  ]
+}

@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TestContract } from 'runar-testing';
+import { compile } from 'runar-compiler';
+import { ScriptVM } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'MultiSig2of3.runar.ts'), 'utf8');
@@ -14,6 +16,34 @@ const PK2 = '02' + 'bb'.repeat(32);
 const PK3 = '02' + 'cc'.repeat(32);
 const SIG1 = '30' + '11'.repeat(35);
 const SIG2 = '30' + '22'.repeat(35);
+const SIG_WRONG = '30' + '99'.repeat(35);
+
+function encodePush(hex: string): string {
+  const n = hex.length / 2;
+  if (n === 0) return '00';
+  if (n < 0x4c) return n.toString(16).padStart(2, '0') + hex;
+  if (n < 0x100) return '4c' + n.toString(16).padStart(2, '0') + hex;
+  throw new Error('push too large');
+}
+
+function hexToBytes(h: string): Uint8Array {
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function buildLockingScript(pks: [string, string, string]): string {
+  const r = compile(source);
+  if (!r.success || !r.scriptHex || !r.artifact) throw new Error('compile failed');
+  let s = r.scriptHex.toLowerCase();
+  const sorted = [...(r.artifact.constructorSlots ?? [])].sort((a, b) => b.byteOffset - a.byteOffset);
+  for (const slot of sorted) {
+    const enc = encodePush(pks[slot.paramIndex]!);
+    const off = slot.byteOffset * 2;
+    s = s.slice(0, off) + enc + s.slice(off + 2);
+  }
+  return s;
+}
 
 describe('MultiSig2of3 (TS)', () => {
   it('compiles a 2-of-3 multisig to Bitcoin Script with OP_CHECKMULTISIG', () => {
@@ -27,5 +57,61 @@ describe('MultiSig2of3 (TS)', () => {
     expect(contract.state.pk1).toBeDefined();
     expect(contract.state.pk2).toBeDefined();
     expect(contract.state.pk3).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------
+  // BUG-009 / BUG-003 regression — these execute the COMPILED locking
+  // script through ScriptVM with a controlled checkSigCallback, not the
+  // interpreter. Before the fix any input passed (the script was
+  // structurally OP_TRUE). See packages/runar-compiler/src/__tests__/
+  // checkmultisig-stack-layout.test.ts for the layout-level coverage.
+  // -----------------------------------------------------------------
+
+  it('rejects all-empty signatures', () => {
+    const locking = buildLockingScript([PK1, PK2, PK3]);
+    const unlocking = encodePush('') + encodePush('');
+    const vm = new ScriptVM({ checkSigCallback: (sig) => sig.length > 0 });
+    const r = vm.execute(hexToBytes(unlocking), hexToBytes(locking));
+    expect(r.success).toBe(false);
+  });
+
+  it('rejects below-threshold (one valid sig, one garbage)', () => {
+    const locking = buildLockingScript([PK1, PK2, PK3]);
+    const unlocking = encodePush(SIG1) + encodePush(SIG_WRONG);
+    const cb = (sig: Uint8Array, pk: Uint8Array) => {
+      const sh = Array.from(sig, x => x.toString(16).padStart(2, '0')).join('');
+      const ph = Array.from(pk, x => x.toString(16).padStart(2, '0')).join('');
+      // Only sig1 against pk1 validates; sig2 (garbage) matches nothing.
+      return (sh === SIG1 && ph === PK1);
+    };
+    const vm = new ScriptVM({ checkSigCallback: cb });
+    const r = vm.execute(hexToBytes(unlocking), hexToBytes(locking));
+    expect(r.success).toBe(false);
+  });
+
+  it('rejects sigs in wrong order (sig2 before sig1)', () => {
+    const locking = buildLockingScript([PK1, PK2, PK3]);
+    const unlocking = encodePush(SIG2) + encodePush(SIG1); // swapped
+    const cb = (sig: Uint8Array, pk: Uint8Array) => {
+      const sh = Array.from(sig, x => x.toString(16).padStart(2, '0')).join('');
+      const ph = Array.from(pk, x => x.toString(16).padStart(2, '0')).join('');
+      return (sh === SIG1 && ph === PK1) || (sh === SIG2 && ph === PK2);
+    };
+    const vm = new ScriptVM({ checkSigCallback: cb });
+    const r = vm.execute(hexToBytes(unlocking), hexToBytes(locking));
+    expect(r.success).toBe(false);
+  });
+
+  it('accepts a valid 2-of-3 unlock', () => {
+    const locking = buildLockingScript([PK1, PK2, PK3]);
+    const unlocking = encodePush(SIG1) + encodePush(SIG2);
+    const cb = (sig: Uint8Array, pk: Uint8Array) => {
+      const sh = Array.from(sig, x => x.toString(16).padStart(2, '0')).join('');
+      const ph = Array.from(pk, x => x.toString(16).padStart(2, '0')).join('');
+      return (sh === SIG1 && ph === PK1) || (sh === SIG2 && ph === PK2);
+    };
+    const vm = new ScriptVM({ checkSigCallback: cb });
+    const r = vm.execute(hexToBytes(unlocking), hexToBytes(locking));
+    expect(r.success).toBe(true);
   });
 });

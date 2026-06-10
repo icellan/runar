@@ -40,6 +40,8 @@
 //! - `unless` -> if with negated condition
 //! - snake_case identifiers -> camelCase in AST
 
+use num_bigint::BigInt;
+use num_traits::{Num, ToPrimitive};
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -68,7 +70,7 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
         .map(|msg| Diagnostic::error(msg, None))
         .collect();
 
-    ParseResult { contract, errors }
+    ParseResult { contract, errors, source_size_err: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +245,7 @@ enum Token {
 
     // Identifiers and literals
     Ident(String),
-    NumberLit(i128),
+    NumberLit(BigInt),
     HexStringLit(String),  // single-quoted strings
     StringLit(String),      // double-quoted strings
     Symbol(String),         // :name
@@ -657,9 +659,11 @@ fn tokenize(source: &str) -> Vec<Token> {
                     }
                 }
                 let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    i128::from_str_radix(&num_str[2..], 16).unwrap_or(0)
+                    <BigInt as Num>::from_str_radix(&num_str[2..], 16)
+                        .unwrap_or_else(|_| BigInt::from(0))
                 } else {
-                    num_str.parse::<i128>().unwrap_or(0)
+                    <BigInt as Num>::from_str_radix(&num_str, 10)
+                        .unwrap_or_else(|_| BigInt::from(0))
                 };
                 tokens.push(Token::NumberLit(val));
                 continue;
@@ -1127,7 +1131,7 @@ impl<'a> RbParser<'a> {
             let element = self.parse_type();
             self.expect(&Token::Comma);
             let length = match self.advance() {
-                Token::NumberLit(n) => n as usize,
+                Token::NumberLit(n) => n.to_usize().unwrap_or(0),
                 _ => {
                     self.errors
                         .push("FixedArray requires numeric length".to_string());
@@ -2098,7 +2102,7 @@ impl<'a> RbParser<'a> {
             Token::NumberLit(v) => Expression::BigIntLiteral { value: v },
             Token::TrueLit => Expression::BoolLiteral { value: true },
             Token::FalseLit => Expression::BoolLiteral { value: false },
-            Token::NilLit => Expression::BigIntLiteral { value: 0 },
+            Token::NilLit => Expression::BigIntLiteral { value: BigInt::from(0) },
             Token::HexStringLit(v) => Expression::ByteStringLiteral { value: v },
             Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
             Token::Ivar(name) => {
@@ -2143,7 +2147,7 @@ impl<'a> RbParser<'a> {
             other => {
                 self.errors
                     .push(format!("Unexpected token in expression: {:?}", other));
-                Expression::BigIntLiteral { value: 0 }
+                Expression::BigIntLiteral { value: BigInt::from(0) }
             }
         }
     }

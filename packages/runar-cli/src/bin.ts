@@ -37,6 +37,7 @@ program
   .option('--from-ir <path>', 'compile from an ANF IR JSON file (skips parse/validate/typecheck/anf-lower)')
   .option('--hex', 'print only the script hex to stdout (no artifact JSON)')
   .option('--parse-only', 'stop after parse + validate; print "parser ok" on success (requires source input)')
+  .option('--emit-source-map <path>', 'after a successful compile, write artifact.sourceMap JSON to <path>')
   .action(compileCommand);
 
 program

@@ -71,9 +71,9 @@ cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest  # Ru
 cd compilers/zig && zig build test              # Run Zig compiler tests
 cd compilers/ruby && rake test                  # Run Ruby compiler tests
 cd packages/runar-zig && zig build test         # Run Zig SDK + package tests
-cd compilers/java && gradle test                # Run Java compiler tests (no wrapper committed; gradle 8.5+ required)
-cd packages/runar-java && gradle test           # Run Java SDK + package tests
-cd examples/java && gradle test                 # Run Java contract tests (business logic + Rúnar compile check)
+cd compilers/java && ./gradlew test             # Run Java compiler tests (wrapper pinned at Gradle 8.5; first run downloads it)
+cd packages/runar-java && ./gradlew test        # Run Java SDK + package tests
+cd examples/java && ./gradlew test              # Run Java contract tests (business logic + Rúnar compile check)
 ```
 
 ## Compiler Pipeline

@@ -23,6 +23,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
+
 use super::ast::*;
 use super::side_effect_summary::{
     compute_side_effect_summary, ContinuationShape, SideEffectSummary,
@@ -49,6 +52,7 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
         contract_name: contract.name.clone(),
         properties,
         methods,
+        parent_class: contract.parent_class.clone(),
     }
 }
 
@@ -82,13 +86,27 @@ fn lower_properties(contract: &ContractNode) -> Vec<ANFProperty> {
 /// Convert an i128 to a serde_json::Value. Values within i64 range use
 /// Number; larger values fall back to a JSON number via string parsing so
 /// precision is preserved in the IR.
-fn i128_to_json(v: i128) -> serde_json::Value {
-    if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
-        serde_json::Value::Number(serde_json::Number::from(v as i64))
+
+/// Serialise a `num_bigint::BigInt` to a `serde_json::Value` for IR-JSON.
+///
+/// Values within `i64` range serialise as JSON numbers. Larger values
+/// serialise as a JS-style decimal `BigInt` literal — the decimal digits
+/// followed by a literal `n` suffix, quoted as a JSON string. The `n`
+/// suffix is the cross-tier discriminator that distinguishes a decimal
+/// `BigInt` from a hex-encoded `ByteString` literal (both are JSON
+/// strings made of ASCII digits in the all-decimal case, e.g. `"3030"`
+/// is both a valid decimal and a valid hex bytestring).
+///
+/// Mirrors:
+///   - Go: `compilers/go/frontend/anf_lower.go::makeLoadConstInt`
+///   - Python: `compilers/python/runar_compiler/frontend/anf_lower.py::_make_load_const_int`
+///   - TS: `conformance/runner/runner.ts` BigInt canonicalisation
+fn bigint_to_json(v: &num_bigint::BigInt) -> serde_json::Value {
+    use num_traits::ToPrimitive;
+    if let Some(i) = v.to_i64() {
+        serde_json::Value::Number(serde_json::Number::from(i))
     } else {
-        // serde_json can parse arbitrarily large integer strings into Number
-        let s = v.to_string();
-        serde_json::from_str(&s).unwrap_or_else(|_| serde_json::Value::Number(serde_json::Number::from(0)))
+        serde_json::Value::String(format!("{}n", v))
     }
 }
 
@@ -112,7 +130,7 @@ fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
 
 fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
     match expr {
-        Expression::BigIntLiteral { value } => Some(i128_to_json(*value)),
+        Expression::BigIntLiteral { value } => Some(bigint_to_json(value)),
         Expression::BoolLiteral { value } => Some(serde_json::Value::Bool(*value)),
         Expression::ByteStringLiteral { value } => {
             Some(serde_json::Value::String(value.clone()))
@@ -122,7 +140,7 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
             operand,
         } => {
             if let Expression::BigIntLiteral { value } = operand.as_ref() {
-                Some(i128_to_json(-*value))
+                Some(bigint_to_json(&(-value)))
             } else {
                 None
             }
@@ -194,6 +212,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             });
             method_ctx.emit(ANFValue::Assert {
                 value: check_result,
+                is_auto_injected_state_check: false,
             });
 
             // Deserialize mutable state from the preimage's scriptCode.
@@ -288,7 +307,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                         right: output_hash_ref,
                         result_type: Some("bytes".to_string()),
                     });
-                    method_ctx.emit(ANFValue::Assert { value: eq_ref });
+                    method_ctx.emit(ANFValue::Assert { value: eq_ref, is_auto_injected_state_check: true });
                 } else {
                     // Single-output continuation: build raw state output bytes,
                     // then splice in any declared data outputs, then concat
@@ -332,7 +351,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                         right: output_hash_ref,
                         result_type: Some("bytes".to_string()),
                     });
-                    method_ctx.emit(ANFValue::Assert { value: eq_ref });
+                    method_ctx.emit(ANFValue::Assert { value: eq_ref, is_auto_injected_state_check: true });
                 }
             }
 
@@ -1027,7 +1046,7 @@ fn extract_loop_count(init: &Statement, condition: &Expression) -> usize {
 
 fn extract_bigint_value(expr: &Expression) -> Option<i128> {
     match expr {
-        Expression::BigIntLiteral { value } => Some(*value),
+        Expression::BigIntLiteral { value } => value.to_i128(),
         Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
             extract_bigint_value(operand).map(|v| -v)
         }
@@ -1046,7 +1065,7 @@ fn extract_bigint_value(expr: &Expression) -> Option<i128> {
 fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
     match expr {
         Expression::BigIntLiteral { value } => ctx.emit(ANFValue::LoadConst {
-            value: i128_to_json(*value),
+            value: bigint_to_json(value),
         }),
 
         Expression::BoolLiteral { value } => ctx.emit(ANFValue::LoadConst {
@@ -1282,12 +1301,12 @@ fn lower_call_expr(
         if name == "assert" {
             if !args.is_empty() {
                 let value_ref = lower_expr_to_ref(&args[0], ctx);
-                return ctx.emit(ANFValue::Assert { value: value_ref });
+                return ctx.emit(ANFValue::Assert { value: value_ref, is_auto_injected_state_check: false });
             }
             let false_ref = ctx.emit(ANFValue::LoadConst {
                 value: serde_json::Value::Bool(false),
             });
-            return ctx.emit(ANFValue::Assert { value: false_ref });
+            return ctx.emit(ANFValue::Assert { value: false_ref, is_auto_injected_state_check: false });
         }
     }
 
@@ -1325,7 +1344,14 @@ fn lower_call_expr(
                 });
             }
             let idx = match &args[0] {
-                Expression::BigIntLiteral { value } => *value,
+                Expression::BigIntLiteral { value } => match value.to_i128() {
+                    Some(v) => v,
+                    None => {
+                        return ctx.emit(ANFValue::LoadConst {
+                            value: serde_json::Value::String(String::new()),
+                        });
+                    }
+                },
                 _ => {
                     return ctx.emit(ANFValue::LoadConst {
                         value: serde_json::Value::String(String::new()),
@@ -1347,7 +1373,14 @@ fn lower_call_expr(
             // literal prefixLen is baked into the emitted Stack-IR.
             let bytes_to_hash_ref = if args.len() == 3 {
                 let prefix_len = match &args[2] {
-                    Expression::BigIntLiteral { value } => *value,
+                    Expression::BigIntLiteral { value } => match value.to_i128() {
+                        Some(v) => v,
+                        None => {
+                            return ctx.emit(ANFValue::LoadConst {
+                                value: serde_json::Value::String(String::new()),
+                            });
+                        }
+                    },
                     _ => {
                         return ctx.emit(ANFValue::LoadConst {
                             value: serde_json::Value::String(String::new()),
@@ -1380,7 +1413,7 @@ fn lower_call_expr(
                 right: expected_hash_ref,
                 result_type: Some("bytes".to_string()),
             });
-            ctx.emit(ANFValue::Assert { value: eq_ref });
+            ctx.emit(ANFValue::Assert { value: eq_ref, is_auto_injected_state_check: false });
             return witness_ref;
         }
     }
@@ -1405,7 +1438,14 @@ fn lower_call_expr(
                 });
             }
             let idx = match &args[0] {
-                Expression::BigIntLiteral { value } => *value,
+                Expression::BigIntLiteral { value } => match value.to_i128() {
+                    Some(v) => v,
+                    None => {
+                        return ctx.emit(ANFValue::LoadConst {
+                            value: serde_json::Value::String(String::new()),
+                        });
+                    }
+                },
                 _ => {
                     return ctx.emit(ANFValue::LoadConst {
                         value: serde_json::Value::String(String::new()),
@@ -1449,7 +1489,7 @@ fn lower_call_expr(
                     right: expected_out_hash_ref,
                     result_type: Some("bytes".to_string()),
                 });
-                ctx.emit(ANFValue::Assert { value: hash_eq_ref });
+                ctx.emit(ANFValue::Assert { value: hash_eq_ref, is_auto_injected_state_check: false });
             }
 
             // Lower the user-supplied args (pubkeyHash, amount).
@@ -1506,7 +1546,7 @@ fn lower_call_expr(
                 right: expected_output_ref,
                 result_type: Some("bytes".to_string()),
             });
-            return ctx.emit(ANFValue::Assert { value: out_eq_ref });
+            return ctx.emit(ANFValue::Assert { value: out_eq_ref, is_auto_injected_state_check: false });
         }
     }
 
@@ -1678,10 +1718,10 @@ fn lower_call_expr(
                 bytes = value.clone();
             }
             if let Some(Expression::BigIntLiteral { value }) = args.get(1) {
-                in_arity = (*value).max(0) as usize;
+                in_arity = value.to_usize().unwrap_or(0);
             }
             if let Some(Expression::BigIntLiteral { value }) = args.get(2) {
-                out_arity = (*value).max(0) as usize;
+                out_arity = value.to_usize().unwrap_or(1);
             }
             return ctx.emit(ANFValue::RawScript {
                 bytes,
@@ -2142,7 +2182,7 @@ fn is_assert_false_else(bindings: &[ANFBinding]) -> bool {
         return false;
     }
     let last = &bindings[bindings.len() - 1];
-    if let ANFValue::Assert { value: assert_ref } = &last.value {
+    if let ANFValue::Assert { value: assert_ref, .. } = &last.value {
         // Find the binding that assert_ref references
         for b in bindings {
             if b.name == *assert_ref {
@@ -2257,7 +2297,7 @@ fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue
             method: method.clone(),
             args: args.iter().map(|a| r(a)).collect(),
         },
-        ANFValue::Assert { value: v } => ANFValue::Assert { value: r(v) },
+        ANFValue::Assert { value: v, is_auto_injected_state_check } => ANFValue::Assert { value: r(v), is_auto_injected_state_check: *is_auto_injected_state_check },
         ANFValue::UpdateProp { name, value: v } => ANFValue::UpdateProp {
             name: name.clone(),
             value: r(v),

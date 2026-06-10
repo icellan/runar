@@ -24,8 +24,12 @@ function countSlhdsaOps(paramKey: string): number {
 
 describe('SLH-DSA codegen — op-count goldens (T-006)', () => {
   const goldens: Array<[paramKey: string, expected: number]> = [
-    ['SHA2_128f', 85761],
-    ['SHA2_192s', 41899],
+    // +5 ops vs pre-BUG-011 baseline: the new OP_SIZE / push / OP_EQUALVERIFY
+    // length guard adds 3 ops, and the rearranged tracker ordering (sig brought
+    // to top first now) adds one swap on the new toTop("sig") and one swap on
+    // the following toTop("pubkey") that the old code emitted as a no-op.
+    ['SHA2_128f', 85766],
+    ['SHA2_192s', 41904],
   ];
 
   for (const [paramKey, expected] of goldens) {

@@ -20,7 +20,243 @@ cd "$(dirname "$0")/.."
 # |partial def) ` keys on declaration position; in practice the
 # false-positive rate is low because Lean docstrings indent.
 
-TARGET_AXIOMS=82        # Breakdown (2026-05-24, Tier 1 wave 66 —
+TARGET_AXIOMS=73        # Breakdown (2026-05-26, Tier 3 EC wave —
+                        # emitEcAdd codegen-to-spec axiom discharge, the LAST
+                        # in-scope EC straight-line op):
+                        # −1 in Crypto/Spec.lean §7 — `emitEcAdd_runOps_eq`
+                        #     RETIRED, moved to a THEOREM in Stack/AgreesEC.lean
+                        #     (Part 18 + Part 19). The codegen op-list is
+                        #     `expectedEcAdd = ecaDp2.ops ++ affineAddInc ++
+                        #     composeRxRyInc`. The discharge: (a) `emitEcAdd_ops`
+                        #     proves the op-list equals that determined concat;
+                        #     (b) the runtime threads the two `decomposePoint`
+                        #     bases (`ecaDp2_runOps`, the depth-1/depth-2 roll-
+                        #     prefixed decodes of pa/pb) → the 24-step affineAdd
+                        #     field chain (`affineAddInc_runOps`, via the depth-
+                        #     general `fieldBinop_runOps_simT` /
+                        #     `fieldSqr_runOps_simT` sims at each step's probed
+                        #     `da`/`db` + the proven `fieldInv_runOps_sim` at the
+                        #     `_s_den` modular-inverse step + the 4 cleanup roll-
+                        #     drops) → the `composePoint_runOps_sim` build-back,
+                        #     reduced to `Crypto.Secp256k1.ecAdd`'s non-degenerate
+                        #     branch via `aaRx_aaRy_eq_affineAdd`. Carries INPUT-
+                        #     side wf hyps the bare axiom lacked: both points
+                        #     64-byte + the four `decomposePoint` decode bridges,
+                        #     the two `composePoint` num2binEncode? + BE bridges at
+                        #     the result coords, the two non-sentinel guards, and
+                        #     the non-degenerate case split `fieldMod (pointX pa) ≠
+                        #     fieldMod (pointX pb)` (the `pxm ≠ qxm` branch; the
+                        #     `P = ±Q` / doubling case routes through
+                        #     `affineDouble`, a SEPARATE codegen path NOT exercised
+                        #     by `emitEcAdd`'s straight-line affine-add). Anti-
+                        #     vacuity: `smoke_emitEcAdd_wf_satisfiable` (the
+                        #     fieldInv-free hyps on two distinct on-curve points
+                        #     G / 2G) + `smoke_emitEcAdd_runOps_eq_applies` (the
+                        #     discharge specialised to symbolic inputs FIRES).
+                        #     `#print axioms emitEcAdd_runOps_eq` = propext /
+                        #     Classical.choice / Quot.sound + the 2 pre-existing
+                        #     crypto backends (authBackend / hashBackend) only — NO
+                        #     sorryAx, NO Lean.ofReduceBool, NO new axiom, NOT
+                        #     depending on the removed axiom. native_decide ONLY in
+                        #     the wf-satisfiable smoke (fieldInv-free hyps).
+                        #     STILL AXIOMATIZED: `emitEcMul`/`emitEcMulGen`
+                        #     (257-iter Jacobian double-and-add loop, out of scope
+                        #     for the EC straight-line ops). EC IN-SCOPE COMPLETE.
+                        # Net delta: −1, 74 → 73.
+                        #
+                        # Breakdown (2026-05-25, Tier 3 EC wave —
+                        # emitEcNegate codegen-to-spec axiom discharge):
+                        # −1 in Crypto/Spec.lean §7 — `emitEcNegate_runOps_eq`
+                        #     RETIRED, moved to a THEOREM in Stack/AgreesEC.lean
+                        #     (Part 14). Same `decomposePoint` base as
+                        #     `emitEcOnCurve`, then `composePoint` (the build-back).
+                        #     The codegen op-list is `t.ops.toList` after the 4-step
+                        #     `decomposePoint "_nx" "_ny"` → `pushFieldP "_fp"` →
+                        #     `fieldSub "_fp" "_ny" "_neg_y"` → `composePoint
+                        #     "_nx" "_neg_y" "_result"` Tracker chain. The discharge:
+                        #     (a) `emitEcNegate_ops` proves the op-list equals the
+                        #     determined concat `expectedDecomposePoint ++ [push
+                        #     fieldP] ++ fieldSubSwapInc ++ composeInc`, folding the
+                        #     codegen findDepths via the wave-77 bridge + the
+                        #     intermediate-nm chain (enT1..enT3_nm); (b) the runtime
+                        #     threads `decomposePoint_runOps_neg` →
+                        #     `fieldSub_runOps_sim` (the NEW field-sub composed sim,
+                        #     deliverable 1) → `composePoint_runOps_sim` (the NEW
+                        #     build-back transport, deliverable 2 — the
+                        #     `decomposePoint_runOps` peer, encoding both coords via
+                        #     the `coordEncode_transport` leaf + OP_CAT), reduced to
+                        #     `Crypto.Secp256k1.ecNegate` via the spec bridge
+                        #     `ecNegate_eq_makePoint` (`fieldSub p y ≡ fieldSub 0 y`
+                        #     under the canonical `fieldMod` that `intToBE32`
+                        #     applies). Carries the SAME `decomposePoint` decode
+                        #     bridges as `emitEcPointX/Y` (`64 ≤ pt.size` + hDecX /
+                        #     hDecY) PLUS the two `composePoint` num2binEncode? +
+                        #     size + BE-encode bridges (`emitEcMakePoint`-style) at
+                        #     the coordinates `pointX pt` / `fieldSub FIELD_P
+                        #     (pointY pt)`, witnessed by
+                        #     `smoke_emitEcNegate_wf_satisfiable`.
+                        #     `#print axioms emitEcNegate_runOps_eq` = propext /
+                        #     Classical.choice / Quot.sound + the 2 pre-existing
+                        #     crypto backends (authBackend / hashBackend) only — NO
+                        #     sorryAx, NO Lean.ofReduceBool, NO new axiom, NOT
+                        #     depending on the removed axiom. native_decide ONLY in
+                        #     the smokes. STILL AXIOMATIZED: `emitEcAdd_runOps_eq`
+                        #     (last in-scope EC op — needs the fieldInv runtime sim,
+                        #     ~8k-op modular inverse) + `emitEcMul`/`emitEcMulGen`
+                        #     (Jacobian double-and-add loop).
+                        # Net delta: −1, 75 → 74.
+                        #
+                        # Breakdown (2026-05-25, Tier 3 EC wave —
+                        # emitEcOnCurve codegen-to-spec axiom discharge):
+                        # −1 in Crypto/Spec.lean §7 — `emitEcOnCurve_runOps_eq`
+                        #     RETIRED, moved to a THEOREM in Stack/AgreesEC.lean
+                        #     (Part 12/13). The codegen op-list is `t.ops.toList`
+                        #     after the 10-step `decomposePoint` → `fieldSqr` /
+                        #     `fieldSqr` / `fieldMul` / `fieldAdd` → `OP_EQUAL`
+                        #     Tracker chain. The discharge: (a) `emitEcOnCurve_ops`
+                        #     proves the op-list equals a determined concatenation,
+                        #     folding the codegen `findDepth`s via the wave-77 bridge
+                        #     + the per-helper ops-append leaves; (b) the runtime
+                        #     threads through the NEW tail-general `TrackerSim`
+                        #     (`TrackerSimT`) per-field-helper composed sims
+                        #     (`fieldSqr_runOps_sim` / `fieldSqrX_runOps_sim` /
+                        #     `fieldMul_runOps_sim` / `fieldAdd_runOps_sim`) off the
+                        #     wave-80 `decomposePoint_runOps` base + the final
+                        #     `opEqual_int_transport`, reducing to
+                        #     `Crypto.Secp256k1.ecOnCurve`'s closed form. Carries the
+                        #     SAME INPUT-side wf hyps as `emitEcPointX/Y` (`64 ≤
+                        #     pt.size` + the two canonical-decode bridges hDecX/hDecY),
+                        #     witnessed by `smoke_emitEcOnCurve_wf_satisfiable`.
+                        #     `#print axioms emitEcOnCurve_runOps_eq` = propext /
+                        #     Classical.choice / Quot.sound + the 2 pre-existing crypto
+                        #     backends (authBackend / hashBackend) only — NO sorryAx,
+                        #     NO Lean.ofReduceBool, NO new axiom, NOT depending on the
+                        #     removed axiom. native_decide ONLY in the smokes.
+                        #     STILL AXIOMATIZED: `emitEcNegate_runOps_eq` — same
+                        #     decomposePoint base, then composePoint; reuses the
+                        #     Part-12 TrackerSim + a fieldSub sim + a composePoint
+                        #     transport (next wave).
+                        # Net delta: −1, 76 → 75.
+                        #
+                        # Breakdown (2026-05-25, Tier 3 EC wave —
+                        # THREE MORE EC codegen-to-spec axiom discharges):
+                        # −3 in Crypto/Spec.lean §7 — the three `reverse32`-routed
+                        #     "medium" coordinate ops RETIRED, moved to THEOREMS in
+                        #     Stack/AgreesEC.lean (Part 7):
+                        #   • `emitEcPointX_runOps_eq` — `[push 32, OP_SPLIT, drop]`
+                        #     + `emitReverse32Ops` + `[push 0x00, OP_CAT, OP_BIN2NUM]`.
+                        #     Discharged by an honest op-chain composing the wave-74
+                        #     `reverse32_ops_transport` on the 32-byte x-half, lifted
+                        #     to `Crypto.Secp256k1.ecPointX` under the split-range
+                        #     guard `32 ≤ p.size` + the canonical-decode bridge
+                        #     `hDec` (byte-reversed x-half decodes to `ecPointX p`).
+                        #   • `emitEcPointY_runOps_eq` — same shape with
+                        #     `[push 32, OP_SPLIT, swap, drop]` on the y-half;
+                        #     split-range guard `64 ≤ p.size` + bridge `hDec`.
+                        #   • `emitEcMakePoint_runOps_eq` — per-coordinate
+                        #     `[push 33, OP_NUM2BIN, push 32, OP_SPLIT, drop]` +
+                        #     `emitReverse32Ops` then `OP_CAT`. Discharged under two
+                        #     `num2binEncode? · 33 = some enc` hypotheses + size
+                        #     guards + the BE-encoding bridges `hBeX`/`hBeY` (each
+                        #     byte-reversed low-32 half = spec `intToBE32`).
+                        #   All wf hypotheses are INPUT-level (constrain `p` / the
+                        #   coordinates, never the output), witnessed concretely by
+                        #   `smoke_ecPointX/Y/MakePoint_wf_satisfiable`. `#print
+                        #   axioms` on all three: NO sorryAx, NO new axiom, NOT
+                        #   depending on the axioms they replace — only propext /
+                        #   Quot.sound + the pre-existing crypto backends.
+                        #   STILL AXIOMATIZED: `emitEcNegate_runOps_eq` and
+                        #   `emitEcOnCurve_runOps_eq` — their codegen runs the
+                        #   `Stack.Ec.Tracker` state machine (`.roll`/`.pickStruct`
+                        #   depths from `Tracker.findDepth` over the threaded name
+                        #   array), so an honest `runOps` transport needs a
+                        #   Tracker-to-runtime-stack simulation invariant absent from
+                        #   the wave-74 substrate (BLOCKED; see AgreesEC.lean Part 8).
+                        #   `ecAdd/ecMul/ecMulGen` remain M4-walled (Jacobian).
+                        # Net delta: −3, 79 → 76.
+                        #
+                        # Breakdown (2026-05-25, Tier 3 EC wave —
+                        # TWO EC codegen-to-spec axiom discharges):
+                        # −2 in Crypto/Spec.lean §7 — the two EASIEST of the ten
+                        #     `emitEc*_runOps_eq` codegen-to-spec links RETIRED,
+                        #     moved to THEOREMS in Stack/AgreesEC.lean:
+                        #   • `emitEcModReduce_runOps_eq` — the 8-op
+                        #     `OP_2DUP/OP_MOD/…` fragment. The bare axiom was
+                        #     FALSE at `m = 0` (Stack `OP_MOD` errors divByZero;
+                        #     spec returns 0). Restated WITH `m ≠ 0` (honest fix;
+                        #     the axiom had no proof-term consumers, only doc
+                        #     refs) and discharged off the wave-71
+                        #     `ecModReduce_step_transport`.
+                        #   • `emitEcEncodeCompressed_runOps_eq` — the
+                        #     `OP_SPLIT/OP_SIZE/OP_SUB/OP_BIN2NUM/OP_MOD/OP_CAT`
+                        #     + `.ifOp` fragment. Discharged by an honest 14-op
+                        #     step-chain (`ec_encode_op_transport`, incl. a
+                        #     `pop?`/`asBool?` branch split on the ifOp), lifted
+                        #     to the spec `Crypto.Secp256k1.ecEncodeCompressed`
+                        #     under input-level wf hypotheses: `32 ≤ p.size`,
+                        #     `1 ≤ (p.extract 32 p.size).size` (both OP_SPLIT
+                        #     indices in range — a 64-byte point satisfies both);
+                        #     `hX` (x-half round-trips: `p.extract 0 32 =
+                        #     intToBE32 (pointX p)`); `hPar` (last y-byte parity =
+                        #     `pointY p % 2`). All four are honest INPUT-level
+                        #     invariants of every canonically-encoded point
+                        #     (witnessed by `smoke_ecEncodeCompressed_wf_satisfiable`
+                        #     on `makePoint 5 6`), NOT assumptions about the output.
+                        #   `#print axioms` on both discharged theorems: NO
+                        #   sorryAx, NO new axiom, NOT depending on the axioms
+                        #   they replace — only propext / Quot.sound + the
+                        #   pre-existing crypto backends. Remaining EC axioms:
+                        #   the 5 medium ops (`ecNegate/ecOnCurve/ecMakePoint/
+                        #   ecPointX/ecPointY`) blocked on the OP_0→empty-bytes VM
+                        #   gap (reverse32 init), plus `ecAdd/ecMul/ecMulGen`
+                        #   (Jacobian group law, M4-walled) — separate waves.
+                        # Net delta: −2, 81 → 79.
+                        #
+                        # Breakdown (2026-05-24, Tier 1 wave 69 —
+                        # SIXTH TCB axiom retirement — D1 DISPATCH SELECTION):
+                        # −1 in Pipeline.lean — the Phase D multi-method
+                        #     Merkle-dispatch selection axiom
+                        #     `merkle_dispatch_selection_correct` RETIRED. It is
+                        #     now a THEOREM proved from the wave-69a substrate:
+                        #     `Parse.parseScript_emitDispatch_eq_dispatchReconL`
+                        #     (the production dispatch bytes parse back to the
+                        #     `dispatchReconL` op-list cascade) glued via the
+                        #     add-only cross-file bridge
+                        #     `dispatchReconL_eq_dispatchReconOps` to
+                        #     `AgreesD1.dispatchReconOps_select_branch` (witness
+                        #     `i` selects branch `i`, popping the dispatch index).
+                        #     The bytes identity rides the add-only helpers
+                        #     `emit_multi_eq_emitDispatch` +
+                        #     `emitFast_multi_eq_emitDispatch` (multi-public
+                        #     `emitFast` = `emitDispatch (publicMethodsOf …)` via
+                        #     the verified `Emit.emit_eq_emitFast`). The
+                        #     conversion strengthens the original axiom's `hOps`
+                        #     (selected-method emittability) to `hAllEmit` (all
+                        #     public methods) + the `≤ 17` dispatch-length bound
+                        #     `hLen17` — both consumed by the substrate parse
+                        #     lemma. The axiom had NO proof-term consumers (only
+                        #     doc references), so the stronger hypothesis set is
+                        #     harmless and removes it cleanly from the TCB.
+                        #     `#print axioms merkle_dispatch_selection_correct`
+                        #     confirms NO sorryAx, NO new axiom: only propext /
+                        #     Classical.choice / Quot.sound + the pre-existing
+                        #     crypto backends. The sub-omnibus
+                        #     `compileSafe_observational_correct_modulo_dispatch_codegen`
+                        #     remains an axiom (deliverable-2 BLOCKED): it is
+                        #     fully general (arbitrary method, arbitrary
+                        #     pre-dispatch stack, no structural preconditions,
+                        #     conclusion at `initialStack` via `evalBindingsP`),
+                        #     whereas the capstone
+                        #     `compileSafe_multi_public_observational_correct`
+                        #     proves a single dispatched-branch result at the
+                        #     POST-drop `dispatchedStack` via `evalBindings`
+                        #     under a heavy M2/M3/M4 precondition bundle + a
+                        #     dispatch witness — the sub-omnibus carries neither
+                        #     the witness nor the preconditions, so no
+                        #     axiom-free bridge exists.
+                        # Net delta: −1, 82 → 81.
+                        #
+                        # Breakdown (2026-05-24, Tier 1 wave 66 —
                         # FIFTH TCB axiom retirement):
                         # −1 in Pipeline.lean — the method_call sub-omnibus
                         #     `compileSafe_observational_correct_modulo_method_call_codegen`

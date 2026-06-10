@@ -16,6 +16,7 @@
 //!   [m0..m15, v0..v15]  (all LE 4-byte values)
 //!   v15 at TOS (depth 0), v0 at depth 15, m15 at depth 16, m0 at depth 31.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 use std::sync::OnceLock;
@@ -106,7 +107,7 @@ impl Emitter {
     }
 
     fn push_i(&mut self, v: i128) {
-        self.ops.push(StackOp::Push(PushValue::Int(v)));
+        self.ops.push(StackOp::Push(PushValue::Int(BigInt::from(v))));
         self.depth += 1;
     }
 

@@ -173,6 +173,14 @@ public final class Cli {
             return 70;
         }
 
+        // GAP-002: --emit-source-map writes {"mappings":[...]} to the path.
+        // Runs INDEPENDENTLY of --emit-ir / --hex so a single invocation
+        // can produce both artefacts (e.g. `--hex --emit-source-map=...`).
+        if (parsed.emitSourceMap != null) {
+            int rc = writeSourceMap(anf, parsed.emitSourceMap);
+            if (rc != 0) return rc;
+        }
+
         if (parsed.emitIr) {
             out.println(Jcs.stringify(anf));
             return 0;
@@ -186,6 +194,69 @@ public final class Cli {
         // the other compilers' behaviour when --emit-ir is implied.
         out.println(Jcs.stringify(anf));
         return 0;
+    }
+
+    /**
+     * GAP-002: lower ANF through stack + peephole + emit and write the
+     * source map JSON to {@code path}. The path's parent directory is
+     * created on demand. Returns 0 on success, non-zero on failure.
+     */
+    /**
+     * GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
+     * goldens stay stable across worktree paths and developer machines. Walks
+     * up from the source file looking for {@code pnpm-workspace.yaml} (the
+     * canonical repo root marker); falls back to the basename if no marker is
+     * found. Strings that aren't absolute paths are returned unchanged.
+     */
+    static String repoRelativeFileName(String srcPath) {
+        if (srcPath == null || srcPath.isEmpty()) return srcPath;
+        Path p = Path.of(srcPath);
+        if (!p.isAbsolute()) return srcPath;
+        Path dir = p.getParent();
+        while (dir != null) {
+            if (Files.exists(dir.resolve("pnpm-workspace.yaml"))) {
+                String rel = dir.relativize(p).toString();
+                return rel.replace(java.io.File.separatorChar, '/');
+            }
+            dir = dir.getParent();
+        }
+        return p.getFileName() == null ? srcPath : p.getFileName().toString();
+    }
+
+    private int writeSourceMap(AnfProgram anf, String path) {
+        try {
+            StackProgram stack = StackLower.run(anf);
+            StackProgram optimised = Peephole.run(stack);
+            Emit.EmitResultWithSourceMap result = Emit.runResultWithSourceMap(optimised);
+            StringBuilder b = new StringBuilder(64 + 80 * result.sourceMap().size());
+            b.append("{\n  \"mappings\": [");
+            for (int i = 0; i < result.sourceMap().size(); i++) {
+                Emit.SourceMapping m = result.sourceMap().get(i);
+                if (i > 0) b.append(',');
+                // GAP-011: normalize sourceFile to repo-relative POSIX so
+                // goldens stay stable across worktree paths.
+                b.append("\n    {\"opcodeIndex\": ").append(m.opcodeIndex())
+                    .append(", \"sourceFile\": ").append(jsonString(repoRelativeFileName(m.sourceFile())))
+                    .append(", \"line\": ").append(m.line())
+                    .append(", \"column\": ").append(m.column())
+                    .append('}');
+            }
+            if (!result.sourceMap().isEmpty()) b.append("\n  ");
+            b.append("]\n}\n");
+            Path target = Path.of(path);
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.writeString(target, b.toString());
+            err.println("runar-java: source map written to " + path);
+            return 0;
+        } catch (IOException e) {
+            err.println("runar-java: failed to write source map to " + path + ": " + e.getMessage());
+            return 74;
+        } catch (RuntimeException e) {
+            err.println("runar-java: source-map emit error: " + e.getMessage());
+            return 70;
+        }
     }
 
     private int compileIr(Args parsed) {
@@ -214,6 +285,12 @@ public final class Cli {
             return 70;
         }
 
+        // GAP-002: --emit-source-map also runs on the IR path.
+        if (parsed.emitSourceMap != null) {
+            int rc = writeSourceMap(anf, parsed.emitSourceMap);
+            if (rc != 0) return rc;
+        }
+
         if (parsed.emitIr) {
             out.println(Jcs.stringify(anf));
             return 0;
@@ -237,6 +314,10 @@ public final class Cli {
         if (!disableConstantFolding) {
             anf = ConstantFold.run(anf);
         }
+        // AnfOptimize delegates internally to {@link Dce#eliminateDead} for
+        // dead-binding cleanup after any EC rewrite. The standalone Dce class
+        // exists as the canonical, named DCE pass module mirroring Zig's
+        // compilers/zig/src/passes/dce.zig.
         anf = AnfOptimize.run(anf);
         return anf;
     }
@@ -263,6 +344,7 @@ public final class Cli {
         stream.println("  --emit-ir                    emit canonical ANF JSON on stdout");
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
         stream.println("  --disable-constant-folding   disable the constant-folding optimizer (required for conformance)");
+        stream.println("  --emit-source-map <path>     write the artifact's sourceMap JSON to <path>");
         stream.println("  --daemon                     run in daemon mode (line-delimited JSON RPC on stdin/stdout)");
         stream.println("  --version                    print version and exit");
         stream.println("  -h, --help                   print this help and exit");
@@ -513,12 +595,19 @@ public final class Cli {
         boolean version;
         boolean help;
         boolean daemon;
+        // GAP-002: when non-null, after compile finishes write the
+        // sourceMap object ({"mappings":[...]}) to this path.
+        String emitSourceMap;
 
         static Args parse(String[] argv) {
             Args out = new Args();
             List<String> list = new ArrayList<>(List.of(argv));
             while (!list.isEmpty()) {
                 String arg = list.remove(0);
+                if (arg.startsWith("--emit-source-map=")) {
+                    out.emitSourceMap = arg.substring("--emit-source-map=".length());
+                    continue;
+                }
                 switch (arg) {
                     case "--source" -> out.source = requireValue(list, "--source");
                     case "--ir" -> out.ir = requireValue(list, "--ir");
@@ -526,6 +615,7 @@ public final class Cli {
                     case "--hex" -> out.hex = true;
                     case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
+                    case "--emit-source-map" -> out.emitSourceMap = requireValue(list, "--emit-source-map");
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
                     case "-h", "--help" -> out.help = true;

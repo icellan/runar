@@ -16,7 +16,7 @@ import type {
   Call,
   LoadConst,
 } from '../ir/index.js';
-import { eliminateDeadBindings } from './constant-fold.js';
+import { eliminateDeadBindings } from './dce.js';
 
 // ---------------------------------------------------------------------------
 // EC constants

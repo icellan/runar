@@ -170,4 +170,86 @@ describe('SchnorrZKP contract', () => {
     const result = c.call('verify', { rPoint: rHex, s });
     expect(result.success).toBe(true);
   });
+
+  // ---------------------------------------------------------------------------
+  // BUG-001 adversarial tests: s-bound malleability gate
+  // ---------------------------------------------------------------------------
+
+  it('rejects_s_at_n: s = secp256k1 group order is rejected (upper bound exclusive)', () => {
+    // `within(s, 1, n)` is half-open [1, n); s = n must fail. This is the
+    // canonical malleability witness — without the s-bound assert, any
+    // valid s could be replaced with s + n and the script would still
+    // verify (because k*G == (k + n)*G).
+    const privKey = 42n;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex });
+    const result = c.call('verify', {
+      rPoint: makePointHex(GX, GY),
+      s: EC_N,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects_s_zero: s = 0 is rejected (lower bound inclusive but 0 < 1)', () => {
+    // `within(s, 1, n)` requires s >= 1. s = 0 must fail. (Real signatures
+    // never produce s = 0 because that would require r = -e*k mod n which
+    // leaks the secret key, but the gate enforces it explicitly.)
+    const privKey = 42n;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex });
+    const result = c.call('verify', {
+      rPoint: makePointHex(GX, GY),
+      s: 0n,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('nonce_reuse_recovers_key: reusing r across two proofs leaks the private key off-chain', () => {
+    // Schnorr is fragile against nonce reuse — when two proofs (e1, s1) and
+    // (e2, s2) reuse the same r:
+    //   s1 = r + e1*k       s2 = r + e2*k
+    //   s1 - s2 = (e1 - e2)*k     →     k = (e1 - e2)^{-1} * (s1 - s2)
+    // Both proofs verify on-chain (they're individually valid). The bug is
+    // an off-chain prover-side responsibility: this test demonstrates that
+    // a key-recovery attack is feasible against any prover that reuses r.
+    const privKey = 0xC0FFEEn;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+
+    // Same nonce r for both proofs. Different messages → different
+    // challenges. We need two distinct (R, P) → e pairs that share r;
+    // since Fiat-Shamir derives e from (R, P), we vary P by re-running
+    // the prover for two completely independent pubkeys... or, more
+    // cleanly, we vary R itself but keep the inner scalar r constant.
+    // The latter is what the prover would actually do if it
+    // accidentally re-sampled r from a broken RNG. To keep the demo
+    // self-contained we manufacture two distinct challenges off-chain
+    // and check the algebra.
+    const r = 12345n;
+    const [rX, rY] = scalarMul(GX, GY, r);
+    const rHex = makePointHex(rX, rY);
+    const e1 = deriveChallenge(rHex, pubKeyHex);
+    const s1 = mod(r + e1 * privKey, EC_N);
+    // Fabricate a second challenge by perturbing the hash input (in
+    // practice the prover would sign a second proof for a different P,
+    // but for the algebraic demonstration any distinct e2 works).
+    const e2 = mod(e1 + 1n, EC_N);
+    const s2 = mod(r + e2 * privKey, EC_N);
+
+    // Both proofs verify when run independently (this is the gotcha —
+    // the on-chain verifier cannot detect r reuse). The key leak is
+    // entirely off-chain:
+    const recovered = mod((s1 - s2) * modInv(e1 - e2, EC_N), EC_N);
+    expect(recovered).toBe(privKey);
+
+    // Both proofs would individually pass the contract — we only verify
+    // the first one (full e2-based proof requires the matching `rPoint`
+    // and pubKey, which we don't materialise here; the algebraic recovery
+    // above is the canonical demonstration).
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex });
+    const v1 = c.call('verify', { rPoint: rHex, s: s1 });
+    expect(v1.success).toBe(true);
+  });
 });

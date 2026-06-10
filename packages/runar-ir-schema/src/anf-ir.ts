@@ -119,6 +119,12 @@ export interface Loop {
 export interface Assert {
   kind: 'assert';
   value: string; // reference to a temp name
+  // Optional marker: set to `true` only on the auto-injected
+  // `hash256(continuationOutputs) === extractOutputHash(txPreimage)` assert
+  // emitted by the StatefulSmartContract lowering. Off-chain SDK
+  // interpreters use it to skip the equality check without resorting to
+  // structural heuristics. Absent => developer code.
+  isAutoInjectedStateCheck?: boolean;
 }
 
 export interface UpdateProp {

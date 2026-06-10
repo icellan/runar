@@ -17,6 +17,7 @@ import static runar.lang.Builtins.ecOnCurve;
 import static runar.lang.Builtins.ecPointX;
 import static runar.lang.Builtins.ecPointY;
 import static runar.lang.Builtins.hash256;
+import static runar.lang.Builtins.within;
 
 /**
  * Schnorr Zero-Knowledge Proof verifier (non-interactive, Fiat-Shamir).
@@ -54,6 +55,23 @@ class SchnorrZKP extends SmartContract {
      */
     @Public
     void verify(Point rPoint, BigInteger s) {
+        // Bound s to the canonical range [1, n) where n is the secp256k1
+        // group order (malleability gate). EC scalars are intentionally not
+        // reduced mod n inside the primitives (k*G == (k + n)*G), so without
+        // this bound `s` and `s + n` would both verify, opening a
+        // malleability surface where any forwarded valid proof can be
+        // silently rewritten. The group order is too large to express as a
+        // Java long literal (the secp256k1 order is 256 bits, javac caps
+        // integer literals at Long.MAX_VALUE), so we materialise it via
+        // `new BigInteger("decimal")` — the Rúnar Java parser folds this
+        // shape into a bigint literal at parse time so the ANF matches the
+        // canonical TS source.
+        assertThat(within(
+            s,
+            BigInteger.ONE,
+            new BigInteger("115792089237316195423570985008687907852837564279074904382605163141518161494337")
+        ));
+
         // Verify R is on the curve.
         assertThat(ecOnCurve(rPoint));
 

@@ -27,6 +27,11 @@
       "type": "string",
       "minLength": 1
     },
+    "parentClass": {
+      "type": "string",
+      "enum": ["SmartContract", "StatefulSmartContract", "UnsafeSmartContract"],
+      "description": "Base class the contract extends; authoritative stateful signal for the terminal sighash subscript trim (a StatefulSmartContract with zero mutable fields still needs the trim)."
+    },
     "abi": { "$ref": "#/$defs/ABI" },
     "script": {
       "type": "string",

@@ -16,17 +16,82 @@ const ParseError = error{
     InvalidConstValue,
     UnexpectedValueType,
     MaxRecursionDepthExceeded,
+    // BUG-008 follow-up: typed DoS-bound rejection of oversized IR JSON.
+    IRSizeExceeded,
 };
 
 const max_parse_depth: u32 = 256;
+
+/// Mirrors InputLimits.MAX_IR_BYTES (16 MiB) from the TS schema package.
+/// Any ANF IR JSON larger than this is rejected at parseANFProgram BEFORE
+/// std.json.parseFromSlice runs so a malicious caller cannot exhaust
+/// memory / CPU with a giant payload. BUG-008 follow-up.
+pub const MAX_IR_BYTES: usize = 16 * 1024 * 1024;
+
+/// Mirrors InputLimits.MAX_NESTING (512) from the TS schema package
+/// for the structural-depth pre-walk. Note that the existing
+/// per-binding parser also enforces max_parse_depth = 256 as a defense
+/// in depth; whichever fires first wins. BUG-008 follow-up.
+pub const MAX_IR_NESTING: usize = 512;
+
+/// Walks the raw JSON bytes and returns ParseError.MaxRecursionDepthExceeded
+/// the first time the structural nesting (objects + arrays) exceeds
+/// MAX_IR_NESTING. Runs BEFORE std.json.parseFromSlice so a deeply-nested
+/// payload cannot exhaust the thread stack inside the deserializer.
+///
+/// Skips strings (respecting backslash-escapes).
+fn assertIRNestingUnderLimit(data: []const u8) ParseError!void {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (data) |b| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (b == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (b == '"') in_string = false;
+            continue;
+        }
+        switch (b) {
+            '"' => in_string = true,
+            '{', '[' => {
+                depth += 1;
+                if (depth > MAX_IR_NESTING) {
+                    return ParseError.MaxRecursionDepthExceeded;
+                }
+            },
+            '}', ']' => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
+        }
+    }
+}
 
 // ============================================================================
 // Public API
 // ============================================================================
 
 /// Parse a JSON string into an ANFProgram.
+///
+/// Rejects oversized (>MAX_IR_BYTES) payloads with the typed
+/// ParseError.IRSizeExceeded BEFORE std.json.parseFromSlice runs.
+/// Depth is bounded by std.json's parseFromSlice with max_value_len /
+/// max_parse_depth; the structural-nesting cap is enforced indirectly
+/// by max_parse_depth = 256 inside this module. BUG-008 follow-up.
 pub fn parseANFProgram(allocator: std.mem.Allocator, json_source: []const u8) !types.ANFProgram {
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_source, .{});
+    if (json_source.len > MAX_IR_BYTES) {
+        return ParseError.IRSizeExceeded;
+    }
+    try assertIRNestingUnderLimit(json_source);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_source, .{
+        .max_value_len = MAX_IR_BYTES,
+    });
     defer parsed.deinit();
 
     const root = parsed.value;
@@ -102,7 +167,16 @@ fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]typ
                 break :blk @as(?types.ConstValue, .{ .integer = int_val });
             },
             .bool => |b| @as(?types.ConstValue, .{ .boolean = b }),
-            .string => |s| @as(?types.ConstValue, .{ .string = try allocator.dupe(u8, s) }),
+            .string => |s| blk: {
+                // Same `n`-suffix discriminator used by parseLoadConst —
+                // oversize bigint initializers (e.g. property defaults) round
+                // through the same encoding as inline literals.
+                if (isDecimalBigIntLiteral(s)) {
+                    const decimal = try allocator.dupe(u8, s[0 .. s.len - 1]);
+                    break :blk @as(?types.ConstValue, .{ .big_integer = decimal });
+                }
+                break :blk @as(?types.ConstValue, .{ .string = try allocator.dupe(u8, s) });
+            },
             else => return ParseError.InvalidConstValue,
         } else null;
         result[i] = .{
@@ -300,9 +374,38 @@ fn parseLoadConst(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
             return .{ .load_const = .{ .value = .{ .integer = int_val } } };
         },
         .bool => |b| return .{ .load_const = .{ .value = .{ .boolean = b } } },
-        .string => |s| return .{ .load_const = .{ .value = .{ .string = try allocator.dupe(u8, s) } } },
+        .string => |s| {
+            // Cross-tier IR producers (TS / Go / Python) emit oversize bigints
+            // as a quoted decimal string with the canonical JS BigInt `n`
+            // suffix so the value survives JSON precision loss. Distinguish
+            // this shape from hex-encoded ByteString literals (which never
+            // carry the suffix) before falling back to `string`.
+            if (isDecimalBigIntLiteral(s)) {
+                const decimal = try allocator.dupe(u8, s[0 .. s.len - 1]);
+                return .{ .load_const = .{ .value = .{ .big_integer = decimal } } };
+            }
+            return .{ .load_const = .{ .value = .{ .string = try allocator.dupe(u8, s) } } };
+        },
         else => return ParseError.InvalidConstValue,
     }
+}
+
+/// True if `s` matches the canonical JS BigInt decimal-literal encoding used
+/// by the TS / Go / Python IR emitters for oversize values: optional leading
+/// `-`, one or more ASCII digits, and a REQUIRED trailing `n` marker. The
+/// trailing `n` is the discriminator that separates a decimal-encoded BigInt
+/// from a hex-encoded ByteString literal (which never carries the suffix),
+/// so a hex string like "3030" is not mis-decoded as the integer 3030.
+fn isDecimalBigIntLiteral(s: []const u8) bool {
+    if (s.len < 2 or s[s.len - 1] != 'n') return false;
+    var start: usize = 0;
+    if (s[0] == '-') start = 1;
+    const body = s[start .. s.len - 1];
+    if (body.len == 0) return false;
+    for (body) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
 }
 
 fn parseBinOp(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
@@ -402,9 +505,14 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
 
 fn parseAssert(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
     const val_ref = try getString(obj, "value");
+    const marker = if (obj.get("isAutoInjectedStateCheck")) |v|
+        v == .bool and v.bool
+    else
+        false;
 
     return .{ .assert = .{
         .value = try allocator.dupe(u8, val_ref),
+        .is_auto_injected_state_check = marker,
     } };
 }
 
@@ -909,7 +1017,15 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
         },
         .assert => |a| {
             try writer.writeAll("{\n");
-            // Sorted keys: kind, value
+            // Sorted keys: isAutoInjectedStateCheck (when true), kind, value
+            // The marker is omitted entirely when false to keep the
+            // checked-in fold-OFF goldens stable for developer asserts.
+            if (a.is_auto_injected_state_check) {
+                try writeIndent(writer, depth + 1);
+                try writeJsonString(writer, "isAutoInjectedStateCheck");
+                try writer.writeAll(": true,\n");
+            }
+
             try writeIndent(writer, depth + 1);
             try writeJsonString(writer, "kind");
             try writer.writeAll(": ");
@@ -1122,6 +1238,16 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
 fn writeConstValue(writer: anytype, value: types.ConstValue) !void {
     switch (value) {
         .integer => |i| try writer.print("{d}", .{i}),
+        .big_integer => |s| {
+            // Canonical JS BigInt encoding: quoted decimal string with the
+            // trailing `n` discriminator. Matches the TS / Go / Python
+            // emitters so the IR JSON is byte-identical across tiers for
+            // oversize literals (e.g. the 256-bit secp256k1 group order in
+            // schnorr-zkp).
+            try writer.writeByte('"');
+            try writer.writeAll(s);
+            try writer.writeAll("n\"");
+        },
         .boolean => |b| {
             if (b) {
                 try writer.writeAll("true");

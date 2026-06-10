@@ -24,6 +24,9 @@ export const InputLimits = {
                                          // (p384-wallet hits ~1.87 MB; 2× headroom)
   MAX_NESTING: 512,                      // recursion depth for JSON / ANF traversal
   MAX_STRING_BYTES: 4 * 1024 * 1024,    // 4 MiB — single string field inside JSON
+  MAX_SOURCE_BYTES: 4 * 1024 * 1024,    // 4 MiB — single Rúnar source file
+                                         // (BUG-008 follow-up: source parser entry guard
+                                         //  across all 7 tiers)
 } as const;
 
 export type InputLimitsKey = keyof typeof InputLimits;
@@ -35,12 +38,12 @@ export type InputLimitsKey = keyof typeof InputLimits;
  * RangeError / SyntaxError.
  */
 export class CanonicalJsonError extends Error {
-  readonly code: 'depth' | 'bytes' | 'string-bytes' | 'circular' | 'invalid';
+  readonly code: 'depth' | 'bytes' | 'string-bytes' | 'circular' | 'invalid' | 'lone-surrogate';
   readonly limit?: number;
   readonly actual?: number;
 
   constructor(
-    code: 'depth' | 'bytes' | 'string-bytes' | 'circular' | 'invalid',
+    code: 'depth' | 'bytes' | 'string-bytes' | 'circular' | 'invalid' | 'lone-surrogate',
     message: string,
     info?: { limit?: number; actual?: number },
   ) {

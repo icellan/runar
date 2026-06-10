@@ -1158,11 +1158,12 @@ split the addDataOutput call into a separate method",
                 // bounds check below produces a clear "must be >= 0"
                 // rather than the misleading "must be an integer literal"
                 // message.
+                use num_traits::ToPrimitive;
                 let idx_lit: Option<i128> = match &args[0] {
-                    Expression::BigIntLiteral { value } => Some(*value),
+                    Expression::BigIntLiteral { value } => value.to_i128(),
                     Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
                         if let Expression::BigIntLiteral { value } = operand.as_ref() {
-                            Some(-*value)
+                            (-value).to_i128()
                         } else {
                             None
                         }
@@ -1231,7 +1232,8 @@ split the addDataOutput call into a separate method",
                     // hash-sized chunk). prefixLen > 4 MiB exceeds
                     // MAX_SCRIPT_BYTES — wouldn't fit in a legal Bitcoin
                     // Script anyway.
-                    let n = *value;
+                    use num_traits::ToPrimitive;
+                    let n: i128 = value.to_i128().unwrap_or(i128::MAX);
                     if n < 32 {
                         self.add_error(format!(
                             "extractPrevOutputScript() argument 3 (prefixLen) must be >= 32 (the hash assertion compares a 32-byte SHA-256); got {}",

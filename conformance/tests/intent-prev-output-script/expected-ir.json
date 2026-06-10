@@ -329,6 +329,7 @@
         {
           "name": "t30",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t29"
           }

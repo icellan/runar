@@ -1121,6 +1121,21 @@ function emitVerifySLHDSA(
 
   const t = new SLHTracker(['msg', 'sig', 'pubkey'], emit);
 
+  // ---- 0. BUG-011: enforce exact signature length on-chain ----
+  // Each parameter set has a canonical sig length: n + k*(1+a)*n + d*(len+hp)*n.
+  // Without this, the d xmss-layer split loop silently drops trailing bytes
+  // past layer d-1 (the htSigRest leftover is dropped during cleanup), so an
+  // oversize signature would still verify. Bring sig to top, OP_SIZE pushes its
+  // byte length without consuming, then OP_EQUALVERIFY against the parameter
+  // set's canonical length.
+  const expectedSigLen = n + forsSigLen + d * xmssSigLen;
+  t.toTop('sig');
+  t.rawBlock(['sig'], 'sig', (e) => {
+    e({ op: 'opcode', code: 'OP_SIZE' });
+    e({ op: 'push', value: BigInt(expectedSigLen) });
+    e({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+  });
+
   // ---- 1. Parse pubkey -> pkSeed, pkRoot ----
   t.toTop('pubkey');
   t.pushInt(null, BigInt(n));

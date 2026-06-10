@@ -1,0 +1,88 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 41,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 41,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 41,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 42,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 42,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 10,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 42,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 42,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 42,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 48,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 48,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 15,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 48,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 49,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 49,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 18,
+      "sourceFile": "examples/rust/escrow/Escrow.runar.rs",
+      "line": 49,
+      "column": 9
+    }
+  ]
+}

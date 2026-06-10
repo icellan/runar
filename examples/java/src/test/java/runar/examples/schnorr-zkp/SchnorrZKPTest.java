@@ -72,4 +72,57 @@ class SchnorrZKPTest {
             () -> sim.call("verify", rPoint, s.add(BigInteger.ONE))
         );
     }
+
+    // BUG-001 adversarial tests — see examples/ts/schnorr-zkp/SchnorrZKP.test.ts
+    // for the canonical commentary; this is the .runar.java mirror.
+
+    @Test
+    void rejectsSAtN() {
+        // s = secp256k1 group order is rejected (within(s, 1, n) half-open).
+        BigInteger k = BigInteger.valueOf(12345);
+        Point pubKey = MockCrypto.ecMulGen(k);
+        Point rPoint = MockCrypto.ecMulGen(BigInteger.valueOf(67890));
+        SchnorrZKP c = new SchnorrZKP(pubKey);
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        assertThrows(
+            Throwable.class,
+            () -> sim.call("verify", rPoint, MockCrypto.EC_N)
+        );
+    }
+
+    @Test
+    void rejectsSZero() {
+        // s = 0 is rejected (within(s, 1, n) requires s >= 1).
+        BigInteger k = BigInteger.valueOf(12345);
+        Point pubKey = MockCrypto.ecMulGen(k);
+        Point rPoint = MockCrypto.ecMulGen(BigInteger.valueOf(67890));
+        SchnorrZKP c = new SchnorrZKP(pubKey);
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        assertThrows(
+            Throwable.class,
+            () -> sim.call("verify", rPoint, BigInteger.ZERO)
+        );
+    }
+
+    @Test
+    void nonceReuseRecoversKey() {
+        // Reusing r across two proofs leaks k = (e1-e2)^{-1} * (s1-s2).
+        BigInteger k = BigInteger.valueOf(0xC0FFEEL);
+        Point pubKey = MockCrypto.ecMulGen(k);
+        BigInteger r = BigInteger.valueOf(12345);
+        Point rPoint = MockCrypto.ecMulGen(r);
+        BigInteger e1 = deriveChallenge(rPoint, pubKey);
+        BigInteger s1 = r.add(e1.multiply(k)).mod(MockCrypto.EC_N);
+        BigInteger e2 = e1.add(BigInteger.ONE).mod(MockCrypto.EC_N);
+        BigInteger s2 = r.add(e2.multiply(k)).mod(MockCrypto.EC_N);
+        BigInteger eDiff = e1.subtract(e2).mod(MockCrypto.EC_N);
+        BigInteger recovered = s1.subtract(s2)
+            .multiply(eDiff.modInverse(MockCrypto.EC_N))
+            .mod(MockCrypto.EC_N);
+        org.junit.jupiter.api.Assertions.assertEquals(k, recovered);
+        // Each proof verifies individually — on-chain gate cannot detect r reuse.
+        SchnorrZKP c = new SchnorrZKP(pubKey);
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        sim.call("verify", rPoint, s1);
+    }
 }

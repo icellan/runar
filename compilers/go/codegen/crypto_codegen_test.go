@@ -58,8 +58,11 @@ func TestSlhdsaEmitOpCountGoldens(t *testing.T) {
 		param string
 		want  int
 	}{
-		{"SHA2_128f", 85761},
-		{"SHA2_192s", 41899},
+		// BUG-011: each verifySLHDSA_* prologue now emits an OP_SIZE exact-length
+		// guard (5 additional ops per parameter set) before the existing FORS /
+		// Merkle path expansion.
+		{"SHA2_128f", 85766},
+		{"SHA2_192s", 41904},
 	}
 	for _, tc := range cases {
 		t.Run(tc.param, func(t *testing.T) {

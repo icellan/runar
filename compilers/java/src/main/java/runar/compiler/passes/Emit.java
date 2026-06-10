@@ -55,6 +55,27 @@ public final class Emit {
      */
     public record EmitResult(String scriptHex, List<RawScriptSpan> rawScriptSpans) {}
 
+    /**
+     * GAP-002: single source-map entry. Records the opcode index (0-based,
+     * sequential over the emitted op stream — NOT the byte offset) and the
+     * tier-local source location for that op. Mirrors the cross-tier
+     * {@code SourceMapping} record declared in
+     * {@code packages/runar-ir-schema/src/artifact.ts}.
+     */
+    public record SourceMapping(int opcodeIndex, String sourceFile, int line, int column) {}
+
+    /**
+     * GAP-002: extended emit result that also carries the source-map table
+     * walked from the {@code sourceLoc} field on each emitted {@link StackOp}.
+     * Use this variant when the caller needs to write the artifact's
+     * {@code sourceMap} field (e.g. the {@code --emit-source-map} CLI flag).
+     */
+    public record EmitResultWithSourceMap(
+        String scriptHex,
+        List<RawScriptSpan> rawScriptSpans,
+        List<SourceMapping> sourceMap
+    ) {}
+
     // ------------------------------------------------------------------
     // Opcode table
     // ------------------------------------------------------------------
@@ -179,6 +200,17 @@ public final class Emit {
      * empty for programs that contain no {@code raw_script} ANF nodes.
      */
     public static EmitResult runResult(StackProgram program) {
+        EmitResultWithSourceMap full = runResultWithSourceMap(program);
+        return new EmitResult(full.scriptHex(), full.rawScriptSpans());
+    }
+
+    /**
+     * GAP-002: extended emit entry point that also walks the per-op
+     * {@code sourceLoc} field on every {@link StackOp} to build a parallel
+     * {@code SourceMapping} table. Ops with no {@code sourceLoc} are
+     * skipped — the resulting table is sparse over the opcode index space.
+     */
+    public static EmitResultWithSourceMap runResultWithSourceMap(StackProgram program) {
         Ctx ctx = new Ctx();
 
         List<StackMethod> publicMethods = new java.util.ArrayList<>();
@@ -187,7 +219,7 @@ public final class Emit {
         }
 
         if (publicMethods.isEmpty()) {
-            return new EmitResult("", List.copyOf(ctx.rawScriptSpans));
+            return new EmitResultWithSourceMap("", List.copyOf(ctx.rawScriptSpans), List.copyOf(ctx.sourceMap));
         }
 
         if (publicMethods.size() == 1) {
@@ -196,7 +228,7 @@ public final class Emit {
             emitMethodDispatch(publicMethods, ctx);
         }
 
-        return new EmitResult(ctx.hex.toString(), List.copyOf(ctx.rawScriptSpans));
+        return new EmitResultWithSourceMap(ctx.hex.toString(), List.copyOf(ctx.rawScriptSpans), List.copyOf(ctx.sourceMap));
     }
 
     private static void emitMethodDispatch(List<StackMethod> methods, Ctx ctx) {
@@ -222,6 +254,10 @@ public final class Emit {
     }
 
     private static void emitStackOp(StackOp op, Ctx ctx) {
+        // GAP-002: read the StackSourceLoc the StackLower pass stamped onto
+        // this op (when any) so Ctx#recordSourceMapping can attach it to
+        // the next opcode index.
+        ctx.setPendingSourceLoc(extractSourceLoc(op));
         if (op instanceof PushOp p) {
             ctx.emitPush(p.value());
         } else if (op instanceof DupOp) {
@@ -259,6 +295,30 @@ public final class Emit {
         }
     }
 
+    /**
+     * GAP-002: pull the {@link runar.compiler.ir.stack.StackSourceLoc}
+     * out of any concrete {@link StackOp} variant that carries one.
+     * Returns {@code null} when the op has no source location.
+     */
+    private static runar.compiler.ir.stack.StackSourceLoc extractSourceLoc(StackOp op) {
+        if (op instanceof OpcodeOp o) return o.sourceLoc();
+        if (op instanceof DupOp o) return o.sourceLoc();
+        if (op instanceof SwapOp o) return o.sourceLoc();
+        if (op instanceof RollOp o) return o.sourceLoc();
+        if (op instanceof PickOp o) return o.sourceLoc();
+        if (op instanceof DropOp o) return o.sourceLoc();
+        if (op instanceof NipOp o) return o.sourceLoc();
+        if (op instanceof OverOp o) return o.sourceLoc();
+        if (op instanceof RotOp o) return o.sourceLoc();
+        if (op instanceof TuckOp o) return o.sourceLoc();
+        if (op instanceof PushOp o) return o.sourceLoc();
+        if (op instanceof IfOp o) return o.sourceLoc();
+        if (op instanceof PlaceholderOp o) return o.sourceLoc();
+        if (op instanceof PushCodeSepIndexOp o) return o.sourceLoc();
+        // RawBytesOp / others have no sourceLoc.
+        return null;
+    }
+
     private static void emitIf(List<StackOp> thenOps, List<StackOp> elseOps, Ctx ctx) {
         ctx.emitOpcode("OP_IF");
         for (StackOp op : thenOps) emitStackOp(op, ctx);
@@ -276,21 +336,50 @@ public final class Emit {
     private static final class Ctx {
         final StringBuilder hex = new StringBuilder();
         final java.util.List<RawScriptSpan> rawScriptSpans = new java.util.ArrayList<>();
+        // GAP-002: sourceMap accumulator + opcode index + pending loc.
+        // Mirrors the EmitContext pattern from the TS / Go / Rust / Python
+        // / Zig / Ruby tiers.
+        final java.util.List<SourceMapping> sourceMap = new java.util.ArrayList<>();
         int byteLength = 0;
+        int opcodeIndex = 0;
+        runar.compiler.ir.stack.StackSourceLoc pendingSourceLoc;
 
         void appendHex(String s) {
             hex.append(s);
             byteLength += s.length() / 2;
         }
 
+        void setPendingSourceLoc(runar.compiler.ir.stack.StackSourceLoc loc) {
+            this.pendingSourceLoc = loc;
+        }
+
+        private void recordSourceMapping() {
+            if (pendingSourceLoc == null) return;
+            sourceMap.add(new SourceMapping(
+                opcodeIndex,
+                pendingSourceLoc.file(),
+                pendingSourceLoc.line().intValueExact(),
+                pendingSourceLoc.column().intValueExact()
+            ));
+            // Consume after recording so each StackOp produces at most one
+            // mapping. Dispatch-table opcodes (OP_DUP/OP_NUMEQUAL/...) and
+            // emitIf opcodes (OP_IF/OP_ELSE/OP_ENDIF) emitted between user
+            // ops therefore don't pick up the prior op's loc by accident.
+            pendingSourceLoc = null;
+        }
+
         void emitOpcode(String name) {
             Integer b = OPCODES.get(name);
             if (b == null) throw new RuntimeException("Unknown opcode: " + name);
+            recordSourceMapping();
             appendHex(byteToHex(b));
+            opcodeIndex++;
         }
 
         void emitPush(PushValue value) {
+            recordSourceMapping();
             appendHex(encodePushValue(value));
+            opcodeIndex++;
         }
 
         /**
@@ -303,8 +392,10 @@ public final class Emit {
         void emitRawBytes(byte[] bytes, int inArity, int outArity) {
             if (bytes == null || bytes.length == 0) return;
             int offset = byteLength;
+            recordSourceMapping();
             appendHex(bytesToHex(bytes));
             rawScriptSpans.add(new RawScriptSpan(offset, bytes.length, inArity, outArity));
+            opcodeIndex++;
         }
     }
 

@@ -6,6 +6,7 @@
 //! Point representation: 64 bytes (x[32] || y[32], big-endian unsigned).
 //! Internal arithmetic uses Jacobian coordinates for scalar multiplication.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 // ===========================================================================
@@ -81,7 +82,7 @@ impl<'a> ECTracker<'a> {
     }
 
     fn push_int(&mut self, n: &str, v: i128) {
-        (self.e)(StackOp::Push(PushValue::Int(v)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v))));
         self.nm.push(n.to_string());
     }
 
@@ -143,7 +144,7 @@ impl<'a> ECTracker<'a> {
             self.rot();
             return;
         }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Opcode("OP_ROLL".into()));
         self.nm.pop(); // pop the push
@@ -161,7 +162,7 @@ impl<'a> ECTracker<'a> {
             self.over(n);
             return;
         }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Opcode("OP_PICK".into()));
         self.nm.pop(); // pop the push
@@ -316,7 +317,7 @@ fn field_mul_const(t: &mut ECTracker, a_name: &str, c: i128, result_name: &str) 
             // Use OP_2MUL (single opcode, no push needed)
             e(StackOp::Opcode("OP_2MUL".into()));
         } else {
-            e(StackOp::Push(PushValue::Int(c)));
+            e(StackOp::Push(PushValue::Int(BigInt::from(c))));
             e(StackOp::Opcode("OP_MUL".into()));
         }
     });
@@ -377,7 +378,7 @@ fn decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &s
     t.to_top(point_name);
     // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
     t.raw_block(&[point_name], None, |e| {
-        e(StackOp::Push(PushValue::Int(32)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
     // Manually track the two new items
@@ -413,10 +414,10 @@ fn compose_point(t: &mut ECTracker, x_name: &str, y_name: &str, result_name: &st
     // Use NUM2BIN(33) to accommodate the sign byte, then drop the last byte
     t.to_top(x_name);
     t.raw_block(&[x_name], Some("_cp_xb"), |e| {
-        e(StackOp::Push(PushValue::Int(33)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(33))));
         e(StackOp::Opcode("OP_NUM2BIN".into()));
         // Drop the sign byte (last byte) — split at 32, keep left
-        e(StackOp::Push(PushValue::Int(32)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
         emit_reverse_32(e);
@@ -425,9 +426,9 @@ fn compose_point(t: &mut ECTracker, x_name: &str, y_name: &str, result_name: &st
     // Convert y to 32-byte big-endian
     t.to_top(y_name);
     t.raw_block(&[y_name], Some("_cp_yb"), |e| {
-        e(StackOp::Push(PushValue::Int(33)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(33))));
         e(StackOp::Opcode("OP_NUM2BIN".into()));
-        e(StackOp::Push(PushValue::Int(32)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
         emit_reverse_32(e);
@@ -450,7 +451,7 @@ pub fn emit_reverse_32(e: &mut dyn FnMut(StackOp)) {
     // 32 iterations: peel first byte, prepend to accumulator
     for _i in 0..32 {
         // Stack: [accum, remaining]
-        e(StackOp::Push(PushValue::Int(1)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(1))));
         e(StackOp::Opcode("OP_SPLIT".into()));
         // Stack: [accum, byte0, rest]
         e(StackOp::Rot);
@@ -826,16 +827,16 @@ pub fn emit_ec_mod_reduce(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [compressed (33 bytes)]
 pub fn emit_ec_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
     // Split at 32: [x_bytes, y_bytes]
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     // Get last byte of y for parity
     emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(1)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
     emit(StackOp::Opcode("OP_SUB".into()));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     // Stack: [x_bytes, y_prefix, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
-    emit(StackOp::Push(PushValue::Int(2)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
     // Stack: [x_bytes, y_prefix, parity]
     emit(StackOp::Swap);
@@ -855,18 +856,18 @@ pub fn emit_ec_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [point_bytes (64 bytes)]
 pub fn emit_ec_make_point(emit: &mut dyn FnMut(StackOp)) {
     // Convert y to 32 bytes big-endian (NUM2BIN(33) to handle sign byte, then take first 32)
-    emit(StackOp::Push(PushValue::Int(33)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(33))));
     emit(StackOp::Opcode("OP_NUM2BIN".into()));
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Drop);
     emit_reverse_32(emit);
     // Stack: [x_num, y_be]
     emit(StackOp::Swap);
     // Stack: [y_be, x_num]
-    emit(StackOp::Push(PushValue::Int(33)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(33))));
     emit(StackOp::Opcode("OP_NUM2BIN".into()));
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Drop);
     emit_reverse_32(emit);
@@ -880,7 +881,7 @@ pub fn emit_ec_make_point(emit: &mut dyn FnMut(StackOp)) {
 /// Stack in: [point (64 bytes)]
 /// Stack out: [x as bigint]
 pub fn emit_ec_point_x(emit: &mut dyn FnMut(StackOp)) {
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Drop);
     emit_reverse_32(emit);
@@ -894,7 +895,7 @@ pub fn emit_ec_point_x(emit: &mut dyn FnMut(StackOp)) {
 /// Stack in: [point (64 bytes)]
 /// Stack out: [y as bigint]
 pub fn emit_ec_point_y(emit: &mut dyn FnMut(StackOp)) {
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Swap);
     emit(StackOp::Drop);

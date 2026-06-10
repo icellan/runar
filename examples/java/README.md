@@ -14,8 +14,8 @@ example set (30+ contracts) lands in milestone 12.
 
 ```bash
 cd examples/java
-gradle build     # compiles against packages/runar-java
-gradle test      # runs JUnit 5
+./gradlew build     # compiles against packages/runar-java
+./gradlew test      # runs JUnit 5
 ```
 
 The `.runar.java` files compile with `javac` directly — Rúnar treats

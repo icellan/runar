@@ -10,6 +10,7 @@
 //! All values fit in a single BSV script number (31-bit prime).
 //! No multi-limb arithmetic needed.
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 // ===========================================================================
@@ -55,7 +56,7 @@ impl<'a> BBTracker<'a> {
     }
 
     fn push_int(&mut self, n: &str, v: i64) {
-        (self.e)(StackOp::Push(PushValue::Int(v as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v as i128))));
         self.nm.push(n.to_string());
     }
 
@@ -104,7 +105,7 @@ impl<'a> BBTracker<'a> {
     fn pick(&mut self, depth: usize, n: &str) {
         if depth == 0 { self.dup(n); return; }
         if depth == 1 { self.over(n); return; }
-        (self.e)(StackOp::Push(PushValue::Int(depth as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(depth as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Pick { depth });
         self.nm.pop();
@@ -115,7 +116,7 @@ impl<'a> BBTracker<'a> {
         if d == 0 { return; }
         if d == 1 { self.swap(); return; }
         if d == 2 { self.rot(); return; }
-        (self.e)(StackOp::Push(PushValue::Int(d as i128)));
+        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
         self.nm.push(String::new());
         (self.e)(StackOp::Roll { depth: d });
         self.nm.pop();
@@ -175,11 +176,11 @@ fn field_mod(t: &mut BBTracker, a_name: &str, result_name: &str) {
     t.to_top(a_name);
     t.raw_block(&[a_name], Some(result_name), |e| {
         // (a % p + p) % p -- handles negative values from sub
-        e(StackOp::Push(PushValue::Int(BB_P as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(BB_P as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
-        e(StackOp::Push(PushValue::Int(BB_P as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(BB_P as i128))));
         e(StackOp::Opcode("OP_ADD".into()));
-        e(StackOp::Push(PushValue::Int(BB_P as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(BB_P as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 }
@@ -194,7 +195,7 @@ fn field_add(t: &mut BBTracker, a_name: &str, b_name: &str, result_name: &str) {
     // Sum of two values in [0, p-1] is always non-negative, so simple OP_MOD suffices
     t.to_top("_bb_add");
     t.raw_block(&["_bb_add"], Some(result_name), |e| {
-        e(StackOp::Push(PushValue::Int(BB_P as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(BB_P as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 }
@@ -220,7 +221,7 @@ fn field_mul(t: &mut BBTracker, a_name: &str, b_name: &str, result_name: &str) {
     // Product of two non-negative values is non-negative, simple OP_MOD
     t.to_top("_bb_prod");
     t.raw_block(&["_bb_prod"], Some(result_name), |e| {
-        e(StackOp::Push(PushValue::Int(BB_P as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(BB_P as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 }
@@ -271,12 +272,12 @@ fn field_inv(t: &mut BBTracker, a_name: &str, result_name: &str) {
 fn field_mul_const(t: &mut BBTracker, a_name: &str, c: i64, result_name: &str) {
     t.to_top(a_name);
     t.raw_block(&[a_name], Some("_bb_mc"), |e| {
-        e(StackOp::Push(PushValue::Int(c as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(c as i128))));
         e(StackOp::Opcode("OP_MUL".into()));
     });
     t.to_top("_bb_mc");
     t.raw_block(&["_bb_mc"], Some(result_name), |e| {
-        e(StackOp::Push(PushValue::Int(BB_P as i128)));
+        e(StackOp::Push(PushValue::Int(BigInt::from(BB_P as i128))));
         e(StackOp::Opcode("OP_MOD".into()));
     });
 }

@@ -73,6 +73,22 @@ contract GameBoard is StatefulSmartContract {
 
 Properties with initializers are excluded from the auto-generated constructor. Only properties without defaults need to be passed as constructor arguments. Initializers must be literal values (`0`, `true`, `false`, hex byte strings).
 
+### Fixed-Size Arrays
+
+The Solidity-native `T[N]` suffix declares a fixed-size array. Suffixes nest left-to-right in outer-to-inner declaration order — `T[A][B]` reads as "outer `B` of inner `A` of `T`" and lowers to the Rúnar AST shape `FixedArray<FixedArray<T, A>, B>`:
+
+```solidity
+contract Grid2x2 is StatefulSmartContract {
+    bigint[2][2] grid = [[0, 0], [0, 0]];
+
+    function set00(bigint v) public {
+        this.grid[0][0] = v;
+    }
+}
+```
+
+Both property declarations and function parameters accept the `T[N]…[M]` suffix. Lengths must be non-negative integer literals.
+
 ### Methods
 
 ```solidity

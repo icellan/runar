@@ -426,6 +426,12 @@ pub fn bin2num(bytes: base.ByteString) SignedBigint {
     return signedBigintFromScriptNum(&script_num);
 }
 
+/// Bitcoin Script's OP_WITHIN semantics: `lo <= value < hi` (half-open).
+/// Used by the BUG-001 schnorr s-bound malleability gate.
+pub fn within(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) bool {
+    return value >= lo and value < hi;
+}
+
 pub fn clamp(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) base.Bigint {
     return @max(lo, @min(hi, value));
 }

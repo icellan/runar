@@ -17,6 +17,7 @@
 //!
 //! Where D = depth.
 
+use num_bigint::BigInt;
 use super::poseidon2_koalabear::emit_poseidon2_kb_compress;
 use super::stack::{PushValue, StackOp};
 
@@ -33,7 +34,7 @@ fn emit_roll(emit: &mut dyn FnMut(StackOp), d: usize) {
         emit(StackOp::Rot);
         return;
     }
-    emit(StackOp::Push(PushValue::Int(d as i128)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
     emit(StackOp::Roll { depth: d });
 }
 
@@ -76,11 +77,11 @@ pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
             if i == 1 {
                 emit(StackOp::Opcode("OP_2DIV".into()));
             } else {
-                emit(StackOp::Push(PushValue::Int(i as i128)));
+                emit(StackOp::Push(PushValue::Int(BigInt::from(i as i128))));
                 emit(StackOp::Opcode("OP_RSHIFTNUM".into()));
             }
         }
-        emit(StackOp::Push(PushValue::Int(2)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
         emit(StackOp::Opcode("OP_MOD".into()));
         // Stack: [..., current(8), sib_i(8), future_sibs, index, bit]
 
@@ -116,21 +117,21 @@ pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
                 // bit==1: swap the two groups of 8 elements.
                 // 8x roll(15) moves each element of the bottom group (current)
                 // above the top group (sibling), producing [sibling(8), current(8)].
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
-                StackOp::Push(PushValue::Int(15)),
+                StackOp::Push(PushValue::Int(BigInt::from(15))),
                 StackOp::Roll { depth: 15 },
             ],
             // bit==0: already in correct order [current(8), sibling(8)]

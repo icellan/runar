@@ -6,6 +6,7 @@
 //! These are integration-level tests that call the public `optimize_stack_ops`
 //! function via the crate's public API.
 
+use num_bigint::BigInt;
 use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
 use runar_compiler_rust::codegen::stack::{PushValue, StackOp};
 
@@ -14,7 +15,13 @@ use runar_compiler_rust::codegen::stack::{PushValue, StackOp};
 // ---------------------------------------------------------------------------
 
 fn push_int(n: i128) -> StackOp {
-    StackOp::Push(PushValue::Int(n))
+    StackOp::Push(PushValue::Int(BigInt::from(n)))
+}
+
+/// Test matcher: true if `op` is `PushValue::Int(n)` holding the given i128.
+fn is_push_int_eq(op: &StackOp, n: i128) -> bool {
+    use num_traits::ToPrimitive;
+    matches!(op, StackOp::Push(PushValue::Int(v)) if v.to_i128() == Some(n))
 }
 
 fn opcode(code: &str) -> StackOp {
@@ -510,7 +517,7 @@ fn test_const_fold_add() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1, "PUSH(3) PUSH(7) ADD should fold to 1 op, got {:?}", result);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(10))),
+        is_push_int_eq(&result[0], 10),
         "expected PUSH(10), got {:?}",
         result[0]
     );
@@ -522,7 +529,7 @@ fn test_const_fold_add_large_values() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(1999))),
+        is_push_int_eq(&result[0], 1999),
         "expected PUSH(1999), got {:?}",
         result[0]
     );
@@ -538,7 +545,7 @@ fn test_const_fold_sub() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1, "PUSH(10) PUSH(4) SUB should fold to 1 op, got {:?}", result);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(6))),
+        is_push_int_eq(&result[0], 6),
         "expected PUSH(6), got {:?}",
         result[0]
     );
@@ -550,7 +557,7 @@ fn test_const_fold_sub_produces_negative() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(-7))),
+        is_push_int_eq(&result[0], -7),
         "expected PUSH(-7), got {:?}",
         result[0]
     );
@@ -566,7 +573,7 @@ fn test_const_fold_mul() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1, "PUSH(5) PUSH(6) MUL should fold to 1 op, got {:?}", result);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(30))),
+        is_push_int_eq(&result[0], 30),
         "expected PUSH(30), got {:?}",
         result[0]
     );
@@ -598,7 +605,7 @@ fn test_chain_fold_add_add() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 2, "PUSH(3) ADD PUSH(5) ADD should chain-fold to 2 ops, got {:?}", result);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(8))),
+        is_push_int_eq(&result[0], 8),
         "expected PUSH(8), got {:?}",
         result[0]
     );
@@ -619,7 +626,7 @@ fn test_chain_fold_sub_sub() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 2, "PUSH(2) SUB PUSH(3) SUB should chain-fold to 2 ops, got {:?}", result);
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(5))),
+        is_push_int_eq(&result[0], 5),
         "expected PUSH(5), got {:?}",
         result[0]
     );
@@ -647,7 +654,7 @@ fn test_single_push_unchanged() {
     let ops = vec![push_int(42)];
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 1, "single push should pass through unchanged");
-    assert!(matches!(&result[0], StackOp::Push(PushValue::Int(42))));
+    assert!(is_push_int_eq(&result[0], 42));
 }
 
 #[test]
@@ -877,7 +884,7 @@ fn test_then_branch_with_constant_fold() {
     assert_eq!(result.len(), 1);
     if let StackOp::If { then_ops, else_ops } = &result[0] {
         assert_eq!(then_ops.len(), 1, "PUSH(3) PUSH(4) ADD should fold to PUSH(7), got {:?}", then_ops);
-        assert!(matches!(&then_ops[0], StackOp::Push(PushValue::Int(7))));
+        assert!(is_push_int_eq(&then_ops[0], 7));
         assert!(else_ops.is_empty());
     } else {
         panic!("expected If, got {:?}", result[0]);
@@ -980,7 +987,7 @@ fn test_chain_fold_add_with_context() {
     let result = optimize_stack_ops(&ops);
     assert_eq!(result.len(), 3, "DUP PUSH(3) ADD PUSH(7) ADD -> DUP PUSH(10) ADD, got {:?}", result);
     assert!(matches!(&result[0], StackOp::Dup));
-    assert!(matches!(&result[1], StackOp::Push(PushValue::Int(10))));
+    assert!(is_push_int_eq(&result[1], 10));
     assert!(matches!(&result[2], StackOp::Opcode(c) if c == "OP_ADD"));
 }
 
@@ -1000,12 +1007,12 @@ fn test_o32_division_not_constant_folded() {
         result
     );
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(6))),
+        is_push_int_eq(&result[0], 6),
         "first op should still be PUSH(6), got {:?}",
         result[0]
     );
     assert!(
-        matches!(&result[1], StackOp::Push(PushValue::Int(2))),
+        is_push_int_eq(&result[1], 2),
         "second op should still be PUSH(2), got {:?}",
         result[1]
     );
@@ -1036,7 +1043,7 @@ fn test_o33_negative_constant_fold_result() {
         result
     );
     assert!(
-        matches!(&result[0], StackOp::Push(PushValue::Int(-7))),
+        is_push_int_eq(&result[0], -7),
         "PUSH(3) PUSH(10) OP_SUB should fold to PUSH(-7) (3 - 10 = -7), got {:?}",
         result[0]
     );

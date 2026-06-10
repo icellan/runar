@@ -458,7 +458,12 @@ async function runTsCompiler(source: string, sourceFile: string): Promise<Compil
         if (asBigInt >= BigInt(Number.MIN_SAFE_INTEGER) && asBigInt <= BigInt(Number.MAX_SAFE_INTEGER)) {
           return Number(asBigInt);
         }
-        return asBigInt.toString();
+        // Oversize bigints — keep the canonical JS BigInt `n` suffix so
+        // downstream IR consumers can distinguish a decimal-encoded big
+        // integer from a hex-encoded ByteString literal (which never
+        // carries the suffix). Stripping the suffix would silently make
+        // the two indistinguishable; see BUG-001.
+        return asBigInt.toString() + 'n';
       }
       return v;
     }) as {

@@ -10,6 +10,12 @@ pub const SchnorrZKP = struct {
     }
 
     pub fn verify(self: *const SchnorrZKP, rPoint: runar.Point, s: runar.Bigint) void {
+        // Bound s to the canonical range [1, n) where n is the secp256k1
+        // group order (malleability gate). Inlined as a decimal literal so
+        // every frontend lowers it to the same bigint_literal ANF node.
+        // Value: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        runar.assert(runar.within(s, 1, 115792089237316195423570985008687907852837564279074904382605163141518161494337));
+
         // Verify R is on the curve.
         runar.assert(runar.ecOnCurve(rPoint));
 

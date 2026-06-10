@@ -771,14 +771,12 @@ def _eval_value(
         call_args = [env.get(a) for a in value.get('args', [])]
         # Strict mode: a `call(assert, x)` lowering path must enforce the
         # predicate the same way the dedicated `assert` ANF node does.
-        # Auto-injected continuation-hash asserts (predicate ref tainted by
-        # ``computeStateOutput`` / ``get_state_script``) are skipped because
-        # the off-chain interpreter has no script bytes to make the hash
-        # equality hold; that path is gated on-chain instead.
+        # The auto-injected continuation-hash assert is emitted via the
+        # dedicated ``kind == 'assert'`` ANF node (see
+        # ``compilers/python/runar_compiler/frontend/anf_lower.py``), so the
+        # ``call(assert, ...)`` path here is always developer code — no
+        # marker skip needed.
         if strict is not None and value.get('func') == 'assert':
-            pred_arg = value.get('args', [''])[0] if value.get('args') else ''
-            if pred_arg in continuation_taint:
-                return None
             pred = call_args[0] if call_args else None
             if not _is_truthy(pred):
                 raise AssertionFailureError(strict.method_name, binding_name)
@@ -831,14 +829,20 @@ def _eval_value(
         # Lenient mode: skip; the on-chain script enforces.
         # Strict mode: enforce — raise AssertionFailureError on first falsy
         # predicate, which propagates up out of any nested if/loop/private
-        # call to the original execute_strict caller. Auto-injected
-        # continuation-hash asserts (predicate ref tainted by
-        # ``computeStateOutput`` / ``get_state_script``) are skipped --
-        # the on-chain script is the authoritative source for that check.
+        # call to the original execute_strict caller.
+        #
+        # Marker-based skip: the auto-injected stateful-continuation
+        # ``assert(hash256(_) === extractOutputHash(_))`` carries
+        # ``isAutoInjectedStateCheck: true`` (set in
+        # ``compilers/python/runar_compiler/frontend/anf_lower.py``).
+        # Developer-written covenant asserts with the identical IR shape
+        # do NOT carry the marker and ARE enforced — the previous
+        # taint-propagation heuristic was structural and misfired on
+        # them. Skip only on the marker.
         if strict is not None:
-            pred_ref = value.get('value', '')
-            if pred_ref in continuation_taint:
+            if value.get('isAutoInjectedStateCheck') is True:
                 return None
+            pred_ref = value.get('value', '')
             pred = env.get(pred_ref)
             if not _is_truthy(pred):
                 raise AssertionFailureError(strict.method_name, binding_name)

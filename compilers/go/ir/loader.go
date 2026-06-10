@@ -9,31 +9,35 @@ import (
 
 // LoadIR reads an ANF IR JSON file from disk, deserialises it, validates it,
 // and decodes constant values into their typed Go representations.
+//
+// Rejects oversized (>MaxIRBytes) or deeply-nested (>MaxIRNesting) payloads
+// with typed IRSizeExceededError / IRNestingExceededError before json.Unmarshal
+// runs.
 func LoadIR(path string) (*ANFProgram, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading IR file: %w", err)
 	}
 
-	var program ANFProgram
-	if err := json.Unmarshal(data, &program); err != nil {
-		return nil, fmt.Errorf("invalid IR JSON: %w", err)
-	}
-
-	// Decode typed constant values from raw JSON
-	if err := DecodeConstants(&program); err != nil {
-		return nil, fmt.Errorf("decoding constants: %w", err)
-	}
-
-	if err := ValidateIR(&program); err != nil {
-		return nil, err
-	}
-
-	return &program, nil
+	return LoadIRFromBytes(data)
 }
 
 // LoadIRFromBytes is like LoadIR but accepts raw JSON bytes directly.
+//
+// Rejects oversized (>MaxIRBytes) or deeply-nested (>MaxIRNesting) payloads
+// with typed IRSizeExceededError / IRNestingExceededError before json.Unmarshal
+// runs.
 func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
+	// DoS-bound guards run before json.Unmarshal so a malicious payload
+	// cannot exhaust memory (size) or the goroutine stack (nesting)
+	// inside the stdlib decoder.
+	if err := assertIRBytesUnderLimit(data); err != nil {
+		return nil, err
+	}
+	if err := assertIRNestingUnderLimit(data); err != nil {
+		return nil, err
+	}
+
 	var program ANFProgram
 	if err := json.Unmarshal(data, &program); err != nil {
 		return nil, fmt.Errorf("invalid IR JSON: %w", err)

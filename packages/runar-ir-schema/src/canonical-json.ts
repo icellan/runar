@@ -124,16 +124,12 @@ function serialise(value: unknown, seen: Set<object>, depth: number): string {
   }
   seen.add(obj);
 
-  let result: string;
-  if (Array.isArray(obj)) {
-    result = serialiseArray(obj, seen, depth + 1);
-  } else if (isPlainObjectOrToJSON(obj)) {
-    result = serialiseObject(obj, seen, depth + 1);
-  } else {
-    // Typed arrays, Date, RegExp, etc. — use toJSON if available,
-    // otherwise fall back to plain-object serialisation.
-    result = serialiseObject(obj, seen, depth + 1);
-  }
+  // Arrays and objects (including typed arrays, Date, RegExp, etc.) both
+  // route through serialiseObject which honours `toJSON` and otherwise
+  // walks own enumerable keys.
+  const result: string = Array.isArray(obj)
+    ? serialiseArray(obj, seen, depth + 1)
+    : serialiseObject(obj, seen, depth + 1);
 
   seen.delete(obj);
   return result;
@@ -170,6 +166,30 @@ function serialiseString(s: string): string {
       `canonical JSON string field exceeds ${InputLimits.MAX_STRING_BYTES} bytes (actual ${byteLen})`,
       { limit: InputLimits.MAX_STRING_BYTES, actual: byteLen },
     );
+  }
+  // RFC 8785 §3.2.2.2 / audit D6: the input MUST be well-formed Unicode.
+  // JS strings are UTF-16 code-unit sequences and may legally contain
+  // unpaired surrogates; `JSON.stringify` happily emits them, producing
+  // bytes that the six other SDK tiers reject. Walk code units, reject any
+  // unpaired surrogate, and only then delegate to `JSON.stringify` for the
+  // actual escape table (which is correct on well-formed inputs).
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xD800 && c <= 0xDBFF) {
+      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : -1;
+      if (next < 0xDC00 || next > 0xDFFF) {
+        throw new CanonicalJsonError(
+          'lone-surrogate',
+          `canonical JSON: lone high surrogate U+${c.toString(16).toUpperCase().padStart(4, '0')} in string`,
+        );
+      }
+      i++; // skip the valid low surrogate
+    } else if (c >= 0xDC00 && c <= 0xDFFF) {
+      throw new CanonicalJsonError(
+        'lone-surrogate',
+        `canonical JSON: lone low surrogate U+${c.toString(16).toUpperCase().padStart(4, '0')} in string`,
+      );
+    }
   }
   // JSON.stringify already produces correct escaping for most cases.
   // RFC 8785 additionally requires that code-points U+0000–U+001F are
@@ -223,11 +243,3 @@ function serialiseObject(obj: object, seen: Set<object>, depth: number): string 
   return '{' + parts.join(',') + '}';
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function isPlainObjectOrToJSON(obj: object): boolean {
-  const proto = Object.getPrototypeOf(obj) as object | null;
-  return proto === null || proto === Object.prototype || typeof (obj as Record<string, unknown>)['toJSON'] === 'function';
-}

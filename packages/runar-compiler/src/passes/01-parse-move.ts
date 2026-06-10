@@ -348,11 +348,24 @@ class MoveParser {
     const name = this.expect('ident').value;
     const mapped = mapMoveType(name);
 
+    // FixedArray<T, N> — nestable: FixedArray<FixedArray<bigint, 2>, 2>.
+    // The `>>` lexer eagerly forms a shift token, so when we see `>>` while
+    // closing a FixedArray generic, we split it into two `>` by patching
+    // the token in place and falling through to the next `>` close.
+    if (name === 'FixedArray' && this.current().type === '<') {
+      this.advance();
+      const inner = this.parseMoveType();
+      this.expect(',');
+      const length = parseInt(this.expect('number').value, 10);
+      this.consumeGenericClose();
+      return { kind: 'fixed_array_type', element: inner, length };
+    }
+
     // vector<T> => FixedArray<T, N> (we treat it as ByteString for now)
     if (name === 'vector' && this.current().type === '<') {
       this.advance();
       const innerType = this.parseMoveType();
-      this.expect('>');
+      this.consumeGenericClose();
       return innerType; // Simplify: vector<u8> -> ByteString
     }
 
@@ -365,6 +378,27 @@ class MoveParser {
       return { kind: 'primitive_type', name: mapped as PrimitiveTypeName };
     }
     return { kind: 'custom_type', name: mapped };
+  }
+
+  /**
+   * Close a generic-argument list. Accepts either a plain `>` or splits a
+   * `>>` shift token into two `>` (consuming the first half here and
+   * leaving a `>` for an outer generic close).
+   */
+  private consumeGenericClose(): void {
+    const t = this.current();
+    if (t.type === '>') {
+      this.advance();
+      return;
+    }
+    if (t.type === '>>') {
+      // Split `>>` into two `>` tokens in-place: consume one half here,
+      // and mutate the remaining token to a single `>` so the outer
+      // close sees it.
+      this.tokens[this.pos] = { type: '>', value: '>', line: t.line, column: t.column + 1 };
+      return;
+    }
+    this.expect('>');
   }
 
   private parseFunction(): { method: MethodNode; hasMutReceiver: boolean } {

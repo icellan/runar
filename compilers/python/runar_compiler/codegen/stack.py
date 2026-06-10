@@ -263,10 +263,25 @@ class StackMap:
 
 def compute_last_uses(bindings: list[ANFBinding]) -> dict[str, int]:
     last_use: dict[str, int] = {}
+    # Pre-scan: map each array_literal binding to its element refs. Used to
+    # propagate last-use across the array indirection (the array binding is
+    # pure metadata in _lower_array_literal -- its elements must remain live
+    # until the array's consumer, not until the array_literal binding itself).
+    array_elems: dict[str, list[str]] = {}
+    for b in bindings:
+        if b.value.kind == "array_literal":
+            array_elems[b.name] = list(b.value.elements)
     for i, binding in enumerate(bindings):
+        # array_literal is metadata-only -- do NOT advance its elements'
+        # last-use to here; defer to the array's consumer.
+        if binding.value.kind == "array_literal":
+            continue
         refs = collect_refs(binding.value)
         for ref in refs:
             last_use[ref] = i
+            if ref in array_elems:
+                for e in array_elems[ref]:
+                    last_use[e] = i
     return last_use
 
 
@@ -366,6 +381,8 @@ class _LoweringContext:
         self.const_values: dict[str, int | str | bool] = {}
         # Element counts for array_literal bindings (used by checkMultiSig).
         self.array_lengths: dict[str, int] = {}
+        # Element refs for array_literal bindings (used by checkMultiSig).
+        self.array_elements: dict[str, list[str]] = {}
         self._track_depth()
 
     def _track_depth(self) -> None:
@@ -946,6 +963,14 @@ class _LoweringContext:
                 and len(value.const_string) > 5
                 and value.const_string[:5] == "@ref:"):
             ref_name = value.const_string[5:]
+            # Special case: aliasing an array_literal (metadata-only binding,
+            # not present in the stack-map). Copy the array metadata under
+            # the new binding name and emit no stack moves.
+            if ref_name in self.array_elements:
+                self.array_elements[binding_name] = list(self.array_elements[ref_name])
+                if ref_name in self.array_lengths:
+                    self.array_lengths[binding_name] = self.array_lengths[ref_name]
+                return
             if self.sm.has(ref_name):
                 # CRITICAL: Only consume (ROLL) if the ref target is a local binding
                 # in the current scope.  Outer-scope refs must be copied (PICK) so
@@ -2403,24 +2428,15 @@ class _LoweringContext:
 
     def _lower_array_literal(self, binding_name: str, elements: list[str],
                               binding_index: int, last_uses: dict[str, int]) -> None:
-        """Lower an array_literal by bringing each element to the top of the stack.
-
-        The elements are brought to the top in order; on the stack-map we
-        collapse the N entries into a single logical slot labelled with the
-        binding name. Consumers (e.g. checkMultiSig) treat the whole array
-        as one stack item and read the element count from ``array_lengths``.
+        """Metadata-only. Array literals in Rúnar today only feed into
+        checkMultiSig. Pre-laying the elements onto the runtime stack here
+        would desync the stack-map from the runtime stack (the map can only
+        model one slot per binding, but an array binding spans N runtime
+        slots). _lower_check_multi_sig pulls each element to TOS at the use site.
         """
-        for elem in elements:
-            is_last = self._is_last_use(elem, binding_index, last_uses)
-            self.bring_to_top(elem, is_last)
-        # Pop all elements from the stack map (consumed into the array)
-        for _ in elements:
-            self.sm.pop()
-        # Push a single entry representing the whole array
-        self.sm.push(binding_name)
-        # Record the array length so checkMultiSig can emit the correct counts
+        del binding_index, last_uses
         self.array_lengths[binding_name] = len(elements)
-        self._track_depth()
+        self.array_elements[binding_name] = list(elements)
 
     # -----------------------------------------------------------------
     # raw_script
@@ -2470,42 +2486,51 @@ class _LoweringContext:
 
     def _lower_check_multi_sig(self, binding_name: str, args: list[str],
                                 binding_index: int, last_uses: dict[str, int]) -> None:
-        """Emit OP_CHECKMULTISIG with the OP_0 dummy workaround.
+        """Lower checkMultiSig([sig1..sigN], [pk1..pkM]).
 
-        Bitcoin Script stack layout:
-          OP_0 <sig1> ... <sigN> <nSigs> <pk1> ... <pkM> <nPKs> OP_CHECKMULTISIG
+        OP_CHECKMULTISIG expects the stack (bottom -> top):
+          <dummy=OP_0> <sig1> ... <sigN> <N> <pk1> ... <pkM> <M>
 
-        The two args reference array_literal bindings whose individual elements
-        are already on the stack. Element counts are read from
-        ``array_lengths``, populated by ``_lower_array_literal``.
+        args[0] and args[1] are bindings produced by array_literal. Those
+        bindings are NOT physical stack slots -- their element refs live on
+        the stack-map as individual named bindings. We pull each element to
+        TOS via bring_to_top. compute_last_uses propagates each element's
+        last-use through the array indirection to THIS binding.
         """
         sigs_ref = args[0]
         pks_ref = args[1]
-        n_sigs = self.array_lengths.get(sigs_ref, 1)
-        n_pks = self.array_lengths.get(pks_ref, 1)
+        sig_elems = self.array_elements.get(sigs_ref)
+        pk_elems = self.array_elements.get(pks_ref)
+        if sig_elems is None or pk_elems is None:
+            raise RuntimeError(
+                f"checkMultiSig: array_literal metadata missing (sigs={sigs_ref!r}, pks={pks_ref!r})"
+            )
 
-        # Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
+        # Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         self.emit_op(StackOp(op="push", value=big_int_push(0)))
         self.sm.push("")
 
-        # Bring sigs array ref to top (the individual elements are treated as one item)
-        sigs_is_last = self._is_last_use(sigs_ref, binding_index, last_uses)
-        self.bring_to_top(sigs_ref, sigs_is_last)
+        # Bring each sig element to TOS in declaration order.
+        for sig in sig_elems:
+            is_last = self._is_last_use(sig, binding_index, last_uses)
+            self.bring_to_top(sig, is_last)
 
-        # Push nSigs count
-        self.emit_op(StackOp(op="push", value=big_int_push(n_sigs)))
+        # Push nSigs.
+        self.emit_op(StackOp(op="push", value=big_int_push(len(sig_elems))))
         self.sm.push("")
 
-        # Bring pubkeys array ref to top
-        pks_is_last = self._is_last_use(pks_ref, binding_index, last_uses)
-        self.bring_to_top(pks_ref, pks_is_last)
+        # Bring each pubkey element to TOS in declaration order.
+        for pk in pk_elems:
+            is_last = self._is_last_use(pk, binding_index, last_uses)
+            self.bring_to_top(pk, is_last)
 
-        # Push nPKs count
-        self.emit_op(StackOp(op="push", value=big_int_push(n_pks)))
+        # Push nPKs.
+        self.emit_op(StackOp(op="push", value=big_int_push(len(pk_elems))))
         self.sm.push("")
 
-        # Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
-        for _ in range(5):
+        # OP_CHECKMULTISIG consumes: dummy + N sigs + nSigs + M pks + nPKs.
+        consumed = 1 + len(sig_elems) + 1 + len(pk_elems) + 1
+        for _ in range(consumed):
             self.sm.pop()
 
         self.emit_op(StackOp(op="opcode", code="OP_CHECKMULTISIG"))
@@ -3987,9 +4012,12 @@ def _lower_method_with_private_methods(
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = any(b.value.kind == "deserialize_state" for b in method.body)
-    if method.is_public and has_deserialize_state and ctx.sm.depth() > 1:
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth>1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public and ctx.sm.depth() > 1:
         excess = ctx.sm.depth() - 1
         for _ in range(excess):
             ctx.emit_op(StackOp(op="nip"))
@@ -4017,9 +4045,12 @@ def _lower_method(
     ctx = _LoweringContext(param_names, properties)
     ctx.lower_bindings(method.body, method.is_public)
 
-    # Clean up excess stack items left by deserialize_state.
-    has_deserialize_state = any(b.value.kind == "deserialize_state" for b in method.body)
-    if method.is_public and has_deserialize_state and ctx.sm.depth() > 1:
+    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
+    # Excess items can come from deserialize_state (stateful methods reading
+    # mutable fields) or from readonly-field-binding patterns in all-readonly
+    # terminal methods. The depth>1 guard keeps this a no-op for already-clean
+    # methods.
+    if method.is_public and ctx.sm.depth() > 1:
         excess = ctx.sm.depth() - 1
         for _ in range(excess):
             ctx.emit_op(StackOp(op="nip"))

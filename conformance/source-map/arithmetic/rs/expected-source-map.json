@@ -1,0 +1,172 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 11,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 11,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 2,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 6,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 12,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 13,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 13,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 13,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 10,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 13,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 13,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 14,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 14,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 14,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 15,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 14,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 16,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 14,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 17,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 18,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 19,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 20,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 21,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 22,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 23,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 24,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 25,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 15,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 26,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 16,
+      "column": 9
+    },
+    {
+      "opcodeIndex": 27,
+      "sourceFile": "examples/rust/arithmetic/Arithmetic.runar.rs",
+      "line": 16,
+      "column": 9
+    }
+  ]
+}

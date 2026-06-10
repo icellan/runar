@@ -11,6 +11,17 @@ Rabin signature verification checks the modular identity
 `(sig² + padding) mod pubKey == SHA256(msg)` using a fixed 10-opcode
 script body.
 
+⚠️ BUG-010 follow-up (see `_review/BUG-010-rfc.md`). The user-facing
+compiler now emits an additional 5-opcode `OP_WITHIN` range check that
+enforces `0 ≤ padding < 65536` on-chain (closing a forgery exploit
+documented in `_review/BUG-004-finding.md`). The Lean spec below still
+models the original 10-opcode body. Re-modeling the 15-opcode body and
+re-deriving every dependent theorem is tracked as a Phase B10 follow-up
+in `RunarVerification/PATH2_PLAN.md`. The differential workflow exercises
+the *real* compiler hex through the Lean stack VM, so the on-chain
+behavior is still cross-validated — only the Lean spec lemmas are
+stale until the follow-up lands.
+
 Mirrors the TypeScript reference one-to-one. The dispatch arm in
 `Stack.Lower` (`lowerVerifyRabinSigOpsLive`) brings the four args to the
 top of the stack via `loadRefLive` — yielding the layout
@@ -296,6 +307,34 @@ private theorem runOpcode_EQUAL_def_local (s : StackState) :
                .ok (s'.push (.vBool eq))
            | _ => .error (.unsupported "OP_EQUAL popN bug")) := rfl
 
+/-- The OP_EQUAL coercion cascade, specialized to operand `a = .vBigint x`
+(the modular residue) and `b = .vBytes h` (the SHA-256 digest), still collapses
+to `decide (encodeMinimalLE x = h)` under the Bitcoin-faithful
+`asBytes? (vBigint 0) = some empty`.  For `x = 0` the leading bytes/bytes branch
+fires (`empty = h`) and `encodeMinimalLE 0 = empty` makes it agree; for `x ≠ 0`
+control falls through the (now-`none`) `asBytes? a` exactly as in B10-prep. -/
+private theorem equal_intBytes_cascade (x : Int) (h : ByteArray) :
+    (match asBytes? (.vBigint x), asBytes? (.vBytes h) with
+     | some ab, some bb => decide (ab.toList = bb.toList)
+     | _, _ =>
+         match asInt? (.vBigint x), asInt? (.vBytes h) with
+         | some ai, some bi => decide (ai = bi)
+         | _, _ =>
+             match asInt? (.vBigint x), asBytes? (.vBytes h) with
+             | some ai, some bb =>
+                 decide ((encodeMinimalLE ai).toList = bb.toList)
+             | _, _ =>
+                 match asBytes? (.vBigint x), asInt? (.vBytes h) with
+                 | some ab, some bi =>
+                     decide (ab.toList = (encodeMinimalLE bi).toList)
+                 | _, _ => false)
+    = decide ((encodeMinimalLE x).toList = h.toList) := by
+  by_cases hx : x = 0
+  · subst hx
+    simp only [asBytes?, encodeMinimalLE_zero, ByteArray.toList_empty]
+  · rw [asBytes?_vBigint_ne_zero hx]
+    simp only [asBytes?, asInt?]
+
 /-- The terminal `OP_EQUAL` step in the Rabin body: comparing
 `.vBytes h` (TOS, the SHA-256 digest) against `.vBigint x` (the
 modular residue) reduces to the int↔bytes coercion arm widened in
@@ -310,7 +349,8 @@ private theorem runOpcode_EQUAL_intBytes
                 ((encodeMinimalLE x).toList = h.toList)))) := by
   rw [runOpcode_EQUAL_def_local]
   rw [popN_two_local s _ _ rest hStk]
-  simp [asBytes?, asInt?]
+  simp only []
+  rw [equal_intBytes_cascade x h]
 
 /-! ### `runOps` cons reduction for the Rabin body
 

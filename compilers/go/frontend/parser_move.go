@@ -703,8 +703,7 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 			}
 		}
 
-		typeName := p.parseMoveTypeName()
-		typeNode := moveMapType(typeName)
+		typeNode := p.parseMoveTypeNode()
 
 		// Optional initializer: = value
 		var initializer Expression
@@ -751,15 +750,125 @@ func (p *moveParser) parseMoveTypeName() string {
 		for depth > 0 && !p.check(moveTokEOF) {
 			if p.check(moveTokLt) {
 				depth++
+				p.advance()
+				continue
 			}
 			if p.check(moveTokGt) {
 				depth--
+				p.advance()
+				continue
+			}
+			if p.check(moveTokShr) {
+				// `>>` closes two nested generic argument lists at once.
+				depth -= 2
+				if depth < 0 {
+					depth = 0
+				}
+				p.advance()
+				continue
 			}
 			p.advance()
 		}
 	}
 
 	return name
+}
+
+// parseMoveTypeNode parses a Move-style type into a TypeNode, including
+// nested `FixedArray<T, N>` generics. The Move lexer eagerly forms `>>`
+// as a shift token, so when a generic argument list close encounters
+// `>>` we split it in place into two `>` tokens.
+func (p *moveParser) parseMoveTypeNode() TypeNode {
+	// Handle & references
+	if p.match(moveTokAmp) {
+		if p.matchIdent("mut") {
+			// &mut Type
+		}
+	}
+
+	nameTok := p.expect(moveTokIdent)
+	name := nameTok.value
+
+	// Handle path types: module::Type
+	for p.match(moveTokColonColon) {
+		nextTok := p.expect(moveTokIdent)
+		name = nextTok.value
+	}
+
+	// FixedArray<T, N> — nestable. Closes split `>>` shift tokens.
+	if name == "FixedArray" && p.check(moveTokLt) {
+		p.advance() // <
+		inner := p.parseMoveTypeNode()
+		p.expect(moveTokComma)
+		lenTok := p.expect(moveTokNumber)
+		length := 0
+		if bi := new(big.Int); bi != nil {
+			if _, ok := bi.SetString(lenTok.value, 0); ok && bi.IsInt64() && bi.Sign() >= 0 {
+				length = int(bi.Int64())
+			} else {
+				p.addError(fmt.Sprintf("FixedArray length must be a non-negative integer literal, got %q", lenTok.value))
+			}
+		}
+		p.consumeMoveGenericClose()
+		return FixedArrayType{Element: inner, Length: length}
+	}
+
+	// vector<T> => ByteString (legacy behaviour preserved)
+	if name == "vector" && p.check(moveTokLt) {
+		p.advance() // <
+		// Skip the inner type entirely — we don't model dynamic-length vectors.
+		p.parseMoveTypeNode()
+		p.consumeMoveGenericClose()
+		return PrimitiveType{Name: "ByteString"}
+	}
+
+	// Generic types we don't model: skip the arg list balancing nested generics.
+	if p.match(moveTokLt) {
+		depth := 1
+		for depth > 0 && !p.check(moveTokEOF) {
+			if p.check(moveTokLt) {
+				depth++
+				p.advance()
+				continue
+			}
+			if p.check(moveTokGt) {
+				depth--
+				p.advance()
+				continue
+			}
+			if p.check(moveTokShr) {
+				depth -= 2
+				if depth < 0 {
+					depth = 0
+				}
+				p.advance()
+				continue
+			}
+			p.advance()
+		}
+	}
+
+	return moveMapType(name)
+}
+
+// consumeMoveGenericClose closes a generic-argument list. Accepts either
+// a plain `>` or splits a `>>` shift token in place into two `>` so that
+// an enclosing generic close can consume the second half.
+func (p *moveParser) consumeMoveGenericClose() {
+	if p.check(moveTokGt) {
+		p.advance()
+		return
+	}
+	if p.check(moveTokShr) {
+		// Mutate the current `>>` into `>` in place — the next close will
+		// consume the remaining `>`.
+		tok := &p.tokens[p.pos]
+		tok.kind = moveTokGt
+		tok.value = ">"
+		tok.col++
+		return
+	}
+	p.expect(moveTokGt)
 }
 
 // ---------------------------------------------------------------------------

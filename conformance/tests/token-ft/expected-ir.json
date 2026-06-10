@@ -520,6 +520,7 @@
         {
           "name": "t46",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t45"
           }
@@ -790,6 +791,7 @@
         {
           "name": "t28",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t27"
           }
@@ -1263,6 +1265,7 @@
         {
           "name": "t50",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t49"
           }

@@ -1,0 +1,64 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 12,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 13,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 3,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 14,
+      "column": 6
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 14,
+      "column": 6
+    },
+    {
+      "opcodeIndex": 5,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 14,
+      "column": 6
+    },
+    {
+      "opcodeIndex": 7,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 16,
+      "column": 6
+    },
+    {
+      "opcodeIndex": 8,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 16,
+      "column": 6
+    },
+    {
+      "opcodeIndex": 9,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 16,
+      "column": 6
+    },
+    {
+      "opcodeIndex": 11,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 18,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/ts/if-else/IfElse.runar.ts",
+      "line": 18,
+      "column": 4
+    }
+  ]
+}

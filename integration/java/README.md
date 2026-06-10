@@ -24,7 +24,7 @@ with the other six compilers.
 ## Running
 
 All tests are gated behind the `runar.integration=true` system property
-so a bare `gradle test` inside CI without a live node is a no-op (the
+so a bare `./gradlew test` inside CI without a live node is a no-op (the
 wiring smoke tests still run). To actually hit a node:
 
 ### Regtest (SV Node)
@@ -33,7 +33,7 @@ wiring smoke tests still run). To actually hit a node:
 cd integration
 ./regtest.sh start
 cd java
-gradle test -Drunar.integration=true
+./gradlew test -Drunar.integration=true
 ```
 
 ### Teranode
@@ -42,7 +42,7 @@ gradle test -Drunar.integration=true
 cd integration
 ./teranode.sh start        # ~5 min on first boot (pre-mines 10,101 blocks)
 cd java
-BSV_BACKEND=teranode gradle test -Drunar.integration=true
+BSV_BACKEND=teranode ./gradlew test -Drunar.integration=true
 ```
 
 ### Full matrix

@@ -1,0 +1,28 @@
+{
+  "mappings": [
+    {
+      "opcodeIndex": 0,
+      "sourceFile": "examples/ts/p2pkh/P2PKH.runar.ts",
+      "line": 43,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 1,
+      "sourceFile": "examples/ts/p2pkh/P2PKH.runar.ts",
+      "line": 43,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 2,
+      "sourceFile": "examples/ts/p2pkh/P2PKH.runar.ts",
+      "line": 43,
+      "column": 4
+    },
+    {
+      "opcodeIndex": 4,
+      "sourceFile": "examples/ts/p2pkh/P2PKH.runar.ts",
+      "line": 45,
+      "column": 4
+    }
+  ]
+}

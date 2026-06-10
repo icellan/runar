@@ -30,6 +30,7 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 		ContractName: contract.Name,
 		Properties:   properties,
 		Methods:      methods,
+		ParentClass:  contract.ParentClass,
 	}
 }
 
@@ -299,7 +300,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef2}))
 					eqRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: hashRef, Right: outputHashRef, ResultType: "bytes"})
-					methodCtx.emit(makeAssert(eqRef))
+					methodCtx.emit(makeAutoInjectedStateCheckAssert(eqRef))
 				} else {
 					// Single-output continuation: build raw output bytes, then
 					// splice in any declared data outputs, then concat with
@@ -317,7 +318,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef4}))
 					eqRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: hashRef, Right: outputHashRef, ResultType: "bytes"})
-					methodCtx.emit(makeAssert(eqRef))
+					methodCtx.emit(makeAutoInjectedStateCheckAssert(eqRef))
 				}
 			}
 
@@ -1575,7 +1576,20 @@ func (ctx *lowerCtx) lowerDecrementExpr(e DecrementExpr) string {
 // ---------------------------------------------------------------------------
 
 func makeLoadConstInt(val *big.Int) ir.ANFValue {
-	raw, _ := json.Marshal(val)
+	// big.Int's default JSON marshaler emits the value as a JSON number,
+	// which Go's encoding/json prints in scientific notation for magnitudes
+	// > ~1e15 — silently losing precision for 256-bit constants like the
+	// secp256k1 group order used in schnorr-zkp's s-bound assert. Emit
+	// oversize bigints as a quoted decimal string with the canonical JS
+	// BigInt `n` suffix so the IR round-trips losslessly across tiers AND
+	// so the consuming IR decoder can distinguish a decimal-encoded big
+	// integer from a hex-encoded ByteString literal.
+	var raw json.RawMessage
+	if val.IsInt64() {
+		raw, _ = json.Marshal(val.Int64())
+	} else {
+		raw, _ = json.Marshal(val.String() + "n")
+	}
 	v := ir.ANFValue{
 		Kind:        "load_const",
 		RawValue:    raw,
@@ -1622,6 +1636,22 @@ func makeAssert(valueRef string) ir.ANFValue {
 		Kind:     "assert",
 		RawValue: raw,
 		ValueRef: valueRef,
+	}
+}
+
+// makeAutoInjectedStateCheckAssert builds the auto-injected
+// stateful-continuation hash-equality assert with the
+// IsAutoInjectedStateCheck marker set. Off-chain SDK interpreters use
+// this marker to skip the equality check via a direct lookup instead of
+// structural / taint heuristics that misfire on developer covenant
+// asserts whose IR shape is identical.
+func makeAutoInjectedStateCheckAssert(valueRef string) ir.ANFValue {
+	raw, _ := json.Marshal(valueRef)
+	return ir.ANFValue{
+		Kind:                     "assert",
+		RawValue:                 raw,
+		ValueRef:                 valueRef,
+		IsAutoInjectedStateCheck: true,
 	}
 }
 

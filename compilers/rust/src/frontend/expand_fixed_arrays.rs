@@ -26,6 +26,7 @@
 //!   - Non-pure index/value expressions are hoisted to fresh
 //!     `__idx_K` / `__val_K` bindings.
 
+use num_bigint::BigInt;
 use std::collections::HashMap;
 
 use super::ast::*;
@@ -781,7 +782,7 @@ impl<'a> ExpandContext<'a> {
             index: Box::new(index.clone()),
         };
         match self.try_resolve_literal_index_chain(&whole) {
-            ChainResolve::Error => return Expression::BigIntLiteral { value: 0 },
+            ChainResolve::Error => return Expression::BigIntLiteral { value: BigInt::from(0) },
             ChainResolve::Leaf(name) => {
                 return Expression::PropertyAccess { property: name };
             }
@@ -825,7 +826,7 @@ impl<'a> ExpandContext<'a> {
                     ),
                     None,
                 ));
-                return Expression::BigIntLiteral { value: 0 };
+                return Expression::BigIntLiteral { value: BigInt::from(0) };
             }
             let slot = meta.slot_names[literal as usize].clone();
             return Expression::PropertyAccess { property: slot };
@@ -841,7 +842,7 @@ impl<'a> ExpandContext<'a> {
                 "Runtime index access on a nested FixedArray is not supported",
                 None,
             ));
-            return Expression::BigIntLiteral { value: 0 };
+            return Expression::BigIntLiteral { value: BigInt::from(0) };
         }
 
         self.build_read_dispatch_ternary(&meta, &index_ref)
@@ -899,7 +900,7 @@ impl<'a> ExpandContext<'a> {
             let cond = Expression::BinaryExpr {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
-                right: Box::new(Expression::BigIntLiteral { value: i as i128 }),
+                right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
             };
             let assign = Statement::Assignment {
                 target: target.clone(),
@@ -939,7 +940,7 @@ impl<'a> ExpandContext<'a> {
             let cond = Expression::BinaryExpr {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
-                right: Box::new(Expression::BigIntLiteral { value: i as i128 }),
+                right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
             };
             let branch = Expression::PropertyAccess {
                 property: slot.clone(),
@@ -1039,7 +1040,7 @@ impl<'a> ExpandContext<'a> {
             let cond = Expression::BinaryExpr {
                 op: BinaryOp::StrictEq,
                 left: Box::new(index_ref.clone()),
-                right: Box::new(Expression::BigIntLiteral { value: i as i128 }),
+                right: Box::new(Expression::BigIntLiteral { value: BigInt::from(i as i128) }),
             };
             let branch_assign = Statement::Assignment {
                 target: Expression::PropertyAccess {
@@ -1191,14 +1192,15 @@ struct StmtForm {
 }
 
 fn as_literal_index(expr: &Expression) -> Option<i128> {
+    use num_traits::ToPrimitive;
     match expr {
-        Expression::BigIntLiteral { value } => Some(*value),
+        Expression::BigIntLiteral { value } => value.to_i128(),
         Expression::UnaryExpr {
             op: UnaryOp::Neg,
             operand,
         } => {
             if let Expression::BigIntLiteral { value } = operand.as_ref() {
-                Some(-*value)
+                (-value).to_i128()
             } else {
                 None
             }
@@ -1375,7 +1377,10 @@ class Init extends StatefulSmartContract {
             .properties
             .iter()
             .map(|p| match &p.initializer {
-                Some(Expression::BigIntLiteral { value }) => *value,
+                Some(Expression::BigIntLiteral { value }) => {
+                    use num_traits::ToPrimitive;
+                    value.to_i128().unwrap_or(-1)
+                }
                 _ => -1,
             })
             .collect();

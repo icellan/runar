@@ -16,7 +16,9 @@ const P2Blake3PKH = @import("p2blake3pkh/P2Blake3PKH.runar.zig").P2Blake3PKH;
 const P2PKH = @import("p2pkh/P2PKH.runar.zig").P2PKH;
 const PostQuantumWallet = @import("post-quantum-wallet/PostQuantumWallet.runar.zig").PostQuantumWallet;
 const BoundedCounter = @import("property-initializers/BoundedCounter.runar.zig").BoundedCounter;
-const SchnorrZKP = @import("schnorr-zkp/SchnorrZKP.runar.zig").SchnorrZKP;
+// SchnorrZKP omitted — see examples/zig/schnorr-zkp/SchnorrZKP_test.zig
+// for the BUG-001 rationale (native i64 Bigint can't hold the 256-bit
+// secp256k1 group order embedded in the malleability gate).
 const Sha256CompressTest = @import("sha256-compress/Sha256CompressTest.runar.zig").Sha256CompressTest;
 const Sha256FinalizeTest = @import("sha256-finalize/Sha256FinalizeTest.runar.zig").Sha256FinalizeTest;
 const sphincs_fixtures = @import("sphincs-wallet/fixtures.zig");
@@ -70,6 +72,11 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "auction-close-wrong-sig")) return probeAuctionCloseWrongSig();
     if (std.mem.eql(u8, probe_case, "covenant-vault-wrong-output")) return probeCovenantVaultWrongOutput();
     if (std.mem.eql(u8, probe_case, "covenant-vault-wrong-sig")) return probeCovenantVaultWrongSig();
+    if (std.mem.eql(u8, probe_case, "covenant-vault-zero-outputs")) return probeCovenantVaultZeroOutputs();
+    if (std.mem.eql(u8, probe_case, "covenant-vault-extra-output")) return probeCovenantVaultExtraOutput();
+    if (std.mem.eql(u8, probe_case, "covenant-vault-reordered")) return probeCovenantVaultReordered();
+    if (std.mem.eql(u8, probe_case, "covenant-vault-amount-minus-one")) return probeCovenantVaultAmountMinusOne();
+    if (std.mem.eql(u8, probe_case, "covenant-vault-amount-plus-one")) return probeCovenantVaultAmountPlusOne();
     if (std.mem.eql(u8, probe_case, "oracle-price-wrong-rabin-proof")) return probeOraclePriceWrongRabinProof();
     if (std.mem.eql(u8, probe_case, "oracle-price-below-threshold")) return probeOraclePriceBelowThreshold();
     if (std.mem.eql(u8, probe_case, "oracle-price-wrong-receiver-sig")) return probeOraclePriceWrongReceiverSig();
@@ -103,7 +110,7 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-wrong-ecdsa-sig")) return probeSPHINCSWalletWrongECDSASig();
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-wrong-slhdsa-key")) return probeSPHINCSWalletWrongSLHDSAKey();
     if (std.mem.eql(u8, probe_case, "sphincs-wallet-invalid-slhdsa-proof")) return probeSPHINCSWalletInvalidSLHDSAProof();
-    if (std.mem.eql(u8, probe_case, "schnorr-zkp-invalid-r-point")) return probeSchnorrZKPInvalidRPoint();
+    // schnorr-zkp-invalid-r-point omitted — see SchnorrZKP_test.zig (BUG-001).
     return error.UnknownProbeCase;
 }
 
@@ -282,6 +289,74 @@ fn probeCovenantVaultWrongSig() !void {
         .outputHash = runar.hash256(expected_output),
     });
     vault.spend(runar.signTestMessage(runar.BOB), preimage);
+}
+
+// -- Adversarial output-shape probes ----------------------------------------
+//
+// These build the *contract-shaped* expected output (ASCII-bytes 1976a914 ‖
+// pkh ‖ 88ac — matching how `runar.cat("1976a914", recipient)` evaluates
+// natively in Zig). The happy-path test in CovenantVault_test.zig uses the
+// same helper, so the adversarial cases differ from it in exactly the
+// attacker-controlled dimension (count / order / value).
+fn covenantExpectedOutput(recipient: []const u8, amount: i64) []const u8 {
+    const script_prefix = runar.cat("1976a914", recipient);
+    const p2pkh_script = runar.cat(script_prefix, "88ac");
+    return runar.cat(runar.num2bin(amount, 8), p2pkh_script);
+}
+
+fn probeCovenantVaultZeroOutputs() !void {
+    const recipient = runar.BOB.pubKeyHash;
+    const vault = CovenantVault.init(runar.ALICE.pubKey, recipient, 5000);
+    // hashOutputs commits to *no* outputs at all (n-1).
+    const preimage = runar.mockPreimage(.{
+        .outputHash = runar.hash256(""),
+    });
+    vault.spend(runar.signTestMessage(runar.ALICE), preimage);
+}
+
+fn probeCovenantVaultExtraOutput() !void {
+    const recipient = runar.BOB.pubKeyHash;
+    const vault = CovenantVault.init(runar.ALICE.pubKey, recipient, 5000);
+    const required = covenantExpectedOutput(recipient, 5000);
+    const extra_pkh = [_]u8{0xcc} ** 20;
+    const extra = covenantExpectedOutput(&extra_pkh, 1000);
+    const preimage = runar.mockPreimage(.{
+        .outputHash = runar.hash256(runar.cat(required, extra)),
+    });
+    vault.spend(runar.signTestMessage(runar.ALICE), preimage);
+}
+
+fn probeCovenantVaultReordered() !void {
+    const recipient = runar.BOB.pubKeyHash;
+    const vault = CovenantVault.init(runar.ALICE.pubKey, recipient, 5000);
+    const required = covenantExpectedOutput(recipient, 5000);
+    const other_pkh = [_]u8{0xcc} ** 20;
+    const other = covenantExpectedOutput(&other_pkh, 5000);
+    // Place the unauthorised output BEFORE the required one.
+    const preimage = runar.mockPreimage(.{
+        .outputHash = runar.hash256(runar.cat(other, required)),
+    });
+    vault.spend(runar.signTestMessage(runar.ALICE), preimage);
+}
+
+fn probeCovenantVaultAmountMinusOne() !void {
+    const recipient = runar.BOB.pubKeyHash;
+    const vault = CovenantVault.init(runar.ALICE.pubKey, recipient, 5000);
+    const candidate = covenantExpectedOutput(recipient, 4999);
+    const preimage = runar.mockPreimage(.{
+        .outputHash = runar.hash256(candidate),
+    });
+    vault.spend(runar.signTestMessage(runar.ALICE), preimage);
+}
+
+fn probeCovenantVaultAmountPlusOne() !void {
+    const recipient = runar.BOB.pubKeyHash;
+    const vault = CovenantVault.init(runar.ALICE.pubKey, recipient, 5000);
+    const candidate = covenantExpectedOutput(recipient, 5001);
+    const preimage = runar.mockPreimage(.{
+        .outputHash = runar.hash256(candidate),
+    });
+    vault.spend(runar.signTestMessage(runar.ALICE), preimage);
 }
 
 fn probeOraclePriceWrongRabinProof() !void {
@@ -588,14 +663,4 @@ fn probeSPHINCSWalletInvalidSLHDSAProof() !void {
     contract.spend(slhdsa_sig, &sphincs_fixtures.slhdsa_pub_key, ecdsa_sig, runar.ALICE.pubKey);
 }
 
-fn probeSchnorrZKPInvalidRPoint() !void {
-    const pub_key = try runar.hex.decodeAlloc(
-        std.heap.page_allocator,
-        "fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af" ++
-            "07b158f244cd0de2134ac7c1d371cffbfae4db40801a2572e531c573cda9b5b4",
-    );
-    defer std.heap.page_allocator.free(pub_key);
-    const contract = SchnorrZKP.init(pub_key);
-    const bad_point = [_]u8{0x01} ** 64;
-    contract.verify(&bad_point, runar.bigint(1));
-}
+// probeSchnorrZKPInvalidRPoint deleted — see SchnorrZKP_test.zig (BUG-001).

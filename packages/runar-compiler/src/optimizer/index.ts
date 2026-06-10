@@ -3,5 +3,6 @@
  */
 
 export { optimizeStackIR } from './peephole.js';
-export { foldConstants, eliminateDeadBindings } from './constant-fold.js';
+export { foldConstants } from './constant-fold.js';
+export { eliminateDeadBindings } from './dce.js';
 export { optimizeEC } from './anf-ec.js';

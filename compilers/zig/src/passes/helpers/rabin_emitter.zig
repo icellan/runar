@@ -1,9 +1,12 @@
 //! Rabin signature verification codegen for Bitcoin Script.
 //!
-//! Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg).
-//! The emission is a fixed 10-opcode sequence:
+//! Rabin verification checks: (sig^2 + padding) mod pubKey == SHA256(msg)
+//! AND padding is in [0, 65536) — the bound is enforced on-chain (BUG-010).
+//! The emission is a fixed 15-opcode sequence:
 //!
-//!   OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+//!   OP_SWAP
+//!   OP_DUP OP_0 <push 65536> OP_WITHIN OP_VERIFY   // 0 <= padding < 65536 (BUG-010)
+//!   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
 //!
 //! The caller must bring the 4 arguments to the top of the stack in argument
 //! order (msg sig padding pubKey, pubKey on top) before emitting this sequence.
@@ -17,39 +20,62 @@ const std = @import("std");
 /// Rabin instruction lists are interoperable with the shared crypto emitter.
 pub const Instruction = @import("crypto_emitters.zig").CryptoInstruction;
 
-/// The fixed 10-opcode Rabin verification sequence.
-pub const opcode_sequence = [_][]const u8{
-    "OP_SWAP", // msg sig pubKey padding
-    "OP_ROT", // msg pubKey padding sig
-    "OP_DUP", // msg pubKey padding sig sig
-    "OP_MUL", // msg pubKey padding sig^2
-    "OP_ADD", // msg pubKey (sig^2+padding)
-    "OP_SWAP", // msg (sig^2+padding) pubKey
-    "OP_MOD", // msg ((sig^2+padding) mod pubKey)
-    "OP_SWAP", // ((sig^2+padding) mod pubKey) msg
-    "OP_SHA256", // ((sig^2+padding) mod pubKey) SHA256(msg)
-    "OP_EQUAL", // bool
-};
+/// Exclusive upper bound on the Rabin `padding` parameter, enforced on-chain.
+/// The legitimate signer (`packages/runar-go/rabin.go::RabinSign`) produces
+/// `padding < 1000`; the on-chain bound is 65536 (16-bit) for slack.
+/// See `_review/BUG-010-rfc.md`.
+pub const rabin_padding_limit: i64 = 65536;
 
 /// Append the Rabin verification opcode sequence to `list`.
 pub fn append(
     list: *std.ArrayListUnmanaged(Instruction),
     allocator: std.mem.Allocator,
 ) !void {
-    for (opcode_sequence) |op| {
-        try list.append(allocator, .{ .op_name = op });
-    }
+    try list.append(allocator, .{ .op_name = "OP_SWAP" });
+    // BUG-010 padding range check: assert 0 <= padding < 65536.
+    try list.append(allocator, .{ .op_name = "OP_DUP" });
+    try list.append(allocator, .{ .op_name = "OP_0" });
+    try list.append(allocator, .{ .push_int = rabin_padding_limit });
+    try list.append(allocator, .{ .op_name = "OP_WITHIN" });
+    try list.append(allocator, .{ .op_name = "OP_VERIFY" });
+    try list.append(allocator, .{ .op_name = "OP_ROT" });
+    try list.append(allocator, .{ .op_name = "OP_DUP" });
+    try list.append(allocator, .{ .op_name = "OP_MUL" });
+    try list.append(allocator, .{ .op_name = "OP_ADD" });
+    try list.append(allocator, .{ .op_name = "OP_SWAP" });
+    try list.append(allocator, .{ .op_name = "OP_MOD" });
+    try list.append(allocator, .{ .op_name = "OP_SWAP" });
+    try list.append(allocator, .{ .op_name = "OP_SHA256" });
+    try list.append(allocator, .{ .op_name = "OP_EQUAL" });
 }
 
-test "rabin emitter appends the 10-opcode byte-frozen golden sequence" {
+test "rabin emitter appends the 15-opcode byte-frozen golden sequence (BUG-010)" {
     const allocator = std.testing.allocator;
     var list: std.ArrayListUnmanaged(Instruction) = .empty;
     defer list.deinit(allocator);
 
     try append(&list, allocator);
 
-    try std.testing.expectEqual(@as(usize, 10), list.items.len);
-    for (list.items, opcode_sequence) |inst, expected| {
-        try std.testing.expectEqualStrings(expected, inst.op_name);
+    try std.testing.expectEqual(@as(usize, 15), list.items.len);
+
+    const expected_opcodes = [_]?[]const u8{
+        "OP_SWAP", "OP_DUP", "OP_0",
+        null, // index 3 is push_int(65536), checked separately
+        "OP_WITHIN", "OP_VERIFY",
+        "OP_ROT", "OP_DUP", "OP_MUL", "OP_ADD", "OP_SWAP",
+        "OP_MOD", "OP_SWAP", "OP_SHA256", "OP_EQUAL",
+    };
+
+    for (list.items, expected_opcodes, 0..) |inst, expected, i| {
+        if (expected) |op_name| {
+            try std.testing.expectEqualStrings(op_name, inst.op_name);
+        } else {
+            // index 3: must be push_int(65536).
+            try std.testing.expect(i == 3);
+            switch (inst) {
+                .push_int => |v| try std.testing.expectEqual(rabin_padding_limit, v),
+                else => return error.TestExpectedPushInt,
+            }
+        }
     }
 }

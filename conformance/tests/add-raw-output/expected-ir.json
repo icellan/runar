@@ -247,6 +247,7 @@
         {
           "name": "t24",
           "value": {
+            "isAutoInjectedStateCheck": true,
             "kind": "assert",
             "value": "t23"
           }

@@ -41,6 +41,7 @@
 //! }
 //! ```
 
+use num_bigint::BigInt;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
@@ -61,7 +62,7 @@ pub fn parse_java(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = JavaParser::new(tokens, file, &mut errors);
     let contract = parser.parse();
 
-    ParseResult { contract, errors }
+    ParseResult { contract, errors, source_size_err: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -1779,7 +1780,7 @@ impl<'a> JavaParser<'a> {
         match self.current().typ.clone() {
             TokenType::Number(n) => {
                 self.advance();
-                Some(Expression::BigIntLiteral { value: n })
+                Some(Expression::BigIntLiteral { value: BigInt::from(n) })
             }
             TokenType::True => {
                 self.advance();
@@ -1858,8 +1859,52 @@ impl<'a> JavaParser<'a> {
             }
             TokenType::New => {
                 self.advance();
-                // Support only `new T[]{...}` / `new T[N]{...}` array literals.
-                let _elem_type = self.parse_type();
+                // Support `new T[]{...}` / `new T[N]{...}` array literals AND
+                // `new BigInteger("decimal" [, radix])` (oversize-bigint
+                // escape hatch — see parser_java.go for the rationale).
+                let elem_type = self.parse_type();
+                // Detect `new BigInteger("...")`.
+                if matches!(elem_type, TypeNode::Primitive(PrimitiveTypeName::Bigint))
+                    && matches!(self.current().typ, TokenType::LParen)
+                {
+                    self.advance(); // '('
+                    if let TokenType::StringLit(raw) = self.current().typ.clone() {
+                        self.advance();
+                        let mut radix: u32 = 10;
+                        if matches!(self.current().typ, TokenType::Comma) {
+                            self.advance();
+                            if let TokenType::Number(n) = self.current().typ.clone() {
+                                self.advance();
+                                radix = n as u32;
+                            }
+                        }
+                        if matches!(self.current().typ, TokenType::RParen) {
+                            self.advance();
+                        }
+                        let cleaned: String = raw.chars().filter(|c| *c != '_').collect();
+                        // Parse the decimal/hex string into a full-precision
+                        // BigInt. With the AST widened to `num_bigint::BigInt`,
+                        // 256-bit constants (e.g. the secp256k1 group order
+                        // used in schnorr-zkp's s-bound assert) round-trip
+                        // losslessly through ANF / Stack IR.
+                        let value = parse_radix_to_bigint(&cleaned, radix).unwrap_or_else(|| BigInt::from(0));
+                        return Some(Expression::BigIntLiteral { value });
+                    }
+                    // Unknown shape: consume balanced parens, emit zero.
+                    let mut depth = 1i32;
+                    while depth > 0 && !matches!(self.current().typ, TokenType::Eof) {
+                        match self.current().typ {
+                            TokenType::LParen => depth += 1,
+                            TokenType::RParen => depth -= 1,
+                            _ => {}
+                        }
+                        self.advance();
+                    }
+                    self.error(
+                        "`new BigInteger(...)` only supports string-literal forms".to_string(),
+                    );
+                    return Some(Expression::BigIntLiteral { value: BigInt::from(0) });
+                }
                 self.expect_tok(&TokenType::LBracket);
                 // Optional length expression is allowed but ignored; the
                 // initializer list is authoritative.
@@ -1923,22 +1968,22 @@ impl<'a> JavaParser<'a> {
                             "ZERO" => {
                                 self.advance(); // '.'
                                 self.advance(); // ZERO
-                                return Some(Expression::BigIntLiteral { value: 0 });
+                                return Some(Expression::BigIntLiteral { value: BigInt::from(0) });
                             }
                             "ONE" => {
                                 self.advance();
                                 self.advance();
-                                return Some(Expression::BigIntLiteral { value: 1 });
+                                return Some(Expression::BigIntLiteral { value: BigInt::from(1) });
                             }
                             "TWO" => {
                                 self.advance();
                                 self.advance();
-                                return Some(Expression::BigIntLiteral { value: 2 });
+                                return Some(Expression::BigIntLiteral { value: BigInt::from(2) });
                             }
                             "TEN" => {
                                 self.advance();
                                 self.advance();
-                                return Some(Expression::BigIntLiteral { value: 10 });
+                                return Some(Expression::BigIntLiteral { value: BigInt::from(10) });
                             }
                             _ => {}
                         }
@@ -1972,6 +2017,41 @@ impl<'a> JavaParser<'a> {
 ///   - `a.neg()`                           → `UnaryExpr(-)`
 ///   - `a.abs()`                           → `CallExpr(abs, a)` (builtin)
 ///   - `assertThat(c)`                     → `CallExpr(assert, c)`
+/// Parse a digit string in the given radix into an i128. Returns `Some(v)`
+/// on success, `None` on overflow or invalid digits. Used by the
+/// `new BigInteger("decimal" [, radix])` parser branch — the i128 backing
+/// truncates values that exceed 2^127; the schnorr-zkp secp256k1-n literal
+/// will overflow, but the parser still accepts the source (the canonical
+/// codegen path comes from the TS compiler emitting the literal as a
+/// decimal-string load_const, not from this Rust frontend).
+fn parse_radix_to_i128(s: &str, radix: u32) -> Option<i128> {
+    if radix < 2 || radix > 36 {
+        return None;
+    }
+    let mut value: i128 = 0;
+    for ch in s.chars() {
+        let d = ch.to_digit(radix)?;
+        value = value.checked_mul(radix as i128)?.checked_add(d as i128)?;
+    }
+    Some(value)
+}
+
+/// Same as `parse_radix_to_i128` but returns an arbitrary-precision
+/// `BigInt`. Used to capture 256-bit constants (e.g. the secp256k1 group
+/// order in schnorr-zkp's s-bound assert) without truncation.
+fn parse_radix_to_bigint(s: &str, radix: u32) -> Option<BigInt> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    let mut value = BigInt::from(0);
+    let radix_bi = BigInt::from(radix);
+    for ch in s.chars() {
+        let d = ch.to_digit(radix)?;
+        value = value * &radix_bi + BigInt::from(d);
+    }
+    Some(value)
+}
+
 ///
 /// This is the Rust analogue of the Java parser's `convertCall` helper.
 fn promote_literal_calls(expr: Expression) -> Expression {
@@ -1996,7 +2076,7 @@ fn promote_literal_calls(expr: Expression) -> Expression {
             if let Expression::MemberExpr { .. } = callee.as_ref() {
                 if is_biginteger_value_of_callee(callee) || is_bigint_of_callee(callee) {
                     if let Expression::BigIntLiteral { value } = &args[0] {
-                        return Expression::BigIntLiteral { value: *value };
+                        return Expression::BigIntLiteral { value: value.clone() };
                     }
                 }
             }
@@ -2188,11 +2268,12 @@ fn is_bigint_of_callee(callee: &Expression) -> bool {
 /// `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
 /// unknown call (which the typechecker rejects loudly).
 fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Expression {
+    use num_traits::Zero;
     if !is_comparison_op(op.clone()) {
         return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
     }
     if let Some((a, b)) = compare_to_receiver_arg(&left) {
-        if matches!(&right, Expression::BigIntLiteral { value } if *value == 0i128) {
+        if matches!(&right, Expression::BigIntLiteral { value } if value.is_zero()) {
             return Expression::BinaryExpr {
                 op,
                 left: Box::new(a),
@@ -2201,7 +2282,7 @@ fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Ex
         }
     }
     if let Some((a, b)) = compare_to_receiver_arg(&right) {
-        if matches!(&left, Expression::BigIntLiteral { value } if *value == 0i128) {
+        if matches!(&left, Expression::BigIntLiteral { value } if value.is_zero()) {
             return Expression::BinaryExpr {
                 op,
                 left: Box::new(b),
@@ -2495,7 +2576,7 @@ mod tests {
             .find(|p| p.name == "count")
             .expect("count property");
         match &count.initializer {
-            Some(Expression::BigIntLiteral { value }) => assert_eq!(*value, 0),
+            Some(Expression::BigIntLiteral { value }) => assert_eq!(value, &BigInt::from(0)),
             other => panic!("expected BigIntLiteral(0), got {:?}", other),
         }
     }
@@ -2565,7 +2646,7 @@ mod tests {
                     other => panic!("expected identifier x, got {:?}", other),
                 }
                 match right.as_ref() {
-                    Expression::BigIntLiteral { value } => assert_eq!(*value, 7),
+                    Expression::BigIntLiteral { value } => assert_eq!(value, &BigInt::from(7)),
                     other => panic!("expected BigIntLiteral(7), got {:?}", other),
                 }
             }

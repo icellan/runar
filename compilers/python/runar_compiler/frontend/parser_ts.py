@@ -1585,9 +1585,11 @@ def _parse_number(s: str) -> Expression:
         val = int(s, 0)
     except ValueError:
         val = 0
-    # Check int64 overflow
-    if val > 9223372036854775807 or val < -9223372036854775808:
-        return BigIntLiteral(value=0)
+    # Python ints are arbitrary-precision; Runar's BigIntLiteral carries the
+    # full Python int so 256-bit constants (e.g. the secp256k1 group order
+    # used in schnorr-zkp's s-bound assert) round-trip cleanly through
+    # codegen. Downstream consumers (load_const serializer) handle the
+    # arbitrary-precision case via decimal-string encoding.
     return BigIntLiteral(value=val)
 
 

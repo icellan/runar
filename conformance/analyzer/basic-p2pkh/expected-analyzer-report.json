@@ -1,0 +1,23 @@
+{
+  "script": "76a90088ac",
+  "scriptSize": 5,
+  "findings": [],
+  "paths": [
+    {
+      "id": 0,
+      "description": "linear (no branches)",
+      "branchChoices": [],
+      "reachable": true,
+      "hasCheckSig": true,
+      "stackDepthAtEnd": -1
+    }
+  ],
+  "summary": {
+    "totalPaths": 1,
+    "reachablePaths": 1,
+    "pathsWithCheckSig": 1,
+    "pathsWithoutCheckSig": 0,
+    "maxStackDepth": 0,
+    "scriptSizeBytes": 5
+  }
+}

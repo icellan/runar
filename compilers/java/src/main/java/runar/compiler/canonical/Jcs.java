@@ -293,6 +293,16 @@ public final class Jcs {
                 // Matches TS omit-undefined semantics.
                 continue;
             }
+            // Optional-marker convention: a boolean record component named
+            // with the `isAutoInjectedStateCheck` shape is omitted entirely
+            // when false to keep the checked-in fold-OFF conformance goldens
+            // stable for developer asserts (only the compiler-emitted
+            // continuation-hash assert carries the marker). The TS
+            // reference's `isAutoInjectedStateCheck?: boolean` field follows
+            // the same omit-when-false convention.
+            if (val instanceof Boolean bv && !bv && "isAutoInjectedStateCheck".equals(rc.getName())) {
+                continue;
+            }
             JsonName override = rc.getAnnotation(JsonName.class);
             String key = override != null ? override.value() : rc.getName();
             map.put(key, val);

@@ -1,0 +1,10 @@
+{
+  "mappings": [
+    {"opcodeIndex": 5, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 6, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 7, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 11, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 12, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 0, "column": 0},
+    {"opcodeIndex": 13, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 0, "column": 0}
+  ]
+}

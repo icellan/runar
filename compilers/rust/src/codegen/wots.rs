@@ -10,6 +10,7 @@
 //! Stack on entry: `[..., msg, sig, pubkey]` (pubkey on top).
 //! Stack on exit:  `[..., bool]` (1 = valid, 0 = invalid).
 
+use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
 /// Emit one WOTS+ chain verification.
@@ -19,7 +20,7 @@ use super::stack::{PushValue, StackOp};
 fn emit_wots_one_chain(emit: &mut dyn FnMut(StackOp), chain_index: usize) {
     // Save steps_copy = 15 - digit to alt (for checksum accumulation later)
     emit(StackOp::Opcode("OP_DUP".into()));
-    emit(StackOp::Push(PushValue::Int(15)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(15))));
     emit(StackOp::Swap);
     emit(StackOp::Opcode("OP_SUB".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into())); // push#1: steps_copy
@@ -33,7 +34,7 @@ fn emit_wots_one_chain(emit: &mut dyn FnMut(StackOp), chain_index: usize) {
 
     // Split 32B sig element
     emit(StackOp::Swap);
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into())); // push#4: sigRest
     emit(StackOp::Swap);
@@ -52,7 +53,7 @@ fn emit_wots_one_chain(emit: &mut dyn FnMut(StackOp), chain_index: usize) {
             ],
             else_ops: vec![
                 StackOp::Swap,                                  // pubSeed digit X
-                StackOp::Push(PushValue::Int(2)),
+                StackOp::Push(PushValue::Int(BigInt::from(2))),
                 StackOp::Opcode("OP_PICK".into()),            // copy pubSeed
                 StackOp::Push(PushValue::Bytes(adrs_bytes)),   // ADRS [chainIndex, j]
                 StackOp::Opcode("OP_CAT".into()),              // pubSeed || adrs
@@ -78,7 +79,7 @@ fn emit_wots_one_chain(emit: &mut dyn FnMut(StackOp), chain_index: usize) {
 
     // Concat endpoint to endpt_acc
     emit(StackOp::Swap);
-    emit(StackOp::Push(PushValue::Int(3)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(3))));
     emit(StackOp::Opcode("OP_ROLL".into()));
     emit(StackOp::Opcode("OP_CAT".into()));
 }
@@ -95,7 +96,7 @@ pub fn emit_verify_wots(emit: &mut dyn FnMut(StackOp)) {
     // main: msg sig pubkey(64B: pubSeed||pkRoot)
 
     // Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
-    emit(StackOp::Push(PushValue::Int(32)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));          // msg sig pubSeed pkRoot
     emit(StackOp::Opcode("OP_TOALTSTACK".into()));    // pkRoot → alt
 
@@ -107,30 +108,30 @@ pub fn emit_verify_wots(emit: &mut dyn FnMut(StackOp)) {
 
     // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
     emit(StackOp::Swap);
-    emit(StackOp::Push(PushValue::Int(0)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
     emit(StackOp::Opcode("OP_0".into()));
-    emit(StackOp::Push(PushValue::Int(3)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(3))));
     emit(StackOp::Opcode("OP_ROLL".into()));
 
     // Process 32 bytes → 64 message chains
     for byte_idx in 0..32 {
         if byte_idx < 31 {
-            emit(StackOp::Push(PushValue::Int(1)));
+            emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
             emit(StackOp::Opcode("OP_SPLIT".into()));
             emit(StackOp::Swap);
         }
         // Unsigned byte conversion
-        emit(StackOp::Push(PushValue::Int(0)));
-        emit(StackOp::Push(PushValue::Int(1)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
         emit(StackOp::Opcode("OP_NUM2BIN".into()));
         emit(StackOp::Opcode("OP_CAT".into()));
         emit(StackOp::Opcode("OP_BIN2NUM".into()));
         // Extract nibbles
         emit(StackOp::Opcode("OP_DUP".into()));
-        emit(StackOp::Push(PushValue::Int(16)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(16))));
         emit(StackOp::Opcode("OP_DIV".into()));
         emit(StackOp::Swap);
-        emit(StackOp::Push(PushValue::Int(16)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(16))));
         emit(StackOp::Opcode("OP_MOD".into()));
 
         if byte_idx < 31 {
@@ -163,27 +164,27 @@ pub fn emit_verify_wots(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::Swap);
     // d66
     emit(StackOp::Opcode("OP_DUP".into()));
-    emit(StackOp::Push(PushValue::Int(16)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(16))));
     emit(StackOp::Opcode("OP_MOD".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into()));
     // d65
     emit(StackOp::Opcode("OP_DUP".into()));
-    emit(StackOp::Push(PushValue::Int(16)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(16))));
     emit(StackOp::Opcode("OP_DIV".into()));
-    emit(StackOp::Push(PushValue::Int(16)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(16))));
     emit(StackOp::Opcode("OP_MOD".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into()));
     // d64
-    emit(StackOp::Push(PushValue::Int(256)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(256))));
     emit(StackOp::Opcode("OP_DIV".into()));
-    emit(StackOp::Push(PushValue::Int(16)));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(16))));
     emit(StackOp::Opcode("OP_MOD".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into()));
 
     // 3 checksum chains (indices 64, 65, 66)
     for ci in 0..3 {
         emit(StackOp::Opcode("OP_TOALTSTACK".into()));
-        emit(StackOp::Push(PushValue::Int(0)));
+        emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
         emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
         emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
         emit_wots_one_chain(emit, 64 + ci);

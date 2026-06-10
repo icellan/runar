@@ -9,9 +9,55 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/compilers/go/compiler"
 )
+
+// GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
+// goldens stay stable across worktree paths and developer machines. Walk up
+// from the source file looking for pnpm-workspace.yaml (the canonical repo
+// root marker); fall back to the basename if no marker is found. Strings
+// that aren't absolute paths are returned unchanged.
+func repoRelativeFileName(srcPath string) string {
+	if !filepath.IsAbs(srcPath) {
+		return srcPath
+	}
+	dir := filepath.Dir(srcPath)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "pnpm-workspace.yaml")); err == nil {
+			rel, err := filepath.Rel(dir, srcPath)
+			if err == nil {
+				return filepath.ToSlash(rel)
+			}
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Base(srcPath)
+}
+
+// rewriteSourceMapPaths replaces SourceFile on each mapping with its
+// repo-relative POSIX form. Pure serialization-time normalization; the
+// in-memory artifact is unchanged.
+func rewriteSourceMapPaths(sm *compiler.SourceMap) *compiler.SourceMap {
+	if sm == nil {
+		return nil
+	}
+	out := &compiler.SourceMap{Mappings: make([]codegen.SourceMapping, len(sm.Mappings))}
+	for i, m := range sm.Mappings {
+		nm := m
+		nm.SourceFile = repoRelativeFileName(m.SourceFile)
+		out.Mappings[i] = nm
+	}
+	return out
+}
+
 
 func main() {
 	// Subcommand dispatch: if the first arg looks like a subcommand
@@ -50,10 +96,14 @@ func main() {
 	emitIR := flag.Bool("emit-ir", false, "output only the ANF IR JSON (requires --source)")
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
+	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
 	flag.Parse()
 
 	opts := compiler.CompileOptions{
 		DisableConstantFolding: *disableConstFold,
+		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
+		// so the artifact carries the mapping table the user just asked for.
+		IncludeSourceMap: *emitSourceMap != "",
 	}
 
 	if *irFile == "" && *sourceFile == "" {
@@ -135,6 +185,29 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// --emit-source-map: write the artifact's SourceMap field as
+	// canonical JSON ({"mappings":[...]}) to the requested path. Always
+	// emits the wrapper object so downstream tooling sees a uniform shape
+	// even when the underlying mapping table is empty.
+	if *emitSourceMap != "" {
+		sm := artifact.SourceMapData
+		if sm == nil {
+			sm = &compiler.SourceMap{Mappings: []codegen.SourceMapping{}}
+		}
+		// GAP-011: normalize sourceFile to repo-relative POSIX.
+		sm = rewriteSourceMapPaths(sm)
+		smBytes, smErr := json.MarshalIndent(sm, "", "  ")
+		if smErr != nil {
+			fmt.Fprintf(os.Stderr, "Source map serialization error: %v\n", smErr)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*emitSourceMap, append(smBytes, '\n'), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing source map: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Source map written to %s\n", *emitSourceMap)
 	}
 
 	// Determine output

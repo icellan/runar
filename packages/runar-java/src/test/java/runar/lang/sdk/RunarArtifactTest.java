@@ -49,6 +49,70 @@ class RunarArtifactTest {
     }
 
     @Test
+    void parentStatefulTrueForZeroMutableFieldStatefulContract() {
+        // Issue #44: a StatefulSmartContract with ZERO mutable fields has empty
+        // stateFields (isStateful() == false) yet still injects checkPreimage at
+        // entry, so the terminal sighash subscript trim must still fire. The
+        // authoritative signal is parentClass, surfaced via parentStateful().
+        String json = """
+            {
+              "version": "runar-v0.5.0",
+              "compilerVersion": "0.5.0",
+              "contractName": "AllReadonlyCleanstack",
+              "parentClass": "StatefulSmartContract",
+              "abi": { "constructor": { "params": [] }, "methods": [] },
+              "script": "6a",
+              "asm": "OP_RETURN"
+            }
+            """;
+        RunarArtifact art = RunarArtifact.fromJson(json);
+        assertEquals("StatefulSmartContract", art.parentClass());
+        assertFalse(art.isStateful(), "no mutable fields => isStateful is false");
+        assertTrue(art.parentStateful(), "parentClass drives the terminal trim gate");
+    }
+
+    @Test
+    void parentStatefulFalseForStatelessCovenant() {
+        // A stateless SmartContract (e.g. CovenantVault) must NOT trim: its
+        // user checkSig may run BEFORE the codesep, so it signs the full script.
+        String json = """
+            {
+              "version": "runar-v0.5.0",
+              "compilerVersion": "0.5.0",
+              "contractName": "CovenantVault",
+              "parentClass": "SmartContract",
+              "abi": { "constructor": { "params": [] }, "methods": [] },
+              "script": "6a",
+              "asm": "OP_RETURN"
+            }
+            """;
+        RunarArtifact art = RunarArtifact.fromJson(json);
+        assertEquals("SmartContract", art.parentClass());
+        assertFalse(art.parentStateful());
+    }
+
+    @Test
+    void parentStatefulFallsBackToIsStatefulWhenParentClassAbsent() {
+        // Older artifacts omit parentClass: fall back to the stateFields-based
+        // isStateful() so legacy behaviour is preserved.
+        String json = """
+            {
+              "version": "runar-v0.1.0",
+              "compilerVersion": "0.1.0",
+              "contractName": "Counter",
+              "abi": { "constructor": { "params": [] }, "methods": [] },
+              "script": "6a",
+              "asm": "OP_RETURN",
+              "stateFields": [ { "name": "count", "type": "bigint", "index": 0 } ]
+            }
+            """;
+        RunarArtifact art = RunarArtifact.fromJson(json);
+        assertNull(art.parentClass());
+        assertTrue(art.isStateful());
+        assertTrue(art.parentStateful(), "absent parentClass falls back to isStateful");
+    }
+
+    @Test
     void parsesJsonDirectlyWithoutArtifactWrapper() {
         String json = """
             {

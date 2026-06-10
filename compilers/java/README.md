@@ -17,23 +17,16 @@ include this binary alongside the other six tiers. See
 ## Requirements
 
 - JDK 17 (compile target). JDK 21 LTS works for local development.
-- Gradle 8.5+. Install via [SDKMAN!](https://sdkman.io/) or Homebrew
-  (`brew install gradle`). CI uses `gradle/actions/setup-gradle@v3` so
-  no wrapper jar is committed initially.
-
-First-time contributors can generate the Gradle wrapper once:
-
-```bash
-cd compilers/java
-gradle wrapper --gradle-version 8.10
-```
+- The Gradle wrapper (`gradlew` / `gradlew.bat`) is committed at Gradle 8.5,
+  so no system `gradle` install is required. The wrapper downloads its
+  pinned distribution on first invocation.
 
 ## Build & Run
 
 ```bash
 cd compilers/java
-gradle build              # compile + run tests
-gradle installDist        # produce an executable layout under build/install/
+./gradlew build              # compile + run tests
+./gradlew installDist        # produce an executable layout under build/install/
 ./build/install/runar-java-compiler/bin/runar-java --version
 ```
 
