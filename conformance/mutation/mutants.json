@@ -1,0 +1,167 @@
+{
+  "_doc": "Curated compiler-bug corpus for measuring the safety-net's detection power (TS-GAP-006). Each mutant is a targeted, exact, UNIQUE find/replace patch to a real line in a TypeScript compiler source file under packages/runar-compiler/src/. run-mutation.ts applies each patch to the working tree, runs the mapped fast in-process gate(s), records caught-vs-survived, and ALWAYS reverts. Because the gates resolve `runar-compiler`/`runar-testing` through the root vitest SRC alias (see vitest.config.ts), a mutated src file is observed WITHOUT a rebuild. Scope: TS tier only; Go/other-tier mutants are a documented future extension.",
+  "_gates": {
+    "differential-witness": "cd conformance && npx vitest run witnesses/differential.test.ts",
+    "fold-equivalence": "cd conformance && npx vitest run witnesses/fold-equivalence.test.ts",
+    "peephole-exhaustive": "cd packages/runar-compiler && npx vitest run src/__tests__/peephole-exhaustive.test.ts"
+  },
+  "_schema": {
+    "id": "stable unique id",
+    "file": "repo-relative path to the compiler src file",
+    "find": "exact substring that MUST occur exactly once in file",
+    "replace": "replacement substring injecting the bug",
+    "class": "one of: off-by-one stack index | swapped operands | dropped OP_VERIFY | if-without-else regression",
+    "stage": "pipeline stage: stack-lower | emit | constant-fold | peephole",
+    "expectCaughtBy": "gate names that MUST fail (catch) this mutant; empty => documented survivor",
+    "checkGates": "for documented survivors: gates run to CONFIRM the mutant survives them",
+    "finding": "for documented survivors: the measured coverage hole this mutant records"
+  },
+  "mutants": [
+    {
+      "id": "stacklower-add-to-sub",
+      "file": "packages/runar-compiler/src/passes/05-stack-lower.ts",
+      "find": "'+': ['OP_ADD'],",
+      "replace": "'+': ['OP_SUB'],",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "stacklower-sub-to-add",
+      "file": "packages/runar-compiler/src/passes/05-stack-lower.ts",
+      "find": "'-': ['OP_SUB'],",
+      "replace": "'-': ['OP_ADD'],",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "stacklower-mul-to-add",
+      "file": "packages/runar-compiler/src/passes/05-stack-lower.ts",
+      "find": "'*': ['OP_MUL'],",
+      "replace": "'*': ['OP_ADD'],",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "stacklower-gt-to-lt",
+      "file": "packages/runar-compiler/src/passes/05-stack-lower.ts",
+      "find": "'>': ['OP_GREATERTHAN'],",
+      "replace": "'>': ['OP_LESSTHAN'],",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "stacklower-numeq-to-numneq",
+      "file": "packages/runar-compiler/src/passes/05-stack-lower.ts",
+      "find": "'===': ['OP_NUMEQUAL'],",
+      "replace": "'===': ['OP_NUMNOTEQUAL'],",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "emit-add-opcode-to-sub",
+      "file": "packages/runar-compiler/src/passes/06-emit.ts",
+      "find": "'OP_ADD': 0x93,",
+      "replace": "'OP_ADD': 0x94,",
+      "class": "swapped operands",
+      "stage": "emit",
+      "expectCaughtBy": ["differential-witness", "peephole-exhaustive"]
+    },
+    {
+      "id": "emit-numequal-to-numnotequal",
+      "file": "packages/runar-compiler/src/passes/06-emit.ts",
+      "find": "'OP_NUMEQUAL': 0x9c,",
+      "replace": "'OP_NUMEQUAL': 0x9e,",
+      "class": "swapped operands",
+      "stage": "emit",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "emit-lessthan-to-greaterthan",
+      "file": "packages/runar-compiler/src/passes/06-emit.ts",
+      "find": "'OP_LESSTHAN': 0x9f,",
+      "replace": "'OP_LESSTHAN': 0xa0,",
+      "class": "swapped operands",
+      "stage": "emit",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "emit-if-without-else-threshold",
+      "file": "packages/runar-compiler/src/passes/06-emit.ts",
+      "find": "if (elseOps && elseOps.length > 0)",
+      "replace": "if (elseOps && elseOps.length > 1)",
+      "class": "if-without-else regression",
+      "stage": "emit",
+      "expectCaughtBy": ["differential-witness"]
+    },
+    {
+      "id": "peephole-equalverify-drop",
+      "file": "packages/runar-compiler/src/optimizer/peephole-rules.ts",
+      "find": "replacement: [opc('OP_EQUALVERIFY')],",
+      "replace": "replacement: [opc('OP_EQUAL')],",
+      "class": "dropped OP_VERIFY",
+      "stage": "peephole",
+      "expectCaughtBy": ["peephole-exhaustive"]
+    },
+    {
+      "id": "peephole-numequalverify-drop",
+      "file": "packages/runar-compiler/src/optimizer/peephole-rules.ts",
+      "find": "replacement: [opc('OP_NUMEQUALVERIFY')],",
+      "replace": "replacement: [opc('OP_NUMEQUAL')],",
+      "class": "dropped OP_VERIFY",
+      "stage": "peephole",
+      "expectCaughtBy": ["peephole-exhaustive"]
+    },
+    {
+      "id": "peephole-1add-to-1sub",
+      "file": "packages/runar-compiler/src/optimizer/peephole-rules.ts",
+      "find": "replacement: [opc('OP_1ADD')],",
+      "replace": "replacement: [opc('OP_1SUB')],",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "expectCaughtBy": ["peephole-exhaustive"]
+    },
+    {
+      "id": "peephole-numequal-to-not-corrupt",
+      "file": "packages/runar-compiler/src/optimizer/peephole-rules.ts",
+      "find": "replacement: [opc('OP_NOT')],",
+      "replace": "replacement: [opc('OP_0NOTEQUAL')],",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "expectCaughtBy": ["peephole-exhaustive"]
+    },
+    {
+      "id": "peephole-rot-to-swap",
+      "file": "packages/runar-compiler/src/optimizer/peephole-rules.ts",
+      "find": "replacement: [{ op: 'rot' }],",
+      "replace": "replacement: [{ op: 'swap' }],",
+      "class": "off-by-one stack index",
+      "stage": "peephole",
+      "expectCaughtBy": ["peephole-exhaustive"]
+    },
+    {
+      "id": "peephole-pick1-over-to-dup",
+      "file": "packages/runar-compiler/src/optimizer/peephole-rules.ts",
+      "find": "replacement: [{ op: 'over' }],",
+      "replace": "replacement: [{ op: 'dup' }],",
+      "class": "off-by-one stack index",
+      "stage": "peephole",
+      "expectCaughtBy": ["peephole-exhaustive"]
+    },
+    {
+      "id": "constantfold-add-to-sub",
+      "file": "packages/runar-compiler/src/optimizer/constant-fold.ts",
+      "find": "case '+': return left + right;",
+      "replace": "case '+': return left - right;",
+      "class": "swapped operands",
+      "stage": "constant-fold",
+      "expectCaughtBy": [],
+      "checkGates": ["differential-witness", "fold-equivalence"],
+      "finding": "MEASURED HOLE (survivor). The ANF constant-fold pass's arithmetic evaluator (evalBinOp '+') is UNCOVERED by the fast execution gates: no witnessed conformance fixture executes an all-constant subexpression through the fold pass. Only if-without-else-multi-temp folds a constant ('8n + 1n'), but its declared reject witness (outCount=0) skips that code path at runtime, so fold-OFF and fold-ON execute identically and the mutation is invisible. Closing this needs a witnessed fixture whose accept/reject verdict depends on a folded constant. Left as a documented survivor per the TS-GAP-006 no-silence rule; do not delete without adding that coverage."
+    }
+  ]
+}
