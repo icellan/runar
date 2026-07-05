@@ -159,9 +159,9 @@
       "replace": "case '+': return left - right;",
       "class": "swapped operands",
       "stage": "constant-fold",
-      "expectCaughtBy": [],
-      "checkGates": ["differential-witness", "fold-equivalence"],
-      "finding": "MEASURED HOLE (survivor). The ANF constant-fold pass's arithmetic evaluator (evalBinOp '+') is UNCOVERED by the fast execution gates: no witnessed conformance fixture executes an all-constant subexpression through the fold pass. Only if-without-else-multi-temp folds a constant ('8n + 1n'), but its declared reject witness (outCount=0) skips that code path at runtime, so fold-OFF and fold-ON execute identically and the mutation is invisible. Closing this needs a witnessed fixture whose accept/reject verdict depends on a folded constant. Left as a documented survivor per the TS-GAP-006 no-silence rule; do not delete without adding that coverage."
+      "expectCaughtBy": ["fold-execution"],
+      "checkGates": ["differential-witness", "fold-equivalence", "fold-execution"],
+      "finding": "Previously a MEASURED HOLE (survivor): no witnessed fixture executed an all-constant subexpression through the fold pass, so a fold arithmetic bug in evalBinOp('+') was invisible to the execution gates. CLOSED by conformance/witnesses/fold-execution.test.ts, whose accept/reject verdict depends on a folded constant (2n + 3n) and is checked by both the source-vs-script differential oracle and the fold-OFF/fold-ON oracle; the mutation now diverges both and is caught."
     }
   ]
 }

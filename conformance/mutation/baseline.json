@@ -218,11 +218,15 @@
       "id": "constantfold-add-to-sub",
       "class": "swapped operands",
       "stage": "constant-fold",
-      "caught": false,
-      "survived": true,
-      "caughtBy": [],
-      "expectCaughtBy": [],
-      "documentedSurvivor": true
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "fold-execution"
+      ],
+      "expectCaughtBy": [
+        "fold-execution"
+      ],
+      "documentedSurvivor": false
     }
   ]
 }

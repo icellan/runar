@@ -78,6 +78,10 @@ export const GATES: Record<string, GateSpec> = {
     cwd: 'conformance',
     argv: ['npx', 'vitest', 'run', 'witnesses/fold-equivalence.test.ts'],
   },
+  'fold-execution': {
+    cwd: 'conformance',
+    argv: ['npx', 'vitest', 'run', 'witnesses/fold-execution.test.ts'],
+  },
   'peephole-exhaustive': {
     cwd: 'packages/runar-compiler',
     argv: ['npx', 'vitest', 'run', 'src/__tests__/peephole-exhaustive.test.ts'],
