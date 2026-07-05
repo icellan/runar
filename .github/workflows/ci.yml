@@ -741,9 +741,10 @@ jobs:
         # (source semantics) and the @bsv/sdk ScriptVM (script semantics) and
         # require they agree on accept/reject. This catches a bug all seven
         # compilers share (byte-identical but wrong). completeness.test.ts in
-        # the same directory fails CI if any fixture is neither witnessed nor
-        # listed in crypto-exempt.json.
-        run: cd conformance && npx vitest run witnesses/differential.test.ts
+        # the same directory (completeness.test.ts) fails CI if any fixture is
+        # neither witnessed nor listed in crypto-exempt.json /
+        # harness-inapplicable.json.
+        run: cd conformance && npx vitest run witnesses/
 
   conformance-anf-parity:
     # Cross-interpreter parity for the ANF lenient interpreter shipped by
