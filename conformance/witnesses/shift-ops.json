@@ -1,0 +1,7 @@
+{
+  "fixture": "shift-ops",
+  "constructorArgs": { "a": "12n" },
+  "spends": [
+    { "method": "testShift", "args": [], "expect": "accept", "note": "a<<3 and a>>2; asserts are tautologies (x>=0 || x<0). No rejecting witness exists — accept-only." }
+  ]
+}

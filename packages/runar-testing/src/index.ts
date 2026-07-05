@@ -52,6 +52,13 @@ export type {
   Stmt,
 } from './fuzzer/index.js';
 
+// Differential-execution oracle (source-vs-script)
+export {
+  buildWitness,
+  runDifferentialExecution,
+} from './oracle/index.js';
+export type { WitnessArg, DiffExecOptions, DiffExecResult } from './oracle/index.js';
+
 // Test helpers
 export {
   TestSmartContract,

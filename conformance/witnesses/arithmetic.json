@@ -1,0 +1,8 @@
+{
+  "fixture": "arithmetic",
+  "constructorArgs": { "target": "27n" },
+  "spends": [
+    { "method": "verify", "args": ["3n", "7n"], "expect": "accept", "note": "sum10 + diff(-4) + prod21 + quot0 = 27" },
+    { "method": "verify", "args": ["3n", "6n"], "expect": "reject", "note": "near-miss: 9 + (-3) + 18 + 0 = 24 != 27" }
+  ]
+}

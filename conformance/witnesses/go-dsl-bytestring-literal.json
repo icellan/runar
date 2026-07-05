@@ -1,0 +1,8 @@
+{
+  "fixture": "go-dsl-bytestring-literal",
+  "constructorArgs": { "target": "10n", "expected": "0x006a" },
+  "spends": [
+    { "method": "check", "args": ["3n", "7n"], "expect": "accept", "note": "3 + 7 == 10 and literal 006a == expected" },
+    { "method": "check", "args": ["3n", "8n"], "expect": "reject", "note": "near-miss: 11 != target 10" }
+  ]
+}

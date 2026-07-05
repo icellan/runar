@@ -734,6 +734,17 @@ jobs:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
           RUNAR_DISABLE_CONSTANT_FOLDING: '0'
         run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+      - name: Per-fixture differential execution (source vs script, fold-ON)
+        # TS-GAP-001 / TS-GAP-004: the source-vs-script execution oracle. For
+        # every witnessed fixture, compile to fold-ON deployed bytes, then run
+        # each declared valid + near-miss spend through BOTH the ANF interpreter
+        # (source semantics) and the @bsv/sdk ScriptVM (script semantics) and
+        # require they agree on accept/reject. This catches a bug all seven
+        # compilers share (byte-identical but wrong). completeness.test.ts in
+        # the same directory (completeness.test.ts) fails CI if any fixture is
+        # neither witnessed nor listed in crypto-exempt.json /
+        # harness-inapplicable.json.
+        run: cd conformance && npx vitest run witnesses/
 
   conformance-anf-parity:
     # Cross-interpreter parity for the ANF lenient interpreter shipped by

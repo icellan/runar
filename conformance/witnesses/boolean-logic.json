@@ -1,0 +1,10 @@
+{
+  "fixture": "boolean-logic",
+  "constructorArgs": { "threshold": "2n" },
+  "spends": [
+    { "method": "verify", "args": ["5n", "3n", false], "expect": "accept", "note": "both > 2 → bothAbove true" },
+    { "method": "verify", "args": ["5n", "1n", false], "expect": "accept", "note": "eitherAbove && !flag → true (5>2, flag=false)" },
+    { "method": "verify", "args": ["1n", "1n", false], "expect": "reject", "note": "near-miss: neither > 2, no branch true" },
+    { "method": "verify", "args": ["5n", "1n", true], "expect": "reject", "note": "near-miss: only a>2 but flag disables the eitherAbove branch" }
+  ]
+}

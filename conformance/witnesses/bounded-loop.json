@@ -1,0 +1,8 @@
+{
+  "fixture": "bounded-loop",
+  "constructorArgs": { "expectedSum": "25n" },
+  "spends": [
+    { "method": "verify", "args": ["3n"], "expect": "accept", "note": "sum = 5*3 + (0+1+2+3+4) = 25" },
+    { "method": "verify", "args": ["4n"], "expect": "reject", "note": "near-miss: 5*4 + 10 = 30 != 25" }
+  ]
+}

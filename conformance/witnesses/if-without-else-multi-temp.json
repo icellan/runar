@@ -1,0 +1,7 @@
+{
+  "fixture": "if-without-else-multi-temp",
+  "spends": [
+    { "method": "other", "args": ["0x01"], "expect": "accept", "note": "assert(x === x) is always true" },
+    { "method": "verifyMneeTxContainsBothOutputs", "args": ["0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "0x00", "0x00"], "expect": "reject", "note": "near-miss: rawTx byte[46]=0x00 → outCount 0 → foundMnee/foundExtra false → assert(foundMnee) fails" }
+  ]
+}
