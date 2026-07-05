@@ -1039,7 +1039,7 @@ jobs:
           cache: pnpm
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26'
       # The suite's compileRúnar helper imports packages/runar-compiler/dist,
       # so the TS workspace must be built first.
       - run: pnpm install --frozen-lockfile
