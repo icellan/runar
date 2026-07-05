@@ -47,17 +47,26 @@ All 14 findings are covered. TS-GAP-001 is counted once (fixed + randomized halv
 
 ## Live sub-findings surfaced during remediation
 
-Two real observations were surfaced (and are recorded, not silenced) while
-building the oracles:
+Two observations were surfaced (and are recorded, not silenced) while
+building the oracles. On investigation, the first is **not a defect on the
+target consensus** — it is correct behavior:
 
-1. **Oversized `ByteString` literal → single >520-byte PUSHDATA2, no guard.**
-   For a `ByteString` literal larger than the 520-byte
-   `MAX_SCRIPT_ELEMENT_SIZE`, the compiler emits a single PUSHDATA2 element with
-   no compile-time guard. Documented by
-   `packages/runar-compiler/src/__tests__/element-size-guard.test.ts`. This is
-   **sound post-Genesis** (Genesis relaxed the 520-byte element cap), so the
-   test documents the behavior rather than failing it; a pre-Genesis target
-   would need an explicit guard or multi-push lowering.
+1. **Oversized `ByteString` literal → single >520-byte element is CORRECT for
+   the Chronicle target (resolved — not a bug).** The pre-Genesis
+   `MAX_SCRIPT_ELEMENT_SIZE = 520` single-element cap does **not** apply on
+   Chronicle (the post-Genesis BSV node variant this repo compiles for — see
+   `conformance/script_execution_test.go`, whose spends run under
+   `interpreter.WithAfterChronicle()`, which raises the element cap to
+   MaxInt32; the TS `ScriptVM` enforces no element cap either). So the compiler
+   correctly emits an oversized literal as a single push element with no guard —
+   adding a 520-byte rejection would break legitimate large-literal contracts
+   that spend fine on Chronicle. `element-size-guard.test.ts` was corrected to
+   assert this **intended** behavior (previously it mischaracterized it as a
+   "gap"). It also serves as the tripwire that would fire if a pre-Genesis
+   target were ever adopted (which would then require a guard or multi-push
+   lowering). The strict pre-Genesis 520/1000/4-byte limits are themselves
+   exercised adversarially by `conformance/boundary_test.go` under the
+   before-genesis engine config, so both regimes are covered.
 
 2. **`OP_NOT, OP_NOT → []` is boolean-idempotence, not numeric identity.**
    The peephole rule is sound **only** under the compiler's precondition that it
@@ -69,11 +78,13 @@ building the oracles:
 
 ## Mutation-score reference
 
-The mutation scorecard (`conformance/mutation/`) currently reports **caught
-15/15** mutants that must be caught, plus **1 documented survivor**
-(`constantfold-add-to-sub`). That survivor is a genuine measured hole: the ANF
-constant-fold arithmetic evaluator is not executed by any current witness (the
-one fixture that folds a constant skips that path under its reject witness). It
-is recorded in `conformance/mutation/mutants.json` and `baseline.json` and is a
-candidate for the next round of witness coverage — closing it needs a witnessed
-fixture whose accept/reject verdict depends on a folded constant.
+The mutation scorecard (`conformance/mutation/`) reports **caught 16/16**
+mutants that must be caught, with **0 survivors**. The former
+`constantfold-add-to-sub` survivor — a genuine measured hole where the ANF
+constant-fold arithmetic evaluator was not executed by any witness — has been
+**closed** by `conformance/witnesses/fold-execution.test.ts`, whose
+accept/reject verdict depends on a folded constant (`2n + 3n`) and is checked by
+both the source-vs-script differential oracle and the fold-OFF/fold-ON oracle.
+The scorer wires it as the `fold-execution` gate and `baseline.json` records the
+mutant as caught. (This is the mutation harness working as intended: it found a
+real hole in the net, which was then closed with targeted coverage.)

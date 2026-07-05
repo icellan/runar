@@ -1,26 +1,33 @@
 /**
- * Oversized push-element guard (TS-GAP-010, Task 6.3).
+ * Push-element size characterization (TS-GAP-010, Task 6.3).
  *
- * A single Bitcoin Script push element larger than MAX_SCRIPT_ELEMENT_SIZE
- * (520 bytes) is unspendable under a consensus rule that enforces that cap.
- * This suite pins the compiler's CURRENT behavior when a `ByteString` literal
- * exceeds 520 bytes.
+ * The classic pre-Genesis Bitcoin Script rule caps a single push element at
+ * MAX_SCRIPT_ELEMENT_SIZE = 520 bytes. Rúnar, however, targets **Chronicle**
+ * (the post-Genesis BSV node variant this repo compiles for — see
+ * `conformance/script_execution_test.go`, which executes every spend under
+ * `interpreter.WithAfterChronicle()`). Chronicle **lifts** the single-element
+ * cap (it is raised to MaxInt32), so a push element larger than 520 bytes is
+ * perfectly valid and spendable on the target network. The repo's `ScriptVM`
+ * likewise enforces no element-size cap.
  *
- * FINDING (live): the compiler has NO compile-time guard and does NOT chunk
- * the literal — it emits it as a single push element (OP_PUSHDATA2 + N bytes).
- * A 600-byte literal produces one 600-byte push element with `success: true`
- * and no diagnostic. These tests DOCUMENT that gap (they do not silence it):
- * the assertions below encode "the oversized push exists today". When a guard
- * lands — either a compile error or multi-push chunking — these tests will
- * fail loudly and must be flipped to assert the fixed invariant
- * (`maxPushElement <= 520`).
+ * Therefore the compiler CORRECTLY emits an oversized `ByteString` literal as a
+ * single push element with no diagnostic and no chunking: adding a 520-byte
+ * rejection guard would break legitimate large-literal contracts (large data
+ * blobs, embedded keys, etc.) that spend fine on Chronicle. This suite pins
+ * that intended behavior — and doubles as the tripwire that would fire if a
+ * pre-Genesis target were ever adopted (at which point a compile-time guard or
+ * multi-push chunking, plus the matching consensus limits, would be required).
+ *
+ * The strict pre-Genesis 520/1000/4-byte boundaries themselves are covered
+ * adversarially by `conformance/boundary_test.go` (which runs its corpus under
+ * the before-genesis engine config to prove those limits are enforceable).
  */
 
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';
 
-/** MAX_SCRIPT_ELEMENT_SIZE — the classic pre-Genesis single-element cap the
- *  finding references. */
+/** MAX_SCRIPT_ELEMENT_SIZE — the pre-Genesis single-element cap. Lifted on the
+ *  Chronicle target this compiler emits for. */
 const MAX_SCRIPT_ELEMENT_SIZE = 520;
 
 /** Largest single push-element byte length in a compiled script (0 if none). */
@@ -73,29 +80,23 @@ function errors(diagnostics: { severity: string }[]): { severity: string }[] {
   return diagnostics.filter((d) => d.severity === 'error');
 }
 
-describe('oversized push-element guard (TS-GAP-010)', () => {
-  it('boundary control: a 520-byte literal emits a single element of exactly 520 bytes (at the cap)', () => {
+describe('push-element size (Chronicle target — no 520 cap)', () => {
+  it('a 520-byte literal emits a single element of exactly 520 bytes', () => {
     const res = compile(contractWithLiteral(520), { fileName: 'BigPush.runar.ts' });
     expect(res.success).toBe(true);
     expect(errors(res.diagnostics)).toEqual([]);
     expect(maxPushElement(res.artifact!.script)).toBe(MAX_SCRIPT_ELEMENT_SIZE);
   });
 
-  it('DOCUMENTS GAP: a 600-byte literal is emitted as a single >520-byte push with no compile-time guard', () => {
+  it('a 600-byte literal compiles clean and emits a single >520-byte element (valid on Chronicle)', () => {
     const res = compile(contractWithLiteral(600), { fileName: 'BigPush.runar.ts' });
 
-    // Current behavior: compiles clean (no error), no chunking.
+    // CORRECT behavior for the Chronicle target: no spurious guard, no error,
+    // emitted as a single push element. (A pre-Genesis target would instead
+    // require a compile error or chunking — this assertion would then flip.)
     expect(res.success).toBe(true);
     expect(errors(res.diagnostics)).toEqual([]);
-
-    const largest = maxPushElement(res.artifact!.script);
-
-    // The intended/desired behavior would be EITHER a compile error OR no
-    // element over 520 bytes. Neither holds today, so we pin the gap: the
-    // compiler emits a single 600-byte push element (unspendable under a
-    // 520-byte consensus cap). If a guard is added, flip these to
-    // `expect(largest).toBeLessThanOrEqual(MAX_SCRIPT_ELEMENT_SIZE)`.
-    expect(largest).toBeGreaterThan(MAX_SCRIPT_ELEMENT_SIZE);
-    expect(largest).toBe(600);
+    expect(maxPushElement(res.artifact!.script)).toBe(600);
+    expect(maxPushElement(res.artifact!.script)).toBeGreaterThan(MAX_SCRIPT_ELEMENT_SIZE);
   });
 });
