@@ -56,8 +56,16 @@ export type {
 export {
   buildWitness,
   runDifferentialExecution,
+  runFoldEquivalence,
 } from './oracle/index.js';
-export type { WitnessArg, DiffExecOptions, DiffExecResult } from './oracle/index.js';
+export type {
+  WitnessArg,
+  DiffExecOptions,
+  DiffExecResult,
+  FoldEqOptions,
+  FoldEqResult,
+  FoldEqDivergence,
+} from './oracle/index.js';
 
 // Test helpers
 export {
