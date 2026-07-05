@@ -1020,6 +1020,33 @@ jobs:
       - name: Run SDK output conformance (all contracts x 7 SDKs)
         run: cd conformance/sdk-output && npx tsx runner/sdk-runner.ts
 
+  script-execution:
+    # S1 execution oracle (TS-GAP-003): compile every conformance contract to
+    # fold-ON deployed bytes and execute real spends — plus adversarial
+    # MUST-FAIL near-miss witnesses — through the go-sdk Bitcoin Script engine.
+    # This is the only gate that executes fold-ON bytes against a script engine
+    # with per-contract witnesses.
+    name: Script Execution Oracle
+    needs: [ts-compiler, go-compiler]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      # The suite's compileRúnar helper imports packages/runar-compiler/dist,
+      # so the TS workspace must be built first.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Run script-execution oracle
+        run: cd conformance && go test -v -timeout 1200s .
+
   # ---------------------------------------------------------------------------
   # Integration — regtest node tests
   # ---------------------------------------------------------------------------
