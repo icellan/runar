@@ -1,0 +1,9 @@
+{
+  "fixture": "if-else",
+  "constructorArgs": { "limit": "10n" },
+  "spends": [
+    { "method": "check", "args": ["15n", true], "expect": "accept", "note": "mode=true → 15 + 10 = 25 > 0" },
+    { "method": "check", "args": ["15n", false], "expect": "accept", "note": "mode=false → 15 - 10 = 5 > 0" },
+    { "method": "check", "args": ["5n", false], "expect": "reject", "note": "near-miss: 5 - 10 = -5, not > 0" }
+  ]
+}
