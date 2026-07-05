@@ -395,6 +395,16 @@ The suite currently contains **63 fixtures** under `tests/` — that directory i
 | `token-ft` | Fungible token with split/merge | Yes |
 | `token-nft` | NFT with transfer/burn | Yes |
 
+### Script execution oracle
+
+`script_execution_test.go` compiles each contract to its **fold-ON deployed
+bytes** (the compiler default), builds a valid spend witness, and executes the
+unlocking+locking scripts through the go-sdk Bitcoin Script interpreter. Every
+contract family also ships adversarial **near-miss** witnesses (wrong key,
+wrong state, tampered signature, off-curve point) that MUST fail. Gated in CI
+by the `Script Execution Oracle` job. This is the only oracle that executes
+fold-ON bytes against a script engine with per-contract witnesses.
+
 ### SDK-output conformance (46 fixtures, 7 SDKs)
 
 `sdk-output/tests/` contains 46 fixtures (one `input.json` + one
