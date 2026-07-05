@@ -98,7 +98,23 @@ func CompileContract(sourcePath string, constructorArgs map[string]interface{}) 
 	return compileFromProgram(program)
 }
 
+// optimizeANF runs the same ANF passes the shipped Go compiler applies before
+// stack lowering (see compilers/go/compiler/compiler.go CompileFromProgram):
+// constant folding (fold-ON, the compiler default) followed by the EC
+// optimizer, which also performs dead-binding elimination. The integration
+// helper previously skipped both, so its output diverged from the bytes a Go
+// user actually deploys (TS-BUG-001). Compiling always happens from source
+// here (parse → LowerToANF), never from pre-lowered `--ir` input, so folding
+// is unconditionally correct — matching the compiler's source path.
+func optimizeANF(program *ir.ANFProgram) *ir.ANFProgram {
+	program = frontend.FoldConstants(program)
+	program = frontend.OptimizeEC(program)
+	return program
+}
+
 func compileFromProgram(program *ir.ANFProgram) (*Artifact, error) {
+	program = optimizeANF(program)
+
 	stackMethods, err := codegen.LowerToStack(program)
 	if err != nil {
 		return nil, fmt.Errorf("stack lowering: %w", err)
@@ -218,6 +234,12 @@ func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.Runa
 		}
 		lowerOpts.Groth16WAConfig = &cfg
 	}
+
+	// Match the shipped compiler pipeline: fold + EC on ANF before stack
+	// lowering (TS-BUG-001). Constant folding leaves load_prop unchanged, so
+	// the constructor-slot placeholders emitted for readonly properties are
+	// preserved exactly as the shipped SDK compile path produces them.
+	program = optimizeANF(program)
 
 	stackMethods, err := codegen.LowerToStack(program, lowerOpts)
 	if err != nil {
@@ -396,6 +418,12 @@ func CompileSourceStringToSDKArtifact(source, fileName string, constructorArgs m
 	}
 
 	program := frontend.LowerToANF(parseResult.Contract)
+
+	// Match the shipped compiler pipeline: fold + EC on ANF before stack
+	// lowering (TS-BUG-001). load_prop is left unchanged by folding, so the
+	// constructor-slot placeholders spliced by RunarContract.buildCodeScript
+	// remain byte-identical to the shipped SDK compile path.
+	program = optimizeANF(program)
 
 	stackMethods, err := codegen.LowerToStack(program)
 	if err != nil {
