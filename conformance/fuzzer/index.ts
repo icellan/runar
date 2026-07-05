@@ -41,6 +41,7 @@ import {
   ALL_TIERS as CANON_ALL_TIERS,
   type CompilerName as CanonCompilerName,
 } from './canonical-json-differential.js';
+import { runExecuteDifferential } from './execute-differential.js';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -76,7 +77,18 @@ interface FuzzerCLIOptions {
    * typed rejection.
    */
   canonical: boolean;
-  /** Wall-clock budget in ms (anf mode only). */
+  /**
+   * TS-GAP-001 (randomized) / TS-GAP-005 — source-vs-script EXECUTION oracle.
+   * Generates stateless, non-crypto contracts, renders each to TS, and runs
+   * every generated spend through the ANF interpreter AND the compiled fold-ON
+   * script on ScriptVM, asserting accept/reject agreement. A divergence is a
+   * real shared-design bug (all 7 tiers can agree on the same wrong bytes and
+   * still pass the parity fuzzers).
+   */
+  execute: boolean;
+  /** Execution-oracle input vectors per (contract, method). Default 6. */
+  inputs?: number;
+  /** Wall-clock budget in ms (anf / execute modes). */
   timeBudgetMs?: number;
   /**
    * ANF mode only. Run every tier with constant-folding ON (omit
@@ -106,6 +118,7 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
     stateful: false,
     anf: false,
     canonical: false,
+    execute: false,
     foldOn: false,
   };
 
@@ -158,6 +171,12 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
         break;
       case '--canonical':
         opts.canonical = true;
+        break;
+      case '--execute':
+        opts.execute = true;
+        break;
+      case '--inputs':
+        opts.inputs = parseInt(argv[++i] ?? '6', 10);
         break;
       case '--fold-on':
         opts.foldOn = true;
@@ -220,7 +239,18 @@ Options:
                          byte-identical output OR an identical typed rejection.
                          Each non-TS tier is driven via its --canonicalise CLI
                          shim. Use --num for case count and --seed to reproduce.
-  --time-budget-ms <n>   ANF mode only. Early-stop once wall-clock exceeded.
+  --execute              TS-GAP-001 (randomized) / TS-GAP-005 — source-vs-script
+                         EXECUTION oracle. Generates stateless, non-crypto
+                         contracts, renders each to TS, and runs every generated
+                         spend through the ANF interpreter AND the compiled
+                         fold-ON script on ScriptVM, asserting accept/reject
+                         agreement. Unlike the parity fuzzers (--anf/--ir), this
+                         catches bugs where all 7 tiers agree on the SAME wrong
+                         bytes. --num = contract count; --inputs = input vectors
+                         per method; --seed reproduces the corpus AND the inputs.
+  --inputs <n>           Execute mode only. Input vectors per (contract, method)
+                         (default 6).
+  --time-budget-ms <n>   ANF / execute modes. Early-stop once wall-clock exceeded.
   --fold-on              ANF mode only. Run every tier with constant-folding
                          ENABLED (omit --disable-constant-folding). Default is
                          fold-OFF, matching the checked-in goldens. Either mode
@@ -281,8 +311,51 @@ async function main(): Promise<void> {
   if (opts.canonical) {
     console.log('  Generator: canonical (GAP-002 — cross-tier canonicalJson RFC 8785 / JCS)');
   }
+  if (opts.execute) {
+    console.log('  Generator: execute (TS-GAP-001/005 — source-vs-script execution oracle, fold-ON)');
+    console.log(`  Inputs/method: ${opts.inputs ?? 6}`);
+    if (opts.timeBudgetMs !== undefined) {
+      console.log(`  Budget: ${opts.timeBudgetMs}ms`);
+    }
+  }
   console.log(`  Mode: ${opts.property ? 'property-based (with shrinking)' : 'sample-based'}`);
   console.log('');
+
+  if (opts.execute) {
+    const report = await runExecuteDifferential({
+      numContracts: opts.num,
+      seed: opts.seed,
+      inputsPerMethod: opts.inputs,
+      timeBudgetMs: opts.timeBudgetMs,
+      findingsDir: opts.findingsDir,
+      verbose: opts.verbose,
+    });
+    console.log('');
+    console.log('Source-vs-script execution fuzzing complete:');
+    console.log(`  Contracts run: ${report.contractsRun}/${report.totalContracts}`);
+    console.log(`  Spends run:    ${report.casesRun} (accept=${report.acceptCount} reject=${report.rejectCount})`);
+    console.log(`  Divergences:   ${report.divergenceCount}`);
+    console.log(`  Errors:        ${report.errorCount}`);
+    console.log(`  Duration:      ${report.durationMs}ms`);
+    console.log(`  Seed:          ${report.effectiveSeed} (replay with --seed ${report.effectiveSeed})`);
+    if (report.earlyStop) console.log('  Early-stopped: time budget reached');
+    if (report.findings.length > 0) {
+      console.log(`  Findings dir:  ${report.findings[0]}`);
+    }
+    if (opts.output) {
+      writeOutput(opts.output, {
+        timestamp: new Date().toISOString(),
+        generator: 'execute',
+        seed: opts.seed,
+        ...report,
+      });
+      console.log(`\nResults written to: ${opts.output}`);
+    }
+    // A divergence is a real shared-design bug; a throw is a distinct anomaly.
+    // Either fails the run so the gate catches it.
+    if (report.divergenceCount > 0 || report.errorCount > 0) process.exit(1);
+    return;
+  }
 
   if (opts.canonical) {
     const tiers = (opts.compilers as readonly string[]).filter((c): c is CanonCompilerName =>
