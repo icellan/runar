@@ -1,0 +1,8 @@
+{
+  "fixture": "bitwise-ops",
+  "constructorArgs": { "a": "12n", "b": "10n" },
+  "spends": [
+    { "method": "testShift", "args": [], "expect": "accept", "note": "left/right shifts; asserts are tautologies (x>=0 || x<0). No rejecting witness exists — accept-only." },
+    { "method": "testBitwise", "args": [], "expect": "accept", "note": "and/or/xor/not; tautological asserts. No rejecting witness exists — accept-only." }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "fixture": "if-without-else",
+  "constructorArgs": { "threshold": "5n" },
+  "spends": [
+    { "method": "check", "args": ["10n", "8n"], "expect": "accept", "note": "both > 5 → count 2 > 0" },
+    { "method": "check", "args": ["10n", "3n"], "expect": "accept", "note": "only a > 5 → count 1 > 0" },
+    { "method": "check", "args": ["3n", "2n"], "expect": "reject", "note": "near-miss: neither > 5 → count 0" }
+  ]
+}
