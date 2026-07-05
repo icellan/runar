@@ -437,3 +437,55 @@ jobs:
             /tmp/canonical-fuzz-pr.json
           if-no-files-found: ignore
           retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # TS-GAP-009 — metamorphic / EMI fuzz.
+  #
+  # Generates random stateless / arithmetic contracts, applies each
+  # semantics-preserving source transform (identifier rename, commutative
+  # operand reorder, let-introduction, dead-code insertion), and asserts the
+  # ORIGINAL and TRANSFORMED contracts produce the SAME executed accept/reject
+  # verdict on the BSV script engine. A pair where both compile but their
+  # verdicts differ is a real, latent compiler bug (a shared-design mistake all
+  # seven tiers would emit identically, invisible to cross-tier byte-parity).
+  #
+  # TS-only: the driver imports the compiler + differential-execution oracle
+  # in-process, so it needs just the Node toolchain and the TS build — no native
+  # compiler tiers. Deterministic (fixed seed 424242), so it also gates PRs.
+  # ---------------------------------------------------------------------------
+  fuzz-metamorphic:
+    name: Metamorphic / EMI fuzz (semantics-preserving transforms)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The driver imports runar-compiler / runar-testing in-process, so the TS
+      # workspace must be installed + built; conformance is not a pnpm member.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: cd conformance && npm ci
+
+      - name: Metamorphic fuzz (fixed seed, hard-fail on divergence)
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          node_modules/.bin/tsx fuzzer/metamorphic-fuzz.ts \
+            --num 200 \
+            --seed 424242
+
+      - name: Upload metamorphic fuzz findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metamorphic-fuzz-findings-${{ github.run_id }}
+          path: conformance/fuzz-findings-metamorphic/
+          if-no-files-found: ignore
+          retention-days: 30
