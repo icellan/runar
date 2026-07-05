@@ -1,0 +1,228 @@
+{
+  "_doc": "Per-mutant caught/survived reference for the TS-GAP-006 nightly regression gate.",
+  "generatedFrom": "conformance/mutation/mutants.json",
+  "results": [
+    {
+      "id": "stacklower-add-to-sub",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "stacklower-sub-to-add",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "stacklower-mul-to-add",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "stacklower-gt-to-lt",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "stacklower-numeq-to-numneq",
+      "class": "swapped operands",
+      "stage": "stack-lower",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "emit-add-opcode-to-sub",
+      "class": "swapped operands",
+      "stage": "emit",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness",
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "differential-witness",
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "emit-numequal-to-numnotequal",
+      "class": "swapped operands",
+      "stage": "emit",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "emit-lessthan-to-greaterthan",
+      "class": "swapped operands",
+      "stage": "emit",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "emit-if-without-else-threshold",
+      "class": "if-without-else regression",
+      "stage": "emit",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "differential-witness"
+      ],
+      "expectCaughtBy": [
+        "differential-witness"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "peephole-equalverify-drop",
+      "class": "dropped OP_VERIFY",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "peephole-numequalverify-drop",
+      "class": "dropped OP_VERIFY",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "peephole-1add-to-1sub",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "peephole-numequal-to-not-corrupt",
+      "class": "swapped operands",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "peephole-rot-to-swap",
+      "class": "off-by-one stack index",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "peephole-pick1-over-to-dup",
+      "class": "off-by-one stack index",
+      "stage": "peephole",
+      "caught": true,
+      "survived": false,
+      "caughtBy": [
+        "peephole-exhaustive"
+      ],
+      "expectCaughtBy": [
+        "peephole-exhaustive"
+      ],
+      "documentedSurvivor": false
+    },
+    {
+      "id": "constantfold-add-to-sub",
+      "class": "swapped operands",
+      "stage": "constant-fold",
+      "caught": false,
+      "survived": true,
+      "caughtBy": [],
+      "expectCaughtBy": [],
+      "documentedSurvivor": true
+    }
+  ]
+}

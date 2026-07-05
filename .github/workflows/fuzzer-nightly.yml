@@ -509,3 +509,86 @@ jobs:
           path: conformance/fuzz-findings-metamorphic/
           if-no-files-found: ignore
           retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # TS-GAP-006 — mutation scoring of the safety net.
+  #
+  # Applies a curated corpus of representative compiler bugs
+  # (conformance/mutation/mutants.json) to real TypeScript compiler source
+  # files, runs the mapped fast in-process gates (differential-witness,
+  # fold-equivalence, peephole-exhaustive), and records caught-vs-survived.
+  # The scorer ALWAYS reverts each mutant, so the working tree is left clean.
+  #
+  # The gates resolve runar-compiler/runar-testing through the root vitest SRC
+  # alias, so a mutated src file is observed without a rebuild.
+  #
+  # Nightly-only (not a PR gate): the run fails if any mutant that MUST be
+  # caught survives, AND a baseline-regression check fails if any mutant that
+  # was CAUGHT in conformance/mutation/baseline.json has become a survivor
+  # (i.e. the net weakened).
+  # ---------------------------------------------------------------------------
+  mutation-score:
+    name: Mutation score (safety-net detection power)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The gates import runar-compiler / runar-testing in-process via the src
+      # alias; the workspace must be installed + built, and conformance needs
+      # its own tsx (it is not a pnpm member).
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: cd conformance && npm ci
+
+      - name: Mutation score (survivor gate)
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          node_modules/.bin/tsx mutation/run-mutation.ts \
+            --json-out /tmp/mutation-current.json
+
+      - name: Baseline regression check (previously-caught mutant must stay caught)
+        if: always()
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/mutation-current.json ]; then
+            echo "no current scorecard produced — scorer aborted; failing"
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const base = JSON.parse(fs.readFileSync("mutation/baseline.json", "utf8")).results;
+            const cur = JSON.parse(fs.readFileSync("/tmp/mutation-current.json", "utf8")).results;
+            const curById = new Map(cur.map((r) => [r.id, r]));
+            const regressions = [];
+            for (const b of base) {
+              const c = curById.get(b.id);
+              if (!c) { regressions.push(b.id + " (missing from current run)"); continue; }
+              if (b.caught && c.survived) regressions.push(b.id + " (was caught, now SURVIVES)");
+            }
+            if (regressions.length) {
+              console.error("MUTATION REGRESSION — the net weakened:");
+              for (const r of regressions) console.error("  • " + r);
+              process.exit(1);
+            }
+            console.log("No mutation regressions vs baseline (" + base.length + " mutants).");
+          '
+
+      - name: Upload mutation scorecard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-scorecard-${{ github.run_id }}
+          path: /tmp/mutation-current.json
+          if-no-files-found: ignore
+          retention-days: 30
