@@ -161,17 +161,146 @@ export function renameLocals(src: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// The remaining transforms are implemented in Task 9.2.
+// reorderCommutative — swap operands of provably-commutative binary operators
 // ---------------------------------------------------------------------------
 
+/**
+ * Binary operators recognised inside fully-parenthesised generated expressions,
+ * longest-first so `===` is matched before `<`/`>` etc. Operators are always
+ * space-delimited in the generator's output (`(l op r)`), which disambiguates a
+ * unary `-` in a negative literal (`-5`, no surrounding spaces) from a binary
+ * subtraction (` - `).
+ */
+const BIN_OPS = ['===', '!==', '<=', '>=', '&&', '||', '+', '-', '*', '<', '>'];
+
+/** Operators whose operands may be swapped without changing the result. */
+const COMMUTATIVE = new Set(['+', '*', '===', '!==', '&&', '||']);
+
+/** Index of the ')' matching the '(' at `open`, or -1 if unbalanced. */
+function matchParen(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * If `inner` is a single top-level binary expression `L op R` (op at paren
+ * depth 0, space-delimited) whose operator is commutative, return `R op L`;
+ * otherwise return `inner` unchanged. Requires EXACTLY one depth-0 operator so
+ * we never mis-handle an operand list (`a, b`) or a chain.
+ */
+function swapTopLevel(inner: string): string {
+  let depth = 0;
+  const found: Array<{ start: number; end: number; op: string }> = [];
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (c === '(') depth++;
+    else if (c === ')') depth--;
+    else if (c === ' ' && depth === 0) {
+      for (const op of BIN_OPS) {
+        if (
+          inner.startsWith(op, i + 1) &&
+          inner[i + 1 + op.length] === ' '
+        ) {
+          found.push({ start: i, end: i + 1 + op.length, op });
+          break;
+        }
+      }
+    }
+  }
+  if (found.length !== 1) return inner;
+  const { start, end, op } = found[0]!;
+  if (!COMMUTATIVE.has(op)) return inner;
+  const left = inner.slice(0, start);
+  const right = inner.slice(end + 1);
+  return `${right} ${op} ${left}`;
+}
+
+/** Recursively reorder every parenthesised group in `s`. */
+function reorderParens(s: string): string {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '(') {
+      const j = matchParen(s, i);
+      if (j === -1) {
+        // Unbalanced (should not happen for valid source): copy verbatim.
+        out += s.slice(i);
+        break;
+      }
+      const inner = reorderParens(s.slice(i + 1, j));
+      out += '(' + swapTopLevel(inner) + ')';
+      i = j + 1;
+    } else {
+      out += s[i];
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
+ * Swap the operands of provably-commutative binary operators (`+ * === !== && ||`).
+ * Never touches `-`, `/`, `<`, `<=`, `>`, `>=`. Because Rúnar expressions are
+ * pure (no side effects), reordering a commutative operator's operands cannot
+ * change the computed value — but it exercises a different codegen operand order
+ * that byte-parity alone would not stress across the shared compiler design.
+ */
 export function reorderCommutative(src: string): string {
-  throw new Error('reorderCommutative: not implemented');
+  return reorderParens(src);
 }
 
+// ---------------------------------------------------------------------------
+// introduceLet — bind an assert condition to a fresh const
+// ---------------------------------------------------------------------------
+
+/**
+ * Bind the first `assert(EXPR)` condition to a fresh boolean `const` and assert
+ * that instead: `assert(EXPR)` → `const __mm_let0: boolean = (EXPR); assert(__mm_let0)`.
+ * Introducing a let-binding for a pure subexpression is semantics-preserving;
+ * it stresses the ANF binding / common-subexpression path. Returns the source
+ * unchanged if no `assert(...)` statement is found.
+ */
 export function introduceLet(src: string): string {
-  throw new Error('introduceLet: not implemented');
+  const m = /\bassert\s*\(/.exec(src);
+  if (!m) return src;
+  const openParen = m.index + m[0].length - 1; // index of '('
+  const close = matchParen(src, openParen);
+  if (close === -1) return src;
+  const expr = src.slice(openParen + 1, close);
+  const name = '__mm_let0';
+  const replacement = `const ${name}: boolean = (${expr}); assert(${name})`;
+  return src.slice(0, m.index) + replacement + src.slice(close + 1);
 }
 
+// ---------------------------------------------------------------------------
+// insertDeadCode — inject never-executed / unused code
+// ---------------------------------------------------------------------------
+
+/** Match a public method header (`public name(params) [: ret] {`) — not the constructor. */
+const PUBLIC_METHOD_HEADER_RE =
+  /(\bpublic\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*(?::\s*[A-Za-z_]\w*\s*)?\{)/;
+
+/**
+ * Insert an unused `const` and a never-executed `if (false) { … }` branch at the
+ * top of the first public method body. Both are dead: the const is never read
+ * (generated contracts already contain unused locals, so this is valid Rúnar)
+ * and the branch's condition is the literal `false`, so a correct compiler must
+ * never enforce the assert inside it. A semantics-preserving edit that stresses
+ * dead-code handling. Returns the source unchanged if no public method is found.
+ */
 export function insertDeadCode(src: string): string {
-  throw new Error('insertDeadCode: not implemented');
+  const m = PUBLIC_METHOD_HEADER_RE.exec(src);
+  if (!m) return src;
+  const insertAt = m.index + m[1]!.length; // just after the method's `{`
+  const dead =
+    '\n    const __mm_dead: bigint = 42n;' +
+    '\n    if (false) { assert(1n === 2n); }';
+  return src.slice(0, insertAt) + dead + src.slice(insertAt);
 }
