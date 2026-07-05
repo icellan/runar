@@ -20,6 +20,7 @@
     "fuzz:canonical": "tsx fuzzer/index.ts --canonical --num 200",
     "fuzz:canonical:fast": "tsx fuzzer/index.ts --canonical --num 200 --compilers ts,go,rust,python,zig,ruby",
     "fuzz:canonical:gate": "tsx fuzzer/index.ts --canonical --seed 20020602 --num 64 --compilers ts,go,rust,python,zig,ruby",
+    "fuzz:metamorphic": "tsx fuzzer/metamorphic-fuzz.ts --num 200 --seed 424242",
     "sdk-output": "tsx sdk-output/runner/sdk-runner.ts",
     "differential-witness": "vitest run witnesses/differential.test.ts"
   },
