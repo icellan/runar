@@ -3,6 +3,7 @@
     "version": "runar-v1.0.0-rc.1",
     "compilerVersion": "1.0.0-rc.1",
     "contractName": "IfElse",
+    "parentClass": "SmartContract",
     "abi": {
       "constructor": {
         "params": [
@@ -29,7 +30,7 @@
         }
       ]
     },
-    "script": "007c637c0093677c00946800a0",
+    "script": "007c637c0093677c00946800a077",
     "constructorSlots": [
       {
         "paramIndex": 0,

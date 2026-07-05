@@ -708,6 +708,28 @@ export function emitEcOnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   decomposePoint(t, '_pt', '_x', '_y');
 
+  // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
+  // as an unsigned value that may be ≥ p; the field arithmetic below would
+  // silently reduce it mod p, so a non-canonical encoding of a valid point
+  // would pass. Reject it: require x < p AND y < p (coordinates are unsigned,
+  // so the 0 ≤ lower bound holds by construction). Combined with the curve
+  // equation at the end via OP_BOOLAND so ecOnCurve still returns a boolean.
+  t.copyToTop('_x', '_x_lt');
+  pushFieldP(t, '_p_for_x');
+  t.rawBlock(['_x_lt', '_p_for_x'], '_x_canon', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop('_y', '_y_lt');
+  pushFieldP(t, '_p_for_y');
+  t.rawBlock(['_y_lt', '_p_for_y'], '_y_canon', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.toTop('_x_canon');
+  t.toTop('_y_canon');
+  t.rawBlock(['_x_canon', '_y_canon'], '_canon', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+
   // lhs = y²
   fieldSqr(t, '_y', '_y2');
 
@@ -718,11 +740,18 @@ export function emitEcOnCurve(emit: (op: StackOp) => void): void {
   t.pushInt('_seven', 7n);
   fieldAdd(t, '_x3', '_seven', '_rhs');
 
-  // Compare
+  // Compare curve equation
   t.toTop('_y2');
   t.toTop('_rhs');
-  t.rawBlock(['_y2', '_rhs'], '_result', (e) => {
+  t.rawBlock(['_y2', '_rhs'], '_curve_eq', (e) => {
     e({ op: 'opcode', code: 'OP_EQUAL' });
+  });
+
+  // on-curve = canonical AND curve-equation
+  t.toTop('_canon');
+  t.toTop('_curve_eq');
+  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
 

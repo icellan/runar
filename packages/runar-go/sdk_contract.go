@@ -1684,15 +1684,20 @@ func (c *RunarContract) hasCodeSeparator() bool {
 }
 
 // buildStatefulPrefix builds the prefix for an unlocking script:
-// optionally _codePart + _opPushTxSig. These implicit params are pushed before all method args.
+// optionally _codePart. This implicit param is pushed before all method args.
 // needsCodePart should be true only when the method constructs continuation outputs
 // (non-terminal stateful calls). Terminal and stateless methods don't use _codePart.
+//
+// BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the preimage
+// (see codegen emitCheckPreimageBinding), so NO signature is pushed here — the
+// unlocking script carries only _codePart (if needed) and the preimage. The
+// opSigHex parameter is retained for call-site compatibility but ignored.
 func (c *RunarContract) buildStatefulPrefix(opSigHex string, needsCodePart bool) string {
+	_ = opSigHex
 	prefix := ""
 	if needsCodePart && c.hasCodeSeparator() {
 		prefix += EncodePushData(c.getCodePartHex())
 	}
-	prefix += EncodePushData(opSigHex)
 	return prefix
 }
 

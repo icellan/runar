@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.move`
-**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby, Java (all seven)
 
 ---
 

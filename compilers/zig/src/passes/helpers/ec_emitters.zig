@@ -348,6 +348,14 @@ fn emitModOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_MOD");
 }
 
+fn emitLessThanOpcode(t: *ECTracker) !void {
+    try t.emitOpcode("OP_LESSTHAN");
+}
+
+fn emitBoolAndOpcode(t: *ECTracker) !void {
+    try t.emitOpcode("OP_BOOLAND");
+}
+
 fn emitFieldModSequence(t: *ECTracker) !void {
     try t.emitOpcode("OP_2DUP");
     try t.emitOpcode("OP_MOD");
@@ -788,6 +796,23 @@ fn emitEcNegate(t: *ECTracker) !void {
 
 fn emitEcOnCurve(t: *ECTracker) !void {
     try decomposePoint(t, "_pt", "_x", "_y");
+
+    // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
+    // as an unsigned value that may be >= p; the field arithmetic below would
+    // silently reduce it mod p, so a non-canonical encoding of a valid point
+    // would pass. Reject it: require x < p AND y < p (coordinates are unsigned,
+    // so the 0 <= lower bound holds by construction). Combined with the curve
+    // equation at the end via OP_BOOLAND so ecOnCurve still returns a boolean.
+    try t.copyToTop("_x", "_x_lt");
+    try pushFieldPNum(t, "_p_for_x");
+    try t.rawBlock(2, "_x_canon", emitLessThanOpcode);
+    try t.copyToTop("_y", "_y_lt");
+    try pushFieldPNum(t, "_p_for_y");
+    try t.rawBlock(2, "_y_canon", emitLessThanOpcode);
+    try t.toTop("_x_canon");
+    try t.toTop("_y_canon");
+    try t.rawBlock(2, "_canon", emitBoolAndOpcode);
+
     try fieldSqr(t, "_y", "_y2");
 
     try t.copyToTop("_x", "_x_copy");
@@ -798,7 +823,11 @@ fn emitEcOnCurve(t: *ECTracker) !void {
 
     try t.toTop("_y2");
     try t.toTop("_rhs");
-    try t.rawBlock(2, "_result", emitEqualOpcode);
+    try t.rawBlock(2, "_curve_eq", emitEqualOpcode);
+
+    try t.toTop("_canon");
+    try t.toTop("_curve_eq");
+    try t.rawBlock(2, "_result", emitBoolAndOpcode);
 }
 
 fn containsOpcode(ops: []const StackOp, opcode: []const u8) bool {
@@ -862,7 +891,7 @@ test "ec helper op-count goldens" {
         .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 59707) },
         .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 59709) },
         .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 945) },
-        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 518) },
+        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 530) },
     };
     inline for (cases) |c| {
         var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);
@@ -899,12 +928,15 @@ test "ec mul gen helper seeds the generator point" {
     try std.testing.expect(containsOpcode(bundle.ops, "OP_SPLIT"));
 }
 
-test "ec on curve helper ends in equality" {
+test "ec on curve helper ends in canonicity-anded equality" {
     var bundle = try buildBuiltinOps(std.testing.allocator, .ec_on_curve);
     defer bundle.deinit();
 
+    // GAP-301: ecOnCurve now returns (x < p) AND (y < p) AND curve-equation,
+    // so the final op is the OP_BOOLAND that folds canonicity into the result.
     try std.testing.expect(bundle.ops.len > 0);
-    try std.testing.expectEqualStrings("OP_EQUAL", bundle.ops[bundle.ops.len - 1].opcode);
+    try std.testing.expectEqualStrings("OP_BOOLAND", bundle.ops[bundle.ops.len - 1].opcode);
+    try std.testing.expect(containsOpcode(bundle.ops, "OP_LESSTHAN"));
 }
 
 test "ec negate helper uses field-prime script number bytes" {

@@ -17,7 +17,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
-import { Emitter, u32ToLE, u32ToBE } from './codegen-emitter.js';
+import { Emitter, u32ToLE } from './codegen-emitter.js';
 
 // =========================================================================
 // BLAKE3 constants
@@ -240,14 +240,13 @@ function emitGCall(
 /** @internal Generate just the setup ops (for debugging). Returns ops that leave 32 items on stack. */
 export function generateSetupOps(): StackOp[] {
   const em = new Emitter(2);
-  // Copy the setup phase exactly as in generateCompressOps
+  // Copy the setup phase exactly as in generateCompressOps (LE words, no
+  // per-word reversal — see generateCompressOps).
   for (let i = 0; i < 15; i++) em.split4();
-  em.beWordsToLE(16);
   em.roll(16);
   em.toAlt();
   em.fromAlt();
   for (let i = 0; i < 7; i++) em.split4();
-  em.beWordsToLE(8);
   for (let i = 0; i < 4; i++) em.pushB(u32ToLE(BLAKE3_IV[i]!));
   em.pushB(u32ToLE(0));
   em.pushB(u32ToLE(0));
@@ -256,19 +255,31 @@ export function generateSetupOps(): StackOp[] {
   return em.ops;
 }
 
-/** @internal Exposed for testing only */
-export function generateCompressOps(numRounds = 7): StackOp[] {
+/**
+ * @internal Exposed for testing only.
+ *
+ * BLAKE3 is little-endian: the message and chaining value are loaded as
+ * little-endian 32-bit words and the digest is output as little-endian bytes.
+ * A 4-byte Bitcoin Script byte-string IS a little-endian value, so the raw
+ * 4-byte chunks are already the LE words — no per-word byte reversal. (The
+ * previous impl applied `beWordsToLE` here and `reverseBytes4` on output,
+ * treating I/O as big-endian, which — together with a hardcoded block_len — was
+ * BUG-101: `blake3Hash` matched standard BLAKE3 only for 64-byte inputs.)
+ *
+ * `blockLenFromAlt`: when true, v[14] (block_len) is popped from the alt stack
+ * (blake3Hash provides the real message length); otherwise it is the constant 64
+ * (blake3Compress operates on a full 64-byte block).
+ */
+export function generateCompressOps(numRounds = 7, blockLenFromAlt = false): StackOp[] {
   const em = new Emitter(2);
 
   // ================================================================
   // Phase 1: Unpack block into 16 LE message words
   // ================================================================
-  // Stack: [chainingValue(32 BE), block(64 BE)]
-  // Split block into 16 × 4-byte BE words, convert to LE
+  // Stack: [chainingValue(32 LE), block(64 LE)]
+  // Split block into 16 × 4-byte little-endian words (raw chunks are LE words).
   for (let i = 0; i < 15; i++) em.split4();
   em.assert(17, 'after block unpack'); // 16 block words + 1 chainingValue
-  em.beWordsToLE(16);
-  em.assert(17, 'after block LE convert');
   // Stack: [CV, m0(LE), m1(LE), ..., m15(LE)] — m0 deepest of msg words, m15 TOS
 
   // ================================================================
@@ -280,13 +291,11 @@ export function generateCompressOps(numRounds = 7): StackOp[] {
   em.assert(16, 'after CV to alt');
   // Stack: [m0, m1, ..., m15]  Alt: [CV]
 
-  // Get CV back, split into 8 LE words, place on top of msg
+  // Get CV back, split into 8 LE words, place on top of msg (raw chunks are LE).
   em.fromAlt();
   em.assert(17, 'after CV from alt');
   for (let i = 0; i < 7; i++) em.split4();
   em.assert(24, 'after cv unpack');
-  em.beWordsToLE(8);
-  em.assert(24, 'after cv LE convert');
   // Stack: [m0..m15, cv0(LE)..cv7(LE)]
 
   // v[0..7] = chaining value (already on stack)
@@ -294,12 +303,17 @@ export function generateCompressOps(numRounds = 7): StackOp[] {
   for (let i = 0; i < 4; i++) em.pushB(u32ToLE(BLAKE3_IV[i]!));
   em.assert(28, 'after IV push');
 
-  // v[12] = counter_low = 0, v[13] = counter_high = 0
+  // v[12] = counter_low = 0, v[13] = counter_high = 0 (single chunk)
   em.pushB(u32ToLE(0));
   em.pushB(u32ToLE(0));
-  // v[14] = block_len = 64
-  em.pushB(u32ToLE(64));
-  // v[15] = flags = CHUNK_START | CHUNK_END | ROOT = 11
+  // v[14] = block_len — the real message length for blake3Hash (from alt), or
+  // the constant 64 for a full-block blake3Compress.
+  if (blockLenFromAlt) {
+    em.fromAlt(); // block_len (4-byte LE) supplied by caller (emitBlake3Hash)
+  } else {
+    em.pushB(u32ToLE(64));
+  }
+  // v[15] = flags = CHUNK_START | CHUNK_END | ROOT = 11 (single-block root)
   em.pushB(u32ToLE(CHUNK_START | CHUNK_END | ROOT));
   em.assert(32, 'after state init');
 
@@ -367,13 +381,12 @@ export function generateCompressOps(numRounds = 7): StackOp[] {
   em.assert(24, 'after XOR results restored');
   // Main: [m0..m15, h0, h1, ..., h7] h7=TOS
 
-  // Pack into 32-byte BE result: h0_BE || h1_BE || ... || h7_BE
-  em.reverseBytes4();  // h7 → h7_BE
+  // Pack into 32-byte little-endian digest: h0_LE || h1_LE || ... || h7_LE.
+  // The words are already little-endian (BLAKE3 output is LE bytes), so no
+  // per-word reversal — just concatenate the top two (h[i] below, accumulated
+  // above) 7 times, building h0 || h1 || ... || h7.
   for (let i = 1; i < 8; i++) {
-    em.swap();           // bring h[7-i] (LE) to TOS
-    em.reverseBytes4();  // → BE
-    em.swap();           // [new_BE, accumulated]
-    em.binOp('OP_CAT');  // new_BE || accumulated
+    em.binOp('OP_CAT');  // h[7-i] || accumulated
   }
   em.assert(17, 'after hash pack');
 
@@ -398,28 +411,43 @@ function getCompressOps(): StackOp[] {
 }
 
 /**
- * Emit BLAKE3 single-block compression in Bitcoin Script.
- * Stack on entry: [..., chainingValue(32 BE), block(64 BE)]
- * Stack on exit:  [..., hash(32 BE)]
+ * Emit BLAKE3 single full-block compression in Bitcoin Script.
+ * Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
+ * Stack on exit:  [..., hash(32 LE)]
  * Net depth: -1
+ *
+ * Uses block_len=64, counter=0, flags=CHUNK_START|CHUNK_END|ROOT — i.e. compress
+ * one full 64-byte block as a single-chunk root. Words are little-endian
+ * (standard BLAKE3): a 4-byte byte-string is already a little-endian word.
  */
 export function emitBlake3Compress(emit: (op: StackOp) => void): void {
   for (const op of getCompressOps()) emit(op);
 }
 
 /**
- * Emit BLAKE3 hash for a message up to 64 bytes.
- * Stack on entry: [..., message(≤64 BE)]
- * Stack on exit:  [..., hash(32 BE)]
+ * Emit standard BLAKE3 hash for a message of up to 64 bytes (single block).
+ * Stack on entry: [..., message(≤64 bytes)]
+ * Stack on exit:  [..., hash(32 LE)]
  * Net depth: 0
  *
- * Applies zero-padding and uses IV as chaining value.
+ * Matches the official BLAKE3 reference for ALL inputs 0..64 bytes: the real
+ * message length is used as block_len, the message is loaded as little-endian
+ * words, and the digest is output little-endian. (Bitcoin Script is loop-free,
+ * so inputs longer than one 64-byte block are out of scope — see BUG-101 /
+ * docs/formats/typescript.md.)
  */
 export function emitBlake3Hash(emit: (op: StackOp) => void): void {
   const em = new Emitter(1);
 
-  // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
+  // Capture block_len = message length as a 4-byte little-endian value on the
+  // alt stack (consumed as v[14] inside the compression).
   em.oc('OP_SIZE'); em.depth++;  // [message, len]
+  em.oc('OP_DUP'); em.depth++;   // [message, len, len]
+  em.pushI(4n);
+  em.binOp('OP_NUM2BIN');        // [message, len, blockLenLE(4)]
+  em.toAlt();                     // [message, len]; alt: [blockLenLE]
+
+  // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
   em.pushI(64n);
   em.swap();
   em.binOp('OP_SUB');    // [message, 64-len]
@@ -428,17 +456,18 @@ export function emitBlake3Hash(emit: (op: StackOp) => void): void {
   em.binOp('OP_NUM2BIN'); // [message, zeros]
   em.binOp('OP_CAT');    // [paddedMessage(64)]
 
-  // Push IV as 32-byte BE chaining value
+  // Push IV as 32-byte little-endian chaining value
   const ivBytes = new Uint8Array(32);
   for (let i = 0; i < 8; i++) {
-    const be = u32ToBE(BLAKE3_IV[i]!);
-    ivBytes.set(be, i * 4);
+    const le = u32ToLE(BLAKE3_IV[i]!);
+    ivBytes.set(le, i * 4);
   }
   em.pushB(ivBytes);
-  em.swap();  // [IV(32 BE), paddedMessage(64 BE)]
+  em.swap();  // [IV(32 LE), paddedMessage(64 LE)]
 
   // Splice compression ops
-  const compressOps = getCompressOps();
+  // Compress with the real block_len taken from the alt stack.
+  const compressOps = generateCompressOps(7, /* blockLenFromAlt */ true);
   for (const op of compressOps) em.e_raw(op);
   em.depth = 1;
 

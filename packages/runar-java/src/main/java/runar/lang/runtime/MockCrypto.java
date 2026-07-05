@@ -426,12 +426,12 @@ public final class MockCrypto {
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     };
 
-    /** 32-byte big-endian Blake3 IV bytes (compiler-side chaining-value seed). */
+    /** 32-byte little-endian Blake3 IV bytes (standard BLAKE3 chaining-value seed). */
     public static final byte[] BLAKE3_IV_BYTES = blake3IvBytes();
 
     private static byte[] blake3IvBytes() {
         byte[] out = new byte[32];
-        for (int i = 0; i < 8; i++) packBE32(out, i * 4, BLAKE3_IV[i]);
+        for (int i = 0; i < 8; i++) packLE32(out, i * 4, BLAKE3_IV[i]);
         return out;
     }
 
@@ -460,12 +460,16 @@ public final class MockCrypto {
     }
 
     /**
-     * BLAKE3 single-block compression with blockLen=64, counter=0,
+     * BLAKE3 single-block compression with counter=0,
      * flags=11 (CHUNK_START | CHUNK_END | ROOT). Matches the on-chain
      * codegen at {@code compilers/java/src/main/java/runar/compiler/codegen/Blake3.java}
-     * and the Python reference at {@code packages/runar-py/runar/builtins.py:_blake3_compress_impl}.
+     * and the TS interpreter reference {@code blake3CompressImpl}.
      *
-     * @param state 32-byte chaining value (8 big-endian uint32s).
+     * <p>BLAKE3 is little-endian: state/block are parsed as little-endian
+     * uint32 words and the digest is emitted as little-endian bytes. This
+     * public entry operates on a full 64-byte block (block_len = 64).
+     *
+     * @param state 32-byte chaining value (8 little-endian uint32s).
      * @param block 64-byte input block.
      */
     public static ByteString blake3Compress(ByteString state, ByteString block) {
@@ -473,17 +477,25 @@ public final class MockCrypto {
         byte[] blk = block.toByteArray();
         if (cv.length != 32) throw new IllegalArgumentException("blake3Compress: state must be 32 bytes, got " + cv.length);
         if (blk.length != 64) throw new IllegalArgumentException("blake3Compress: block must be 64 bytes, got " + blk.length);
+        return new ByteString(blake3CompressImpl(cv, blk, 64));
+    }
 
+    /**
+     * Core BLAKE3 single-block compression. {@code blockLen} is the state word
+     * v[14]: the real message length for {@code blake3Hash} (0..64), or the
+     * constant 64 for a full-block {@code blake3Compress}.
+     */
+    private static byte[] blake3CompressImpl(byte[] cv, byte[] blk, int blockLen) {
         int[] h = new int[8];
-        for (int i = 0; i < 8; i++) h[i] = unpackBE32(cv, i * 4);
+        for (int i = 0; i < 8; i++) h[i] = unpackLE32(cv, i * 4);
         int[] m = new int[16];
-        for (int i = 0; i < 16; i++) m[i] = unpackBE32(blk, i * 4);
+        for (int i = 0; i < 16; i++) m[i] = unpackLE32(blk, i * 4);
 
         int[] s = new int[]{
             h[0], h[1], h[2], h[3],
             h[4], h[5], h[6], h[7],
             BLAKE3_IV[0], BLAKE3_IV[1], BLAKE3_IV[2], BLAKE3_IV[3],
-            0, 0, 64, 11,
+            0, 0, blockLen, 11,
         };
 
         int[] msg = m.clone();
@@ -497,14 +509,15 @@ public final class MockCrypto {
         }
 
         byte[] out = new byte[32];
-        for (int i = 0; i < 8; i++) packBE32(out, i * 4, s[i] ^ s[i + 8]);
-        return new ByteString(out);
+        for (int i = 0; i < 8; i++) packLE32(out, i * 4, s[i] ^ s[i + 8]);
+        return out;
     }
 
     /**
      * Single-block Blake3 hash for messages up to 64 bytes. Pads with
-     * zero bytes and feeds the IV as the chaining value, matching the
-     * compiler codegen and the TS interpreter reference.
+     * zero bytes, feeds the IV as the chaining value, and uses the real
+     * message length as block_len — standard BLAKE3, matching the compiler
+     * codegen and the TS interpreter reference for all inputs 0..64 bytes.
      */
     public static ByteString blake3Hash(ByteString data) {
         byte[] msg = data.toByteArray();
@@ -513,7 +526,7 @@ public final class MockCrypto {
         }
         byte[] padded = new byte[64];
         System.arraycopy(msg, 0, padded, 0, msg.length);
-        return blake3Compress(new ByteString(BLAKE3_IV_BYTES), new ByteString(padded));
+        return new ByteString(blake3CompressImpl(BLAKE3_IV_BYTES, padded, Math.min(msg.length, 64)));
     }
 
     // =======================================================================
@@ -1015,6 +1028,20 @@ public final class MockCrypto {
         b[off + 1] = (byte) (v >>> 16);
         b[off + 2] = (byte) (v >>> 8);
         b[off + 3] = (byte) v;
+    }
+
+    private static int unpackLE32(byte[] b, int off) {
+        return (b[off] & 0xff)
+             | ((b[off + 1] & 0xff) << 8)
+             | ((b[off + 2] & 0xff) << 16)
+             | ((b[off + 3] & 0xff) << 24);
+    }
+
+    private static void packLE32(byte[] b, int off, int v) {
+        b[off]     = (byte) v;
+        b[off + 1] = (byte) (v >>> 8);
+        b[off + 2] = (byte) (v >>> 16);
+        b[off + 3] = (byte) (v >>> 24);
     }
 
     /**

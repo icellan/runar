@@ -51,19 +51,22 @@ function blake3Round(state: number[], m: number[]): void {
   g(state, 3, 4, 9, 14, m[14]!, m[15]!);
 }
 
+// Standard BLAKE3 single-block hash (little-endian, real block_len) — matches
+// the on-chain codegen and interpreter for messages of 0..64 bytes.
 function referenceBlake3Hash(msgHex: string): string {
-  const padded = msgHex.padEnd(128, '0');
-  const cv: number[] = [];
-  for (let i = 0; i < 8; i++) cv.push(parseInt(BLAKE3_IV_HEX.substring(i * 8, i * 8 + 8), 16));
+  const padded = Buffer.from(msgHex.padEnd(128, '0'), 'hex');
+  const le = (b: Buffer, i: number) =>
+    ((b[i * 4]! | (b[i * 4 + 1]! << 8) | (b[i * 4 + 2]! << 16) | (b[i * 4 + 3]! << 24)) >>> 0);
 
+  const cv = [...BLAKE3_IV]; // IV as the 8 chaining words
   const m: number[] = [];
-  for (let i = 0; i < 16; i++) m.push(parseInt(padded.substring(i * 8, i * 8 + 8), 16));
+  for (let i = 0; i < 16; i++) m.push(le(padded, i));
 
   const state: number[] = [
     cv[0]!, cv[1]!, cv[2]!, cv[3]!,
     cv[4]!, cv[5]!, cv[6]!, cv[7]!,
     BLAKE3_IV[0]!, BLAKE3_IV[1]!, BLAKE3_IV[2]!, BLAKE3_IV[3]!,
-    0, 0, 64, 11, // counter=0, counter_hi=0, blockLen=64, flags=CHUNK_START|CHUNK_END|ROOT
+    0, 0, msgHex.length / 2, 11, // counter=0/0, blockLen=real length, flags=CHUNK_START|CHUNK_END|ROOT
   ];
 
   let msg = [...m];
@@ -72,12 +75,15 @@ function referenceBlake3Hash(msgHex: string): string {
     if (r < 6) msg = MSG_PERM.map(i => msg[i]!);
   }
 
-  const output: number[] = [];
+  const out = Buffer.alloc(32);
   for (let i = 0; i < 8; i++) {
-    output.push((state[i]! ^ state[i + 8]!) >>> 0);
+    const w = (state[i]! ^ state[i + 8]!) >>> 0;
+    out[i * 4] = w & 0xff;
+    out[i * 4 + 1] = (w >>> 8) & 0xff;
+    out[i * 4 + 2] = (w >>> 16) & 0xff;
+    out[i * 4 + 3] = (w >>> 24) & 0xff;
   }
-
-  return output.map(w => w.toString(16).padStart(8, '0')).join('');
+  return out.toString('hex');
 }
 
 // ---- Test fixtures using real test keys ----

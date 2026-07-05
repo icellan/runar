@@ -919,6 +919,23 @@ module RunarCompiler
         t = ECTracker.new(["_pt"], emit)
         ec_decompose_point(t, "_pt", "_x", "_y")
 
+        # GAP-301: coordinate canonicity. `ec_decompose_point` BIN2NUMs each
+        # coordinate as an unsigned value that may be >= p; the field arithmetic
+        # below would silently reduce it mod p, so a non-canonical encoding of a
+        # valid point would pass. Reject it: require x < p AND y < p (coordinates
+        # are unsigned, so the 0 <= lower bound holds by construction). Combined
+        # with the curve equation at the end via OP_BOOLAND so ecOnCurve still
+        # returns a boolean.
+        t.copy_to_top("_x", "_x_lt")
+        ec_push_field_p(t, "_p_for_x")
+        t.raw_block(["_x_lt", "_p_for_x"], "_x_canon", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.copy_to_top("_y", "_y_lt")
+        ec_push_field_p(t, "_p_for_y")
+        t.raw_block(["_y_lt", "_p_for_y"], "_y_canon", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.to_top("_x_canon")
+        t.to_top("_y_canon")
+        t.raw_block(["_x_canon", "_y_canon"], "_canon", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+
         # lhs = y^2
         ec_field_sqr(t, "_y", "_y2")
 
@@ -929,10 +946,15 @@ module RunarCompiler
         t.push_int("_seven", 7)
         ec_field_add(t, "_x3", "_seven", "_rhs")
 
-        # Compare
+        # Compare curve equation
         t.to_top("_y2")
         t.to_top("_rhs")
-        t.raw_block(["_y2", "_rhs"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
+        t.raw_block(["_y2", "_rhs"], "_curve_eq", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
+
+        # on-curve = canonical AND curve-equation
+        t.to_top("_canon")
+        t.to_top("_curve_eq")
+        t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
       end
 
       # Compute ((value % mod) + mod) % mod.

@@ -246,7 +246,7 @@ pub fn ripemd160(data: &[u8]) -> Ripemd160 {
 // primitive. For message sizes ≤ 64 bytes `blake3_hash` applies zero-padding
 // before calling the compression function with the IV as chaining value.
 
-/// BLAKE3 initialization vector (8 u32 words, big-endian when serialized).
+/// BLAKE3 initialization vector (8 u32 words, little-endian when serialized).
 const BLAKE3_IV_WORDS: [u32; 8] = [
     0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a,
     0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19,
@@ -286,12 +286,12 @@ fn blake3_round(s: &mut [u32; 16], m: &[u32; 16]) {
 fn blake3_iv_bytes() -> [u8; 32] {
     let mut out = [0u8; 32];
     for (i, w) in BLAKE3_IV_WORDS.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
     out
 }
 
-fn blake3_compress_impl(cv: &[u8], block: &[u8]) -> [u8; 32] {
+fn blake3_compress_impl(cv: &[u8], block: &[u8], block_len: u32) -> [u8; 32] {
     // Defensive: pad / truncate to the canonical sizes so a misuse doesn't
     // panic. Production code should always pass exactly 32 / 64 bytes.
     let mut cv_buf = [0u8; 32];
@@ -304,7 +304,7 @@ fn blake3_compress_impl(cv: &[u8], block: &[u8]) -> [u8; 32] {
 
     let mut h = [0u32; 8];
     for i in 0..8 {
-        h[i] = u32::from_be_bytes([
+        h[i] = u32::from_le_bytes([
             cv_buf[i * 4],
             cv_buf[i * 4 + 1],
             cv_buf[i * 4 + 2],
@@ -313,7 +313,7 @@ fn blake3_compress_impl(cv: &[u8], block: &[u8]) -> [u8; 32] {
     }
     let mut m = [0u32; 16];
     for i in 0..16 {
-        m[i] = u32::from_be_bytes([
+        m[i] = u32::from_le_bytes([
             blk_buf[i * 4],
             blk_buf[i * 4 + 1],
             blk_buf[i * 4 + 2],
@@ -325,10 +325,10 @@ fn blake3_compress_impl(cv: &[u8], block: &[u8]) -> [u8; 32] {
         h[0], h[1], h[2], h[3],
         h[4], h[5], h[6], h[7],
         BLAKE3_IV_WORDS[0], BLAKE3_IV_WORDS[1], BLAKE3_IV_WORDS[2], BLAKE3_IV_WORDS[3],
-        0,  // counter low
-        0,  // counter high
-        64, // blockLen
-        11, // flags = CHUNK_START | CHUNK_END | ROOT
+        0,         // counter low
+        0,         // counter high
+        block_len, // blockLen (real message length for blake3Hash; 64 for full-block compress)
+        11,        // flags = CHUNK_START | CHUNK_END | ROOT
     ];
 
     let mut msg = m;
@@ -346,28 +346,28 @@ fn blake3_compress_impl(cv: &[u8], block: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for i in 0..8 {
         let w = state[i] ^ state[i + 8];
-        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
     out
 }
 
 /// BLAKE3 single-block compression with hardcoded blockLen=64, counter=0,
 /// flags=11. `chaining_value` should be 32 bytes and `block` 64 bytes; both
-/// are interpreted as 8 / 16 big-endian u32 words. Output is 32 big-endian
-/// bytes. Matches the on-chain codegen.
+/// are interpreted as 8 / 16 little-endian u32 words (standard BLAKE3). Output
+/// is 32 little-endian bytes. Matches the on-chain codegen.
 pub fn blake3_compress(chaining_value: &[u8], block: &[u8]) -> ByteString {
-    blake3_compress_impl(chaining_value, block).to_vec()
+    blake3_compress_impl(chaining_value, block, 64).to_vec()
 }
 
 /// BLAKE3 hash for messages up to 64 bytes. Equivalent to
-/// `blake3_compress(IV, zero_pad(message, 64))`. Matches the on-chain
-/// codegen.
+/// `blake3_compress(IV, zero_pad(message, 64))` with the real message length as
+/// block_len. Matches the on-chain codegen.
 pub fn blake3_hash(message: &[u8]) -> ByteString {
     let cv = blake3_iv_bytes();
     let mut padded = [0u8; 64];
     let n = message.len().min(64);
     padded[..n].copy_from_slice(&message[..n]);
-    blake3_compress_impl(&cv, &padded).to_vec()
+    blake3_compress_impl(&cv, &padded, n as u32).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,17 +1323,18 @@ mod tests {
 
     // -- BLAKE3 single-block compression -------------------------------------
     //
-    // The expected hex strings below are the cross-language reference vectors
-    // pinned in `packages/runar-py/tests/test_blake3.py` and matched by the
-    // Go runtime in `packages/runar-go/blake3_test.go`. Any divergence is a
-    // cross-compiler regression.
+    // The expected hex strings below are the official BLAKE3 reference digests
+    // (standard little-endian BLAKE3, single block, real message length as
+    // block_len — see BUG-101). They are pinned in
+    // `conformance/runtime-vectors/hashes.json` and mirrored by every other
+    // tier. Any divergence is a cross-compiler regression.
 
     #[test]
     fn test_blake3_hash_matches_cross_language_reference() {
         let cases: &[(&[u8], &str)] = &[
-            (b"", "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"),
-            (b"abc", "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"),
-            (b"hello world", "47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc"),
+            (b"", "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"),
+            (b"abc", "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"),
+            (b"hello world", "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"),
         ];
         for (msg, expected) in cases {
             let got = blake3_hash(msg);
@@ -1356,16 +1357,26 @@ mod tests {
 
     #[test]
     fn test_blake3_hash_equivalent_to_compression_with_iv() {
-        // blake3_hash(msg) == blake3_compress(IV, zero-pad(msg, 64)).
+        // For a full 64-byte message, blake3_hash(msg) == blake3_compress(IV, msg):
+        // both use block_len=64 and the IV as chaining value. (For messages
+        // shorter than 64 bytes the two now differ — blake3_hash uses the real
+        // message length as block_len, blake3_compress the constant 64 — which is
+        // the BUG-101 fix that makes blake3_hash match standard BLAKE3.)
         let cv = blake3_iv_bytes();
-        for msg in &[&b""[..], &b"abc"[..], &b"hello world"[..], &[0x19, 0x76, 0xa9, 0x14][..]] {
-            let mut padded = vec![0u8; 64];
-            let n = msg.len().min(64);
-            padded[..n].copy_from_slice(&msg[..n]);
-            let direct = blake3_compress(&cv, &padded);
-            let via_hash = blake3_hash(msg);
-            assert_eq!(direct, via_hash, "mismatch for {:?}", msg);
-        }
+        let msg: Vec<u8> = (0u8..64).collect();
+        let direct = blake3_compress(&cv, &msg);
+        let via_hash = blake3_hash(&msg);
+        assert_eq!(direct, via_hash, "64-byte block mismatch");
+
+        // Sanity: a short message diverges because block_len differs.
+        let short = b"abc";
+        let mut padded = vec![0u8; 64];
+        padded[..short.len()].copy_from_slice(short);
+        assert_ne!(
+            blake3_compress(&cv, &padded),
+            blake3_hash(short),
+            "short message must differ: block_len 64 vs real length"
+        );
     }
 
     #[test]

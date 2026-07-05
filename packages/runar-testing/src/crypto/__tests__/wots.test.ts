@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { wotsKeygen, wotsSign, wotsVerify, WOTS_PARAMS } from '../wots.js';
+import { wotsKeygen, wotsSign, wotsVerify, chain, messageDigits, WOTS_PARAMS } from '../wots.js';
 
 const { LEN, N } = WOTS_PARAMS;
 
@@ -94,6 +94,32 @@ describe('WOTS+ reference implementation', () => {
       otherSeed[0] = 0xaa;
       const { pk: otherPk } = wotsKeygen(otherSeed, pubSeed);
       expect(wotsVerify(msg, sig, otherPk)).toBe(false);
+    });
+
+    it('rejects a chain-advanced forgery (checksum defeats a forward digit bump)', () => {
+      // The property the WOTS+ checksum enforces: an attacker holding a valid
+      // signature can advance any MESSAGE chain FORWARD (hash sig[i] one extra
+      // step — no secret key needed) to claim a higher digit, but that lowers
+      // the checksum, which would require advancing a CHECKSUM chain BACKWARD
+      // (a hash preimage — infeasible). So a signature element that is a
+      // *structurally valid* chain point placed one step too high must still be
+      // rejected. This is strictly stronger than the byte-flip cases above,
+      // whose tampered element is not a valid chain point at all.
+      const { W, LEN1 } = WOTS_PARAMS;
+      const digits = messageDigits(msg);
+      // Pick a message chain (index < LEN1) with room to advance (digit < W-1).
+      const i = digits.findIndex((v, idx) => idx < LEN1 && v < W - 1);
+      expect(i).toBeGreaterThanOrEqual(0);
+
+      const element = sig.slice(i * N, (i + 1) * N);
+      // Advance this message chain one step forward — exactly the operation an
+      // attacker uses to forge the next-higher digit without the secret key.
+      const advanced = chain(element, digits[i]!, 1, pubSeed, i);
+
+      const forged = new Uint8Array(sig);
+      forged.set(advanced, i * N);
+
+      expect(wotsVerify(msg, forged, pk)).toBe(false);
     });
 
     it('rejects truncated signature', () => {

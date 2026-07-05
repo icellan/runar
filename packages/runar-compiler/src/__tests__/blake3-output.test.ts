@@ -85,10 +85,16 @@ function roundFn(st: number[], m: number[]) {
 function permute(m: number[]) { return MSG_PERM.map(i => m[i]!); }
 
 function referenceCompress(cvHex: string, blockHex: string, numRounds: number): string {
+  // Standard BLAKE3 (little-endian): a 4-byte byte-string is a little-endian word,
+  // and the digest is output little-endian — matching generateCompressOps.
+  const cvB = Buffer.from(cvHex, 'hex');
+  const blockB = Buffer.from(blockHex, 'hex');
+  const le = (b: Buffer, i: number) =>
+    ((b[i * 4]! | (b[i * 4 + 1]! << 8) | (b[i * 4 + 2]! << 16) | (b[i * 4 + 3]! << 24)) >>> 0);
   const cv: number[] = [];
-  for (let i = 0; i < 8; i++) cv.push(parseInt(cvHex.substring(i * 8, i * 8 + 8), 16));
+  for (let i = 0; i < 8; i++) cv.push(le(cvB, i));
   const m: number[] = [];
-  for (let i = 0; i < 16; i++) m.push(parseInt(blockHex.substring(i * 8, i * 8 + 8), 16));
+  for (let i = 0; i < 16; i++) m.push(le(blockB, i));
   const state = [
     ...cv,
     BLAKE3_IV[0]!, BLAKE3_IV[1]!, BLAKE3_IV[2]!, BLAKE3_IV[3]!,
@@ -99,9 +105,15 @@ function referenceCompress(cvHex: string, blockHex: string, numRounds: number): 
     roundFn(state, msg);
     if (r < numRounds - 1) msg = permute(msg);
   }
-  const output: number[] = [];
-  for (let i = 0; i < 8; i++) output.push((state[i]! ^ state[i + 8]!) >>> 0);
-  return output.map(w => w.toString(16).padStart(8, '0')).join('');
+  const out = Buffer.alloc(32);
+  for (let i = 0; i < 8; i++) {
+    const w = (state[i]! ^ state[i + 8]!) >>> 0;
+    out[i * 4] = w & 0xff;
+    out[i * 4 + 1] = (w >>> 8) & 0xff;
+    out[i * 4 + 2] = (w >>> 16) & 0xff;
+    out[i * 4 + 3] = (w >>> 24) & 0xff;
+  }
+  return out.toString('hex');
 }
 
 describe('blake3 codegen — isolated phase tests', () => {

@@ -86,16 +86,16 @@ RSpec.describe Runar::Builtins do
     end
 
     it 'blake3_hash returns a 64-char hex string with pinned empty-input value' do
-      # Empty input → known BLAKE3 (single-block, flags=11) hash.
+      # Empty input → official BLAKE3 KAT (standard single-block, 0..64 bytes).
       result = ctx.blake3_hash('')
-      expect(result).to eq('7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86')
+      expect(result).to eq('af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262')
       expect(result.length).to eq(64)
     end
 
     it 'blake3_hash accepts arbitrary hex input and agrees cross-language' do
-      # 'abc' hex-encoded — same expected value as TS and Python runtime.
+      # 'abc' hex-encoded — official BLAKE3 KAT, same value as TS and Python runtime.
       expect(ctx.blake3_hash('616263')).to eq(
-        '6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d'
+        '6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85'
       )
     end
   end

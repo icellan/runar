@@ -8,11 +8,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'Blake3Test.runar.sol'), 'utf8');
 const FILE_NAME = 'Blake3Test.runar.sol';
 
-// BLAKE3 IV: the standard initialization vector (8 x 32-bit words, big-endian hex)
-const BLAKE3_IV = '6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19';
+// BLAKE3 IV as a chaining value: the standard IV encoded little-endian (a
+// 4-byte Bitcoin Script byte-string is a little-endian 32-bit word).
+const BLAKE3_IV = '67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b';
 
-// BLAKE3 hash of an all-zero 64-byte block (compress with blockLen=64, flags=11)
-const BLAKE3_HASH_OF_ZEROS = '7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86';
+// Standard BLAKE3 compress(IV, all-zero 64-byte block, blockLen=64, flags=11),
+// which also equals blake3Hash of a 64-byte all-zero message.
+const BLAKE3_HASH_OF_ZEROS = '4d006976636a8696d909a630a4081aad4d7c50f81afdee04020bf05086ab6a55';
 
 // All-zero 64-byte block
 const ZERO_BLOCK = '00'.repeat(64);

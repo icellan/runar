@@ -1,6 +1,6 @@
 {
-  "version": "runar-v0.1.0",
-  "compilerVersion": "0.1.0",
+  "version": "runar-v1.0.0-rc.1",
+  "compilerVersion": "1.0.0-rc.1",
   "contractName": "P2PKH",
   "abi": {
     "constructor": {

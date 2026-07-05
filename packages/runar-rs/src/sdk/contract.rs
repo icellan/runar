@@ -921,12 +921,12 @@ impl RunarContract {
                     new_amount_hex.push_str(&encode_arg(&SdkValue::Int(new_satoshis.unwrap_or(current_utxo.satoshis))));
                 }
 
-                // Build prefix: optionally _codePart + _opPushTxSig
+                // Build prefix: optionally _codePart (BUG-100: no op_sig pushed —
+                // the signature is derived on-chain from the preimage).
                 let mut prefix = String::new();
                 if let Some(ref cp) = code_part_for_prefix {
                     prefix.push_str(&encode_push_data(cp));
                 }
-                prefix.push_str(&encode_push_data(&op_sig));
 
                 let unlock = format!(
                     "{}{}{}{}{}{}{}",
@@ -1321,10 +1321,10 @@ impl RunarContract {
                     change_hex.push_str(&encode_push_data(change_pkh_hex));
                     change_hex.push_str(&encode_arg(&SdkValue::Int(0)));
                 }
-                // Terminal never needs code part
+                // Terminal never needs code part. BUG-100: no op_sig pushed —
+                // the signature is derived on-chain from the preimage.
                 let unlock = format!(
-                    "{}{}{}{}{}{}",
-                    encode_push_data(&op_sig),
+                    "{}{}{}{}{}",
                     args_hex,
                     change_hex,
                     encode_push_data(&preimage),
@@ -1856,13 +1856,19 @@ impl RunarContract {
             || self.artifact.code_separator_indices.as_ref().map_or(false, |v| !v.is_empty())
     }
 
-    /// Build the prefix for a stateful unlocking script: optionally _codePart + _opPushTxSig.
+    /// Build the prefix for a stateful unlocking script: optionally _codePart.
+    ///
+    /// BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+    /// preimage (see codegen emit_check_preimage_binding), so NO signature is
+    /// pushed here — the unlocking script carries only _codePart (if needed) and
+    /// the preimage. The `op_sig_hex` parameter is retained for call-site
+    /// compatibility but ignored.
     fn build_stateful_prefix(&self, op_sig_hex: &str, needs_code_part: bool) -> String {
+        let _ = op_sig_hex;
         let mut prefix = String::new();
         if needs_code_part && self.has_code_separator() {
             prefix.push_str(&encode_push_data(&self.get_code_part_hex()));
         }
-        prefix.push_str(&encode_push_data(op_sig_hex));
         prefix
     }
 

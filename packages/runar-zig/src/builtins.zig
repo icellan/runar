@@ -43,11 +43,13 @@ const blake3_iv_words = [_]u32{
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 };
 
+// Little-endian encoding of the 8 IV words (standard BLAKE3 encodes CV/IV words
+// as little-endian bytes).
 const blake3_iv_bytes = [_]u8{
-    0x6a, 0x09, 0xe6, 0x67, 0xbb, 0x67, 0xae, 0x85,
-    0x3c, 0x6e, 0xf3, 0x72, 0xa5, 0x4f, 0xf5, 0x3a,
-    0x51, 0x0e, 0x52, 0x7f, 0x9b, 0x05, 0x68, 0x8c,
-    0x1f, 0x83, 0xd9, 0xab, 0x5b, 0xe0, 0xcd, 0x19,
+    0x67, 0xe6, 0x09, 0x6a, 0x85, 0xae, 0x67, 0xbb,
+    0x72, 0xf3, 0x6e, 0x3c, 0x3a, 0xf5, 0x4f, 0xa5,
+    0x7f, 0x52, 0x0e, 0x51, 0x8c, 0x68, 0x05, 0x9b,
+    0xab, 0xd9, 0x83, 0x1f, 0x19, 0xcd, 0xe0, 0x5b,
 };
 
 const blake3_msg_perm = [_]u8{ 2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8 };
@@ -544,25 +546,25 @@ pub fn sha256Finalize(chaining_value: base.ByteString, remaining: base.ByteStrin
     return dupeBytes(&out);
 }
 
-pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
-    // CONTRACT-ABORT: length invariants of the in-contract Blake3 builtin.
-    if (chaining_value.len != 32) @panic("blake3Compress: chaining value must be 32 bytes");
-    if (block.len != 64) @panic("blake3Compress: block must be 64 bytes");
-
+// Single-block BLAKE3 compression. BLAKE3 is little-endian: the chaining value
+// and block are parsed as little-endian u32 words and the digest is emitted as
+// little-endian bytes. `block_len` is the state word v[14] — the real message
+// length for blake3Hash, or the constant 64 for a full-block blake3Compress.
+fn blake3CompressBlock(chaining_value: base.ByteString, block: base.ByteString, block_len: u32) base.ByteString {
     var h: [8]u32 = undefined;
     var m: [16]u32 = undefined;
     for (0..8) |index| {
-        h[index] = std.mem.readInt(u32, chaining_value[index * 4 ..][0..4], .big);
+        h[index] = std.mem.readInt(u32, chaining_value[index * 4 ..][0..4], .little);
     }
     for (0..16) |index| {
-        m[index] = std.mem.readInt(u32, block[index * 4 ..][0..4], .big);
+        m[index] = std.mem.readInt(u32, block[index * 4 ..][0..4], .little);
     }
 
     var state = [_]u32{
         h[0], h[1], h[2], h[3],
         h[4], h[5], h[6], h[7],
         blake3_iv_words[0], blake3_iv_words[1], blake3_iv_words[2], blake3_iv_words[3],
-        0, 0, 64, 11,
+        0, 0, block_len, 11,
     };
     var msg = m;
     for (0..7) |round_index| {
@@ -573,9 +575,18 @@ pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) b
     var out: [32]u8 = undefined;
     for (0..8) |index| {
         const word = state[index] ^ state[index + 8];
-        std.mem.writeInt(u32, out[index * 4 ..][0..4], word, .big);
+        std.mem.writeInt(u32, out[index * 4 ..][0..4], word, .little);
     }
     return dupeBytes(&out);
+}
+
+pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: length invariants of the in-contract Blake3 builtin.
+    if (chaining_value.len != 32) @panic("blake3Compress: chaining value must be 32 bytes");
+    if (block.len != 64) @panic("blake3Compress: block must be 64 bytes");
+
+    // Full 64-byte block → block_len = 64.
+    return blake3CompressBlock(chaining_value, block, 64);
 }
 
 pub fn blake3Hash(message: base.ByteString) base.ByteString {
@@ -584,7 +595,8 @@ pub fn blake3Hash(message: base.ByteString) base.ByteString {
 
     var block = [_]u8{0} ** 64;
     @memcpy(block[0..message.len], message);
-    return blake3Compress(blake3_iv_bytes[0..], &block);
+    // Standard BLAKE3: v[14] = real message length (0..64), IV as LE chaining value.
+    return blake3CompressBlock(blake3_iv_bytes[0..], &block, @intCast(message.len));
 }
 
 // Mirrors the on-chain Rabin codegen's OP_WITHIN bound (0 <= padding < 65536).
@@ -2165,22 +2177,31 @@ test "sha256Finalize matches standard sha256 for one and two block messages" {
 }
 
 test "blake3 helpers follow the single block runtime semantics" {
+    // Standard BLAKE3 of "abc" (little-endian, block_len = 3).
     const expected_abc = [_]u8{
-        0x6f, 0x98, 0x71, 0xb5, 0xd6, 0xe8, 0x0f, 0xc8,
-        0x82, 0xe7, 0xbb, 0x57, 0x85, 0x7f, 0x8b, 0x27,
-        0x9c, 0xdc, 0x22, 0x96, 0x64, 0xea, 0xb9, 0x38,
-        0x2d, 0x28, 0x38, 0xdb, 0xf7, 0xd8, 0xa2, 0x0d,
+        0x64, 0x37, 0xb3, 0xac, 0x38, 0x46, 0x51, 0x33,
+        0xff, 0xb6, 0x3b, 0x75, 0x27, 0x3a, 0x8d, 0xb5,
+        0x48, 0xc5, 0x58, 0x46, 0x5d, 0x79, 0xdb, 0x03,
+        0xfd, 0x35, 0x9c, 0x6c, 0xd5, 0xbd, 0x9d, 0x85,
     };
 
     const hashed = blake3Hash("abc");
     defer freeIfOwned(hashed);
     try std.testing.expectEqualSlices(u8, &expected_abc, hashed);
 
+    // blake3Compress operates on a full 64-byte block (block_len = 64), so it
+    // differs from blake3Hash("abc") (block_len = 3). Verify the compress KAT.
+    const expected_compress = [_]u8{
+        0xed, 0xf4, 0x47, 0xf5, 0xd5, 0xd7, 0x4c, 0xa1,
+        0xc3, 0xb8, 0x79, 0xb0, 0x87, 0x25, 0x41, 0xb4,
+        0x9e, 0x0f, 0xe6, 0xf4, 0xe0, 0x1a, 0xc3, 0xa9,
+        0x2a, 0x8a, 0x81, 0xba, 0x47, 0x48, 0x70, 0x87,
+    };
     var block = [_]u8{0} ** 64;
     @memcpy(block[0..3], "abc");
     const compressed = blake3Compress(blake3_iv_bytes[0..], &block);
     defer freeIfOwned(compressed);
-    try std.testing.expectEqualSlices(u8, hashed, compressed);
+    try std.testing.expectEqualSlices(u8, &expected_compress, compressed);
 }
 
 test "ec helpers use real secp256k1 arithmetic" {

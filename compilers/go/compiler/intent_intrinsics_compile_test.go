@@ -137,8 +137,11 @@ func (c *MinIntent) Bind() {
 	// is being compared. Window is clamped to len(hex) — for a witness-
 	// bridge intrinsic the comparison is one of the LAST things the
 	// script does, so the OP_HASH256 sits near the end and the window
-	// is naturally short.
-	idx := strings.Index(hex, "aa")
+	// is naturally short. Use LastIndex: the auto-injected checkPreimage
+	// prologue is an opaque OP_PUSH_TX blob that contains its own earlier
+	// OP_HASH256 (hash256(preimage)); the witness-bridge hash256→equality
+	// is the LAST OP_HASH256 in the script (BUG-100 fix).
+	idx := strings.LastIndex(hex, "aa")
 	end := idx + 18
 	if end > len(hex) {
 		end = len(hex)

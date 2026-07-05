@@ -17,25 +17,32 @@ def test_blake3_compress_zero_block_zero_cv():
 
 
 def test_blake3_hash_empty_matches_cross_reference():
-    """Empty message hash must match the cross-language reference.
+    """Empty message hash must match the official BLAKE3 KAT.
 
-    The expected value is derived from our own compressor with the same
-    blockLen=64, counter=0, flags=11 parameters. All six language runtimes
-    must agree on this value; any change here is a cross-compiler regression.
+    blake3_hash uses the real message length as block_len (0 here), so it is
+    NOT equal to blake3_compress(IV, zero-pad(msg, 64)) — that identity only
+    holds for a full 64-byte message. All seven runtimes must agree on this
+    official value; any change is a cross-compiler regression.
     """
     h = blake3_hash(b"")
     assert len(h) == 32
-    # Cross-check via explicit compression: blake3Hash(msg) ==
-    # blake3Compress(IV, zero-pad(msg, 64))
-    direct = blake3_compress(_BLAKE3_IV_BYTES, b"\x00" * 64)
-    assert h == direct
+    assert h.hex() == "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
 
 
 def test_blake3_hash_abc_matches_cross_reference():
-    """'abc' input hash must match the explicit compression equivalent."""
+    """'abc' input hash must match the official BLAKE3 KAT (block_len=3)."""
     h = blake3_hash(b"abc")
-    expected = blake3_compress(_BLAKE3_IV_BYTES, b"abc" + b"\x00" * 61)
-    assert h == expected
+    assert h.hex() == "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+
+
+def test_blake3_hash_full_block_equals_compress():
+    """For a full 64-byte message, blake3_hash == blake3_compress(IV, msg).
+
+    Both use block_len=64, so this is the one input length where the
+    hash/compress cross-reference identity holds under standard BLAKE3.
+    """
+    msg = bytes(range(64))
+    assert blake3_hash(msg) == blake3_compress(_BLAKE3_IV_BYTES, msg)
 
 
 def test_blake3_hash_accepts_hex_string_literal():
@@ -71,13 +78,13 @@ def test_blake3_hash_matches_typescript_reference():
     """
     assert (
         blake3_hash(b"").hex()
-        == "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"
+        == "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
     )
     assert (
         blake3_hash(b"abc").hex()
-        == "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"
+        == "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
     )
     assert (
         blake3_hash(b"hello world").hex()
-        == "47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc"
+        == "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     )

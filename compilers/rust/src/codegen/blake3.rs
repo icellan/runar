@@ -2,15 +2,20 @@
 //!
 //! Port of packages/runar-compiler/src/passes/blake3-codegen.ts.
 //!
-//! emit_blake3_compress: [chainingValue(32 BE), block(64 BE)] -> [hash(32 BE)]
-//! emit_blake3_hash:     [message(<=64 BE)]                   -> [hash(32 BE)]
+//! emit_blake3_compress: [chainingValue(32 LE), block(64 LE)] -> [hash(32 LE)]
+//! emit_blake3_hash:     [message(<=64 bytes)]                -> [hash(32 LE)]
+//!
+//! BLAKE3 is little-endian: message and chaining value are loaded as
+//! little-endian 32-bit words and the digest is output as little-endian bytes.
+//! A 4-byte Bitcoin Script byte-string IS a little-endian value, so raw 4-byte
+//! chunks are already the LE words — no per-word byte reversal at I/O.
 //!
 //! Architecture (same as sha256.rs):
 //!   - All 32-bit words stored as 4-byte little-endian during computation.
 //!   - LE additions via BIN2NUM/NUM2BIN (13 ops per add32).
 //!   - Byte-aligned rotations (16, 8) via SPLIT/SWAP/CAT on LE (4 ops).
 //!   - Non-byte-aligned rotations (12, 7) via LE->BE->rotrBE->BE->LE (31 ops).
-//!   - BE<->LE conversion only at input unpack and output pack.
+//!   - BE<->LE conversion only inside the 12/7 rotations.
 //!
 //! Stack layout during rounds:
 //!   [m0..m15, v0..v15]  (all LE 4-byte values)
@@ -47,15 +52,6 @@ fn u32_to_le(n: u32) -> Vec<u8> {
         ((n >> 8) & 0xff) as u8,
         ((n >> 16) & 0xff) as u8,
         ((n >> 24) & 0xff) as u8,
-    ]
-}
-
-fn u32_to_be(n: u32) -> Vec<u8> {
-    vec![
-        ((n >> 24) & 0xff) as u8,
-        ((n >> 16) & 0xff) as u8,
-        ((n >> 8) & 0xff) as u8,
-        (n & 0xff) as u8,
     ]
 }
 
@@ -310,17 +306,6 @@ impl Emitter {
         self.rotr_be(n); // rotate on BE (7 ops)
         self.reverse_bytes4(); // BE -> LE (12 ops)
     }
-
-    /// Convert N x BE words on TOS to LE, preserving stack order.
-    fn be_words_to_le(&mut self, n: usize) {
-        for _ in 0..n {
-            self.reverse_bytes4();
-            self.to_alt();
-        }
-        for _ in 0..n {
-            self.from_alt();
-        }
-    }
 }
 
 // =========================================================================
@@ -495,21 +480,19 @@ fn emit_g_call(
 // Full compression ops generator
 // =========================================================================
 
-fn generate_compress_ops() -> Vec<StackOp> {
+fn generate_compress_ops(block_len_from_alt: bool) -> Vec<StackOp> {
     let mut em = Emitter::new(2);
     let msg_schedule = compute_msg_schedule();
 
     // ================================================================
     // Phase 1: Unpack block into 16 LE message words
     // ================================================================
-    // Stack: [chainingValue(32 BE), block(64 BE)]
-    // Split block into 16 x 4-byte BE words, convert to LE
+    // Stack: [chainingValue(32 LE), block(64 LE)]
+    // Split block into 16 x 4-byte little-endian words (raw chunks are LE words).
     for _ in 0..15 {
         em.split4();
     }
     em.assert_depth(17, "after block unpack"); // 16 block words + 1 chainingValue
-    em.be_words_to_le(16);
-    em.assert_depth(17, "after block LE convert");
     // Stack: [CV, m0(LE), m1(LE), ..., m15(LE)] -- m0 deepest of msg words, m15 TOS
 
     // ================================================================
@@ -521,15 +504,13 @@ fn generate_compress_ops() -> Vec<StackOp> {
     em.assert_depth(16, "after CV to alt");
     // Stack: [m0, m1, ..., m15]  Alt: [CV]
 
-    // Get CV back, split into 8 LE words, place on top of msg
+    // Get CV back, split into 8 LE words, place on top of msg (raw chunks are LE).
     em.from_alt();
     em.assert_depth(17, "after CV from alt");
     for _ in 0..7 {
         em.split4();
     }
     em.assert_depth(24, "after cv unpack");
-    em.be_words_to_le(8);
-    em.assert_depth(24, "after cv LE convert");
     // Stack: [m0..m15, cv0(LE)..cv7(LE)]
 
     // v[0..7] = chaining value (already on stack)
@@ -542,8 +523,13 @@ fn generate_compress_ops() -> Vec<StackOp> {
     // v[12] = counter_low = 0, v[13] = counter_high = 0
     em.push_b(u32_to_le(0));
     em.push_b(u32_to_le(0));
-    // v[14] = block_len = 64
-    em.push_b(u32_to_le(64));
+    // v[14] = block_len — the real message length for blake3Hash (from alt), or
+    // the constant 64 for a full-block blake3Compress.
+    if block_len_from_alt {
+        em.from_alt(); // block_len (4-byte LE) supplied by caller (emit_blake3_hash)
+    } else {
+        em.push_b(u32_to_le(64));
+    }
     // v[15] = flags = CHUNK_START | CHUNK_END | ROOT = 11
     em.push_b(u32_to_le(CHUNK_START | CHUNK_END | ROOT));
     em.assert_depth(32, "after state init");
@@ -615,13 +601,12 @@ fn generate_compress_ops() -> Vec<StackOp> {
     em.assert_depth(24, "after XOR results restored");
     // Main: [m0..m15, h0, h1, ..., h7] h7=TOS
 
-    // Pack into 32-byte BE result: h0_BE || h1_BE || ... || h7_BE
-    em.reverse_bytes4(); // h7 -> h7_BE
+    // Pack into 32-byte little-endian digest: h0_LE || h1_LE || ... || h7_LE.
+    // The words are already little-endian (BLAKE3 output is LE bytes), so no
+    // per-word reversal — just concatenate the top two 7 times, building
+    // h0 || h1 || ... || h7.
     for _ in 1..8 {
-        em.swap(); // bring h[7-i] (LE) to TOS
-        em.reverse_bytes4(); // -> BE
-        em.swap(); // [new_BE, accumulated]
-        em.bin_op("OP_CAT"); // new_BE || accumulated
+        em.bin_op("OP_CAT"); // h[7-i] || accumulated
     }
     em.assert_depth(17, "after hash pack");
 
@@ -639,35 +624,48 @@ fn generate_compress_ops() -> Vec<StackOp> {
 static COMPRESS_OPS: OnceLock<Vec<StackOp>> = OnceLock::new();
 
 fn get_compress_ops() -> &'static Vec<StackOp> {
-    COMPRESS_OPS.get_or_init(generate_compress_ops)
+    COMPRESS_OPS.get_or_init(|| generate_compress_ops(false))
 }
 
 // =========================================================================
 // Public entry points
 // =========================================================================
 
-/// Emit BLAKE3 single-block compression in Bitcoin Script.
-/// Stack on entry: [..., chainingValue(32 BE), block(64 BE)]
-/// Stack on exit:  [..., hash(32 BE)]
+/// Emit BLAKE3 single full-block compression in Bitcoin Script.
+/// Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
+/// Stack on exit:  [..., hash(32 LE)]
 /// Net depth: -1
+///
+/// Uses block_len=64, counter=0, flags=CHUNK_START|CHUNK_END|ROOT — words are
+/// little-endian (standard BLAKE3): a 4-byte byte-string is already a LE word.
 pub fn emit_blake3_compress(emit: &mut dyn FnMut(StackOp)) {
     for op in get_compress_ops() {
         emit(op.clone());
     }
 }
 
-/// Emit BLAKE3 hash for a message up to 64 bytes.
-/// Stack on entry: [..., message(<=64 BE)]
-/// Stack on exit:  [..., hash(32 BE)]
+/// Emit standard BLAKE3 hash for a message up to 64 bytes (single block).
+/// Stack on entry: [..., message(<=64 bytes)]
+/// Stack on exit:  [..., hash(32 LE)]
 /// Net depth: 0
 ///
-/// Applies zero-padding and uses IV as chaining value.
+/// Captures the real message length as block_len, zero-pads to 64 bytes, and
+/// uses the IV as chaining value. Matches the official BLAKE3 reference for all
+/// inputs 0..64 bytes.
 pub fn emit_blake3_hash(emit: &mut dyn FnMut(StackOp)) {
     let mut em = Emitter::new(1);
 
-    // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
+    // Capture block_len = message length as a 4-byte little-endian value on the
+    // alt stack (consumed as v[14] inside the compression).
     em.oc("OP_SIZE");
     em.depth += 1; // [message, len]
+    em.oc("OP_DUP");
+    em.depth += 1; // [message, len, len]
+    em.push_i(4);
+    em.bin_op("OP_NUM2BIN"); // [message, len, blockLenLE(4)]
+    em.to_alt(); // [message, len]; alt: [blockLenLE]
+
+    // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
     em.push_i(64);
     em.swap();
     em.bin_op("OP_SUB"); // [message, 64-len]
@@ -676,17 +674,17 @@ pub fn emit_blake3_hash(emit: &mut dyn FnMut(StackOp)) {
     em.bin_op("OP_NUM2BIN"); // [message, zeros]
     em.bin_op("OP_CAT"); // [paddedMessage(64)]
 
-    // Push IV as 32-byte BE chaining value
+    // Push IV as 32-byte little-endian chaining value
     let mut iv_bytes = Vec::with_capacity(32);
     for i in 0..8 {
-        iv_bytes.extend_from_slice(&u32_to_be(BLAKE3_IV[i]));
+        iv_bytes.extend_from_slice(&u32_to_le(BLAKE3_IV[i]));
     }
     em.push_b(iv_bytes);
-    em.swap(); // [IV(32 BE), paddedMessage(64 BE)]
+    em.swap(); // [IV(32 LE), paddedMessage(64 LE)]
 
-    // Splice compression ops
-    let compress_ops = get_compress_ops();
-    for op in compress_ops {
+    // Splice compression ops with the real block_len taken from the alt stack.
+    let compress_ops = generate_compress_ops(true);
+    for op in &compress_ops {
         em.e_raw(op.clone());
     }
     em.depth = 1;

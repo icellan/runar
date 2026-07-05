@@ -22,6 +22,7 @@ import runar.compiler.ir.stack.PlaceholderOp;
 import runar.compiler.ir.stack.ByteStringPushValue;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
+import runar.compiler.ir.stack.RawBytesOp;
 import runar.compiler.ir.stack.RollOp;
 import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackMethod;
@@ -220,15 +221,21 @@ class StackLowerTest {
         StackProgram p = compile(COUNTER_SRC, "Counter.runar.java");
         StackMethod inc = findMethod(p, "increment");
         boolean sawCodeSep = false;
-        boolean sawChecksigVerify = false;
+        boolean sawPreimageBinding = false;
         for (StackOp op : inc.ops()) {
             if (op instanceof OpcodeOp o) {
                 if ("OP_CODESEPARATOR".equals(o.code())) sawCodeSep = true;
-                if ("OP_CHECKSIGVERIFY".equals(o.code())) sawChecksigVerify = true;
             }
+            // BUG-100: checkPreimage now derives AND verifies the OP_PUSH_TX
+            // signature on-chain as one fixed 760-byte opaque raw_bytes blob.
+            // OP_CHECKSIG is INSIDE the blob (a peephole barrier), so it is no
+            // longer a discrete OP_CHECKSIGVERIFY StackOp. The binding blob is
+            // byte-identical across all seven tiers.
+            if (op instanceof RawBytesOp rb && rb.bytes().length == 760) sawPreimageBinding = true;
         }
         assertTrue(sawCodeSep, "stateful method must emit OP_CODESEPARATOR via checkPreimage");
-        assertTrue(sawChecksigVerify, "checkPreimage emits OP_CHECKSIGVERIFY for the G-verify step");
+        assertTrue(sawPreimageBinding,
+            "checkPreimage must emit the 760-byte OP_PUSH_TX sig-derivation raw_bytes blob");
     }
 
     @Test

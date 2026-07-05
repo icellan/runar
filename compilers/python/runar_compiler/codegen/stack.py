@@ -122,6 +122,46 @@ class StackMethod:
 
 
 # ---------------------------------------------------------------------------
+# OP_PUSH_TX on-chain signature derivation (BUG-100 fix)
+# ---------------------------------------------------------------------------
+#
+# The insecure legacy checkPreimage accepted a witness signature over the real
+# spending transaction and checked it against pubkey G, never reading the pushed
+# preimage — so the preimage was decoupled from the tx. This derives the ECDSA
+# signature FROM the preimage on-chain (s = (hash256(preimage) + r)*k^-1 mod n,
+# fixed nonce, privkey d=1, low-S, minimal DER), so OP_CHECKSIG passes only when
+# hash256(preimage) equals the real tx sighash.
+#
+# The construction compiles to a FIXED byte sequence identical across all seven
+# tiers; it is the canonical output of the TypeScript reference
+# (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a single
+# opaque raw_bytes op (peephole barrier). The cross-tier conformance suite
+# guards that this constant matches every other tier byte-for-byte.
+_CHECK_PREIMAGE_BINDING_HEX = (
+    "76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e"
+    "7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f"
+    "7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c"
+    "7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c51"
+    "7f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b"
+    "7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c"
+    "7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f04c6"
+    "009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f952141"
+    "4136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b757893"
+    "7c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7fa078"
+    "21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d7c94"
+    "9594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c51"
+    "7f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b"
+    "7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c"
+    "517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b"
+    "7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e"
+    "7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f"
+    "7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6047f"
+    "9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e7c7e"
+    "01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad"
+)
+
+
+# ---------------------------------------------------------------------------
 # Builtin function -> opcode mapping
 # ---------------------------------------------------------------------------
 
@@ -2628,38 +2668,47 @@ class _LoweringContext:
 
     def _lower_check_preimage(self, binding_name: str, preimage: str,
                               binding_index: int, last_uses: dict[str, int]) -> None:
+        # OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
+        # current spending transaction. The signature is DERIVED FROM THE PREIMAGE
+        # ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*k^-1 mod n,
+        # with fixed nonce k and privkey d=1 (pubkey = G). OP_CHECKSIG(sig, G)
+        # then passes iff hash256(preimage) equals the node's real tx sighash —
+        # closing BUG-100. The unlocking script pushes ONLY <preimage> (no
+        # witness signature). See _emit_check_preimage_binding for the
+        # construction.
+
         # Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
         # preimage is only the code after this point. This reduces preimage size
         # for large scripts and is required for scripts > ~32KB.
         self.emit_op(StackOp(op="opcode", code="OP_CODESEPARATOR"))
 
-        # Step 1: Bring preimage to top (non-consuming)
+        # Step 1: Bring preimage to top (non-consuming; kept for field extractors)
         is_last = self._is_last_use(preimage, binding_index, last_uses)
         self.bring_to_top(preimage, is_last)
 
-        # Step 2: Bring the implicit _opPushTxSig to top (consuming)
-        self.bring_to_top("_opPushTxSig", True)
-
-        # Step 3: Push compressed secp256k1 generator point G (33 bytes)
-        G = bytes([
-            0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB,
-            0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B,
-            0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28,
-            0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17,
-            0x98,
-        ])
-        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=G)))
-        self.sm.push("")  # G on stack
-
-        # Step 4: OP_CHECKSIGVERIFY
-        self.emit_op(StackOp(op="opcode", code="OP_CHECKSIGVERIFY"))
-        self.sm.pop()  # G consumed
-        self.sm.pop()  # _opPushTxSig consumed
+        # Step 2: Derive + verify the signature on-chain (single opaque raw_bytes
+        # blob, byte-identical across all 7 tiers). Net stack effect is zero.
+        self._emit_check_preimage_binding()
 
         # Preimage remains on top.  Rename for field extractors.
         self.sm.pop()
         self.sm.push(binding_name)
         self._track_depth()
+
+    def _emit_check_preimage_binding(self) -> None:
+        """Emit the on-chain preimage binding as one opaque raw_bytes op.
+
+        Net stack effect is 0 (preimage in -> preimage out), declared as
+        in_arity=1 / out_arity=1 so the static analyzer keeps the depth
+        consistent. The bytes are the canonical BUG-100 construction, identical
+        across all seven tiers and guarded by the cross-tier conformance suite.
+        """
+        self.emit_op(StackOp(
+            op="raw_bytes",
+            raw_bytes=bytes.fromhex(_CHECK_PREIMAGE_BINDING_HEX),
+            in_arity=1,
+            out_arity=1,
+        ))
 
     # -----------------------------------------------------------------
     # Preimage field extractors
@@ -4105,9 +4154,10 @@ def _lower_method_with_private_methods(
 
     # If the method uses checkPreimage, the unlocking script pushes implicit
     # params before all declared parameters (OP_PUSH_TX pattern).
-    # _codePart: full code script (locking script minus state) as ByteString
-    # _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
-    # These are inserted at the base of the stack so they can be consumed later.
+    # _codePart: full code script (locking script minus state) as ByteString.
+    # (BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+    # preimage — see _lower_check_preimage — so NO _opPushTxSig witness item is
+    # pushed. The unlocking script provides only the preimage.)
     # _codePart is needed for continuation builders (add_output/add_raw_output)
     # OR when the method reads a mutable variable-length (ByteString) state
     # field — the deserialization needs it for the preimage-relative offset
@@ -4120,10 +4170,8 @@ def _lower_method_with_private_methods(
         and (_method_uses_code_part(method.body)
              or _method_reads_var_len_state(method.body, var_len_props))
     )
-    if _method_uses_check_preimage(method.body, private_methods):
-        param_names = ["_opPushTxSig"] + param_names
-        if uses_code_part:
-            param_names = ["_codePart"] + param_names
+    if _method_uses_check_preimage(method.body, private_methods) and uses_code_part:
+        param_names = ["_codePart"] + param_names
 
     ctx = _LoweringContext(param_names, properties)
     ctx.private_methods = private_methods

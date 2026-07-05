@@ -1385,11 +1385,18 @@ class RunarContract:
         return self.artifact.code_separator_index is not None or bool(self.artifact.code_separator_indices)
 
     def _build_stateful_prefix(self, op_sig_hex: str, needs_code_part: bool) -> str:
-        """Build prefix: optionally _codePart + _opPushTxSig."""
+        """Build prefix: optionally _codePart.
+
+        BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+        preimage (see codegen _emit_check_preimage_binding), so NO signature is
+        pushed here — the unlocking script carries only _codePart (if needed) and
+        the preimage. The op_sig_hex parameter is retained for call-site
+        compatibility but ignored.
+        """
+        del op_sig_hex  # no longer pushed; signature derived on-chain
         prefix = ''
         if needs_code_part and self._has_code_separator():
             prefix += encode_push_data(self._get_code_part_hex())
-        prefix += encode_push_data(op_sig_hex)
         return prefix
 
     def _find_method_index(self, name: str) -> int:

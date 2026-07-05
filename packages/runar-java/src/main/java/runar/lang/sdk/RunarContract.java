@@ -502,8 +502,9 @@ public final class RunarContract {
     /**
      * Full OP_PUSH_TX call flow: spawns a stateful continuation output
      * (when applicable), borrows P2PKH UTXOs from the signer's address
-     * to pay the fee, splices an {@code _opPushTxSig + preimage}
-     * pair into the unlocking script, and broadcasts.
+     * to pay the fee, splices the {@code preimage} into the unlocking
+     * script, and broadcasts. (BUG-100 fix: no OP_PUSH_TX signature is
+     * pushed — it is derived on-chain from the preimage.)
      */
     private CallOutcome callWithPushTx(
         RunarArtifact.ABIMethod m,
@@ -858,8 +859,11 @@ public final class RunarContract {
 
     /**
      * Builds a full OP_PUSH_TX-style unlocking script:
-     *   [_codePart] _opPushTxSig user_args [_changePKH _changeAmount]
+     *   [_codePart] user_args [_changePKH _changeAmount]
      *   [_newAmount] preimage [methodSelector]
+     *
+     * <p>BUG-100 fix: no OP_PUSH_TX signature is pushed — it is derived
+     * on-chain from the preimage (see codegen emitCheckPreimageBinding).
      *
      * <p>{@code changePkhHex} may be {@code null} when the method does
      * not need a change PKH; same for {@code methodNeedsNewAmount}.
@@ -887,8 +891,11 @@ public final class RunarContract {
             sb.append(ScriptUtils.encodePushData(getCodePartHex()));
         }
 
-        // _opPushTxSig push.
-        sb.append(ScriptUtils.encodePushData(opPushTxSigHex));
+        // BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+        // preimage (see codegen emitCheckPreimageBinding), so NO signature is
+        // pushed here — the unlocking script carries only _codePart (if needed)
+        // and the preimage. The opPushTxSigHex parameter is retained for
+        // call-site compatibility but ignored.
 
         // User args (already resolved).
         for (int i = 0; i < userArgs.size(); i++) {

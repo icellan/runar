@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +12,19 @@ import (
 	"github.com/icellan/runar/compilers/go/frontend"
 	"github.com/icellan/runar/compilers/go/ir"
 )
+
+// buildTimestamp returns the artifact build time as an RFC 3339 string. When
+// SOURCE_DATE_EPOCH is set (the reproducible-builds standard, a Unix seconds
+// value), that instant is used so byte-identical inputs yield byte-identical
+// artifacts across machines and runs; otherwise the current wall-clock time.
+func buildTimestamp() string {
+	if s := os.Getenv("SOURCE_DATE_EPOCH"); s != "" {
+		if sec, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return time.Unix(sec, 0).UTC().Format(time.RFC3339)
+		}
+	}
+	return time.Now().UTC().Format(time.RFC3339)
+}
 
 // ---------------------------------------------------------------------------
 // Artifact types — mirrors the TypeScript RunarArtifact schema
@@ -365,7 +379,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		CodeSepIndexSlots:   codeSepIndexSlots,
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
-		BuildTimestamp:       time.Now().UTC().Format(time.RFC3339),
+		BuildTimestamp:       buildTimestamp(),
 	}
 
 	// Always include ANF IR for stateful contracts — the SDK uses it

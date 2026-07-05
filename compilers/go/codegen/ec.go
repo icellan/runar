@@ -784,6 +784,28 @@ func EmitEcOnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	ecDecomposePoint(t, "_pt", "_x", "_y")
 
+	// GAP-301: coordinate canonicity. ecDecomposePoint BIN2NUMs each coordinate
+	// as an unsigned value that may be >= p; the field arithmetic below would
+	// silently reduce it mod p, so a non-canonical encoding of a valid point
+	// would pass. Reject it: require x < p AND y < p (coordinates are unsigned,
+	// so the 0 <= lower bound holds by construction). Combined with the curve
+	// equation at the end via OP_BOOLAND so ecOnCurve still returns a boolean.
+	t.copyToTop("_x", "_x_lt")
+	ecPushFieldP(t, "_p_for_x")
+	t.rawBlock([]string{"_x_lt", "_p_for_x"}, "_x_canon", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop("_y", "_y_lt")
+	ecPushFieldP(t, "_p_for_y")
+	t.rawBlock([]string{"_y_lt", "_p_for_y"}, "_y_canon", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.toTop("_x_canon")
+	t.toTop("_y_canon")
+	t.rawBlock([]string{"_x_canon", "_y_canon"}, "_canon", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
 	// lhs = y^2
 	ecFieldSqr(t, "_y", "_y2")
 
@@ -794,11 +816,18 @@ func EmitEcOnCurve(emit func(StackOp)) {
 	t.pushInt("_seven", 7)
 	ecFieldAdd(t, "_x3", "_seven", "_rhs")
 
-	// Compare
+	// Compare curve equation
 	t.toTop("_y2")
 	t.toTop("_rhs")
-	t.rawBlock([]string{"_y2", "_rhs"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_y2", "_rhs"}, "_curve_eq", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	})
+
+	// on-curve = canonical AND curve-equation
+	t.toTop("_canon")
+	t.toTop("_curve_eq")
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
 

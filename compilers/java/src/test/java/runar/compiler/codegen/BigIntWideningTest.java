@@ -172,6 +172,10 @@ class BigIntWideningTest {
         String src = Files.readString(source);
         var ast = runar.compiler.frontend.TsParser.parse(src, source.toString());
         runar.compiler.passes.Validate.run(ast);
+        // Match the canonical Cli pipeline: fixed-array expansion runs between
+        // validate and typecheck (Cli.java). Omitting it diverges on fixtures
+        // that use fixed arrays (schnorr-zkp's point/scalar arrays).
+        ast = runar.compiler.passes.ExpandFixedArrays.run(ast);
         runar.compiler.passes.Typecheck.run(ast);
         var anf = runar.compiler.passes.AnfLower.run(ast);
         // Match the canonical fold-OFF goldens (Cli passes --disable-constant-folding).

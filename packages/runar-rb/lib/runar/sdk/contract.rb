@@ -1585,10 +1585,21 @@ module Runar
         !@artifact.code_separator_index.nil? || !@artifact.code_separator_indices.to_a.empty?
       end
 
+      # Builds the prefix for an unlocking script: optionally _codePart. This
+      # implicit param is pushed before all method args. needs_code_part should
+      # be true only when the method constructs continuation outputs
+      # (non-terminal stateful calls). Terminal and stateless methods don't use
+      # _codePart.
+      #
+      # BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+      # preimage (see codegen _lower_check_preimage), so NO signature is pushed
+      # here -- the unlocking script carries only _codePart (if needed) and the
+      # preimage. The op_sig_hex parameter is retained for call-site
+      # compatibility but ignored.
       def build_stateful_prefix(op_sig_hex, needs_code_part)
+        _ = op_sig_hex
         prefix = +''
         prefix << State.encode_push_data(get_code_part_hex) if needs_code_part && has_code_separator?
-        prefix << State.encode_push_data(op_sig_hex)
         prefix
       end
 

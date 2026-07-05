@@ -3,6 +3,7 @@
 // runar-cli/bin.ts — CLI entry point
 // ---------------------------------------------------------------------------
 
+import { createRequire } from 'node:module';
 import { program } from 'commander';
 import { initCommand } from './commands/init.js';
 import { compileCommand } from './commands/compile.js';
@@ -14,10 +15,18 @@ import { debugCommand } from './commands/debug.js';
 import { analyzeCommand } from './commands/analyze.js';
 import { decompileCommand } from './commands/decompile.js';
 
+// Read the published version from package.json so `runar --version` never drifts
+// from the shipped artifact. `../package.json` resolves identically whether this
+// module runs from src/ (tsx) or dist/ (built): both sit one level under the
+// package root.
+const { version } = createRequire(import.meta.url)('../package.json') as {
+  version: string;
+};
+
 program
   .name('runar')
   .description('Rúnar: TypeScript-to-Bitcoin Script compiler')
-  .version('0.1.0');
+  .version(version);
 
 program
   .command('init')

@@ -1185,10 +1185,11 @@ export class RunarInterpreter {
 
       case 'blake3Hash': {
         const msg = this.toBytes(args[0]!);
-        // Zero-pad to 64 bytes, use IV as chaining value
+        // Standard BLAKE3 single block: zero-pad to 64 bytes, IV as chaining
+        // value, real message length as block_len (correct for 0..64 bytes).
         const padded = new Uint8Array(64);
         padded.set(msg.subarray(0, 64));
-        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded) };
+        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded, Math.min(msg.length, 64)) };
       }
 
       // Baby Bear field arithmetic (p = 2013265921)
@@ -1753,6 +1754,10 @@ function ecNegateImpl(pt: Uint8Array): Uint8Array {
 
 function ecOnCurveImpl(pt: Uint8Array): boolean {
   const [x, y] = ecDecodePoint(pt);
+  // GAP-301: reject non-canonical coordinate encodings (x ≥ p or y ≥ p) to
+  // match the compiled script, which range-checks the coordinates before the
+  // field arithmetic reduces them mod p.
+  if (x >= EC_P || y >= EC_P) return false;
   const lhs = ecMod(y * y, EC_P);
   const rhs = ecMod(x * x * x + 7n, EC_P);
   return lhs === rhs;
@@ -1796,10 +1801,11 @@ const BLAKE3_IV_WORDS = [
 
 const BLAKE3_IV_BYTES = new Uint8Array(32);
 for (let i = 0; i < 8; i++) {
-  BLAKE3_IV_BYTES[i * 4] = (BLAKE3_IV_WORDS[i]! >>> 24) & 0xff;
-  BLAKE3_IV_BYTES[i * 4 + 1] = (BLAKE3_IV_WORDS[i]! >>> 16) & 0xff;
-  BLAKE3_IV_BYTES[i * 4 + 2] = (BLAKE3_IV_WORDS[i]! >>> 8) & 0xff;
-  BLAKE3_IV_BYTES[i * 4 + 3] = BLAKE3_IV_WORDS[i]! & 0xff;
+  // Little-endian (standard BLAKE3): the CV/IV words are LE-encoded bytes.
+  BLAKE3_IV_BYTES[i * 4] = BLAKE3_IV_WORDS[i]! & 0xff;
+  BLAKE3_IV_BYTES[i * 4 + 1] = (BLAKE3_IV_WORDS[i]! >>> 8) & 0xff;
+  BLAKE3_IV_BYTES[i * 4 + 2] = (BLAKE3_IV_WORDS[i]! >>> 16) & 0xff;
+  BLAKE3_IV_BYTES[i * 4 + 3] = (BLAKE3_IV_WORDS[i]! >>> 24) & 0xff;
 }
 
 const BLAKE3_MSG_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
@@ -1837,22 +1843,22 @@ function blake3Round(s: number[], m: number[]): void {
  * BLAKE3 single-block compression. Matches the on-chain codegen which
  * hardcodes blockLen=64, counter=0, flags=11 (CHUNK_START|CHUNK_END|ROOT).
  */
-function blake3CompressImpl(cv: Uint8Array, block: Uint8Array): Uint8Array {
-  // Parse chaining value as 8 big-endian u32 words
+function blake3CompressImpl(cv: Uint8Array, block: Uint8Array, blockLen = 64): Uint8Array {
+  // Parse chaining value as 8 little-endian u32 words (standard BLAKE3)
   const h: number[] = [];
   for (let i = 0; i < 8; i++) {
     h.push(
-      ((cv[i * 4]! << 24) | (cv[i * 4 + 1]! << 16) |
-       (cv[i * 4 + 2]! << 8) | cv[i * 4 + 3]!) >>> 0,
+      (cv[i * 4]! | (cv[i * 4 + 1]! << 8) |
+       (cv[i * 4 + 2]! << 16) | (cv[i * 4 + 3]! << 24)) >>> 0,
     );
   }
 
-  // Parse block as 16 big-endian u32 words
+  // Parse block as 16 little-endian u32 words
   const m: number[] = [];
   for (let i = 0; i < 16; i++) {
     m.push(
-      ((block[i * 4]! << 24) | (block[i * 4 + 1]! << 16) |
-       (block[i * 4 + 2]! << 8) | block[i * 4 + 3]!) >>> 0,
+      (block[i * 4]! | (block[i * 4 + 1]! << 8) |
+       (block[i * 4 + 2]! << 16) | (block[i * 4 + 3]! << 24)) >>> 0,
     );
   }
 
@@ -1861,10 +1867,10 @@ function blake3CompressImpl(cv: Uint8Array, block: Uint8Array): Uint8Array {
     h[0]!, h[1]!, h[2]!, h[3]!,
     h[4]!, h[5]!, h[6]!, h[7]!,
     BLAKE3_IV_WORDS[0]!, BLAKE3_IV_WORDS[1]!, BLAKE3_IV_WORDS[2]!, BLAKE3_IV_WORDS[3]!,
-    0,  // counter low
-    0,  // counter high
-    64, // blockLen
-    11, // flags = CHUNK_START | CHUNK_END | ROOT
+    0,          // counter low
+    0,          // counter high
+    blockLen,   // blockLen (real message length for blake3Hash; 64 for full-block compress)
+    11,         // flags = CHUNK_START | CHUNK_END | ROOT
   ];
 
   // 7 rounds with message permutation between rounds
@@ -1874,14 +1880,14 @@ function blake3CompressImpl(cv: Uint8Array, block: Uint8Array): Uint8Array {
     if (r < 6) msg = BLAKE3_MSG_PERM.map(i => msg[i]!);
   }
 
-  // Output: XOR first 8 with last 8, encode as big-endian bytes
+  // Output: XOR first 8 with last 8, encode as little-endian bytes (standard BLAKE3)
   const out = new Uint8Array(32);
   for (let i = 0; i < 8; i++) {
     const w = (state[i]! ^ state[i + 8]!) >>> 0;
-    out[i * 4] = (w >>> 24) & 0xff;
-    out[i * 4 + 1] = (w >>> 16) & 0xff;
-    out[i * 4 + 2] = (w >>> 8) & 0xff;
-    out[i * 4 + 3] = w & 0xff;
+    out[i * 4] = w & 0xff;
+    out[i * 4 + 1] = (w >>> 8) & 0xff;
+    out[i * 4 + 2] = (w >>> 16) & 0xff;
+    out[i * 4 + 3] = (w >>> 24) & 0xff;
   }
   return out;
 }

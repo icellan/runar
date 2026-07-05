@@ -18,6 +18,7 @@ TS_FILES=(
   "$ROOT/packages/runar-testing/package.json"
   "$ROOT/packages/runar-sdk/package.json"
   "$ROOT/packages/runar-cli/package.json"
+  "$ROOT/packages/decompiler/package.json"
 )
 
 RUST_TOMLS=(

@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.java`
-**Supported compilers:** Java (native today). TypeScript, Go, Rust, Python, Zig, and Ruby gain `.runar.java` parsing after milestone 7 of the Java tier plan — until then, cross-compiler parity is limited to the Java compiler.
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby, Java (all seven)
 
 ---
 

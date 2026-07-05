@@ -131,7 +131,18 @@ the witness (`Classical.choose`) that lets the in-file smokes and
 `Pipeline.smoke_stateful_consume_fires` fire the correspondence end-to-end
 on concrete contexts.  It is a sibling of the existing `hashBackend` /
 `authBackend` / `preimageBackend` crypto assumptions — NOT a
-codegen-soundness axiom. -/
+codegen-soundness axiom.
+
+BUG-100 fix (2026-07-05): the emitted `checkPreimage` no longer accepts a
+spender-supplied `_opPushTxSig` witness — the verifying signature is now
+DERIVED ON CHAIN from `hash256(preimage)` (Optimal OP_PUSH_TX: `s = (z + r)·k⁻¹
+mod n`, `OP_CHECKSIG` against `G`). The "constructible by every spender"
+reading above is therefore realized deterministically by the locking script
+itself, and the per-deployment agreement is now ENFORCED BY CODEGEN rather than
+assumed. Previously the emitted script did NOT enforce this binding (the
+covenant-bypass finding); the fix grounds the axiom's assumption in the real
+on-chain construction, so this remains a legitimate crypto assumption rather
+than a hidden codegen gap. -/
 axiom exists_checkSig_witness_under_validTxContext (ctx : TxContext)
     (_hValid : ValidTxContext ctx) :
     ∃ sig : ByteArray,

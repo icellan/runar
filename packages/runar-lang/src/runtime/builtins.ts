@@ -441,6 +441,11 @@ export function ecNegate(p: Point): Point {
 export function ecOnCurve(p: Point): boolean {
   const x = BigInt('0x' + (p as string).slice(0, 64));
   const y = BigInt('0x' + (p as string).slice(64, 128));
+  // GAP-301: reject non-canonical coordinate encodings (x ≥ p or y ≥ p). The
+  // compiled script range-checks the coordinates before the field arithmetic
+  // reduces them mod p, so the interpreter must too or it would accept a point
+  // the on-chain script rejects.
+  if (x >= EC_P || y >= EC_P) return false;
   const lhs = (y * y) % EC_P;
   const rhs = (x * x * x + 7n) % EC_P;
   return lhs === rhs;

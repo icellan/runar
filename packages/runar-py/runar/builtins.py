@@ -318,7 +318,7 @@ _BLAKE3_IV_WORDS = (
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 )
 
-_BLAKE3_IV_BYTES = b"".join(w.to_bytes(4, "big") for w in _BLAKE3_IV_WORDS)
+_BLAKE3_IV_BYTES = b"".join(w.to_bytes(4, "little") for w in _BLAKE3_IV_WORDS)
 
 _BLAKE3_MSG_PERM = (2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8)
 
@@ -349,22 +349,28 @@ def _blake3_round(s, m):
     _blake3_g(s, 3, 4, 9, 14, m[14], m[15])
 
 
-def _blake3_compress_impl(cv: bytes, block: bytes) -> bytes:
-    """Single-block BLAKE3 compression with blockLen=64, counter=0, flags=11."""
+def _blake3_compress_impl(cv: bytes, block: bytes, block_len: int = 64) -> bytes:
+    """Single-block BLAKE3 compression with counter=0, flags=11.
+
+    BLAKE3 is little-endian: the chaining value and block are parsed as
+    little-endian u32 words and the digest is emitted as little-endian bytes.
+    ``block_len`` (state word v[14]) is the constant 64 for a full-block
+    ``blake3_compress`` and the real message length for ``blake3_hash``.
+    """
     if len(cv) != 32:
         raise ValueError(f"blake3 chaining value must be 32 bytes, got {len(cv)}")
     if len(block) != 64:
         raise ValueError(f"blake3 block must be 64 bytes, got {len(block)}")
 
-    h = [int.from_bytes(cv[i * 4:i * 4 + 4], "big") for i in range(8)]
-    m = [int.from_bytes(block[i * 4:i * 4 + 4], "big") for i in range(16)]
+    h = [int.from_bytes(cv[i * 4:i * 4 + 4], "little") for i in range(8)]
+    m = [int.from_bytes(block[i * 4:i * 4 + 4], "little") for i in range(16)]
 
     state = [
         h[0], h[1], h[2], h[3],
         h[4], h[5], h[6], h[7],
         _BLAKE3_IV_WORDS[0], _BLAKE3_IV_WORDS[1],
         _BLAKE3_IV_WORDS[2], _BLAKE3_IV_WORDS[3],
-        0, 0, 64, 11,
+        0, 0, block_len, 11,
     ]
 
     msg = list(m)
@@ -376,7 +382,7 @@ def _blake3_compress_impl(cv: bytes, block: bytes) -> bytes:
     out = bytearray(32)
     for i in range(8):
         w = (state[i] ^ state[i + 8]) & 0xFFFFFFFF
-        out[i * 4:i * 4 + 4] = w.to_bytes(4, "big")
+        out[i * 4:i * 4 + 4] = w.to_bytes(4, "little")
     return bytes(out)
 
 
@@ -396,7 +402,7 @@ def blake3_hash(message) -> bytes:
     """
     msg = _as_bytes(message)
     padded = msg[:64] + b"\x00" * max(0, 64 - len(msg))
-    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded)
+    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded, min(len(msg), 64))
 
 
 # -- SHA-256 Compression (real implementation) --------------------------------

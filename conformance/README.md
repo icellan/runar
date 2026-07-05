@@ -284,12 +284,12 @@ pnpm run fuzz -- --num 5000 --seed 42
 pnpm run fuzz:property
 ```
 
-### IR-based Fuzzing (Richer Grammar, All 6 Compilers)
+### IR-based Fuzzing (Richer Grammar, All 7 Compilers)
 
-The legacy fuzzer (above) emits a single `.runar.ts` source and feeds it to every compiler. A newer IR-based generator produces a language-neutral contract description (`GeneratedContract`) and can render it either as shared TypeScript or as each compiler's native source (`.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`). The IR generator covers multiple property types (`bigint`, `boolean`, `ByteString`, `PubKey`, `Sig`), stateful contracts, multiple methods, built-in calls (`hash160`, `sha256`, `abs`, `min`, `max`, etc.), and `if/else` bodies.
+The legacy fuzzer (above) emits a single `.runar.ts` source and feeds it to every compiler. A newer IR-based generator produces a language-neutral contract description (`GeneratedContract`) and can render it either as shared TypeScript or as each compiler's native source (`.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`, `.runar.java`). The IR generator covers multiple property types (`bigint`, `boolean`, `ByteString`, `PubKey`, `Sig`), stateful contracts, multiple methods, built-in calls (`hash160`, `sha256`, `abs`, `min`, `max`, etc.), and `if/else` bodies.
 
 ```bash
-# Run the IR generator, compare compiled hex across all 6 compilers
+# Run the IR generator, compare compiled hex across all 7 compilers
 pnpm run fuzz:ir -- --num 100 --seed 1
 
 # Render each compiler's native source format (stresses the frontends too)

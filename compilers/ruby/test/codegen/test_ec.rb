@@ -105,7 +105,7 @@ class TestEcCodegen < Minitest::Test
     "ecMul"              => 63828,
     "ecMulGen"           => 63830,
     "ecNegate"           =>   945,
-    "ecOnCurve"          =>   520,
+    "ecOnCurve"          =>   533,
     "ecModReduce"        =>     8,
     "ecEncodeCompressed" =>    14,
     "ecMakePoint"        =>   467,

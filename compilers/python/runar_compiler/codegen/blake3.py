@@ -447,24 +447,34 @@ def _emit_g_call(
 # Full compression ops generator
 # ---------------------------------------------------------------------------
 
-def _generate_compress_ops() -> "list[StackOp]":
+def _generate_compress_ops(block_len_from_alt: bool = False) -> "list[StackOp]":
     """Generate BLAKE3 compression ops.
-    Stack entry: [..., chainingValue(32 BE), block(64 BE)] -- 2 items
-    Stack exit:  [..., hash(32 BE)] -- 1 item
+    Stack entry: [..., chainingValue(32 LE), block(64 LE)] -- 2 items
+    Stack exit:  [..., hash(32 LE)] -- 1 item
     Net depth: -1
+
+    BLAKE3 is little-endian: the message and chaining value are loaded as
+    little-endian 32-bit words and the digest is output as little-endian bytes.
+    A 4-byte Bitcoin Script byte-string IS a little-endian value, so the raw
+    4-byte chunks are already the LE words -- no per-word byte reversal. (The
+    previous impl applied ``be_words_to_le`` here and ``reverse_bytes4`` on
+    output, treating I/O as big-endian, which -- together with a hardcoded
+    block_len -- was BUG-101.)
+
+    ``block_len_from_alt``: when True, v[14] (block_len) is popped from the alt
+    stack (blake3Hash provides the real message length); otherwise it is the
+    constant 64 (blake3Compress operates on a full 64-byte block).
     """
     em = _Emitter(2)
 
     # ================================================================
     # Phase 1: Unpack block into 16 LE message words
     # ================================================================
-    # Stack: [chainingValue(32 BE), block(64 BE)]
-    # Split block into 16 x 4-byte BE words, convert to LE
+    # Stack: [chainingValue(32 LE), block(64 LE)]
+    # Split block into 16 x 4-byte little-endian words (raw chunks are LE words).
     for _ in range(15):
         em.split4()
     em.assert_depth(17, "after block unpack")  # 16 block words + 1 chainingValue
-    em.be_words_to_le(16)
-    em.assert_depth(17, "after block LE convert")
     # Stack: [CV, m0(LE), m1(LE), ..., m15(LE)] -- m0 deepest of msg words, m15 TOS
 
     # ================================================================
@@ -482,9 +492,7 @@ def _generate_compress_ops() -> "list[StackOp]":
     for _ in range(7):
         em.split4()
     em.assert_depth(24, "after cv unpack")
-    em.be_words_to_le(8)
-    em.assert_depth(24, "after cv LE convert")
-    # Stack: [m0..m15, cv0(LE)..cv7(LE)]
+    # Stack: [m0..m15, cv0(LE)..cv7(LE)]  (raw chunks are LE words)
 
     # v[0..7] = chaining value (already on stack)
     # v[8..11] = IV[0..3]
@@ -495,8 +503,12 @@ def _generate_compress_ops() -> "list[StackOp]":
     # v[12] = counter_low = 0, v[13] = counter_high = 0
     em.push_b(_u32_to_le(0))
     em.push_b(_u32_to_le(0))
-    # v[14] = block_len = 64
-    em.push_b(_u32_to_le(64))
+    # v[14] = block_len -- the real message length for blake3Hash (from alt), or
+    # the constant 64 for a full-block blake3Compress.
+    if block_len_from_alt:
+        em.from_alt()  # block_len (4-byte LE) supplied by caller (emit_blake3_hash)
+    else:
+        em.push_b(_u32_to_le(64))
     # v[15] = flags = CHUNK_START | CHUNK_END | ROOT = 11
     em.push_b(_u32_to_le(CHUNK_START | CHUNK_END | ROOT))
     em.assert_depth(32, "after state init")
@@ -562,13 +574,12 @@ def _generate_compress_ops() -> "list[StackOp]":
     em.assert_depth(24, "after XOR results restored")
     # Main: [m0..m15, h0, h1, ..., h7] h7=TOS
 
-    # Pack into 32-byte BE result: h0_BE || h1_BE || ... || h7_BE
-    em.reverse_bytes4()  # h7 -> h7_BE
+    # Pack into 32-byte little-endian digest: h0_LE || h1_LE || ... || h7_LE.
+    # The words are already little-endian (BLAKE3 output is LE bytes), so no
+    # per-word reversal -- just concatenate the top two (h[i] below, accumulated
+    # above) 7 times, building h0 || h1 || ... || h7.
     for _ in range(1, 8):
-        em.swap()           # bring h[7-i] (LE) to TOS
-        em.reverse_bytes4()  # -> BE
-        em.swap()           # [new_BE, accumulated]
-        em.bin_op("OP_CAT")  # new_BE || accumulated
+        em.bin_op("OP_CAT")  # h[7-i] || accumulated
     em.assert_depth(17, "after hash pack")
 
     # Drop 16 message words
@@ -596,27 +607,40 @@ def _get_compress_ops() -> "list[StackOp]":
 # ---------------------------------------------------------------------------
 
 def emit_blake3_compress(emit: Callable[["StackOp"], None]) -> None:
-    """Emit BLAKE3 single-block compression in Bitcoin Script.
-    Stack on entry: [..., chainingValue(32 BE), block(64 BE)]
-    Stack on exit:  [..., hash(32 BE)]
+    """Emit BLAKE3 single full-block compression in Bitcoin Script.
+    Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
+    Stack on exit:  [..., hash(32 LE)]
     Net depth: -1
+
+    Words are little-endian (standard BLAKE3): a 4-byte byte-string is already
+    a little-endian word. Uses block_len=64, counter=0, flags=11.
     """
     for op in _get_compress_ops():
         emit(op)
 
 
 def emit_blake3_hash(emit: Callable[["StackOp"], None]) -> None:
-    """Emit BLAKE3 hash for a message up to 64 bytes.
-    Stack on entry: [..., message(<=64 BE)]
-    Stack on exit:  [..., hash(32 BE)]
+    """Emit standard BLAKE3 hash for a message up to 64 bytes (single block).
+    Stack on entry: [..., message(<=64 bytes)]
+    Stack on exit:  [..., hash(32 LE)]
     Net depth: 0
 
-    Applies zero-padding and uses IV as chaining value.
+    Matches the official BLAKE3 reference for ALL inputs 0..64 bytes: the real
+    message length is used as block_len, the message is loaded as little-endian
+    words, and the digest is output little-endian. Applies zero-padding and uses
+    IV as chaining value.
     """
     em = _Emitter(1)
 
-    # Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
+    # Capture block_len = message length as a 4-byte little-endian value on the
+    # alt stack (consumed as v[14] inside the compression).
     em.oc("OP_SIZE"); em.depth += 1  # [message, len]
+    em.oc("OP_DUP"); em.depth += 1   # [message, len, len]
+    em.push_i(4)
+    em.bin_op("OP_NUM2BIN")          # [message, len, blockLenLE(4)]
+    em.to_alt()                      # [message, len]; alt: [blockLenLE]
+
+    # Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
     em.push_i(64)
     em.swap()
     em.bin_op("OP_SUB")    # [message, 64-len]
@@ -625,16 +649,17 @@ def emit_blake3_hash(emit: Callable[["StackOp"], None]) -> None:
     em.bin_op("OP_NUM2BIN")  # [message, zeros]
     em.bin_op("OP_CAT")    # [paddedMessage(64)]
 
-    # Push IV as 32-byte BE chaining value
+    # Push IV as 32-byte little-endian chaining value
     iv_bytes = bytearray(32)
     for i in range(8):
-        be = _u32_to_be(BLAKE3_IV[i])
-        iv_bytes[i * 4: i * 4 + 4] = be
+        le = _u32_to_le(BLAKE3_IV[i])
+        iv_bytes[i * 4: i * 4 + 4] = le
     em.push_b(bytes(iv_bytes))
-    em.swap()  # [IV(32 BE), paddedMessage(64 BE)]
+    em.swap()  # [IV(32 LE), paddedMessage(64 LE)]
 
-    # Splice compression ops
-    compress_ops = _get_compress_ops()
+    # Splice compression ops.
+    # Compress with the real block_len taken from the alt stack.
+    compress_ops = _generate_compress_ops(block_len_from_alt=True)
     for op in compress_ops:
         em.e_raw(op)
     em.depth = 1

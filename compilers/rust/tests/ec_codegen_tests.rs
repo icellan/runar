@@ -173,7 +173,7 @@ fn test_ec_negate_op_count_golden() {
 #[test]
 fn test_ec_on_curve_op_count_golden() {
     let ops = collect(|s| emit_ec_on_curve(s));
-    assert_eq!(ops.len(), 520, "ecOnCurve op count drift");
+    assert_eq!(ops.len(), 533, "ecOnCurve op count drift");
 }
 
 #[test]

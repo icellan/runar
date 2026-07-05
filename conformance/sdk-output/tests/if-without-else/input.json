@@ -3,6 +3,7 @@
     "version": "runar-v1.0.0-rc.1",
     "compilerVersion": "1.0.0-rc.1",
     "contractName": "IfWithoutElse",
+    "parentClass": "SmartContract",
     "abi": {
       "constructor": {
         "params": [

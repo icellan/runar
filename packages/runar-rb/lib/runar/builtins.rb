@@ -270,16 +270,19 @@ module Runar
 
     # -- BLAKE3 single-block compression (real implementation) ------------------
     #
-    # Matches the compiler codegen (blockLen=64, counter=0, flags=11 =
-    # CHUNK_START | CHUNK_END | ROOT) and the TS interpreter reference in
-    # packages/runar-testing/src/interpreter/interpreter.ts:1742.
+    # Standard BLAKE3 (little-endian): the chaining value and block are parsed as
+    # little-endian 32-bit words and the digest is emitted as little-endian bytes.
+    # counter=0, flags=11 (CHUNK_START | CHUNK_END | ROOT). block_len is the real
+    # message length for blake3_hash (0..64) and the constant 64 for a full-block
+    # blake3_compress. Mirrors the TS interpreter reference blake3CompressImpl in
+    # packages/runar-testing/src/interpreter/interpreter.ts.
 
     BLAKE3_IV_WORDS = [
       0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
       0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     ].freeze
 
-    BLAKE3_IV_BYTES = BLAKE3_IV_WORDS.pack('N*').freeze
+    BLAKE3_IV_BYTES = BLAKE3_IV_WORDS.pack('V*').freeze
 
     BLAKE3_MSG_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8].freeze
 
@@ -309,19 +312,20 @@ module Runar
       _blake3_g(s, 3, 4, 9, 14, m[14], m[15])
     end
 
-    def self._blake3_compress_impl(cv_bytes, block_bytes)
+    def self._blake3_compress_impl(cv_bytes, block_bytes, block_len = 64)
       raise ArgumentError, "blake3 cv must be 32 bytes" unless cv_bytes.bytesize == 32
       raise ArgumentError, "blake3 block must be 64 bytes" unless block_bytes.bytesize == 64
 
-      h = cv_bytes.unpack('N8')
-      m = block_bytes.unpack('N16')
+      # Parse chaining value (8 words) and block (16 words) as little-endian.
+      h = cv_bytes.unpack('V8')
+      m = block_bytes.unpack('V16')
 
       state = [
         h[0], h[1], h[2], h[3],
         h[4], h[5], h[6], h[7],
         BLAKE3_IV_WORDS[0], BLAKE3_IV_WORDS[1],
         BLAKE3_IV_WORDS[2], BLAKE3_IV_WORDS[3],
-        0, 0, 64, 11,
+        0, 0, block_len, 11,
       ]
 
       msg = m.dup
@@ -330,8 +334,9 @@ module Runar
         msg = BLAKE3_MSG_PERM.map { |i| msg[i] } if r < 6
       end
 
+      # Output: XOR first 8 with last 8, encode as little-endian bytes.
       out = (0...8).map { |i| (state[i] ^ state[i + 8]) & 0xFFFFFFFF }
-      out.pack('N8')
+      out.pack('V8')
     end
 
     def self._hex_to_bytes(h)
@@ -348,9 +353,11 @@ module Runar
 
     def blake3_hash(message)
       msg_bytes = Builtins._hex_to_bytes(message)
-      padded = msg_bytes.byteslice(0, 64).to_s
+      truncated = msg_bytes.byteslice(0, 64).to_s
+      block_len = truncated.bytesize # real message length (0..64) = v[14]
+      padded = truncated
       padded = padded + ("\x00".b * (64 - padded.bytesize)) if padded.bytesize < 64
-      Builtins._blake3_compress_impl(BLAKE3_IV_BYTES, padded).unpack1('H*')
+      Builtins._blake3_compress_impl(BLAKE3_IV_BYTES, padded, block_len).unpack1('H*')
     end
 
     # -- Real Hash Functions ---------------------------------------------------

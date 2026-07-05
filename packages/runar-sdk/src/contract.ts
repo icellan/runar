@@ -1649,12 +1649,15 @@ export class RunarContract {
    * needsCodePart should be true only when the method constructs continuation outputs
    * (non-terminal stateful calls). Terminal and stateless methods don't use _codePart.
    */
-  private buildStatefulPrefix(opSig: string, needsCodePart: boolean = false): string {
+  // BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+  // preimage (see codegen emitCheckPreimageBinding), so NO signature is pushed
+  // here — the unlocking script carries only _codePart (if needed) and the
+  // preimage. `opSig` is retained for call-site compatibility but ignored.
+  private buildStatefulPrefix(_opSig: string, needsCodePart: boolean = false): string {
     let prefix = '';
     if (needsCodePart && this.artifact.codeSeparatorIndex !== undefined) {
       prefix += encodePushData(this.getCodePartHex());
     }
-    prefix += encodePushData(opSig);
     return prefix;
   }
 

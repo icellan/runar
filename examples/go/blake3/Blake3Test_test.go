@@ -10,8 +10,8 @@ import (
 // compression with hardcoded blockLen=64, counter=0, flags=11 — the same
 // values pinned in the seven runtime crates.
 const (
-	expectedCompressZeroCvZeroBlock = "443e523c2ed96088ceadcfefa47318bdd02bb2c26b27b7ac58ffe578f243bdfc"
-	expectedHashZero32              = "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"
+	expectedCompressZeroCvZeroBlock = "3c523e448860d92eefcfadcebd1873a4c2b22bd0acb7276b78e5ff58fcbd43f2"
+	expectedHashZero32              = "2ada83c1819a5372dae1238fc1ded123c8104fdaa15862aaee69428a1820fcda"
 )
 
 func mustHex(s string) []byte {

@@ -22,7 +22,7 @@ RSpec.describe Blake3Test do
 
   describe '#verify_hash' do
     it 'passes for empty input with the pinned reference hash' do
-      c = Blake3Test.new('7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86')
+      c = Blake3Test.new('af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262')
       expect { c.verify_hash('') }.not_to raise_error
     end
 

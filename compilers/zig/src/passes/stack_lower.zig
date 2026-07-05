@@ -2551,21 +2551,45 @@ const LowerCtx = struct {
 
     fn lowerCheckPreimage(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
+        // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
+        // current spending transaction. The signature is DERIVED FROM THE PREIMAGE
+        // ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*k⁻¹ mod n, with
+        // fixed nonce k and privkey d=1 (pubkey = G). OP_CHECKSIG(sig, G) then passes
+        // iff hash256(preimage) equals the node's real tx sighash — closing BUG-100.
+        // The unlocking script pushes ONLY <preimage> (no witness signature).
+        // See emitCheckPreimageBinding for the construction.
+
+        // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
+        // the code after this point (smaller preimage; required for large scripts).
         try self.emitOp(.op_codeseparator);
+
+        // Bring the preimage to the top (kept for field extractors below).
         try self.bringToTopAuto(args[0]);
-        if (self.stack.findDepth("_opPushTxSig") == null) return LowerError.VariableNotFound;
-        try self.bringToTop("_opPushTxSig", true);
-        try self.emitPushData(&generator_point_g);
-        // Track the generator point in the stack map so pop accounting is correct
-        try self.stack.push(self.allocator, null);
-        self.trackDepth();
-        // OP_CHECKSIGVERIFY consumes top 2 items (sig/txsig + pubkey/G)
-        try self.emitOp(.op_checksigverify);
-        _ = self.stack.pop(); // G (generator point)
-        _ = self.stack.pop(); // _opPushTxSig
-        // preimage (args[0]) remains on stack — consumed by caller or used downstream
+
+        // Derive + verify the signature on-chain (single opaque raw_bytes blob,
+        // byte-identical across all 7 tiers). Net stack effect is zero.
+        try self.emitCheckPreimageBinding();
+
+        // Preimage remains on top. Rename for field extractors.
         try self.stack.renameAtDepth(self.allocator, 0, bind_name);
         self.trackDepth();
+    }
+
+    /// Emit the on-chain preimage binding (BUG-100 fix) as one opaque raw_bytes
+    /// op. Net stack effect is 0 (preimage in → preimage out), declared as
+    /// in=1/out=1 so the static analyzer keeps the depth consistent and the
+    /// peephole optimizer treats it as a hard barrier. The construction is the
+    /// canonical output of the TypeScript reference, byte-identical across all
+    /// seven tiers (guarded by the cross-tier conformance suite).
+    fn emitCheckPreimageBinding(self: *LowerCtx) !void {
+        const decoded = try self.allocator.alloc(u8, check_preimage_binding_hex.len / 2);
+        _ = std.fmt.hexToBytes(decoded, check_preimage_binding_hex) catch {
+            self.allocator.free(decoded);
+            return LowerError.UnsupportedOperation;
+        };
+        // Track the buffer so it gets freed when the program is deinit'd.
+        try self.owned_push_data.append(self.allocator, decoded);
+        try self.emit(.{ .raw_bytes = .{ .bytes = decoded, .in_arity = 1, .out_arity = 1 } });
     }
 
     fn lowerDeserializeState(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
@@ -4255,16 +4279,22 @@ const LowerCtx = struct {
 };
 
 // ============================================================================
-// Generator point G (secp256k1, compressed)
+// OP_PUSH_TX on-chain signature derivation (BUG-100 fix)
 // ============================================================================
-
-const generator_point_g = [33]u8{
-    0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb,
-    0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
-    0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28,
-    0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17,
-    0x98,
-};
+//
+// The insecure legacy checkPreimage accepted a witness signature over the real
+// spending transaction and checked it against pubkey G, never reading the pushed
+// preimage — so the preimage was decoupled from the tx. This derives the ECDSA
+// signature FROM the preimage on-chain (s = (hash256(preimage) + r)*kinv mod n,
+// fixed nonce k=2, privkey d=1, low-S, minimal DER), so OP_CHECKSIG passes only
+// when hash256(preimage) equals the real tx sighash.
+//
+// The construction compiles to a FIXED byte sequence identical across all seven
+// tiers; it is the canonical output of the TypeScript reference
+// (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a single
+// opaque raw_bytes op (peephole barrier). The cross-tier conformance suite
+// guards that this constant matches every other tier byte-for-byte.
+const check_preimage_binding_hex = "76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f04c6009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f9521414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b7578937c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7fa07821414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d7c949594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e7c7e01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad";
 
 // ============================================================================
 // Public API
@@ -4356,10 +4386,9 @@ fn setupMethodStack(ctx: *LowerCtx, program: types.ANFProgram, method: types.ANF
         ctx.trackDepth();
     }
 
-    if (methodUsesCheckPreimage(bindings)) {
-        try ctx.stack.push(ctx.allocator, "_opPushTxSig");
-        ctx.trackDepth();
-    }
+    // BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+    // preimage (see lowerCheckPreimage), so NO _opPushTxSig witness item is
+    // pushed. The unlocking script provides only the preimage.
 
     for (method.params) |param| {
         try ctx.stack.push(ctx.allocator, param.name);
@@ -4543,10 +4572,8 @@ fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
                     try inner_ctx.stack.push(inner_ctx.allocator, "_codePart");
                     inner_ctx.trackDepth();
                 }
-                if (methodUsesCheckPreimage(inner_bindings) and inner_ctx.stack.findDepth("_opPushTxSig") == null) {
-                    try inner_ctx.stack.push(inner_ctx.allocator, "_opPushTxSig");
-                    inner_ctx.trackDepth();
-                }
+                // BUG-100 fix: no _opPushTxSig — signature derived on-chain from
+                // the preimage (see lowerCheckPreimage).
                 for (inner_method.params) |param| {
                     try inner_ctx.stack.push(inner_ctx.allocator, param.name);
                 }

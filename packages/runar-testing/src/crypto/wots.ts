@@ -54,7 +54,7 @@ function F(pubSeed: Uint8Array, chainIdx: number, stepIdx: number, msg: Uint8Arr
  * Chain function with tweakable hashing.
  * chain(x, startStep, steps, pubSeed, chainIdx) iterates F with incrementing hash address.
  */
-function chain(x: Uint8Array, startStep: number, steps: number, pubSeed: Uint8Array, chainIdx: number): Uint8Array {
+export function chain(x: Uint8Array, startStep: number, steps: number, pubSeed: Uint8Array, chainIdx: number): Uint8Array {
   let current = x;
   for (let j = startStep; j < startStep + steps; j++) {
     current = F(pubSeed, chainIdx, j, current);
@@ -93,6 +93,16 @@ function allDigits(msgHash: Uint8Array): number[] {
   const msg = extractDigits(msgHash);
   const csum = checksumDigits(msg);
   return [...msg, ...csum];
+}
+
+/**
+ * The LEN = 67 base-16 digits (64 message + 3 checksum) a message signs over.
+ * Exported for adversarial tests that need to reason about individual chain
+ * heights (e.g. crafting a chain-advanced forgery). Not part of the on-chain
+ * verification surface.
+ */
+export function messageDigits(msg: Uint8Array): number[] {
+  return allDigits(sha256(msg));
 }
 
 // ---------------------------------------------------------------------------

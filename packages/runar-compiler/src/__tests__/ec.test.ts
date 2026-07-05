@@ -213,7 +213,7 @@ describe('EC builtins — op-count goldens (T-11)', () => {
     ['ecMul',              emitEcMul,               63828],
     ['ecMulGen',           emitEcMulGen,            63830],
     ['ecNegate',           emitEcNegate,              945],
-    ['ecOnCurve',          emitEcOnCurve,             520],
+    ['ecOnCurve',          emitEcOnCurve,             533],
     ['ecModReduce',        emitEcModReduce,             8],
     ['ecEncodeCompressed', emitEcEncodeCompressed,     14],
     ['ecMakePoint',        emitEcMakePoint,           467],

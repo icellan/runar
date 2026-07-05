@@ -455,14 +455,23 @@ module RunarCompiler
       # Full compression ops generator
       # -----------------------------------------------------------------
 
-      def self._generate_compress_ops
+      # BLAKE3 is little-endian: the message and chaining value are loaded as
+      # little-endian 32-bit words and the digest is output as little-endian
+      # bytes. A 4-byte Bitcoin Script byte-string IS a little-endian value, so
+      # the raw 4-byte chunks are already the LE words — no per-word byte
+      # reversal. (The previous impl applied a BE->LE per-word reversal here and
+      # reverse_bytes4 on output, treating I/O as big-endian, which — together
+      # with a hardcoded block_len — was BUG-101.)
+      #
+      # block_len_from_alt: when true, v[14] (block_len) is popped from the alt
+      # stack (blake3Hash provides the real message length); otherwise it is the
+      # constant 64 (blake3Compress operates on a full 64-byte block).
+      def self._generate_compress_ops(block_len_from_alt: false)
         em = Emitter.new(2)
 
-        # Phase 1: Unpack block into 16 LE message words
+        # Phase 1: Unpack block into 16 LE message words (raw chunks are LE words)
         15.times { em.split4 }
         em.assert_depth(17, "after block unpack") # 16 block words + 1 chainingValue
-        em.be_words_to_le(16)
-        em.assert_depth(17, "after block LE convert")
 
         # Phase 2: Initialize 16-word state on top of message words
         em.roll(16)
@@ -473,8 +482,6 @@ module RunarCompiler
         em.assert_depth(17, "after CV from alt")
         7.times { em.split4 }
         em.assert_depth(24, "after cv unpack")
-        em.be_words_to_le(8)
-        em.assert_depth(24, "after cv LE convert")
 
         # v[8..11] = IV[0..3]
         4.times { |i| em.push_b(_u32_to_le(BLAKE3_IV[i])) }
@@ -483,8 +490,13 @@ module RunarCompiler
         # v[12] = counter_low = 0, v[13] = counter_high = 0
         em.push_b(_u32_to_le(0))
         em.push_b(_u32_to_le(0))
-        # v[14] = block_len = 64
-        em.push_b(_u32_to_le(64))
+        # v[14] = block_len — the real message length for blake3Hash (from alt),
+        # or the constant 64 for a full-block blake3Compress.
+        if block_len_from_alt
+          em.from_alt
+        else
+          em.push_b(_u32_to_le(64))
+        end
         # v[15] = flags = CHUNK_START | CHUNK_END | ROOT = 11
         em.push_b(_u32_to_le(CHUNK_START | CHUNK_END | ROOT))
         em.assert_depth(32, "after state init")
@@ -542,14 +554,10 @@ module RunarCompiler
         8.times { em.from_alt }
         em.assert_depth(24, "after XOR results restored")
 
-        # Pack into 32-byte BE result
-        em.reverse_bytes4 # h7 -> h7_BE
-        (1...8).each do
-          em.swap
-          em.reverse_bytes4
-          em.swap
-          em.bin_op("OP_CAT")
-        end
+        # Pack into 32-byte little-endian digest: h0_LE || h1_LE || ... || h7_LE.
+        # The words are already little-endian (BLAKE3 output is LE bytes), so no
+        # per-word reversal — just concatenate the top two 7 times.
+        (1...8).each { em.bin_op("OP_CAT") }
         em.assert_depth(17, "after hash pack")
 
         # Drop 16 message words
@@ -594,8 +602,15 @@ module RunarCompiler
       def self.emit_blake3_hash(emit)
         em = Emitter.new(1)
 
-        # Pad message to 64 bytes
+        # Capture block_len = message length as a 4-byte little-endian value on
+        # the alt stack (consumed as v[14] inside the compression).
         em.oc("OP_SIZE"); em.depth += 1 # [message, len]
+        em.oc("OP_DUP"); em.depth += 1  # [message, len, len]
+        em.push_i(4)
+        em.bin_op("OP_NUM2BIN")         # [message, len, blockLenLE(4)]
+        em.to_alt                        # [message, len]; alt: [blockLenLE]
+
+        # Pad message to 64 bytes
         em.push_i(64)
         em.swap
         em.bin_op("OP_SUB")     # [message, 64-len]
@@ -604,17 +619,17 @@ module RunarCompiler
         em.bin_op("OP_NUM2BIN") # [message, zeros]
         em.bin_op("OP_CAT")     # [paddedMessage(64)]
 
-        # Push IV as 32-byte BE chaining value
+        # Push IV as 32-byte little-endian chaining value
         iv_bytes = "\x00".b * 32
         8.times do |i|
-          be = _u32_to_be(BLAKE3_IV[i])
-          iv_bytes[i * 4, 4] = be
+          le = _u32_to_le(BLAKE3_IV[i])
+          iv_bytes[i * 4, 4] = le
         end
         em.push_b(iv_bytes)
-        em.swap # [IV(32 BE), paddedMessage(64 BE)]
+        em.swap # [IV(32 LE), paddedMessage(64 LE)]
 
-        # Splice compression ops
-        compress_ops = _get_compress_ops
+        # Splice compression ops; block_len taken from the alt stack.
+        compress_ops = _generate_compress_ops(block_len_from_alt: true)
         compress_ops.each { |op| em.e_raw(op) }
         em.depth = 1
 

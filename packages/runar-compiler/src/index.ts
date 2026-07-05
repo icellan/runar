@@ -32,7 +32,13 @@ export type { ExpandFixedArraysResult } from './passes/03b-expand-fixed-arrays.j
 
 export { lowerToANF } from './passes/04-anf-lower.js';
 export { lowerToStack } from './passes/05-stack-lower.js';
-export { emit } from './passes/06-emit.js';
+export { emit, emitMethod } from './passes/06-emit.js';
+export {
+  emitCheckPreimageBinding,
+  emitCheckPreimageBindingRaw,
+  checkPreimageBindingBytes,
+  CHECK_PREIMAGE_BINDING_HEX,
+} from './passes/oppushtx-codegen.js';
 export { optimizeStackIR } from './optimizer/peephole.js';
 export { optimizeEC } from './optimizer/anf-ec.js';
 export { foldConstants } from './optimizer/constant-fold.js';

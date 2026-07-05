@@ -1582,14 +1582,37 @@ mod tests {
               }
             }
         "#;
+        // NOTE (BUG-100): the checkPreimage tail is now a fixed opaque raw_bytes
+        // blob (the long `517f7b7b7c7e`-heavy region), so OP_CHECKSIG lives INSIDE
+        // that blob rather than as a discrete tail opcode, and the stateful
+        // unlocking script no longer carries the `_opPushTxSig` witness push.
         let hex = compile_to_fold_off_hex(source, "Counter.runar.ts");
         let expected = concat!(
-            "76ab547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-            "ad69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b7702",
-            "e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501",
-            "fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c",
-            "58807c7e547a547a041976a9147b7e0288ac7e7c58807c7e7eaa7b820128947f7701207f7587",
-            "7777",
+            "76ab76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b",
+            "7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c",
+            "517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b",
+            "7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e",
+            "7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f",
+            "7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c",
+            "7e7c7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f",
+            "04c6009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f95",
+            "21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b75",
+            "78937c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f",
+            "a07821414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d",
+            "7c949594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e",
+            "7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f",
+            "7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c",
+            "7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c51",
+            "7f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b",
+            "7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c",
+            "517f7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6",
+            "047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e",
+            "7c7e01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817",
+            "98ad69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b77",
+            "02e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f75",
+            "01fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e",
+            "7c58807c7e547a547a041976a9147b7e0288ac7e7c58807c7e7eaa7b820128947f7701207f75",
+            "877777",
         );
         assert_eq!(hex, expected);
     }

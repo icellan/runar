@@ -76,8 +76,8 @@ class EcTest {
     void ecOnCurveShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcOnCurve(ops::add);
-        assertEquals(520, ops.size());
-        assertEquals(655, emitHex(ops).length() / 2);
+        assertEquals(533, ops.size());
+        assertEquals(734, emitHex(ops).length() / 2);
     }
 
     @Test

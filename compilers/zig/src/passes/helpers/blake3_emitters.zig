@@ -50,7 +50,7 @@ const blake3_iv_le = [_][4]u8{
     u32ToLE(0x5be0cd19),
 };
 
-const blake3_iv_be = buildIvBE();
+const blake3_iv_le_flat = buildIvLEFlat();
 const blake3_iv_le_slices = [_][]const u8{
     (&blake3_iv_le[0])[0..],
     (&blake3_iv_le[1])[0..],
@@ -287,16 +287,6 @@ const Emitter = struct {
         try self.rotrBE(n);
         try self.reverseBytes4();
     }
-
-    fn beWordsToLE(self: *Emitter, n: usize) Blake3EmitterError!void {
-        for (0..n) |_| {
-            try self.reverseBytes4();
-            try self.toAlt();
-        }
-        for (0..n) |_| {
-            try self.fromAlt();
-        }
-    }
 };
 
 pub fn appendBuiltinInstructions(
@@ -311,7 +301,7 @@ pub fn appendBuiltinInstructions(
     defer emitter.deinit();
 
     switch (builtin) {
-        .compress => try generateCompressOps(&emitter, 7),
+        .compress => try generateCompressOps(&emitter, 7, false),
         .hash, .blake3 => try generateHashOps(&emitter),
     }
 
@@ -340,8 +330,16 @@ pub fn appendBlake3Instructions(
 }
 
 fn generateHashOps(emitter: *Emitter) Blake3EmitterError!void {
+    // Capture block_len = message length as a 4-byte little-endian value on the
+    // alt stack (consumed as v[14] inside the compression).
     try emitter.emitOp("OP_SIZE");
-    emitter.depth += 1;
+    emitter.depth += 1; // [message, len]
+    try emitter.dup(); // [message, len, len]
+    try emitter.emitPushInt(4);
+    try emitter.binOp("OP_NUM2BIN"); // [message, len, blockLenLE(4)]
+    try emitter.toAlt(); // [message, len]; alt: [blockLenLE]
+
+    // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix).
     try emitter.emitPushInt(64);
     try emitter.swap();
     try emitter.binOp("OP_SUB");
@@ -350,33 +348,34 @@ fn generateHashOps(emitter: *Emitter) Blake3EmitterError!void {
     try emitter.binOp("OP_NUM2BIN");
     try emitter.binOp("OP_CAT");
 
-    try emitter.emitPushData(blake3_iv_be[0..]);
+    // Push IV as a 32-byte little-endian chaining value (standard BLAKE3).
+    try emitter.emitPushData(blake3_iv_le_flat[0..]);
     try emitter.swap();
 
-    try generateCompressOps(emitter, 7);
+    // Compress with the real block_len taken from the alt stack.
+    try generateCompressOps(emitter, 7, true);
     emitter.depth = 1;
     try emitter.assertDepth(1);
 }
 
-fn generateCompressOps(emitter: *Emitter, num_rounds: usize) Blake3EmitterError!void {
+fn generateCompressOps(emitter: *Emitter, num_rounds: usize, block_len_from_alt: bool) Blake3EmitterError!void {
+    // Split the 64-byte block into 16 little-endian 4-byte words. A raw 4-byte
+    // Bitcoin Script byte-string IS a little-endian value — no per-word reversal.
     for (0..15) |_| {
         try emitter.split4();
     }
-    try emitter.assertDepth(17);
-    try emitter.beWordsToLE(16);
     try emitter.assertDepth(17);
 
     try emitter.roll(16);
     try emitter.toAlt();
     try emitter.assertDepth(16);
 
+    // Split the 32-byte chaining value into 8 little-endian 4-byte words.
     try emitter.fromAlt();
     try emitter.assertDepth(17);
     for (0..7) |_| {
         try emitter.split4();
     }
-    try emitter.assertDepth(24);
-    try emitter.beWordsToLE(8);
     try emitter.assertDepth(24);
 
     for (0..4) |i| {
@@ -386,7 +385,13 @@ fn generateCompressOps(emitter: *Emitter, num_rounds: usize) Blake3EmitterError!
 
     try emitter.emitPushData(zero_word_le[0..]);
     try emitter.emitPushData(zero_word_le[0..]);
-    try emitter.emitPushData(block_len_le[0..]);
+    // v[14] = block_len — real message length for blake3Hash (from alt), or the
+    // constant 64 for a full-block blake3Compress.
+    if (block_len_from_alt) {
+        try emitter.fromAlt();
+    } else {
+        try emitter.emitPushData(block_len_le[0..]);
+    }
     try emitter.emitPushData(flags_le[0..]);
     try emitter.assertDepth(32);
 
@@ -437,11 +442,9 @@ fn generateCompressOps(emitter: *Emitter, num_rounds: usize) Blake3EmitterError!
     }
     try emitter.assertDepth(24);
 
-    try emitter.reverseBytes4();
+    // Pack into a 32-byte little-endian digest h0 || h1 || ... || h7. The words
+    // are already little-endian (BLAKE3 output is LE bytes) — just concatenate.
     for (1..8) |_| {
-        try emitter.swap();
-        try emitter.reverseBytes4();
-        try emitter.swap();
         try emitter.binOp("OP_CAT");
     }
     try emitter.assertDepth(17);
@@ -543,23 +546,14 @@ fn u32ToLE(comptime n: u32) [4]u8 {
     };
 }
 
-fn u32ToBE(comptime n: u32) [4]u8 {
-    return .{
-        @intCast((n >> 24) & 0xff),
-        @intCast((n >> 16) & 0xff),
-        @intCast((n >> 8) & 0xff),
-        @intCast(n & 0xff),
-    };
-}
-
-fn buildIvBE() [32]u8 {
+fn buildIvLEFlat() [32]u8 {
     var out: [32]u8 = undefined;
     inline for (blake3_iv_words, 0..) |word, idx| {
-        const be = u32ToBE(word);
-        out[idx * 4 + 0] = be[0];
-        out[idx * 4 + 1] = be[1];
-        out[idx * 4 + 2] = be[2];
-        out[idx * 4 + 3] = be[3];
+        const le = u32ToLE(word);
+        out[idx * 4 + 0] = le[0];
+        out[idx * 4 + 1] = le[1];
+        out[idx * 4 + 2] = le[2];
+        out[idx * 4 + 3] = le[3];
     }
     return out;
 }
@@ -590,7 +584,7 @@ test "blake3 compress emitter emits expected instruction count" {
 
     try appendBlake3CompressInstructions(&list, allocator);
 
-    try std.testing.expectEqual(@as(usize, 10819), list.items.len);
+    try std.testing.expectEqual(@as(usize, 10373), list.items.len);
     try std.testing.expectEqualDeep(Blake3Instruction{ .push_int = 4 }, list.items[0]);
     try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_SPLIT" }, list.items[1]);
     try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_DROP" }, list.items[list.items.len - 1]);
@@ -623,7 +617,7 @@ test "blake3 hash emitter emits expected instruction count" {
 
     try appendBlake3HashInstructions(&list, allocator);
 
-    try std.testing.expectEqual(@as(usize, 10829), list.items.len);
+    try std.testing.expectEqual(@as(usize, 10387), list.items.len);
     try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_SIZE" }, list.items[0]);
     try std.testing.expectEqualDeep(Blake3Instruction{ .op_name = "OP_DROP" }, list.items[list.items.len - 1]);
 }

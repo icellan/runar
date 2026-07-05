@@ -3,6 +3,7 @@
     "version": "runar-v1.0.0-rc.1",
     "compilerVersion": "1.0.0-rc.1",
     "contractName": "CovenantVault",
+    "parentClass": "SmartContract",
     "abi": {
       "constructor": {
         "params": [
@@ -37,7 +38,7 @@
         }
       ]
     },
-    "script": "7c00ad76ab7b210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad69041976a914007e0288ac7e0058807c7eaa7c820128947f7701207f7587",
+    "script": "7c00ad76ab76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f04c6009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f9521414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b7578937c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7fa07821414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d7c949594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e7c7e01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad69041976a914007e0288ac7e0058807c7eaa7c820128947f7701207f7587",
     "constructorSlots": [
       {
         "paramIndex": 0,
@@ -45,16 +46,24 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 47
+        "byteOffset": 771
       },
       {
         "paramIndex": 2,
-        "byteOffset": 53
+        "byteOffset": 777
       }
     ],
     "codeSeparatorIndex": 4,
     "codeSeparatorIndices": [
       4
+    ],
+    "rawScriptSpans": [
+      {
+        "offset": 5,
+        "length": 760,
+        "inArity": 1,
+        "outArity": 1
+      }
     ]
   },
   "constructorArgs": [

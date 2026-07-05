@@ -297,6 +297,16 @@ class CovenantVault extends SmartContract {
 
 The `checkPreimage` call gives the contract access to transaction details. The contract can then enforce rules about the outputs -- for example, that a minimum amount goes to the designated recipient. The owner's signature proves authorization, but the covenant rules constrain what the owner can actually do.
 
+> **Pin the sighash type in stateless covenants.** The compiler auto-injects a
+> `assert(extractSigHashType(txPreimage) === 0x41)` (SIGHASH_ALL | FORKID) pin for
+> `StatefulSmartContract`, but a stateless `SmartContract` that calls
+> `checkPreimage` manually gets no such pin. A permissive flag
+> (ANYONECANPAY / SINGLE / NONE) zeroes preimage fields such as
+> `hashPrevouts`, `hashOutputs`, and `sequence`, which can defeat a covenant that
+> reads them (e.g. via `extractHashOutputs` / `extractHashPrevouts` /
+> `extractSequence`). If your covenant relies on any of those fields, assert the
+> sighash type yourself: `assert(extractSigHashType(txPreimage) === 0x41n);`.
+
 ---
 
 ## On-Chain Auction

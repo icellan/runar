@@ -60,8 +60,9 @@ function permute(m: number[]): number[] {
 }
 
 /**
- * Reference BLAKE3 compression.
- * Matches the on-chain codegen which hardcodes blockLen=64 and flags=11.
+ * Reference BLAKE3 single-block compression (standard, little-endian).
+ * The chaining value and block are little-endian byte strings (a 4-byte
+ * byte-string is a little-endian word), and the digest is output little-endian.
  */
 function referenceBlake3Compress(
   cvHex: string,
@@ -69,11 +70,15 @@ function referenceBlake3Compress(
   blockLen: number = 64,
   flags: number = CHUNK_START | CHUNK_END | ROOT,
 ): string {
-  const cv: number[] = [];
-  for (let i = 0; i < 8; i++) cv.push(parseInt(cvHex.substring(i * 8, i * 8 + 8), 16));
+  const cvB = Buffer.from(cvHex, 'hex');
+  const blockB = Buffer.from(blockHex, 'hex');
+  const le = (b: Buffer, i: number) =>
+    ((b[i * 4]! | (b[i * 4 + 1]! << 8) | (b[i * 4 + 2]! << 16) | (b[i * 4 + 3]! << 24)) >>> 0);
 
+  const cv: number[] = [];
+  for (let i = 0; i < 8; i++) cv.push(le(cvB, i));
   const m: number[] = [];
-  for (let i = 0; i < 16; i++) m.push(parseInt(blockHex.substring(i * 8, i * 8 + 8), 16));
+  for (let i = 0; i < 16; i++) m.push(le(blockB, i));
 
   const state: number[] = [
     cv[0]!, cv[1]!, cv[2]!, cv[3]!,
@@ -88,18 +93,25 @@ function referenceBlake3Compress(
     if (r < 6) msg = permute(msg);
   }
 
-  const output: number[] = [];
+  // Output little-endian bytes of h[i] = state[i] ^ state[i+8]
+  const out = Buffer.alloc(32);
   for (let i = 0; i < 8; i++) {
-    output.push((state[i]! ^ state[i + 8]!) >>> 0);
+    const w = (state[i]! ^ state[i + 8]!) >>> 0;
+    out[i * 4] = w & 0xff;
+    out[i * 4 + 1] = (w >>> 8) & 0xff;
+    out[i * 4 + 2] = (w >>> 16) & 0xff;
+    out[i * 4 + 3] = (w >>> 24) & 0xff;
   }
-
-  return output.map(w => w.toString(16).padStart(8, '0')).join('');
+  return out.toString('hex');
 }
 
-/** Reference BLAKE3 hash of a message <= 64 bytes (blockLen hardcoded to 64). */
+/** Reference standard BLAKE3 hash of a message <= 64 bytes (single block). */
 function referenceBlake3Hash(msgHex: string): string {
+  // IV as little-endian bytes (standard BLAKE3 chaining value).
+  const ivLe = Buffer.alloc(32);
+  for (let i = 0; i < 8; i++) ivLe.writeUInt32LE(BLAKE3_IV[i]! >>> 0, i * 4);
   const padded = msgHex.padEnd(128, '0');
-  return referenceBlake3Compress(BLAKE3_IV_HEX, padded, 64, CHUNK_START | CHUNK_END | ROOT);
+  return referenceBlake3Compress(ivLe.toString('hex'), padded, msgHex.length / 2, CHUNK_START | CHUNK_END | ROOT);
 }
 
 // ---- Tests ----
@@ -109,16 +121,17 @@ describe('Blake3Test', () => {
   const ALL_ZEROS_BLOCK = '00'.repeat(64);
   const EMPTY_HASH = referenceBlake3Hash('');
 
-  // Sanity-check our reference against the known value from the spec
+  // Sanity-check our reference against the official BLAKE3 empty-string KAT
   it('reference implementation produces known hash', () => {
-    expect(EMPTY_HASH).toBe('7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86');
+    expect(EMPTY_HASH).toBe('af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262');
   });
 
   describe('verifyCompress', () => {
     it('accepts BLAKE3 compress of all-zeros block with IV chaining value', () => {
-      const contract = TestContract.fromSource(source, {
-        expected: EMPTY_HASH,
-      });
+      // blake3Compress uses block_len=64 (a full 64-byte block), so this is NOT
+      // the empty-string hash (which uses block_len=0) — compute it explicitly.
+      const expected = referenceBlake3Compress(BLAKE3_IV_HEX, ALL_ZEROS_BLOCK);
+      const contract = TestContract.fromSource(source, { expected });
       const result = contract.call('verifyCompress', {
         chainingValue: BLAKE3_IV_HEX,
         block: ALL_ZEROS_BLOCK,

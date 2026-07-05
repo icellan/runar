@@ -6,19 +6,19 @@ import (
 	"testing"
 )
 
-// Cross-language reference vectors for the Rúnar BLAKE3 single-block
-// compression with hardcoded blockLen=64, counter=0, flags=11
-// (CHUNK_START | CHUNK_END | ROOT). These exact hex strings are pinned in the
-// Python and (forthcoming) TS / Rust runtimes — any divergence is a
+// Cross-language reference vectors for the Rúnar standard BLAKE3 single-block
+// hash (little-endian, real message length as block_len, counter=0, flags=11 =
+// CHUNK_START | CHUNK_END | ROOT). These are the official BLAKE3 digests and
+// are pinned across the TS / Rust / Python / … runtimes — any divergence is a
 // cross-compiler regression.
 var blake3HashRefVectors = []struct {
 	name string
 	in   []byte
 	want string
 }{
-	{"empty", []byte{}, "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"},
-	{"abc", []byte("abc"), "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"},
-	{"hello world", []byte("hello world"), "47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc"},
+	{"empty", []byte{}, "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"},
+	{"abc", []byte("abc"), "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"},
+	{"hello world", []byte("hello world"), "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"},
 }
 
 func TestBlake3Hash_MatchesCrossLanguageReference(t *testing.T) {
@@ -45,17 +45,18 @@ func TestBlake3Compress_NotZeroStub(t *testing.T) {
 }
 
 func TestBlake3Hash_EquivalentToCompressionWithIV(t *testing.T) {
-	// blake3Hash(msg) must equal Blake3Compress(IV, zero-pad(msg, 64)).
-	// This is the contract that the on-chain codegen implements.
-	cases := [][]byte{[]byte{}, []byte("abc"), []byte("hello world"), []byte{0x19, 0x76, 0xa9, 0x14}}
-	for _, msg := range cases {
-		padded := make([]byte, 64)
-		copy(padded, msg)
-		direct := Blake3Compress(ByteString(blake3IVBytes()), ByteString(padded))
-		viaHash := Blake3Hash(ByteString(msg))
-		if !bytes.Equal([]byte(direct), []byte(viaHash)) {
-			t.Fatalf("Blake3Hash(%x) != Blake3Compress(IV, pad(%x))", msg, msg)
-		}
+	// For a full 64-byte message, Blake3Hash(msg) == Blake3Compress(IV, msg):
+	// both use block_len = 64. For shorter messages the block_len differs (the
+	// hash uses the real length), so the equivalence holds ONLY at exactly 64
+	// bytes — that separation is the BUG-101 fix.
+	msg := make([]byte, 64)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+	direct := Blake3Compress(ByteString(blake3IVBytes()), ByteString(msg))
+	viaHash := Blake3Hash(ByteString(msg))
+	if !bytes.Equal([]byte(direct), []byte(viaHash)) {
+		t.Fatalf("Blake3Hash(64B) = %x != Blake3Compress(IV, 64B) = %x", viaHash, direct)
 	}
 }
 
@@ -78,7 +79,7 @@ func TestBlake3Compress_Determinism(t *testing.T) {
 	}
 }
 
-// blake3IVBytes returns the BLAKE3 IV as 32 big-endian bytes (8 u32 words).
+// blake3IVBytes returns the BLAKE3 IV as 32 little-endian bytes (8 u32 words).
 // Mirrors the constant used inside the runtime; duplicated here so the test
 // stays self-contained and catches any IV-byte-order regression.
 func blake3IVBytes() []byte {
@@ -88,10 +89,10 @@ func blake3IVBytes() []byte {
 	}
 	out := make([]byte, 32)
 	for i, w := range words {
-		out[i*4+0] = byte(w >> 24)
-		out[i*4+1] = byte(w >> 16)
-		out[i*4+2] = byte(w >> 8)
-		out[i*4+3] = byte(w)
+		out[i*4+0] = byte(w)
+		out[i*4+1] = byte(w >> 8)
+		out[i*4+2] = byte(w >> 16)
+		out[i*4+3] = byte(w >> 24)
 	}
 	return out
 }

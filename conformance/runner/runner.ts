@@ -864,7 +864,7 @@ async function runRubyCompiler(source: string, sourceFile: string): Promise<Comp
 /**
  * Check whether the Java compiler jar is available. Mirrors the binary-
  * discovery pattern used for Go / Rust: prefer a distributable artifact
- * over spawning a build system. M4 ships IR only; hex lands in M5.
+ * over spawning a build system. The Java compiler ships full IR + hex.
  */
 export function findJavaBinary(): string | null {
   const jarPath = findJavaJarPath();
@@ -966,8 +966,7 @@ export async function shutdownJavaDaemon(): Promise<void> {
 /**
  * Run the Java compiler on the given source. Returns undefined if the
  * Java compiler jar is not available. A failing --hex invocation is
- * captured gracefully with scriptHex = '' (stack lowering + emit land
- * in M5).
+ * captured gracefully with scriptHex = ''.
  */
 async function runJavaCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
   const start = performance.now();
@@ -1594,6 +1593,14 @@ function compareIR(
   outputs: (CompilerOutput | undefined)[],
   expectedCount?: number,
 ): boolean {
+  // A tier reporting success but emitting EMPTY IR is a defect, not an absent
+  // tier (absent tiers return `undefined`). Never silently drop it — otherwise
+  // an emit regression degrades to <N-tier parity while still reporting green.
+  if (outputs.some((o) => o !== undefined && o.success && o.irJson === '')) {
+    console.warn('  WARNING: a compiler reported success but produced empty IR — treating as mismatch');
+    return false;
+  }
+
   const successfulIRs = outputs
     .filter((o): o is CompilerOutput => o !== undefined && o.success && o.irJson !== '')
     .map((o) => o.irJson);
@@ -1617,6 +1624,14 @@ function compareScript(
   outputs: (CompilerOutput | undefined)[],
   expectedCount?: number,
 ): boolean {
+  // A tier reporting success but emitting EMPTY hex is a defect, not an absent
+  // tier (absent tiers return `undefined`). Never silently drop it — otherwise
+  // an emit regression degrades to <N-tier parity while still reporting green.
+  if (outputs.some((o) => o !== undefined && o.success && o.scriptHex.replace(/\s/g, '') === '')) {
+    console.warn('  WARNING: a compiler reported success but produced empty hex — treating as mismatch');
+    return false;
+  }
+
   const successfulHexes = outputs
     .filter((o): o is CompilerOutput => o !== undefined && o.success && o.scriptHex !== '')
     .map((o) => o.scriptHex.toLowerCase().replace(/\s/g, ''));

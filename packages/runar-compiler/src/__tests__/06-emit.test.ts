@@ -4,6 +4,7 @@ import { lowerToANF } from '../passes/04-anf-lower.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
 import { emit, emitMethod, OPCODES } from '../passes/06-emit.js';
 import { optimizeStackIR } from '../optimizer/peephole.js';
+import { CHECK_PREIMAGE_BINDING_HEX } from '../passes/oppushtx-codegen.js';
 import type { StackMethod, StackOp } from '../ir/index.js';
 import type { EmitResult } from '../passes/06-emit.js';
 import type { ContractNode } from '../ir/index.js';
@@ -718,12 +719,13 @@ describe('Pass 6: Emit', () => {
     it('canonical stateful Counter (StatefulSmartContract + addOutput) emits exact bytes', () => {
       // Stateful contract with implicit txPreimage / state-continuation /
       // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
-      // injection (0xab at position 2), the BIP-143 generator pubkey
-      // (0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),
-      // the GAP-302 sighash-type pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP
-      // OP_BIN2NUM <0x41> OP_NUMEQUALVERIFY, right after checkPreimage), and the
-      // addOutput serialization path. A regression in any of these emits would
-      // shift the bytes here.
+      // injection (0xab at position 2), the BUG-100 on-chain OP_PUSH_TX
+      // preimage-binding construction (the opaque 760-byte blob starting `76aa00…`
+      // and ending `…ad` OP_CHECKSIGVERIFY — see oppushtx-codegen.ts; the BIP-143
+      // generator pubkey 0279be…f81798 lives inside it), the GAP-302 sighash-type
+      // pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <0x41> OP_NUMEQUALVERIFY,
+      // right after checkPreimage), and the addOutput serialization path. A
+      // regression in any of these emits would shift the bytes here.
       const source = `
         import { StatefulSmartContract, assert } from 'runar-lang';
         class Counter extends StatefulSmartContract {
@@ -737,8 +739,8 @@ describe('Pass 6: Emit', () => {
       `;
       const result = compileToEmit(source);
       expect(result.scriptHex).toBe(
-        '76ab547a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' +
-        'ad69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b7702' +
+        '76ab' + CHECK_PREIMAGE_BINDING_HEX +
+        '69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b7702' +
         'e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501' +
         'fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c' +
         '58807c7e547a547a041976a9147b7e0288ac7e7c58807c7e7eaa7b820128947f7701207f7587' +

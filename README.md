@@ -426,7 +426,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [BSV20Token](examples/ts/bsv20-token/) | BSV-20 fungible token inscription | No | No |
 | [BSV21Token](examples/ts/bsv21-token/) | BSV-21 fungible token inscription | No | No |
 
-All 24 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 11 contracts are available in all 9 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. The full example set is also mirrored in `sol/` and `move/` (69 contracts each).
+All 24 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 71 contracts are available in all 9 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. The full example set is also mirrored in `sol/` and `move/` (72 contracts each).
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -479,9 +479,9 @@ The constant folding optimizer (+ dead binding elimination) is available between
 Rúnar defines a **canonical IR conformance boundary** at the ANF level. The seven reference compilers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) each accept all nine source formats (`.runar.{ts,sol,move,go,rs,py,zig,rb,java}`) and target two layers of conformance:
 
 - **Frontend parity (mandatory for every tier).** Every fixture must parse cleanly through every compiler in every one of the nine source formats. There are no per-tier carve-outs at the parser layer. Enforced in CI by the `--parser-only` runner mode (`pnpm --filter runar-conformance test:parser-only` locally; CI step "Run all-tier parser-only coverage"): every available compiler runs `--parse-only` against every (fixture, format) pair, ignoring the per-fixture `compilers` allowlist (which only scopes Stack-IR / hex parity).
-- **Stack-IR + hex parity (scoped per fixture).** Fixtures without a `compilers` allowlist in `source.json` must produce byte-identical Stack IR + Bitcoin Script hex across all seven tiers. Fixtures that opt out (Go-only crypto: BabyBear / KoalaBear / Poseidon2 / BN254 / Merkle / FRI; Java-deferred: state-covenant / stateful-bytestring) carry an explicit `compilers` array + `compilersJustification` rationale string.
+- **Stack-IR + hex parity (scoped per fixture).** Fixtures without a `compilers` allowlist in `source.json` must produce byte-identical Stack IR + Bitcoin Script hex across all seven tiers. Fixtures that opt out — the four Go-only fixtures `babybear`, `babybear-ext4`, `merkle-proof`, and `state-covenant` — carry an explicit `compilers` array + `compilersJustification` rationale string.
 
-The TypeScript compiler is the reference implementation; Go, Rust, Python, Zig, Ruby, and Java are full peers. The conformance suite in `conformance/` contains 63 fixtures spanning P2PKH, stateful counters, escrow, oracle covenants, WOTS+/SLH-DSA, SHA-256, BLAKE3, EC, NIST P-256/P-384, BabyBear / KoalaBear / Merkle / FRI primitives. The cross-tier audit (`conformance/runner/__tests__/allowlist-audit.test.ts`) gates the allowlist set so opt-outs don't grow silently.
+The TypeScript compiler is the reference implementation; Go, Rust, Python, Zig, Ruby, and Java are full peers. The conformance suite in `conformance/` contains 64 fixtures spanning P2PKH, stateful counters, escrow, oracle covenants, WOTS+/SLH-DSA, SHA-256, BLAKE3, EC, NIST P-256/P-384, BabyBear / KoalaBear / Merkle / FRI primitives. The cross-tier audit (`conformance/runner/__tests__/allowlist-audit.test.ts`) gates the allowlist set so opt-outs don't grow silently.
 
 ### Contract Model
 

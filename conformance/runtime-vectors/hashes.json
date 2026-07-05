@@ -144,30 +144,31 @@
       "expected": "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
     }
   ],
+  "_blake3_doc": "Standard BLAKE3 (official reference). blake3Hash is correct for messages 0..64 bytes (single block; Bitcoin Script is loop-free so >64 B is out of scope — BUG-101). Values verified against the official BLAKE3 KATs (empty, abc).",
   "blake3_hash": [
     {
       "name": "empty",
       "input": "",
-      "expected": "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"
+      "expected": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
     },
     {
       "name": "abc",
       "input": "616263",
-      "expected": "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"
+      "expected": "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
     },
     {
       "name": "hello-world",
       "input": "68656c6c6f20776f726c64",
-      "expected": "47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc"
+      "expected": "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     }
   ],
   "blake3_compress": [
     {
       "name": "iv-abc-padded",
-      "_doc": "blake3Hash('abc') equivalent: blake3Compress(IV, 'abc' || zeropad to 64)",
-      "state": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+      "_doc": "blake3Compress(IV, 'abc' || zeropad to 64) with block_len=64 = standard BLAKE3 of the 64-byte message 'abc'||zeros. State/block are little-endian words (standard BLAKE3).",
+      "state": "67e6096a85ae67bb72f36e3c3af54fa57f520e518c68059babd9831f19cde05b",
       "block": "61626300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-      "expected": "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"
+      "expected": "edf447f5d5d74ca1c3b879b0872541b49e0fe6f4e01ac3a92a8a81ba47487087"
     }
   ]
 }

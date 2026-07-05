@@ -2990,48 +2990,25 @@ func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string
 }
 
 func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, bindingIndex int, lastUses map[string]int) {
-	// OP_PUSH_TX: verify the sighash preimage matches the current spending
-	// transaction using on-chain signature derivation (BSV Academy pattern).
-	//
-	// The unlocking script pushes ONLY <preimage>. The locking script derives
-	// the ECDSA signature on-chain:
-	//   1. DUP preimage
-	//   2. HASH256 → sighash
-	//   3. BIN2NUM → strip leading zeros
-	//   4. 1ADD → s = sighash_int + 1
-	//   5. NUM2BIN 32 → pad to 32 bytes
-	//   6. Prepend DER prefix (header + known R = Gx)
-	//   7. Append SIGHASH_ALL|FORKID (0x41)
-	//   8. Push known pubkey
-	//   9. CHECKSIGVERIFY
+	// OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
+	// current spending transaction. The signature is DERIVED FROM THE PREIMAGE
+	// ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*k⁻¹ mod n, with
+	// fixed nonce k and privkey d=1 (pubkey = G). OP_CHECKSIG(sig, G) then passes
+	// iff hash256(preimage) equals the node's real tx sighash — closing BUG-100.
+	// The unlocking script pushes ONLY <preimage> (no witness signature).
+	// See emitCheckPreimageBinding (oppushtx.go) for the construction.
 
-	// Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
-	// preimage is only the code after this point. This reduces preimage size
-	// for large scripts and is required for scripts > ~32KB.
+	// Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
+	// the code after this point (smaller preimage; required for large scripts).
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CODESEPARATOR"})
 
-	// Step 1: Bring preimage to top (non-consuming).
+	// Bring the preimage to the top (kept for field extractors below).
 	isLast := ctx.isLastUse(preimage, bindingIndex, lastUses)
 	ctx.bringToTop(preimage, isLast)
 
-	// Step 2: Bring the implicit _opPushTxSig to top (consuming).
-	ctx.bringToTop("_opPushTxSig", true)
-
-	// Step 3: Push compressed secp256k1 generator point G (33 bytes).
-	G := []byte{
-		0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB,
-		0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B,
-		0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28,
-		0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17,
-		0x98,
-	}
-	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: G}})
-	ctx.sm.push("") // G on stack
-
-	// Step 4: OP_CHECKSIGVERIFY — verify and remove sig + pubkey.
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CHECKSIGVERIFY"})
-	ctx.sm.pop() // G consumed
-	ctx.sm.pop() // _opPushTxSig consumed
+	// Derive + verify the signature on-chain (single opaque raw_bytes blob,
+	// byte-identical across all 7 tiers). Net stack effect is zero.
+	ctx.emitCheckPreimageBinding()
 
 	// Preimage remains on top. Rename for field extractors.
 	ctx.sm.pop()
@@ -4298,9 +4275,10 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 
 	// If the method uses checkPreimage, the unlocking script pushes implicit
 	// params before all declared parameters (OP_PUSH_TX pattern).
-	// _codePart: full code script (locking script minus state) as ByteString
-	// _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
-	// These are inserted at the base of the stack so they can be consumed later.
+	// _codePart: full code script (locking script minus state) as ByteString.
+	// (BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+	// preimage — see lowerCheckPreimage — so NO _opPushTxSig witness item is
+	// pushed. The unlocking script provides only the preimage.)
 	// _codePart is needed for continuation builders (add_output/add_raw_output)
 	// OR when the method reads variable-length (ByteString) mutable state — the
 	// deserialization needs it for the preimage-relative offset (issue #100).
@@ -4313,11 +4291,8 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	usesCheckPreimage := methodUsesCheckPreimageRec(method.Body, privateMethods, map[string]bool{})
 	usesCodePart := usesCheckPreimage &&
 		(methodUsesCodePart(method.Body) || methodReadsVarLenState(method.Body, varLenProps))
-	if usesCheckPreimage {
-		paramNames = append([]string{"_opPushTxSig"}, paramNames...)
-		if usesCodePart {
-			paramNames = append([]string{"_codePart"}, paramNames...)
-		}
+	if usesCheckPreimage && usesCodePart {
+		paramNames = append([]string{"_codePart"}, paramNames...)
 	}
 
 	ctx := newLoweringContext(paramNames, properties)

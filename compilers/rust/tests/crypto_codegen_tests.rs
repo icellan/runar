@@ -293,13 +293,13 @@ fn test_emit_verify_slh_dsa_all_param_sets() {
 #[test]
 fn test_blake3_compress_op_count_golden() {
     let ops = collect(|s| emit_blake3_compress(s));
-    assert_eq!(ops.len(), 10819, "blake3_compress op count drift");
+    assert_eq!(ops.len(), 10373, "blake3_compress op count drift");
 }
 
 #[test]
 fn test_blake3_hash_op_count_golden() {
     let ops = collect(|s| emit_blake3_hash(s));
-    assert_eq!(ops.len(), 10829, "blake3_hash op count drift");
+    assert_eq!(ops.len(), 10387, "blake3_hash op count drift");
 }
 
 // -- P-256 -----------------------------------------------------------------

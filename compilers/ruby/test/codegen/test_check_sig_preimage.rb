@@ -108,12 +108,17 @@ class TestCheckSigAndPreimageCodegen < Minitest::Test
     artifact = compile_ts_source(source, 'Counter.runar.ts')
     asm = artifact.asm
 
-    # The stateful preimage check uses HASH256 (double-SHA256) + CHECKSIG
-    # against the txPreimage. Both opcodes must appear.
+    # The stateful preimage check uses HASH256 (double-SHA256) against the
+    # txPreimage, followed by the fixed opaque preimage-verification blob.
     assert_includes asm, 'OP_HASH256',
                     "stateful preimage check must include OP_HASH256"
-    assert(asm.include?('OP_CHECKSIG') || asm.include?('OP_CHECKSIGVERIFY'),
-           "stateful preimage check must include OP_CHECKSIG[VERIFY]")
+    # BUG-100: the checkPreimage tail is now a single fixed opaque
+    # `<raw 760 bytes>` blob emitted as a raw_bytes binding — the OP_CHECKSIG
+    # that verifies the sighash lives INSIDE that blob and is no longer a
+    # discrete ASM token. Assert the opaque blob is present instead of the
+    # (now-absent) standalone CHECKSIG[VERIFY] opcode.
+    assert_match(/<raw 760 bytes>/, asm,
+                 "stateful preimage check must emit the fixed 760-byte opaque preimage-verification blob")
     assert_includes asm, 'OP_CODESEPARATOR',
                     "stateful contracts must emit OP_CODESEPARATOR before the state continuation"
   end

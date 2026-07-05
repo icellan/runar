@@ -51,6 +51,7 @@ zig-pkg/
 compilers/java/build/
 packages/runar-java/build/
 examples/java/build/
+examples/end2end-example/java/build/
 integration/java/build/
 conformance/sdk-output/tools/java-driver/build/
 

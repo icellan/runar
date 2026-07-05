@@ -242,9 +242,21 @@ Built-ins are imported from `runar-lang`. The type checker rejects calls to anyt
 | `hash256` | `(data: ByteString) => Sha256` (double SHA-256) |
 | `ripemd160` | `(data: ByteString) => Ripemd160` |
 | `hash160` | `(data: ByteString) => Addr` (RIPEMD-160 of SHA-256) |
-| `blake3` | `(data: ByteString) => ByteString` |
+| `blake3Hash` | `(data: ByteString) => ByteString` |
+| `blake3Compress` | `(state: ByteString, block: ByteString) => ByteString` |
 | `sha256Compress` | `(state: ByteString, block: ByteString) => ByteString` |
 | `sha256Finalize` | `(state, remaining, msgBitLen) => Sha256` |
+
+> **BLAKE3 supported domain.** `blake3Hash` implements standard/official BLAKE3
+> for messages of **0–64 bytes** (a single BLAKE3 block/chunk: `block_len` = the
+> real message length, `counter = 0`, `flags = CHUNK_START | CHUNK_END | ROOT`).
+> Its output matches the official BLAKE3 KATs across all seven compilers for
+> every input in that range. Bitcoin Script is loop-free, so multi-block /
+> arbitrary-length tree hashing (> 64 bytes) is out of scope. `blake3Compress`
+> exposes the raw single-block compression primitive (`block_len = 64`) for
+> callers that drive their own block schedule. BLAKE3 is little-endian: a 4-byte
+> Script byte-string is already a little-endian 32-bit word, and the digest is
+> emitted little-endian.
 
 ### Byte Manipulation
 

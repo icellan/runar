@@ -304,31 +304,35 @@ class MockCryptoTest {
     @Test
     void blake3HashEmptyMatchesTsReference() {
         ByteString out = MockCrypto.blake3Hash(new ByteString(new byte[0]));
-        assertEquals("7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86", out.toHex());
+        assertEquals("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262", out.toHex());
     }
 
     @Test
     void blake3HashAbcMatchesTsReference() {
         ByteString out = MockCrypto.blake3Hash(new ByteString("abc".getBytes()));
-        assertEquals("6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d", out.toHex());
+        assertEquals("6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85", out.toHex());
     }
 
     @Test
     void blake3HashHelloWorldMatchesTsReference() {
         ByteString out = MockCrypto.blake3Hash(new ByteString("hello world".getBytes()));
-        assertEquals("47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc", out.toHex());
+        assertEquals("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24", out.toHex());
     }
 
     @Test
     void blake3HashEqualsExplicitPaddedCompression() {
-        // blake3Hash(msg) ≡ blake3Compress(IV, msg || zero-pad(64 - |msg|))
-        byte[] msg = "abc".getBytes();
-        byte[] padded = new byte[64];
-        System.arraycopy(msg, 0, padded, 0, msg.length);
+        // For a full 64-byte message, blake3Hash(msg) ≡ blake3Compress(IV, msg):
+        // both use block_len=64. This identity only holds at exactly 64 bytes —
+        // for shorter messages blake3Hash uses the real length as block_len
+        // (standard BLAKE3), so it differs from the block_len=64 compression.
+        byte[] msg = new byte[64];
+        for (int i = 0; i < 64; i++) {
+            msg[i] = (byte) i;
+        }
         ByteString viaHash = MockCrypto.blake3Hash(new ByteString(msg));
         ByteString viaCompress = MockCrypto.blake3Compress(
             new ByteString(MockCrypto.BLAKE3_IV_BYTES),
-            new ByteString(padded));
+            new ByteString(msg));
         assertEquals(viaCompress.toHex(), viaHash.toHex());
     }
 

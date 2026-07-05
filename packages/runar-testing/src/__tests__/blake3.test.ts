@@ -94,7 +94,9 @@ function permute(m: number[]): number[] {
 }
 
 /**
- * Reference BLAKE3 compression function.
+ * Reference BLAKE3 compression function (standard, little-endian).
+ * The chaining value and block are little-endian byte strings (a 4-byte
+ * byte-string is a little-endian word); the digest is output little-endian.
  * @param cvHex - 32-byte chaining value as hex
  * @param blockHex - 64-byte block as hex
  * @param blockLen - number of actual message bytes in the block
@@ -107,13 +109,15 @@ function referenceBlake3Compress(
   blockLen: number = 64,
   flags: number = CHUNK_START | CHUNK_END | ROOT,
 ): string {
-  // Parse chaining value
-  const cv: number[] = [];
-  for (let i = 0; i < 8; i++) cv.push(parseInt(cvHex.substring(i * 8, i * 8 + 8), 16));
+  const cvB = Buffer.from(cvHex, 'hex');
+  const blockB = Buffer.from(blockHex, 'hex');
+  const le = (b: Buffer, i: number) =>
+    ((b[i * 4]! | (b[i * 4 + 1]! << 8) | (b[i * 4 + 2]! << 16) | (b[i * 4 + 3]! << 24)) >>> 0);
 
-  // Parse block into 16 message words (big-endian in hex → u32)
+  const cv: number[] = [];
+  for (let i = 0; i < 8; i++) cv.push(le(cvB, i));
   const m: number[] = [];
-  for (let i = 0; i < 16; i++) m.push(parseInt(blockHex.substring(i * 8, i * 8 + 8), 16));
+  for (let i = 0; i < 16; i++) m.push(le(blockB, i));
 
   // Initialize state
   const state: number[] = [
@@ -133,23 +137,25 @@ function referenceBlake3Compress(
     if (r < 6) msg = permute(msg);
   }
 
-  // Output: XOR first 8 with last 8
-  const output: number[] = [];
+  // Output: little-endian bytes of h[i] = state[i] ^ state[i+8]
+  const out = Buffer.alloc(32);
   for (let i = 0; i < 8; i++) {
-    output.push((state[i]! ^ state[i + 8]!) >>> 0);
+    const w = (state[i]! ^ state[i + 8]!) >>> 0;
+    out[i * 4] = w & 0xff;
+    out[i * 4 + 1] = (w >>> 8) & 0xff;
+    out[i * 4 + 2] = (w >>> 16) & 0xff;
+    out[i * 4 + 3] = (w >>> 24) & 0xff;
   }
-
-  return output.map(w => w.toString(16).padStart(8, '0')).join('');
+  return out.toString('hex');
 }
 
-/** BLAKE3 hash of a message ≤ 64 bytes (used by blake3Hash tests). */
-function _referenceBlake3Hash(msgHex: string): string {
-  const msgBytes = msgHex.length / 2;
+/** Standard BLAKE3 hash of a message ≤ 64 bytes (single block, real block_len). */
+function referenceBlake3Hash(msgHex: string): string {
+  const ivLe = Buffer.alloc(32);
+  for (let i = 0; i < 8; i++) ivLe.writeUInt32LE(BLAKE3_IV[i]! >>> 0, i * 4);
   const padded = msgHex.padEnd(128, '0');
-  const iv = BLAKE3_IV.map(w => w.toString(16).padStart(8, '0')).join('');
-  return referenceBlake3Compress(iv, padded, msgBytes, CHUNK_START | CHUNK_END | ROOT);
+  return referenceBlake3Compress(ivLe.toString('hex'), padded, msgHex.length / 2, CHUNK_START | CHUNK_END | ROOT);
 }
-void _referenceBlake3Hash; // will be used once blockLen is dynamic
 
 // ---- Tests ----
 
@@ -244,11 +250,8 @@ describe('blake3Hash — script execution', () => {
 
   for (const { name, hex } of testMessages) {
     it(`blake3Hash: ${name}`, () => {
-      // Codegen hardcodes blockLen=64 in the state, so match that here
-      const padded = hex.padEnd(128, '0');
-      const expected = referenceBlake3Compress(
-        BLAKE3_IV_HEX, padded, 64, CHUNK_START | CHUNK_END | ROOT,
-      );
+      // blake3Hash uses the real message length as block_len (standard BLAKE3).
+      const expected = referenceBlake3Hash(hex);
 
       const contract = ScriptExecutionContract.fromSource(
         BLAKE3_HASH_SOURCE,

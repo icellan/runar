@@ -74,6 +74,45 @@ public final class StackLower {
 
     private static final int MAX_STACK_DEPTH = 800;
 
+    /**
+     * OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
+     *
+     * <p>The insecure legacy checkPreimage accepted a witness signature over the
+     * real spending transaction and checked it against pubkey G, never reading
+     * the pushed preimage — so the preimage was decoupled from the tx. This
+     * derives the ECDSA signature FROM the preimage on-chain (s = (hash256(
+     * preimage) + r)*kinv mod n, fixed nonce, privkey d=1, low-S, minimal DER),
+     * so OP_CHECKSIG passes only when hash256(preimage) equals the real tx
+     * sighash.
+     *
+     * <p>The construction compiles to a FIXED byte sequence identical across all
+     * seven tiers; it is the canonical output of the TypeScript reference
+     * (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a
+     * single opaque raw_bytes op (peephole barrier). The cross-tier conformance
+     * suite guards that this constant matches every other tier byte-for-byte.
+     */
+    private static final String CHECK_PREIMAGE_BINDING_HEX =
+        "76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e"
+        + "7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f"
+        + "7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c"
+        + "7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c51"
+        + "7f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b"
+        + "7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c"
+        + "7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f04c6"
+        + "009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f952141"
+        + "4136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b757893"
+        + "7c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7fa078"
+        + "21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d7c94"
+        + "9594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c51"
+        + "7f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b"
+        + "7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c"
+        + "517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b"
+        + "7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e"
+        + "7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f"
+        + "7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6047f"
+        + "9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e7c7e"
+        + "01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad";
+
     // ------------------------------------------------------------------
     // State-field type classification (mirrors stack.py)
     // ------------------------------------------------------------------
@@ -366,11 +405,13 @@ public final class StackLower {
         for (AnfParam p : method.params()) paramNames.add(p.name());
 
         if (methodUsesCheckPreimage(method.body(), privateMethods, new java.util.HashSet<>())) {
-            // Implicit params pushed by the SDK before the developer's params.
+            // Implicit param pushed by the SDK before the developer's params.
             // Order matches the Python / Go / Rust references exactly:
-            // _opPushTxSig is prepended first, then _codePart is prepended in
-            // front of it, so the final paramNames layout is
-            // [_codePart, _opPushTxSig, ...declared params...].
+            // the final paramNames layout is [_codePart, ...declared params...].
+            //
+            // BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from
+            // the preimage (see lowerCheckPreimage), so NO _opPushTxSig witness
+            // item is pushed. The unlocking script provides only the preimage.
             //
             // _codePart is provisioned for continuation builders
             // (add_output/add_raw_output/computeStateOutput) OR when the method
@@ -381,7 +422,6 @@ public final class StackLower {
             for (AnfProperty p : properties) {
                 if (!p.readonly() && "ByteString".equals(p.type())) varLenProps.add(p.name());
             }
-            paramNames.add(0, "_opPushTxSig");
             if (methodUsesCodePart(method.body())
                 || methodReadsVarLenState(method.body(), varLenProps)) {
                 paramNames.add(0, "_codePart");
@@ -2234,27 +2274,41 @@ public final class StackLower {
         // ---------------- check_preimage (OP_PUSH_TX) ----------------
 
         void lowerCheckPreimage(String bindingName, String preimage, int idx, Map<String, Integer> lastUses) {
+            // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to
+            // the current spending transaction. The signature is DERIVED FROM THE
+            // PREIMAGE ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*
+            // k⁻¹ mod n, with fixed nonce k and privkey d=1 (pubkey = G).
+            // OP_CHECKSIG(sig, G) then passes iff hash256(preimage) equals the
+            // node's real tx sighash — closing BUG-100. The unlocking script
+            // pushes ONLY <preimage> (no witness signature). See
+            // emitCheckPreimageBinding for the construction.
+
+            // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is
+            // only the code after this point (smaller preimage; required for
+            // large scripts).
             emitOp(new OpcodeOp("OP_CODESEPARATOR"));
 
+            // Bring the preimage to the top (kept for field extractors below).
             bringToTop(preimage, isLastUse(preimage, idx, lastUses));
-            bringToTop("_opPushTxSig", true);
 
-            byte[] G = new byte[] {
-                0x02, 0x79, (byte)0xBE, 0x66, 0x7E, (byte)0xF9, (byte)0xDC, (byte)0xBB,
-                (byte)0xAC, 0x55, (byte)0xA0, 0x62, (byte)0x95, (byte)0xCE, (byte)0x87, 0x0B,
-                0x07, 0x02, (byte)0x9B, (byte)0xFC, (byte)0xDB, 0x2D, (byte)0xCE, 0x28,
-                (byte)0xD9, 0x59, (byte)0xF2, (byte)0x81, 0x5B, 0x16, (byte)0xF8, 0x17,
-                (byte)0x98
-            };
-            emitOp(new PushOp(PushValue.ofHex(bytesToHex(G))));
-            sm.push("");
+            // Derive + verify the signature on-chain (single opaque raw_bytes
+            // blob, byte-identical across all 7 tiers). Net stack effect is zero.
+            emitCheckPreimageBinding();
 
-            emitOp(new OpcodeOp("OP_CHECKSIGVERIFY"));
-            sm.pop();
-            sm.pop();
+            // Preimage remains on top. Rename for field extractors.
             sm.pop();
             sm.push(bindingName);
             trackDepth();
+        }
+
+        /**
+         * Emit the on-chain preimage binding as one opaque raw_bytes op. Net
+         * stack effect is 0 (preimage in → preimage out), declared as in=1/out=1
+         * so the static analyzer keeps the depth consistent. The bytes are the
+         * canonical construction shared byte-for-byte by all seven tiers.
+         */
+        void emitCheckPreimageBinding() {
+            emitOp(new RawBytesOp(Emit.hexToBytes(CHECK_PREIMAGE_BINDING_HEX), 1, 1));
         }
 
         // ---------------- deserialize_state ----------------

@@ -89,7 +89,7 @@ describe('conformance allowlist audit', () => {
   const actual = actualAllowlists();
   const approved = APPROVED_ALLOWLISTS;
 
-  it('every fixture with a compilers allowlist is approved here and in the README', () => {
+  it('every fixture with a compilers allowlist is approved in APPROVED_ALLOWLISTS', () => {
     const unapproved = Object.keys(actual)
       .filter((k) => !(k in approved))
       .sort();

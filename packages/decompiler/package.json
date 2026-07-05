@@ -1,8 +1,10 @@
 {
   "name": "runar-decompiler",
-  "version": "0.0.1",
+  "version": "1.0.0-rc.1",
   "type": "module",
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Bitcoin Script → Rúnar TypeScript decompiler (left inverse of the TS compiler)",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",

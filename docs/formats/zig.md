@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.zig`
-**Supported compilers:** TypeScript, Zig
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby, Java (all seven)
 
 ---
 

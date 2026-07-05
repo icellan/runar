@@ -213,6 +213,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run test
+      - name: GAP-101 — fold-ON⇄fold-OFF ScriptVM equivalence oracle
+        # Compiles each fold-relevant fixture with folding ON and OFF and asserts
+        # both compiled scripts reach the identical accept/reject verdict through
+        # the BSV Spend interpreter — a correctness oracle for the fold pass beyond
+        # cross-tier byte agreement (catches an all-7-tier-shared fold bug).
+        run: npx vitest run packages/runar-testing/src/__tests__/fold-equivalence.test.ts
       - name: Example tests (TS + Sol + Move)
         run: npx vitest run examples/ts/ examples/sol/ examples/move/
       - run: pnpm run typecheck

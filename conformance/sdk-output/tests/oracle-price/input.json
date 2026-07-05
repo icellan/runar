@@ -3,6 +3,7 @@
     "version": "runar-v1.0.0-rc.1",
     "compilerVersion": "1.0.0-rc.1",
     "contractName": "OraclePriceFeed",
+    "parentClass": "SmartContract",
     "abi": {
       "constructor": {
         "params": [
@@ -41,7 +42,7 @@
         }
       ]
     },
-    "script": "53795880537a537a00537a537a537a537a7c7b7695937c977ca8887c0350c300a06900ac",
+    "script": "53795880537a537a00537a537a537a537a7c760003000001a5697b7695937c977ca8887c0350c300a06900ac",
     "constructorSlots": [
       {
         "paramIndex": 0,
@@ -49,7 +50,7 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 34
+        "byteOffset": 42
       }
     ]
   },

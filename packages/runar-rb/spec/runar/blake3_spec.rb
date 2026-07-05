@@ -15,27 +15,30 @@ RSpec.describe 'Runar::Builtins BLAKE3' do
 
   it 'hashes the empty string to a known value' do
     expect(blake3_hash('')).to eq(
-      '7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86'
+      'af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262'
     )
   end
 
   it 'hashes "abc" (hex-encoded) to a known value' do
     expect(blake3_hash('616263')).to eq(
-      '6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d'
+      '6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85'
     )
   end
 
   it 'hashes "hello world" (hex-encoded) to a known value' do
     expect(blake3_hash('68656c6c6f20776f726c64')).to eq(
-      '47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc'
+      'd74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24'
     )
   end
 
   it 'agrees with blake3_compress(IV, zero-pad(msg, 64)) — hash wraps compress' do
     msg = 'abc'
-    padded = ([msg].pack('H*') + "\x00".b * (64 - 'abc'.bytesize / 2)).byteslice(0, 64)
+    msg_bytes = [msg].pack('H*')
+    padded = (msg_bytes + "\x00".b * 64).byteslice(0, 64)
+    # blake3_hash uses the real message length as block_len (v[14]); the direct
+    # compress call must supply the same length for the invariant to hold.
     direct = Runar::Builtins._blake3_compress_impl(
-      Runar::Builtins::BLAKE3_IV_BYTES, padded
+      Runar::Builtins::BLAKE3_IV_BYTES, padded, msg_bytes.bytesize
     ).unpack1('H*')
     expect(blake3_hash(msg)).to eq(direct)
   end

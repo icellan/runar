@@ -25,8 +25,8 @@ import runar.compiler.ir.stack.SwapOp;
  * {@code compilers/python/runar_compiler/codegen/blake3.py}.
  *
  * <ul>
- *   <li>{@code emitBlake3Compress}: [chainingValue(32 BE), block(64 BE)] -&gt; [hash(32 BE)]</li>
- *   <li>{@code emitBlake3Hash}:     [message(&lt;=64 BE)] -&gt; [hash(32 BE)]</li>
+ *   <li>{@code emitBlake3Compress}: [chainingValue(32 LE), block(64 LE)] -&gt; [hash(32 LE)]</li>
+ *   <li>{@code emitBlake3Hash}:     [message(&lt;=64 bytes)] -&gt; [hash(32 LE)]</li>
  * </ul>
  *
  * <p>Architecture (same as {@link Sha256}):
@@ -73,16 +73,6 @@ public final class Blake3 {
             (byte) ((n >> 8) & 0xff),
             (byte) ((n >> 16) & 0xff),
             (byte) ((n >> 24) & 0xff),
-        };
-    }
-
-    /** Encode uint32 as 4-byte big-endian. */
-    private static byte[] u32ToBe(long n) {
-        return new byte[]{
-            (byte) ((n >> 24) & 0xff),
-            (byte) ((n >> 16) & 0xff),
-            (byte) ((n >> 8) & 0xff),
-            (byte) (n & 0xff),
         };
     }
 
@@ -357,17 +347,6 @@ public final class Blake3 {
             rotrBe(n);       // rotate on BE (7 ops)
             reverseBytes4(); // BE -> LE (12 ops)
         }
-
-        /** Convert N x BE words on TOS to LE, preserving stack order. */
-        void beWordsToLe(int n) {
-            for (int i = 0; i < n; i++) {
-                reverseBytes4();
-                toAlt();
-            }
-            for (int i = 0; i < n; i++) {
-                fromAlt();
-            }
-        }
     }
 
     // ==================================================================
@@ -513,22 +492,29 @@ public final class Blake3 {
     /**
      * Generate BLAKE3 compression ops.
      *
-     * <p>Stack entry: [..., chainingValue(32 BE), block(64 BE)] -- 2 items.
-     * Stack exit:  [..., hash(32 BE)] -- 1 item.
+     * <p>Stack entry: [..., chainingValue(32 LE), block(64 LE)] -- 2 items.
+     * Stack exit:  [..., hash(32 LE)] -- 1 item.
      * Net depth: -1.
+     *
+     * <p>BLAKE3 is little-endian: the message and chaining value are loaded as
+     * little-endian 32-bit words and the digest is output as little-endian
+     * bytes. A 4-byte Bitcoin Script byte-string IS a little-endian value, so
+     * the raw 4-byte chunks are already the LE words -- no per-word reversal.
+     *
+     * <p>{@code blockLenFromAlt}: when true, v[14] (block_len) is popped from the
+     * alt stack (blake3Hash supplies the real message length); otherwise it is
+     * the constant 64 (blake3Compress operates on a full 64-byte block).
      */
-    private static List<StackOp> generateCompressOps() {
+    private static List<StackOp> generateCompressOps(boolean blockLenFromAlt) {
         Emitter em = new Emitter(2);
 
         // ================================================================
         // Phase 1: Unpack block into 16 LE message words
         // ================================================================
-        // Stack: [chainingValue(32 BE), block(64 BE)]
-        // Split block into 16 x 4-byte BE words, convert to LE
+        // Stack: [chainingValue(32 LE), block(64 LE)]
+        // Split block into 16 x 4-byte little-endian words (raw chunks are LE words).
         for (int i = 0; i < 15; i++) em.split4();
         em.assertDepth(17, "after block unpack"); // 16 block words + 1 chainingValue
-        em.beWordsToLe(16);
-        em.assertDepth(17, "after block LE convert");
         // Stack: [CV, m0(LE), m1(LE), ..., m15(LE)] -- m0 deepest of msg words, m15 TOS
 
         // ================================================================
@@ -545,9 +531,7 @@ public final class Blake3 {
         em.assertDepth(17, "after CV from alt");
         for (int i = 0; i < 7; i++) em.split4();
         em.assertDepth(24, "after cv unpack");
-        em.beWordsToLe(8);
-        em.assertDepth(24, "after cv LE convert");
-        // Stack: [m0..m15, cv0(LE)..cv7(LE)]
+        // Stack: [m0..m15, cv0(LE)..cv7(LE)] (raw chunks are LE words)
 
         // v[0..7] = chaining value (already on stack)
         // v[8..11] = IV[0..3]
@@ -559,8 +543,13 @@ public final class Blake3 {
         // v[12] = counter_low = 0, v[13] = counter_high = 0
         em.pushB(u32ToLe(0));
         em.pushB(u32ToLe(0));
-        // v[14] = block_len = 64
-        em.pushB(u32ToLe(64));
+        // v[14] = block_len -- the real message length for blake3Hash (from alt),
+        // or the constant 64 for a full-block blake3Compress.
+        if (blockLenFromAlt) {
+            em.fromAlt(); // block_len (4-byte LE) supplied by caller (emitBlake3Hash)
+        } else {
+            em.pushB(u32ToLe(64));
+        }
         // v[15] = flags = CHUNK_START | CHUNK_END | ROOT = 11
         em.pushB(u32ToLe(CHUNK_START | CHUNK_END | ROOT));
         em.assertDepth(32, "after state init");
@@ -633,13 +622,11 @@ public final class Blake3 {
         em.assertDepth(24, "after XOR results restored");
         // Main: [m0..m15, h0, h1, ..., h7] h7=TOS
 
-        // Pack into 32-byte BE result: h0_BE || h1_BE || ... || h7_BE
-        em.reverseBytes4(); // h7 -> h7_BE
+        // Pack into 32-byte little-endian digest: h0_LE || h1_LE || ... || h7_LE.
+        // The words are already little-endian (BLAKE3 output is LE bytes), so no
+        // per-word reversal -- just concatenate the top two 7 times.
         for (int i = 1; i < 8; i++) {
-            em.swap();          // bring h[7-i] (LE) to TOS
-            em.reverseBytes4(); // -> BE
-            em.swap();          // [new_BE, accumulated]
-            em.binOp("OP_CAT"); // new_BE || accumulated
+            em.binOp("OP_CAT"); // h[7-i] || accumulated
         }
         em.assertDepth(17, "after hash pack");
 
@@ -662,7 +649,7 @@ public final class Blake3 {
             synchronized (Blake3.class) {
                 local = compressOpsCache;
                 if (local == null) {
-                    local = List.copyOf(generateCompressOps());
+                    local = List.copyOf(generateCompressOps(false));
                     compressOpsCache = local;
                 }
             }
@@ -676,8 +663,8 @@ public final class Blake3 {
 
     /**
      * Emit BLAKE3 single-block compression in Bitcoin Script.
-     * Stack on entry: [..., chainingValue(32 BE), block(64 BE)]
-     * Stack on exit:  [..., hash(32 BE)]
+     * Stack on entry: [..., chainingValue(32 LE), block(64 LE)]
+     * Stack on exit:  [..., hash(32 LE)]
      * Net depth: -1.
      */
     public static void emitBlake3Compress(Consumer<StackOp> emit) {
@@ -686,17 +673,25 @@ public final class Blake3 {
 
     /**
      * Emit BLAKE3 hash for a message up to 64 bytes.
-     * Stack on entry: [..., message(&lt;=64 BE)]
-     * Stack on exit:  [..., hash(32 BE)]
+     * Stack on entry: [..., message(&lt;=64 bytes)]
+     * Stack on exit:  [..., hash(32 LE)]
      * Net depth: 0.
      *
-     * <p>Applies zero-padding and uses IV as chaining value.
+     * <p>Applies zero-padding and uses IV as chaining value. The real message
+     * length is used as block_len (standard BLAKE3, correct for 0..64 bytes).
      */
     public static void emitBlake3Hash(Consumer<StackOp> emit) {
         Emitter em = new Emitter(1);
 
-        // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
+        // Capture block_len = message length as a 4-byte little-endian value on
+        // the alt stack (consumed as v[14] inside the compression).
         em.oc("OP_SIZE"); em.depth += 1; // [message, len]
+        em.oc("OP_DUP"); em.depth += 1;  // [message, len, len]
+        em.pushI(4);
+        em.binOp("OP_NUM2BIN");          // [message, len, blockLenLE(4)]
+        em.toAlt();                      // [message, len]; alt: [blockLenLE]
+
+        // Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
         em.pushI(64);
         em.swap();
         em.binOp("OP_SUB");    // [message, 64-len]
@@ -705,20 +700,20 @@ public final class Blake3 {
         em.binOp("OP_NUM2BIN"); // [message, zeros]
         em.binOp("OP_CAT");    // [paddedMessage(64)]
 
-        // Push IV as 32-byte BE chaining value
+        // Push IV as 32-byte little-endian chaining value
         byte[] ivBytes = new byte[32];
         for (int i = 0; i < 8; i++) {
-            byte[] be = u32ToBe(BLAKE3_IV[i]);
-            ivBytes[i * 4]     = be[0];
-            ivBytes[i * 4 + 1] = be[1];
-            ivBytes[i * 4 + 2] = be[2];
-            ivBytes[i * 4 + 3] = be[3];
+            byte[] le = u32ToLe(BLAKE3_IV[i]);
+            ivBytes[i * 4]     = le[0];
+            ivBytes[i * 4 + 1] = le[1];
+            ivBytes[i * 4 + 2] = le[2];
+            ivBytes[i * 4 + 3] = le[3];
         }
         em.pushB(ivBytes);
-        em.swap(); // [IV(32 BE), paddedMessage(64 BE)]
+        em.swap(); // [IV(32 LE), paddedMessage(64 LE)]
 
-        // Splice compression ops
-        List<StackOp> compressOps = getCompressOps();
+        // Splice compression ops with the real block_len taken from the alt stack.
+        List<StackOp> compressOps = generateCompressOps(true);
         for (StackOp op : compressOps) em.eRaw(op);
         em.depth = 1;
 

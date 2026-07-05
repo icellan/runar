@@ -20,6 +20,16 @@ import type { Point } from 'runar-lang';
  * The challenge is derived deterministically from the commitment and
  * public key, preventing the prover from choosing a convenient e.
  *
+ * WARNING — this is a proof of KNOWLEDGE, not a spend authorization, and it
+ * is REPLAYABLE. The challenge e = hash256(R || P) binds the witness to the
+ * commitment and public key but NOT to the spending transaction. A valid
+ * (rPoint, s) pair is therefore a bearer credential: once it appears on-chain,
+ * any observer can replay the same (rPoint, s) to satisfy any other UTXO that
+ * carries an identical `SchnorrZKP` locking script (same `pubKey`). Do NOT use
+ * this contract as a standalone spend gate. To bind a proof to a particular
+ * spend, fold the sighash/preimage into the challenge
+ * (e = hash256(R || P || sighash)) so a witness is valid for exactly one tx.
+ *
  * WARNING — nonce reuse is fatal. The contract verifies a single
  * non-interactive proof; it cannot detect that two proofs (sig1, sig2)
  * over different challenges (e1, e2) reuse the same nonce r. When a

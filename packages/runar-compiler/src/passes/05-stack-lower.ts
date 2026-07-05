@@ -28,6 +28,7 @@ import {
   emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
   emitEcMakePoint, emitEcPointX, emitEcPointY,
 } from './ec-codegen.js';
+import { emitCheckPreimageBindingRaw } from './oppushtx-codegen.js';
 import {
   emitBn254FieldAdd, emitBn254FieldSub, emitBn254FieldMul,
   emitBn254FieldInv, emitBn254FieldNeg,
@@ -3158,52 +3159,37 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
-    // OP_PUSH_TX: verify the sighash preimage matches the current spending
-    // transaction.  See https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
+    // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
+    // current spending transaction. See https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
     //
-    // The unlocking script pushes <_opPushTxSig> <preimage>.
-    // The SDK computes the BIP-143 sighash and signs with private key = 1
-    // (public key = secp256k1 generator G, compressed).
-    // The go-sdk's ECDSA library handles DER encoding, low-S normalization,
-    // and all edge cases correctly.
+    // The signature is DERIVED FROM THE PREIMAGE ON CHAIN (Optimal OP_PUSH_TX):
+    //   z    = hash256(preimage)
+    //   s    = (z + r)·k⁻¹ mod n      (fixed nonce k, privkey d=1 ⇒ pubkey = G)
+    // OP_CHECKSIG(sig, G) then passes iff hash256(preimage) equals the node's
+    // real tx sighash — i.e. iff the pushed preimage IS the spending tx's
+    // preimage. This closes BUG-100: a spender can no longer present a preimage
+    // decoupled from the transaction they actually broadcast. The unlocking
+    // script therefore pushes ONLY <preimage> (no witness signature).
     //
-    // Locking script sequence:
-    //   [bring preimage to top]     -- via PICK (non-consuming copy)
-    //   [bring _opPushTxSig to top] -- via ROLL (consuming)
-    //   <G>                         -- push compressed generator point
-    //   OP_CHECKSIGVERIFY           -- verify sig and remove from stack
-    //   -- preimage remains on stack for field extractors
+    // See emitCheckPreimageBinding (oppushtx-codegen.ts) for the construction,
+    // validated end-to-end against the BSV Script interpreter.
 
-    // Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
-    // preimage is only the code after this point. This reduces preimage size
-    // for large scripts and is required for scripts > ~32KB.
+    // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
+    // the code after this point (smaller preimage; required for large scripts).
     this.emitOp({ op: 'opcode', code: 'OP_CODESEPARATOR' });
 
-    // Step 1: Bring preimage to top.
+    // Bring the preimage to the top (kept for field extractors below).
     const isLast = this.isLastUse(preimage, bindingIndex, lastUses);
     this.bringToTop(preimage, isLast);
 
-    // Step 2: Bring the implicit _opPushTxSig to top (consuming).
-    this.bringToTop('_opPushTxSig', true);
+    // Derive + verify the signature on-chain (single opaque raw_bytes blob,
+    // byte-identical across all 7 tiers). Net stack effect is zero: the preimage
+    // is consumed internally as a copy and left on top; OP_CHECKSIGVERIFY aborts
+    // the script unless the binding holds.
+    emitCheckPreimageBindingRaw((op) => this.emitOp(op));
 
-    // Step 3: Push compressed secp256k1 generator point G (33 bytes).
-    const G = new Uint8Array([
-      0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB,
-      0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B,
-      0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28,
-      0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17,
-      0x98,
-    ]);
-    this.emitOp({ op: 'push', value: G });
-    this.stackMap.push(null); // G on stack
-
-    // Step 4: OP_CHECKSIGVERIFY — verify and remove sig + pubkey.
-    this.emitOp({ op: 'opcode', code: 'OP_CHECKSIGVERIFY' });
-    this.stackMap.pop(); // G consumed
-    this.stackMap.pop(); // _opPushTxSig consumed
-
-    // The preimage remains on top. Rename to binding name
-    // so field extractors can reference it.
+    // The preimage remains on top. Rename to the binding name so field
+    // extractors can reference it.
     this.stackMap.pop();
     this.stackMap.push(bindingName);
 
@@ -4976,9 +4962,10 @@ function lowerMethod(
 
   // If the method uses checkPreimage, the unlocking script pushes implicit
   // params before all declared parameters (OP_PUSH_TX pattern).
-  // _codePart: full code script (locking script minus state) as ByteString
-  // _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
-  // These are inserted at the base of the stack so they can be consumed later.
+  // _codePart: full code script (locking script minus state) as ByteString.
+  // (BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+  // preimage — see lowerCheckPreimage — so NO _opPushTxSig witness item is
+  // pushed. The unlocking script provides only the preimage.)
   // _codePart is needed for continuation builders (add_output/add_raw_output)
   // OR when the method reads variable-length (ByteString) mutable state — the
   // deserialization needs it for the preimage-relative offset (issue #100).
@@ -4988,11 +4975,8 @@ function lowerMethod(
   const usesCodePart =
     methodUsesCheckPreimage(method.body, privateMethods) &&
     (methodUsesCodePart(method.body) || methodReadsVarLenState(method.body, varLenProps));
-  if (methodUsesCheckPreimage(method.body, privateMethods)) {
-    paramNames.unshift('_opPushTxSig');
-    if (usesCodePart) {
-      paramNames.unshift('_codePart');
-    }
+  if (methodUsesCheckPreimage(method.body, privateMethods) && usesCodePart) {
+    paramNames.unshift('_codePart');
   }
 
   const ctx = new LoweringContext(paramNames, properties, privateMethods);

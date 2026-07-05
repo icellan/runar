@@ -1984,11 +1984,17 @@ pub const RunarContract = struct {
     }
 
     /// Build the full stateful unlocking script:
-    ///   [codePart] + opPushTxSig + args + [changePKH + changeAmount] + preimage + [witnessHex] + [methodSelector]
+    ///   [codePart] + args + [changePKH + changeAmount] + preimage + [witnessHex] + [methodSelector]
     /// `intent_witness_hex` carries pre-encoded PUSHDATA pushes for the
     /// compiler's auto-injected intent-intrinsic params (`_prevOutScript_*`
     /// then `_serialisedOutputs`, ABI order). Empty when the method has no
     /// auto-injected intent params.
+    ///
+    /// BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+    /// preimage (see codegen emitCheckPreimageBinding), so NO signature is pushed
+    /// here — the unlocking script carries only _codePart (if needed) and the
+    /// preimage. The op_sig_hex parameter is retained for call-site compatibility
+    /// but ignored.
     fn buildStatefulUnlockScript(
         self: *const RunarContract,
         op_sig_hex: []const u8,
@@ -2002,6 +2008,10 @@ pub const RunarContract = struct {
         method_selector_hex: ?[]const u8,
         intent_witness_hex: []const u8,
     ) ![]u8 {
+        // BUG-100 fix: op_sig_hex is no longer pushed (the signature is derived
+        // on-chain from the preimage). Retained for call-site compatibility.
+        _ = op_sig_hex;
+
         var script: std.ArrayListUnmanaged(u8) = .empty;
         errdefer script.deinit(self.allocator);
 
@@ -2010,13 +2020,6 @@ pub const RunarContract = struct {
             const code_part = try self.getCodePartHex();
             defer self.allocator.free(code_part);
             const encoded = try state_mod.encodePushData(self.allocator, code_part);
-            defer self.allocator.free(encoded);
-            try script.appendSlice(self.allocator, encoded);
-        }
-
-        // _opPushTxSig
-        {
-            const encoded = try state_mod.encodePushData(self.allocator, op_sig_hex);
             defer self.allocator.free(encoded);
             try script.appendSlice(self.allocator, encoded);
         }

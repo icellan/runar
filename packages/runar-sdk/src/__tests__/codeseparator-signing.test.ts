@@ -176,17 +176,18 @@ describe('OP_CODESEPARATOR: stateful terminal method without terminalOutputs', (
     expect(result.txid.length).toBe(64);
 
     // Verify the unlocking script: should have the right number of items.
-    // For close(sig) on a stateful contract with 2 methods:
-    //   <opPushTxSig> <sig> <txPreimage> <methodSelector>
-    // = 4 items. If _codePart were erroneously pushed, there would be 5.
+    // For close(sig) on a stateful contract with 2 methods (BUG-100 fix: the
+    // OP_PUSH_TX signature is derived on-chain, so no _opPushTxSig is pushed):
+    //   <sig> <txPreimage> <methodSelector>
+    // = 3 items. If _codePart were erroneously pushed, there would be 4.
     const broadcastedTxs = provider.getBroadcastedTxs();
     const callTx = broadcastedTxs[broadcastedTxs.length - 1]!;
     const unlocks = parseUnlockingScripts(callTx);
     // First input is the contract input
     const contractUnlock = unlocks[0]!;
     const itemCount = countPushdataItems(contractUnlock);
-    // 4 items: opPushTxSig, sig, txPreimage, methodSelector
-    expect(itemCount).toBe(4);
+    // 3 items: sig, txPreimage, methodSelector (opPushTxSig removed — derived on-chain)
+    expect(itemCount).toBe(3);
   });
 
   it('should push _codePart for non-terminal methods (bid method)', async () => {
@@ -218,16 +219,16 @@ describe('OP_CODESEPARATOR: stateful terminal method without terminalOutputs', (
     expect(result.txid).toBeTruthy();
 
     // Verify the unlocking script has _codePart.
-    // For bid(sig, bidder, bidAmount) on a stateful contract with 2 methods:
-    //   <codePart> <opPushTxSig> <sig> <bidder> <bidAmount> <changePKH> <changeAmount> <txPreimage> <methodSelector>
-    // = 9 items.
+    // For bid(sig, bidder, bidAmount) on a stateful contract with 2 methods
+    // (BUG-100 fix: OP_PUSH_TX signature derived on-chain, no _opPushTxSig):
+    //   <codePart> <sig> <bidder> <bidAmount> <changePKH> <changeAmount> <newAmount> <txPreimage> <methodSelector>
     const broadcastedTxs = provider.getBroadcastedTxs();
     const callTx = broadcastedTxs[broadcastedTxs.length - 1]!;
     const unlocks = parseUnlockingScripts(callTx);
     const contractUnlock = unlocks[0]!;
     const itemCount = countPushdataItems(contractUnlock);
-    // 10 items: codePart + opPushTxSig + sig + bidder + bidAmount + changePKH + changeAmount + newAmount + txPreimage + methodSelector
-    expect(itemCount).toBe(10);
+    // 9 items: codePart + sig + bidder + bidAmount + changePKH + changeAmount + newAmount + txPreimage + methodSelector (opPushTxSig removed)
+    expect(itemCount).toBe(9);
   });
 });
 
@@ -377,12 +378,13 @@ class SimpleClose extends StatefulSmartContract {
     expect(result.txid).toBeTruthy();
 
     // Verify no _codePart in unlock (single method = no method selector either)
-    // Expected items: <opPushTxSig> <sig> <txPreimage> = 3 items
+    // (BUG-100 fix: OP_PUSH_TX signature derived on-chain, no _opPushTxSig)
+    // Expected items: <sig> <txPreimage> = 2 items
     const broadcastedTxs = provider.getBroadcastedTxs();
     const callTx = broadcastedTxs[broadcastedTxs.length - 1]!;
     const unlocks = parseUnlockingScripts(callTx);
     const contractUnlock = unlocks[0]!;
     const itemCount = countPushdataItems(contractUnlock);
-    expect(itemCount).toBe(3);
+    expect(itemCount).toBe(2);
   });
 });

@@ -988,9 +988,12 @@ describe('Pass 5: Stack Lower', () => {
       const method = findStackMethod(program, 'signedIncrement');
       const allOps = flattenOps(method.ops);
 
-      // Find OP_CHECKSIGVERIFY (from checkSig inside assert)
+      // Find the user's OP_CHECKSIG (from checkSig inside assert). Note: the
+      // checkPreimage's own signature check is now emitted inside the opaque
+      // OP_PUSH_TX binding blob (raw_bytes), so it is NOT a discrete opcode here
+      // (BUG-100 fix) — the only discrete CHECKSIG is the user's.
       const checksigIdx = allOps.findIndex(
-        o => o.op === 'opcode' && (o as { code: string }).code === 'OP_CHECKSIGVERIFY',
+        o => o.op === 'opcode' && (o as { code: string }).code === 'OP_CHECKSIG',
       );
       expect(checksigIdx).toBeGreaterThan(0);
 
@@ -1002,9 +1005,11 @@ describe('Pass 5: Stack Lower', () => {
       );
       expect(codesepIdx).toBeGreaterThan(-1);
 
-      // After OP_CODESEPARATOR, the stack should be:
-      //   _codePart, _opPushTxSig, sig, _changePKH, _changeAmount, _newAmount, txPreimage
-      // check_preimage consumes txPreimage and _opPushTxSig, leaving:
+      // After OP_CODESEPARATOR, the stack should be (BUG-100 fix: no _opPushTxSig
+      // witness — the OP_PUSH_TX signature is derived on-chain inside the opaque
+      // binding blob):
+      //   _codePart, sig, _changePKH, _changeAmount, _newAmount, txPreimage
+      // check_preimage reads txPreimage (kept), leaving:
       //   _codePart, sig, _changePKH, _changeAmount, _newAmount
       // Then deserialize_state pushes pk, value from preimage:
       //   _codePart, sig, _changePKH, _changeAmount, _newAmount, pk, value
@@ -1041,8 +1046,9 @@ describe('Pass 5: Stack Lower', () => {
       // With the off-by-one bug, we'd see depths of 8+ when the max should be 6.
       for (const rp of rollPickOps) {
         expect(rp.depth).toBeGreaterThanOrEqual(0);
-        // With 7 items on the stack, max valid depth is 6 (0-indexed)
-        expect(rp.depth).toBeLessThanOrEqual(6);
+        // Every ROLL/PICK depth must stay within the method's tracked stack size
+        // (off-by-one would push a depth >= maxStackDepth).
+        expect(rp.depth).toBeLessThan(method.maxStackDepth);
       }
     });
 
@@ -1136,15 +1142,16 @@ describe('Pass 5: Stack Lower', () => {
       const joinOps = flattenOps(joinMethod.ops);
       const playOps = flattenOps(playMethod.ops);
 
-      // Find the OP_CHECKSIGVERIFY in each method and the ROLL just before it
-      // that brings the signature to TOS.
+      // Find the user's OP_CHECKSIG in each method and the ROLL just before it
+      // that brings the signature to TOS. (The checkPreimage's own CHECKSIG is
+      // now inside the opaque OP_PUSH_TX binding blob, not a discrete opcode.)
       function findCheckSigRollDepth(ops: ReturnType<typeof flattenOps>): number {
         const csIdx = ops.findIndex(
-          o => o.op === 'opcode' && (o as { code: string }).code === 'OP_CHECKSIGVERIFY',
+          o => o.op === 'opcode' && (o as { code: string }).code === 'OP_CHECKSIG',
         );
         expect(csIdx).toBeGreaterThan(0);
 
-        // Walk backwards from CHECKSIGVERIFY to find the last ROLL before it
+        // Walk backwards from CHECKSIG to find the last ROLL before it
         // (this brings the sig to TOS for the CHECKSIG operation)
         for (let i = csIdx - 1; i >= 0; i--) {
           if (ops[i]!.op === 'roll') {
@@ -1157,10 +1164,16 @@ describe('Pass 5: Stack Lower', () => {
       const joinSigRollDepth = findCheckSigRollDepth(joinOps);
       const playSigRollDepth = findCheckSigRollDepth(playOps);
 
-      // play has 1 more user param (position) than join (opponent, sig vs position, player, sig).
-      // So the sig ROLL depth for play should be exactly 1 more than join's.
-      // With the off-by-one bug, play's depth would be 2 more instead of 1 more.
-      expect(playSigRollDepth).toBe(joinSigRollDepth + 1);
+      // The checkSig(sig, ...) fetch runs at the same point in both methods
+      // (right after the status assert), where the stack holds the same
+      // deserialized state plus each method's params — sig being the last param
+      // in both. So both methods bring sig to TOS from the same depth. The
+      // original per-method-index off-by-one bug this guards would leave method 1
+      // (play) systematically DEEPER than method 0 (join); equality proves there
+      // is no such inflation. (Pre-BUG-100 the spender-supplied `_opPushTxSig`
+      // sat at the stack base and shifted this by a param-count-dependent offset;
+      // with the signature now derived on-chain there is no such base item.)
+      expect(playSigRollDepth).toBe(joinSigRollDepth);
     });
   });
 

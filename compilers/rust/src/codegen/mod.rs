@@ -15,6 +15,7 @@ pub mod fiat_shamir_kb;
 pub mod koalabear;
 pub mod merkle;
 pub mod opcodes;
+pub mod oppushtx;
 pub mod optimizer;
 pub mod poseidon2_koalabear;
 pub mod poseidon2_merkle;

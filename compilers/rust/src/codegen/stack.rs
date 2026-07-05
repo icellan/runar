@@ -2725,77 +2725,44 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        // OP_PUSH_TX: verify the sighash preimage matches the current spending
-        // transaction.  See https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
-        //
-        // The technique uses a well-known ECDSA keypair where private key = 1
-        // (so the public key is the secp256k1 generator point G, compressed:
-        //   0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798).
-        //
-        // At spending time the SDK must:
-        //   1. Serialise the BIP-143 sighash preimage for the current input.
-        //   2. Compute sighash = SHA256(SHA256(preimage)).
-        //   3. Derive an ECDSA signature (r, s) with privkey = 1:
-        //        r = Gx  (x-coordinate of the generator point, constant)
-        //        s = (sighash + r) mod n
-        //   4. DER-encode (r, s) and append the SIGHASH_ALL|FORKID byte (0x41).
-        //   5. Push <sig> <preimage> (plus any other method args) as the
-        //      unlocking script.
-        //
-        // The locking script sequence:
-        //   [bring preimage to top]     -- via PICK or ROLL
-        //   [bring _opPushTxSig to top] -- via ROLL (consuming)
-        //   <G>                         -- push compressed generator point
-        //   OP_CHECKSIG                 -- verify sig over SHA256(SHA256(preimage))
-        //   OP_VERIFY                   -- abort if invalid
-        //   -- preimage remains on stack for field extractors
-        //
-        // Stack map trace:
-        //   After bring_to_top(preimage):  [..., preimage]
-        //   After bring_to_top(sig, true): [..., preimage, _opPushTxSig]
-        //   After push G:                  [..., preimage, _opPushTxSig, null(G)]
-        //   After OP_CHECKSIG:             [..., preimage, null(result)]
-        //   After OP_VERIFY:               [..., preimage]
+        // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
+        // current spending transaction. The signature is DERIVED FROM THE PREIMAGE
+        // ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*k⁻¹ mod n, with
+        // fixed nonce k and privkey d=1 (pubkey = G). OP_CHECKSIG(sig, G) then passes
+        // iff hash256(preimage) equals the node's real tx sighash — closing BUG-100.
+        // The unlocking script pushes ONLY <preimage> (no witness signature).
+        // See emit_check_preimage_binding (oppushtx.rs) for the construction.
 
-        // Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
-        // preimage is only the code after this point. This reduces preimage size
-        // for large scripts and is required for scripts > ~32KB.
+        // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
+        // the code after this point (smaller preimage; required for large scripts).
         self.emit_op(StackOp::Opcode("OP_CODESEPARATOR".to_string()));
 
-        // Step 1: Bring preimage to top.
+        // Bring the preimage to the top (kept for field extractors below).
         let is_last = self.is_last_use(preimage, binding_index, last_uses);
         self.bring_to_top(preimage, is_last);
 
-        // Step 2: Bring the implicit _opPushTxSig to top (consuming).
-        self.bring_to_top("_opPushTxSig", true);
+        // Derive + verify the signature on-chain (single opaque raw_bytes blob,
+        // byte-identical across all 7 tiers). Net stack effect is zero.
+        self.emit_check_preimage_binding();
 
-        // Step 3: Push compressed secp256k1 generator point G (33 bytes).
-        let g: Vec<u8> = vec![
-            0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB,
-            0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B,
-            0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28,
-            0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17,
-            0x98,
-        ];
-        self.emit_op(StackOp::Push(PushValue::Bytes(g)));
-        self.sm.push(""); // G on stack
-
-        // Step 4: OP_CHECKSIG -- pops pubkey (G) and sig, pushes boolean result.
-        self.emit_op(StackOp::Opcode("OP_CHECKSIG".to_string()));
-        self.sm.pop(); // G consumed
-        self.sm.pop(); // _opPushTxSig consumed
-        self.sm.push(""); // boolean result
-
-        // Step 5: OP_VERIFY -- abort if false, removes result from stack.
-        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
-        self.sm.pop(); // result consumed
-
-        // The preimage is now on top (from Step 1). Rename to binding name
-        // so field extractors can reference it.
+        // The preimage is now on top. Rename to binding name so field extractors
+        // can reference it.
         self.sm.pop();
         self.sm.push(binding_name);
 
         self.track_depth();
+    }
+
+    /// Emit the on-chain preimage binding as one opaque `raw_bytes` op. Net stack
+    /// effect is 0 (preimage in → preimage out), declared as in=1/out=1 so the
+    /// static analyzer keeps the depth consistent. The stack tracker is updated
+    /// by the caller (`lower_check_preimage`), mirroring the Go reference.
+    fn emit_check_preimage_binding(&mut self) {
+        self.emit_op(StackOp::RawBytes {
+            bytes: super::oppushtx::check_preimage_binding_bytes(),
+            in_arity: 1,
+            out_arity: 1,
+        });
     }
 
     /// Lower `deserialize_state(preimage)` — extracts mutable property values
@@ -4759,9 +4726,10 @@ fn lower_method_with_private_methods(
 
     // If the method uses checkPreimage, the unlocking script pushes implicit
     // params before all declared parameters (OP_PUSH_TX pattern).
-    // _codePart: full code script (locking script minus state) as ByteString
-    // _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
-    // These are inserted at the base of the stack so they can be consumed later.
+    // _codePart: full code script (locking script minus state) as ByteString.
+    // (BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
+    // preimage — see lower_check_preimage — so NO _opPushTxSig witness item is
+    // pushed. The unlocking script provides only the preimage.)
     // _codePart is needed for continuation builders (add_output/add_raw_output)
     // OR when the method reads a mutable variable-length (ByteString) state
     // field — the deserialization needs it for the preimage-relative offset
@@ -4774,11 +4742,8 @@ fn lower_method_with_private_methods(
     let uses_code_part = method_uses_check_preimage(&method.body, Some(private_methods))
         && (method_uses_code_part(&method.body)
             || method_reads_var_len_state(&method.body, &var_len_props));
-    if method_uses_check_preimage(&method.body, Some(private_methods)) {
-        param_names.insert(0, "_opPushTxSig".to_string());
-        if uses_code_part {
-            param_names.insert(0, "_codePart".to_string());
-        }
+    if uses_code_part {
+        param_names.insert(0, "_codePart".to_string());
     }
 
     let mut ctx = LoweringContext::new(&param_names, properties);

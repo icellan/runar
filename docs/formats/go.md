@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.go`
-**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby (all six)
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby, Java (all seven)
 
 ---
 

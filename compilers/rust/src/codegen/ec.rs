@@ -790,6 +790,28 @@ pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
     decompose_point(&mut t, "_pt", "_x", "_y");
 
+    // GAP-301: coordinate canonicity. `decompose_point` BIN2NUMs each coordinate
+    // as an unsigned value that may be >= p; the field arithmetic below would
+    // silently reduce it mod p, so a non-canonical encoding of a valid point
+    // would pass. Reject it: require x < p AND y < p (coordinates are unsigned,
+    // so the 0 <= lower bound holds by construction). Combined with the curve
+    // equation at the end via OP_BOOLAND so ecOnCurve still returns a boolean.
+    t.copy_to_top("_x", "_x_lt");
+    push_field_p(&mut t, "_p_for_x");
+    t.raw_block(&["_x_lt", "_p_for_x"], Some("_x_canon"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top("_y", "_y_lt");
+    push_field_p(&mut t, "_p_for_y");
+    t.raw_block(&["_y_lt", "_p_for_y"], Some("_y_canon"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.to_top("_x_canon");
+    t.to_top("_y_canon");
+    t.raw_block(&["_x_canon", "_y_canon"], Some("_canon"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+
     // lhs = y^2
     field_sqr(&mut t, "_y", "_y2");
 
@@ -800,11 +822,18 @@ pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp)) {
     t.push_int("_seven", 7);
     field_add(&mut t, "_x3", "_seven", "_rhs");
 
-    // Compare
+    // Compare curve equation
     t.to_top("_y2");
     t.to_top("_rhs");
-    t.raw_block(&["_y2", "_rhs"], Some("_result"), |e| {
+    t.raw_block(&["_y2", "_rhs"], Some("_curve_eq"), |e| {
         e(StackOp::Opcode("OP_EQUAL".into()));
+    });
+
+    // on-curve = canonical AND curve-equation
+    t.to_top("_canon");
+    t.to_top("_curve_eq");
+    t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
     });
 }
 

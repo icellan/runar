@@ -82,6 +82,13 @@ export function hash256(_data: ByteString): Sha256 {
  * Takes a 32-byte intermediate state and a 64-byte message block,
  * returns the 32-byte updated state.
  * Compiled to inlined SHA-256 compression opcodes (~3000 ops).
+ *
+ * SECURITY — this exposes SHA-256's internal state, i.e. the length-extension
+ * primitive. Do NOT build a keyed MAC as `sha256(key || msg)`: an attacker who
+ * knows `sha256(key || msg)` and `len(key || msg)` can compute
+ * `sha256(key || msg || pad || suffix)` with `sha256Compress`/`sha256Finalize`
+ * without knowing `key`. Use HMAC (or BLAKE3, which is length-extension
+ * resistant) for authentication.
  */
 export function sha256Compress(_state: ByteString, _block: ByteString): ByteString {
   return compilerStub('sha256Compress');
@@ -521,6 +528,14 @@ export function ecNegate(_p: Point): Point {
 
 /**
  * Check if a point lies on the secp256k1 curve: y² ≡ x³ + 7 (mod p).
+ *
+ * SECURITY — this checks only the curve equation, NOT coordinate canonicity.
+ * A coordinate in `[p, 2²⁵⁶)` is reduced mod p by the field arithmetic, so a
+ * non-canonical encoding of a valid point passes `ecOnCurve` while having
+ * different raw bytes than its canonical form. If you gate an attacker-supplied
+ * `Point` and later hash or compare its RAW bytes (rather than the reduced
+ * point), also assert each coordinate is canonical (0 ≤ x, y < `EC_P`) with
+ * `within(...)` to close the malleability surface.
  */
 export function ecOnCurve(_p: Point): boolean {
   return compilerStub('ecOnCurve');
