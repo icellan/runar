@@ -84,6 +84,18 @@ export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult 
     );
   }
 
+  // Multi-method dispatch: when a contract has more than one public spending
+  // entry point, the compiled locking script selects the branch by a method
+  // index pushed on TOP of the unlocking stack (public methods numbered from 0
+  // in declaration order). Single-method contracts have no selector. The
+  // interpreter selects by name, so the selector is a VM-witness-only concern.
+  const publicMethods = (compiled.contract?.methods ?? []).filter(
+    (m) => m.visibility === 'public' && m.name !== 'constructor',
+  );
+  const publicIndex = publicMethods.findIndex((m) => m.name === opts.method);
+  const witnessArgs: WitnessArg[] =
+    publicMethods.length > 1 ? [...opts.args, BigInt(publicIndex)] : [...opts.args];
+
   // 2. Source-semantics oracle: run the method through the ANF interpreter.
   //    TestContract.call reports a failed assert via `success: false` (it does
   //    NOT throw); we also catch genuine interpreter errors defensively.
@@ -104,7 +116,7 @@ export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult 
   }
 
   // 3. Script-semantics oracle: run the compiled script on the BSV engine.
-  const witness = buildWitness(opts.args);
+  const witness = buildWitness(witnessArgs);
   const witnessHex = bytesToHex(witness);
   let vmAccepted: boolean;
   let vmError: string | undefined;
