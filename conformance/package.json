@@ -23,6 +23,7 @@
     "fuzz:execute": "tsx fuzzer/index.ts --execute --num 200 --time-budget-ms 60000",
     "fuzz:execute:gate": "tsx fuzzer/index.ts --execute --num 60 --seed 424242",
     "fuzz:metamorphic": "tsx fuzzer/metamorphic-fuzz.ts --num 200 --seed 424242",
+    "fuzz:ir:gate": "tsx fuzzer/index.ts --ir --seed 424242 --num 40 --compilers ts,go,rust,python,zig,ruby,java --render native",
     "sdk-output": "tsx sdk-output/runner/sdk-runner.ts",
     "differential-witness": "vitest run witnesses/differential.test.ts"
   },
