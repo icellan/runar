@@ -156,6 +156,27 @@ jobs:
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldon.json
 
+      # ----- PR merge gate (TS-GAP-001 randomized half / TS-GAP-005): the
+      # ----- source-vs-script EXECUTION oracle. Unlike the parity gates above
+      # ----- (which only assert 7-tier byte-identical hex — seven tiers can
+      # ----- agree on the SAME wrong bytes), this generates stateless non-crypto
+      # ----- contracts, renders each to TS, and runs every generated spend
+      # ----- through the ANF interpreter AND the compiled fold-ON script on
+      # ----- ScriptVM, hard-failing (exit 1) on any accept/reject divergence.
+      # ----- The oracle is tier-independent (in-process TS compiler + @bsv/sdk
+      # ----- ScriptVM), so it needs no native compiler build. FIXED seed
+      # ----- (424242) keeps it deterministic and flake-free.
+      - name: Fuzz (PR gate — execution oracle, fixed seed)
+        if: github.event_name == 'pull_request'
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          node_modules/.bin/tsx fuzzer/index.ts \
+            --execute \
+            --num 60 \
+            --seed 424242 \
+            --output /tmp/anf-fuzz-pr-execute.json
+
       - name: Upload PR-gate fuzz findings
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
@@ -163,8 +184,10 @@ jobs:
           name: anf-fuzz-pr-findings
           path: |
             conformance/fuzz-findings-anf/
+            conformance/fuzz-findings-execute/
             /tmp/anf-fuzz-pr-foldoff.json
             /tmp/anf-fuzz-pr-foldon.json
+            /tmp/anf-fuzz-pr-execute.json
           if-no-files-found: ignore
           retention-days: 30
 
@@ -217,6 +240,25 @@ jobs:
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-report.json
 
+      # ----- Nightly source-vs-script EXECUTION oracle (TS-GAP-001 randomized /
+      # ----- TS-GAP-005): a larger rotating-seed corpus than the fixed-seed PR
+      # ----- gate, hard-failing on any interpreter-vs-ScriptVM accept/reject
+      # ----- divergence. `$SEED` is the already-validated integer from the
+      # ----- Resolve step (reaches argv via env:, never shell-interpolated).
+      - name: Fuzz (execution oracle, rotating seed)
+        if: github.event_name != 'pull_request'
+        working-directory: conformance
+        env:
+          SEED: ${{ steps.params.outputs.seed }}
+        run: |
+          set -euo pipefail
+          node_modules/.bin/tsx fuzzer/index.ts \
+            --execute \
+            --num 500 \
+            --seed "$SEED" \
+            --time-budget-ms 120000 \
+            --output /tmp/anf-exec-nightly.json
+
       # ----- Always upload the per-finding artifact tree so a failing
       # ----- run leaves behind a replayable repro corpus.
       - name: Upload fuzz findings
@@ -226,7 +268,9 @@ jobs:
           name: anf-fuzz-findings-${{ steps.params.outputs.seed }}
           path: |
             conformance/fuzz-findings-anf/
+            conformance/fuzz-findings-execute/
             /tmp/anf-fuzz-report.json
+            /tmp/anf-exec-nightly.json
           if-no-files-found: ignore
           retention-days: 30
 
