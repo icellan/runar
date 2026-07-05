@@ -20,6 +20,7 @@
     "fuzz:canonical": "tsx fuzzer/index.ts --canonical --num 200",
     "fuzz:canonical:fast": "tsx fuzzer/index.ts --canonical --num 200 --compilers ts,go,rust,python,zig,ruby",
     "fuzz:canonical:gate": "tsx fuzzer/index.ts --canonical --seed 20020602 --num 64 --compilers ts,go,rust,python,zig,ruby",
+    "fuzz:ir:gate": "tsx fuzzer/index.ts --ir --seed 424242 --num 40 --compilers ts,go,rust,python,zig,ruby,java --render native",
     "sdk-output": "tsx sdk-output/runner/sdk-runner.ts"
   },
   "dependencies": {

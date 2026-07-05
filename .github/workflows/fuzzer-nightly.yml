@@ -156,6 +156,25 @@ jobs:
             --compilers ts,go,rust,python,zig,ruby,java \
             --output /tmp/anf-fuzz-pr-foldon.json
 
+      # ----- Contract-level (`--ir`) PR gate (TS-GAP-007). The ANF gates above
+      # ----- drive raw generated ANF programs; this gate drives the
+      # ----- contract-level generator (stateful + native renderers) through the
+      # ----- full `--ir` pipeline across all 7 tiers, fixed-seed for a
+      # ----- deterministic, flake-free merge gate. Hard-fails (fuzzer exit 1)
+      # ----- on any cross-tier divergence.
+      - name: Fuzz (PR gate — contract-level IR, fixed seed)
+        if: github.event_name == 'pull_request'
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          node_modules/.bin/tsx fuzzer/index.ts \
+            --ir \
+            --seed 424242 \
+            --num 40 \
+            --compilers ts,go,rust,python,zig,ruby,java \
+            --render native \
+            --output /tmp/ir-fuzz-pr.json
+
       - name: Upload PR-gate fuzz findings
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
@@ -165,6 +184,7 @@ jobs:
             conformance/fuzz-findings-anf/
             /tmp/anf-fuzz-pr-foldoff.json
             /tmp/anf-fuzz-pr-foldon.json
+            /tmp/ir-fuzz-pr.json
           if-no-files-found: ignore
           retention-days: 30
 
