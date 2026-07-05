@@ -395,7 +395,7 @@ describe('compiler fuzzing', () => {
 
 ### Differential Fuzzing
 
-The conformance fuzzer in `packages/runar-testing/src/fuzzer/` generates random programs and checks that the compiler + VM produce the same result as the interpreter:
+The conformance fuzzer in `conformance/fuzzer/` generates random ANF programs and checks that all seven compiler tiers produce **byte-identical** Bitcoin Script hex for each program (a cross-tier *parity* oracle). It does **not** execute the generated scripts or compare against the interpreter — that source-vs-script execution oracle is provided separately by `packages/runar-testing/src/oracle/differential-execution.ts` and the `--execute` fuzzer mode (see "Differential execution").
 
 ```bash
 # Run the differential fuzzer
@@ -959,7 +959,8 @@ Rúnar employs a layered testing strategy:
 | **VM execution** | Compiled script with specific inputs | `TestSmartContract` / `ScriptVM` (execute compiled Bitcoin Script) |
 | **Interpreter oracle** | ANF IR evaluation matches VM execution | `RunarInterpreter` vs `ScriptVM` |
 | **Property-based fuzzing** | Random valid programs compile correctly | fast-check generators |
-| **Differential fuzzing** | Compiler + VM agree with interpreter | `conformance/fuzzer` |
+| **Differential fuzzing (parity)** | All 7 tiers emit byte-identical hex | `conformance/fuzzer` |
+| **Differential execution (semantics)** | Interpreter and BSV engine agree on accept/reject + state | `packages/runar-testing/src/oracle`, `conformance/fuzzer --execute` |
 | **Cross-compiler conformance** | All compilers produce identical output | Golden-file SHA-256 comparison |
 | **Post-quantum dual-oracle** | Compiled PQ script matches interpreter | `TestContract` vs `ScriptExecutionContract` |
 
