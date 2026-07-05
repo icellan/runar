@@ -24,13 +24,18 @@ package conformance
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
+	crypto "github.com/bsv-blockchain/go-sdk/primitives/hash"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/script/interpreter"
 	errs "github.com/bsv-blockchain/go-sdk/script/interpreter/errs"
 	scriptflag "github.com/bsv-blockchain/go-sdk/script/interpreter/scriptflag"
+	"github.com/bsv-blockchain/go-sdk/transaction"
+	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 )
 
 // executeScriptStrict runs unlocking+locking scripts through the go-sdk
@@ -205,5 +210,204 @@ func TestBoundary_StackDepthLimit(t *testing.T) {
 	}
 	if !errs.IsErrorCode(err, errs.ErrStackOverflow) {
 		t.Fatalf("expected ErrStackOverflow for 1001-element stack, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Verifier-side signature adversarial tests (TS-GAP-011)
+//
+// The existing P2PKH spend test (TestP2PKH_ScriptExecution) only exercises the
+// happy path. These tests feed a high-S signature and a malformed-DER
+// signature into a compiled OP_CHECKSIG path and assert the interpreter
+// REJECTS them under the strict/low-S policy flags.
+//
+// A standard P2PKH locking script is hand-built here (rather than compiled via
+// the node helper) so the suite stays self-contained — the checkSig semantics
+// under test are identical to those the Rúnar P2PKH contract compiles to.
+// ---------------------------------------------------------------------------
+
+// executeScriptStrictTx runs unlocking+locking with a tx context under the
+// after-Chronicle config plus fork-id, applying any extra policy flags such as
+// VerifyLowS / VerifyDERSignatures. WithForkID already implies
+// VerifyStrictEncoding, so DER structure is enforced; low-S requires the extra
+// VerifyLowS flag.
+func executeScriptStrictTx(lockingHex, unlockingHex string, tx *transaction.Transaction, inputIdx int, prevOutput *transaction.TransactionOutput, extraFlags scriptflag.Flag) error {
+	locking, err := script.NewFromHex(lockingHex)
+	if err != nil {
+		return fmt.Errorf("invalid locking script hex: %w", err)
+	}
+	unlocking, err := script.NewFromHex(unlockingHex)
+	if err != nil {
+		return fmt.Errorf("invalid unlocking script hex: %w", err)
+	}
+
+	eng := interpreter.NewEngine()
+	return eng.Execute(
+		interpreter.WithScripts(locking, unlocking),
+		interpreter.WithAfterChronicle(),
+		interpreter.WithForkID(),
+		interpreter.WithTx(tx, inputIdx, prevOutput),
+		interpreter.WithFlags(extraFlags),
+	)
+}
+
+// buildP2PKHLocking returns the hex of a standard P2PKH locking script:
+// OP_DUP OP_HASH160 <20-byte pkh> OP_EQUALVERIFY OP_CHECKSIG.
+func buildP2PKHLocking(pubKeyHash []byte) string {
+	return fmt.Sprintf("%02x%02x", script.OpDUP, script.OpHASH160) +
+		encodePushBytes(pubKeyHash) +
+		fmt.Sprintf("%02x%02x", script.OpEQUALVERIFY, script.OpCHECKSIG)
+}
+
+// canonicalizeIntDER mirrors the go-sdk ec.canonicalizeInt helper: minimal
+// big-endian bytes with a leading 0x00 when the high bit would otherwise make
+// the value look negative.
+func canonicalizeIntDER(v *big.Int) []byte {
+	b := v.Bytes()
+	if len(b) == 0 {
+		b = []byte{0x00}
+	}
+	if b[0]&0x80 != 0 {
+		padded := make([]byte, len(b)+1)
+		copy(padded[1:], b)
+		b = padded
+	}
+	return b
+}
+
+// encodeDER hand-rolls the strict DER encoding go-sdk uses
+// (0x30 <len> 0x02 <lenR> R 0x02 <lenS> S) for an arbitrary (R, S) pair —
+// needed because ec.Signature.Serialize() force-normalises S to the low form,
+// so it cannot emit a high-S signature.
+func encodeDER(r, s *big.Int) []byte {
+	rb := canonicalizeIntDER(r)
+	sb := canonicalizeIntDER(s)
+	length := 6 + len(rb) + len(sb)
+	b := make([]byte, length)
+	b[0] = 0x30
+	b[1] = byte(length - 2)
+	b[2] = 0x02
+	b[3] = byte(len(rb))
+	off := copy(b[4:], rb) + 4
+	b[off] = 0x02
+	b[off+1] = byte(len(sb))
+	copy(b[off+2:], sb)
+	return b
+}
+
+// TestP2PKH_ScriptExecution_HighS feeds a signature whose S value is the high
+// (non-canonical) complement N-S into an OP_CHECKSIG path and asserts it is
+// rejected under the low-S policy. A positive control confirms the canonical
+// low-S form of the same signature verifies, so high-S is the sole rejection
+// cause.
+func TestP2PKH_ScriptExecution_HighS(t *testing.T) {
+	privKey, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	pubKeyBytes := privKey.PubKey().Compressed()
+	pubKeyHash := crypto.Hash160(pubKeyBytes)
+
+	lockingHex := buildP2PKHLocking(pubKeyHash)
+
+	const satoshis = uint64(10000)
+	spendTx, prevOutput, err := buildSpendingTx(lockingHex, satoshis)
+	if err != nil {
+		t.Fatalf("build tx: %v", err)
+	}
+
+	sigHash, err := spendTx.CalcInputSignatureHash(0, sighash.AllForkID)
+	if err != nil {
+		t.Fatalf("sighash: %v", err)
+	}
+	sig, err := privKey.Sign(sigHash)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	// Positive control: canonical low-S form verifies under the low-S policy.
+	lowDER := sig.Serialize() // Serialize() normalises S to the low form.
+	lowUnlock := encodePushBytes(append(append([]byte{}, lowDER...), byte(sighash.AllForkID))) +
+		encodePushBytes(pubKeyBytes)
+	if err := executeScriptStrictTx(lockingHex, lowUnlock, spendTx, 0, prevOutput, scriptflag.VerifyLowS); err != nil {
+		t.Fatalf("canonical low-S signature should verify, got: %v", err)
+	}
+
+	// Force S to the high half: S' = N - S (both are valid ECDSA S values;
+	// this is the classic ECDSA malleability). N-S > N/2 whenever S <= N/2.
+	N := ec.S256().N
+	halfN := new(big.Int).Rsh(N, 1)
+	highS := sig.S
+	if highS.Cmp(halfN) <= 0 {
+		highS = new(big.Int).Sub(N, sig.S)
+	}
+	if highS.Cmp(halfN) <= 0 {
+		t.Fatalf("failed to construct a high-S value (S=%x)", highS)
+	}
+
+	highDER := encodeDER(sig.R, highS)
+	highUnlock := encodePushBytes(append(append([]byte{}, highDER...), byte(sighash.AllForkID))) +
+		encodePushBytes(pubKeyBytes)
+
+	err = executeScriptStrictTx(lockingHex, highUnlock, spendTx, 0, prevOutput, scriptflag.VerifyLowS)
+	if err == nil {
+		t.Fatal("high-S signature should be rejected under low-S policy but execution succeeded")
+	}
+	if !errs.IsErrorCode(err, errs.ErrSigHighS) {
+		t.Fatalf("expected ErrSigHighS for high-S signature, got: %v", err)
+	}
+}
+
+// TestP2PKH_ScriptExecution_MalformedDER corrupts the DER total-length prefix
+// of an otherwise valid signature and asserts the OP_CHECKSIG path rejects it
+// under strict DER encoding. A positive control confirms the intact signature
+// verifies.
+func TestP2PKH_ScriptExecution_MalformedDER(t *testing.T) {
+	privKey, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	pubKeyBytes := privKey.PubKey().Compressed()
+	pubKeyHash := crypto.Hash160(pubKeyBytes)
+
+	lockingHex := buildP2PKHLocking(pubKeyHash)
+
+	const satoshis = uint64(10000)
+	spendTx, prevOutput, err := buildSpendingTx(lockingHex, satoshis)
+	if err != nil {
+		t.Fatalf("build tx: %v", err)
+	}
+
+	sigHash, err := spendTx.CalcInputSignatureHash(0, sighash.AllForkID)
+	if err != nil {
+		t.Fatalf("sighash: %v", err)
+	}
+	sig, err := privKey.Sign(sigHash)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	derSig := sig.Serialize()
+
+	// Positive control: the intact DER signature verifies.
+	goodUnlock := encodePushBytes(append(append([]byte{}, derSig...), byte(sighash.AllForkID))) +
+		encodePushBytes(pubKeyBytes)
+	if err := executeScriptStrictTx(lockingHex, goodUnlock, spendTx, 0, prevOutput, scriptflag.VerifyDERSignatures); err != nil {
+		t.Fatalf("intact DER signature should verify, got: %v", err)
+	}
+
+	// Corrupt the DER total-length prefix (byte index 1). The interpreter
+	// expects sig[1] == len(sig)-2; setting it to len(sig) is unambiguously
+	// wrong without changing the sequence tag or the overall length.
+	bad := append([]byte{}, derSig...)
+	bad[1] = byte(len(derSig))
+	badUnlock := encodePushBytes(append(append([]byte{}, bad...), byte(sighash.AllForkID))) +
+		encodePushBytes(pubKeyBytes)
+
+	err = executeScriptStrictTx(lockingHex, badUnlock, spendTx, 0, prevOutput, scriptflag.VerifyDERSignatures)
+	if err == nil {
+		t.Fatal("malformed-DER signature should be rejected under strict DER but execution succeeded")
+	}
+	if !errs.IsErrorCode(err, errs.ErrSigInvalidDataLen) {
+		t.Fatalf("expected ErrSigInvalidDataLen for corrupted DER length prefix, got: %v", err)
 	}
 }
