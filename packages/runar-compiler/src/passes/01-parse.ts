@@ -1115,6 +1115,13 @@ function parseCallExpression(
     return parseAsmCall(callExpr, file, errors, loc);
   }
 
+  // Shorthand: `opReturn(data)` / `opReturn([f0, f1, ...])` desugars to the
+  // asm escape hatch — `asm({ body: [OP_RETURN, push(f0), push(f1), ...] })` —
+  // so all downstream passes see the same IR shape and the bytes are identical.
+  if (calleeNode.isKind(SyntaxKind.Identifier) && calleeText === 'opReturn') {
+    return parseOpReturnCall(callExpr, file, errors, loc);
+  }
+
   const callee = parseExpression(calleeNode, file, errors);
   const args: Expression[] = [];
 
@@ -1295,6 +1302,64 @@ function parseAsmCall(
     result.asmReturnType = asmReturnType;
   }
   return result;
+}
+
+/**
+ * Decode `opReturn(data)` / `opReturn([f0, f1, ...])` into the same synthetic
+ * `asm` call_expr the array-body form produces: body = `OP_RETURN` followed by a
+ * minimal push of each (hex-string) field, with in_arity 1 / out_arity 1. Each
+ * field is encoded by the same `encodeAsmPushLiteral` used for `push(...)`, so
+ * `opReturn(['46544b'])` and `asm({ body: [OP_RETURN, push('46544b')] })` are
+ * byte-identical. Malformed input still yields a valid call_expr so later passes
+ * can keep diagnosing.
+ */
+function parseOpReturnCall(
+  callExpr: CallExpression,
+  file: string,
+  errors: CompilerDiagnostic[],
+  loc: SourceLocation,
+): Expression {
+  const calleeExpr: Expression = { kind: 'identifier', name: 'asm', sourceLocation: loc };
+  const mkAsm = (bodyHex: string): Expression => ({
+    kind: 'call_expr',
+    callee: calleeExpr,
+    args: [
+      { kind: 'bytestring_literal', value: bodyHex, sourceLocation: loc },
+      { kind: 'bigint_literal', value: 1n, sourceLocation: loc }, // in_arity
+      { kind: 'bigint_literal', value: 1n, sourceLocation: loc }, // out_arity
+    ],
+    sourceLocation: loc,
+  });
+
+  const callArgs = callExpr.getArguments();
+  if (callArgs.length !== 1) {
+    errors.push(makeDiagnostic(
+      `opReturn() expects exactly one argument: a hex string or an array of hex strings, got ${callArgs.length} arguments`,
+      'error',
+      loc,
+    ));
+    return mkAsm(byteToHex(OPCODES['OP_RETURN']!));
+  }
+
+  const arg = callArgs[0]!;
+  const fields: Node[] = arg.isKind(SyntaxKind.ArrayLiteralExpression)
+    ? arg.asKindOrThrow(SyntaxKind.ArrayLiteralExpression).getElements()
+    : [arg];
+
+  let body = byteToHex(OPCODES['OP_RETURN']!);
+  for (const f of fields) {
+    if (!f.isKind(SyntaxKind.StringLiteral) && !f.isKind(SyntaxKind.NoSubstitutionTemplateLiteral)) {
+      errors.push(makeDiagnostic(
+        `opReturn() fields must be hex string literals (e.g. opReturn('46544b') or opReturn(['00', '46544b'])); got '${f.getKindName()}'`,
+        'error',
+        locFromNode(f, file),
+      ));
+      continue;
+    }
+    const pushed = encodeAsmPushLiteral(f, file, errors);
+    if (pushed !== undefined) body += pushed;
+  }
+  return mkAsm(body);
 }
 
 /**

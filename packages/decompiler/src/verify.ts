@@ -80,6 +80,71 @@ export function verifyDecompilationAnf(
   }
 }
 
+/** Minimal Bitcoin push encoding for a hex value (covers our recovered args). */
+function pushData(hex: string): string {
+  const len = hex.length / 2;
+  if (len === 0) return '00';
+  if (len <= 75) return len.toString(16).padStart(2, '0') + hex;
+  if (len <= 255) return '4c' + len.toString(16).padStart(2, '0') + hex;
+  throw new Error(`pushData: value too large to splice (${len} bytes)`);
+}
+
+/**
+ * Splice constructor args into a compiled template at its `constructorSlots`,
+ * mirroring Rúnar's deploy-time splice: each slot's 1-byte `OP_0` placeholder
+ * is replaced by the minimal push of the arg. Slots are applied left-to-right
+ * with a running offset shift.
+ */
+export function spliceConstructorArgs(
+  templateHex: string,
+  slots: Array<{ paramIndex: number; byteOffset: number }>,
+  args: Record<number, string>,
+): string {
+  let out = templateHex;
+  let shift = 0;
+  for (const slot of [...slots].sort((a, b) => a.byteOffset - b.byteOffset)) {
+    const val = args[slot.paramIndex];
+    if (val === undefined) continue;
+    const off = (slot.byteOffset + shift) * 2;
+    const push = pushData(val);
+    out = out.slice(0, off) + push + out.slice(off + 2); // replace the 1-byte placeholder
+    shift += push.length / 2 - 1;
+  }
+  return out;
+}
+
+/**
+ * Verify a compiling reconstruction that parameterizes constructor args: the
+ * emitted source compiles to a TEMPLATE (placeholders at constructorSlots);
+ * splicing the recovered `args` must reproduce the target byte-for-byte.
+ */
+export function verifyCompiling(
+  target: Uint8Array,
+  source: string,
+  args: Record<number, string>,
+  opts: VerifyOptions = {},
+): VerifyResult {
+  const result = compile(source, {
+    fileName: opts.fileName ?? '_Recovered.runar.ts',
+    disableConstantFolding: opts.disableConstantFolding ?? opts.strict ?? false,
+    disablePeephole: opts.strict ?? false,
+    disableEcOptimizer: opts.strict ?? false,
+  });
+  if (!result.success || !result.scriptHex) {
+    const errors = result.diagnostics.filter((d) => d.severity === 'error');
+    return {
+      ok: false,
+      kind: 'compile-error',
+      message: errors.map((e) => e.message).join('; ') || 'compilation failed',
+    };
+  }
+  const slots =
+    (result as { artifact?: { constructorSlots?: Array<{ paramIndex: number; byteOffset: number }> } })
+      .artifact?.constructorSlots ?? [];
+  const spliced = spliceConstructorArgs(result.scriptHex, slots, args);
+  return compareBytes(target, hexToBytes(spliced));
+}
+
 function compareBytes(target: Uint8Array, compiled: Uint8Array): VerifyResult {
   if (bytesEqual(compiled, target)) return { ok: true };
   const off = firstDiff(compiled, target);

@@ -542,3 +542,27 @@ export function asm(_args: AsmArgs): void {
     'asm() cannot be called at runtime — compile this contract with the Rúnar compiler.',
   );
 }
+
+/**
+ * Shorthand for an `OP_RETURN` data output: emit `OP_RETURN` followed by a
+ * minimal push of each field. Only callable from a contract extending
+ * {@link UnsafeSmartContract} (it desugars to {@link asm}).
+ *
+ * ```ts
+ * opReturn('48656c6c6f');                 // OP_RETURN <push "Hello">
+ * opReturn(['00', '46544b', '64656d6f']); // OP_RETURN <00> <"FTK"> <"demo">
+ * ```
+ *
+ * Each field is an even-length hex string. `opReturn(x)` is exactly
+ * `asm({ body: [OP_RETURN, push(f0), push(f1), ...], in_arity: 1, out_arity: 1 })`.
+ *
+ * NOTE (2026-05-21): implemented in the TypeScript compiler first; the Go / Rust
+ * / Python / Zig / Ruby / Java compilers do not yet recognize `opReturn` — port
+ * pending (until then, those tiers must use the `asm` array form).
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function opReturn(_data: string | string[]): void {
+  throw new Error(
+    'opReturn() cannot be called at runtime — compile this contract with the Rúnar compiler.',
+  );
+}

@@ -27,12 +27,15 @@ import { matchFingerprints } from './match.js';
 import { runSymbolic } from './symexec.js';
 import { lift, buildRawScriptProgram } from './lift.js';
 import { emitTs, emitRawScriptSource } from './emit-ts.js';
-import { verifyDecompilation, verifyDecompilationAnf } from './verify.js';
+import { verifyDecompilation, verifyDecompilationAnf, verifyCompiling } from './verify.js';
 import { loadFingerprints } from './fingerprints.js';
 import { tryTemplates } from './templates.js';
 import { liftStraightLine, liftMultiMethod, renderTsSource } from './symexec-lift.js';
 import { liftStatefulFromArtifact, renderStatefulSource } from './stateful-lift.js';
 import { runRefinement } from './refine.js';
+import { generalLift } from './general-lift.js';
+import { recoverContract, renderCompiling, renderStructured } from './general-emit.js';
+import { computeFidelity } from './fidelity.js';
 import type { DecompileResult, FingerprintDB, VerifyDiff } from './types.js';
 
 export interface DecompileOptions {
@@ -54,6 +57,14 @@ export interface DecompileOptions {
    * Bitcoin Script byte stream (Rúnar-produced or not).
    */
   raw?: boolean;
+  /**
+   * Opt into the general (semantic) lifter. When all byte-identity-gated
+   * layers decline, recover *structure* from a foreign (non-Rúnar) script —
+   * recognized idioms, contract kind, owner pkh, OP_RETURN state — keeping the
+   * executable body as byte-exact asm islands and attaching a per-span
+   * fidelity map. Off by default, so standard decompilation is unchanged.
+   */
+  semantic?: boolean;
   /**
    * Constructor parameter placeholder byte offsets, copied verbatim from the
    * artifact's `constructorSlots`. When supplied, the symexec layer recovers
@@ -267,7 +278,80 @@ export function decompile(target: Uint8Array | string, opts: DecompileOptions = 
     // byte-canonical.
   }
 
+  // Layer 4 (opt-in) — general (semantic) lifter for foreign scripts. Only
+  // reached when every byte-identity-gated layer above declined, so it never
+  // changes behaviour for Rúnar-emitted scripts. Upgrades what would have been
+  // a raw_script result into structured output + a fidelity map.
+  if (opts.semantic) {
+    const semantic = decompileViaSemantic(bytes, ops);
+    if (semantic) return semantic;
+  }
+
   return decompileViaRawScript(bytes, opts);
+}
+
+/**
+ * General (semantic) recovery: segment the foreign script via the idiom pass,
+ * recover the contract skeleton, and verify the byte-exact ANF candidate. The
+ * rendered source is the human-readable view; the fidelity map labels each
+ * span. Returns null if the candidate fails to recompile (caller falls back to
+ * raw_script).
+ */
+/**
+ * Prepend a verification verdict the decompiler actually checked: VERIFIED when
+ * recompiling the displayed source reproduces the input, otherwise a divergence
+ * WARNING. No assumptions — the verdict reflects a real compile-and-compare.
+ */
+function withVerdict(source: string, byteIdentical: boolean): string {
+  const banner = byteIdentical
+    ? [
+        '// ✓ VERIFIED: recompiling this source reproduces the original script bytes',
+        '//   exactly (checked by the decompiler).',
+      ]
+    : [
+        '// ⚠ WARNING: recompiling this source does NOT reproduce the original bytes',
+        '//   (checked by the decompiler) — control flow / conditions are reconstructed.',
+        '//   Use the byte-identical companion: runar decompile --semantic --byte-exact.',
+      ];
+  return banner.join('\n') + '\n\n' + source;
+}
+
+function decompileViaSemantic(bytes: Uint8Array, ops: ReturnType<typeof disassemble>): DecompileResult | null {
+  const { segments } = generalLift(ops);
+  if (segments.length === 0) return null;
+  const recovered = recoverContract(bytes, segments);
+  const args: Record<number, string> = recovered.ownerPkh ? { 0: recovered.ownerPkh } : {};
+
+  // Displayed source: native-if structured view — control flow lifted to real
+  // Rúnar if/else, branch bodies as asm, large branches as recovered methods.
+  // CHECK it: actually recompile the displayed source and compare. Usually it
+  // is semantic-only (conditions reconstructed) and diverges, but a script with
+  // no reconstructed control flow can come out byte-identical — in which case
+  // no divergence warning is warranted.
+  const rendered = renderStructured(recovered, bytes);
+  // The structured source is usually NOT valid compilable Rúnar (reconstructed
+  // conditions reference synthetic names), so the compile check may throw —
+  // treat any failure as "not byte-identical".
+  let sourceByteIdentical = false;
+  try {
+    sourceByteIdentical = verifyCompiling(bytes, rendered, args).ok;
+  } catch {
+    sourceByteIdentical = false;
+  }
+  const source = withVerdict(rendered, sourceByteIdentical);
+
+  // Byte-exact companion proof: the compiling reconstruction (owner pkh via the
+  // constructor + asm tiling) compiles to a template; splicing the recovered
+  // constructor args at constructorSlots must reproduce the input byte-for-byte.
+  // This keeps `ok` (and the CLI's exit 0) honest — the bytes ARE fully
+  // recoverable — even when the readable `source` reconstructs conditions.
+  const byteExactSource = renderCompiling(recovered, bytes);
+  const verify = verifyCompiling(bytes, byteExactSource, args);
+  const fidelity = computeFidelity(bytes, segments);
+  const base = { source, attempts: 1, recoveryPath: 'semantic' as const, fidelity, byteExactSource, sourceByteIdentical };
+  if (verify.ok) return { ok: true, ...base };
+  const diff: VerifyDiff | undefined = verify.kind === 'byte-diff' ? verify : undefined;
+  return { ok: false, diff, ...base };
 }
 
 /**
@@ -291,7 +375,7 @@ export { matchFingerprints } from './match.js';
 export { runSymbolic } from './symexec.js';
 export { lift, buildRawScriptProgram } from './lift.js';
 export { emitTs, emitRawScriptSource } from './emit-ts.js';
-export { verifyDecompilation, verifyDecompilationAnf, bytesEqual, firstDiff } from './verify.js';
+export { verifyDecompilation, verifyDecompilationAnf, verifyCompiling, spliceConstructorArgs, bytesEqual, firstDiff } from './verify.js';
 export { loadFingerprints, emptyDB, entriesByLengthDesc } from './fingerprints.js';
 export { tryTemplates } from './templates.js';
 export {
@@ -324,6 +408,30 @@ export type {
   Verifier,
 } from './refine.js';
 export { bytesToHex, hexToBytes } from 'runar-testing';
+export { generalLift, segmentByBoundaries, buildShadowProgram, scanIdioms } from './general-lift.js';
+export type { IdiomSpan } from './general-lift.js';
+export { parseControlFlow, flattenSpans } from './control-flow.js';
+export type { CFNode, CFLinear, CFIf } from './control-flow.js';
+export type { Segment, AsmSegment, LiftedSegment, GeneralLiftResult, SegmentOptions } from './general-lift.js';
+export { recoverContract, renderSemanticSource, renderReadable, renderCompiling, renderStructured, buildCandidateProgram } from './general-emit.js';
+export type { RecoveredContract, RecoveredState } from './general-emit.js';
+export { computeFidelity } from './fidelity.js';
+export type { FidelityMap, FidelitySpan, FidelitySummary, FidelityVerdict } from './fidelity.js';
+export { symExec, describeSym } from './symcore.js';
+export type { SymValue, SymState, SymExecOptions } from './symcore.js';
+export { analyzeRegion } from './symanalyze.js';
+export type { RegionFinding, RegionAnalysis } from './symanalyze.js';
+export {
+  IDIOMS,
+  matchIdiomAt,
+  opReturnState,
+  opPushTx,
+  p2pkhSigGate,
+  preimageExtract,
+  outputsEnforce,
+  buildP2pkhOutput,
+} from './general-idioms.js';
+export type { Idiom, IdiomMatch } from './general-idioms.js';
 export type {
   Op,
   AnnotatedOp,

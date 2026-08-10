@@ -96,6 +96,8 @@ program
   .option('-o, --out-file <path>', 'write recovered source to file (default: stdout)')
   .option('-q, --quiet', 'suppress the round-trip status message on stderr')
   .option('--raw', 'force the raw_script path: skip templates, wrap the entire input in an asm({...}) call. Honest output for arbitrary byte streams, byte-identical round-trip.')
+  .option('--semantic', 'general lifter for foreign (non-Rúnar) scripts: recover structure (recognized idioms, contract kind, owner pkh, OP_RETURN state), lifting control flow to native Rúnar if/else + recovered methods with opcode-array asm bodies + a per-span fidelity map. Only engages when standard recovery declines.')
+  .option('--byte-exact', 'with --semantic: print the byte-identical companion (asm-island tiling) instead of the readable native-if view')
   .action(decompileCommand);
 
 program.parse();

@@ -150,6 +150,7 @@ function main() {
     'assert-recognizer': 0,
     'symexec': 0,
     'raw_script': 0,
+    'semantic': 0,
   };
   for (const r of rows) {
     summary[r.outcome]++;

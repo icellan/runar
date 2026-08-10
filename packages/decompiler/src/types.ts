@@ -70,8 +70,13 @@ export interface DispatchResult {
  * - `raw_script`: fell through to the byte-canonical floor. Source wraps
  *   the entire input in a single `asm({...})` call. Honest output — no
  *   structural claim, only byte-identity.
+ * - `semantic`: the general lifter recovered structure from a *foreign*
+ *   (non-Rúnar) script — opt-in via `decompile({ semantic: true })`. The
+ *   executable body is kept as byte-exact asm islands; recovered structure
+ *   (contract kind, owner pkh, state fields, recognized idioms) is surfaced
+ *   in the source + the per-span `fidelity` map. Trust each span per that map.
  */
-export type RecoveryPath = 'template' | 'assert-recognizer' | 'symexec' | 'raw_script';
+export type RecoveryPath = 'template' | 'assert-recognizer' | 'symexec' | 'raw_script' | 'semantic';
 
 /** Decompile result returned to callers. */
 export interface DecompileResult {
@@ -81,6 +86,21 @@ export interface DecompileResult {
   diff?: VerifyDiff;
   /** Which recovery layer produced this candidate. */
   recoveryPath: RecoveryPath;
+  /** Per-span fidelity map (only present for the `semantic` recovery path). */
+  fidelity?: import('./fidelity.js').FidelityMap;
+  /**
+   * Byte-exact companion source (semantic path only): the asm-island tiling
+   * that recompiles BYTE-IDENTICAL. `source` is the readable native-if view
+   * (semantic-only); this is the verifiable image behind `ok`.
+   */
+  byteExactSource?: string;
+  /**
+   * Whether the DISPLAYED `source` itself recompiles byte-identical to the
+   * input — determined by actually compiling it (semantic path only). When
+   * true, no divergence warning is needed; when false, recompiling `source`
+   * yields different bytes (use `byteExactSource`).
+   */
+  sourceByteIdentical?: boolean;
 }
 
 export type VerifyResult =

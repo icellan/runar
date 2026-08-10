@@ -29,6 +29,20 @@ export interface DecompileOptions {
    * byte-identically without claiming structural recovery.
    */
   raw?: boolean;
+  /**
+   * Opt into the general (semantic) lifter: when standard byte-identity-gated
+   * recovery declines (a foreign, non-Rúnar script), recover structure —
+   * recognized idioms, contract kind, owner pkh, OP_RETURN state — keeping the
+   * executable body as byte-exact asm islands and printing a fidelity summary.
+   */
+  semantic?: boolean;
+  /**
+   * With `--semantic`: print the byte-exact companion (the asm-island tiling
+   * that recompiles BYTE-IDENTICAL) instead of the readable native-if view.
+   * The default semantic output lifts control flow to native Rúnar if/else and
+   * is semantic-only; this flag prints the verifiable image behind it.
+   */
+  byteExact?: boolean;
 }
 
 function resolveInput(input: string): string {
@@ -73,17 +87,51 @@ export function decompileCommand(input: string, opts: DecompileOptions): void {
     process.exit(2);
   }
 
-  const result = decompile(bytes, { raw: opts.raw === true });
+  const result = decompile(bytes, { raw: opts.raw === true, semantic: opts.semantic === true });
+
+  // `--byte-exact` prints the verifiable companion (semantic path only); the
+  // default semantic `source` is the readable native-if view.
+  const output =
+    opts.byteExact && result.byteExactSource ? result.byteExactSource : result.source;
 
   if (opts.outFile) {
-    writeFileSync(opts.outFile, result.source);
+    writeFileSync(opts.outFile, output);
   } else {
-    process.stdout.write(result.source);
-    if (!result.source.endsWith('\n')) process.stdout.write('\n');
+    process.stdout.write(output);
+    if (!output.endsWith('\n')) process.stdout.write('\n');
   }
 
   if (!opts.quiet) {
-    if (result.ok) {
+    if (result.recoveryPath === 'semantic' && result.fidelity) {
+      const s = result.fidelity.summary;
+      const recognized = result.fidelity.spans.filter((sp) => sp.idiom).length;
+      // The decompiler actually recompiled the shown source: warn only when
+      // that check shows divergence. A source that reproduces the bytes needs
+      // no warning.
+      if (opts.byteExact && result.byteExactSource) {
+        process.stderr.write('\n[byte-exact] companion shown — recompiles BYTE-IDENTICAL to the input\n');
+      } else if (result.sourceByteIdentical) {
+        process.stderr.write('\n[verified] recompiling the shown source reproduces the input byte-identical\n');
+      } else if (result.byteExactSource) {
+        process.stderr.write(
+          '\n⚠ WARNING: recompiling the shown source does NOT reproduce the original bytes\n' +
+            '  (checked) — control flow + conditions are reconstructed.\n' +
+            '  Re-run with --byte-exact for the byte-identical companion.\n',
+        );
+      }
+      process.stderr.write(
+        `\n[semantic] ${s.coveredBytes}/${s.totalBytes} bytes covered — ` +
+          `${result.fidelity.spans.length} spans: ${s.byteVerified} byte-verified, ` +
+          `${s.semanticOnly} semantic-only, ${s.asmIslands} asm islands (${recognized} recognized)\n`,
+      );
+      for (const sp of result.fidelity.spans) {
+        const label = sp.idiom ? sp.idiom : '(unrecognized)';
+        const note = sp.note ? ` — ${sp.note}` : '';
+        process.stderr.write(
+          `  @${sp.originalRange[0]}..${sp.originalRange[1]}  ${sp.verdict}  ${label}${note}\n`,
+        );
+      }
+    } else if (result.ok) {
       process.stderr.write(`\n[round-trip OK] ${bytes.length} bytes recovered byte-identical\n`);
     } else if (result.diff) {
       process.stderr.write(
@@ -94,5 +142,8 @@ export function decompileCommand(input: string, opts: DecompileOptions): void {
     }
   }
 
-  process.exit(result.ok ? 0 : 1);
+  // A semantic result is success-with-caveats: it produced structured output +
+  // a fidelity map even though it is not (necessarily) a byte-identical
+  // round-trip of a Rúnar contract.
+  process.exit(result.recoveryPath === 'semantic' || result.ok ? 0 : 1);
 }
