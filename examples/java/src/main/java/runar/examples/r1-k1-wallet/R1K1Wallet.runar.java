@@ -5,6 +5,7 @@ import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
 import runar.lang.annotations.Readonly;
 import runar.lang.types.Addr;
+import runar.lang.types.Bigint;
 import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
 import runar.lang.types.Sig;
@@ -35,7 +36,7 @@ class R1K1Wallet extends SmartContract {
     void spendR1(ByteString r1Sig, ByteString r1PubKey, ByteString r1Salt, SigHashPreimage txPreimage) {
         assertThat(len(r1Salt).equals(BigInteger.valueOf(32)));
         assertThat(hash160(cat(r1PubKey, r1Salt)).equals(r1SaltedPubKeyHash));
-        assertThat(substr(txPreimage, len(txPreimage).subtract(BigInteger.valueOf(4)), BigInteger.valueOf(4))
+        assertThat(substr(txPreimage, len(txPreimage).minus(Bigint.of(4)).value(), Bigint.of(4).value())
             .equals(ByteString.fromHex("41000000")));
         assertThat(checkPreimage(txPreimage));
         assertThat(verifyECDSA_P256(sha256(txPreimage), r1Sig, r1PubKey));

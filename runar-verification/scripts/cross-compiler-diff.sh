@@ -542,8 +542,11 @@ for name in "${FIXTURES[@]}"; do
   expected_hex_file="${dir}/expected-script.hex"
 
   expected_hex=""
+  normalized_expected_file="${TMP_ROOT}/${name}.expected.hex"
+  : > "$normalized_expected_file"
   if [ -f "$expected_hex_file" ]; then
     expected_hex=$(tr -d '[:space:]' < "$expected_hex_file" | tr '[:upper:]' '[:lower:]')
+    printf '%s' "$expected_hex" > "$normalized_expected_file"
   fi
 
   # Per-fixture compiler allowlist.
@@ -721,33 +724,35 @@ for name in "${FIXTURES[@]}"; do
   else
     all_match_json=false
   fi
-  fixture_entry=$(jq -n \
+  fixture_entry_file="${TMP_ROOT}/${name}.fixture.json"
+  jq -n \
     --arg name "$name" \
     --arg src_ext "$source_ext" \
-    --arg expected "$expected_hex" \
+    --rawfile expected "$normalized_expected_file" \
     --arg allowlist "$allowlist" \
     --argjson all_match "$all_match_json" \
     '{name: $name, source_ext: $src_ext, expected_hex: $expected, allowlist: $allowlist,
-      compilers: {}, all_match: $all_match}')
+      compilers: {}, all_match: $all_match}' > "$fixture_entry_file"
 
   for id in $active_ids; do
     out_file="${TMP_ROOT}/${name}.${id}.hex"
     rc_file="${TMP_ROOT}/${name}.${id}.rc"
     msg_file="${TMP_ROOT}/${name}.${id}.msg"
     me_file="${TMP_ROOT}/${name}.${id}.matches"
-    hex_val=$(cat "$out_file" 2>/dev/null || true)
     rc_val=$(cat "$rc_file" 2>/dev/null || echo 0)
-    msg_val=$(cat "$msg_file" 2>/dev/null || true)
     me_val=$(cat "$me_file" 2>/dev/null || echo false)
-    fixture_entry=$(printf '%s' "$fixture_entry" | jq \
-      --arg id "$id" --arg hex "$hex_val" --arg err "$msg_val" \
+    fixture_entry_next="${TMP_ROOT}/${name}.fixture-next.json"
+    jq \
+      --arg id "$id" --rawfile hex "$out_file" --rawfile err "$msg_file" \
       --argjson rc "$rc_val" \
       --argjson me "$me_val" \
-      '.compilers[$id] = {hex: $hex, exit_code: $rc, error: $err, matches_expected: $me}')
+      '.compilers[$id] = {hex: $hex, exit_code: $rc, error: $err, matches_expected: $me}' \
+      "$fixture_entry_file" > "$fixture_entry_next"
+    mv "$fixture_entry_next" "$fixture_entry_file"
   done
 
   REPORT_TMP_NEXT="${TMP_ROOT}/report-next.json"
-  jq --argjson entry "$fixture_entry" '.fixtures += [$entry]' "$REPORT_TMP" > "$REPORT_TMP_NEXT"
+  jq --slurpfile entry "$fixture_entry_file" '.fixtures += $entry' "$REPORT_TMP" > "$REPORT_TMP_NEXT"
   mv "$REPORT_TMP_NEXT" "$REPORT_TMP"
 done
 
