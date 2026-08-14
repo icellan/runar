@@ -3,13 +3,14 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, const
 import { join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import { createRequire } from 'module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = resolve(join(__dirname, '..', '..', '..'));
-const require = createRequire(import.meta.url);
-const TSX_CLI = require.resolve('tsx/cli');
+// Reuse the loader that is already executing this TypeScript runner. This
+// works for both a workspace-local tsx and the temporary package installed by
+// `npx tsx`, without a second package-manager invocation or module lookup.
+const TSX_NODE_ARGS = process.execArgv;
 
 interface SdkResult {
   sdk: string;
@@ -51,7 +52,7 @@ function buildSdkTools(): SdkTool[] {
     {
       name: 'typescript',
       cmd: process.execPath,
-      args: (input) => [TSX_CLI, join(toolsDir, 'ts-sdk-tool.ts'), input],
+      args: (input) => [...TSX_NODE_ARGS, join(toolsDir, 'ts-sdk-tool.ts'), input],
     },
     {
       name: 'go',

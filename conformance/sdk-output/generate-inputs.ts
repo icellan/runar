@@ -2,14 +2,15 @@ import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename, dirname, resolve, relative } from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '../..');
 const TESTS_DIR = join(__dirname, 'tests');
 const CONFORMANCE_TESTS_DIR = join(ROOT, 'conformance/tests');
-const require = createRequire(import.meta.url);
-const TSX_CLI = require.resolve('tsx/cli');
+// Reuse the loader that is already executing this TypeScript generator. This
+// works for both a workspace-local tsx and the temporary package installed by
+// `npx tsx`, without a second package-manager invocation or module lookup.
+const TSX_NODE_ARGS = process.execArgv;
 
 interface TestSpec {
   name: string;
@@ -436,7 +437,14 @@ for (const spec of TEST_SPECS) {
   try {
     execFileSync(
       process.execPath,
-      [TSX_CLI, 'packages/runar-cli/src/bin.ts', 'compile', sourcePath, '-o', TMP_DIR],
+      [
+        ...TSX_NODE_ARGS,
+        'packages/runar-cli/src/bin.ts',
+        'compile',
+        sourcePath,
+        '-o',
+        TMP_DIR,
+      ],
       { cwd: ROOT, stdio: 'pipe' },
     );
   } catch (err: any) {
