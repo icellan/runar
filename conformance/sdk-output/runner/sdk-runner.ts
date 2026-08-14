@@ -3,10 +3,13 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, const
 import { join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { createRequire } from 'module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = resolve(join(__dirname, '..', '..', '..'));
+const require = createRequire(import.meta.url);
+const TSX_CLI = require.resolve('tsx/cli');
 
 interface SdkResult {
   sdk: string;
@@ -47,8 +50,8 @@ function buildSdkTools(): SdkTool[] {
   const tools: SdkTool[] = [
     {
       name: 'typescript',
-      cmd: 'npx',
-      args: (input) => ['tsx', join(toolsDir, 'ts-sdk-tool.ts'), input],
+      cmd: process.execPath,
+      args: (input) => [TSX_CLI, join(toolsDir, 'ts-sdk-tool.ts'), input],
     },
     {
       name: 'go',

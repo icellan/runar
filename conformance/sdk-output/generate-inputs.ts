@@ -2,11 +2,14 @@ import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename, dirname, resolve, relative } from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '../..');
 const TESTS_DIR = join(__dirname, 'tests');
 const CONFORMANCE_TESTS_DIR = join(ROOT, 'conformance/tests');
+const require = createRequire(import.meta.url);
+const TSX_CLI = require.resolve('tsx/cli');
 
 interface TestSpec {
   name: string;
@@ -41,6 +44,7 @@ function resolveTestSource(spec: TestSpec): string {
 // Standard test values
 const PK = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
 const ADDR = '751e76e8199196d454941c45d1b3a323f1433bd6';
+const ALT_ADDR = '89abcdefabbaabbaabbaabbaabbaabbaabbaabba';
 const HASH32 = '0000000000000000000000000000000000000000000000000000000000000001';
 const POINT = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8';
 const HELLO = '48656c6c6f';
@@ -241,6 +245,14 @@ const TEST_SPECS: TestSpec[] = [
     ],
   },
   {
+    name: 'r1-k1-wallet',
+    source: 'examples/ts/r1-k1-wallet/R1K1Wallet.runar.ts',
+    constructorArgs: [
+      { type: 'Addr', value: ADDR },
+      { type: 'Addr', value: ALT_ADDR },
+    ],
+  },
+  {
     name: 'p384-primitives',
     source: 'examples/ts/p384-primitives/P384Primitives.runar.ts',
     constructorArgs: [
@@ -423,8 +435,8 @@ for (const spec of TEST_SPECS) {
   console.log(`Compiling ${spec.name} (${sourceRel})...`);
   try {
     execFileSync(
-      'npx',
-      ['tsx', 'packages/runar-cli/src/bin.ts', 'compile', sourcePath, '-o', TMP_DIR],
+      process.execPath,
+      [TSX_CLI, 'packages/runar-cli/src/bin.ts', 'compile', sourcePath, '-o', TMP_DIR],
       { cwd: ROOT, stdio: 'pipe' },
     );
   } catch (err: any) {
