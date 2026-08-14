@@ -110,6 +110,15 @@
       "date": "2026-08-05"
     },
     {
+      "path": "conformance/sdk-output/tests/r1-k1-wallet/expected-locking.hex",
+      "sha256": "4609dccc9ea1844fbcf821f164fe1f200c2e9e139ac5af458327c20e3cf425c3",
+      "verified-against": "second-implementation",
+      "reason": "First deploy-locking golden for the R1-K1 wallet, produced by replacing its two fixed 20-byte Addr constructor slots with distinct commitments. Independent TypeScript, Go, Python, Ruby, Rust, and Java SDK tools locally reproduced the same 959632-byte script and SHA-256 digest; the required SDK-output CI gate additionally verifies the Zig implementation and all seven tiers byte-for-byte against this pin.",
+      "reviewer": "unreviewed:generated-by-agent",
+      "date": "2026-08-14",
+      "review-status": "unreviewed"
+    },
+    {
       "path": "conformance/sdk-output/tests/state-bigint-edges-127/expected-locking.hex",
       "sha256": "385ac444ab679f44a4cd4d2dac33e23d65bd50463c2345d57e8a39e42bca118e",
       "verified-against": "second-implementation",
