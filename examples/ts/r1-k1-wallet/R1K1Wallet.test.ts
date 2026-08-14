@@ -125,6 +125,17 @@ describe('R1K1Wallet', () => {
     expect(result.success).toBe(false);
   });
 
+  it('rejects an otherwise-valid R1 signature with a non-ALL sighash suffix', () => {
+    const wrongSighashPreimage = PREIMAGE.slice(0, -8) + '42000000';
+    const result = wallet().call('spendR1', {
+      r1Sig: signPreimage(wrongSighashPreimage),
+      r1PubKey: R1_PUBKEY,
+      r1Salt: R1_SALT,
+      txPreimage: wrongSighashPreimage,
+    });
+    expect(result.success).toBe(false);
+  });
+
   it('accepts the K1 recovery path for the committed recovery key', () => {
     const result = wallet().call('recoverK1', {
       k1Sig: K1_SIG,
@@ -170,9 +181,34 @@ describe('R1K1Wallet', () => {
     expect(anf).toContain('spendR1');
     expect(anf).toContain('recoverK1');
     expect(anf).toContain('check_preimage');
-    expect(anf).toContain('extractSigHashType');
+    expect(anf).toContain('substr');
     expect(anf).toContain('verifyECDSA_P256');
     expect(anf).toContain('cat');
     expect(anf).toContain('checkSig');
+  });
+
+  it('emits identical script bytes from all nine source frontends', () => {
+    const sourceFiles = [
+      join(__dirname, 'R1K1Wallet.runar.ts'),
+      join(__dirname, '../../go/r1-k1-wallet/R1K1Wallet.runar.go'),
+      join(__dirname, '../../rust/r1-k1-wallet/R1K1Wallet.runar.rs'),
+      join(__dirname, '../../ruby/r1-k1-wallet/R1K1Wallet.runar.rb'),
+      join(__dirname, '../../python/r1-k1-wallet/R1K1Wallet.runar.py'),
+      join(__dirname, '../../zig/r1-k1-wallet/R1K1Wallet.runar.zig'),
+      join(__dirname, '../../sol/r1-k1-wallet/R1K1Wallet.runar.sol'),
+      join(__dirname, '../../move/r1-k1-wallet/R1K1Wallet.runar.move'),
+      join(
+        __dirname,
+        '../../java/src/main/java/runar/examples/r1-k1-wallet/R1K1Wallet.runar.java',
+      ),
+    ];
+
+    const scripts = sourceFiles.map(file => {
+      const result = compile(readFileSync(file, 'utf8'), { fileName: file });
+      expect(result.success, `${file}: ${JSON.stringify(result.diagnostics)}`).toBe(true);
+      return result.artifact!.script;
+    });
+
+    expect(new Set(scripts).size).toBe(1);
   });
 });

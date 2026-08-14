@@ -2,7 +2,7 @@
 
 **A collection of example smart contracts demonstrating Rúnar patterns and features.**
 
-Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rust/`, `python/`, and `zig/`. Each directory contains the contract sources for that frontend, and the native-language frontends share the same 21-contract example set with adjacent native tests.
+Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rust/`, `ruby/`, `python/`, `zig/`, and `java/`. Each directory contains contract sources for that frontend.
 
 ---
 
@@ -20,6 +20,7 @@ Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`,
 | **Oracle Price Feed** | `*/oracle-price/` | Oracle (Rabin) | Advanced | Contract that settles based on an oracle-signed price. Uses Rabin signatures for cheap on-chain verification. |
 | **Auction** | `*/auction/` | Stateful, Multi-method | Advanced | On-chain auction with bidding and closing phases. Tracks highest bidder and bid amount. Enforces deadline via locktime. |
 | **Covenant Vault** | `*/covenant-vault/` | Covenant | Advanced | Vault that restricts spending with covenant rules. Owner must authorize, and the output amount must exceed a minimum. |
+| **R1-K1 Wallet** | `*/r1-k1-wallet/` | Stateless, Multi-method, P-256 | Advanced | Hardware-backed P-256 primary spending with a private per-output salt and an independent mnemonic-derived secp256k1 recovery path. |
 | **Math Demo** | `*/math-demo/` | Stateful (OP_PUSH_TX) | Beginner | Demonstrates built-in math functions (abs, min, max, sqrt, pow, etc.). |
 | **EC Demo** | `*/ec-demo/` | Stateless, EC | Intermediate | Demonstrates EC point operations (ecAdd, ecMul, ecMulGen, etc.). |
 | **Property Initializers** | `*/property-initializers/` | Stateful (OP_PUSH_TX) | Beginner | Demonstrates default values on contract properties. |
@@ -34,13 +35,7 @@ Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`,
 | **SHA-256 Compress** | `{ts,go,rust,python,zig}/sha256-compress/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 compression builtin directly. |
 | **SHA-256 Finalize** | `{ts,go,rust,python,zig}/sha256-finalize/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 finalize builtin directly. |
 
-The Solidity-like and Move-style example trees currently cover a 16-contract subset: `auction`, `blake3`, `covenant-vault`, `ec-demo`, `escrow`, `math-demo`, `oracle-price`, `p2blake3pkh`, `p2pkh`, `property-initializers`, `sha256-compress`, `sha256-finalize`, `stateful-counter`, `tic-tac-toe`, `token-ft`, and `token-nft`.
-
-TypeScript-specific wallet examples:
-
-| Contract | Directory | Pattern | Complexity | Description |
-|---|---|---|---|---|
-| **R1-K1 Wallet** | `ts/r1-k1-wallet/` | Stateless, Multi-method, P-256 | Advanced | Hardware-backed P-256 primary spending with an independent mnemonic-derived secp256k1 recovery path. |
+The Solidity-like and Move-style example trees include the original 16-contract subset plus `r1-k1-wallet`: `auction`, `blake3`, `covenant-vault`, `ec-demo`, `escrow`, `math-demo`, `oracle-price`, `p2blake3pkh`, `p2pkh`, `property-initializers`, `r1-k1-wallet`, `sha256-compress`, `sha256-finalize`, `stateful-counter`, `tic-tac-toe`, `token-ft`, and `token-nft`.
 
 ---
 

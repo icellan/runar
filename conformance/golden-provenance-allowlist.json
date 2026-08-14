@@ -69,11 +69,11 @@
     },
     {
       "path": "conformance/script-size-baseline.json",
-      "sha256": "d2817459528c70d767f065d672ca37b40716c68f7d9a9202a5f5ace4a6724473",
+      "sha256": "204e0e66078a18d01961a7eeb163cd0df0db137b05f2f7ef6f6c8057ece5ca77",
       "verified-against": "second-implementation",
-      "reason": "MERGE RE-STAMP, not a new size change. The previous pin (38cb4fc1) was stamped on fix/ec-complete-formulas and described only that branch's deltas; merging fix/testing-gap-remediation alongside it makes the file the UNION of both branches' edits, so the hash moved without any fixture size moving for a new reason. Verified mechanically rather than by assertion: every one of the 71 entries was recomputed as len(conformance/tests/<fixture>/expected-script.hex)/2 and all 71 match the committed number exactly (0 mismatches, 0 missing hex files), so this file is a pure function of goldens that are themselves gated elsewhere -- 639/639 seven-tier Stack-IR + hex parity in BOTH fold modes, plus the real-crypto witnesses under conformance/witnesses/real-crypto/. Per-entry provenance of the delta vs origin/main e7221a7b: 5 entries are NEW fixtures from the testing-gap branch (assert-false-guard 2019, loop-if-merged-locals 2011, merge-locals-prop-updates 1006, merge-locals-shapes 3031, state-bigint-edges 952); 2 moved on that branch only (branched-readonly-len 1086 -> 1096, if-else 14 -> 20, both from the multi-result branch node); 9 moved on the EC branch only (ec-unit 453374 -> 479716, ec-demo and ec-primitives 1329161 -> 1332782, convergence-proof 451172 -> 452386, schnorr-zkp 872782 -> 875189, p256-primitives 924855 -> 928219, p256-wallet 955310 -> 958792, p384-primitives 1879251 -> 1883767, p384-wallet 1958395 -> 1963300, from the complete addition formulas plus the r/s range gate that closes the all-zero-signature universal forgery). Every merged value equals exactly the one branch that changed it -- no entry holds a blended or averaged number, which is the check that the merge did not silently reconcile two different size claims. All growth is inside the +10% tolerance and nothing shrank. See docs/audit/2026-08-ec-degenerate-cases.md.",
+      "reason": "Adds the new r1-k1-wallet fixture at exactly 959592 bytes. The update command recomputed all 72 entries from their expected-script.hex files; the only new baseline row is r1-k1-wallet, and its size independently equals the byte length emitted by all nine source frontends and all seven compiler tiers in multi-format conformance.",
       "reviewer": "unreviewed:generated-by-agent",
-      "date": "2026-08-07",
+      "date": "2026-08-14",
       "review-status": "unreviewed"
     },
     {
@@ -1517,6 +1517,24 @@
       "reason": "Regenerated for #116 (conditional change-output gate): the auto-injected stateful covenant now emits the change output only when _changeAmount != 0, so the compiled Stack IR + script hex for this fixture legitimately change. Intentional codegen change, not a silent self-regeneration: independently corroborated by the 7-tier cross-compiler conformance parity (all seven compilers regenerate byte-identical Stack IR and Bitcoin Script hex for this fixture, fold-off and fold-on).",
       "reviewer": "gh:icellan",
       "date": "2026-07-09"
+    },
+    {
+      "path": "conformance/tests/r1-k1-wallet/expected-ir.json",
+      "sha256": "03927dd806bd12b2de88807b22af47052c6bf7d7d1cdb1bedabebe42090db1fe",
+      "verified-against": "second-implementation",
+      "reason": "New R1-K1 multi-format fixture. The TypeScript-generated ANF is independently reproduced byte-for-byte by the Go, Rust, Python, Zig, Ruby, and Java compiler tiers from each of the nine source-language variants, in both fold modes.",
+      "reviewer": "unreviewed:generated-by-agent",
+      "date": "2026-08-14",
+      "review-status": "unreviewed"
+    },
+    {
+      "path": "conformance/tests/r1-k1-wallet/expected-script.hex",
+      "sha256": "868bc54b6c6016b945d1871c5878462b0314c11d76609046abf7aa711f528fce",
+      "verified-against": "second-implementation",
+      "reason": "New R1-K1 multi-format fixture. All nine source frontends and all seven independent compiler tiers emit the same 959592-byte locking script in fold-off and fold-on conformance; the focused real-crypto suite separately verifies genuine P-256 and K1 signatures and negative witnesses.",
+      "reviewer": "unreviewed:generated-by-agent",
+      "date": "2026-08-14",
+      "review-status": "unreviewed"
     },
     {
       "path": "conformance/tests/schnorr-zkp/expected-script.hex",

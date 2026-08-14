@@ -12,6 +12,11 @@ hash. The R1 salt is kept off-chain until it is supplied with the unlocking
 witness. A public key is revealed when its corresponding path is used; neither
 private key is ever placed on-chain.
 
+Equivalent sources are maintained for all nine Rúnar frontends: TypeScript,
+Go, Rust, Ruby, Python, Zig, Java, Solidity, and Move. The multi-format
+conformance fixture requires every source to emit the same ANF and locking
+script bytes.
+
 ## Security model
 
 Either key can spend independently. The YubiKey is the convenient normal path,

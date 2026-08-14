@@ -427,7 +427,7 @@ Selected example contracts demonstrate the major contract patterns implemented a
 | [BSV20Token](examples/ts/bsv20-token/) | BSV-20 fungible token inscription | No | No |
 | [BSV21Token](examples/ts/bsv21-token/) | BSV-21 fungible token inscription | No | No |
 
-The original 24 cross-format examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`; R1K1Wallet is currently TypeScript-only. 71 contracts are available in all 9 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. The full example set is also mirrored in `sol/` and `move/` (72 contracts each).
+The original 24 cross-format examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`; R1K1Wallet is available in all 9 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity, Move). 72 contracts are available in all 9 formats. FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. The full example set is also mirrored in `sol/` and `move/` (73 contracts each).
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
