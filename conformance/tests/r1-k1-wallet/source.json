@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/r1-k1-wallet/R1K1Wallet.runar.ts",
+    ".runar.sol": "../../../examples/sol/r1-k1-wallet/R1K1Wallet.runar.sol",
+    ".runar.move": "../../../examples/move/r1-k1-wallet/R1K1Wallet.runar.move",
+    ".runar.go": "../../../examples/go/r1-k1-wallet/R1K1Wallet.runar.go",
+    ".runar.rs": "../../../examples/rust/r1-k1-wallet/R1K1Wallet.runar.rs",
+    ".runar.py": "../../../examples/python/r1-k1-wallet/R1K1Wallet.runar.py",
+    ".runar.zig": "../../../examples/zig/r1-k1-wallet/R1K1Wallet.runar.zig",
+    ".runar.rb": "../../../examples/ruby/r1-k1-wallet/R1K1Wallet.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/r1-k1-wallet/R1K1Wallet.runar.java"
+  }
+}

@@ -7,6 +7,10 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = resolve(join(__dirname, '..', '..', '..'));
+// Reuse the loader that is already executing this TypeScript runner. This
+// works for both a workspace-local tsx and the temporary package installed by
+// `npx tsx`, without a second package-manager invocation or module lookup.
+const TSX_NODE_ARGS = process.execArgv;
 
 interface SdkResult {
   sdk: string;
@@ -47,8 +51,8 @@ function buildSdkTools(): SdkTool[] {
   const tools: SdkTool[] = [
     {
       name: 'typescript',
-      cmd: 'npx',
-      args: (input) => ['tsx', join(toolsDir, 'ts-sdk-tool.ts'), input],
+      cmd: process.execPath,
+      args: (input) => [...TSX_NODE_ARGS, join(toolsDir, 'ts-sdk-tool.ts'), input],
     },
     {
       name: 'go',

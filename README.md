@@ -397,11 +397,12 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-24 example contracts demonstrate the major contract patterns implemented across the maintained native-language frontends:
+Selected example contracts demonstrate the major contract patterns implemented across the maintained native-language frontends:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
 | [P2PKH](examples/ts/p2pkh/) | Pay-to-Public-Key-Hash | No | No |
+| [R1K1Wallet](examples/ts/r1-k1-wallet/) | P-256 hardware key with K1 recovery | No | Yes (2 paths) |
 | [Escrow](examples/ts/escrow/) | Multi-party authorization | No | Yes (4 paths) |
 | [Counter](examples/ts/stateful-counter/) | Stateful state machine | Yes | Yes |
 | [Auction](examples/ts/auction/) | Bidding with deadline | Yes | Yes |
@@ -426,7 +427,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [BSV20Token](examples/ts/bsv20-token/) | BSV-20 fungible token inscription | No | No |
 | [BSV21Token](examples/ts/bsv21-token/) | BSV-21 fungible token inscription | No | No |
 
-All 24 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 71 contracts are available in all 9 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. The full example set is also mirrored in `sol/` and `move/` (72 contracts each).
+The original 24 cross-format examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`; R1K1Wallet is available in all 9 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity, Move). 72 contracts are available in all 9 formats. FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. The full example set is also mirrored in `sol/` and `move/` (73 contracts each).
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts

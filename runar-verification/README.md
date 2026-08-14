@@ -12,7 +12,7 @@ pipeline. The package is useful in two roles:
 
 | Area | Status |
 |---|---:|
-| Conformance fixtures discovered (Lean-recognised) | 71/71 (dynamic readDir) |
+| Conformance fixtures discovered (Lean-recognised) | 72/72 (dynamic readDir) |
 | ANF parse + well-formedness | 64/64 |
 | ANF JSON round-trip | 64/64 |
 | Default byte-exact gate (`pipelineGolden`) | 48/65 byte-exact (40 baseline + 8 stored crypto constants; see note) |
