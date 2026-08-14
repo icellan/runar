@@ -36,6 +36,12 @@ Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`,
 
 The Solidity-like and Move-style example trees currently cover a 16-contract subset: `auction`, `blake3`, `covenant-vault`, `ec-demo`, `escrow`, `math-demo`, `oracle-price`, `p2blake3pkh`, `p2pkh`, `property-initializers`, `sha256-compress`, `sha256-finalize`, `stateful-counter`, `tic-tac-toe`, `token-ft`, and `token-nft`.
 
+TypeScript-specific wallet examples:
+
+| Contract | Directory | Pattern | Complexity | Description |
+|---|---|---|---|---|
+| **R1-K1 Wallet** | `ts/r1-k1-wallet/` | Stateless, Multi-method, P-256 | Advanced | Hardware-backed P-256 primary spending with an independent mnemonic-derived secp256k1 recovery path. |
+
 ---
 
 ## SDK Usage Reference
