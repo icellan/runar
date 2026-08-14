@@ -61,11 +61,12 @@ function listContractFiles(dir: string): string[] {
 // pathological (super-linear) runtime — minutes-to-hours each. Mirrors the
 // PATHOLOGICAL_DECOMPILE set in __tests__/roundtrip.test.ts: the parameterized
 // SLH-DSA "naive INSECURE" pedagogy contracts unroll into enormous hash-chain
-// scripts. The trigger is script *structure*, not raw size (p384-wallet ~1.95
-// MB decompiles in <1s). Recorded as 'skipped' so the matrix completes in
-// seconds instead of hours; the base post-quantum-slhdsa-naive-INSECURE (128s)
-// is fast and stays measured.
+// scripts, while r1-k1-wallet fully unrolls a P-256 verifier. The trigger is
+// script *structure*, not raw size (p384-wallet ~1.95 MB decompiles in <1s).
+// Recorded as 'skipped' so the matrix completes in seconds instead of hours;
+// the base post-quantum-slhdsa-naive-INSECURE (128s) is fast and stays measured.
 const PATHOLOGICAL_DECOMPILE: ReadonlySet<string> = new Set([
+  'r1-k1-wallet/R1K1Wallet',
   'post-quantum-slhdsa-naive-INSECURE-128f/PostQuantumSLHDSANaiveInsecure128f',
   'post-quantum-slhdsa-naive-INSECURE-192f/PostQuantumSLHDSANaiveInsecure192f',
   'post-quantum-slhdsa-naive-INSECURE-192s/PostQuantumSLHDSANaiveInsecure192s',
