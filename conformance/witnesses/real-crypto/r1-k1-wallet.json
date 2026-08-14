@@ -1,0 +1,24 @@
+{
+  "fixture": "r1-k1-wallet",
+  "kind": "stateless-signed",
+  "note": "Executes the exact R1-K1 fixture bytes through @bsv/sdk Spend. The recovery branch uses a real secp256k1 BIP-143 signature; the dedicated example suite separately exercises the P-256 branch with a real prime256v1 signature and its salted public-key commitment.",
+  "constructorArgs": {
+    "r1SaltedPubKeyHash": "1111111111111111111111111111111111111111",
+    "k1PubKeyHash": { "$pkh": "alice" }
+  },
+  "spends": [
+    {
+      "method": "recoverK1",
+      "args": [{ "$sig": "alice" }, { "$pubkey": "alice" }],
+      "expect": "accept",
+      "note": "recovery key matches the constructor commitment and signs the real BIP-143 digest"
+    },
+    {
+      "method": "recoverK1",
+      "args": [{ "$sig": "bob" }, { "$pubkey": "bob" }],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "note": "a valid signature from the wrong recovery key reaches the Spend engine but fails the committed HASH160 guard"
+    }
+  ]
+}
