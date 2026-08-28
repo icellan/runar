@@ -82,6 +82,13 @@ export interface LoweringOptions {
   ecConstantPool?: boolean;
 
   /**
+   * Drop the sign fix-up from EC modular reductions wherever a sign lattice
+   * proves the dividend non-negative. Only pays alongside `ecConstantPool`;
+   * the codegen compares emitted bytes before choosing the cheap subtraction.
+   */
+  ecReductionSinking?: boolean;
+
+  /**
    * Operand scheduling strategy.
    *
    * `'current'` (default) is the shipping behaviour: results are pushed on top
@@ -1284,7 +1291,11 @@ class LoweringContext {
    * identical to the shipping ones.
    */
   private ecCodegenOptions(): EcCodegenOptions | undefined {
-    return this.opts.ecConstantPool ? { constantPool: true } : undefined;
+    if (!this.opts.ecConstantPool && !this.opts.ecReductionSinking) return undefined;
+    return {
+      constantPool: this.opts.ecConstantPool === true,
+      reductionSinking: this.opts.ecReductionSinking === true,
+    };
   }
 
   bringToTop(name: string, consume: boolean): void {

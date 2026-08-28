@@ -183,6 +183,17 @@ export interface CompileOptions {
   ecConstantPool?: boolean;
 
   /**
+   * EXPERIMENTAL. Drop the sign fix-up from EC modular reductions wherever a
+   * sign lattice proves the dividend non-negative, and use the cheap
+   * `a - b + p` form where the subtrahend is proved reduced.
+   *
+   * Only pays alongside `ecConstantPool` — the cheap subtraction references the
+   * prime twice — and the codegen compares emitted bytes before choosing it.
+   * Measured: `verifyECDSA_P256` 304,463 -> ~180,000 bytes with both on.
+   */
+  ecReductionSinking?: boolean;
+
+  /**
    * EXPERIMENTAL. Operand scheduling strategy for the ANF -> Stack pass.
    *
    * `'current'` (default) ships today's bytes. `'liveness'` parks a result on
@@ -500,6 +511,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     onProgress?.('Stack lowering', 60);
     const stackProgram = lowerToStack(optimizedAnf, {
       ecConstantPool: opts.ecConstantPool === true,
+      ecReductionSinking: opts.ecReductionSinking === true,
       schedulerMode: opts.schedulerMode,
     });
 
@@ -592,6 +604,8 @@ export interface CompileFromANFOptions {
   disablePeephole?: boolean;
   /** EXPERIMENTAL. Pool repeated EC curve constants. See CompileOptions. */
   ecConstantPool?: boolean;
+  /** EXPERIMENTAL. Sink EC modular reductions. See CompileOptions. */
+  ecReductionSinking?: boolean;
   /** EXPERIMENTAL. Operand scheduling strategy. See CompileOptions. */
   schedulerMode?: 'current' | 'liveness';
 }
@@ -665,6 +679,7 @@ export function compileFromANF(
 
   const stackProgram = lowerToStack(optimizedAnf, {
     ecConstantPool: opts.ecConstantPool === true,
+    ecReductionSinking: opts.ecReductionSinking === true,
     schedulerMode: opts.schedulerMode,
   });
   if (!opts.disablePeephole) {

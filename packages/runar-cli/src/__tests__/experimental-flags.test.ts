@@ -128,4 +128,10 @@ describe('experimental size-optimizer flags', () => {
     const pooled = await hexWith({ ecConstantPool: true }, 'pool');
     expect(pooled).toBe(bare);
   });
+
+  it('--ec-reduction-sinking is inert on a contract with no EC operations', async () => {
+    const bare = await hexWith({}, 'nosink');
+    const sunk = await hexWith({ ecConstantPool: true, ecReductionSinking: true }, 'sink');
+    expect(sunk).toBe(bare);
+  });
 });

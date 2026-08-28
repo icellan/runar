@@ -72,6 +72,7 @@ export function tsSourcePath(fixture: string, testsDir: string = TESTS_DIR): str
 export const VARIANTS: Record<string, CompileOptions> = {
   current: {},
   'ec-pool': { ecConstantPool: true },
+  'ec-sink': { ecConstantPool: true, ecReductionSinking: true },
   liveness: { schedulerMode: 'liveness' },
   both: { ecConstantPool: true, schedulerMode: 'liveness' },
 };

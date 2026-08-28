@@ -14,7 +14,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
-import { ECTracker, POOL_FIELD_P, POOL_GROUP_N } from './ec-codegen.js';
+import { ECTracker, POOL_FIELD_P, POOL_GROUP_N, Dom, isNonNegative } from './ec-codegen.js';
 import type { EcCodegenOptions } from './ec-codegen.js';
 
 // ===========================================================================
@@ -133,7 +133,30 @@ function pushFieldP(t: ECTracker, name: string, c: CurveParams): void {
   t.pushConst(POOL_FIELD_P, c.fieldP, name);
 }
 
+/**
+ * `a mod p` with no sign fix-up: 1 opcode instead of 7. Sound only when the
+ * dividend is provably >= 0 — the caller proves that, this does not check.
+ */
+function cFieldModShort(t: ECTracker, aName: string, resultName: string, c: CurveParams): void {
+  t.toTop(aName);
+  pushFieldP(t, '_fmods_p', c);
+  t.rawBlock([aName, '_fmods_p'], resultName, (e) => {
+    e({ op: 'opcode', code: 'OP_MOD' });
+  });
+  t.setDomain(resultName, Dom.Reduced);
+}
+
+/** Does the cheap `a - b + p` subtraction pay? Only when p is pooled. */
+function cCheapSubPays(t: ECTracker, c: CurveParams): boolean {
+  const cost = t.constCost(POOL_FIELD_P, c.fieldP);
+  return 2 * cost + 2 < cost + 8;
+}
+
 function cFieldMod(t: ECTracker, aName: string, resultName: string, c: CurveParams): void {
+  if (t.sinking && isNonNegative(t.domainOf(aName))) {
+    cFieldModShort(t, aName, resultName, c);
+    return;
+  }
   t.toTop(aName);
   pushFieldP(t, '_fmod_p', c);
   t.rawBlock([aName, '_fmod_p'], resultName, (e) => {
@@ -146,36 +169,68 @@ function cFieldMod(t: ECTracker, aName: string, resultName: string, c: CurvePara
     e({ op: 'swap' });
     e({ op: 'opcode', code: 'OP_MOD' });
   });
+  t.setDomain(resultName, Dom.Reduced);
 }
 
 function cFieldAdd(t: ECTracker, aName: string, bName: string, resultName: string, c: CurveParams): void {
+  // Read the operand facts before rawBlock consumes their slots.
+  const sumNonNeg = isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName));
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_fadd_sum', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
+  if (sumNonNeg) t.setDomain('_fadd_sum', Dom.NonNegative);
   cFieldMod(t, '_fadd_sum', resultName, c);
 }
 
 function cFieldSub(t: ECTracker, aName: string, bName: string, resultName: string, c: CurveParams): void {
   t.toTop(aName);
   t.toTop(bName);
+  // Needs a >= 0 AND b in [0, p): then a - b > -p and one shifted reduction is
+  // exact. `b >= 0` alone is not enough — a coordinate decoded from 32 unsigned
+  // bytes may exceed p by up to 2^32 + 977.
+  const cheap = t.sinking
+    && isNonNegative(t.domainOf(aName))
+    && t.domainOf(bName) === Dom.Reduced
+    && cCheapSubPays(t, c);
+
   t.rawBlock([aName, bName], '_fsub_diff', (e) => {
     e({ op: 'opcode', code: 'OP_SUB' });
   });
+
+  if (cheap) {
+    pushFieldP(t, '_fsub_p', c);
+    t.rawBlock(['_fsub_diff', '_fsub_p'], '_fsub_shift', (e) => {
+      e({ op: 'opcode', code: 'OP_ADD' });
+    });
+    t.setDomain('_fsub_shift', Dom.NonNegative);
+    cFieldModShort(t, '_fsub_shift', resultName, c);
+    return;
+  }
   cFieldMod(t, '_fsub_diff', resultName, c);
 }
 
-function cFieldMul(t: ECTracker, aName: string, bName: string, resultName: string, c: CurveParams): void {
+function cFieldMul(
+  t: ECTracker, aName: string, bName: string, resultName: string, c: CurveParams,
+  productNonNegative = false,
+): void {
+  // `productNonNegative` lets cFieldSqr assert the sign independently of the
+  // operand: a*a >= 0 for any a whatsoever.
+  const nonNeg = productNonNegative
+    || (isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName)));
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_fmul_prod', (e) => {
     e({ op: 'opcode', code: 'OP_MUL' });
   });
+  if (nonNeg) t.setDomain('_fmul_prod', Dom.NonNegative);
   cFieldMod(t, '_fmul_prod', resultName, c);
 }
 
 function cFieldMulConst(t: ECTracker, aName: string, cv: bigint, resultName: string, c: CurveParams): void {
+  // Every call site passes a small positive cv, so the product keeps a's sign.
+  const nonNeg = cv > 0n && isNonNegative(t.domainOf(aName));
   t.toTop(aName);
   t.rawBlock([aName], '_fmc_prod', (e) => {
     if (cv === 2n) {
@@ -185,12 +240,13 @@ function cFieldMulConst(t: ECTracker, aName: string, cv: bigint, resultName: str
       e({ op: 'opcode', code: 'OP_MUL' });
     }
   });
+  if (nonNeg) t.setDomain('_fmc_prod', Dom.NonNegative);
   cFieldMod(t, '_fmc_prod', resultName, c);
 }
 
 function cFieldSqr(t: ECTracker, aName: string, resultName: string, c: CurveParams): void {
   t.copyToTop(aName, '_fsqr_copy');
-  cFieldMul(t, aName, '_fsqr_copy', resultName, c);
+  cFieldMul(t, aName, '_fsqr_copy', resultName, c, true);
 }
 
 /**
@@ -325,8 +381,8 @@ function cDecomposePoint(t: ECTracker, pointName: string, xName: string, yName: 
     e({ op: 'push', value: BigInt(c.coordBytes) });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
-  t.nm.push('_dp_xb');
-  t.nm.push('_dp_yb');
+  t.pushTracked('_dp_xb');
+  t.pushTracked('_dp_yb');
 
   // Convert y_bytes (on top) to num: reverse BE→LE, append sign byte, BIN2NUM
   t.rawBlock(['_dp_yb'], yName, (e) => {
@@ -335,6 +391,10 @@ function cDecomposePoint(t: ECTracker, pointName: string, xName: string, yName: 
     e({ op: 'opcode', code: 'OP_CAT' });
     e({ op: 'opcode', code: 'OP_BIN2NUM' });
   });
+  // A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+  // UNSIGNED: >= 0, but possibly >= p by up to 2^32 + 977. That gap is exactly
+  // what the subtraction precondition turns on.
+  t.setDomain(yName, Dom.NonNegative);
 
   // Convert x_bytes to num
   t.toTop('_dp_xb');
@@ -344,6 +404,7 @@ function cDecomposePoint(t: ECTracker, pointName: string, xName: string, yName: 
     e({ op: 'opcode', code: 'OP_CAT' });
     e({ op: 'opcode', code: 'OP_BIN2NUM' });
   });
+  t.setDomain(xName, Dom.NonNegative);
 
   // Swap to standard order [xName, yName]
   t.swap();
@@ -649,7 +710,7 @@ function cJacobianToAffine(t: ECTracker, rxName: string, ryName: string, c: Curv
  * After:        [..., ax, ay, _k, jx', jy', jz']
  */
 function buildJacobianAddAffineInline(e: (op: StackOp) => void, t: ECTracker, c: CurveParams): void {
-  jacobianAddAffineBody(new ECTracker([...t.nm], e, t.options), false, c);
+  jacobianAddAffineBody(new ECTracker([...t.nm], e, t.options, [...t.dm]), false, c);
 }
 
 /**
@@ -796,7 +857,7 @@ function cSelectCoord(
  * Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
  */
 function buildJacobianAddOrDoubleInline(e: (op: StackOp) => void, t: ECTracker, c: CurveParams): void {
-  const it = new ECTracker([...t.nm], e, t.options);
+  const it = new ECTracker([...t.nm], e, t.options, [...t.dm]);
 
   // Keep the pre-add accumulator: it is what must be DOUBLED in the
   // exceptional case, and the add below consumes jx/jy/jz.
@@ -929,7 +990,7 @@ function cEmitMul(
 
     // Conditional add
     t.toTop('_bit');
-    t.nm.pop(); // _bit consumed by IF
+    t.popTracked(); // _bit consumed by IF
     const addOps: StackOp[] = [];
     const addEmit = (op: StackOp) => addOps.push(op);
     // Only the final step can be handed two equal operands — see
@@ -1024,8 +1085,8 @@ function decompressPubKey(
     e({ op: 'push', value: 1n });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
-  t.nm.push('_dk_prefix');
-  t.nm.push('_dk_xbytes');
+  t.pushTracked('_dk_prefix');
+  t.pushTracked('_dk_xbytes');
 
   // SEC1 §2.3.4 requires the prefix to be exactly 0x02 or 0x03. The parity
   // reduction below is `BIN2NUM, 2 MOD`, which accepts far more than that:
@@ -1120,7 +1181,7 @@ function decompressPubKey(
   // Use OP_IF to select: if match, use y_cand (drop neg_y), else use neg_y (drop y_cand)
   // First, bring match to top for the IF
   t.toTop('_dk_match');
-  t.nm.pop(); // condition consumed by IF
+  t.popTracked(); // condition consumed by IF
 
   // After IF consumes _dk_match, stack is: [..., _dk_x_save, _dk_y_cand, _dk_neg_y]
   // Then branch (match): we want y_cand → drop neg_y (TOS)
@@ -1134,7 +1195,7 @@ function decompressPubKey(
   // Tracker still has both _dk_y_cand and _dk_neg_y; one was consumed.
   // Remove one and rename the remaining to qyName.
   const negIdx = t.nm.lastIndexOf('_dk_neg_y');
-  if (negIdx >= 0) t.nm.splice(negIdx, 1);
+  if (negIdx >= 0) t.removeSlotAt(negIdx);
   // The surviving item is _dk_y_cand — rename it
   const ycIdx = t.nm.lastIndexOf('_dk_y_cand');
   if (ycIdx >= 0) t.nm[ycIdx] = qyName;
@@ -1210,8 +1271,8 @@ function cEmitLengthGate(t: ECTracker, name: string, want: number, flagName: str
     e({ op: 'opcode', code: 'OP_SPLIT' });
     e({ op: 'drop' });
   });
-  t.nm.push(flagName);
-  t.nm.push(name);
+  t.pushTracked(flagName);
+  t.pushTracked(name);
 }
 
 /**
@@ -1345,8 +1406,8 @@ function cEmitVerifyECDSA(
     e({ op: 'push', value: BigInt(c.coordBytes) });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
-  t.nm.push('_r_bytes');
-  t.nm.push('_s_bytes');
+  t.pushTracked('_r_bytes');
+  t.pushTracked('_s_bytes');
 
   // Convert r_bytes to integer
   t.toTop('_r_bytes');
@@ -1419,14 +1480,14 @@ function cEmitVerifyECDSA(
 
   // cEmitMul creates its own ECTracker with ['_pt', '_k'] — items below
   // the top two are invisible to it. Remove _G and _u1 from our tracker.
-  t.nm.pop(); // _u1
-  t.nm.pop(); // _G
+  t.popTracked(); // _u1
+  t.popTracked(); // _G
 
   // Emit the mul (it manages its own tracker internally)
   cEmitMul(emit, c, g, opts);
 
   // After mul, one result point is on the stack
-  t.nm.push('_R1_point');
+  t.pushTracked('_R1_point');
 
   // Altstack (top→bottom): _qx, _qy, _u2, _r_save
   // Pop qx/qy/u2 FIRST while _qx is still altstack top (LIFO order)
@@ -1444,10 +1505,10 @@ function cEmitVerifyECDSA(
   // Stack: [..., _Q_point, _u2]
 
   // Pop from tracker, emit mul, push result
-  t.nm.pop(); // _u2
-  t.nm.pop(); // _Q_point
+  t.popTracked(); // _u2
+  t.popTracked(); // _Q_point
   cEmitMul(emit, c, g, opts);
-  t.nm.push('_R2_point');
+  t.pushTracked('_R2_point');
 
   // Restore R1 point
   t.fromAlt('_R1_point');
