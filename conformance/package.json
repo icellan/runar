@@ -12,6 +12,7 @@
     "test:parser-only": "tsx runner/index.ts --parser-only",
     "update-golden": "tsx runner/index.ts --update-golden",
     "script-size-check": "tsx runner/script-size-check.ts",
+    "script-metrics": "tsx runner/script-metrics.ts",
     "fuzz": "tsx fuzzer/index.ts",
     "fuzz:quick": "tsx fuzzer/index.ts --ir --compilers ts,go,rust,python,zig,ruby,java --render native --num 20",
     "fuzz:property": "tsx fuzzer/index.ts --property",

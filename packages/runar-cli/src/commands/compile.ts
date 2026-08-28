@@ -12,6 +12,8 @@ interface CompileOptions {
   ir?: boolean;
   asm?: boolean;
   disableConstantFolding?: boolean;
+  ecConstantPool?: boolean;
+  stackScheduler?: string;
   fromIr?: string;
   hex?: boolean;
   parseOnly?: boolean;
@@ -72,6 +74,19 @@ function repoRelativeFileName(absSourcePath: string): string {
  * 3. Write the resulting artifact JSON to the output directory.
  * 4. Optionally print the ASM to stdout.
  */
+/**
+ * Validate `--stack-scheduler`. An unrecognised mode is an error rather than a
+ * silent fall back to the default: a benchmark run that quietly measured the
+ * shipping compiler while reporting an experiment would be worse than a crash.
+ */
+function schedulerMode(options: { stackScheduler?: string }): 'current' | 'liveness' {
+  const mode = options.stackScheduler ?? 'current';
+  if (mode !== 'current' && mode !== 'liveness') {
+    throw new Error(`--stack-scheduler: unknown mode '${mode}' (expected current|liveness)`);
+  }
+  return mode;
+}
+
 export async function compileCommand(
   files: string[],
   options: CompileOptions,
@@ -81,10 +96,10 @@ export async function compileCommand(
 
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
-  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; parseOnly?: boolean }) => unknown;
+  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; ecConstantPool?: boolean; schedulerMode?: 'current' | 'liveness'; parseOnly?: boolean }) => unknown;
   type CompileFromANFFn = (
     program: unknown,
-    options?: { disableConstantFolding?: boolean },
+    options?: { disableConstantFolding?: boolean; ecConstantPool?: boolean; schedulerMode?: 'current' | 'liveness' },
   ) => { scriptHex: string; scriptAsm: string };
   type LoadANFFn = (json: string) => unknown;
 
@@ -174,7 +189,11 @@ export async function compileCommand(
 
     let result: { scriptHex: string; scriptAsm: string };
     try {
-      result = compileFromANF(program, { disableConstantFolding: options.disableConstantFolding });
+      result = compileFromANF(program, {
+      disableConstantFolding: options.disableConstantFolding,
+      ecConstantPool: options.ecConstantPool,
+      schedulerMode: schedulerMode(options),
+    });
     } catch (err) {
       console.error(`  Compilation error: ${(err as Error).message}`);
       process.exitCode = 1;
@@ -250,6 +269,8 @@ export async function compileCommand(
       compileResult = compile(source, {
         fileName: resolvedPath,
         disableConstantFolding: options.disableConstantFolding,
+        ecConstantPool: options.ecConstantPool,
+        schedulerMode: schedulerMode(options),
         parseOnly: options.parseOnly,
       }) as CompileResultLike;
     } catch (err) {

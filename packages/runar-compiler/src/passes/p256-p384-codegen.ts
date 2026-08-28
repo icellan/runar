@@ -14,7 +14,8 @@
  */
 
 import type { StackOp } from '../ir/index.js';
-import { ECTracker } from './ec-codegen.js';
+import { ECTracker, POOL_FIELD_P, POOL_GROUP_N } from './ec-codegen.js';
+import type { EcCodegenOptions } from './ec-codegen.js';
 
 // ===========================================================================
 // P-256 constants (secp256r1 / NIST P-256)
@@ -129,7 +130,7 @@ const P384_PARAMS: CurveParams = {
 };
 
 function pushFieldP(t: ECTracker, name: string, c: CurveParams): void {
-  t.pushInt(name, c.fieldP);
+  t.pushConst(POOL_FIELD_P, c.fieldP, name);
 }
 
 function cFieldMod(t: ECTracker, aName: string, resultName: string, c: CurveParams): void {
@@ -230,7 +231,7 @@ const P256_GROUP: GroupParams = { n: P256_N, nMinus2: P256_N_MINUS_2 };
 const P384_GROUP: GroupParams = { n: P384_N, nMinus2: P384_N_MINUS_2 };
 
 function pushGroupN(t: ECTracker, name: string, g: GroupParams): void {
-  t.pushInt(name, g.n);
+  t.pushConst(POOL_GROUP_N, g.n, name);
 }
 
 function cGroupMod(t: ECTracker, aName: string, resultName: string, g: GroupParams): void {
@@ -648,7 +649,7 @@ function cJacobianToAffine(t: ECTracker, rxName: string, ryName: string, c: Curv
  * After:        [..., ax, ay, _k, jx', jy', jz']
  */
 function buildJacobianAddAffineInline(e: (op: StackOp) => void, t: ECTracker, c: CurveParams): void {
-  jacobianAddAffineBody(new ECTracker([...t.nm], e), false, c);
+  jacobianAddAffineBody(new ECTracker([...t.nm], e, t.options), false, c);
 }
 
 /**
@@ -795,7 +796,7 @@ function cSelectCoord(
  * Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
  */
 function buildJacobianAddOrDoubleInline(e: (op: StackOp) => void, t: ECTracker, c: CurveParams): void {
-  const it = new ECTracker([...t.nm], e);
+  const it = new ECTracker([...t.nm], e, t.options);
 
   // Keep the pre-add accumulator: it is what must be DOUBLED in the
   // exceptional case, and the add below consumes jx/jy/jz.
@@ -862,8 +863,11 @@ function cEmitMul(
   emit: (op: StackOp) => void,
   c: CurveParams,
   g: GroupParams,
+  opts?: EcCodegenOptions,
 ): void {
-  const t = new ECTracker(['_pt', '_k'], emit);
+  const t = new ECTracker(['_pt', '_k'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, c.fieldP);
+  t.poolConstant(POOL_GROUP_N, g.n);
   cDecomposePoint(t, '_pt', 'ax', 'ay', c);
 
   // k' = k + 3n: guarantees a fixed high bit for MSB-first double-and-add.
@@ -943,6 +947,8 @@ function cEmitMul(
   t.toTop('_k'); t.drop();
 
   cComposePoint(t, '_rx', '_ry', '_result', c);
+  t.releaseConstant(POOL_GROUP_N);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 // ===========================================================================
@@ -1298,8 +1304,15 @@ function cEmitVerifyECDSA(
   sqrtExp: bigint,
   gx: bigint,
   gy: bigint,
+  opts?: EcCodegenOptions,
 ): void {
-  const t = new ECTracker(['_msg', '_sig', '_pk'], emit);
+  const t = new ECTracker(['_msg', '_sig', '_pk'], emit, opts);
+  // The verifier does hundreds of reductions OUTSIDE the two ladders —
+  // decompression's sqrt ladder, cGroupInv, cAffineAdd, the final cGroupMod.
+  // Each ladder pools separately: cEmitMul runs on its own tracker that
+  // deliberately cannot see this stack, so it cannot reach this slot.
+  t.poolConstant(POOL_FIELD_P, c.fieldP);
+  t.poolConstant(POOL_GROUP_N, g.n);
 
   // Step 0: length gate. `_sig` and `_pk` are bare ByteString in the builtin
   // table and the type checker imposes no width, so both arrive attacker-sized.
@@ -1410,7 +1423,7 @@ function cEmitVerifyECDSA(
   t.nm.pop(); // _G
 
   // Emit the mul (it manages its own tracker internally)
-  cEmitMul(emit, c, g);
+  cEmitMul(emit, c, g, opts);
 
   // After mul, one result point is on the stack
   t.nm.push('_R1_point');
@@ -1433,7 +1446,7 @@ function cEmitVerifyECDSA(
   // Pop from tracker, emit mul, push result
   t.nm.pop(); // _u2
   t.nm.pop(); // _Q_point
-  cEmitMul(emit, c, g);
+  cEmitMul(emit, c, g, opts);
   t.nm.push('_R2_point');
 
   // Restore R1 point
@@ -1487,6 +1500,8 @@ function cEmitVerifyECDSA(
   t.rawBlock(['_input_ok', '_sig_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
+  t.releaseConstant(POOL_GROUP_N);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 // ===========================================================================
@@ -1498,12 +1513,14 @@ function cEmitVerifyECDSA(
  * Stack in: [P256Point, P256Point] (second on top)
  * Stack out: [P256Point]
  */
-export function emitP256Add(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pa', '_pb'], emit);
+export function emitP256Add(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pa', '_pb'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, P256_PARAMS.fieldP);
   cDecomposePoint(t, '_pa', 'px', 'py', P256_PARAMS);
   cDecomposePoint(t, '_pb', 'qx', 'qy', P256_PARAMS);
   cAffineAdd(t, P256_PARAMS);
   cComposePoint(t, 'rx', 'ry', '_result', P256_PARAMS);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -1511,8 +1528,8 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
  * Stack in: [P256Point, bigint] (scalar on top)
  * Stack out: [P256Point]
  */
-export function emitP256Mul(emit: (op: StackOp) => void): void {
-  cEmitMul(emit, P256_PARAMS, P256_GROUP);
+export function emitP256Mul(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  cEmitMul(emit, P256_PARAMS, P256_GROUP, opts);
 }
 
 /**
@@ -1520,13 +1537,13 @@ export function emitP256Mul(emit: (op: StackOp) => void): void {
  * Stack in: [bigint]
  * Stack out: [P256Point]
  */
-export function emitP256MulGen(emit: (op: StackOp) => void): void {
+export function emitP256MulGen(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
   const gPoint = new Uint8Array(64);
   gPoint.set(bigintToBytes(P256_GX, 32), 0);
   gPoint.set(bigintToBytes(P256_GY, 32), 32);
   emit({ op: 'push', value: gPoint });
   emit({ op: 'swap' }); // [point, scalar]
-  emitP256Mul(emit);
+  emitP256Mul(emit, opts);
 }
 
 /**
@@ -1534,12 +1551,14 @@ export function emitP256MulGen(emit: (op: StackOp) => void): void {
  * Stack in: [P256Point]
  * Stack out: [P256Point]
  */
-export function emitP256Negate(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitP256Negate(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, P256_PARAMS.fieldP);
   cDecomposePoint(t, '_pt', '_nx', '_ny', P256_PARAMS);
   pushFieldP(t, '_fp', P256_PARAMS);
   cFieldSub(t, '_fp', '_ny', '_neg_y', P256_PARAMS);
   cComposePoint(t, '_nx', '_neg_y', '_result', P256_PARAMS);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -1547,8 +1566,9 @@ export function emitP256Negate(emit: (op: StackOp) => void): void {
  * Stack in: [P256Point]
  * Stack out: [boolean]
  */
-export function emitP256OnCurve(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitP256OnCurve(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, P256_PARAMS.fieldP);
   cDecomposePoint(t, '_pt', '_x', '_y', P256_PARAMS);
   cEmitCanonicityGuard(t, '_x', '_y', P256_PARAMS);
 
@@ -1578,6 +1598,7 @@ export function emitP256OnCurve(emit: (op: StackOp) => void): void {
   t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -1616,8 +1637,8 @@ export function emitP256EncodeCompressed(emit: (op: StackOp) => void): void {
  * Stack in: [msg_bytes, sig(64B), pubkey(33B)] (pubkey on top)
  * Stack out: [boolean]
  */
-export function emitVerifyECDSA_P256(emit: (op: StackOp) => void): void {
-  cEmitVerifyECDSA(emit, P256_PARAMS, P256_GROUP, P256_B, P256_SQRT_EXP, P256_GX, P256_GY);
+export function emitVerifyECDSA_P256(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  cEmitVerifyECDSA(emit, P256_PARAMS, P256_GROUP, P256_B, P256_SQRT_EXP, P256_GX, P256_GY, opts);
 }
 
 // ===========================================================================
@@ -1629,12 +1650,14 @@ export function emitVerifyECDSA_P256(emit: (op: StackOp) => void): void {
  * Stack in: [P384Point, P384Point] (second on top)
  * Stack out: [P384Point]
  */
-export function emitP384Add(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pa', '_pb'], emit);
+export function emitP384Add(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pa', '_pb'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, P384_PARAMS.fieldP);
   cDecomposePoint(t, '_pa', 'px', 'py', P384_PARAMS);
   cDecomposePoint(t, '_pb', 'qx', 'qy', P384_PARAMS);
   cAffineAdd(t, P384_PARAMS);
   cComposePoint(t, 'rx', 'ry', '_result', P384_PARAMS);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -1642,8 +1665,8 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
  * Stack in: [P384Point, bigint] (scalar on top)
  * Stack out: [P384Point]
  */
-export function emitP384Mul(emit: (op: StackOp) => void): void {
-  cEmitMul(emit, P384_PARAMS, P384_GROUP);
+export function emitP384Mul(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  cEmitMul(emit, P384_PARAMS, P384_GROUP, opts);
 }
 
 /**
@@ -1651,13 +1674,13 @@ export function emitP384Mul(emit: (op: StackOp) => void): void {
  * Stack in: [bigint]
  * Stack out: [P384Point]
  */
-export function emitP384MulGen(emit: (op: StackOp) => void): void {
+export function emitP384MulGen(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
   const gPoint = new Uint8Array(96);
   gPoint.set(bigintToBytes(P384_GX, 48), 0);
   gPoint.set(bigintToBytes(P384_GY, 48), 48);
   emit({ op: 'push', value: gPoint });
   emit({ op: 'swap' }); // [point, scalar]
-  emitP384Mul(emit);
+  emitP384Mul(emit, opts);
 }
 
 /**
@@ -1665,12 +1688,14 @@ export function emitP384MulGen(emit: (op: StackOp) => void): void {
  * Stack in: [P384Point]
  * Stack out: [P384Point]
  */
-export function emitP384Negate(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitP384Negate(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, P384_PARAMS.fieldP);
   cDecomposePoint(t, '_pt', '_nx', '_ny', P384_PARAMS);
   pushFieldP(t, '_fp', P384_PARAMS);
   cFieldSub(t, '_fp', '_ny', '_neg_y', P384_PARAMS);
   cComposePoint(t, '_nx', '_neg_y', '_result', P384_PARAMS);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -1678,8 +1703,9 @@ export function emitP384Negate(emit: (op: StackOp) => void): void {
  * Stack in: [P384Point]
  * Stack out: [boolean]
  */
-export function emitP384OnCurve(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitP384OnCurve(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, P384_PARAMS.fieldP);
   cDecomposePoint(t, '_pt', '_x', '_y', P384_PARAMS);
   cEmitCanonicityGuard(t, '_x', '_y', P384_PARAMS);
 
@@ -1709,6 +1735,7 @@ export function emitP384OnCurve(emit: (op: StackOp) => void): void {
   t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -1747,6 +1774,6 @@ export function emitP384EncodeCompressed(emit: (op: StackOp) => void): void {
  * Stack in: [msg_bytes, sig(96B), pubkey(49B)] (pubkey on top)
  * Stack out: [boolean]
  */
-export function emitVerifyECDSA_P384(emit: (op: StackOp) => void): void {
-  cEmitVerifyECDSA(emit, P384_PARAMS, P384_GROUP, P384_B, P384_SQRT_EXP, P384_GX, P384_GY);
+export function emitVerifyECDSA_P384(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  cEmitVerifyECDSA(emit, P384_PARAMS, P384_GROUP, P384_B, P384_SQRT_EXP, P384_GX, P384_GY, opts);
 }

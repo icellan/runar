@@ -10,6 +10,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import { sizeOfPushValue } from '../metrics/cost-model.js';
 
 // ===========================================================================
 // Constants
@@ -40,13 +41,49 @@ function bigintToBytes32(n: bigint): Uint8Array {
 // ECTracker — named stack state tracker (mirrors SLHTracker)
 // ===========================================================================
 
+/**
+ * Codegen options shared by every EC / NIST-curve emitter.
+ *
+ * Off by default: with no options (or `constantPool: false`) each emitter is
+ * byte-identical to what the seven tiers ship today, so no golden, size
+ * baseline, or cross-tier parity gate can move.
+ */
+export interface EcCodegenOptions {
+  /**
+   * Park large repeated constants (the field prime, the group order) in a
+   * stack slot and copy them with `OP_PICK` instead of re-pushing the literal.
+   *
+   * `fieldMod` pushes the 256-bit prime at every modular reduction — 34 bytes
+   * a time, 20,025 times in `p256-wallet` (71 % of that fixture). A pick from
+   * a slot a dozen deep costs 2. See
+   * `docs/experiments/script-size-optimization-baseline.md`.
+   */
+  constantPool?: boolean;
+}
+
+/** Stack slot names reserved for pooled constants. */
+export const POOL_FIELD_P = '_pool$p';
+export const POOL_GROUP_N = '_pool$n';
+
 export class ECTracker {
   nm: (string | null)[];
   _e: (op: StackOp) => void;
+  /** True when this tracker may serve constants from a pooled slot. */
+  readonly pooling: boolean;
 
-  constructor(init: (string | null)[], emit: (op: StackOp) => void) {
+  constructor(
+    init: (string | null)[],
+    emit: (op: StackOp) => void,
+    opts?: EcCodegenOptions,
+  ) {
     this.nm = [...init];
     this._e = emit;
+    this.pooling = opts?.constantPool === true;
+  }
+
+  /** The options this tracker was built with, for handing to a nested tracker. */
+  get options(): EcCodegenOptions {
+    return { constantPool: this.pooling };
   }
 
   get depth(): number { return this.nm.length; }
@@ -109,6 +146,48 @@ export class ECTracker {
   }
   toTop(name: string): void { this.roll(this.findDepth(name)); }
   copyToTop(name: string, n?: string): void { this.pick(this.findDepth(name), n ?? name); }
+
+  // -- constant pool --------------------------------------------------------
+  //
+  // A pooled constant is an ordinary tracked slot; nothing about the stack
+  // model changes. `pushConst` just chooses, per call site and by emitted
+  // bytes, between copying that slot and re-pushing the literal. Nested
+  // trackers built with `[...t.nm]` inherit the slot for free, so pooled
+  // constants work unchanged inside an `OP_IF` arm.
+
+  /** Park `value` in `slot` for the lifetime of this emitter. No-op when pooling is off. */
+  poolConstant(slot: string, value: bigint): void {
+    if (!this.pooling || this.nm.includes(slot)) return;
+    this.pushInt(slot, value);
+  }
+
+  /** Remove a pooled slot. No-op when pooling is off or the slot is absent. */
+  releaseConstant(slot: string): void {
+    if (!this.pooling || !this.nm.includes(slot)) return;
+    this.toTop(slot);
+    this.drop();
+  }
+
+  /**
+   * Materialize `value` on top as `name`, from the pooled `slot` when that is
+   * cheaper in emitted bytes than pushing the literal.
+   *
+   * The comparison is exact — `sizeOfPushValue` is the same encoder the emit
+   * pass uses — so pooling can never make a call site bigger. A pick at depth
+   * d costs `sizeOfPushValue(d) + 1`; depths 0 and 1 are OP_DUP / OP_OVER, 1
+   * byte each.
+   */
+  pushConst(slot: string, value: bigint, name: string): void {
+    if (this.pooling && this.nm.includes(slot)) {
+      const d = this.findDepth(slot);
+      const pickCost = d <= 1 ? 1 : sizeOfPushValue(BigInt(d)) + 1;
+      if (pickCost < sizeOfPushValue(value)) {
+        this.pick(d, name);
+        return;
+      }
+    }
+    this.pushInt(name, value);
+  }
   toAlt(): void { this.op('OP_TOALTSTACK'); this.nm.pop(); }
   fromAlt(n: string): void { this.op('OP_FROMALTSTACK'); this.nm.push(n); }
   rename(n: string): void {
@@ -145,10 +224,9 @@ export class ECTracker {
 
 /** Push the field prime p onto the stack as a script number. */
 function pushFieldP(t: ECTracker, name: string): void {
-  // Push p directly as a BigInt — the emit pass encodes it as a proper
-  // little-endian sign-magnitude script number push.
-  t.pushInt(name, FIELD_P);
+  t.pushConst(POOL_FIELD_P, FIELD_P, name);
 }
+
 
 /**
  * Reduce a scalar to [0, n-1]: ((k mod n) + n) mod n.
@@ -165,7 +243,7 @@ function pushFieldP(t: ECTracker, name: string): void {
  * well defined.
  */
 function emitScalarReduce(t: ECTracker, kName: string, resultName: string): void {
-  t.pushInt('_n_red', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n_red');
   t.rawBlock([kName, '_n_red'], resultName, (e) => {
     e({ op: 'opcode', code: 'OP_2DUP' });
     e({ op: 'opcode', code: 'OP_MOD' });
@@ -626,7 +704,7 @@ function jacobianToAffine(t: ECTracker, rxName: string, ryName: string): void {
  */
 function buildJacobianAddAffineInline(e: (op: StackOp) => void, t: ECTracker): void {
   // Create inner tracker with cloned stack state
-  jacobianAddAffineBody(new ECTracker([...t.nm], e), false);
+  jacobianAddAffineBody(new ECTracker([...t.nm], e, t.options), false);
 }
 
 /**
@@ -780,7 +858,7 @@ function selectCoord(t: ECTracker, addName: string, dblName: string, condName: s
  * Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
  */
 function buildJacobianAddOrDoubleInline(e: (op: StackOp) => void, t: ECTracker): void {
-  const it = new ECTracker([...t.nm], e);
+  const it = new ECTracker([...t.nm], e, t.options);
 
   // Keep the pre-add accumulator: it is what must be DOUBLED in the
   // exceptional case, and the add below consumes jx/jy/jz.
@@ -839,12 +917,14 @@ function buildJacobianAddOrDoubleInline(e: (op: StackOp) => void, t: ECTracker):
  * Stack in: [point_a, point_b] (b on top)
  * Stack out: [result_point]
  */
-export function emitEcAdd(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pa', '_pb'], emit);
+export function emitEcAdd(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pa', '_pb'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
   decomposePoint(t, '_pa', 'px', 'py');
   decomposePoint(t, '_pb', 'qx', 'qy');
   affineAdd(t);
   composePoint(t, 'rx', 'ry', '_result');
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -858,8 +938,10 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
  * This avoids the k+n overflow issue where bit 256 was only set for
  * large k, causing incorrect results for ~half of all scalar values.
  */
-export function emitEcMul(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt', '_k'], emit);
+export function emitEcMul(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt', '_k'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
+  t.poolConstant(POOL_GROUP_N, CURVE_N);
   decomposePoint(t, '_pt', 'ax', 'ay');
 
   // k' = k + 3n: guarantees bit 257 is set for MSB-first double-and-add.
@@ -870,15 +952,15 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
   // usually an unlock argument — so reduce it first. See emitScalarReduce.
   t.toTop('_k');
   emitScalarReduce(t, '_k', '_kr');
-  t.pushInt('_n', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n');
   t.rawBlock(['_kr', '_n'], '_kn', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
-  t.pushInt('_n2', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n2');
   t.rawBlock(['_kn', '_n2'], '_kn2', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
-  t.pushInt('_n3', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n3');
   t.rawBlock(['_kn2', '_n3'], '_kn3', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
@@ -935,6 +1017,8 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
   t.toTop('_k'); t.drop();
 
   composePoint(t, '_rx', '_ry', '_result');
+  t.releaseConstant(POOL_GROUP_N);
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -942,14 +1026,14 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
  * Stack in: [scalar]
  * Stack out: [result_point]
  */
-export function emitEcMulGen(emit: (op: StackOp) => void): void {
+export function emitEcMulGen(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
   // Push generator point as 64-byte blob, then delegate to ecMul
   const gPoint = new Uint8Array(64);
   gPoint.set(bigintToBytes32(GEN_X), 0);
   gPoint.set(bigintToBytes32(GEN_Y), 32);
   emit({ op: 'push', value: gPoint });
   emit({ op: 'swap' }); // [point, scalar]
-  emitEcMul(emit);
+  emitEcMul(emit, opts);
 }
 
 /**
@@ -957,12 +1041,14 @@ export function emitEcMulGen(emit: (op: StackOp) => void): void {
  * Stack in: [point]
  * Stack out: [negated_point]
  */
-export function emitEcNegate(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitEcNegate(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
   decomposePoint(t, '_pt', '_nx', '_ny');
   pushFieldP(t, '_fp');
   fieldSub(t, '_fp', '_ny', '_neg_y');
   composePoint(t, '_nx', '_neg_y', '_result');
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -970,8 +1056,9 @@ export function emitEcNegate(emit: (op: StackOp) => void): void {
  * Stack in: [point]
  * Stack out: [boolean]
  */
-export function emitEcOnCurve(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitEcOnCurve(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
   decomposePoint(t, '_pt', '_x', '_y');
 
   // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1019,6 +1106,7 @@ export function emitEcOnCurve(emit: (op: StackOp) => void): void {
   t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
