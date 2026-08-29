@@ -19,10 +19,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   combTable, combValue, combSafeRounds, combParams, scalarMulJS,
-  P256_COMB_CURVE, P384_COMB_CURVE,
+  P256_COMB_CURVE, P384_COMB_CURVE, SECP256K1_COMB_CURVE,
 } from '../passes/comb.js';
 
 const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+
+/** Every curve the comb is wired for. secp256k1 is a=0, not a=-3. */
+const CURVES = [P256_COMB_CURVE, P384_COMB_CURVE, SECP256K1_COMB_CURVE];
 
 describe('compile-time point arithmetic', () => {
   it('G doubles to the published 2G for P-256', () => {
@@ -36,8 +40,27 @@ describe('compile-time point arithmetic', () => {
     expect(scalarMulJS(P256_N, P256_COMB_CURVE.g, P256_COMB_CURVE)).toBeNull();
   });
 
+  it('G doubles to the published 2G for secp256k1', () => {
+    // secp256k1 has a = 0, so the tangent numerator is 3x² with no `+ a` term.
+    // A curve entry that copied the NIST a = -3 would still produce points that
+    // pass the on-curve check for the WRONG curve, so pin a published vector.
+    const two = scalarMulJS(2n, SECP256K1_COMB_CURVE.g, SECP256K1_COMB_CURVE);
+    expect(two).not.toBeNull();
+    expect(two!.x).toBe(0xc6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5n);
+    expect(two!.y).toBe(0x1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52an);
+  });
+
+  it('secp256k1 uses a = 0 and b = 7', () => {
+    expect(SECP256K1_COMB_CURVE.a).toBe(0n);
+    expect(SECP256K1_COMB_CURVE.b).toBe(7n);
+  });
+
+  it('n·G is the point at infinity on secp256k1 too', () => {
+    expect(scalarMulJS(SECP256K1_N, SECP256K1_COMB_CURVE.g, SECP256K1_COMB_CURVE)).toBeNull();
+  });
+
   it('every table point is on the curve', () => {
-    for (const curve of [P256_COMB_CURVE, P384_COMB_CURVE]) {
+    for (const curve of CURVES) {
       const { p, a, b } = curve;
       for (const w of [2, 3, 4]) {
         const params = combParams(w, curve);
@@ -116,5 +139,16 @@ describe('combSafeRounds — the interval argument, executable', () => {
     const safe = combSafeRounds(p384, P384_COMB_CURVE);
     expect(safe).toHaveLength(p384.d);
     expect(safe.filter(Boolean).length).toBeGreaterThan(p384.d - 8);
+  });
+
+  it('works for secp256k1 too', () => {
+    const k1 = combParams(w, SECP256K1_COMB_CURVE)!;
+    const safe = combSafeRounds(k1, SECP256K1_COMB_CURVE);
+    expect(safe).toHaveLength(k1.d);
+    expect(safe.filter(Boolean).length).toBeGreaterThan(k1.d - 8);
+    // The scalar domain must sit inside the digit width, or the leading digit
+    // can vanish and the accumulator starts at infinity.
+    expect(k1.lo >= (1n << BigInt(k1.w * k1.d - 1))).toBe(true);
+    expect(k1.hi < (1n << BigInt(k1.w * k1.d))).toBe(true);
   });
 });

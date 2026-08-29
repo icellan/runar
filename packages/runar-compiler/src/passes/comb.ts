@@ -27,7 +27,7 @@ export interface CombPoint {
 export interface CombCurve {
   /** Field prime. */
   p: bigint;
-  /** Curve coefficient a. Both NIST curves use a = -3. */
+  /** Curve coefficient a. The NIST curves use a = -3; secp256k1 uses a = 0. */
   a: bigint;
   /** Curve coefficient b. */
   b: bigint;
@@ -76,6 +76,11 @@ const P384_B = 0xb3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875
 const P384_GX = 0xaa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7n;
 const P384_GY = 0x3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5fn;
 
+const K1_P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+const K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const K1_GX = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
+const K1_GY = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
+
 function bitLength(v: bigint): number {
   return v === 0n ? 0 : v.toString(2).length;
 }
@@ -109,6 +114,17 @@ export function combParams(w: number, c: CombCurve): CombParams | null {
 
 export const P256_COMB_CURVE: CombCurve = makeCurve(P256_P, P256_B, P256_N, P256_GX, P256_GY);
 export const P384_COMB_CURVE: CombCurve = makeCurve(P384_P, P384_B, P384_N, P384_GX, P384_GY);
+
+/**
+ * secp256k1. Not built with `makeCurve`: that hardcodes the NIST `a = -3`, and
+ * secp256k1 is `y² = x³ + 7`. Getting `a` wrong here does not produce an
+ * obviously broken table — it produces a table of points on a DIFFERENT curve,
+ * which the on-curve check for that other curve would happily accept. Hence the
+ * published 2G vector pinned in `comb-table.test.ts`.
+ */
+export const SECP256K1_COMB_CURVE: CombCurve = {
+  p: K1_P, a: 0n, b: 7n, n: K1_N, g: { x: K1_GX, y: K1_GY },
+};
 
 // ---------------------------------------------------------------------------
 // Affine arithmetic (compile time only)

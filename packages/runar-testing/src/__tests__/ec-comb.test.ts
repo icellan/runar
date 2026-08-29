@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { createSign, generateKeyPairSync } from 'node:crypto';
 import {
   emitMethod, emitP256MulGen, emitP384MulGen, emitP256Mul, emitVerifyECDSA_P256,
+  emitEcMulGen, emitEcMul,
 } from 'runar-compiler';
 import type { StackOp } from 'runar-ir-schema';
 import { ScriptVM } from '../index.js';
@@ -28,6 +29,9 @@ const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63255
 const P384_N = 0xffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973n;
 const P256_G = '6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296'
   + '4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5';
+const K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const K1_G = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+  + '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8';
 
 function run(
   emitter: (e: (o: StackOp) => void, o?: Opts) => void,
@@ -74,6 +78,56 @@ describe('P-256 comb agrees with the binary ladder', () => {
       const comb = run(emitP256MulGen, [num(k)], COMB);
       const generic = run(emitP256Mul, [bytes(P256_G), num(k)], LADDER);
       expect(comb, `k=${k}`).toEqual(generic);
+    }
+  });
+});
+
+describe('secp256k1 comb agrees with the binary ladder', () => {
+  /**
+   * secp256k1 is the curve every `ecMulGen` contract in the corpus actually
+   * uses, and it is the one curve where the comb's doubling formula differs:
+   * a = 0, so `jacobianDouble` computes D = 3X² rather than the NIST
+   * 3(X-Z²)(X+Z²). Same boundary set as P-256 — the reduced domain's ends, the
+   * scalars whose leading comb digits are minimal, and the out-of-range inputs
+   * `emitScalarReduce` exists to fold back in.
+   */
+  const SCALARS = [
+    0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 15n, 16n, 17n,
+    K1_N - 2n, K1_N - 1n, K1_N, K1_N + 1n, 2n * K1_N,
+    -1n, -2n, -K1_N,
+    (1n << 85n), (1n << 86n), (1n << 86n) - 1n,
+    (1n << 171n), (1n << 172n), (1n << 255n), (1n << 256n) - 1n,
+    0x2n ** 128n + 12345n,
+    0xdeadbeefcafebaben,
+  ];
+
+  it.each(SCALARS)('G * %s', (k) => {
+    expect(run(emitEcMulGen, [num(k)], COMB)).toEqual(run(emitEcMulGen, [num(k)], LADDER));
+  });
+
+  it('agrees with the generic ladder driven by an explicit G, too', () => {
+    // `emitEcMulGen` delegates to `emitEcMul` on the ladder path, so a shared
+    // bug in the wrapper would cancel out above. Pin against the generic
+    // runtime-point ladder as well.
+    for (const k of [1n, 2n, 7n, K1_N - 1n, 0n]) {
+      expect(run(emitEcMulGen, [num(k)], COMB), `k=${k}`)
+        .toEqual(run(emitEcMul, [bytes(K1_G), num(k)], LADDER));
+    }
+  });
+
+  it('reproduces the published k·G vectors', () => {
+    // Absolute, not differential: both sides above could be wrong together.
+    const VECTORS: Array<[bigint, string]> = [
+      [1n, K1_G],
+      [2n, 'c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5'
+         + '1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a'],
+      [3n, 'f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9'
+         + '388f7b0f632de8140fe337e62a37f3566500a99934c2231b6cb9fd7584b8e672'],
+      [7n, '5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc'
+         + '6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da'],
+    ];
+    for (const [k, want] of VECTORS) {
+      expect(run(emitEcMulGen, [num(k)], COMB), `k=${k}`).toEqual([want]);
     }
   });
 });
@@ -145,6 +199,7 @@ describe('the comb is actually smaller', () => {
     ['emitP256MulGen', emitP256MulGen],
     ['emitP384MulGen', emitP384MulGen],
     ['emitVerifyECDSA_P256', emitVerifyECDSA_P256],
+    ['emitEcMulGen', emitEcMulGen],
   ] as Array<[string, (e: (o: StackOp) => void, o?: Opts) => void]>)('%s', (name, e) => {
     const size = (o: Opts): number => {
       const ops: StackOp[] = [];

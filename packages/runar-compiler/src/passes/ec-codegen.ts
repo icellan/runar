@@ -10,7 +10,8 @@
  */
 
 import type { StackOp } from '../ir/index.js';
-import { sizeOfPushValue } from '../metrics/cost-model.js';
+import { sizeOfPushValue, estimateScriptBytes } from '../metrics/cost-model.js';
+import { combParams, combTable, combSafeRounds, SECP256K1_COMB_CURVE } from './comb.js';
 
 // ===========================================================================
 // Constants
@@ -1263,12 +1264,258 @@ export function emitEcMul(emit: (op: StackOp) => void, opts?: EcCodegenOptions):
   t.releaseConstant(POOL_FIELD_P);
 }
 
+
+// ===========================================================================
+// Fixed-base comb (secp256k1)
+// ===========================================================================
+
+/**
+ * `k·G` by a Lim–Lee fixed-base comb instead of the 257-round binary ladder.
+ *
+ * The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+ * the scalar into `w` blocks of `d` bits and reads one bit from each block per
+ * round, so it performs one doubling and one conditional add per COLUMN: the
+ * round count falls from `w*d` to `d` at the price of a `2^w - 1` entry table.
+ * G is a compile-time constant here, so the table costs nothing to build — it
+ * is `2·(2^w - 1)` literal pushes, resident for the whole emitter, read by
+ * every round with a 2-3 byte `OP_PICK`.
+ *
+ * This is the secp256k1 twin of `p256-p384-codegen.ts#cEmitCombMulGen`. The
+ * curve arithmetic is NOT shared: secp256k1 has `a = 0`, so `jacobianDouble`
+ * here computes `D = 3X²` where the NIST version computes `3(X-Z²)(X+Z²)`.
+ * Only `comb.ts` — the compile-time table and the interval checker — is common,
+ * and it takes `a` from the curve record rather than assuming it.
+ *
+ * SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+ * accumulator equal to the addend, its negation, or the point at infinity.
+ * `buildJacobianAddOrDoubleInline`'s comment justifies using it everywhere but
+ * the ladder's LAST step by an interval argument over `c_i mod n`, and insists
+ * that argument be re-derived by anything changing the offset or the iteration
+ * count. A comb changes both, so it is re-derived: `combSafeRounds` evaluates
+ * the same argument as executable interval arithmetic over the comb's own
+ * geometry, and any round it cannot prove gets the complete add-or-double form
+ * instead. Nothing is assumed safe.
+ *
+ * The other half of that argument is that the accumulator never starts at
+ * infinity, which needs the first digit non-zero. `combParams` searches for the
+ * scalar offset that guarantees it rather than reusing the ladder's hardcoded
+ * `+3n` — which happens to be right for secp256k1 at w=3 and is wrong for
+ * P-384.
+ *
+ * Stack in: [_k]. Stack out: [_result].
+ */
+function emitCombMulGen(
+  emit: (op: StackOp) => void,
+  w: number,
+  opts?: EcCodegenOptions,
+): boolean {
+  const curve = SECP256K1_COMB_CURVE;
+  const params = combParams(w, curve);
+  if (params === null) return false;
+  const { d, offsetMultiple } = params;
+  const table = combTable(w, d, curve);
+  const safe = combSafeRounds(params, curve);
+  const entries = (1 << w) - 1;
+
+  const t = new ECTracker(['_k'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
+  t.poolConstant(POOL_GROUP_N, CURVE_N);
+
+  // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so what
+  // makes the interval argument apply at all; see emitScalarReduce.
+  t.toTop('_k');
+  emitScalarReduce(t, '_k', '_kr');
+  t.rename('_k');
+  for (let i = 0n; i < offsetMultiple; i++) {
+    t.pushConst(POOL_GROUP_N, CURVE_N, `_off${i}`);
+    t.rawBlock(['_k', `_off${i}`], '_k', (e) => {
+      e({ op: 'opcode', code: 'OP_ADD' });
+    });
+  }
+  t.setDomain('_k', Dom.NonNegative);
+
+  // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+  // against a 34-byte literal push, and every round reads all of them.
+  for (let j = 1; j <= entries; j++) {
+    const pt = table[j]!;
+    t.pushInt(`_Tx${j}`, pt.x);
+    t.pushInt(`_Ty${j}`, pt.y);
+    t.setDomain(`_Tx${j}`, Dom.Reduced);
+    t.setDomain(`_Ty${j}`, Dom.Reduced);
+  }
+
+  /**
+   * Digit of round `i`, and the selected table entry, as `ax`/`ay`/`_flag`.
+   *
+   * Exactly one equality holds, so `Σ eq_j · T_j` is that entry's coordinate
+   * and every term is non-negative and below p — no reduction is needed, and
+   * the result is `Reduced` by construction. When the digit is zero every term
+   * vanishes and `_flag` is 0, so no add runs.
+   */
+  const emitSelect = (i: number): void => {
+    for (let b = 0; b < w; b++) {
+      const shift = i + b * d;
+      t.copyToTop('_k', `_kc${b}`);
+      if (shift === 0) {
+        t.rename(`_sh${b}`);
+      } else if (shift === 1) {
+        t.rawBlock([`_kc${b}`], `_sh${b}`, (e) => {
+          e({ op: 'opcode', code: 'OP_2DIV' });
+        });
+      } else {
+        t.pushInt(`_sd${b}`, BigInt(shift));
+        t.rawBlock([`_kc${b}`, `_sd${b}`], `_sh${b}`, (e) => {
+          e({ op: 'opcode', code: 'OP_RSHIFTNUM' });
+        });
+      }
+      t.pushInt(`_two${b}`, 2n);
+      t.rawBlock([`_sh${b}`, `_two${b}`], `_b${b}`, (e) => {
+        e({ op: 'opcode', code: 'OP_MOD' });
+      });
+      t.setDomain(`_b${b}`, Dom.Reduced);
+    }
+
+    t.toTop('_b0');
+    t.rename('_idx');
+    for (let b = 1; b < w; b++) {
+      t.toTop(`_b${b}`);
+      t.pushInt(`_wt${b}`, BigInt(1 << b));
+      t.rawBlock([`_b${b}`, `_wt${b}`], `_bw${b}`, (e) => {
+        e({ op: 'opcode', code: 'OP_MUL' });
+      });
+      t.toTop('_idx');
+      t.rawBlock([`_bw${b}`, '_idx'], '_idx', (e) => {
+        e({ op: 'opcode', code: 'OP_ADD' });
+      });
+    }
+    t.setDomain('_idx', Dom.Reduced);
+
+    for (let j = 1; j <= entries; j++) {
+      t.copyToTop('_idx', `_ic${j}`);
+      t.pushInt(`_jv${j}`, BigInt(j));
+      t.rawBlock([`_ic${j}`, `_jv${j}`], `_eq${j}`, (e) => {
+        e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+      });
+      t.setDomain(`_eq${j}`, Dom.Reduced);
+    }
+
+    for (const coord of ['x', 'y'] as const) {
+      const acc = coord === 'x' ? 'ax' : 'ay';
+      for (let j = 1; j <= entries; j++) {
+        t.copyToTop(`_eq${j}`, `_e${coord}${j}`);
+        t.copyToTop(`_T${coord}${j}`, `_t${coord}${j}`);
+        t.rawBlock([`_e${coord}${j}`, `_t${coord}${j}`], `_pr${coord}${j}`, (e) => {
+          e({ op: 'opcode', code: 'OP_MUL' });
+        });
+        if (j === 1) {
+          t.rename(acc);
+        } else {
+          t.toTop(acc);
+          t.rawBlock([`_pr${coord}${j}`, acc], acc, (e) => {
+            e({ op: 'opcode', code: 'OP_ADD' });
+          });
+        }
+      }
+      t.setDomain(acc, Dom.Reduced);
+    }
+
+    for (let j = entries; j >= 1; j--) { t.toTop(`_eq${j}`); t.drop(); }
+
+    t.toTop('_idx');
+    t.rawBlock(['_idx'], '_flag', (e) => {
+      e({ op: 'opcode', code: 'OP_0NOTEQUAL' });
+    });
+  };
+
+  // Round d-1 initialises the accumulator. The first digit is non-zero by
+  // construction (combParams), so this is a real point and never infinity.
+  emitSelect(d - 1);
+  t.toTop('_flag'); t.drop();
+  t.toTop('ax'); t.rename('jx');
+  t.toTop('ay'); t.rename('jy');
+  t.pushInt('jz', 1n);
+  t.setDomain('jz', Dom.Reduced);
+
+  for (let i = d - 2; i >= 0; i--) {
+    jacobianDouble(t);
+    emitSelect(i);
+
+    // `jacobianAddAffineBody` documents its layout as [..., ax, ay, jx, jy, jz]
+    // and replaces the accumulator IN PLACE at the top. The selection leaves
+    // ax/ay above jz, so restore the contract before the branch — otherwise the
+    // add arm would reorder the stack and the empty else arm would not, leaving
+    // the two arms with different layouts at OP_ENDIF.
+    t.toTop('_flag');
+    t.toAlt();
+    t.toTop('jx');
+    t.toTop('jy');
+    t.toTop('jz');
+    t.fromAlt('_flag');
+
+    t.popTracked(); // consumed by OP_IF
+    const addOps: StackOp[] = [];
+    const addEmit = (op: StackOp) => addOps.push(op);
+    if (safe[i]) buildJacobianAddAffineInline(addEmit, t);
+    else buildJacobianAddOrDoubleInline(addEmit, t);
+    emit({ op: 'if', then: addOps, else: [] });
+
+    // The addend was selected fresh for this round; the add only copied it.
+    t.toTop('ay'); t.drop();
+    t.toTop('ax'); t.drop();
+  }
+
+  jacobianToAffine(t, '_rx', '_ry');
+
+  for (let j = entries; j >= 1; j--) {
+    t.toTop(`_Ty${j}`); t.drop();
+    t.toTop(`_Tx${j}`); t.drop();
+  }
+  t.toTop('_k'); t.drop();
+
+  composePoint(t, '_rx', '_ry', '_result');
+  t.releaseConstant(POOL_GROUP_N);
+  t.releaseConstant(POOL_FIELD_P);
+  return true;
+}
+
+/**
+ * Emit the cheapest comb over the candidate window widths.
+ *
+ * Each candidate is rendered in full and scored with the same byte-cost model
+ * the emitter is measured by, and the smallest wins — the window width is not
+ * hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the `2^w`
+ * selection logic outgrows the saving.
+ *
+ * Returns null when no candidate could be built, so the caller falls back to
+ * the ladder rather than emitting nothing.
+ */
+function emitCombBest(opts?: EcCodegenOptions): StackOp[] | null {
+  let best: StackOp[] | null = null;
+  for (const w of [2, 3, 4]) {
+    const ops: StackOp[] = [];
+    if (!emitCombMulGen(op => ops.push(op), w, opts)) continue;
+    if (best === null || estimateScriptBytes(ops) < estimateScriptBytes(best)) best = ops;
+  }
+  return best;
+}
+
 /**
  * ecMulGen: scalar multiplication G * k.
  * Stack in: [scalar]
  * Stack out: [result_point]
  */
 export function emitEcMulGen(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  // G is a compile-time constant, so this is the one secp256k1 call site where
+  // a fixed-base comb applies. `emitEcMul` cannot use it: its base arrives at
+  // run time.
+  if (opts?.fixedBaseComb === true) {
+    const ops = emitCombBest(opts);
+    if (ops !== null) {
+      for (const op of ops) emit(op);
+      return;
+    }
+  }
+
   // Push generator point as 64-byte blob, then delegate to ecMul
   const gPoint = new Uint8Array(64);
   gPoint.set(bigintToBytes32(GEN_X), 0);

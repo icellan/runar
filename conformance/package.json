@@ -2,7 +2,7 @@
   "name": "runar-conformance",
   "version": "0.1.0",
   "private": true,
-  "description": "Conformance test infrastructure for verifying Rúnar compiler implementations produce identical output",
+  "description": "Conformance test infrastructure for verifying R\u00fanar compiler implementations produce identical output",
   "type": "module",
   "scripts": {
     "test": "tsx runner/index.ts",
@@ -35,7 +35,9 @@
     "sdk-vertical:generate": "tsx sdk-vertical/generate.ts",
     "sdk-vertical:check": "tsx sdk-vertical/generate.ts --check",
     "differential-witness": "vitest run witnesses/differential.test.ts",
-    "mutation:score": "tsx mutation/run-mutation.ts"
+    "mutation:score": "tsx mutation/run-mutation.ts",
+    "ec-flag-parity:generate": "node scripts/gen-ec-flag-parity.mjs",
+    "ec-flag-parity": "vitest run ec-flag-parity/parity.test.ts"
   },
   "dependencies": {
     "fast-check": "^3.22.0"
