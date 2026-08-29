@@ -33,10 +33,10 @@ import "math/big"
 // It also tracks estimated byte sizes of values on the stack for deferred
 // mod reduction (modulo threshold technique from nChain paper).
 type flatEmitter struct {
-	emit      func(StackOp)
-	stackSize int   // current number of items on stack
-	sizes     []int // estimated byte sizes of stack items (top is last element)
-	modThreshold int // max bytes before mod reduction (0 = always reduce)
+	emit         func(StackOp)
+	stackSize    int   // current number of items on stack
+	sizes        []int // estimated byte sizes of stack items (top is last element)
+	modThreshold int   // max bytes before mod reduction (0 = always reduce)
 }
 
 func newFlatEmitter(emit func(StackOp), initialStackSize int) *flatEmitter {
@@ -59,19 +59,25 @@ func newFlatEmitterWithThreshold(emit func(StackOp), initialStackSize, threshold
 
 // topSize returns the estimated byte size of TOS.
 func (f *flatEmitter) topSize() int {
-	if len(f.sizes) == 0 { return 48 }
+	if len(f.sizes) == 0 {
+		return 48
+	}
 	return f.sizes[len(f.sizes)-1]
 }
 
 // setTopSize sets the estimated byte size of TOS.
 func (f *flatEmitter) setTopSize(n int) {
-	if len(f.sizes) > 0 { f.sizes[len(f.sizes)-1] = n }
+	if len(f.sizes) > 0 {
+		f.sizes[len(f.sizes)-1] = n
+	}
 }
 
 // sizeAt returns the estimated byte size at depth d (0 = TOS).
 func (f *flatEmitter) sizeAt(d int) int {
 	idx := len(f.sizes) - 1 - d
-	if idx < 0 || idx >= len(f.sizes) { return 48 }
+	if idx < 0 || idx >= len(f.sizes) {
+		return 48
+	}
 	return f.sizes[idx]
 }
 
@@ -131,17 +137,23 @@ func (f *flatEmitter) roll(d int) {
 func (f *flatEmitter) drop() {
 	f.emit(StackOp{Op: "drop"})
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
 }
 func (f *flatEmitter) drop2() {
 	f.emit(StackOp{Op: "opcode", Code: "OP_2DROP"})
 	f.stackSize -= 2
-	if len(f.sizes) >= 2 { f.sizes = f.sizes[:len(f.sizes)-2] }
+	if len(f.sizes) >= 2 {
+		f.sizes = f.sizes[:len(f.sizes)-2]
+	}
 }
 func (f *flatEmitter) swap() {
 	f.emit(StackOp{Op: "swap"})
 	L := len(f.sizes)
-	if L >= 2 { f.sizes[L-1], f.sizes[L-2] = f.sizes[L-2], f.sizes[L-1] }
+	if L >= 2 {
+		f.sizes[L-1], f.sizes[L-2] = f.sizes[L-2], f.sizes[L-1]
+	}
 }
 func (f *flatEmitter) rot() {
 	f.emit(StackOp{Op: "rot"})
@@ -169,7 +181,9 @@ func (f *flatEmitter) nip() {
 	f.emit(StackOp{Op: "nip"})
 	f.stackSize--
 	L := len(f.sizes)
-	if L >= 2 { f.sizes = append(f.sizes[:L-2], f.sizes[L-1]) }
+	if L >= 2 {
+		f.sizes = append(f.sizes[:L-2], f.sizes[L-1])
+	}
 }
 func (f *flatEmitter) tuck() {
 	// TUCK: copy TOS and insert below TOS-1. [a, b] -> [b, a, b]
@@ -217,25 +231,33 @@ func (f *flatEmitter) modPositive() {
 	f.fetchQ()
 	f.op("OP_MOD")
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
 	f.setTopSize(48) // reduced field element
 }
 
 // modFull: [..., a] -> [... ((a%q)+q)%q].  (handles negative a)
 func (f *flatEmitter) modFull() {
-	f.fetchQ()          // [..., a, q]
-	f.tuck()            // [..., q, a, q]
-	f.op("OP_MOD")     // [..., q, a%q]
+	f.fetchQ()     // [..., a, q]
+	f.tuck()       // [..., q, a, q]
+	f.op("OP_MOD") // [..., q, a%q]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
-	f.over()            // [..., q, a%q, q]
-	f.op("OP_ADD")     // [..., q, a%q+q]
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
+	f.over()       // [..., q, a%q, q]
+	f.op("OP_ADD") // [..., q, a%q+q]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
-	f.swap()            // [..., a%q+q, q]
-	f.op("OP_MOD")     // [..., result]
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
+	f.swap()       // [..., a%q+q, q]
+	f.op("OP_MOD") // [..., result]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
 	f.setTopSize(48)
 }
 
@@ -283,7 +305,9 @@ func (f *flatEmitter) fAddU() {
 	if len(f.sizes) >= 2 {
 		f.sizes = f.sizes[:len(f.sizes)-2]
 		maxS := sA
-		if sB > maxS { maxS = sB }
+		if sB > maxS {
+			maxS = sB
+		}
 		f.sizes = append(f.sizes, maxS+1) // sum size ~ max + 1
 	}
 }
@@ -302,26 +326,32 @@ func (f *flatEmitter) fSubU() {
 	if len(f.sizes) >= 2 {
 		f.sizes = f.sizes[:len(f.sizes)-2]
 		maxS := sA
-		if sB > maxS { maxS = sB }
+		if sB > maxS {
+			maxS = sB
+		}
 		f.sizes = append(f.sizes, maxS+1) // difference size ~ max + 1
 	}
 }
 
 // fSub: [..., a, b] -> [..., (a-b+q)%q].
 func (f *flatEmitter) fSub() {
-	f.fSubU()           // [..., a-b]
+	f.fSubU() // [..., a-b]
 	if f.modThreshold > 0 && f.topSize() < f.modThreshold {
 		return // defer mod -- caller handles negative values
 	}
-	f.fetchQ()          // [..., a-b, q]
-	f.tuck()            // [..., q, a-b, q]
-	f.op("OP_ADD")     // [..., q, a-b+q]
+	f.fetchQ()     // [..., a-b, q]
+	f.tuck()       // [..., q, a-b, q]
+	f.op("OP_ADD") // [..., q, a-b+q]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
-	f.swap()            // [..., a-b+q, q]
-	f.op("OP_MOD")     // [..., result]
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
+	f.swap()       // [..., a-b+q, q]
+	f.op("OP_MOD") // [..., result]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
 	f.setTopSize(48)
 }
 
@@ -333,19 +363,23 @@ func (f *flatEmitter) fNeg() {
 		f.op("OP_NEGATE")
 		return
 	}
-	f.fetchQ()          // [..., a, q]
-	f.op("OP_DUP")     // [..., a, q, q]
+	f.fetchQ()     // [..., a, q]
+	f.op("OP_DUP") // [..., a, q, q]
 	f.stackSize++
 	f.sizes = append(f.sizes, 48)
-	f.rot()             // [..., q, q, a]
-	f.op("OP_SUB")     // [..., q, q-a]
+	f.rot()        // [..., q, q, a]
+	f.op("OP_SUB") // [..., q, q-a]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
 	f.setTopSize(49)
-	f.swap()            // [..., q-a, q]
-	f.op("OP_MOD")     // [..., result]
+	f.swap()       // [..., q-a, q]
+	f.op("OP_MOD") // [..., result]
 	f.stackSize--
-	if len(f.sizes) > 0 { f.sizes = f.sizes[:len(f.sizes)-1] }
+	if len(f.sizes) > 0 {
+		f.sizes = f.sizes[:len(f.sizes)-1]
+	}
 	f.setTopSize(48)
 }
 
@@ -393,11 +427,14 @@ func (f *flatEmitter) fMulConstU(c int64) {
 // or [..., r0, r1] if reduced. Net effect: -2.
 //
 // When reduced=true:
-//   r0 = (t0-t1) mod q  (full mod, may be negative)
-//   r1 = (cross-t0-t1) mod q  (positive mod, always >= 0)
+//
+//	r0 = (t0-t1) mod q  (full mod, may be negative)
+//	r1 = (cross-t0-t1) mod q  (positive mod, always >= 0)
+//
 // When reduced=false:
-//   r0_raw = t0-t1 (unreduced, may be negative; in [-p^2, p^2])
-//   r1_raw = cross-t0-t1 (unreduced, always >= 0; in [0, 4p^2])
+//
+//	r0_raw = t0-t1 (unreduced, may be negative; in [-p^2, p^2])
+//	r1_raw = cross-t0-t1 (unreduced, always >= 0; in [0, 4p^2])
 func (f *flatEmitter) fp2MulCore(reduced bool) {
 	// Stack: a0(3) a1(2) b0(1) b1(0)
 
@@ -412,8 +449,8 @@ func (f *flatEmitter) fp2MulCore(reduced bool) {
 	f.fMulU() // a0 a1 b0 b1 t0 t1
 
 	// r0 = t0 - t1 (may be negative)
-	f.over()  // copy t0
-	f.over()  // copy t1
+	f.over() // copy t0
+	f.over() // copy t1
 	f.fSubU()
 	if reduced {
 		f.modFullIfNeeded() // a0 a1 b0 b1 t0 t1 r0 (or unreduced if deferred)
@@ -432,7 +469,7 @@ func (f *flatEmitter) fp2MulCore(reduced bool) {
 	// r1 = cross - t0 - t1 (non-negative: = a0*b1 + a1*b0)
 	f.roll(3) // bring t0
 	f.fSubU()
-	f.rot()   // bring t1
+	f.rot() // bring t1
 	f.fSubU()
 	if reduced {
 		f.modPositiveIfNeeded() // r0 r1 (or unreduced if deferred)
@@ -469,7 +506,7 @@ func (f *flatEmitter) fp2Sqr() {
 	f.fSubU() // a0 a1 sum diff
 
 	// r0 = (sum * diff) mod q
-	f.fMulU()          // a0 a1 (sum*diff)
+	f.fMulU()           // a0 a1 (sum*diff)
 	f.modFullIfNeeded() // a0 a1 r0
 
 	// prod = a0 * a1
@@ -478,20 +515,20 @@ func (f *flatEmitter) fp2Sqr() {
 	f.fMulU() // r0 prod
 
 	// r1 = (2*prod) mod q
-	f.dup()   // r0 prod prod
-	f.fAddU() // r0 2*prod
+	f.dup()                 // r0 prod prod
+	f.fAddU()               // r0 2*prod
 	f.modPositiveIfNeeded() // r0 r1
 }
 
 // fp2Add: [..., a0, a1, b0, b1] -> [..., r0, r1]. Net: -2.
 func (f *flatEmitter) fp2Add() {
-	f.rot()   // a0 b0 b1 a1  (bring a1 from depth 2 to top)
-	f.swap()  // a0 b0 a1 b1
-	f.fAdd()  // a0 b0 r1
-	f.rot()   // b0 r1 a0
-	f.rot()   // r1 a0 b0
-	f.fAdd()  // r1 r0
-	f.swap()  // r0 r1
+	f.rot()  // a0 b0 b1 a1  (bring a1 from depth 2 to top)
+	f.swap() // a0 b0 a1 b1
+	f.fAdd() // a0 b0 r1
+	f.rot()  // b0 r1 a0
+	f.rot()  // r1 a0 b0
+	f.fAdd() // r1 r0
+	f.swap() // r0 r1
 }
 
 // fp2AddU: unreduced Fp2 add. [..., a0, a1, b0, b1] -> [..., r0, r1]. Net: -2.
@@ -507,13 +544,13 @@ func (f *flatEmitter) fp2AddU() {
 
 // fp2Sub: [..., a0, a1, b0, b1] -> [..., r0, r1]. Net: -2.
 func (f *flatEmitter) fp2Sub() {
-	f.rot()   // a0 b0 b1 a1
-	f.swap()  // a0 b0 a1 b1  (TOS=b1, TOS-1=a1)
-	f.fSub()  // a0 b0 r1      (r1 = (a1-b1+q)%q)
-	f.rot()   // b0 r1 a0
-	f.rot()   // r1 a0 b0      (TOS=b0, TOS-1=a0)
-	f.fSub()  // r1 r0          (r0 = (a0-b0+q)%q)
-	f.swap()  // r0 r1
+	f.rot()  // a0 b0 b1 a1
+	f.swap() // a0 b0 a1 b1  (TOS=b1, TOS-1=a1)
+	f.fSub() // a0 b0 r1      (r1 = (a1-b1+q)%q)
+	f.rot()  // b0 r1 a0
+	f.rot()  // r1 a0 b0      (TOS=b0, TOS-1=a0)
+	f.fSub() // r1 r0          (r0 = (a0-b0+q)%q)
+	f.swap() // r0 r1
 }
 
 // fp2SubU: unreduced Fp2 subtraction.
@@ -529,13 +566,12 @@ func (f *flatEmitter) fp2SubU() {
 	f.swap()  // (a0-b0) (a1-b1)
 }
 
-
 // fp2Neg: [..., a0, a1] -> [..., -a0, -a1]. Net: unchanged.
 func (f *flatEmitter) fp2Neg() {
-	f.fNeg()  // a0 (-a1)
-	f.swap()  // (-a1) a0
-	f.fNeg()  // (-a1) (-a0)
-	f.swap()  // (-a0) (-a1)
+	f.fNeg() // a0 (-a1)
+	f.swap() // (-a1) a0
+	f.fNeg() // (-a1) (-a0)
+	f.swap() // (-a0) (-a1)
 }
 
 // fp2Conj: conjugate. [..., a0, a1] -> [..., a0, -a1]. Net: unchanged.
@@ -550,20 +586,20 @@ func (f *flatEmitter) fp2MulByNonResidue() {
 	// Stack: a0(1) a1(0)
 
 	// Compute 9*a0 (unreduced)
-	f.over()          // a0 a1 a0c
-	f.fMulConstU(9)   // a0 a1 9a0
+	f.over()        // a0 a1 a0c
+	f.fMulConstU(9) // a0 a1 9a0
 
 	// r0 = (9*a0 - a1) mod q  -- fetch a1 for subtraction
-	f.over()          // a0 a1 9a0 a1c  (copies a1 from depth 2 after previous push)
+	f.over() // a0 a1 9a0 a1c  (copies a1 from depth 2 after previous push)
 	// Stack: a0 a1 9a0 a1c. TOS=a1c, TOS-1=9a0. fSub: (9a0-a1c+q)%q.
-	f.fSub()          // a0 a1 r0
+	f.fSub() // a0 a1 r0
 
 	// Compute r1 = (a0 + 9*a1) mod q
-	f.swap()          // a0 r0 a1
-	f.rot()           // r0 a1 a0
-	f.swap()          // r0 a0 a1
-	f.fMulConstU(9)   // r0 a0 9a1
-	f.fAdd()          // r0 r1
+	f.swap()        // a0 r0 a1
+	f.rot()         // r0 a1 a0
+	f.swap()        // r0 a0 a1
+	f.fMulConstU(9) // r0 a0 9a1
+	f.fAdd()        // r0 r1
 }
 
 // fp2MulByConst: multiply Fp2 on stack by constant Fp2 value.
@@ -721,10 +757,10 @@ func (f *flatEmitter) fp6MulByNonResidue() {
 	f.fp2MulByNonResidue() // c0_0 c0_1 c1_0 c1_1 xi*c2_0 xi*c2_1
 	// Now rotate: want xi*c2, c0, c1
 	// Roll xi*c2 to the bottom of the 6-element block
-	f.roll(5)  // c0_1 c1_0 c1_1 xi*c2_0 xi*c2_1 c0_0
-	f.roll(5)  // c1_0 c1_1 xi*c2_0 xi*c2_1 c0_0 c0_1
-	f.roll(5)  // c1_1 xi*c2_0 xi*c2_1 c0_0 c0_1 c1_0
-	f.roll(5)  // xi*c2_0 xi*c2_1 c0_0 c0_1 c1_0 c1_1
+	f.roll(5) // c0_1 c1_0 c1_1 xi*c2_0 xi*c2_1 c0_0
+	f.roll(5) // c1_0 c1_1 xi*c2_0 xi*c2_1 c0_0 c0_1
+	f.roll(5) // c1_1 xi*c2_0 xi*c2_1 c0_0 c0_1 c1_0
+	f.roll(5) // xi*c2_0 xi*c2_1 c0_0 c0_1 c1_0 c1_1
 	// Result: xi*c2_0 xi*c2_1 c0_0 c0_1 c1_0 c1_1 = (xi*c2, c0, c1)
 }
 
@@ -769,15 +805,15 @@ func (f *flatEmitter) fp2Reduce() {
 // r0 may be negative (9*a0 - a1), r1 is non-negative.
 func (f *flatEmitter) fp2MulByNonResidueU() {
 	// Stack: a0(1) a1(0)
-	f.over()          // a0 a1 a0c
-	f.fMulConstU(9)   // a0 a1 9a0
-	f.over()          // a0 a1 9a0 a1c
-	f.fSubU()         // a0 a1 (9a0-a1)  -- may be negative
-	f.swap()          // a0 (9a0-a1) a1
-	f.rot()           // (9a0-a1) a1 a0
-	f.swap()          // (9a0-a1) a0 a1
-	f.fMulConstU(9)   // (9a0-a1) a0 9a1
-	f.fAddU()         // (9a0-a1) (a0+9a1)
+	f.over()        // a0 a1 a0c
+	f.fMulConstU(9) // a0 a1 9a0
+	f.over()        // a0 a1 9a0 a1c
+	f.fSubU()       // a0 a1 (9a0-a1)  -- may be negative
+	f.swap()        // a0 (9a0-a1) a1
+	f.rot()         // (9a0-a1) a1 a0
+	f.swap()        // (9a0-a1) a0 a1
+	f.fMulConstU(9) // (9a0-a1) a0 9a1
+	f.fAddU()       // (9a0-a1) (a0+9a1)
 	// r0 = 9a0-a1 (may be negative), r1 = a0+9a1 (non-negative)
 }
 

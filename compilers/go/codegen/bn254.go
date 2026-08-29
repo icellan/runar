@@ -5,10 +5,11 @@
 // Uses a BN254Tracker (mirrors ECTracker) for named stack state tracking.
 //
 // BN254 parameters:
-//   Field prime: p = 21888242871839275222246405745257275088696311157297823662689037894645226208583
-//   Curve order: r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
-//   Curve:       y^2 = x^3 + 3
-//   Generator:   G1 = (1, 2)
+//
+//	Field prime: p = 21888242871839275222246405745257275088696311157297823662689037894645226208583
+//	Curve order: r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+//	Curve:       y^2 = x^3 + 3
+//	Generator:   G1 = (1, 2)
 //
 // Point representation: 64 bytes (x[32] || y[32], big-endian unsigned).
 // Internal arithmetic uses Jacobian coordinates for scalar multiplication.
@@ -59,8 +60,8 @@ func init() {
 
 // BN254Tracker tracks named stack positions and emits StackOps for BN254 codegen.
 type BN254Tracker struct {
-	nm             []string // stack names ("" for anonymous)
-	e              func(StackOp)
+	nm               []string // stack names ("" for anonymous)
+	e                func(StackOp)
 	primeCacheActive bool // true when the field prime is cached on the alt-stack
 	// qAtBottom indicates the field modulus is stored at the bottom of the main stack.
 	// When true, fetchPrime uses OP_DEPTH OP_1SUB OP_PICK instead of alt-stack.
@@ -349,6 +350,7 @@ func bn254PushFieldP(t *BN254Tracker, name string) {
 // When primeCacheActive is true, the field prime is fetched from a cache:
 //   - qAtBottom: uses OP_DEPTH OP_1SUB OP_PICK (3 bytes, prime at stack bottom)
 //   - otherwise: uses OP_FROMALTSTACK/DUP/OP_TOALTSTACK (3 bytes, alt-stack)
+//
 // Both save ~93 bytes per mod reduction vs pushing a fresh 34-byte literal.
 // At ~70,000 Fp operations in a Groth16 verifier, this totals ~6.5 MB saved.
 func bn254FieldMod(t *BN254Tracker, aName, resultName string) {
@@ -784,13 +786,14 @@ func bn254G1AffineAdd(t *BN254Tracker) {
 // Expects jx, jy, jz on tracker. Replaces with updated values.
 //
 // Formulas (a=0 since y^2 = x^3 + b):
-//   A  = Y^2
-//   B  = 4*X*A
-//   C  = 8*A^2
-//   D  = 3*X^2  (a=0, so 3*X^2 + a*Z^4 simplifies to 3*X^2)
-//   X' = D^2 - 2*B
-//   Y' = D*(B - X') - C
-//   Z' = 2*Y*Z
+//
+//	A  = Y^2
+//	B  = 4*X*A
+//	C  = 8*A^2
+//	D  = 3*X^2  (a=0, so 3*X^2 + a*Z^4 simplifies to 3*X^2)
+//	X' = D^2 - 2*B
+//	Y' = D*(B - X') - C
+//	Z' = 2*Y*Z
 func bn254G1JacobianDouble(t *BN254Tracker) {
 	// Save copies of jx, jy, jz for later use
 	t.copyToTop("jy", "_jy_save")

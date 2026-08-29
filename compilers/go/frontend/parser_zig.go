@@ -406,35 +406,35 @@ func zigIsIdentPart(ch byte) bool {
 // ---------------------------------------------------------------------------
 
 var zigTypeMap = map[string]string{
-	"i8":           "bigint",
-	"i16":          "bigint",
-	"i32":          "bigint",
-	"i64":          "bigint",
-	"i128":         "bigint",
-	"isize":        "bigint",
-	"u8":           "bigint",
-	"u16":          "bigint",
-	"u32":          "bigint",
-	"u64":          "bigint",
-	"u128":         "bigint",
-	"usize":        "bigint",
-	"comptime_int": "bigint",
-	"Bigint":       "bigint",
-	"bool":         "boolean",
-	"void":         "void",
-	"ByteString":   "ByteString",
-	"PubKey":       "PubKey",
-	"Sig":          "Sig",
-	"Sha256":       "Sha256",
-	"Sha256Digest": "Sha256",
-	"Ripemd160":    "Ripemd160",
-	"Addr":         "Addr",
+	"i8":              "bigint",
+	"i16":             "bigint",
+	"i32":             "bigint",
+	"i64":             "bigint",
+	"i128":            "bigint",
+	"isize":           "bigint",
+	"u8":              "bigint",
+	"u16":             "bigint",
+	"u32":             "bigint",
+	"u64":             "bigint",
+	"u128":            "bigint",
+	"usize":           "bigint",
+	"comptime_int":    "bigint",
+	"Bigint":          "bigint",
+	"bool":            "boolean",
+	"void":            "void",
+	"ByteString":      "ByteString",
+	"PubKey":          "PubKey",
+	"Sig":             "Sig",
+	"Sha256":          "Sha256",
+	"Sha256Digest":    "Sha256",
+	"Ripemd160":       "Ripemd160",
+	"Addr":            "Addr",
 	"SigHashPreimage": "SigHashPreimage",
-	"RabinSig":     "RabinSig",
-	"RabinPubKey":  "RabinPubKey",
-	"Point":        "Point",
-	"P256Point":    "P256Point",
-	"P384Point":    "P384Point",
+	"RabinSig":        "RabinSig",
+	"RabinPubKey":     "RabinPubKey",
+	"Point":           "Point",
+	"P256Point":       "P256Point",
+	"P384Point":       "P384Point",
 }
 
 func zigMapType(name string) string {
@@ -1161,8 +1161,8 @@ func (p *zigParser) parseStatement() Statement {
 		rhs := p.parseExpression()
 		p.match(zigTokSemicolon)
 		return AssignmentStmt{
-			Target: target,
-			Value:  BinaryExpr{Op: compoundOp, Left: target, Right: rhs},
+			Target:         target,
+			Value:          BinaryExpr{Op: compoundOp, Left: target, Right: rhs},
 			SourceLocation: loc,
 		}
 	}
@@ -1238,8 +1238,8 @@ func (p *zigParser) parseWhileStatement(loc SourceLocation) Statement {
 		if compoundOp != "" {
 			rhs := p.parseExpression()
 			update = AssignmentStmt{
-				Target: updateTarget,
-				Value:  BinaryExpr{Op: compoundOp, Left: updateTarget, Right: rhs},
+				Target:         updateTarget,
+				Value:          BinaryExpr{Op: compoundOp, Left: updateTarget, Right: rhs},
 				SourceLocation: loc,
 			}
 		} else {

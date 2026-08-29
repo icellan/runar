@@ -98,11 +98,11 @@ func TestEmit_ByteOffsetAccountsForPrecedingOpcodes(t *testing.T) {
 	method := &StackMethod{
 		Name: "check",
 		Ops: []StackOp{
-			{Op: "opcode", Code: "OP_DUP"},       // 1 byte (0x76)
-			{Op: "opcode", Code: "OP_HASH160"},    // 1 byte (0xa9)
+			{Op: "opcode", Code: "OP_DUP"},                              // 1 byte (0x76)
+			{Op: "opcode", Code: "OP_HASH160"},                          // 1 byte (0xa9)
 			{Op: "placeholder", ParamIndex: 0, ParamName: "pubKeyHash"}, // placeholder at byte 2
-			{Op: "opcode", Code: "OP_EQUALVERIFY"}, // 1 byte (0x88)
-			{Op: "opcode", Code: "OP_CHECKSIG"},    // 1 byte (0xac)
+			{Op: "opcode", Code: "OP_EQUALVERIFY"},                      // 1 byte (0x88)
+			{Op: "opcode", Code: "OP_CHECKSIG"},                         // 1 byte (0xac)
 		},
 	}
 
@@ -1026,8 +1026,8 @@ func TestEmit_SHA256InASM(t *testing.T) {
 
 func TestEncodePushData_Boundaries(t *testing.T) {
 	tests := []struct {
-		name      string
-		dataLen   int
+		name       string
+		dataLen    int
 		wantPrefix string // expected hex prefix of the encoding
 	}{
 		// 75 bytes: direct push (single length byte 0x4b = 75)

@@ -84,7 +84,7 @@ func testKBBinaryOp(t *testing.T, filename string, emitFn func(func(StackOp))) {
 	opOps := gatherOps(emitFn)
 
 	for _, v := range vecs {
-			t.Run(v.Desc, func(t *testing.T) {
+		t.Run(v.Desc, func(t *testing.T) {
 			// Build script: push a, push b, <operation>, push expected, OP_EQUALVERIFY, OP_1
 			var ops []StackOp
 			ops = append(ops, pushInt64(v.A))
@@ -224,7 +224,7 @@ func TestKBFieldInv_Script(t *testing.T) {
 	opOps := gatherOps(EmitKBFieldInv)
 
 	for _, v := range vecs {
-			t.Run(v.Desc, func(t *testing.T) {
+		t.Run(v.Desc, func(t *testing.T) {
 			var ops []StackOp
 			ops = append(ops, pushInt64(v.A))
 			ops = append(ops, opOps...)
@@ -275,7 +275,7 @@ func TestKBExt4Mul_Script(t *testing.T) {
 	mul3Ops := gatherOps(EmitKBExt4Mul3)
 
 	for _, v := range vecs {
-			t.Run(v.Desc, func(t *testing.T) {
+		t.Run(v.Desc, func(t *testing.T) {
 			b := v.B
 			for comp, compOps := range [][]StackOp{mul0Ops, mul1Ops, mul2Ops, mul3Ops} {
 				var ops []StackOp
@@ -307,7 +307,7 @@ func TestKBExt4Inv_Script(t *testing.T) {
 	inv3Ops := gatherOps(EmitKBExt4Inv3)
 
 	for _, v := range vecs {
-			t.Run(v.Desc, func(t *testing.T) {
+		t.Run(v.Desc, func(t *testing.T) {
 			for comp, compOps := range [][]StackOp{inv0Ops, inv1Ops, inv2Ops, inv3Ops} {
 				var ops []StackOp
 				for _, val := range v.A {
@@ -369,7 +369,7 @@ func testBN254BinaryOp(t *testing.T, filename string, emitFn func(func(StackOp))
 	opOps := gatherOps(emitFn)
 
 	for _, v := range vecs {
-			t.Run(v.Desc, func(t *testing.T) {
+		t.Run(v.Desc, func(t *testing.T) {
 			var ops []StackOp
 			ops = append(ops, pushBigInt(hexToBigInt(v.A)))
 			ops = append(ops, pushBigInt(hexToBigInt(*v.B)))
@@ -541,7 +541,7 @@ func TestBN254FieldInv_Script(t *testing.T) {
 	opOps := gatherOps(EmitBN254FieldInv)
 
 	for _, v := range vecs {
-			t.Run(v.Desc, func(t *testing.T) {
+		t.Run(v.Desc, func(t *testing.T) {
 			var ops []StackOp
 			ops = append(ops, pushBigInt(hexToBigInt(v.A)))
 			ops = append(ops, opOps...)

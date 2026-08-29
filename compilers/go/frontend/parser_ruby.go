@@ -100,9 +100,9 @@ const (
 	rbTokTrue
 	rbTokFalse
 	rbTokNil
-	rbTokAnd    // keyword 'and'
-	rbTokOr     // keyword 'or'
-	rbTokNot    // keyword 'not'
+	rbTokAnd // keyword 'and'
+	rbTokOr  // keyword 'or'
+	rbTokNot // keyword 'not'
 	rbTokSuper
 	rbTokRequire
 	rbTokAssert
@@ -121,10 +121,10 @@ type rbToken struct {
 // ---------------------------------------------------------------------------
 
 type rbParser struct {
-	fileName      string
-	tokens        []rbToken
-	pos           int
-	errors        []Diagnostic
+	fileName       string
+	tokens         []rbToken
+	pos            int
+	errors         []Diagnostic
 	declaredLocals map[string]bool // track locally declared variables per method scope
 }
 
@@ -481,14 +481,14 @@ var rbSpecialNames = map[string]string{
 	"check_preimage":  "checkPreimage",
 
 	// Post-quantum
-	"verify_wots":               "verifyWOTS",
-	"verify_slh_dsa_sha2_128s":  "verifySLHDSA_SHA2_128s",
-	"verify_slh_dsa_sha2_128f":  "verifySLHDSA_SHA2_128f",
-	"verify_slh_dsa_sha2_192s":  "verifySLHDSA_SHA2_192s",
-	"verify_slh_dsa_sha2_192f":  "verifySLHDSA_SHA2_192f",
-	"verify_slh_dsa_sha2_256s":  "verifySLHDSA_SHA2_256s",
-	"verify_slh_dsa_sha2_256f":  "verifySLHDSA_SHA2_256f",
-	"verify_rabin_sig":          "verifyRabinSig",
+	"verify_wots":              "verifyWOTS",
+	"verify_slh_dsa_sha2_128s": "verifySLHDSA_SHA2_128s",
+	"verify_slh_dsa_sha2_128f": "verifySLHDSA_SHA2_128f",
+	"verify_slh_dsa_sha2_192s": "verifySLHDSA_SHA2_192s",
+	"verify_slh_dsa_sha2_192f": "verifySLHDSA_SHA2_192f",
+	"verify_slh_dsa_sha2_256s": "verifySLHDSA_SHA2_256s",
+	"verify_slh_dsa_sha2_256f": "verifySLHDSA_SHA2_256f",
+	"verify_rabin_sig":         "verifyRabinSig",
 
 	// EC builtins
 	"ec_add":               "ecAdd",
@@ -521,9 +521,9 @@ var rbSpecialNames = map[string]string{
 	"verify_ecdsa_p384":      "verifyECDSA_P384",
 
 	// Intrinsics
-	"add_output":      "addOutput",
-	"add_raw_output":  "addRawOutput",
-	"add_data_output": "addDataOutput",
+	"add_output":       "addOutput",
+	"add_raw_output":   "addRawOutput",
+	"add_data_output":  "addDataOutput",
 	"get_state_script": "getStateScript",
 
 	// SHA-256 partial verification
@@ -531,19 +531,19 @@ var rbSpecialNames = map[string]string{
 	"sha256_finalize": "sha256Finalize",
 
 	// Transaction intrinsics
-	"extract_locktime":    "extractLocktime",
-	"extract_output_hash": "extractOutputHash",
-	"extract_sequence":    "extractSequence",
-	"extract_version":     "extractVersion",
-	"extract_amount":      "extractAmount",
-	"extract_nsequence":   "extractNSequence",
+	"extract_locktime":      "extractLocktime",
+	"extract_output_hash":   "extractOutputHash",
+	"extract_sequence":      "extractSequence",
+	"extract_version":       "extractVersion",
+	"extract_amount":        "extractAmount",
+	"extract_nsequence":     "extractNSequence",
 	"extract_hash_prevouts": "extractHashPrevouts",
 	"extract_hash_sequence": "extractHashSequence",
-	"extract_outpoint":    "extractOutpoint",
-	"extract_script_code": "extractScriptCode",
-	"extract_input_index": "extractInputIndex",
+	"extract_outpoint":      "extractOutpoint",
+	"extract_script_code":   "extractScriptCode",
+	"extract_input_index":   "extractInputIndex",
 	"extract_sig_hash_type": "extractSigHashType",
-	"extract_outputs":     "extractOutputs",
+	"extract_outputs":       "extractOutputs",
 
 	// Math builtins
 	"mul_div":       "mulDiv",
@@ -562,8 +562,8 @@ var rbSpecialNames = map[string]string{
 	// Misc
 	"num2bin": "num2bin",
 	"bin2num": "bin2num",
-	"log2":   "log2",
-	"divmod": "divmod",
+	"log2":    "log2",
+	"divmod":  "divmod",
 
 	// EC constants
 	"EC_P": "EC_P",
@@ -782,7 +782,7 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 	var methods []MethodNode
 
 	// Pending visibility/param types for the next method
-	var pendingVisibility string          // "public" or ""
+	var pendingVisibility string // "public" or ""
 	var pendingParamTypes map[string]TypeNode
 
 	for !p.check(rbTokEnd) && !p.check(rbTokEOF) {
@@ -1134,8 +1134,8 @@ func (p *rbParser) autoGenerateConstructor(properties []PropertyNode) MethodNode
 
 	for _, prop := range requiredProps {
 		body = append(body, AssignmentStmt{
-			Target: PropertyAccessExpr{Property: prop.Name},
-			Value:  Identifier{Name: prop.Name},
+			Target:         PropertyAccessExpr{Property: prop.Name},
+			Value:          Identifier{Name: prop.Name},
 			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
 		})
 	}

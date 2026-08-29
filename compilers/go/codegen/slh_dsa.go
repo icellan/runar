@@ -606,7 +606,7 @@ func emitSLHOneChain(emit func(StackOp), n, layer, chainIdx int, pkSeedPadDepth,
 	// Split n-byte sig element
 	emit(StackOp{Op: "swap"})
 	emit(StackOp{Op: "push", Value: bigIntPush(int64(n))})
-	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})       // steps sigElem sigRest
+	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})      // steps sigElem sigRest
 	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // alt: ..., csum, sigRest(top)
 	emit(StackOp{Op: "swap"})
 	// main: sigElem(1) steps(0)
@@ -719,7 +719,7 @@ func emitSLHWotsAll(emit func(StackOp), p SLHCodegenParams, layer int) {
 		if byteIdx < n-1 {
 			// Stack: psp ta8 kp4 sig csum endptAcc msgRest hiNib loNib
 			emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // loNib -> alt
-			emit(StackOp{Op: "swap"})                            // msgRest hiNib -> hiNib msgRest
+			emit(StackOp{Op: "swap"})                          // msgRest hiNib -> hiNib msgRest
 			emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // msgRest -> alt
 			// Stack: psp(6) ta8(5) kp4(4) sig(3) csum(2) endptAcc(1) hiNib(0)
 			// pspD=6, ta8D=5, kp4D=4
@@ -938,9 +938,9 @@ func emitSLHFors(emit func(StackOp), p SLHCodegenParams) {
 
 	// Input: psp(4) ta8(3) kp4(2) forsSig(1) md(0)
 	// Save md to alt, push empty rootAcc to alt
-	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})  // md -> alt
+	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // md -> alt
 	emit(StackOp{Op: "opcode", Code: "OP_0"})
-	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})  // rootAcc(empty) -> alt
+	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // rootAcc(empty) -> alt
 	// psp(3) ta8(2) kp4(1) forsSig(0) | alt: md, rootAcc(top)
 	// pspD=3, ta8D=2, kp4D=1
 
@@ -951,9 +951,9 @@ func emitSLHFors(emit func(StackOp), p SLHCodegenParams) {
 		emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"}) // rootAcc
 		emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"}) // md
 		emit(StackOp{Op: "opcode", Code: "OP_DUP"})
-		emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})   // md back
+		emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // md back
 		emit(StackOp{Op: "swap"})
-		emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})   // rootAcc back
+		emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // rootAcc back
 		// psp(4) ta8(3) kp4(2) forsSigRem(1) md_copy(0)
 
 		// Extract idx: `a` bits at position i*a from md_copy
@@ -1178,7 +1178,7 @@ func emitSLHHmsg(emit func(StackOp), n, outLen int) {
 		}
 	} else {
 		emit(StackOp{Op: "opcode", Code: "OP_0"}) // seed resultAcc
-		emit(StackOp{Op: "swap"})                   // resultAcc seed
+		emit(StackOp{Op: "swap"})                 // resultAcc seed
 
 		for ctr := 0; ctr < blocks; ctr++ {
 			if ctr < blocks-1 {
@@ -1375,7 +1375,7 @@ func EmitVerifySLHDSA(emit func(StackOp), paramKey string) {
 		emitSLHFors(e, p)
 		// Stack: psp(3) ta8(2) kp4(1) forsPk(0)
 		// Drop psp, ta8, kp4
-		e(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // forsPk -> alt
+		e(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})   // forsPk -> alt
 		e(StackOp{Op: "drop"})                            // kp4
 		e(StackOp{Op: "drop"})                            // ta8
 		e(StackOp{Op: "drop"})                            // psp

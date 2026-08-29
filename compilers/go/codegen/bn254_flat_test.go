@@ -310,21 +310,21 @@ func TestFlatFp2Mul_Analytical_Script(t *testing.T) {
 		{
 			// (0 + 0u) * (5 + 3u) = 0 + 0u
 			name: "zero_times_any",
-			a0: big.NewInt(0), a1: big.NewInt(0),
+			a0:   big.NewInt(0), a1: big.NewInt(0),
 			b0: big.NewInt(5), b1: big.NewInt(3),
 			expR0: big.NewInt(0), expR1: big.NewInt(0),
 		},
 		{
 			// (1 + 0u) * (7 + 11u) = 7 + 11u  (multiplicative identity)
 			name: "identity",
-			a0: big.NewInt(1), a1: big.NewInt(0),
+			a0:   big.NewInt(1), a1: big.NewInt(0),
 			b0: big.NewInt(7), b1: big.NewInt(11),
 			expR0: big.NewInt(7), expR1: big.NewInt(11),
 		},
 		{
 			// (0 + 1u) * (0 + 1u) = u² = -1 mod p = p-1
 			name: "i_squared_equals_minus_one",
-			a0: big.NewInt(0), a1: big.NewInt(1),
+			a0:   big.NewInt(0), a1: big.NewInt(1),
 			b0: big.NewInt(0), b1: big.NewInt(1),
 			expR0: new(big.Int).Sub(p, big.NewInt(1)), expR1: big.NewInt(0),
 		},
@@ -332,21 +332,21 @@ func TestFlatFp2Mul_Analytical_Script(t *testing.T) {
 			// (1 + 1u) * (1 - 1u) = 1*1 - 1*(-1) + (1*(-1) + 1*1)u = 2 + 0u
 			// (difference of squares: |1+u|² = 1 - u² = 1 - (-1) = 2)
 			name: "conjugate_product",
-			a0: big.NewInt(1), a1: big.NewInt(1),
+			a0:   big.NewInt(1), a1: big.NewInt(1),
 			b0: big.NewInt(1), b1: new(big.Int).Sub(p, big.NewInt(1)), // -1 mod p
 			expR0: big.NewInt(2), expR1: big.NewInt(0),
 		},
 		{
 			// (1 + 1u) * (1 + 1u) = (1 - 1) + (1 + 1)u = 0 + 2u
 			name: "one_plus_i_squared",
-			a0: big.NewInt(1), a1: big.NewInt(1),
+			a0:   big.NewInt(1), a1: big.NewInt(1),
 			b0: big.NewInt(1), b1: big.NewInt(1),
 			expR0: big.NewInt(0), expR1: big.NewInt(2),
 		},
 		{
 			// (3 + 0u) * (0 + 5u) = 0 + 15u  (real * pure imaginary)
 			name: "real_times_imaginary",
-			a0: big.NewInt(3), a1: big.NewInt(0),
+			a0:   big.NewInt(3), a1: big.NewInt(0),
 			b0: big.NewInt(0), b1: big.NewInt(5),
 			expR0: big.NewInt(0), expR1: big.NewInt(15),
 		},

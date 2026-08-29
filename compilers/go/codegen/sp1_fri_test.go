@@ -202,13 +202,13 @@ func TestSp1FriVerifier_Step1_ProofBlobBinding_RejectsTampered(t *testing.T) {
 //
 // Test shape:
 //
-//   1. Absorb 8 base-field elements (1..8) into the reference DuplexChallenger,
-//      sample 4 elements — capture canonical values.
-//   2. Build a Bitcoin Script that does the equivalent: push 16 zeros for the
-//      sponge state, then absorb 1..8 (which fills rate and triggers permute),
-//      then squeeze 4 elements. Assert each squeezed element equals the
-//      reference value via OP_NUMEQUALVERIFY.
-//   3. Execute via BuildAndExecuteOps. The script must succeed.
+//  1. Absorb 8 base-field elements (1..8) into the reference DuplexChallenger,
+//     sample 4 elements — capture canonical values.
+//  2. Build a Bitcoin Script that does the equivalent: push 16 zeros for the
+//     sponge state, then absorb 1..8 (which fills rate and triggers permute),
+//     then squeeze 4 elements. Assert each squeezed element equals the
+//     reference value via OP_NUMEQUALVERIFY.
+//  3. Execute via BuildAndExecuteOps. The script must succeed.
 func TestFiatShamirKB_SqueezeMatchesReference(t *testing.T) {
 	// 1. Reference values.
 	ref := sp1fri.NewDuplexChallenger()
@@ -1651,8 +1651,8 @@ func TestSp1FriVerifier_PerQueryConditionalFoldsMatchReference(t *testing.T) {
 //
 // For each bit ∈ {0, 1}:
 //   - Construct (folded, sibling) and derive (e_low, e_high) per the bit:
-//       bit==0 → (e_low, e_high) = (folded, sibling)
-//       bit==1 → (e_low, e_high) = (sibling, folded)
+//     bit==0 → (e_low, e_high) = (folded, sibling)
+//     bit==1 → (e_low, e_high) = (sibling, folded)
 //   - Compute reference fold via the validated lagrangeInterpolateAt.
 //   - Emit on-chain via emitFriFoldRowConditional with the runtime bit.
 //   - Assert on-chain Ext4 result matches the reference byte-identical.

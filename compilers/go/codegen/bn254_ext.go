@@ -4,9 +4,10 @@
 // All operations use bn254FieldAdd/Sub/Mul/Inv/Neg from bn254.go for Fp operations.
 //
 // Extension field tower:
-//   Fp2 = Fp[u] / (u^2 + 1)          — elements (a0, a1) = a0 + a1*u
-//   Fp6 = Fp2[v] / (v^3 - ξ)         — elements (c0, c1, c2), ξ = 9 + u
-//   Fp12 = Fp6[w] / (w^2 - v)        — elements (a, b)
+//
+//	Fp2 = Fp[u] / (u^2 + 1)          — elements (a0, a1) = a0 + a1*u
+//	Fp6 = Fp2[v] / (v^3 - ξ)         — elements (c0, c1, c2), ξ = 9 + u
+//	Fp12 = Fp6[w] / (w^2 - v)        — elements (a, b)
 //
 // Fp2 elements occupy 2 Fp slots on stack.
 // Fp6 elements occupy 6 Fp slots on stack.
@@ -82,11 +83,12 @@ func bn254Fp2Sub(t *BN254Tracker, a0, a1, b0, b1, r0, r1 string) {
 // modular reduction.
 //
 // Karatsuba formula:
-//   t0 = a0 * b0           (unreduced, <= p^2 ~ 2^508)
-//   t1 = a1 * b1           (unreduced, <= p^2 ~ 2^508)
-//   r0 = (t0 - t1) mod p   (1 mod -- handles potentially negative result)
-//   t2 = (a0+a1) * (b0+b1) (unreduced -- sums <= 2p, product <= 4p^2 ~ 2^510)
-//   r1 = (t2 - t0 - t1) mod p  (1 mod -- always non-negative: = a0*b1 + a1*b0)
+//
+//	t0 = a0 * b0           (unreduced, <= p^2 ~ 2^508)
+//	t1 = a1 * b1           (unreduced, <= p^2 ~ 2^508)
+//	r0 = (t0 - t1) mod p   (1 mod -- handles potentially negative result)
+//	t2 = (a0+a1) * (b0+b1) (unreduced -- sums <= 2p, product <= 4p^2 ~ 2^510)
+//	r1 = (t2 - t0 - t1) mod p  (1 mod -- always non-negative: = a0*b1 + a1*b0)
 //
 // Total: 3 unreduced Fp muls, 2 mod reductions (was: 4 Fp muls, 6 mods).
 //
@@ -142,11 +144,12 @@ func bn254Fp2MulTracker(t *BN254Tracker, a0, a1, b0, b1, r0, r1 string) {
 // bn254Fp2Sqr computes (a0+a1*u)^2 with deferred modular reduction.
 //
 // Formula:
-//   sum  = a0 + a1        (unreduced)
-//   diff = a0 - a1        (unreduced, may be negative)
-//   r0   = (sum * diff) mod p   (1 mul unreduced + 1 mod -- = a0^2 - a1^2)
-//   prod = a0 * a1        (unreduced)
-//   r1   = (2 * prod) mod p     (1 mod -- = 2*a0*a1)
+//
+//	sum  = a0 + a1        (unreduced)
+//	diff = a0 - a1        (unreduced, may be negative)
+//	r0   = (sum * diff) mod p   (1 mul unreduced + 1 mod -- = a0^2 - a1^2)
+//	prod = a0 * a1        (unreduced)
+//	r1   = (2 * prod) mod p     (1 mod -- = 2*a0*a1)
 //
 // Total: 2 unreduced muls, 2 mod reductions (was: 2 muls + 4 mods).
 //
@@ -418,9 +421,11 @@ func bn254Fp6MulByNonResidue(t *BN254Tracker, aPrefix, rPrefix string) {
 
 // bn254Fp6Mul computes Fp6 multiplication using schoolbook method.
 // Given a = (a0, a1, a2) and b = (b0, b1, b2) in Fp2[v]/(v^3 - ξ):
-//   r0 = a0*b0 + ξ*(a1*b2 + a2*b1)
-//   r1 = a0*b1 + a1*b0 + ξ*a2*b2
-//   r2 = a0*b2 + a1*b1 + a2*b0
+//
+//	r0 = a0*b0 + ξ*(a1*b2 + a2*b1)
+//	r1 = a0*b1 + a1*b0 + ξ*a2*b2
+//	r2 = a0*b2 + a1*b1 + a2*b0
+//
 // Consumes 12 Fp slots; produces 6 Fp slots.
 func bn254Fp6Mul(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
 	// t0 = a0 * b0  (Fp2 mul)
@@ -571,10 +576,12 @@ func bn254Fp12Sub(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
 
 // bn254Fp12Mul computes Fp12 multiplication using Karatsuba.
 // a = (a_a, a_b), b = (b_a, b_b) in Fp6[w]/(w^2 - v):
-//   t0 = a_a * b_a
-//   t1 = a_b * b_b
-//   r_a = t0 + v*t1  (where v* means Fp6MulByNonResidue)
-//   r_b = (a_a + a_b)*(b_a + b_b) - t0 - t1
+//
+//	t0 = a_a * b_a
+//	t1 = a_b * b_b
+//	r_a = t0 + v*t1  (where v* means Fp6MulByNonResidue)
+//	r_b = (a_a + a_b)*(b_a + b_b) - t0 - t1
+//
 // Consumes 24 Fp slots; produces 12 Fp slots.
 func bn254Fp12Mul(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
 	// t0 = a_a * b_a
@@ -818,7 +825,9 @@ func bn254Fp6MulByC2Zero(t *BN254Tracker, aPrefix, b0Prefix, b1Prefix, rPrefix s
 
 // bn254Fp6MulByFp2Copy multiplies Fp6 element by a scalar Fp2 element (b, 0, 0).
 // Given a = (a0, a1, a2) and scalar b (Fp2):
-//   r = (a0*b, a1*b, a2*b)
+//
+//	r = (a0*b, a1*b, a2*b)
+//
 // Total: 3 Fp2 muls.
 // Preserves both operands via copy; produces r (6 Fp slots).
 func bn254Fp6MulByFp2Copy(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
@@ -829,9 +838,11 @@ func bn254Fp6MulByFp2Copy(t *BN254Tracker, aPrefix, bPrefix, rPrefix string) {
 
 // bn254Fp12Sqr computes Fp12 squaring (optimized).
 // a = (a_a, a_b):
-//   t0 = a_a * a_b
-//   r_a = (a_a + a_b)*(a_a + v*a_b) - t0 - v*t0
-//   r_b = 2*t0
+//
+//	t0 = a_a * a_b
+//	r_a = (a_a + a_b)*(a_a + v*a_b) - t0 - v*t0
+//	r_b = 2*t0
+//
 // Consumes 12 Fp slots; produces 12 Fp slots.
 func bn254Fp12Sqr(t *BN254Tracker, aPrefix, rPrefix string) {
 	// t0 = a_a * a_b
@@ -938,11 +949,13 @@ func bn254Fp12Inv(t *BN254Tracker, aPrefix, rPrefix string) {
 
 // bn254Fp6Inv computes the multiplicative inverse of an Fp6 element.
 // Given n = (n0, n1, n2) in Fp2[v]/(v^3 - ξ):
-//   A = n0^2 - ξ*n1*n2
-//   B = ξ*n2^2 - n0*n1
-//   C = n1^2 - n0*n2
-//   det = n0*A + ξ*(n2*B + n1*C)
-//   inv = (A/det, B/det, C/det)
+//
+//	A = n0^2 - ξ*n1*n2
+//	B = ξ*n2^2 - n0*n1
+//	C = n1^2 - n0*n2
+//	det = n0*A + ξ*(n2*B + n1*C)
+//	inv = (A/det, B/det, C/det)
+//
 // Consumes 6 Fp slots; produces 6 Fp slots.
 func bn254Fp6Inv(t *BN254Tracker, prefix, rPrefix string) {
 	// A = n0^2 - ξ*n1*n2

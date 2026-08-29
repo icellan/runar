@@ -13,9 +13,10 @@
 //   - Digest: first 8 elements of the output state
 //
 // The permutation is structured as:
-//   Phase 1 — 4 external rounds (rounds 0-3)
-//   Phase 2 — 20 internal rounds (rounds 4-23)
-//   Phase 3 — 4 external rounds (rounds 24-27)
+//
+//	Phase 1 — 4 external rounds (rounds 0-3)
+//	Phase 2 — 20 internal rounds (rounds 4-23)
+//	Phase 3 — 4 external rounds (rounds 24-27)
 //
 // External rounds apply the full S-box and MDS matrix to all 16 elements.
 // Internal rounds apply S-box only to element 0 and use a diagonal diffusion matrix.

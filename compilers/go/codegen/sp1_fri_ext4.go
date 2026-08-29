@@ -16,13 +16,13 @@
 //
 // Reference algebra (binomial extension F_p[X]/(X^4 - W) with W = 3):
 //
-//   add: r_i = a_i + b_i
-//   sub: r_i = a_i - b_i
-//   mul: r0 = a0 b0 + W (a1 b3 + a2 b2 + a3 b1)
-//        r1 = a0 b1 + a1 b0 + W (a2 b3 + a3 b2)
-//        r2 = a0 b2 + a1 b1 + a2 b0 + W a3 b3
-//        r3 = a0 b3 + a1 b2 + a2 b1 + a3 b0
-//   inv: see kbExt4InvComponent in koalabear.go (tower of quadratic extensions).
+//	add: r_i = a_i + b_i
+//	sub: r_i = a_i - b_i
+//	mul: r0 = a0 b0 + W (a1 b3 + a2 b2 + a3 b1)
+//	     r1 = a0 b1 + a1 b0 + W (a2 b3 + a3 b2)
+//	     r2 = a0 b2 + a1 b1 + a2 b0 + W a3 b3
+//	     r3 = a0 b3 + a1 b2 + a2 b1 + a3 b0
+//	inv: see kbExt4InvComponent in koalabear.go (tower of quadratic extensions).
 //
 // Mirrors `packages/runar-go/sp1fri/koalabear.go::Ext4{Add,Sub,Mul,Inv}`.
 package codegen

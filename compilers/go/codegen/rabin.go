@@ -26,20 +26,20 @@ const RabinPaddingLimit = int64(65536)
 // Stack on entry (bottom→top): msg sig padding pubKey
 // Stack on exit:               bool  (1 = valid, 0 = invalid)
 func EmitVerifyRabinSig(emit func(StackOp)) {
-	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                       // msg sig pubKey padding
+	emit(StackOp{Op: "opcode", Code: "OP_SWAP"}) // msg sig pubKey padding
 	// BUG-010 padding range check: assert 0 <= padding < 65536.
-	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                        // msg sig pubKey padding padding
-	emit(StackOp{Op: "opcode", Code: "OP_0"})                          // ... padding padding 0
-	emit(StackOp{Op: "push", Value: bigIntPush(RabinPaddingLimit)})    // ... padding padding 0 65536
-	emit(StackOp{Op: "opcode", Code: "OP_WITHIN"})                     // ... padding (0<=padding<65536)
-	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})                     // msg sig pubKey padding (abort if false)
-	emit(StackOp{Op: "opcode", Code: "OP_ROT"})                        // msg pubKey padding sig
-	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                        // msg pubKey padding sig sig
-	emit(StackOp{Op: "opcode", Code: "OP_MUL"})                        // msg pubKey padding sig^2
-	emit(StackOp{Op: "opcode", Code: "OP_ADD"})                        // msg pubKey (sig^2+padding)
-	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                       // msg (sig^2+padding) pubKey
-	emit(StackOp{Op: "opcode", Code: "OP_MOD"})                        // msg ((sig^2+padding) mod pubKey)
-	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                       // ((sig^2+padding) mod pubKey) msg
-	emit(StackOp{Op: "opcode", Code: "OP_SHA256"})                     // ((sig^2+padding) mod pubKey) SHA256(msg)
-	emit(StackOp{Op: "opcode", Code: "OP_EQUAL"})                      // bool
+	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                     // msg sig pubKey padding padding
+	emit(StackOp{Op: "opcode", Code: "OP_0"})                       // ... padding padding 0
+	emit(StackOp{Op: "push", Value: bigIntPush(RabinPaddingLimit)}) // ... padding padding 0 65536
+	emit(StackOp{Op: "opcode", Code: "OP_WITHIN"})                  // ... padding (0<=padding<65536)
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})                  // msg sig pubKey padding (abort if false)
+	emit(StackOp{Op: "opcode", Code: "OP_ROT"})                     // msg pubKey padding sig
+	emit(StackOp{Op: "opcode", Code: "OP_DUP"})                     // msg pubKey padding sig sig
+	emit(StackOp{Op: "opcode", Code: "OP_MUL"})                     // msg pubKey padding sig^2
+	emit(StackOp{Op: "opcode", Code: "OP_ADD"})                     // msg pubKey (sig^2+padding)
+	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                    // msg (sig^2+padding) pubKey
+	emit(StackOp{Op: "opcode", Code: "OP_MOD"})                     // msg ((sig^2+padding) mod pubKey)
+	emit(StackOp{Op: "opcode", Code: "OP_SWAP"})                    // ((sig^2+padding) mod pubKey) msg
+	emit(StackOp{Op: "opcode", Code: "OP_SHA256"})                  // ((sig^2+padding) mod pubKey) SHA256(msg)
+	emit(StackOp{Op: "opcode", Code: "OP_EQUAL"})                   // bool
 }

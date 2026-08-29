@@ -747,16 +747,16 @@ func TestGroth16WA_G1PointAddition_Script(t *testing.T) {
 		// x3 = lambda^2 - x1 - x2 mod p
 		// bn254FieldSqr consumes _lambda, so copy it first for later use
 		tr.copyToTop("_lambda", "_lam_for_y3")
-		bn254FieldSqr(tr, "_lambda", "_lam_sq")           // consumes _lambda
+		bn254FieldSqr(tr, "_lambda", "_lam_sq") // consumes _lambda
 		tr.copyToTop("_x1", "_x1_for_sub")
 		bn254FieldSub(tr, "_lam_sq", "_x1_for_sub", "_tmp1") // consumes _lam_sq, _x1_for_sub
 		tr.copyToTop("_x2", "_x2_for_sub")
-		bn254FieldSub(tr, "_tmp1", "_x2_for_sub", "_x3")  // consumes _tmp1, _x2_for_sub
+		bn254FieldSub(tr, "_tmp1", "_x2_for_sub", "_x3") // consumes _tmp1, _x2_for_sub
 
 		// y3 = lambda*(x1 - x3) - y1 mod p
 		tr.copyToTop("_x1", "_x1_for_y")
 		tr.copyToTop("_x3", "_x3_for_y")
-		bn254FieldSub(tr, "_x1_for_y", "_x3_for_y", "_x1mx3") // x1 - x3
+		bn254FieldSub(tr, "_x1_for_y", "_x3_for_y", "_x1mx3")    // x1 - x3
 		bn254FieldMul(tr, "_lam_for_y3", "_x1mx3", "_lam_x1mx3") // lambda*(x1-x3)
 		tr.copyToTop("_y1", "_y1_for_sub")
 		bn254FieldSub(tr, "_lam_x1mx3", "_y1_for_sub", "_y3") // lambda*(x1-x3) - y1

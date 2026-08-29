@@ -99,7 +99,7 @@ type SourceMap struct {
 
 // IRDebug holds optional IR snapshots for debugging / conformance checking.
 type IRDebug struct {
-	ANF   *ir.ANFProgram       `json:"anf,omitempty"`
+	ANF   *ir.ANFProgram        `json:"anf,omitempty"`
 	Stack []codegen.StackMethod `json:"stack,omitempty"`
 }
 
@@ -122,22 +122,22 @@ type Groth16WAMeta struct {
 
 // Artifact is the final compiled output of a Rúnar compiler.
 type Artifact struct {
-	Version                string            `json:"version"`
-	CompilerVersion        string            `json:"compilerVersion"`
-	ContractName           string            `json:"contractName"`
-	ParentClass            string            `json:"parentClass,omitempty"`
-	ABI                    ABI               `json:"abi"`
-	Script                 string            `json:"script"`
-	ASM                    string            `json:"asm"`
-	StateFields            []StateField      `json:"stateFields,omitempty"`
-	ConstructorSlots       []ConstructorSlot  `json:"constructorSlots,omitempty"`
-	CodeSepIndexSlots      []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
-	CodeSeparatorIndex     *int               `json:"codeSeparatorIndex,omitempty"`
-	CodeSeparatorIndices   []int             `json:"codeSeparatorIndices,omitempty"`
-	BuildTimestamp         string            `json:"buildTimestamp"`
-	ANF                    *ir.ANFProgram    `json:"anf,omitempty"`
-	SourceMapData          *SourceMap        `json:"sourceMap,omitempty"`
-	IR                     *IRDebug          `json:"ir,omitempty"`
+	Version              string             `json:"version"`
+	CompilerVersion      string             `json:"compilerVersion"`
+	ContractName         string             `json:"contractName"`
+	ParentClass          string             `json:"parentClass,omitempty"`
+	ABI                  ABI                `json:"abi"`
+	Script               string             `json:"script"`
+	ASM                  string             `json:"asm"`
+	StateFields          []StateField       `json:"stateFields,omitempty"`
+	ConstructorSlots     []ConstructorSlot  `json:"constructorSlots,omitempty"`
+	CodeSepIndexSlots    []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
+	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
+	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
+	BuildTimestamp       string             `json:"buildTimestamp"`
+	ANF                  *ir.ANFProgram     `json:"anf,omitempty"`
+	SourceMapData        *SourceMap         `json:"sourceMap,omitempty"`
+	IR                   *IRDebug           `json:"ir,omitempty"`
 
 	// Groth16WA is populated only for artifacts produced by the
 	// `runarc groth16-wa` backend. Nil for normal Rúnar contract
@@ -229,6 +229,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 	if o.SP1FriParams != nil {
 		lowerOpts.SP1FriParams = o.SP1FriParams
 	}
+	lowerOpts.EcCodegen = o.ecCodegenOptions()
 
 	// Pass 5: Stack lowering
 	stackMethods, err := codegen.LowerToStack(program, lowerOpts)
@@ -390,7 +391,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		ASM:                  scriptAsm,
 		StateFields:          stateFields,
 		ConstructorSlots:     constructorSlots,
-		CodeSepIndexSlots:   codeSepIndexSlots,
+		CodeSepIndexSlots:    codeSepIndexSlots,
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
 		BuildTimestamp:       buildTimestamp(),
@@ -742,6 +743,7 @@ func CompileFromSourceWithResult(sourcePath string, opts ...CompileOptions) *Com
 		if o.SP1FriParams != nil {
 			lowerOpts.SP1FriParams = o.SP1FriParams
 		}
+		lowerOpts.EcCodegen = o.ecCodegenOptions()
 		stackMethods, stackErr = codegen.LowerToStack(result.ANF, lowerOpts)
 		if stackErr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
@@ -906,6 +908,7 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 		if o.SP1FriParams != nil {
 			lowerOpts.SP1FriParams = o.SP1FriParams
 		}
+		lowerOpts.EcCodegen = o.ecCodegenOptions()
 		stackMethods, stackErr = codegen.LowerToStack(result.ANF, lowerOpts)
 		if stackErr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(

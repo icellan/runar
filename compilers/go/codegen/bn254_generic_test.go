@@ -143,9 +143,13 @@ func TestBN254G1Negate_Script(t *testing.T) {
 // for the first time.
 //
 // Also covers G + G = 2G (the doubling case). The original chord formula
-//   s = (qy - py) / (qx - px)
+//
+//	s = (qy - py) / (qx - px)
+//
 // divides by zero when P == Q; the unified slope formula
-//   s = (px^2 + px*qx + qx^2) / (py + qy)
+//
+//	s = (px^2 + px*qx + qx^2) / (py + qy)
+//
 // handles both addition and doubling on y^2 = x^3 + b.
 func TestBN254G1Add_Script(t *testing.T) {
 	gx := big.NewInt(1)
@@ -154,7 +158,7 @@ func TestBN254G1Add_Script(t *testing.T) {
 	x3, y3 := bn254ComputeAddG_2G(t)
 
 	cases := []struct {
-		name                     string
+		name                   string
 		ax, ay, bx, by, xR, yR *big.Int
 	}{
 		{"G+2G=3G", gx, gy, x2, y2, x3, y3},

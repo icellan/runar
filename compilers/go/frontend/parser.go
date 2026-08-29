@@ -48,6 +48,7 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.zig -> ParseZig
 //   - .runar.java -> ParseJava
 //   - default -> Parse (existing TypeScript parser)
+//
 // ackUnsoundSP1FriRE opts a contract in to the KNOWN-UNSOUND SP1 FRI verifier.
 // Scanned over the RAW SOURCE in ParseSource so every surface format honours it
 // identically — unlike @sighash / @embedAlways, which only the TypeScript

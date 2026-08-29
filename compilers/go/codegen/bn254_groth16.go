@@ -4,13 +4,13 @@
 // script only VERIFIES them.
 //
 // Techniques from nChain paper (eprint 2024/1498):
-//   1. Witness-assisted field inversion: prover supplies inverse, script checks a*b mod p == 1
-//   2. Witness-assisted line gradients: prover supplies lambda, script checks lambda*(x2-x1) == y2-y1
-//   3. Modulo threshold: defer mod reduction until intermediates exceed configurable byte size
-//   4. Batched modulo: reduce multiple Fp_n components sharing a single q-fetch
-//   5. q at stack bottom: store modulus at main stack bottom, fetch with OP_DEPTH OP_1SUB OP_PICK
-//   6. Precomputed e(alpha,beta): hardcoded Fp12 constant in locking script
-//   7. Triple Miller loop: 3 pairs processed simultaneously (4th precomputed)
+//  1. Witness-assisted field inversion: prover supplies inverse, script checks a*b mod p == 1
+//  2. Witness-assisted line gradients: prover supplies lambda, script checks lambda*(x2-x1) == y2-y1
+//  3. Modulo threshold: defer mod reduction until intermediates exceed configurable byte size
+//  4. Batched modulo: reduce multiple Fp_n components sharing a single q-fetch
+//  5. q at stack bottom: store modulus at main stack bottom, fetch with OP_DEPTH OP_1SUB OP_PICK
+//  6. Precomputed e(alpha,beta): hardcoded Fp12 constant in locking script
+//  7. Triple Miller loop: 3 pairs processed simultaneously (4th precomputed)
 //
 // This is a separate module from the general-purpose bn254.go/bn254_ext.go/bn254_pairing.go.
 // It generates a monolithic Groth16 verifier, not composable builtins.
@@ -195,8 +195,9 @@ func swapFp2Pairs(gnark [4]*big.Int) [4]*big.Int {
 // a simple mul + mod + comparison (~50 bytes).
 //
 // Stack effect (combined unlock + lock view):
-//   Unlock pushes: [a, a_inv]
-//   Lock script: verifies a * a_inv mod p == 1
+//
+//	Unlock pushes: [a, a_inv]
+//	Lock script: verifies a * a_inv mod p == 1
 //
 // After: a_inv remains on stack as the verified result (a is consumed).
 func emitWitnessInverseVerify(t *BN254Tracker, aName, aInvName, resultName string) {
@@ -859,8 +860,9 @@ func emitWAG2SubgroupCheck(t *BN254Tracker, x0, x1, y0, y1 string) {
 // emitWAG1AddFp performs witness-assisted G1 point addition in Fp.
 // The prover supplies the gradient lambda in the unlocking script; the script
 // verifies lambda * (x2 - x1) == (y2 - y1) mod p, then computes the sum point:
-//   x3 = lambda^2 - x1 - x2
-//   y3 = lambda * (x1 - x3) - y1
+//
+//	x3 = lambda^2 - x1 - x2
+//	y3 = lambda * (x1 - x3) - y1
 //
 // Both input points are consumed; the result point is placed on the tracker.
 func emitWAG1AddFp(t *BN254Tracker, p1xName, p1yName, p2xName, p2yName, lamName, resultXName, resultYName string) {
@@ -1102,8 +1104,10 @@ func emitWALineEvalAddSparse(t *BN254Tracker, tPrefix, qPrefix, lamPrefix, pxNam
 // verifies it.
 //
 // The gradients must be pre-pushed onto the tracker with names:
-//   "_wlam_d{k}_{iteration}" for doubling gradients (pair k, iteration i)
-//   "_wlam_a{k}_{iteration}" for addition gradients
+//
+//	"_wlam_d{k}_{iteration}" for doubling gradients (pair k, iteration i)
+//	"_wlam_a{k}_{iteration}" for addition gradients
+//
 // where k = 1,2,3 and iteration counts down from msbIdx-1 to 0.
 //
 // This function is called from EmitGroth16VerifierWitnessAssisted to generate
@@ -1738,6 +1742,7 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 //   - compilers/go/codegen/stack.go: emitGroth16WAPreamble (useMSM=true)
 //   - packages/runar-go/bn254witness/witness.go (witness-stack layout)
 //   - packages/runar-go/bn254.go (Groth16Config.IC documentation)
+//
 // Generalising to an arbitrary number of public inputs would require
 // threading the arity through Groth16Config, the witness-stack layout,
 // and the SP1Verifier contract DSL; that is out of scope for this

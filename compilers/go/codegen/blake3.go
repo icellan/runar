@@ -223,8 +223,8 @@ func (em *blake3Emitter) rotrBE(n int) {
 // Swaps the two 16-bit halves: [b0,b1,b2,b3] → [b2,b3,b0,b1].
 func (em *blake3Emitter) rotr16LE() {
 	em.pushI(2)
-	em.split()        // [lo2, hi2]
-	em.swap()         // [hi2, lo2]
+	em.split()         // [lo2, hi2]
+	em.swap()          // [hi2, lo2]
 	em.binOp("OP_CAT") // [hi2||lo2]
 }
 
@@ -232,8 +232,8 @@ func (em *blake3Emitter) rotr16LE() {
 // [b0,b1,b2,b3] → [b1,b2,b3,b0]
 func (em *blake3Emitter) rotr8LE() {
 	em.pushI(1)
-	em.split()        // [b0, b1b2b3]
-	em.swap()         // [b1b2b3, b0]
+	em.split()         // [b0, b1b2b3]
+	em.swap()          // [b1b2b3, b0]
 	em.binOp("OP_CAT") // [b1b2b3||b0]
 }
 
@@ -304,9 +304,9 @@ func emitHalfG(em *blake3Emitter, rotD int, rotB int) {
 
 	// Step 1: a' = a + b + m
 	// Stack: [a, b, c, d, m] — a=4, b=3, c=2, d=1, m=0
-	em.roll(3)  // [a, c, d, m, b]
-	em.roll(4)  // [c, d, m, b, a]
-	em.addN(3)  // [c, d, a']
+	em.roll(3) // [a, c, d, m, b]
+	em.roll(4) // [c, d, m, b, a]
+	em.addN(3) // [c, d, a']
 	em.assertDepth(d0-2, "halfG step1")
 
 	// Step 2: d' = (d ^ a') >>> rotD
@@ -533,9 +533,9 @@ func generateBlake3CompressOps(blockLenFromAlt bool) []StackOp {
 	// XOR pairs: h[7-k] = v[7-k] ^ v[15-k] for k=0..7
 	// Process top-down: v15^v7, v14^v6, ..., v8^v0. Send each result to alt.
 	for k := 0; k < 8; k++ {
-		em.roll(8 - k)      // bring v[7-k] to TOS (past v[15-k] and remaining)
-		em.binOp("OP_XOR")  // h[7-k] = v[7-k] ^ v[15-k]
-		em.toAlt()          // result to alt; main shrinks by 2
+		em.roll(8 - k)     // bring v[7-k] to TOS (past v[15-k] and remaining)
+		em.binOp("OP_XOR") // h[7-k] = v[7-k] ^ v[15-k]
+		em.toAlt()         // result to alt; main shrinks by 2
 	}
 	em.assertDepth(16, "after XOR pairs")
 	// Alt (bottom→top): h7, h6, h5, h4, h3, h2, h1, h0. Main: [m0..m15].
@@ -609,8 +609,8 @@ func EmitBlake3Hash(emit func(StackOp)) {
 	// Capture block_len = message length as a 4-byte little-endian value on the
 	// alt stack (consumed as v[14] inside the compression).
 	em.oc("OP_SIZE")
-	em.depth++             // [message, len]
-	em.dup()               // [message, len, len]
+	em.depth++ // [message, len]
+	em.dup()   // [message, len, len]
 	em.pushI(4)
 	em.binOp("OP_NUM2BIN") // [message, len, blockLenLE(4)]
 	em.toAlt()             // [message, len]; alt: [blockLenLE]
@@ -618,7 +618,7 @@ func EmitBlake3Hash(emit func(StackOp)) {
 	// Pad message to 64 bytes (BLAKE3 zero-pads, no length suffix)
 	em.pushI(64)
 	em.swap()
-	em.binOp("OP_SUB")     // [message, 64-len]
+	em.binOp("OP_SUB") // [message, 64-len]
 	em.pushI(0)
 	em.swap()
 	em.binOp("OP_NUM2BIN") // [message, zeros]
