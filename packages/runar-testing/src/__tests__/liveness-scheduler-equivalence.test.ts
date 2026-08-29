@@ -64,6 +64,18 @@ const VARIANTS = [
   { name: 'liveness', opts: { schedulerMode: 'liveness' as const } },
   { name: 'ec-pool', opts: { ecConstantPool: true } },
   { name: 'both', opts: { schedulerMode: 'liveness' as const, ecConstantPool: true } },
+  // Everything at once. Each optimization is proved separately elsewhere, but
+  // they compose in one compilation and the combination is what a user would
+  // actually turn on, so it gets its own pass over the witness corpus.
+  {
+    name: 'all',
+    opts: {
+      schedulerMode: 'liveness' as const,
+      ecConstantPool: true,
+      ecReductionSinking: true,
+      ecFixedBaseComb: true,
+    },
+  },
 ];
 
 describe('experimental backends preserve acceptance', () => {

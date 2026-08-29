@@ -58,6 +58,8 @@ export interface DiffExecOptions {
    */
   schedulerMode?: 'current' | 'liveness';
   ecConstantPool?: boolean;
+  ecReductionSinking?: boolean;
+  ecFixedBaseComb?: boolean;
 }
 
 export interface DiffExecResult {
@@ -98,6 +100,8 @@ export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult 
     constructorArgs: ctor,
     schedulerMode: opts.schedulerMode,
     ecConstantPool: opts.ecConstantPool,
+    ecReductionSinking: opts.ecReductionSinking,
+    ecFixedBaseComb: opts.ecFixedBaseComb,
   });
   if (!compiled.success || !compiled.artifact) {
     const errs = compiled.diagnostics

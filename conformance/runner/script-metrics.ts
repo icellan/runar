@@ -76,6 +76,12 @@ export const VARIANTS: Record<string, CompileOptions> = {
   'ec-comb': { ecConstantPool: true, ecReductionSinking: true, ecFixedBaseComb: true },
   liveness: { schedulerMode: 'liveness' },
   both: { ecConstantPool: true, schedulerMode: 'liveness' },
+  all: {
+    ecConstantPool: true,
+    ecReductionSinking: true,
+    ecFixedBaseComb: true,
+    schedulerMode: 'liveness',
+  },
 };
 
 // ---------------------------------------------------------------------------

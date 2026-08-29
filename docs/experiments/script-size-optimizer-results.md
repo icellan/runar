@@ -1,38 +1,41 @@
-# Script-size optimizer — Phases 0–2 results
+# Script-size optimizer — results
 
-**Scope:** the first slice of the size-optimization brief — baseline instrumentation (Phase 0),
-an exact script-byte cost model (Phase 1), and two prototype optimizations behind opt-in flags
-(Phase 2). No modular-domain analysis, no witness hints, no scalar-multiplication algorithms.
+**Scope:** baseline instrumentation (Phase 0), an exact script-byte cost model (Phase 1), a
+liveness stack scheduler (Phase 2), EC constant pooling, sign-lattice reduction sinking
+(Phases 4–5), and a fixed-base comb (Phase 10). Straus/Shamir (Phase 9) was measured and
+rejected — see §3.10. No witness hints (Phase 7).
 **Companion documents:** [`script-size-optimization-baseline.md`](script-size-optimization-baseline.md),
 [`stack-scheduler-design.md`](stack-scheduler-design.md).
 
 Everything below is measured on the 72 conformance fixtures with
-`pnpm --filter runar-conformance run script-metrics -- --compare current,liveness,ec-pool,both`.
+`pnpm --filter runar-conformance run script-metrics -- --compare current,ec-pool,ec-sink,ec-comb
+pnpm --filter runar-conformance run script-metrics -- --compare current,all`.
 
 ---
 
 ## 1. Headline
 
-| | corpus bytes | vs baseline | fixtures changed | fixtures grown |
-|---|---:|---:|---:|---:|
-| `current` (shipping) | 13,526,563 | — | — | — |
-| `liveness` (scheduler) | 13,526,482 | −0.0 % | 34 | 0 |
-| `ec-pool` (constant pool) | 6,285,154 | **−53.5 %** | 9 | 0 |
-| `both` | 6,285,073 | **−53.5 %** | 43 | 0 |
+**`conformance/tests/p256-wallet`: 958,792 → 147,113 bytes (−84.7 %)** — the fixture the brief
+calls its "959,592 B reference implementation". `p384-wallet`: 1,963,300 → 223,204 (−88.6 %).
 
-**`conformance/tests/p256-wallet`: 958,792 → 304,463 bytes (−68.2 %)**, which is the brief's
-959 kB reference implementation. `p384-wallet`: 1,963,300 → 463,435 (−76.4 %).
+Across the whole corpus, with every flag on: **13,526,563 → 4,906,225 bytes (−63.7 %)**,
+43 of 72 fixtures changed, **none grown**.
 
-The next step after this slice has been measured rather than projected: adding reduction
-sinking takes `p256-wallet` to **179,796 bytes (−81.2 % from shipping)** and `p384-wallet` to
-272,584 (−86.1 %). See §3.7, and §3.8 for the precondition it turns out to need.
+| stage | p256-wallet | p384-wallet | corpus |
+|---|---:|---:|---:|
+| shipping | 958,792 | 1,963,300 | 13,526,563 |
+| + EC constant pool | 304,463 (−68.2 %) | 463,435 (−76.4 %) | 6,285,154 (−53.5 %) |
+| + reduction sinking | 179,890 (−81.2 %) | 272,678 (−86.1 %) | — |
+| + fixed-base comb | **147,113 (−84.7 %)** | **223,204 (−88.6 %)** | **4,906,225 (−63.7 %)** |
 
-Default output is unchanged: all 72 fixtures still reproduce their checked-in
+The liveness scheduler moves 34 fixtures but −0.0 % of corpus bytes; it is reported separately
+in §2 because its value is qualitative, not numeric.
+
+Default output is unchanged at every stage: all 72 fixtures reproduce their checked-in
 `expected-script.hex` byte-for-byte
-(`packages/runar-compiler/src/__tests__/golden-invariance.test.ts`), and the Go and Rust
-cross-compiler golden tests still pass.
-
----
+(`packages/runar-compiler/src/__tests__/golden-invariance.test.ts`), `script-size-check` is
+72/72 ok, and the Go and Rust cross-compiler golden tests still pass. Every optimization is
+opt-in.
 
 ## 2. What was built
 
@@ -42,6 +45,8 @@ cross-compiler golden tests still pass.
 | 1 | Exact script-byte cost model | `packages/runar-compiler/src/metrics/cost-model.ts` |
 | 2a | Liveness scheduler (`--stack-scheduler=liveness`) | `packages/runar-compiler/src/passes/05-stack-lower.ts` |
 | 2b | EC constant pool (`--ec-constant-pool`) | `packages/runar-compiler/src/passes/ec-codegen.ts`, `p256-p384-codegen.ts` |
+| 4–5 | Sign lattice + reduction sinking (`--ec-reduction-sinking`) | `ec-codegen.ts` (`Dom`, `ECTracker.dm`), `p256-p384-codegen.ts` |
+| 10 | Fixed-base comb (`--ec-fixed-base-comb`) | `packages/runar-compiler/src/passes/comb.ts`, `p256-p384-codegen.ts` |
 
 ### Phase 1 — the cost model is exact, not an estimate
 
@@ -137,6 +142,9 @@ results differ only because P-384's prime is a 50-byte push instead of 34.
   `OP_PICK` depth pushes. Measurement killed it: of 387,749 `OP_PICK`/`OP_ROLL` sites in the
   corpus, **657 are deeper than 16**; typical depths are 2–5, and depths 0–2 are single-byte
   opcodes anyway. Every drop would cost 1–3 bytes to save approximately nothing.
+- **Straus/Shamir joint double-scalar multiplication.** Measured at ~700 B/bit-position against
+  690 for two independent ladders, because a joint ladder forfeits the incomplete-addition
+  argument and completing the addition costs +299 B/round. See §3.10.
 - **A forked scheduler pass.** A `schedulerMode` field on `LoweringContext` kept one code
   path and let the existing 66 structural assertions in `05-stack-lower.test.ts` cover both
   modes. A 5,500-line fork would have drifted from the branch/loop invariant fixes landing on
@@ -226,24 +234,77 @@ plus a **`< p` bit that only subtrahends need**. That is a materially smaller pi
 than a full domain lattice, and it is the difference between an optimization that passes 256
 oracle assertions and one that is actually correct.
 
-### 3.9 Revised trajectory
+### 3.9 Trajectory
 
 ```
-958,792  shipping
-179,796  + constant pool + reduction sinking   (MEASURED)
-        − Straus/Shamir: one joint ladder instead of two   (Phase 9, estimated)
-        − fixed-base comb for u1·G, G compile-time known   (Phases 10–11, estimated)
- ~30,000  ← the reference trajectory's comb stage (34,470 B)
+958,792   shipping
+304,463   + EC constant pool                     MEASURED
+179,890   + sign lattice + reduction sinking     MEASURED
+147,113   + fixed-base comb for u1·G             MEASURED
+          - secp256k1 comb wiring                not done
+          - witness-hint modular inverse         not done (Phase 7)
+ ~30,000  <- the reference trajectory's comb stage (34,470 B)
 ```
 
-Everything above 179,796 is measured; everything below it is still an estimate.
+Everything down to 147,113 is measured. At that point the split is 70.0 % stack-shuffle /
+25.4 % arithmetic, and constant pushes are down from 697,019 bytes to 2,116 — 99.7 %
+eliminated. What is left is the `u2·Q` ladder plus the operand traffic inside it, which is why
+the field-element IR in §4 is now the structural item rather than another algorithm.
 
-Note what the measurement does to the ordering. At 179,796 bytes the split is 69.6 %
-stack-shuffle / 26.7 % arithmetic, and `OP_PICK` (×36,683) is the single largest opcode. Once
-a reduction costs 3 bytes, **`ECTracker`'s own operand shuffling is the bottleneck, not the
-reduction**. Straus and comb still help — they cut total operations, so both columns shrink —
-but the structural fix underneath is the field-element IR in §4: it would put those 125,119
-bytes of shuffle within reach of a scheduler, which nothing can reach today.
+### 3.10 Straus/Shamir was measured, then rejected; the comb was not
+
+The obvious next step after reduction sinking is a joint ladder for `u1·G + u2·Q`. It does not
+pay, and the reason is the most transferable finding in this document.
+
+The ladder's speed comes from the **cheap incomplete** mixed add.
+`buildJacobianAddOrDoubleInline` justifies using it everywhere but the final step with an
+interval argument over `c_i mod n`, which works because the accumulator is `c_i·P` and the
+addend is `P` — one generator, coefficient fixed by the scalar and the step index. A joint
+ladder makes the accumulator `c_i·G + d_i·Q` with **Q supplied by the caller**: an attacker
+choosing `Q = k·G` solves `c_i + d_i·k ≡ 1 (mod n)` for `k`, one equation in one free
+variable, so the exception becomes reachable at an arbitrary step. The argument does not
+transfer.
+
+Completing the addition costs a measured **+299 B/round** — a whole ladder goes 90,610 →
+167,410 bytes, +84.8 %:
+
+| scheme | B/bit-position |
+|---|---:|
+| current — two independent ladders | 690 |
+| joint + 4-entry table + incomplete add | ~400 |
+| **joint + 4-entry table + complete add** | **~700** |
+| shared doubling, two incomplete adds | ~540 |
+| shared doubling, two complete adds | ~1,138 |
+
+Every joint variant is a loss unless it keeps the incomplete formula, and keeping it means
+replacing an unconditional guarantee with a DLP-hardness assumption inside a signature
+verifier. Rejected.
+
+**The comb keeps a single generator, so the argument survives** — which is why the work went
+there instead. `u1·G` gets a comb (the base is a compile-time constant); `u2·Q` keeps the
+ladder, because Q arrives in the witness.
+
+| emitter | ladder | comb | |
+|---|---:|---:|---:|
+| `emitP256MulGen` | 90,676 | 54,117 | −40.3 % |
+| `emitP384MulGen` | 136,599 | 81,418 | −40.4 % |
+| `emitVerifyECDSA_P256` | 195,120 | 158,560 | −18.7 % |
+
+Two things the soundness work turned up, both in `passes/comb.ts`:
+
+- **The ladder's `+3n` offset is not portable.** `combParams` searches for the offset `m` with
+  `m·n ≥ 2^(w·d−1)` and `(m+1)·n − 1 < 2^(w·d)`, which is what keeps the first comb digit
+  non-zero and so the accumulator off infinity. For P-256 at w=3 it returns `+3n`, matching the
+  ladder. **For P-384 at w=3 it returns `+5n`.** Reusing `+3n` there would have let the leading
+  digit vanish.
+- **The safety analysis must be allowed to fail.** `combSafeRounds` proves per round that the
+  pre-add accumulator cannot be `0`, `+T[j]` or `−T[j]` mod n over the whole scalar domain;
+  rounds it cannot prove get the complete add-or-double form. For P-256 at w=3 it proves 81 of
+  86, so the fallback costs ~1.2 kB. A checker that proved every round would be broken rather
+  than clever, and the tests assert it refuses the last ones.
+
+The window width is chosen by `estimateScriptBytes` over w ∈ {2,3,4}, not hardcoded — the
+measured optimum is w=3, and the `2^w` selection logic overtakes the saving by w=5.
 
 ---
 
@@ -308,15 +369,21 @@ Two process notes worth carrying forward:
 2. `conformance/runner/script-metrics.ts` alongside the existing `script-size-check.ts` — the
    latter answers "did anything grow?", the former "where did the bytes go?".
 
-**Adopt after a 7-tier port:**
+**Adopt after a 7-tier port, in this order:**
 
-3. The EC constant pool. It is the largest single byte win available, it is
-   curve-parameterized rather than curve-specific, and it is proved equivalent against OpenSSL
-   signatures on both curves plus every SEC1 rejection case
-   (`packages/runar-testing/src/__tests__/ec-constant-pool-equivalence.test.ts`, 44 cases).
-   Landing it means porting to `compilers/{go,rust,python,ruby,zig,java}`, regenerating 9
-   goldens, re-stamping `conformance/script-size-baseline.json` (the −67 % shrink trips its
-   50 % guard by design), and adding provenance entries.
+3. **The EC constant pool.** The largest single win (−53.5 % of the corpus), curve-parameterized
+   rather than curve-specific, proved equivalent against OpenSSL signatures on both curves plus
+   every SEC1 rejection case (`ec-constant-pool-equivalence.test.ts`, 44 cases).
+4. **Sign lattice + reduction sinking.** −124 kB more on `p256-wallet`, within 94 bytes of the
+   measured ceiling. Depends on (3): the cheap subtraction references the prime twice, so
+   without a pooled slot it is a regression.
+5. **Fixed-base comb.** −33 kB more on `p256-wallet`, −49 kB on `p384-wallet`. Carries the
+   heaviest proof obligation of the three (`comb.ts`), and the only one that needed a
+   curve-specific fact re-derived rather than reused.
+
+Each means porting to `compilers/{go,rust,python,ruby,zig,java}`, regenerating the 9 EC
+goldens, re-stamping `conformance/script-size-baseline.json` (the shrink trips its 50 % guard
+by design), and adding provenance entries.
 
 **Keep experimental:**
 
@@ -326,17 +393,14 @@ Two process notes worth carrying forward:
 
 **Do next (highest value first):**
 
-5. **Sign analysis + reduction sinking** (brief Phases 4–5). **Measured at 124,667 bytes on
-   `p256-wallet`** (304,463 → 179,796) — see §3.7. Two facts to carry: *dividend ≥ 0*, which a
-   trivial sign lattice gives for ~70 % of reductions, and *subtrahend < p*, which only
-   `fieldSub` needs and which unsigned 32-byte decoding does NOT imply (§3.8). It is also the
-   prerequisite for everything after it: Straus, comb and lazy accumulation all need to know
-   which values are already reduced.
-6. **A typed field-element IR under the crypto emitters.** After §5 lands, 69.6 % of what
-   remains is `ECTracker`'s own operand shuffling, which no pass can currently reach. This is
-   larger than any single item here, and it would let §5, §7 and future work be written once
-   instead of seven times (§4).
-7. **Straus/Shamir joint ladder**, then a **fixed-base comb** for `u1·G` (Phases 9–11).
+6. **secp256k1 comb wiring.** `comb.ts` is curve-generic, but the emitter uses the NIST
+   codegen's `a = −3` doubling, so `ec-codegen.ts` needs its own. `ec-primitives`, `ec-demo`,
+   `schnorr-zkp`, `ec-unit` and `convergence-proof` — 4.5 MB of fixtures — are still on the
+   ladder. Roughly another −35 % on them, and the analysis is already written.
+7. **A typed field-element IR under the crypto emitters.** At 147,113 bytes `p256-wallet` is
+   70.0 % stack traffic, which no pass can currently reach because the crypto emitters build
+   their own layout (§4). This is larger than any single item above and would let the next
+   three be written once instead of seven times.
 8. **Witness-hint modular inverse** (Phase 7) — removes three unrolled Fermat ladders
    (382 + 423 + 286 field multiplications per P-256 verify). The first item requiring an
    explicit soundness argument rather than a translation-validation proof.
@@ -359,7 +423,11 @@ npx vitest run packages/runar-compiler/src/__tests__/liveness-scheduler.test.ts
 npx vitest run packages/runar-testing/src/__tests__/ec-constant-pool-equivalence.test.ts
 npx vitest run packages/runar-testing/src/__tests__/liveness-scheduler-equivalence.test.ts
 npx vitest run packages/runar-testing/src/__tests__/scheduler-headroom.test.ts
+npx vitest run packages/runar-testing/src/__tests__/ec-reduction-sinking.test.ts
+npx vitest run packages/runar-testing/src/__tests__/ec-comb.test.ts
+npx vitest run packages/runar-compiler/src/__tests__/comb-table.test.ts
 
 # CLI
-node --import tsx packages/runar-cli/src/bin.ts compile <file> --ec-constant-pool --hex
+node --import tsx packages/runar-cli/src/bin.ts compile <file> --hex \
+  --ec-constant-pool --ec-reduction-sinking --ec-fixed-base-comb --stack-scheduler liveness
 ```
