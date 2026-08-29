@@ -627,6 +627,12 @@ struct LoweringContext {
     /// deserialized property slot (issue #130). Empty for the common
     /// no-collision case, so all other contracts are byte-identical.
     renamed_params: HashMap<String, String>,
+    /// EXPERIMENTAL EC size options (constant pool, sign lattice / reduction
+    /// sinking, fixed-base comb), handed down to the EC and NIST curve
+    /// emitters. `None` — not an all-false struct — when nothing is enabled, so
+    /// those emitters take their untouched default path and the emitted bytes
+    /// are provably identical to the shipping ones.
+    ec_codegen: Option<super::ec::EcCodegenOptions>,
 }
 
 impl LoweringContext {
@@ -646,6 +652,7 @@ impl LoweringContext {
             array_lengths: HashMap::new(),
             array_elements: HashMap::new(),
             renamed_params: HashMap::new(),
+            ec_codegen: None,
         };
 
         // Issue #130 (stack layer): a method param whose name collides with a
@@ -4505,14 +4512,16 @@ impl LoweringContext {
             self.sm.pop();
         }
 
+        // Snapshot before `emit` takes a mutable borrow of `self`.
+        let ec_opts = self.ec_codegen;
         let emit = &mut |op: StackOp| self.ops.push(op);
 
         match func_name {
-            "ecAdd" => super::ec::emit_ec_add(emit),
-            "ecMul" => super::ec::emit_ec_mul(emit),
-            "ecMulGen" => super::ec::emit_ec_mul_gen(emit),
-            "ecNegate" => super::ec::emit_ec_negate(emit),
-            "ecOnCurve" => super::ec::emit_ec_on_curve(emit),
+            "ecAdd" => super::ec::emit_ec_add(emit, ec_opts.as_ref()),
+            "ecMul" => super::ec::emit_ec_mul(emit, ec_opts.as_ref()),
+            "ecMulGen" => super::ec::emit_ec_mul_gen(emit, ec_opts.as_ref()),
+            "ecNegate" => super::ec::emit_ec_negate(emit, ec_opts.as_ref()),
+            "ecOnCurve" => super::ec::emit_ec_on_curve(emit, ec_opts.as_ref()),
             "ecModReduce" => super::ec::emit_ec_mod_reduce(emit),
             "ecEncodeCompressed" => super::ec::emit_ec_encode_compressed(emit),
             "ecMakePoint" => super::ec::emit_ec_make_point(emit),
@@ -4546,20 +4555,22 @@ impl LoweringContext {
             self.sm.pop();
         }
 
+        // Snapshot before `emit` takes a mutable borrow of `self`.
+        let ec_opts = self.ec_codegen;
         let emit = &mut |op: StackOp| self.ops.push(op);
 
         match func_name {
-            "p256Add" => super::p256_p384::emit_p256_add(emit),
-            "p256Mul" => super::p256_p384::emit_p256_mul(emit),
-            "p256MulGen" => super::p256_p384::emit_p256_mul_gen(emit),
-            "p256Negate" => super::p256_p384::emit_p256_negate(emit),
-            "p256OnCurve" => super::p256_p384::emit_p256_on_curve(emit),
+            "p256Add" => super::p256_p384::emit_p256_add(emit, ec_opts.as_ref()),
+            "p256Mul" => super::p256_p384::emit_p256_mul(emit, ec_opts.as_ref()),
+            "p256MulGen" => super::p256_p384::emit_p256_mul_gen(emit, ec_opts.as_ref()),
+            "p256Negate" => super::p256_p384::emit_p256_negate(emit, ec_opts.as_ref()),
+            "p256OnCurve" => super::p256_p384::emit_p256_on_curve(emit, ec_opts.as_ref()),
             "p256EncodeCompressed" => super::p256_p384::emit_p256_encode_compressed(emit),
-            "p384Add" => super::p256_p384::emit_p384_add(emit),
-            "p384Mul" => super::p256_p384::emit_p384_mul(emit),
-            "p384MulGen" => super::p256_p384::emit_p384_mul_gen(emit),
-            "p384Negate" => super::p256_p384::emit_p384_negate(emit),
-            "p384OnCurve" => super::p256_p384::emit_p384_on_curve(emit),
+            "p384Add" => super::p256_p384::emit_p384_add(emit, ec_opts.as_ref()),
+            "p384Mul" => super::p256_p384::emit_p384_mul(emit, ec_opts.as_ref()),
+            "p384MulGen" => super::p256_p384::emit_p384_mul_gen(emit, ec_opts.as_ref()),
+            "p384Negate" => super::p256_p384::emit_p384_negate(emit, ec_opts.as_ref()),
+            "p384OnCurve" => super::p256_p384::emit_p384_on_curve(emit, ec_opts.as_ref()),
             "p384EncodeCompressed" => super::p256_p384::emit_p384_encode_compressed(emit),
             _ => panic!("unknown NIST EC builtin: {}", func_name),
         }
@@ -4594,12 +4605,14 @@ impl LoweringContext {
         self.sm.pop(); // sig
         self.sm.pop(); // msg
 
+        // Snapshot before `emit` takes a mutable borrow of `self`.
+        let ec_opts = self.ec_codegen;
         let emit = &mut |op: StackOp| self.ops.push(op);
 
         if func_name == "verifyECDSA_P256" {
-            super::p256_p384::emit_verify_ecdsa_p256(emit);
+            super::p256_p384::emit_verify_ecdsa_p256(emit, ec_opts.as_ref());
         } else {
-            super::p256_p384::emit_verify_ecdsa_p384(emit);
+            super::p256_p384::emit_verify_ecdsa_p384(emit, ec_opts.as_ref());
         }
 
         self.sm.push(binding_name);
@@ -5215,15 +5228,29 @@ impl LoweringContext {
 /// Private methods are inlined at call sites rather than compiled separately.
 /// The constructor is skipped since it's not emitted to Bitcoin Script.
 pub fn lower_to_stack(program: &ANFProgram) -> Result<Vec<StackMethod>, String> {
+    lower_to_stack_with_ec(program, None)
+}
+
+/// `lower_to_stack` with the EXPERIMENTAL EC script-size options.
+///
+/// `None` keeps every EC emitter byte-identical to the shipping output; see
+/// `EcCodegenOptions` and docs/experiments/script-size-optimizer-results.md.
+pub fn lower_to_stack_with_ec(
+    program: &ANFProgram,
+    ec_codegen: Option<super::ec::EcCodegenOptions>,
+) -> Result<Vec<StackMethod>, String> {
     // Convert any panic (stack underflow, unknown operator, type mismatch, or a
     // deliberate refusal) into an error return instead of crashing the process
     // — and without the default panic hook printing a crash report first. See
     // `crate::refusal`.
-    crate::refusal::catch_refusal("stack lowering", || lower_to_stack_inner(program))
+    crate::refusal::catch_refusal("stack lowering", || lower_to_stack_inner(program, ec_codegen))
         .and_then(|inner| inner)
 }
 
-fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String> {
+fn lower_to_stack_inner(
+    program: &ANFProgram,
+    ec_codegen: Option<super::ec::EcCodegenOptions>,
+) -> Result<Vec<StackMethod>, String> {
     // Build map of private methods for inlining
     let mut private_methods: HashMap<String, ANFMethod> = HashMap::new();
     for method in &program.methods {
@@ -5239,7 +5266,8 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
         if method.name == "constructor" || (!method.is_public && method.name != "constructor") {
             continue;
         }
-        let sm = lower_method_with_private_methods(method, &program.properties, &private_methods)?;
+        let sm = lower_method_with_private_methods(
+            method, &program.properties, &private_methods, ec_codegen)?;
         methods.push(sm);
     }
 
@@ -5384,6 +5412,7 @@ fn lower_method_with_private_methods(
     method: &ANFMethod,
     properties: &[ANFProperty],
     private_methods: &HashMap<String, ANFMethod>,
+    ec_codegen: Option<super::ec::EcCodegenOptions>,
 ) -> Result<StackMethod, String> {
     let mut param_names: Vec<String> = method.params.iter().map(|p| p.name.clone()).collect();
 
@@ -5411,6 +5440,7 @@ fn lower_method_with_private_methods(
 
     let mut ctx = LoweringContext::new(&param_names, properties);
     ctx.private_methods = private_methods.clone();
+    ctx.ec_codegen = ec_codegen;
     // Pass terminal_assert=true for public methods so the last assert leaves
     // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
     ctx.lower_bindings(&method.body, method.is_public);

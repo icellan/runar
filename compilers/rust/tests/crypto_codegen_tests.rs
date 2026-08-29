@@ -88,31 +88,31 @@ fn test_emit_blake3_compress_deterministic() {
 
 #[test]
 fn test_emit_p256_add_nontrivial() {
-    let ops = collect(|s| emit_p256_add(s));
+    let ops = collect(|s| emit_p256_add(s, None));
     assert!(ops.len() > 10, "p256_add should emit a substantial program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_p256_mul_nontrivial() {
-    let ops = collect(|s| emit_p256_mul(s));
+    let ops = collect(|s| emit_p256_mul(s, None));
     assert!(ops.len() > 100, "p256_mul should emit a large program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_p256_mul_gen_nontrivial() {
-    let ops = collect(|s| emit_p256_mul_gen(s));
+    let ops = collect(|s| emit_p256_mul_gen(s, None));
     assert!(!ops.is_empty(), "p256_mul_gen should not be empty");
 }
 
 #[test]
 fn test_emit_p256_negate_nontrivial() {
-    let ops = collect(|s| emit_p256_negate(s));
+    let ops = collect(|s| emit_p256_negate(s, None));
     assert!(!ops.is_empty(), "p256_negate should not be empty");
 }
 
 #[test]
 fn test_emit_p256_on_curve_nontrivial() {
-    let ops = collect(|s| emit_p256_on_curve(s));
+    let ops = collect(|s| emit_p256_on_curve(s, None));
     assert!(!ops.is_empty(), "p256_on_curve should not be empty");
 }
 
@@ -124,7 +124,7 @@ fn test_emit_p256_encode_compressed_nontrivial() {
 
 #[test]
 fn test_emit_verify_ecdsa_p256_nontrivial() {
-    let ops = collect(|s| emit_verify_ecdsa_p256(s));
+    let ops = collect(|s| emit_verify_ecdsa_p256(s, None));
     assert!(
         ops.len() > 100,
         "verify_ecdsa_p256 should emit a substantial program, got {}",
@@ -138,31 +138,31 @@ fn test_emit_verify_ecdsa_p256_nontrivial() {
 
 #[test]
 fn test_emit_p384_add_nontrivial() {
-    let ops = collect(|s| emit_p384_add(s));
+    let ops = collect(|s| emit_p384_add(s, None));
     assert!(ops.len() > 10, "p384_add should emit a substantial program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_p384_mul_nontrivial() {
-    let ops = collect(|s| emit_p384_mul(s));
+    let ops = collect(|s| emit_p384_mul(s, None));
     assert!(ops.len() > 100, "p384_mul should emit a large program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_p384_mul_gen_nontrivial() {
-    let ops = collect(|s| emit_p384_mul_gen(s));
+    let ops = collect(|s| emit_p384_mul_gen(s, None));
     assert!(!ops.is_empty(), "p384_mul_gen should not be empty");
 }
 
 #[test]
 fn test_emit_p384_negate_nontrivial() {
-    let ops = collect(|s| emit_p384_negate(s));
+    let ops = collect(|s| emit_p384_negate(s, None));
     assert!(!ops.is_empty(), "p384_negate should not be empty");
 }
 
 #[test]
 fn test_emit_p384_on_curve_nontrivial() {
-    let ops = collect(|s| emit_p384_on_curve(s));
+    let ops = collect(|s| emit_p384_on_curve(s, None));
     assert!(!ops.is_empty(), "p384_on_curve should not be empty");
 }
 
@@ -174,7 +174,7 @@ fn test_emit_p384_encode_compressed_nontrivial() {
 
 #[test]
 fn test_emit_verify_ecdsa_p384_nontrivial() {
-    let ops = collect(|s| emit_verify_ecdsa_p384(s));
+    let ops = collect(|s| emit_verify_ecdsa_p384(s, None));
     assert!(
         ops.len() > 100,
         "verify_ecdsa_p384 should emit a substantial program, got {}",
@@ -334,7 +334,7 @@ fn test_blake3_hash_op_count_golden() {
 
 #[test]
 fn test_p256_add_op_count_golden() {
-    let ops = collect(|s| emit_p256_add(s));
+    let ops = collect(|s| emit_p256_add(s, None));
     // 6642 -> 6663 (+21 ops / +21 bytes) — the same delta ecAdd and p384Add
     // take, since all three share the affine-add structure: a second
     // OP_NUMEQUAL on y, the OP_BOOLAND folding it into `cond`, OP_SUB/OP_NOT
@@ -345,29 +345,43 @@ fn test_p256_add_op_count_golden() {
 
 #[test]
 fn test_p256_mul_op_count_golden() {
-    let ops = collect(|s| emit_p256_mul(s));
+    let ops = collect(|s| emit_p256_mul(s, None));
     // Rust emits 4 fewer raw StackOps than Python/Java peers; same pattern
     // as ecMul (see ec_codegen_tests.rs module comment). Final hex is
     // byte-identical (enforced by the conformance harness).
-    assert_eq!(count_op_tree(&ops), 140032, "p256_mul op count drift");
+        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
+    // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
+    // unchanged (the conformance hex goldens are untouched) — and the raw op
+    // tree now agrees with the Go tier, which always emitted the three steps.
+    // The pre-folded form was this tier's private shortcut, and it is what made
+    // the cross-tier flag-parity comparison impossible to run here.
+    assert_eq!(count_op_tree(&ops), 140036, "p256_mul op count drift");
 }
 
 #[test]
 fn test_p256_mul_gen_op_count_golden() {
-    let ops = collect(|s| emit_p256_mul_gen(s));
+    let ops = collect(|s| emit_p256_mul_gen(s, None));
     // See p256_mul_op_count_golden comment.
-    assert_eq!(count_op_tree(&ops), 140034, "p256_mul_gen op count drift");
+        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
+    // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
+    // unchanged (the conformance hex goldens are untouched) — and the raw op
+    // tree now agrees with the Go tier, which always emitted the three steps.
+    // The pre-folded form was this tier's private shortcut, and it is what made
+    // the cross-tier flag-parity comparison impossible to run here.
+    assert_eq!(count_op_tree(&ops), 140038, "p256_mul_gen op count drift");
 }
 
 #[test]
 fn test_p256_negate_op_count_golden() {
-    let ops = collect(|s| emit_p256_negate(s));
+    let ops = collect(|s| emit_p256_negate(s, None));
     assert_eq!(count_op_tree(&ops), 945, "p256_negate op count drift");
 }
 
 #[test]
 fn test_p256_on_curve_op_count_golden() {
-    let ops = collect(|s| emit_p256_on_curve(s));
+    let ops = collect(|s| emit_p256_on_curve(s, None));
     assert_eq!(count_op_tree(&ops), 559, "p256_on_curve op count drift");
 }
 
@@ -379,7 +393,7 @@ fn test_p256_encode_compressed_op_count_golden() {
 
 #[test]
 fn test_verify_ecdsa_p256_op_count_golden() {
-    let ops = collect(|s| emit_verify_ecdsa_p256(s));
+    let ops = collect(|s| emit_verify_ecdsa_p256(s, None));
     // Rust emits 8 fewer raw StackOps than Python/Java peers (a verify
     // computes two mul/mul_gen invocations × the 4-op divergence).
     //
@@ -419,14 +433,21 @@ fn test_verify_ecdsa_p256_op_count_golden() {
     // it pays 306 bytes rather than 225 purely on wider constants — +49 in the
     // length gates (49/96-byte pads) and +32 in the range gate (two 50-byte
     // pushes of n). Both totals match the TS reference.
-    assert_eq!(count_op_tree(&ops), 297323, "verify_ecdsa_p256 op count drift");
+        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
+    // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
+    // unchanged (the conformance hex goldens are untouched) — and the raw op
+    // tree now agrees with the Go tier, which always emitted the three steps.
+    // The pre-folded form was this tier's private shortcut, and it is what made
+    // the cross-tier flag-parity comparison impossible to run here.
+    assert_eq!(count_op_tree(&ops), 297331, "verify_ecdsa_p256 op count drift");
 }
 
 // -- P-384 -----------------------------------------------------------------
 
 #[test]
 fn test_p384_add_op_count_golden() {
-    let ops = collect(|s| emit_p384_add(s));
+    let ops = collect(|s| emit_p384_add(s, None));
     // 11448 -> 11469 (+21 ops / +21 bytes): same affine-add P == -Q -> O mask
     // as ecAdd / p256Add, see test_p256_add_op_count_golden.
     assert_eq!(count_op_tree(&ops), 11469, "p384_add op count drift");
@@ -434,20 +455,34 @@ fn test_p384_add_op_count_golden() {
 
 #[test]
 fn test_p384_mul_op_count_golden() {
-    let ops = collect(|s| emit_p384_mul(s));
+    let ops = collect(|s| emit_p384_mul(s, None));
     // See ec_codegen_tests.rs module comment for the 4-op divergence pattern.
-    assert_eq!(count_op_tree(&ops), 211174, "p384_mul op count drift");
+        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
+    // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
+    // unchanged (the conformance hex goldens are untouched) — and the raw op
+    // tree now agrees with the Go tier, which always emitted the three steps.
+    // The pre-folded form was this tier's private shortcut, and it is what made
+    // the cross-tier flag-parity comparison impossible to run here.
+    assert_eq!(count_op_tree(&ops), 211178, "p384_mul op count drift");
 }
 
 #[test]
 fn test_p384_mul_gen_op_count_golden() {
-    let ops = collect(|s| emit_p384_mul_gen(s));
+    let ops = collect(|s| emit_p384_mul_gen(s, None));
     // See p384_mul_op_count_golden comment.
-    assert_eq!(count_op_tree(&ops), 211176, "p384_mul_gen op count drift");
+        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
+    // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
+    // unchanged (the conformance hex goldens are untouched) — and the raw op
+    // tree now agrees with the Go tier, which always emitted the three steps.
+    // The pre-folded form was this tier's private shortcut, and it is what made
+    // the cross-tier flag-parity comparison impossible to run here.
+    assert_eq!(count_op_tree(&ops), 211180, "p384_mul_gen op count drift");
 }
 
 #[test]
 fn test_p384_negate_op_count_golden() {
-    let ops = collect(|s| emit_p384_negate(s));
+    let ops = collect(|s| emit_p384_negate(s, None));
     assert_eq!(count_op_tree(&ops), 1393, "p384_negate op count drift");
 }

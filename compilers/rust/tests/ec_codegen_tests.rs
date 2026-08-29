@@ -56,31 +56,31 @@ fn test_emit_reverse_32_nontrivial() {
 
 #[test]
 fn test_emit_ec_add_nontrivial() {
-    let ops = collect(|s| emit_ec_add(s));
+    let ops = collect(|s| emit_ec_add(s, None));
     assert!(ops.len() > 10, "ec_add should emit a substantial program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_ec_mul_nontrivial() {
-    let ops = collect(|s| emit_ec_mul(s));
+    let ops = collect(|s| emit_ec_mul(s, None));
     assert!(ops.len() > 100, "ec_mul should emit a large program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_ec_mul_gen_nontrivial() {
-    let ops = collect(|s| emit_ec_mul_gen(s));
+    let ops = collect(|s| emit_ec_mul_gen(s, None));
     assert!(!ops.is_empty(), "ec_mul_gen should not be empty");
 }
 
 #[test]
 fn test_emit_ec_negate_nontrivial() {
-    let ops = collect(|s| emit_ec_negate(s));
+    let ops = collect(|s| emit_ec_negate(s, None));
     assert!(!ops.is_empty(), "ec_negate should not be empty");
 }
 
 #[test]
 fn test_emit_ec_on_curve_nontrivial() {
-    let ops = collect(|s| emit_ec_on_curve(s));
+    let ops = collect(|s| emit_ec_on_curve(s, None));
     assert!(!ops.is_empty(), "ec_on_curve should not be empty");
 }
 
@@ -124,15 +124,15 @@ fn sig(ops: &[StackOp]) -> String {
 
 #[test]
 fn test_emit_ec_add_deterministic() {
-    let a = collect(|s| emit_ec_add(s));
-    let b = collect(|s| emit_ec_add(s));
+    let a = collect(|s| emit_ec_add(s, None));
+    let b = collect(|s| emit_ec_add(s, None));
     assert_eq!(sig(&a), sig(&b), "emit_ec_add should be deterministic");
 }
 
 #[test]
 fn test_emit_ec_mul_deterministic() {
-    let a = collect(|s| emit_ec_mul(s));
-    let b = collect(|s| emit_ec_mul(s));
+    let a = collect(|s| emit_ec_mul(s, None));
+    let b = collect(|s| emit_ec_mul(s, None));
     assert_eq!(sig(&a), sig(&b), "emit_ec_mul should be deterministic");
 }
 
@@ -165,7 +165,7 @@ fn test_emit_reverse_32_deterministic() {
 
 #[test]
 fn test_ec_add_op_count_golden() {
-    let ops = collect(|s| emit_ec_add(s));
+    let ops = collect(|s| emit_ec_add(s, None));
     // 8202 -> 8223 (+21 ops / +21 bytes) over the pre-P==-Q-fix shape: the
     // second OP_NUMEQUAL on y, the OP_BOOLAND that folds it into `cond`, the
     // OP_SUB/OP_NOT that build `notinf`, the two OP_MULs that mask rx/ry, and
@@ -176,7 +176,7 @@ fn test_ec_add_op_count_golden() {
 
 #[test]
 fn test_ec_mul_op_count_golden() {
-    let ops = collect(|s| emit_ec_mul(s));
+    let ops = collect(|s| emit_ec_mul(s, None));
     // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
     // module-level comment above. Final hex is byte-identical.
     assert_eq!(count_op_tree(&ops), 130511, "ecMul op count drift");
@@ -184,7 +184,7 @@ fn test_ec_mul_op_count_golden() {
 
 #[test]
 fn test_ec_mul_gen_op_count_golden() {
-    let ops = collect(|s| emit_ec_mul_gen(s));
+    let ops = collect(|s| emit_ec_mul_gen(s, None));
     // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
     // module-level comment above. Final hex is byte-identical.
     assert_eq!(count_op_tree(&ops), 130513, "ecMulGen op count drift");
@@ -192,13 +192,13 @@ fn test_ec_mul_gen_op_count_golden() {
 
 #[test]
 fn test_ec_negate_op_count_golden() {
-    let ops = collect(|s| emit_ec_negate(s));
+    let ops = collect(|s| emit_ec_negate(s, None));
     assert_eq!(count_op_tree(&ops), 945, "ecNegate op count drift");
 }
 
 #[test]
 fn test_ec_on_curve_op_count_golden() {
-    let ops = collect(|s| emit_ec_on_curve(s));
+    let ops = collect(|s| emit_ec_on_curve(s, None));
     assert_eq!(count_op_tree(&ops), 533, "ecOnCurve op count drift");
 }
 

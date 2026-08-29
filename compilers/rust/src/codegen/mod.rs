@@ -8,6 +8,8 @@
 pub mod babybear;
 pub mod blake3;
 pub mod bn254;
+pub mod comb;
+pub mod cost_model;
 pub mod ec;
 pub mod emit;
 pub mod p256_p384;
