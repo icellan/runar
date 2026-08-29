@@ -73,6 +73,7 @@ export const VARIANTS: Record<string, CompileOptions> = {
   current: {},
   'ec-pool': { ecConstantPool: true },
   'ec-sink': { ecConstantPool: true, ecReductionSinking: true },
+  'ec-comb': { ecConstantPool: true, ecReductionSinking: true, ecFixedBaseComb: true },
   liveness: { schedulerMode: 'liveness' },
   both: { ecConstantPool: true, schedulerMode: 'liveness' },
 };

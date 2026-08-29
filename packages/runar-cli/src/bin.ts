@@ -45,6 +45,7 @@ program
   .option('--disable-constant-folding', 'disable ANF constant folding pass')
   .option('--ec-constant-pool', 'EXPERIMENTAL: pool repeated EC curve constants (changes emitted bytes)')
   .option('--ec-reduction-sinking', 'EXPERIMENTAL: drop provably-dead sign fix-ups from EC modular reductions')
+  .option('--ec-fixed-base-comb', 'EXPERIMENTAL: comb multiplication where the base point is a compile-time constant')
   .option('--stack-scheduler <mode>', 'EXPERIMENTAL: operand scheduling — current|liveness', 'current')
   .option('--from-ir <path>', 'compile from an ANF IR JSON file (skips parse/validate/typecheck/anf-lower)')
   .option('--hex', 'print only the script hex to stdout (no artifact JSON)')

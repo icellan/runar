@@ -194,6 +194,18 @@ export interface CompileOptions {
   ecReductionSinking?: boolean;
 
   /**
+   * EXPERIMENTAL. Use a fixed-base comb instead of the binary ladder wherever
+   * the base point is a compile-time constant (`p256MulGen`, `p384MulGen`, and
+   * the `u1·G` half of ECDSA verification). One doubling and one add per COLUMN
+   * instead of per bit; the window width is chosen by the byte-cost model.
+   *
+   * Where the comb cannot prove the cheap incomplete addition safe it falls
+   * back to the complete add-or-double form — see `passes/comb.ts`.
+   * Measured: `verifyECDSA_P256` 195,120 -> 158,560 bytes.
+   */
+  ecFixedBaseComb?: boolean;
+
+  /**
    * EXPERIMENTAL. Operand scheduling strategy for the ANF -> Stack pass.
    *
    * `'current'` (default) ships today's bytes. `'liveness'` parks a result on
@@ -512,6 +524,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     const stackProgram = lowerToStack(optimizedAnf, {
       ecConstantPool: opts.ecConstantPool === true,
       ecReductionSinking: opts.ecReductionSinking === true,
+      ecFixedBaseComb: opts.ecFixedBaseComb === true,
       schedulerMode: opts.schedulerMode,
     });
 
@@ -606,6 +619,8 @@ export interface CompileFromANFOptions {
   ecConstantPool?: boolean;
   /** EXPERIMENTAL. Sink EC modular reductions. See CompileOptions. */
   ecReductionSinking?: boolean;
+  /** EXPERIMENTAL. Fixed-base comb for compile-time-known bases. See CompileOptions. */
+  ecFixedBaseComb?: boolean;
   /** EXPERIMENTAL. Operand scheduling strategy. See CompileOptions. */
   schedulerMode?: 'current' | 'liveness';
 }
@@ -680,6 +695,7 @@ export function compileFromANF(
   const stackProgram = lowerToStack(optimizedAnf, {
     ecConstantPool: opts.ecConstantPool === true,
     ecReductionSinking: opts.ecReductionSinking === true,
+    ecFixedBaseComb: opts.ecFixedBaseComb === true,
     schedulerMode: opts.schedulerMode,
   });
   if (!opts.disablePeephole) {

@@ -14,6 +14,7 @@ interface CompileOptions {
   disableConstantFolding?: boolean;
   ecConstantPool?: boolean;
   ecReductionSinking?: boolean;
+  ecFixedBaseComb?: boolean;
   stackScheduler?: string;
   fromIr?: string;
   hex?: boolean;
@@ -97,10 +98,10 @@ export async function compileCommand(
 
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
-  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; ecConstantPool?: boolean; ecReductionSinking?: boolean; schedulerMode?: 'current' | 'liveness'; parseOnly?: boolean }) => unknown;
+  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; ecConstantPool?: boolean; ecReductionSinking?: boolean; ecFixedBaseComb?: boolean; schedulerMode?: 'current' | 'liveness'; parseOnly?: boolean }) => unknown;
   type CompileFromANFFn = (
     program: unknown,
-    options?: { disableConstantFolding?: boolean; ecConstantPool?: boolean; ecReductionSinking?: boolean; schedulerMode?: 'current' | 'liveness' },
+    options?: { disableConstantFolding?: boolean; ecConstantPool?: boolean; ecReductionSinking?: boolean; ecFixedBaseComb?: boolean; schedulerMode?: 'current' | 'liveness' },
   ) => { scriptHex: string; scriptAsm: string };
   type LoadANFFn = (json: string) => unknown;
 
@@ -194,6 +195,7 @@ export async function compileCommand(
       disableConstantFolding: options.disableConstantFolding,
       ecConstantPool: options.ecConstantPool,
       ecReductionSinking: options.ecReductionSinking,
+      ecFixedBaseComb: options.ecFixedBaseComb,
       schedulerMode: schedulerMode(options),
     });
     } catch (err) {
@@ -273,6 +275,7 @@ export async function compileCommand(
         disableConstantFolding: options.disableConstantFolding,
         ecConstantPool: options.ecConstantPool,
         ecReductionSinking: options.ecReductionSinking,
+        ecFixedBaseComb: options.ecFixedBaseComb,
         schedulerMode: schedulerMode(options),
         parseOnly: options.parseOnly,
       }) as CompileResultLike;

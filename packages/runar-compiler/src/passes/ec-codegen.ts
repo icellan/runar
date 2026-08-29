@@ -73,6 +73,16 @@ export interface EcCodegenOptions {
    * it is a regression.
    */
   reductionSinking?: boolean;
+
+  /**
+   * Use a fixed-base comb instead of the binary ladder wherever the base point
+   * is a compile-time constant (`p256MulGen`, `p384MulGen`, and the `u1·G` half
+   * of ECDSA verification).
+   *
+   * The window width is not fixed here: the emitter renders each candidate and
+   * keeps whichever the byte-cost model scores smallest.
+   */
+  fixedBaseComb?: boolean;
 }
 
 // ===========================================================================
@@ -133,6 +143,8 @@ export class ECTracker {
   readonly pooling: boolean;
   /** True when this tracker may emit sunk reductions. */
   readonly sinking: boolean;
+  /** True when a compile-time-known base may use a fixed-base comb. */
+  readonly comb: boolean;
 
   constructor(
     init: (string | null)[],
@@ -145,11 +157,12 @@ export class ECTracker {
     this._e = emit;
     this.pooling = opts?.constantPool === true;
     this.sinking = opts?.reductionSinking === true;
+    this.comb = opts?.fixedBaseComb === true;
   }
 
   /** The options this tracker was built with, for handing to a nested tracker. */
   get options(): EcCodegenOptions {
-    return { constantPool: this.pooling, reductionSinking: this.sinking };
+    return { constantPool: this.pooling, reductionSinking: this.sinking, fixedBaseComb: this.comb };
   }
 
   // -- sign lattice ---------------------------------------------------------

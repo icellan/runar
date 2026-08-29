@@ -89,6 +89,12 @@ export interface LoweringOptions {
   ecReductionSinking?: boolean;
 
   /**
+   * Use a fixed-base comb wherever the base point is a compile-time constant.
+   * The window width is chosen by the byte-cost model, not fixed.
+   */
+  ecFixedBaseComb?: boolean;
+
+  /**
    * Operand scheduling strategy.
    *
    * `'current'` (default) is the shipping behaviour: results are pushed on top
@@ -1291,10 +1297,12 @@ class LoweringContext {
    * identical to the shipping ones.
    */
   private ecCodegenOptions(): EcCodegenOptions | undefined {
-    if (!this.opts.ecConstantPool && !this.opts.ecReductionSinking) return undefined;
+    if (!this.opts.ecConstantPool && !this.opts.ecReductionSinking
+      && !this.opts.ecFixedBaseComb) return undefined;
     return {
       constantPool: this.opts.ecConstantPool === true,
       reductionSinking: this.opts.ecReductionSinking === true,
+      fixedBaseComb: this.opts.ecFixedBaseComb === true,
     };
   }
 
