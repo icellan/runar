@@ -588,6 +588,17 @@ public final class StackLower {
     // ------------------------------------------------------------------
 
     public static StackProgram run(AnfProgram program) {
+        return run(program, null);
+    }
+
+    /**
+     * {@code run} with the EXPERIMENTAL EC script-size options.
+     *
+     * <p>{@code null} keeps every EC emitter byte-identical to the shipping output; see {@code
+     * Ec.EcCodegenOptions} and docs/experiments/script-size-optimizer-results.md.
+     */
+    public static StackProgram run(
+        AnfProgram program, runar.compiler.codegen.Ec.EcCodegenOptions ecCodegen) {
         Map<String, AnfMethod> privateMethods = new HashMap<>();
         for (AnfMethod m : program.methods()) {
             if (!m.isPublic() && !"constructor".equals(m.name())) {
@@ -598,7 +609,7 @@ public final class StackLower {
         List<StackMethod> out = new ArrayList<>();
         for (AnfMethod m : program.methods()) {
             if ("constructor".equals(m.name()) || !m.isPublic()) continue;
-            out.add(lowerMethod(m, program.properties(), privateMethods));
+            out.add(lowerMethod(m, program.properties(), privateMethods, ecCodegen));
         }
 
         return new StackProgram(program.contractName(), out);
@@ -607,7 +618,8 @@ public final class StackLower {
     private static StackMethod lowerMethod(
         AnfMethod method,
         List<AnfProperty> properties,
-        Map<String, AnfMethod> privateMethods
+        Map<String, AnfMethod> privateMethods,
+        runar.compiler.codegen.Ec.EcCodegenOptions ecCodegen
     ) {
         List<String> paramNames = new ArrayList<>();
         for (AnfParam p : method.params()) paramNames.add(p.name());
@@ -637,6 +649,7 @@ public final class StackLower {
         }
 
         LoweringContext ctx = new LoweringContext(paramNames, properties, privateMethods);
+        ctx.ecCodegen = ecCodegen;
         ctx.lowerBindings(method.body(), method.isPublic());
 
         // Strip excess stack items below the top-of-stack boolean (CLEANSTACK).
@@ -780,6 +793,14 @@ public final class StackLower {
         // StackOp emitted while that binding lowers. The Emit pass walks
         // op.sourceLoc() to build the artifact's sourceMap.
         runar.compiler.ir.ast.SourceLocation currentSourceLoc;
+        /**
+         * EXPERIMENTAL EC size options (constant pool, sign lattice / reduction
+         * sinking, fixed-base comb), handed down to the EC and NIST curve
+         * emitters. {@code null} — not an all-false record — when nothing is
+         * enabled, so those emitters take their untouched default path and the
+         * emitted bytes are provably identical to the shipping ones.
+         */
+        runar.compiler.codegen.Ec.EcCodegenOptions ecCodegen;
 
         LoweringContext(List<String> params, List<AnfProperty> properties) {
             this.sm = new StackMap(params);
@@ -900,6 +921,7 @@ public final class StackLower {
 
         LoweringContext subContext() {
             LoweringContext c = new LoweringContext(null, properties);
+            c.ecCodegen = this.ecCodegen;
             c.sm.slots.addAll(this.sm.slots);
             c.privateMethods = this.privateMethods;
             // Issue #130: a `load_param` for a shadowed param inside a branch
@@ -1603,7 +1625,7 @@ public final class StackLower {
             }
             for (int i = 0; i < args.size(); i++) sm.pop();
 
-            runar.compiler.codegen.Ec.dispatch(funcName, this::emitOp);
+            runar.compiler.codegen.Ec.dispatch(funcName, this::emitOp, ecCodegen);
 
             sm.push(bindingName);
             trackDepth();
@@ -1622,7 +1644,7 @@ public final class StackLower {
             }
             for (int i = 0; i < args.size(); i++) sm.pop();
 
-            runar.compiler.codegen.P256P384.dispatch(funcName, this::emitOp);
+            runar.compiler.codegen.P256P384.dispatch(funcName, this::emitOp, ecCodegen);
 
             sm.push(bindingName);
             trackDepth();
