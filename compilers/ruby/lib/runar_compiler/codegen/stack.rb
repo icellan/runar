@@ -663,7 +663,7 @@ module RunarCompiler::Codegen
   class LoweringContext
     attr_accessor :sm, :ops, :max_depth, :properties, :private_methods,
                   :local_bindings, :outer_protected_refs, :inside_branch,
-                  :current_source_loc
+                  :current_source_loc, :ec_codegen
 
     # OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
     #
@@ -751,6 +751,12 @@ module RunarCompiler::Codegen
       @outer_protected_refs = nil
       @inside_branch = false
       @current_source_loc = nil
+      # EXPERIMENTAL EC size options (constant pool, sign lattice / reduction
+      # sinking, fixed-base comb), handed down to the EC and NIST curve
+      # emitters. nil -- not an all-false instance -- when nothing is enabled,
+      # so those emitters take their untouched default path and the emitted
+      # bytes are provably identical to the shipping ones.
+      @ec_codegen = nil
 
       # #130 (stack layer): a method param whose name collides with a MUTABLE
       # property gets a duplicate stackMap slot once deserialize_state pushes
@@ -2967,7 +2973,7 @@ module RunarCompiler::Codegen
       args.length.times { @sm.pop }
 
       emit_fn = ->(op) { emit_op(op) }
-      EC.dispatch_ec_builtin(func_name, emit_fn)
+      EC.dispatch_ec_builtin(func_name, emit_fn, @ec_codegen)
 
       @sm.push(binding_name)
       _track_depth
@@ -2982,7 +2988,7 @@ module RunarCompiler::Codegen
       args.length.times { @sm.pop }
 
       emit_fn = ->(op) { emit_op(op) }
-      NISTEC.dispatch_nist_ec_builtin(func_name, emit_fn)
+      NISTEC.dispatch_nist_ec_builtin(func_name, emit_fn, @ec_codegen)
 
       @sm.push(binding_name)
       _track_depth
@@ -3003,7 +3009,7 @@ module RunarCompiler::Codegen
       @sm.pop # msg
 
       emit_fn = ->(op) { emit_op(op) }
-      NISTEC.dispatch_verify_ecdsa(func_name, emit_fn)
+      NISTEC.dispatch_verify_ecdsa(func_name, emit_fn, @ec_codegen)
 
       @sm.push(binding_name)
       _track_depth
@@ -4200,8 +4206,8 @@ module RunarCompiler::Codegen
   #
   # @param program [IR::ANFProgram] the ANF program
   # @return [Array<Hash>] list of stack method hashes
-  def self.lower_to_stack(program)
-    _lower_to_stack_inner(program)
+  def self.lower_to_stack(program, ec_codegen = nil)
+    _lower_to_stack_inner(program, ec_codegen)
   rescue RuntimeError
     raise
   rescue ::RunarCompiler::IR::UnknownANFKindError
@@ -4213,7 +4219,7 @@ module RunarCompiler::Codegen
   end
 
   # @api private
-  def self._lower_to_stack_inner(program)
+  def self._lower_to_stack_inner(program, ec_codegen = nil)
     # Build map of private methods for inlining
     private_methods = {}
     program.methods.each do |m|
@@ -4226,7 +4232,8 @@ module RunarCompiler::Codegen
       next if method.name == "constructor"
       next if !method.is_public && method.name != "constructor"
 
-      sm = _lower_method_with_private_methods(method, program.properties, private_methods)
+      sm = _lower_method_with_private_methods(method, program.properties, private_methods,
+                                              ec_codegen)
       methods << sm
     end
 
@@ -4235,7 +4242,7 @@ module RunarCompiler::Codegen
   private_class_method :_lower_to_stack_inner
 
   # @api private
-  def self._lower_method_with_private_methods(method, properties, private_methods)
+  def self._lower_method_with_private_methods(method, properties, private_methods, ec_codegen = nil)
     param_names = method.params.map(&:name)
 
     # _codePart is needed for continuation builders (add_output/add_raw_output)
@@ -4255,6 +4262,7 @@ module RunarCompiler::Codegen
     end
 
     ctx = LoweringContext.new(param_names, properties)
+    ctx.ec_codegen = ec_codegen
     ctx.private_methods = private_methods
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)

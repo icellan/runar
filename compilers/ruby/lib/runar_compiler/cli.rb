@@ -113,6 +113,21 @@ module RunarCompiler
           options[:disable_constant_folding] = true
         end
 
+        opts.on("--ec-constant-pool",
+                "EXPERIMENTAL: pool repeated EC curve constants (changes emitted bytes)") do
+          options[:ec_constant_pool] = true
+        end
+
+        opts.on("--ec-reduction-sinking",
+                "EXPERIMENTAL: drop provably-dead sign fix-ups from EC modular reductions") do
+          options[:ec_reduction_sinking] = true
+        end
+
+        opts.on("--ec-fixed-base-comb",
+                "EXPERIMENTAL: comb multiplication where the base point is a compile-time constant") do
+          options[:ec_fixed_base_comb] = true
+        end
+
         opts.on("--emit-source-map PATH", "After a successful compile, write artifact.sourceMap JSON to PATH") do |path|
           options[:emit_source_map] = path
         end
@@ -207,7 +222,10 @@ module RunarCompiler
         if options[:source]
           artifact = RunarCompiler.compile_from_source(
             options[:source],
-            disable_constant_folding: disable_cf
+            disable_constant_folding: disable_cf,
+            ec_constant_pool: options[:ec_constant_pool] || false,
+            ec_reduction_sinking: options[:ec_reduction_sinking] || false,
+            ec_fixed_base_comb: options[:ec_fixed_base_comb] || false
           )
         else
           artifact = RunarCompiler.compile_from_ir(

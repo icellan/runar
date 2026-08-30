@@ -16,6 +16,8 @@
 # Direct port of compilers/go/codegen/p256_p384.go
 
 require_relative "ec"
+require_relative "comb"
+require_relative "cost_model"
 
 module RunarCompiler
   module Codegen
@@ -138,10 +140,30 @@ module RunarCompiler
       # =================================================================
 
       def self.c_push_field_p(t, name, c)
-        t.push_big_int(name, c.field_p)
+        t.push_const(EC::POOL_FIELD_P, c.field_p, name)
+      end
+
+      # `a mod p` with no sign fix-up: 1 opcode instead of 7. Sound only when the
+      # dividend is provably >= 0 -- the caller proves that, this does not check.
+      def self.c_field_mod_short(t, a_name, result_name, c)
+        t.to_top(a_name)
+        c_push_field_p(t, "_fmods_p", c)
+        t.raw_block([a_name, "_fmods_p"], result_name,
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MOD")) })
+        t.set_domain(result_name, EC::DOM_REDUCED)
+      end
+
+      # Does the cheap `a - b + p` subtraction pay? Only when p is pooled.
+      def self.c_cheap_sub_pays(t, c)
+        cost = t.const_cost(EC::POOL_FIELD_P, c.field_p)
+        2 * cost + 2 < cost + 8
       end
 
       def self.c_field_mod(t, a_name, result_name, c)
+        if t.sinking && EC.non_negative?(t.domain_of(a_name))
+          c_field_mod_short(t, a_name, result_name, c)
+          return
+        end
         t.to_top(a_name)
         c_push_field_p(t, "_fmod_p", c)
         fn = ->(e) {
@@ -155,30 +177,58 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_MOD"))
         }
         t.raw_block([a_name, "_fmod_p"], result_name, fn)
+        t.set_domain(result_name, EC::DOM_REDUCED)
       end
 
       def self.c_field_add(t, a_name, b_name, result_name, c)
+        # Read the operand facts before raw_block consumes their slots.
+        sum_non_neg = EC.non_negative?(t.domain_of(a_name)) && EC.non_negative?(t.domain_of(b_name))
         t.to_top(a_name)
         t.to_top(b_name)
         t.raw_block([a_name, b_name], "_fadd_sum", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_ADD")) })
+        t.set_domain("_fadd_sum", EC::DOM_NON_NEGATIVE) if sum_non_neg
         c_field_mod(t, "_fadd_sum", result_name, c)
       end
 
       def self.c_field_sub(t, a_name, b_name, result_name, c)
         t.to_top(a_name)
         t.to_top(b_name)
+        # Needs a >= 0 AND b in [0, p): then a - b > -p and one shifted reduction
+        # is exact. `b >= 0` alone is not enough -- a coordinate decoded from 32
+        # unsigned bytes may exceed p by up to 2^32 + 977.
+        cheap = t.sinking &&
+                EC.non_negative?(t.domain_of(a_name)) &&
+                t.domain_of(b_name) == EC::DOM_REDUCED &&
+                c_cheap_sub_pays(t, c)
+
         t.raw_block([a_name, b_name], "_fsub_diff", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_SUB")) })
+
+        if cheap
+          c_push_field_p(t, "_fsub_p", c)
+          t.raw_block(["_fsub_diff", "_fsub_p"], "_fsub_shift",
+                      ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_ADD")) })
+          t.set_domain("_fsub_shift", EC::DOM_NON_NEGATIVE)
+          c_field_mod_short(t, "_fsub_shift", result_name, c)
+          return
+        end
         c_field_mod(t, "_fsub_diff", result_name, c)
       end
 
-      def self.c_field_mul(t, a_name, b_name, result_name, c)
+      def self.c_field_mul(t, a_name, b_name, result_name, c, product_non_negative = false)
+        # product_non_negative lets c_field_sqr assert the sign independently of
+        # the operand: a*a >= 0 for any a whatsoever.
+        non_neg = product_non_negative ||
+                  (EC.non_negative?(t.domain_of(a_name)) && EC.non_negative?(t.domain_of(b_name)))
         t.to_top(a_name)
         t.to_top(b_name)
         t.raw_block([a_name, b_name], "_fmul_prod", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
+        t.set_domain("_fmul_prod", EC::DOM_NON_NEGATIVE) if non_neg
         c_field_mod(t, "_fmul_prod", result_name, c)
       end
 
       def self.c_field_mul_const(t, a_name, cv, result_name, c)
+        # Every call site passes a small positive cv, so the product keeps a's sign.
+        non_neg = cv.positive? && EC.non_negative?(t.domain_of(a_name))
         t.to_top(a_name)
         t.raw_block([a_name], "_fmc_prod", ->(e) {
           if cv == 2
@@ -188,12 +238,13 @@ module RunarCompiler
             e.call(make_stack_op(op: "opcode", code: "OP_MUL"))
           end
         })
+        t.set_domain("_fmc_prod", EC::DOM_NON_NEGATIVE) if non_neg
         c_field_mod(t, "_fmc_prod", result_name, c)
       end
 
       def self.c_field_sqr(t, a_name, result_name, c)
         t.copy_to_top(a_name, "_fsqr_copy")
-        c_field_mul(t, a_name, "_fsqr_copy", result_name, c)
+        c_field_mul(t, a_name, "_fsqr_copy", result_name, c, true)
       end
 
       # Generic square-and-multiply inversion: a^(p-2) mod p
@@ -224,7 +275,7 @@ module RunarCompiler
       # =================================================================
 
       def self.c_push_group_n(t, name, g)
-        t.push_big_int(name, g.n)
+        t.push_const(EC::POOL_GROUP_N, g.n, name)
       end
 
       def self.c_group_mod(t, a_name, result_name, g)
@@ -312,8 +363,8 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         }
         t.raw_block([point_name], "", split_fn)
-        t.nm.push("_dp_xb")
-        t.nm.push("_dp_yb")
+        t.push_tracked("_dp_xb", EC::DOM_UNKNOWN)
+        t.push_tracked("_dp_yb", EC::DOM_UNKNOWN)
 
         # Convert y_bytes (on top) to num
         rev_fn = c.reverse_bytes_fn
@@ -324,6 +375,10 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         }
         t.raw_block(["_dp_yb"], y_name, convert_y)
+        # A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+        # UNSIGNED: >= 0, but it may be up to 2^(8*coordBytes) - 1 and therefore
+        # >= p. That gap is exactly what the subtraction precondition turns on.
+        t.set_domain(y_name, EC::DOM_NON_NEGATIVE)
 
         # Convert x_bytes to num
         t.to_top("_dp_xb")
@@ -334,6 +389,7 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         }
         t.raw_block(["_dp_xb"], x_name, convert_x)
+        t.set_domain(x_name, EC::DOM_NON_NEGATIVE)
 
         t.swap
       end
@@ -632,7 +688,12 @@ module RunarCompiler
       # =================================================================
 
       def self.c_build_jacobian_add_affine_inline(e, t, c)
-        c_jacobian_add_affine_body(EC::ECTracker.new(t.nm.dup, e), false, c)
+        # The inner tracker inherits the stack state AND the lattice facts:
+        # the operands' proved domains are what decide which reduction shape the
+        # body emits, so dropping them here would silently fall back everywhere.
+        c_jacobian_add_affine_body(
+          EC::ECTracker.new(t.nm.dup, e, t.options, t.dm.dup), false, c
+        )
       end
 
       # The mixed-add itself, emitting through a tracker the caller owns.
@@ -763,7 +824,7 @@ module RunarCompiler
       #
       # Stack layout: [..., ax, ay, _k, jx, jy, jz] -- same in and out.
       def self.c_build_jacobian_add_or_double_inline(e, t, c)
-        it = EC::ECTracker.new(t.nm.dup, e)
+        it = EC::ECTracker.new(t.nm.dup, e, t.options, t.dm.dup)
 
         # Keep the pre-add accumulator: it is what must be DOUBLED in the
         # exceptional case, and the add below consumes jx/jy/jz.
@@ -824,8 +885,10 @@ module RunarCompiler
       # Scalar multiplication (generic for both P-256 and P-384)
       # =================================================================
 
-      def self.c_emit_mul(emit, c, g)
-        t = EC::ECTracker.new(["_pt", "_k"], emit)
+      def self.c_emit_mul(emit, c, g, opts = nil)
+        t = EC::ECTracker.new(["_pt", "_k"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, c.field_p)
+        t.pool_constant(EC::POOL_GROUP_N, g.n)
         c_decompose_point(t, "_pt", "ax", "ay", c)
 
         # k' = k + 3n
@@ -868,7 +931,7 @@ module RunarCompiler
           t.raw_block(["_shifted", "_two"], "_bit", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MOD")) })
 
           t.to_top("_bit")
-          t.nm.pop # _bit consumed by IF
+          t.pop_tracked # _bit consumed by IF
 
           add_ops = []
           add_emit = ->(op) { add_ops.push(op) }
@@ -893,6 +956,8 @@ module RunarCompiler
         t.drop
 
         c_compose_point(t, "_rx", "_ry", "_result", c)
+        t.release_constant(EC::POOL_GROUP_N)
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
       # =================================================================
@@ -961,8 +1026,8 @@ module RunarCompiler
           e.call(make_stack_op(op: "push", value: big_int_push(1)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         })
-        t.nm.push("_dk_prefix")
-        t.nm.push("_dk_xbytes")
+        t.push_tracked("_dk_prefix", EC::DOM_UNKNOWN)
+        t.push_tracked("_dk_xbytes", EC::DOM_UNKNOWN)
 
         # SEC1 2.3.4 requires the prefix to be exactly 0x02 or 0x03. The parity
         # reduction below is `BIN2NUM, 2 MOD`, which accepts far more than
@@ -1051,7 +1116,7 @@ module RunarCompiler
 
         # Use OP_IF to select: if match, use y_cand; else use neg_y
         t.to_top("_dk_match")
-        t.nm.pop # condition consumed by IF
+        t.pop_tracked # condition consumed by IF
 
         then_ops = [make_stack_op(op: "drop")]
         else_ops = [make_stack_op(op: "nip")]
@@ -1059,7 +1124,7 @@ module RunarCompiler
 
         # Remove one item from tracker and rename the surviving item
         neg_idx = t.nm.rindex("_dk_neg_y")
-        t.nm.delete_at(neg_idx) if neg_idx
+        t.remove_slot_at(neg_idx) if neg_idx
 
         yc_idx = t.nm.rindex("_dk_y_cand")
         t.nm[yc_idx] = qy_name if yc_idx
@@ -1134,8 +1199,8 @@ module RunarCompiler
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
           e.call(make_stack_op(op: "drop"))
         })
-        t.nm.push(flag_name)
-        t.nm.push(name)
+        t.push_tracked(flag_name, EC::DOM_UNKNOWN)
+        t.push_tracked(name, EC::DOM_UNKNOWN)
       end
 
       # SEC1 4.1.4 step 1 / FIPS 186-5 6.4.2: verify 1 <= r <= n-1 and
@@ -1207,8 +1272,165 @@ module RunarCompiler
         })
       end
 
-      def self.c_emit_verify_ecdsa(emit, c, g, curve_b, sqrt_exp, gx, gy)
-        t = EC::ECTracker.new(["_msg", "_sig", "_pk"], emit)
+       # =================================================================
+      # Fixed-base comb (the base is a compile-time constant)
+      # =================================================================
+
+      # k*G by a Lim-Lee comb, for a base known at compile time.
+      #
+      # The binary ladder runs one doubling and one conditional add per scalar
+      # BIT. A comb splits the scalar into w blocks of d bits and runs one
+      # doubling and one conditional add per COLUMN, so the round count falls
+      # from w*d to d at the price of a 2^w - 1 entry table -- which costs
+      # nothing to build here, because G is a constant. Measured optimum is w=3:
+      # the selection logic grows as 2^w and overtakes the saving by w=5.
+      #
+      # SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+      # accumulator equal to the addend, its negation, or the point at infinity.
+      # c_build_jacobian_add_or_double_inline's comment justifies using it
+      # everywhere but the last step of the BINARY ladder by an interval
+      # argument over c_i mod n, and insists that argument be re-derived by
+      # anything changing the offset or the iteration count. A comb changes
+      # both, so it is re-derived -- as executable interval arithmetic in
+      # comb_safe_rounds, evaluated here. Rounds it cannot prove get the
+      # complete add-or-double form instead; nothing is assumed. For P-256 at
+      # w=3 it proves 81 of 86 rounds.
+      #
+      # The other half of that argument is that the accumulator never starts at
+      # infinity, which needs the first digit non-zero. comb_geometry searches
+      # for the scalar offset that guarantees it rather than reusing the
+      # ladder's hardcoded +3n -- right for P-256 at w=3 and WRONG for P-384.
+      #
+      # Stack in: [_k]. Stack out: [_result].
+      #
+      # @return [Boolean] false when no geometry exists for w
+      def self.c_emit_comb_mul_gen(emit, c, g, curve, w, opts = nil)
+        params = Comb.comb_geometry(w, curve)
+        return false if params.nil?
+
+        d = params.d
+        table = Comb.comb_table(w, d, curve)
+        safe = Comb.comb_safe_rounds(params, curve)
+        entries = (1 << w) - 1
+
+        t = EC::ECTracker.new(["_k"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, c.field_p)
+        t.pool_constant(EC::POOL_GROUP_N, g.n)
+
+        # k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+        # what makes the interval argument apply at all.
+        t.to_top("_k")
+        c_emit_scalar_reduce(t, "_k", "_kr", g)
+        t.rename("_k")
+        (0...params.offset_multiple).each do |i|
+          off = "_off#{i}"
+          t.push_const(EC::POOL_GROUP_N, g.n, off)
+          t.raw_block(["_k", off], "_k", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_ADD")) })
+        end
+        t.set_domain("_k", EC::DOM_NON_NEGATIVE)
+
+        # Table, resident for the whole comb: picking an entry costs 2-3 bytes
+        # against a 34-byte literal push, and every round reads all of them.
+        (1..entries).each do |j|
+          pt = table[j]
+          t.push_big_int("_Tx#{j}", pt.x)
+          t.push_big_int("_Ty#{j}", pt.y)
+          t.set_domain("_Tx#{j}", EC::DOM_REDUCED)
+          t.set_domain("_Ty#{j}", EC::DOM_REDUCED)
+        end
+
+        # Round d-1 initialises the accumulator. The first digit is non-zero by
+        # construction (comb_geometry), so this is a real point, never infinity.
+        EC.comb_emit_select(t, d - 1, w, d)
+        t.to_top("_flag")
+        t.drop
+        t.to_top("ax")
+        t.rename("jx")
+        t.to_top("ay")
+        t.rename("jy")
+        t.push_int("jz", 1)
+        t.set_domain("jz", EC::DOM_REDUCED)
+
+        (d - 2).downto(0) do |i|
+          c_jacobian_double(t, c)
+          EC.comb_emit_select(t, i, w, d)
+
+          # c_jacobian_add_affine_body documents its layout as
+          # [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at
+          # the top. The selection leaves ax/ay above jz, so restore the
+          # contract before the branch -- otherwise the add arm would reorder
+          # the stack and the empty else arm would not, leaving the two arms
+          # with different layouts at OP_ENDIF.
+          t.to_top("_flag")
+          t.to_alt
+          t.to_top("jx")
+          t.to_top("jy")
+          t.to_top("jz")
+          t.from_alt("_flag")
+
+          t.pop_tracked # consumed by OP_IF
+          add_ops = []
+          add_emit = ->(o) { add_ops.push(o) }
+          if safe[i]
+            c_build_jacobian_add_affine_inline(add_emit, t, c)
+          else
+            c_build_jacobian_add_or_double_inline(add_emit, t, c)
+          end
+          emit.call(make_stack_op(op: "if", then: add_ops, else_ops: []))
+
+          # The addend was selected fresh for this round; the add only copied it.
+          t.to_top("ay")
+          t.drop
+          t.to_top("ax")
+          t.drop
+        end
+
+        c_jacobian_to_affine(t, "_rx", "_ry", c)
+
+        entries.downto(1) do |j|
+          t.to_top("_Ty#{j}")
+          t.drop
+          t.to_top("_Tx#{j}")
+          t.drop
+        end
+        t.to_top("_k")
+        t.drop
+
+        c_compose_point(t, "_rx", "_ry", "_result", c)
+        t.release_constant(EC::POOL_GROUP_N)
+        t.release_constant(EC::POOL_FIELD_P)
+        true
+      end
+
+      # Emit the cheapest comb over the candidate window widths.
+      #
+      # Each candidate is rendered in full and scored with the same byte-cost
+      # model the emitter is measured by, and the smallest wins.
+      #
+      # @return [Array<Hash>, nil]
+      def self.c_emit_comb_best(c, g, curve, opts = nil)
+        best = nil
+        [2, 3, 4].each do |w|
+          ops = []
+          next unless c_emit_comb_mul_gen(->(o) { ops.push(o) }, c, g, curve, w, opts)
+
+          if best.nil? ||
+             CostModel.estimate_script_bytes(ops) < CostModel.estimate_script_bytes(best)
+            best = ops
+          end
+        end
+        best
+      end
+
+      def self.c_emit_verify_ecdsa(emit, c, g, curve_b, sqrt_exp, gx, gy, comb_curve = nil, opts = nil)
+        t = EC::ECTracker.new(["_msg", "_sig", "_pk"], emit, opts)
+        # The verifier does hundreds of reductions OUTSIDE the two ladders --
+        # decompression's sqrt ladder, c_group_inv, c_affine_add, the final
+        # c_group_mod. Each ladder pools separately: c_emit_mul runs on its own
+        # tracker that deliberately cannot see this stack, so it cannot reach
+        # this slot.
+        t.pool_constant(EC::POOL_FIELD_P, c.field_p)
+        t.pool_constant(EC::POOL_GROUP_N, g.n)
 
         # Step 0: length gate. `_sig` and `_pk` are bare ByteString in the
         # builtin table and the type checker imposes no width, so both arrive
@@ -1241,8 +1463,8 @@ module RunarCompiler
           e.call(make_stack_op(op: "push", value: big_int_push(c.coord_bytes)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         })
-        t.nm.push("_r_bytes")
-        t.nm.push("_s_bytes")
+        t.push_tracked("_r_bytes", EC::DOM_UNKNOWN)
+        t.push_tracked("_s_bytes", EC::DOM_UNKNOWN)
 
         rev_fn = c.reverse_bytes_fn
 
@@ -1301,7 +1523,14 @@ module RunarCompiler
         # Step 7: R = u1*G + u2*Q
         point_bytes = c.coord_bytes * 2
         g_point = bigint_to_n_bytes(gx, c.coord_bytes) + bigint_to_n_bytes(gy, c.coord_bytes)
-        t.push_bytes("_G", g_point)
+
+        # u1*G. G is a compile-time constant, so this half can use a fixed-base
+        # comb -- one doubling and one add per COLUMN instead of per bit. u2*Q
+        # below cannot: Q arrives in the witness.
+        comb_ops = nil
+        comb_ops = c_emit_comb_best(c, g, comb_curve, opts) if opts && opts.fixed_base_comb && comb_curve
+
+        t.push_bytes("_G", g_point) if comb_ops.nil?
         t.to_top("_u1")
 
         # Stash items on altstack.
@@ -1317,14 +1546,19 @@ module RunarCompiler
         t.to_top("_qx")
         t.to_alt
 
-        # Remove _G and _u1 from tracker before c_emit_mul
-        t.nm.pop # _u1
-        t.nm.pop # _G
+        # The multiply creates its own ECTracker and cannot see items below its
+        # operands. Remove them from ours.
+        t.pop_tracked # _u1
+        t.pop_tracked if comb_ops.nil? # _G
 
-        c_emit_mul(emit, c, g)
+        if comb_ops
+          comb_ops.each { |o| emit.call(o) }
+        else
+          c_emit_mul(emit, c, g, opts)
+        end
 
         # After mul, one result point is on the stack
-        t.nm.push("_R1_point")
+        t.push_tracked("_R1_point", EC::DOM_UNKNOWN)
 
         # Pop qx/qy/u2 from altstack (LIFO order)
         t.from_alt("_qx")
@@ -1341,10 +1575,10 @@ module RunarCompiler
         t.to_top("_u2")
 
         # Remove from tracker, emit mul, push result
-        t.nm.pop # _u2
-        t.nm.pop # _Q_point
-        c_emit_mul(emit, c, g)
-        t.nm.push("_R2_point")
+        t.pop_tracked # _u2
+        t.pop_tracked # _Q_point
+        c_emit_mul(emit, c, g, opts)
+        t.push_tracked("_R2_point", EC::DOM_UNKNOWN)
 
         # Restore R1 point
         t.from_alt("_R1_point")
@@ -1389,41 +1623,55 @@ module RunarCompiler
         t.raw_block(["_input_ok", "_sig_ok"], "_result", ->(e) {
           e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
         })
+        t.release_constant(EC::POOL_GROUP_N)
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
       # =================================================================
       # P-256 public API
       # =================================================================
 
-      def self.emit_p256_add(emit)
-        t = EC::ECTracker.new(["_pa", "_pb"], emit)
+      def self.emit_p256_add(emit, opts = nil)
+        t = EC::ECTracker.new(["_pa", "_pb"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, P256_CURVE.field_p)
         c_decompose_point(t, "_pa", "px", "py", P256_CURVE)
         c_decompose_point(t, "_pb", "qx", "qy", P256_CURVE)
         c_affine_add(t, P256_CURVE)
         c_compose_point(t, "rx", "ry", "_result", P256_CURVE)
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
-      def self.emit_p256_mul(emit)
-        c_emit_mul(emit, P256_CURVE, P256_GROUP)
+      def self.emit_p256_mul(emit, opts = nil)
+        c_emit_mul(emit, P256_CURVE, P256_GROUP, opts)
       end
 
-      def self.emit_p256_mul_gen(emit)
+      def self.emit_p256_mul_gen(emit, opts = nil)
+        if opts && opts.fixed_base_comb
+          ops = c_emit_comb_best(P256_CURVE, P256_GROUP, Comb::P256_COMB_CURVE, opts)
+          if ops
+            ops.each { |o| emit.call(o) }
+            return
+          end
+        end
         g_point = bigint_to_n_bytes(P256_GX, 32) + bigint_to_n_bytes(P256_GY, 32)
         emit.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: g_point)))
         emit.call(make_stack_op(op: "swap"))
-        emit_p256_mul(emit)
+        emit_p256_mul(emit, opts)
       end
 
-      def self.emit_p256_negate(emit)
-        t = EC::ECTracker.new(["_pt"], emit)
+      def self.emit_p256_negate(emit, opts = nil)
+        t = EC::ECTracker.new(["_pt"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, P256_CURVE.field_p)
         c_decompose_point(t, "_pt", "_nx", "_ny", P256_CURVE)
         c_push_field_p(t, "_fp", P256_CURVE)
         c_field_sub(t, "_fp", "_ny", "_neg_y", P256_CURVE)
         c_compose_point(t, "_nx", "_neg_y", "_result", P256_CURVE)
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
-      def self.emit_p256_on_curve(emit)
-        t = EC::ECTracker.new(["_pt"], emit)
+      def self.emit_p256_on_curve(emit, opts = nil)
+        t = EC::ECTracker.new(["_pt"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, P256_CURVE.field_p)
         c_decompose_point(t, "_pt", "_x", "_y", P256_CURVE)
         c_emit_canonicity_guard(t, "_x", "_y", P256_CURVE)
 
@@ -1446,6 +1694,7 @@ module RunarCompiler
         t.to_top("_canon")
         t.to_top("_curve_eq")
         t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
       def self.emit_p256_encode_compressed(emit)
@@ -1469,43 +1718,55 @@ module RunarCompiler
         emit.call(make_stack_op(op: "opcode", code: "OP_CAT"))
       end
 
-      def self.emit_verify_ecdsa_p256(emit)
-        c_emit_verify_ecdsa(emit, P256_CURVE, P256_GROUP, P256_B, P256_SQRT_EXP, P256_GX, P256_GY)
+      def self.emit_verify_ecdsa_p256(emit, opts = nil)
+        c_emit_verify_ecdsa(emit, P256_CURVE, P256_GROUP, P256_B, P256_SQRT_EXP, P256_GX, P256_GY, Comb::P256_COMB_CURVE, opts)
       end
 
       # =================================================================
       # P-384 public API
       # =================================================================
 
-      def self.emit_p384_add(emit)
-        t = EC::ECTracker.new(["_pa", "_pb"], emit)
+      def self.emit_p384_add(emit, opts = nil)
+        t = EC::ECTracker.new(["_pa", "_pb"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, P384_CURVE.field_p)
         c_decompose_point(t, "_pa", "px", "py", P384_CURVE)
         c_decompose_point(t, "_pb", "qx", "qy", P384_CURVE)
         c_affine_add(t, P384_CURVE)
         c_compose_point(t, "rx", "ry", "_result", P384_CURVE)
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
-      def self.emit_p384_mul(emit)
-        c_emit_mul(emit, P384_CURVE, P384_GROUP)
+      def self.emit_p384_mul(emit, opts = nil)
+        c_emit_mul(emit, P384_CURVE, P384_GROUP, opts)
       end
 
-      def self.emit_p384_mul_gen(emit)
+      def self.emit_p384_mul_gen(emit, opts = nil)
+        if opts && opts.fixed_base_comb
+          ops = c_emit_comb_best(P384_CURVE, P384_GROUP, Comb::P384_COMB_CURVE, opts)
+          if ops
+            ops.each { |o| emit.call(o) }
+            return
+          end
+        end
         g_point = bigint_to_n_bytes(P384_GX, 48) + bigint_to_n_bytes(P384_GY, 48)
         emit.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: g_point)))
         emit.call(make_stack_op(op: "swap"))
-        emit_p384_mul(emit)
+        emit_p384_mul(emit, opts)
       end
 
-      def self.emit_p384_negate(emit)
-        t = EC::ECTracker.new(["_pt"], emit)
+      def self.emit_p384_negate(emit, opts = nil)
+        t = EC::ECTracker.new(["_pt"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, P384_CURVE.field_p)
         c_decompose_point(t, "_pt", "_nx", "_ny", P384_CURVE)
         c_push_field_p(t, "_fp", P384_CURVE)
         c_field_sub(t, "_fp", "_ny", "_neg_y", P384_CURVE)
         c_compose_point(t, "_nx", "_neg_y", "_result", P384_CURVE)
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
-      def self.emit_p384_on_curve(emit)
-        t = EC::ECTracker.new(["_pt"], emit)
+      def self.emit_p384_on_curve(emit, opts = nil)
+        t = EC::ECTracker.new(["_pt"], emit, opts)
+        t.pool_constant(EC::POOL_FIELD_P, P384_CURVE.field_p)
         c_decompose_point(t, "_pt", "_x", "_y", P384_CURVE)
         c_emit_canonicity_guard(t, "_x", "_y", P384_CURVE)
 
@@ -1528,6 +1789,7 @@ module RunarCompiler
         t.to_top("_canon")
         t.to_top("_curve_eq")
         t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.release_constant(EC::POOL_FIELD_P)
       end
 
       def self.emit_p384_encode_compressed(emit)
@@ -1551,8 +1813,8 @@ module RunarCompiler
         emit.call(make_stack_op(op: "opcode", code: "OP_CAT"))
       end
 
-      def self.emit_verify_ecdsa_p384(emit)
-        c_emit_verify_ecdsa(emit, P384_CURVE, P384_GROUP, P384_B, P384_SQRT_EXP, P384_GX, P384_GY)
+      def self.emit_verify_ecdsa_p384(emit, opts = nil)
+        c_emit_verify_ecdsa(emit, P384_CURVE, P384_GROUP, P384_B, P384_SQRT_EXP, P384_GX, P384_GY, Comb::P384_COMB_CURVE, opts)
       end
 
       # =================================================================
@@ -1589,17 +1851,24 @@ module RunarCompiler
         "p384EncodeCompressed" => method(:emit_p384_encode_compressed),
       }.freeze
 
-      def self.dispatch_nist_ec_builtin(func_name, emit)
+      def self.dispatch_nist_ec_builtin(func_name, emit, opts = nil)
         fn = NIST_EC_DISPATCH[func_name]
         raise "unknown NIST EC builtin: #{func_name}" if fn.nil?
-        fn.call(emit)
+
+        # The encode-compressed emitters are pure byte shuffling with no field
+        # arithmetic, so the flags cannot reach them and they take no options.
+        if func_name.end_with?("EncodeCompressed")
+          fn.call(emit)
+        else
+          fn.call(emit, opts)
+        end
       end
 
-      def self.dispatch_verify_ecdsa(func_name, emit)
+      def self.dispatch_verify_ecdsa(func_name, emit, opts = nil)
         if func_name == "verifyECDSA_P256"
-          emit_verify_ecdsa_p256(emit)
+          emit_verify_ecdsa_p256(emit, opts)
         else
-          emit_verify_ecdsa_p384(emit)
+          emit_verify_ecdsa_p384(emit, opts)
         end
       end
     end

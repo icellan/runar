@@ -289,9 +289,9 @@ module RunarCompiler
   private_class_method :_eliminate_dead_code
 
   # Stack lowering: ANF -> Stack IR.
-  def self._lower_to_stack(program)
+  def self._lower_to_stack(program, ec_codegen = nil)
     require_relative "codegen/stack"
-    Codegen.lower_to_stack(program)
+    Codegen.lower_to_stack(program, ec_codegen)
   end
   private_class_method :_lower_to_stack
 
@@ -481,7 +481,27 @@ module RunarCompiler
   # @param program [IR::ANFProgram] the ANF program
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @return [Artifact]
-  def self.compile_from_program(program, disable_constant_folding: false)
+  # Options handed to the EC / NIST codegen modules.
+  #
+  # Returns nil -- not an all-false instance -- when nothing is enabled, so
+  # those emitters take their untouched default path and the emitted bytes are
+  # provably identical to the shipping ones.
+  #
+  # Cross-tier byte parity for the flags THEMSELVES is gated by
+  # conformance/ec-flag-parity/expected.json.
+  def self._ec_codegen_options(pool, sinking, comb)
+    return nil unless pool || sinking || comb
+
+    require "runar_compiler/codegen/ec"
+    Codegen::EC::EcCodegenOptions.new(
+      constant_pool: pool, reduction_sinking: sinking, fixed_base_comb: comb
+    )
+  end
+  private_class_method :_ec_codegen_options
+
+  def self.compile_from_program(program, disable_constant_folding: false,
+                                ec_constant_pool: false, ec_reduction_sinking: false,
+                                ec_fixed_base_comb: false)
     # Pass 4.25: Constant folding (on by default)
     program = _fold_constants(program) unless disable_constant_folding
 
@@ -490,7 +510,10 @@ module RunarCompiler
     program = _optimize_ec(program)
 
     # Pass 5: Stack lowering
-    stack_methods = _lower_to_stack(program)
+    stack_methods = _lower_to_stack(
+      program,
+      _ec_codegen_options(ec_constant_pool, ec_reduction_sinking, ec_fixed_base_comb)
+    )
 
     # Peephole optimization -- runs on Stack IR before emission.
     stack_methods.each do |sm|
@@ -523,7 +546,9 @@ module RunarCompiler
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @param constructor_args [Hash, nil] constructor argument overrides
   # @return [Artifact]
-  def self.compile_from_source(source_path, disable_constant_folding: false, constructor_args: nil)
+  def self.compile_from_source(source_path, disable_constant_folding: false, constructor_args: nil,
+                               ec_constant_pool: false, ec_reduction_sinking: false,
+                               ec_fixed_base_comb: false)
     source = _read_file(source_path)
 
     # Pass 1: Parse
@@ -561,7 +586,13 @@ module RunarCompiler
     _apply_constructor_args(program, constructor_args)
 
     # Feed into existing compilation pipeline (passes 4.25-6)
-    compile_from_program(program, disable_constant_folding: disable_constant_folding)
+    compile_from_program(
+      program,
+      disable_constant_folding: disable_constant_folding,
+      ec_constant_pool: ec_constant_pool,
+      ec_reduction_sinking: ec_reduction_sinking,
+      ec_fixed_base_comb: ec_fixed_base_comb
+    )
   end
 
   # Run passes 1-4 on a source file and return the ANF program.
