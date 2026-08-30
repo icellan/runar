@@ -309,7 +309,15 @@ pub fn estimateScriptBytes(ops: []const StackOp) usize {
     return total;
 }
 
-const ECTracker = struct {
+/// Named stack-state tracker, shared with `nist_ec_emitters.zig`.
+///
+/// It is `pub` for exactly that reason. The NIST emitters kept their own copy
+/// until this port; two independently-maintained copies of a sign lattice are
+/// two chances to prove `.reduced` where only `.non_negative` holds, and the
+/// resulting script is smaller, passes every local test, and is wrong. The
+/// curve-specific parts (prime, order, coordinate width) are function
+/// parameters over there, not tracker state, so one tracker serves both.
+pub const ECTracker = struct {
     allocator: Allocator,
     names: std.ArrayListUnmanaged(?[]const u8),
     /// Sign-lattice fact per stack SLOT, kept parallel to `names`.
@@ -339,7 +347,7 @@ const ECTracker = struct {
 
     /// Create a tracker carrying codegen options and, optionally, initial
     /// lattice facts for the pre-existing slots.
-    fn initOpts(
+    pub fn initOpts(
         allocator: Allocator,
         initial_names: []const ?[]const u8,
         opts: EcCodegenOptions,
@@ -367,7 +375,7 @@ const ECTracker = struct {
         };
     }
 
-    fn deinit(self: *ECTracker) void {
+    pub fn deinit(self: *ECTracker) void {
         deinitOpsRecursive(self.allocator, self.ops.items);
         self.ops.deinit(self.allocator);
         self.names.deinit(self.allocator);
@@ -380,7 +388,7 @@ const ECTracker = struct {
     }
 
     /// Copy a formatted slot name into tracker-owned storage.
-    fn internName(self: *ECTracker, name: []const u8) ![]const u8 {
+    pub fn internName(self: *ECTracker, name: []const u8) ![]const u8 {
         const copy = try self.allocator.dupe(u8, name);
         try self.owned_names.append(self.allocator, copy);
         return copy;
@@ -389,7 +397,7 @@ const ECTracker = struct {
     // -- sign lattice --------------------------------------------------------
 
     /// What is known about the named value. `.unknown` when the name is absent.
-    fn domainOf(self: *const ECTracker, name: []const u8) Dom {
+    pub fn domainOf(self: *const ECTracker, name: []const u8) Dom {
         // A silent desync here would hand a transfer function a fact about the
         // WRONG slot, which is the one failure mode that produces a smaller
         // script that quietly computes something else. Fail loudly instead.
@@ -404,7 +412,7 @@ const ECTracker = struct {
     }
 
     /// Record a fact about the named value's slot.
-    fn setDomain(self: *ECTracker, name: []const u8, d: Dom) void {
+    pub fn setDomain(self: *ECTracker, name: []const u8, d: Dom) void {
         var i = self.names.items.len;
         while (i > 0) {
             i -= 1;
@@ -417,26 +425,26 @@ const ECTracker = struct {
     }
 
     /// Push a slot the caller tracks itself (used where raw opcodes create items).
-    fn pushTracked(self: *ECTracker, name: ?[]const u8, d: Dom) !void {
+    pub fn pushTracked(self: *ECTracker, name: ?[]const u8, d: Dom) !void {
         try self.names.append(self.allocator, name);
         try self.doms.append(self.allocator, d);
     }
 
     /// Pop a slot the caller tracks itself. Mirror of `pushTracked`.
-    fn popTracked(self: *ECTracker) void {
+    pub fn popTracked(self: *ECTracker) void {
         if (self.names.items.len == 0) return;
         _ = self.names.pop();
         _ = self.doms.pop();
     }
 
     /// Remove the slot at an absolute (bottom-relative) index.
-    fn removeSlotAt(self: *ECTracker, index: usize) struct { name: ?[]const u8, dom: Dom } {
+    pub fn removeSlotAt(self: *ECTracker, index: usize) struct { name: ?[]const u8, dom: Dom } {
         const n = self.names.orderedRemove(index);
         const d = self.doms.orderedRemove(index);
         return .{ .name = n, .dom = d };
     }
 
-    fn takeBundle(self: *ECTracker) !EcOpBundle {
+    pub fn takeBundle(self: *ECTracker) !EcOpBundle {
         const ops = try self.ops.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(ops);
         const owned_bytes = try self.owned_bytes.toOwnedSlice(self.allocator);
@@ -464,7 +472,7 @@ const ECTracker = struct {
         return self.names.items.len;
     }
 
-    fn findDepth(self: *const ECTracker, name: []const u8) !usize {
+    pub fn findDepth(self: *const ECTracker, name: []const u8) !usize {
         var i = self.names.items.len;
         while (i > 0) {
             i -= 1;
@@ -476,51 +484,51 @@ const ECTracker = struct {
         return error.UnsupportedBuiltin;
     }
 
-    fn emitRaw(self: *ECTracker, op: StackOp) !void {
+    pub fn emitRaw(self: *ECTracker, op: StackOp) !void {
         try self.ops.append(self.allocator, op);
     }
 
-    fn emitOpcode(self: *ECTracker, code: []const u8) !void {
+    pub fn emitOpcode(self: *ECTracker, code: []const u8) !void {
         try self.emitRaw(.{ .opcode = code });
     }
 
-    fn emitPushIntRaw(self: *ECTracker, value: i64) !void {
+    pub fn emitPushIntRaw(self: *ECTracker, value: i64) !void {
         try self.emitRaw(.{ .push = .{ .integer = value } });
     }
 
-    fn emitPushBytesRaw(self: *ECTracker, value: []const u8) !void {
+    pub fn emitPushBytesRaw(self: *ECTracker, value: []const u8) !void {
         try self.emitRaw(.{ .push = .{ .bytes = value } });
     }
 
-    fn pushInt(self: *ECTracker, name: ?[]const u8, value: i64) !void {
+    pub fn pushInt(self: *ECTracker, name: ?[]const u8, value: i64) !void {
         try self.emitPushIntRaw(value);
         try self.pushTracked(name, if (value >= 0) .non_negative else .unknown);
     }
 
-    fn pushOwnedBytes(self: *ECTracker, name: ?[]const u8, value: []u8) !void {
+    pub fn pushOwnedBytes(self: *ECTracker, name: ?[]const u8, value: []u8) !void {
         try self.owned_bytes.append(self.allocator, value);
         try self.emitPushBytesRaw(value);
         // A byte blob is not a number until BIN2NUM decides how to read it.
         try self.pushTracked(name, .unknown);
     }
 
-    fn pushStaticBytes(self: *ECTracker, name: ?[]const u8, value: []const u8) !void {
+    pub fn pushStaticBytes(self: *ECTracker, name: ?[]const u8, value: []const u8) !void {
         try self.emitPushBytesRaw(value);
         try self.pushTracked(name, .unknown);
     }
 
-    fn dup(self: *ECTracker, name: ?[]const u8) !void {
+    pub fn dup(self: *ECTracker, name: ?[]const u8) !void {
         try self.emitRaw(.{ .dup = {} });
         const d: Dom = if (self.doms.items.len > 0) self.doms.items[self.doms.items.len - 1] else .unknown;
         try self.pushTracked(name, d);
     }
 
-    fn drop(self: *ECTracker) !void {
+    pub fn drop(self: *ECTracker) !void {
         try self.emitRaw(.{ .drop = {} });
         self.popTracked();
     }
 
-    fn swap(self: *ECTracker) !void {
+    pub fn swap(self: *ECTracker) !void {
         try self.emitRaw(.{ .swap = {} });
         const len = self.names.items.len;
         if (len >= 2) {
@@ -533,7 +541,7 @@ const ECTracker = struct {
         }
     }
 
-    fn rot(self: *ECTracker) !void {
+    pub fn rot(self: *ECTracker) !void {
         try self.emitRaw(.{ .rot = {} });
         const len = self.names.items.len;
         if (len >= 3) {
@@ -542,13 +550,13 @@ const ECTracker = struct {
         }
     }
 
-    fn over(self: *ECTracker, name: ?[]const u8) !void {
+    pub fn over(self: *ECTracker, name: ?[]const u8) !void {
         try self.emitRaw(.{ .over = {} });
         const d: Dom = if (self.doms.items.len >= 2) self.doms.items[self.doms.items.len - 2] else .unknown;
         try self.pushTracked(name, d);
     }
 
-    fn roll(self: *ECTracker, depth_from_top: usize) !void {
+    pub fn roll(self: *ECTracker, depth_from_top: usize) !void {
         if (depth_from_top == 0) return;
         if (depth_from_top == 1) return self.swap();
         if (depth_from_top == 2) return self.rot();
@@ -558,7 +566,7 @@ const ECTracker = struct {
         try self.pushTracked(rolled.name, rolled.dom);
     }
 
-    fn pick(self: *ECTracker, depth_from_top: usize, name: ?[]const u8) !void {
+    pub fn pick(self: *ECTracker, depth_from_top: usize, name: ?[]const u8) !void {
         if (depth_from_top == 0) return self.dup(name);
         if (depth_from_top == 1) return self.over(name);
         try self.emitRaw(.{ .pick = @intCast(depth_from_top) });
@@ -570,28 +578,28 @@ const ECTracker = struct {
         try self.pushTracked(name, src);
     }
 
-    fn toTop(self: *ECTracker, name: []const u8) !void {
+    pub fn toTop(self: *ECTracker, name: []const u8) !void {
         try self.roll(try self.findDepth(name));
     }
 
-    fn copyToTop(self: *ECTracker, name: []const u8, copy_name: ?[]const u8) !void {
+    pub fn copyToTop(self: *ECTracker, name: []const u8, copy_name: ?[]const u8) !void {
         try self.pick(try self.findDepth(name), copy_name);
     }
 
-    fn renameTop(self: *ECTracker, name: ?[]const u8) void {
+    pub fn renameTop(self: *ECTracker, name: ?[]const u8) void {
         if (self.names.items.len > 0) {
             self.names.items[self.names.items.len - 1] = name;
         }
     }
 
-    fn popNames(self: *ECTracker, count: usize) void {
+    pub fn popNames(self: *ECTracker, count: usize) void {
         var i: usize = 0;
         while (i < count and self.names.items.len > 0) : (i += 1) {
             self.popTracked();
         }
     }
 
-    fn rawBlock(
+    pub fn rawBlock(
         self: *ECTracker,
         consume_count: usize,
         produce_name: ?[]const u8,
@@ -614,7 +622,7 @@ const ECTracker = struct {
     // trackers seeded from `names.items` inherit the slot for free, so pooled
     // constants work unchanged inside an `OP_IF` arm.
 
-    fn hasSlot(self: *const ECTracker, slot: []const u8) bool {
+    pub fn hasSlot(self: *const ECTracker, slot: []const u8) bool {
         for (self.names.items) |n| {
             const name = n orelse continue;
             if (std.mem.eql(u8, name, slot)) return true;
@@ -624,14 +632,29 @@ const ECTracker = struct {
 
     /// Park the script-number encoding of `value_be` in `slot` for the lifetime
     /// of this emitter. No-op when pooling is off.
-    fn poolConstant(self: *ECTracker, slot: []const u8, value_be: []const u8) !void {
+    ///
+    /// The slot carries `.non_negative`, not `.unknown`. The reference spells
+    /// this `pushInt(slot, value)`, whose fact for a positive literal is
+    /// NonNegative; here the constant arrives as a byte slice, and
+    /// `pushOwnedBytes`'s blanket `.unknown` — "a byte blob is not a number
+    /// until BIN2NUM reads it" — is the wrong default for a value that already
+    /// IS a script number. Every `pick` off this slot inherits the fact.
+    ///
+    /// Measured: it moves no bytes today, on either curve family, under any flag
+    /// combination — no emitter currently passes a pooled constant as the
+    /// operand of a reduction that consults the lattice. It is stated anyway,
+    /// because the tracker is now shared with the NIST emitters and a fact that
+    /// quietly disagrees with the reference is the exact shape of divergence
+    /// this port is gated against.
+    pub fn poolConstant(self: *ECTracker, slot: []const u8, value_be: []const u8) !void {
         if (!self.opts.constant_pool or self.hasSlot(slot)) return;
         const encoded = try beToUnsignedScriptNumAlloc(self.allocator, value_be);
         try self.pushOwnedBytes(slot, encoded);
+        self.setDomain(slot, .non_negative);
     }
 
     /// Remove a pooled slot. No-op when pooling is off or the slot is absent.
-    fn releaseConstant(self: *ECTracker, slot: []const u8) !void {
+    pub fn releaseConstant(self: *ECTracker, slot: []const u8) !void {
         if (!self.opts.constant_pool or !self.hasSlot(slot)) return;
         try self.toTop(slot);
         try self.drop();
@@ -643,7 +666,7 @@ const ECTracker = struct {
     /// pooling can never make a call site bigger. A pick at depth d costs
     /// `sizeOfScriptNumber(d) + 1`; depths 0 and 1 are OP_DUP / OP_OVER,
     /// 1 byte each.
-    fn constCost(self: *const ECTracker, slot: []const u8, encoded_len: usize) usize {
+    pub fn constCost(self: *const ECTracker, slot: []const u8, encoded_len: usize) usize {
         const literal = pushDataCost(encoded_len);
         if (self.opts.constant_pool and self.hasSlot(slot)) {
             const d = self.findDepth(slot) catch return literal;
@@ -655,7 +678,11 @@ const ECTracker = struct {
 
     /// Materialize the constant on top as `name`, from the pooled slot when that
     /// is cheaper in emitted bytes than pushing the literal.
-    fn pushConst(self: *ECTracker, slot: []const u8, value_be: []const u8, name: []const u8) !void {
+    ///
+    /// `.non_negative` on both paths, for the reason `poolConstant` gives — the
+    /// picked copy inherits the fact from the slot, the literal needs it stated
+    /// here.
+    pub fn pushConst(self: *ECTracker, slot: []const u8, value_be: []const u8, name: []const u8) !void {
         const encoded = try beToUnsignedScriptNumAlloc(self.allocator, value_be);
         if (self.opts.constant_pool and self.hasSlot(slot)) {
             const d = try self.findDepth(slot);
@@ -667,9 +694,10 @@ const ECTracker = struct {
             }
         }
         try self.pushOwnedBytes(name, encoded);
+        self.setDomain(name, .non_negative);
     }
 
-    fn toAlt(self: *ECTracker) !void {
+    pub fn toAlt(self: *ECTracker) !void {
         try self.emitOpcode("OP_TOALTSTACK");
         if (self.names.items.len == 0) return;
         const d = self.doms.items[self.doms.items.len - 1];
@@ -677,7 +705,7 @@ const ECTracker = struct {
         try self.alt_doms.append(self.allocator, d);
     }
 
-    fn fromAlt(self: *ECTracker, name: ?[]const u8) !void {
+    pub fn fromAlt(self: *ECTracker, name: ?[]const u8) !void {
         try self.emitOpcode("OP_FROMALTSTACK");
         const d: Dom = if (self.alt_doms.items.len > 0) self.alt_doms.pop().? else .unknown;
         try self.pushTracked(name, d);
@@ -800,7 +828,7 @@ fn emitReverse32Raw(t: *ECTracker) !void {
     try t.emitRaw(.{ .drop = {} });
 }
 
-fn beToUnsignedScriptNumAlloc(allocator: Allocator, be: []const u8) ![]u8 {
+pub fn beToUnsignedScriptNumAlloc(allocator: Allocator, be: []const u8) ![]u8 {
     var first: usize = 0;
     while (first < be.len and be[first] == 0) : (first += 1) {}
     if (first == be.len) {

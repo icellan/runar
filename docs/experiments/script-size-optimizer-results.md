@@ -499,12 +499,29 @@ carries a sign lattice whose transfer functions decide which reduction shape is 
 copies is two chances to prove `Reduced` where only `NonNegative` holds. Deleted; the tiers share
 one tracker.
 
-**Zig** is the one tier that cannot assert the raw hash. Its peephole reassociates only `i64`
-`push_int` chains, and a 256-bit constant is a `push_data` blob in its IR, so `k + 3n` stays
-pre-folded there while the reference emits three `+n` steps its own peephole collapses. Identical
-shipped bytes, different pre-peephole spelling. Zig therefore gates on the raw byte *count* with
-that single divergence asserted exactly (`allowedDelta`), plus end-to-end hex identity through the
-CLI. The fixture carries a `postPeephole` measurement alongside the raw one for exactly this.
+**Zig** is the one tier that cannot assert the raw hash, for two reasons, both differences in
+*spelling* that its own peephole normalises away before the script ships.
+
+First, `k + 3n`. Its peephole reassociates only `i64` `push_int` chains, and a 256/384-bit constant
+is a `push_data` blob in its IR, so the offset stays pre-folded there while the reference emits
+three `+n` steps its own peephole collapses. The two curve families differ in *when* this bites:
+the secp256k1 reference routes those three pushes through the constant pool, so Zig matches it
+raw-for-raw as soon as `--ec-constant-pool` is on and diverges only under `off`; the NIST reference
+(`cEmitMul`) pushes raw literals under **every** flag combination, so the divergence there is
+constant — −70 B per P-256 ladder (n encodes to 33 bytes: `3*(1+33)+3` against `(1+33)+1`) and
+−102 B per P-384 ladder (49 bytes: 153 against 51). Copying either tier's conditional into the
+other is a live way to get this wrong.
+
+Second, MINIMALDATA on one-byte blobs. The reference writes `push [0x02]` as `OP_2`; Zig's push
+encoder always writes the length-prefixed form. Two such pushes per site — the `0x02` / `0x03`
+prefix pair in `decompressPubKey` and in the parity select of `pNNNEncodeCompressed` — so `+2` on
+`VerifyECDSA_*` and on `pNNNEncodeCompressed`. This one is pre-existing and flag-independent: it is
+there with every flag off, on an emitter no flag reaches.
+
+Zig therefore gates on the raw byte *count* with both divergences priced exactly
+(`allowedDelta`, which returns zero for every emitter they do not name), plus end-to-end hex
+identity through the CLI. The fixture carries a `postPeephole` measurement alongside the raw one
+for exactly this.
 
 Zig's cost model also differs by construction: its `roll` / `pick` ops carry the depth themselves
 and the emitter writes the depth push while emitting them, so they cost `sizeOfScriptNumber(depth)
@@ -519,6 +536,19 @@ negative exponent, so there is no `x.pow(-1, m)` shortcut as in Python.
 For the same `ecMulGen` contract compiled with all three flags, **all seven compilers emit
 byte-identical hex** (50,157 bytes, down from 424,567 with the flags off).
 
+On the NIST side the same holds for the two real conformance fixtures. `p256-wallet` and
+`p384-wallet` both go through `verifyECDSA_*`, so they exercise every emitter the flags touch —
+the two ladders, the decompression sqrt chain, `groupInv`, `affineAdd`. The Zig and TypeScript
+CLIs agree **byte for byte under all four flag combinations**:
+
+| fixture | off | pool | sink | comb |
+|---|---:|---:|---:|---:|
+| `p256-wallet` | 958,792 | 304,463 | 179,890 | **147,113** (−84.7 %) |
+| `p384-wallet` | 1,963,300 | 463,435 | 272,678 | **223,204** (−88.6 %) |
+
+That is the check that closes the two raw-spelling divergences above: the peephole normalises both
+away, so the shipped script is identical even where the pre-peephole op stream is not.
+
 Per-tier gates:
 
 | tier | parity test | assertions |
@@ -529,7 +559,7 @@ Per-tier gates:
 | Python | `tests/test_ec_flag_parity.py` | 48 |
 | Ruby | `test/codegen/test_ec_flag_parity.rb` | 24 emitters × 4 variants |
 | Java | `codegen/EcFlagParityTest` | 3 tests over 24 × 4 |
-| Zig | `passes/helpers/ec_flag_parity_test.zig` | 4 tests, byte counts + width selection |
+| Zig | `passes/helpers/ec_flag_parity_test.zig` | 7 tests over 19 emitters × 4, byte counts + width selection per curve |
 
 Every tier additionally pins that the flags OFF reproduce the shipping hash for every emitter, so
 the experimental work cannot move default output.
@@ -541,6 +571,4 @@ The ports are complete and gated, but this is still not a merge candidate:
 - The checked-in EC goldens were stamped under flags-off and are unchanged, which is correct — but
   nothing regenerates them for a flags-on world, and `conformance/script-size-baseline.json` would
   trip its 50 % shrink guard by design if the flags ever became default.
-- `nist_ec_emitters.zig` (the Zig NIST tier) is not ported; only Zig's secp256k1 side is. The
-  parity fixture covers what is ported, and the NIST emitters there keep their shipping path.
 - No golden-provenance entries exist for a flags-on stamping, because nothing has been stamped.

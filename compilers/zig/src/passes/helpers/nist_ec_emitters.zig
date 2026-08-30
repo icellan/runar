@@ -1,7 +1,8 @@
 //! NIST P-256 and P-384 elliptic curve codegen for Bitcoin Script.
 //!
-//! Follows the same pattern as ec_emitters.zig and bn254_emitters.zig.
-//! Uses ECTracker for named stack state tracking.
+//! Follows the same pattern as ec_emitters.zig and bn254_emitters.zig, and
+//! shares that module's `ECTracker` — including its sign lattice — rather than
+//! keeping a second copy. See the tracker section below for why.
 //!
 //! Point representation:
 //!   P-256: 64 bytes (x[32] || y[32], big-endian unsigned)
@@ -9,9 +10,14 @@
 //!
 //! Key difference from secp256k1: a = -3 (not 0), giving an optimized
 //! Jacobian doubling formula.
+//!
+//! The three EXPERIMENTAL size flags (`EcCodegenOptions`) are honoured here as
+//! they are for secp256k1: an all-false value leaves every emitter byte-
+//! identical to what this tier shipped before they existed.
 
 const std = @import("std");
 const ec = @import("ec_emitters.zig");
+const comb = @import("comb.zig");
 const registry = @import("crypto_builtins.zig");
 
 const Allocator = std.mem.Allocator;
@@ -19,6 +25,10 @@ const StackOp = ec.StackOp;
 const StackIf = ec.StackIf;
 const PushValue = ec.PushValue;
 const EcOpBundle = ec.EcOpBundle;
+const Dom = ec.Dom;
+const EcCodegenOptions = ec.EcCodegenOptions;
+const POOL_FIELD_P = ec.POOL_FIELD_P;
+const POOL_GROUP_N = ec.POOL_GROUP_N;
 
 // ===========================================================================
 // P-256 (secp256r1) constants — 32-byte big-endian
@@ -202,21 +212,21 @@ const p384_3n_be = [_]u8{
 // Helper: encode big-endian bytes to Bitcoin Script number (unsigned LE + sign byte)
 // ===========================================================================
 
-fn beToUnsignedScriptNumAlloc(allocator: Allocator, be: []const u8) ![]u8 {
+/// Shared with `ec_emitters.zig` rather than reimplemented: a second encoder
+/// free to drift is a second spelling of the same constant, and the pool prices
+/// call sites off the length this returns.
+const beToUnsignedScriptNumAlloc = ec.beToUnsignedScriptNumAlloc;
+
+/// Length of `be`'s unsigned script-number encoding, without allocating.
+///
+/// `cheapSubPays` prices the prime before anything is emitted, and the pool's
+/// cheaper-of-two comparison must be exact or it could make a call site bigger.
+fn scriptNumLen(be: []const u8) usize {
     var first: usize = 0;
     while (first < be.len and be[first] == 0) : (first += 1) {}
-    if (first == be.len) {
-        return allocator.dupe(u8, &.{});
-    }
+    if (first == be.len) return 0;
     const trimmed = be[first..];
-    const needs_sign_byte = (trimmed[0] & 0x80) != 0;
-    const out_len = trimmed.len + @as(usize, if (needs_sign_byte) 1 else 0);
-    const out = try allocator.alloc(u8, out_len);
-    for (trimmed, 0..) |_, idx| {
-        out[idx] = trimmed[trimmed.len - 1 - idx];
-    }
-    if (needs_sign_byte) out[out_len - 1] = 0;
-    return out;
+    return trimmed.len + @as(usize, if ((trimmed[0] & 0x80) != 0) 1 else 0);
 }
 
 /// Get bit `i` (0 = LSB) of a big-endian byte slice.
@@ -254,6 +264,12 @@ const NistCurveParams = struct {
     sqrt_exp_be: []const u8,
     gen_x_be: []const u8,
     gen_y_be: []const u8,
+    /// The same curve for `comb.zig`'s compile-time table. Kept here so the
+    /// fixed-base comb can never be handed a curve whose field prime disagrees
+    /// with the one the emitted reductions use — that would build a table of
+    /// points on a DIFFERENT curve, which this curve's on-curve check would
+    /// happily accept.
+    comb_curve: comb.Curve,
 };
 
 const p256_params = NistCurveParams{
@@ -267,6 +283,7 @@ const p256_params = NistCurveParams{
     .sqrt_exp_be = p256_sqrt_exp_be[0..],
     .gen_x_be = p256_gx_be[0..],
     .gen_y_be = p256_gy_be[0..],
+    .comb_curve = comb.P256_COMB_CURVE,
 };
 
 const p384_params = NistCurveParams{
@@ -280,182 +297,95 @@ const p384_params = NistCurveParams{
     .sqrt_exp_be = p384_sqrt_exp_be[0..],
     .gen_x_be = p384_gx_be[0..],
     .gen_y_be = p384_gy_be[0..],
+    .comb_curve = comb.P384_COMB_CURVE,
 };
 
 // ===========================================================================
-// NistTracker — named stack state tracker for NIST EC operations
+// Tracker — shared with ec_emitters.zig
 // ===========================================================================
 
-const NistTracker = struct {
-    allocator: Allocator,
-    names: std.ArrayListUnmanaged(?[]const u8),
-    ops: std.ArrayListUnmanaged(StackOp),
-    owned_bytes: std.ArrayListUnmanaged([]u8),
-    params: *const NistCurveParams,
+/// The NIST emitters run on `ec_emitters.ECTracker`, the same tracker the
+/// secp256k1 ones use. They kept a private copy of it until the size flags
+/// landed; the copy carried no sign lattice, and adding a second one would have
+/// been two chances to prove `.reduced` where only `.non_negative` holds — a
+/// script that is smaller, passes every local test, and is wrong on an
+/// adversarial coordinate.
+///
+/// The curve-specific state that copy carried (`params`) is a function
+/// parameter here instead. Nothing about a tracker is per-curve: the prime, the
+/// order and the coordinate width all reach the emitters through the call, and
+/// one emitter only ever works on one curve.
+const NistTracker = ec.ECTracker;
 
-    fn init(allocator: Allocator, initial_names: []const ?[]const u8, params: *const NistCurveParams) !NistTracker {
-        var names: std.ArrayListUnmanaged(?[]const u8) = .empty;
-        errdefer names.deinit(allocator);
-        try names.appendSlice(allocator, initial_names);
-        return .{
-            .allocator = allocator,
-            .names = names,
-            .ops = .empty,
-            .owned_bytes = .empty,
-            .params = params,
-        };
-    }
+/// Push a positive big-endian constant as a script number.
+///
+/// The reference spells this `t.pushInt(name, value)`, and the `.non_negative`
+/// fact that comes with a positive literal there is load-bearing: it is what
+/// lets `fieldAdd(x^3 - 3x, b)` take the short reduction. Arriving as a byte
+/// slice it would otherwise be `.unknown` — see `ECTracker.poolConstant`.
+fn pushBigIntBE(t: *NistTracker, name: []const u8, be: []const u8) !void {
+    const encoded = try beToUnsignedScriptNumAlloc(t.allocator, be);
+    try t.pushOwnedBytes(name, encoded);
+    t.setDomain(name, .non_negative);
+}
 
-    fn deinit(self: *NistTracker) void {
-        ec.deinitOpsRecursive(self.allocator, self.ops.items);
-        self.ops.deinit(self.allocator);
-        self.names.deinit(self.allocator);
-        for (self.owned_bytes.items) |bytes| self.allocator.free(bytes);
-        self.owned_bytes.deinit(self.allocator);
-    }
+/// The field prime, from the pooled slot when that is cheaper.
+fn pushFieldP(t: *NistTracker, name: []const u8, p_be: []const u8) !void {
+    try t.pushConst(POOL_FIELD_P, p_be, name);
+}
 
-    fn takeBundle(self: *NistTracker) !EcOpBundle {
-        const ops = try self.ops.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(ops);
-        const owned_bytes = try self.owned_bytes.toOwnedSlice(self.allocator);
-        self.names.deinit(self.allocator);
-        self.names = .empty;
-        self.ops = .empty;
-        self.owned_bytes = .empty;
-        return .{
-            .allocator = self.allocator,
-            .ops = ops,
-            .owned_bytes = owned_bytes,
-        };
-    }
+/// The group order, from the pooled slot when that is cheaper.
+fn pushGroupN(t: *NistTracker, name: []const u8, n_be: []const u8) !void {
+    try t.pushConst(POOL_GROUP_N, n_be, name);
+}
 
-    fn findDepth(self: *const NistTracker, name: []const u8) !usize {
-        var i = self.names.items.len;
-        while (i > 0) {
-            i -= 1;
-            const slot = self.names.items[i] orelse continue;
-            if (std.mem.eql(u8, slot, name)) {
-                return self.names.items.len - 1 - i;
-            }
-        }
-        return error.NameNotFound;
-    }
+// `rawBlock` takes a plain function pointer, not a closure, so every body it
+// can run has to be a fixed sequence with its operands already on the stack.
+// These are those bodies; anything parameterised (the byte reversals, the
+// width-dependent splits) does its own popNames / emit / pushTracked instead.
 
-    fn emitRaw(self: *NistTracker, op: StackOp) !void {
-        try self.ops.append(self.allocator, op);
-    }
+fn emitAddOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_ADD");
+}
 
-    fn emitOpcode(self: *NistTracker, code: []const u8) !void {
-        try self.emitRaw(.{ .opcode = code });
-    }
+fn emitSubOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_SUB");
+}
 
-    fn emitPushInt(self: *NistTracker, value: i64) !void {
-        try self.emitRaw(.{ .push = .{ .integer = value } });
-    }
+fn emitMulOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_MUL");
+}
 
-    fn pushInt(self: *NistTracker, name: ?[]const u8, value: i64) !void {
-        try self.emitPushInt(value);
-        try self.names.append(self.allocator, name);
-    }
+fn emitModOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_MOD");
+}
 
-    fn pushOwnedBytes(self: *NistTracker, name: ?[]const u8, value: []u8) !void {
-        try self.owned_bytes.append(self.allocator, value);
-        try self.emitRaw(.{ .push = .{ .bytes = value } });
-        try self.names.append(self.allocator, name);
-    }
+fn emit2DivOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_2DIV");
+}
 
-    fn pushStaticBytes(self: *NistTracker, name: ?[]const u8, value: []const u8) !void {
-        try self.emitRaw(.{ .push = .{ .bytes = value } });
-        try self.names.append(self.allocator, name);
-    }
+fn emitRshiftnumOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_RSHIFTNUM");
+}
 
-    fn pushBigIntBE(self: *NistTracker, name: ?[]const u8, be: []const u8) !void {
-        const encoded = try beToUnsignedScriptNumAlloc(self.allocator, be);
-        try self.pushOwnedBytes(name, encoded);
-    }
+fn emitNumEqualOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_NUMEQUAL");
+}
 
-    fn dup(self: *NistTracker, name: ?[]const u8) !void {
-        try self.emitRaw(.{ .dup = {} });
-        try self.names.append(self.allocator, name);
-    }
+fn emit0NotEqualOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_0NOTEQUAL");
+}
 
-    fn drop(self: *NistTracker) !void {
-        try self.emitRaw(.{ .drop = {} });
-        _ = self.names.pop();
-    }
-
-    fn swap(self: *NistTracker) !void {
-        try self.emitRaw(.{ .swap = {} });
-        const len = self.names.items.len;
-        if (len >= 2) {
-            const tmp = self.names.items[len - 1];
-            self.names.items[len - 1] = self.names.items[len - 2];
-            self.names.items[len - 2] = tmp;
-        }
-    }
-
-    fn over(self: *NistTracker, name: ?[]const u8) !void {
-        try self.emitRaw(.{ .over = {} });
-        try self.names.append(self.allocator, name);
-    }
-
-    fn rot(self: *NistTracker) !void {
-        try self.emitRaw(.{ .rot = {} });
-        const len = self.names.items.len;
-        if (len >= 3) {
-            const rolled = self.names.orderedRemove(len - 3);
-            try self.names.append(self.allocator, rolled);
-        }
-    }
-
-    fn roll(self: *NistTracker, depth_from_top: usize) !void {
-        if (depth_from_top == 0) return;
-        if (depth_from_top == 1) return self.swap();
-        if (depth_from_top == 2) return self.rot();
-        try self.emitRaw(.{ .roll = @intCast(depth_from_top) });
-        const idx = self.names.items.len - 1 - depth_from_top;
-        const rolled = self.names.orderedRemove(idx);
-        try self.names.append(self.allocator, rolled);
-    }
-
-    fn pick(self: *NistTracker, depth_from_top: usize, name: ?[]const u8) !void {
-        if (depth_from_top == 0) return self.dup(name);
-        if (depth_from_top == 1) return self.over(name);
-        try self.emitRaw(.{ .pick = @intCast(depth_from_top) });
-        try self.names.append(self.allocator, name);
-    }
-
-    fn toTop(self: *NistTracker, name: []const u8) !void {
-        try self.roll(try self.findDepth(name));
-    }
-
-    fn copyToTop(self: *NistTracker, name: []const u8, copy_name: ?[]const u8) !void {
-        try self.pick(try self.findDepth(name), copy_name);
-    }
-
-    fn renameTop(self: *NistTracker, name: ?[]const u8) void {
-        if (self.names.items.len > 0) {
-            self.names.items[self.names.items.len - 1] = name;
-        }
-    }
-
-    fn popNames(self: *NistTracker, count: usize) void {
-        var i: usize = 0;
-        while (i < count and self.names.items.len > 0) : (i += 1) {
-            _ = self.names.pop();
-        }
-    }
-
-    fn toAlt(self: *NistTracker) !void {
-        try self.emitOpcode("OP_TOALTSTACK");
-        _ = self.names.pop();
-    }
-
-    fn fromAlt(self: *NistTracker, name: ?[]const u8) !void {
-        try self.emitOpcode("OP_FROMALTSTACK");
-        try self.names.append(self.allocator, name);
-    }
-};
+fn emitModSequence(t: *NistTracker) !void {
+    try t.emitOpcode("OP_2DUP");
+    try t.emitOpcode("OP_MOD");
+    try t.emitRaw(.{ .rot = {} });
+    try t.emitRaw(.{ .drop = {} });
+    try t.emitRaw(.{ .over = {} });
+    try t.emitOpcode("OP_ADD");
+    try t.emitRaw(.{ .swap = {} });
+    try t.emitOpcode("OP_MOD");
+}
 
 // ===========================================================================
 // Byte reversal emitters (for coord_bytes = 32 or 48)
@@ -465,7 +395,7 @@ fn emitReverseN(t: *NistTracker, n: usize) !void {
     try t.emitOpcode("OP_0");
     try t.emitRaw(.{ .swap = {} });
     for (0..n) |_| {
-        try t.emitPushInt(1);
+        try t.emitPushIntRaw(1);
         try t.emitOpcode("OP_SPLIT");
         try t.emitRaw(.{ .rot = {} });
         try t.emitRaw(.{ .rot = {} });
@@ -487,9 +417,9 @@ fn emitBytesToUnsignedNum(t: *NistTracker, coord_bytes: usize) !void {
 /// Convert an unsigned script-num on TOS to N big-endian bytes.
 fn emitUnsignedNumToBeBytes(t: *NistTracker, coord_bytes: usize) !void {
     const n_plus_1 = @as(i64, @intCast(coord_bytes + 1));
-    try t.emitPushInt(n_plus_1);
+    try t.emitPushIntRaw(n_plus_1);
     try t.emitOpcode("OP_NUM2BIN");
-    try t.emitPushInt(@as(i64, @intCast(coord_bytes)));
+    try t.emitPushIntRaw(@as(i64, @intCast(coord_bytes)));
     try t.emitOpcode("OP_SPLIT");
     try t.emitRaw(.{ .drop = {} });
     try emitReverseN(t, coord_bytes);
@@ -499,111 +429,184 @@ fn emitUnsignedNumToBeBytes(t: *NistTracker, coord_bytes: usize) !void {
 // Point decompose / compose
 // ===========================================================================
 
-fn decomposePoint(t: *NistTracker, point_name: []const u8, x_name: []const u8, y_name: []const u8) !void {
-    const cb = t.params.coord_bytes;
+fn decomposePoint(
+    t: *NistTracker,
+    c: *const NistCurveParams,
+    point_name: []const u8,
+    x_name: []const u8,
+    y_name: []const u8,
+) !void {
+    const cb = c.coord_bytes;
     try t.toTop(point_name);
     t.popNames(1);
-    try t.emitPushInt(@intCast(cb));
+    try t.emitPushIntRaw(@intCast(cb));
     try t.emitOpcode("OP_SPLIT");
-    try t.names.append(t.allocator, "_dp_xb");
-    try t.names.append(t.allocator, "_dp_yb");
+    try t.pushTracked("_dp_xb", .unknown);
+    try t.pushTracked("_dp_yb", .unknown);
 
     // Convert y_bytes (on top) to num
     try t.toTop("_dp_yb");
     t.popNames(1);
     try emitBytesToUnsignedNum(t, cb);
-    try t.names.append(t.allocator, y_name);
+    try t.pushTracked(y_name, .unknown);
+    // A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+    // UNSIGNED: >= 0, but it may be up to 2^(8*cb) - 1 and therefore >= p. That
+    // gap is exactly what the subtraction precondition turns on — recording
+    // `.reduced` here would make `p256Add((0,1), (2^256-1,1))` wrong by exactly
+    // 2^256 - p while passing every ordinary test.
+    t.setDomain(y_name, .non_negative);
 
     // Convert x_bytes to num
     try t.toTop("_dp_xb");
     t.popNames(1);
     try emitBytesToUnsignedNum(t, cb);
-    try t.names.append(t.allocator, x_name);
+    try t.pushTracked(x_name, .unknown);
+    t.setDomain(x_name, .non_negative);
 
     try t.swap();
 }
 
-fn composePoint(t: *NistTracker, x_name: []const u8, y_name: []const u8, result_name: []const u8) !void {
-    const cb = t.params.coord_bytes;
+fn composePoint(
+    t: *NistTracker,
+    c: *const NistCurveParams,
+    x_name: []const u8,
+    y_name: []const u8,
+    result_name: []const u8,
+) !void {
+    const cb = c.coord_bytes;
 
     try t.toTop(x_name);
     t.popNames(1);
     try emitUnsignedNumToBeBytes(t, cb);
-    try t.names.append(t.allocator, "_cp_xb");
+    try t.pushTracked("_cp_xb", .unknown);
 
     try t.toTop(y_name);
     t.popNames(1);
     try emitUnsignedNumToBeBytes(t, cb);
-    try t.names.append(t.allocator, "_cp_yb");
+    try t.pushTracked("_cp_yb", .unknown);
 
     try t.toTop("_cp_xb");
     try t.toTop("_cp_yb");
     t.popNames(2);
     try t.emitOpcode("OP_CAT");
-    try t.names.append(t.allocator, result_name);
+    try t.pushTracked(result_name, .unknown);
 }
 
 // ===========================================================================
 // Field arithmetic (parameterized by the field prime)
 // ===========================================================================
 
-fn fieldMod(t: *NistTracker, a_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
+/// `a mod p` with no sign fix-up: 1 opcode instead of 7.
+///
+/// Sound only when the dividend is provably >= 0, because `OP_MOD` takes the
+/// sign of the dividend. The caller proves that; this function does not check.
+fn fieldModShort(t: *NistTracker, a_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
     try t.toTop(a_name);
-    try t.pushBigIntBE("_fmod_p", p_be);
-    t.popNames(2);
-    try t.emitOpcode("OP_2DUP");
-    try t.emitOpcode("OP_MOD");
-    try t.emitRaw(.{ .rot = {} });
-    try t.emitRaw(.{ .drop = {} });
-    try t.emitRaw(.{ .over = {} });
-    try t.emitOpcode("OP_ADD");
-    try t.emitRaw(.{ .swap = {} });
-    try t.emitOpcode("OP_MOD");
-    try t.names.append(t.allocator, result_name);
+    try pushFieldP(t, "_fmods_p", p_be);
+    try t.rawBlock(2, result_name, emitModOpcode);
+    t.setDomain(result_name, .reduced);
+}
+
+/// Does the cheap `a - b + p` subtraction shape pay here?
+///
+/// It references the prime TWICE where the shipping shape references it once and
+/// pays six more opcodes, so it only wins when the prime is cheap to materialise
+/// — i.e. when it is pooled. Without a pool the rewrite makes the script LARGER,
+/// which is why it is a cost comparison and not a flag.
+fn cheapSubPays(t: *const NistTracker, p_be: []const u8) bool {
+    const c = t.constCost(POOL_FIELD_P, scriptNumLen(p_be));
+    return 2 * c + 2 < c + 8;
+}
+
+fn fieldMod(t: *NistTracker, a_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
+    if (t.opts.reduction_sinking and t.domainOf(a_name).isNonNegative()) {
+        try fieldModShort(t, a_name, p_be, result_name);
+        return;
+    }
+    try t.toTop(a_name);
+    try pushFieldP(t, "_fmod_p", p_be);
+    try t.rawBlock(2, result_name, emitModSequence);
+    t.setDomain(result_name, .reduced);
 }
 
 fn fieldAdd(t: *NistTracker, a_name: []const u8, b_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
+    // Read the operand facts BEFORE rawBlock consumes their slots.
+    const sum_non_neg = t.domainOf(a_name).isNonNegative() and t.domainOf(b_name).isNonNegative();
     try t.toTop(a_name);
     try t.toTop(b_name);
-    t.popNames(2);
-    try t.emitOpcode("OP_ADD");
-    try t.names.append(t.allocator, "_fadd_sum");
+    try t.rawBlock(2, "_fadd_sum", emitAddOpcode);
+    if (sum_non_neg) t.setDomain("_fadd_sum", .non_negative);
     try fieldMod(t, "_fadd_sum", p_be, result_name);
 }
 
 fn fieldSub(t: *NistTracker, a_name: []const u8, b_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
     try t.toTop(a_name);
     try t.toTop(b_name);
-    t.popNames(2);
-    try t.emitOpcode("OP_SUB");
-    try t.names.append(t.allocator, "_fsub_diff");
+    // The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a single
+    // shifted reduction is exact. `b >= 0` alone is NOT enough — a coordinate
+    // decoded from 32 / 48 unsigned bytes can exceed p, which is precisely the
+    // `p256Add((0,1), (2^256-1,1))` counterexample.
+    const cheap = t.opts.reduction_sinking and
+        t.domainOf(a_name).isNonNegative() and
+        t.domainOf(b_name) == .reduced and
+        cheapSubPays(t, p_be);
+
+    try t.rawBlock(2, "_fsub_diff", emitSubOpcode);
+
+    if (cheap) {
+        try pushFieldP(t, "_fsub_p", p_be);
+        try t.rawBlock(2, "_fsub_shift", emitAddOpcode);
+        t.setDomain("_fsub_shift", .non_negative);
+        try fieldModShort(t, "_fsub_shift", p_be, result_name);
+        return;
+    }
     try fieldMod(t, "_fsub_diff", p_be, result_name);
 }
 
 fn fieldMul(t: *NistTracker, a_name: []const u8, b_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
+    try fieldMulSigned(t, a_name, b_name, p_be, result_name, false);
+}
+
+/// `fieldMul` with an explicit assertion about the product's sign, independent
+/// of the operands — `fieldSqr` uses it, since a*a >= 0 for any a whatsoever.
+fn fieldMulSigned(
+    t: *NistTracker,
+    a_name: []const u8,
+    b_name: []const u8,
+    p_be: []const u8,
+    result_name: []const u8,
+    product_non_negative: bool,
+) !void {
+    const non_neg = product_non_negative or
+        (t.domainOf(a_name).isNonNegative() and t.domainOf(b_name).isNonNegative());
     try t.toTop(a_name);
     try t.toTop(b_name);
-    t.popNames(2);
-    try t.emitOpcode("OP_MUL");
-    try t.names.append(t.allocator, "_fmul_prod");
+    try t.rawBlock(2, "_fmul_prod", emitMulOpcode);
+    if (non_neg) t.setDomain("_fmul_prod", .non_negative);
     try fieldMod(t, "_fmul_prod", p_be, result_name);
 }
 
+/// `(a * a) mod p`. A square is non-negative whatever a's sign is.
 fn fieldSqr(t: *NistTracker, a_name: []const u8, p_be: []const u8, result_name: []const u8) !void {
     try t.copyToTop(a_name, "_fsqr_copy");
-    try fieldMul(t, a_name, "_fsqr_copy", p_be, result_name);
+    try fieldMulSigned(t, a_name, "_fsqr_copy", p_be, result_name, true);
+}
+
+fn emit2MulOpcode(t: *NistTracker) !void {
+    try t.emitOpcode("OP_2MUL");
 }
 
 fn fieldMulConst(t: *NistTracker, a_name: []const u8, c: i64, p_be: []const u8, result_name: []const u8) !void {
+    // Every call site passes a small positive c, so the product keeps a's sign.
+    const non_neg = c > 0 and t.domainOf(a_name).isNonNegative();
     try t.toTop(a_name);
-    t.popNames(1);
     if (c == 2) {
-        try t.emitOpcode("OP_2MUL");
+        try t.rawBlock(1, "_fmc_prod", emit2MulOpcode);
     } else {
-        try t.emitPushInt(c);
-        try t.emitOpcode("OP_MUL");
+        try t.pushInt("_fmc_c", c);
+        try t.rawBlock(2, "_fmc_prod", emitMulOpcode);
     }
-    try t.names.append(t.allocator, "_fmc_prod");
+    if (non_neg) t.setDomain("_fmc_prod", .non_negative);
     try fieldMod(t, "_fmc_prod", p_be, result_name);
 }
 
@@ -648,27 +651,23 @@ fn fieldInv(t: *NistTracker, a_name: []const u8, exp_be: []const u8, p_be: []con
 // Group-order arithmetic (mod n)
 // ===========================================================================
 
+/// `((a mod n) + n) mod n`, always in the long form.
+///
+/// Deliberately NOT sunk the way `fieldMod` is. The lattice tracks values
+/// against the FIELD prime, and the pool's `.reduced` fact means "in [0, p)" —
+/// which says nothing about [0, n). Reusing the short form here would be
+/// proving a bound about the wrong modulus; the scalar reduce that gates the
+/// ladder's whole interval argument runs through this function.
 fn groupMod(t: *NistTracker, a_name: []const u8, n_be: []const u8, result_name: []const u8) !void {
     try t.toTop(a_name);
-    try t.pushBigIntBE("_gmod_n", n_be);
-    t.popNames(2);
-    try t.emitOpcode("OP_2DUP");
-    try t.emitOpcode("OP_MOD");
-    try t.emitRaw(.{ .rot = {} });
-    try t.emitRaw(.{ .drop = {} });
-    try t.emitRaw(.{ .over = {} });
-    try t.emitOpcode("OP_ADD");
-    try t.emitRaw(.{ .swap = {} });
-    try t.emitOpcode("OP_MOD");
-    try t.names.append(t.allocator, result_name);
+    try pushGroupN(t, "_gmod_n", n_be);
+    try t.rawBlock(2, result_name, emitModSequence);
 }
 
 fn groupMul(t: *NistTracker, a_name: []const u8, b_name: []const u8, n_be: []const u8, result_name: []const u8) !void {
     try t.toTop(a_name);
     try t.toTop(b_name);
-    t.popNames(2);
-    try t.emitOpcode("OP_MUL");
-    try t.names.append(t.allocator, "_gmul_prod");
+    try t.rawBlock(2, "_gmul_prod", emitMulOpcode);
     try groupMod(t, "_gmul_prod", n_be, result_name);
 }
 
@@ -717,20 +716,20 @@ fn groupInv(t: *NistTracker, a_name: []const u8, exp_be: []const u8, n_be: []con
 /// rejects even though both are documented as THE gate for untrusted points.
 fn emitCanonicityGuard(t: *NistTracker, x_name: []const u8, y_name: []const u8, p_be: []const u8) !void {
     try t.copyToTop(x_name, "_x_lt");
-    try t.pushBigIntBE("_p_for_x", p_be);
+    try pushFieldP(t, "_p_for_x", p_be);
     t.popNames(2);
     try t.emitOpcode("OP_LESSTHAN");
-    try t.names.append(t.allocator, "_x_canon");
+    try t.pushTracked("_x_canon", .unknown);
     try t.copyToTop(y_name, "_y_lt");
-    try t.pushBigIntBE("_p_for_y", p_be);
+    try pushFieldP(t, "_p_for_y", p_be);
     t.popNames(2);
     try t.emitOpcode("OP_LESSTHAN");
-    try t.names.append(t.allocator, "_y_canon");
+    try t.pushTracked("_y_canon", .unknown);
     try t.toTop("_x_canon");
     try t.toTop("_y_canon");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_canon");
+    try t.pushTracked("_canon", .unknown);
 }
 
 /// Affine point addition.
@@ -770,24 +769,25 @@ fn emitCanonicityGuard(t: *NistTracker, x_name: []const u8, y_name: []const u8, 
 ///
 /// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
 /// and notinf is 0 or 1, so the product is canonical either way.
-fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
+fn affineAdd(t: *NistTracker, c: *const NistCurveParams) !void {
+    const p_be = c.field_p_be;
     try t.copyToTop("px", "_px_eq");
     try t.copyToTop("qx", "_qx_eq");
     t.popNames(2);
     try t.emitOpcode("OP_NUMEQUAL");
-    try t.names.append(t.allocator, "_xeq");
+    try t.pushTracked("_xeq", .unknown);
 
     try t.copyToTop("py", "_py_eq");
     try t.copyToTop("qy", "_qy_eq");
     t.popNames(2);
     try t.emitOpcode("OP_NUMEQUAL");
-    try t.names.append(t.allocator, "_yeq");
+    try t.pushTracked("_yeq", .unknown);
 
     try t.copyToTop("_xeq", "_xeq_c");
     try t.toTop("_yeq");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_cond");
+    try t.pushTracked("_cond", .unknown);
 
     // notinf = NOT(xeq - cond): 1 exactly when px == qx and the points differ.
     try t.toTop("_xeq");
@@ -795,7 +795,7 @@ fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
     t.popNames(2);
     try t.emitOpcode("OP_SUB");
     try t.emitOpcode("OP_NOT");
-    try t.names.append(t.allocator, "_notinf");
+    try t.pushTracked("_notinf", .unknown);
 
     // chord numerator / denominator
     try t.copyToTop("qy", "_qy1");
@@ -829,7 +829,7 @@ fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
     try fieldMul(t, "_den_diff", "_cond_d", p_be, "_den_sel");
     try fieldAdd(t, "_den_chord", "_den_sel", p_be, "_s_den");
 
-    try fieldInv(t, "_s_den", t.params.field_p_minus_2_be, p_be, "_s_den_inv");
+    try fieldInv(t, "_s_den", c.field_p_minus_2_be, p_be, "_s_den_inv");
     try fieldMul(t, "_s_num", "_s_den_inv", p_be, "_s");
 
     try t.copyToTop("_s", "_s_keep");
@@ -860,12 +860,12 @@ fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
     try t.copyToTop("_notinf", "_notinf_x");
     t.popNames(2);
     try t.emitOpcode("OP_MUL");
-    try t.names.append(t.allocator, "rx");
+    try t.pushTracked("rx", .unknown);
     try t.toTop("ry");
     try t.toTop("_notinf");
     t.popNames(2);
     try t.emitOpcode("OP_MUL");
-    try t.names.append(t.allocator, "ry");
+    try t.pushTracked("ry", .unknown);
 }
 
 // ===========================================================================
@@ -958,11 +958,20 @@ fn jacobianToAffine(t: *NistTracker, rx_name: []const u8, ry_name: []const u8, p
 // Jacobian mixed addition (point_jacobian + point_affine) — for inside OP_IF
 // ===========================================================================
 
-fn buildJacobianAddAffineInline(allocator: Allocator, base_names: []const ?[]const u8, params: *const NistCurveParams) !EcOpBundle {
-    var inner = try NistTracker.init(allocator, base_names, params);
+fn buildJacobianAddAffineInline(
+    allocator: Allocator,
+    base_names: []const ?[]const u8,
+    params: *const NistCurveParams,
+    opts: EcCodegenOptions,
+    base_doms: []const Dom,
+) !EcOpBundle {
+    // The inner tracker inherits the stack state AND the lattice facts: the
+    // operands' proved domains are what decide which reduction shape the body
+    // emits, so dropping them here would silently fall back everywhere.
+    var inner = try NistTracker.initOpts(allocator, base_names, opts, base_doms);
     errdefer inner.deinit();
 
-    try jacobianAddAffineBody(&inner, false);
+    try jacobianAddAffineBody(&inner, params, false);
     return inner.takeBundle();
 }
 
@@ -972,8 +981,8 @@ fn buildJacobianAddAffineInline(allocator: Allocator, base_names: []const ?[]con
 /// exactly when the Jacobian accumulator is the same curve point as the affine
 /// operand, the one case these formulas cannot compute. See
 /// buildJacobianAddOrDoubleInline.
-fn jacobianAddAffineBody(inner: *NistTracker, keep_hr: bool) !void {
-    const p_be = inner.params.field_p_be;
+fn jacobianAddAffineBody(inner: *NistTracker, c: *const NistCurveParams, keep_hr: bool) !void {
+    const p_be = c.field_p_be;
 
     try inner.copyToTop("jz", "_jz_for_z1cu");
     try inner.copyToTop("jz", "_jz_for_z3");
@@ -1049,12 +1058,13 @@ fn jacobianAddAffineBody(inner: *NistTracker, keep_hr: bool) !void {
 /// Consumes add_name, dbl_name and cond_name.
 fn selectCoord(
     t: *NistTracker,
+    c: *const NistCurveParams,
     add_name: []const u8,
     dbl_name: []const u8,
     cond_name: []const u8,
     result_name: []const u8,
 ) !void {
-    const p_be = t.params.field_p_be;
+    const p_be = c.field_p_be;
     try t.copyToTop(add_name, "_sel_add_c");
     try fieldSub(t, dbl_name, "_sel_add_c", p_be, "_sel_diff");
     try fieldMul(t, "_sel_diff", cond_name, p_be, "_sel_scaled");
@@ -1111,8 +1121,14 @@ fn selectCoord(
 /// the reduce must redo the interval check, not assume this still holds.
 ///
 /// Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
-fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]const u8, params: *const NistCurveParams) !EcOpBundle {
-    var inner = try NistTracker.init(allocator, base_names, params);
+fn buildJacobianAddOrDoubleInline(
+    allocator: Allocator,
+    base_names: []const ?[]const u8,
+    params: *const NistCurveParams,
+    opts: EcCodegenOptions,
+    base_doms: []const Dom,
+) !EcOpBundle {
+    var inner = try NistTracker.initOpts(allocator, base_names, opts, base_doms);
     errdefer inner.deinit();
 
     const p_be = params.field_p_be;
@@ -1123,7 +1139,7 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
     try inner.copyToTop("jy", "_sy");
     try inner.copyToTop("jz", "_sz");
 
-    try jacobianAddAffineBody(&inner, true);
+    try jacobianAddAffineBody(&inner, params, true);
 
     // cond = (H == 0) AND (R == 0). Requiring R == 0 too keeps the
     // accumulator == -P case (k = 0) on the add path, where Z3 = 0 correctly
@@ -1132,17 +1148,17 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
     try inner.pushInt("_zero_h", 0);
     inner.popNames(2);
     try inner.emitOpcode("OP_NUMEQUAL");
-    try inner.names.append(inner.allocator, "_h_is0");
+    try inner.pushTracked("_h_is0", .unknown);
     try inner.toTop("_R_keep");
     try inner.pushInt("_zero_r", 0);
     inner.popNames(2);
     try inner.emitOpcode("OP_NUMEQUAL");
-    try inner.names.append(inner.allocator, "_r_is0");
+    try inner.pushTracked("_r_is0", .unknown);
     try inner.toTop("_h_is0");
     try inner.toTop("_r_is0");
     inner.popNames(2);
     try inner.emitOpcode("OP_BOOLAND");
-    try inner.names.append(inner.allocator, "_cond");
+    try inner.pushTracked("_cond", .unknown);
 
     // Move the add result aside so jacobianDouble can work on jx/jy/jz again,
     // this time holding the saved accumulator.
@@ -1167,12 +1183,12 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
     inner.renameTop("_dbl_z");
 
     try inner.copyToTop("_cond", "_cond_x");
-    try selectCoord(&inner, "_add_x", "_dbl_x", "_cond_x", "jx");
+    try selectCoord(&inner, params, "_add_x", "_dbl_x", "_cond_x", "jx");
     try inner.copyToTop("_cond", "_cond_y");
-    try selectCoord(&inner, "_add_y", "_dbl_y", "_cond_y", "jy");
+    try selectCoord(&inner, params, "_add_y", "_dbl_y", "_cond_y", "jy");
     try inner.toTop("_cond");
     inner.renameTop("_cond_z");
-    try selectCoord(&inner, "_add_z", "_dbl_z", "_cond_z", "jz");
+    try selectCoord(&inner, params, "_add_z", "_dbl_z", "_cond_z", "jz");
 
     return inner.takeBundle();
 }
@@ -1184,32 +1200,49 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
 /// buildScalarMulBundle creates a standalone bundle for scalar multiplication.
 /// Expects exactly two items on the stack: [point, scalar] (scalar on top).
 /// Produces exactly one result item: the result point.
-fn buildScalarMulBundle(allocator: Allocator, params: *const NistCurveParams) !EcOpBundle {
-    var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, params);
+fn buildScalarMulBundle(
+    allocator: Allocator,
+    params: *const NistCurveParams,
+    opts: EcCodegenOptions,
+) !EcOpBundle {
+    var t = try NistTracker.initOpts(allocator, &.{ "_pt", "_k" }, opts, null);
     errdefer t.deinit();
-    try emitScalarMulOnTracker(&t);
+    try emitScalarMulOnTracker(&t, params);
     return t.takeBundle();
 }
 
 /// emitScalarMulOnTracker performs scalar mul using the tracker's current names.
 /// The tracker must have "_pt" and "_k" as named items (in any position).
-fn emitScalarMulOnTracker(t: *NistTracker) !void {
-    const c = t.params;
+fn emitScalarMulOnTracker(t: *NistTracker, c: *const NistCurveParams) !void {
     const p_be = c.field_p_be;
 
-    try decomposePoint(t, "_pt", "ax", "ay");
+    try t.poolConstant(POOL_FIELD_P, c.field_p_be);
+    try t.poolConstant(POOL_GROUP_N, c.group_n_be);
+    try decomposePoint(t, c, "_pt", "ax", "ay");
 
-    // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
+    // k' = k + 3n, PRE-FOLDED — on every path, including the pooled ones.
+    //
+    // The reference emits three literal `+n` steps (`cEmitMul`, raw `pushInt`
+    // under every flag combination) and lets its peephole reassociate them back
+    // to `push 3n; OP_ADD`. This tier's peephole folds only i64 `push_int`
+    // chains (peephole.zig rule 27) and a 256/384-bit constant is a `push_data`
+    // blob here, so three steps would SHIP 70 / 102 extra bytes rather than
+    // collapsing. Same shipped bytes as the reference, different pre-peephole
+    // spelling — which is why the Zig parity test allows exactly that delta on
+    // exactly these emitters and zero everywhere else.
+    //
+    // Note this differs from the secp256k1 ladder next door: there the reference
+    // uses POOLED pushes, so that tier emits three pooled steps and matches
+    // raw-for-raw whenever the pool is on. Do not copy this shape there, or that
+    // one here.
     //
     // The "k in [1, n-1]" precondition is one the caller cannot enforce — the
     // scalar is usually an unlock argument — so reduce it to [0, n-1] first.
     // groupMod IS ((k mod n) + n) mod n, which is exactly that.
     try t.toTop("_k");
     try groupMod(t, "_k", c.group_n_be, "_kr");
-    try t.pushBigIntBE("_3n", c.three_n_be);
-    t.popNames(2);
-    try t.emitOpcode("OP_ADD");
-    try t.names.append(t.allocator, "_k");
+    try pushBigIntBE(t, "_3n", c.three_n_be);
+    try t.rawBlock(2, "_k", emitAddOpcode);
 
     // Determine iteration count based on 3n bit length.
     // The max value of k+3n is 4n-1 which has the same MSB as 3n.
@@ -1230,19 +1263,19 @@ fn emitScalarMulOnTracker(t: *NistTracker) !void {
         if (bit == 1) {
             t.popNames(1);
             try t.emitOpcode("OP_2DIV");
-            try t.names.append(t.allocator, "_shifted");
+            try t.pushTracked("_shifted", .unknown);
         } else if (bit > 1) {
             try t.pushInt("_shift", bit);
             t.popNames(2);
             try t.emitOpcode("OP_RSHIFTNUM");
-            try t.names.append(t.allocator, "_shifted");
+            try t.pushTracked("_shifted", .unknown);
         } else {
             t.renameTop("_shifted");
         }
         try t.pushInt("_two", 2);
         t.popNames(2);
         try t.emitOpcode("OP_MOD");
-        try t.names.append(t.allocator, "_bit");
+        try t.pushTracked("_bit", .unknown);
 
         // Conditional add
         try t.toTop("_bit");
@@ -1251,9 +1284,9 @@ fn emitScalarMulOnTracker(t: *NistTracker) !void {
         // Only the final step can be handed two equal operands — see
         // buildJacobianAddOrDoubleInline for why, and for what it costs not to.
         var add_bundle = if (bit == 0)
-            try buildJacobianAddOrDoubleInline(t.allocator, t.names.items, c)
+            try buildJacobianAddOrDoubleInline(t.allocator, t.names.items, c, t.opts, t.doms.items)
         else
-            try buildJacobianAddAffineInline(t.allocator, t.names.items, c);
+            try buildJacobianAddAffineInline(t.allocator, t.names.items, c, t.opts, t.doms.items);
         errdefer add_bundle.deinit();
 
         try t.owned_bytes.appendSlice(t.allocator, add_bundle.owned_bytes);
@@ -1273,15 +1306,24 @@ fn emitScalarMulOnTracker(t: *NistTracker) !void {
     try t.toTop("_k");
     try t.drop();
 
-    try composePoint(t, "_rx", "_ry", "_result");
+    try composePoint(t, c, "_rx", "_ry", "_result");
+    try t.releaseConstant(POOL_GROUP_N);
+    try t.releaseConstant(POOL_FIELD_P);
 }
 
 /// emitScalarMulInline emits scalar mul ops into `outer` tracker.
 /// Before calling, the outer tracker must have pushed the point and scalar
 /// (point then scalar, scalar on top) and removed their names via popNames(2).
 /// After the call, one result name is appended to the outer tracker.
-fn emitScalarMulInline(outer: *NistTracker, result_name: []const u8) !void {
-    var bundle = try buildScalarMulBundle(outer.allocator, outer.params);
+fn emitScalarMulInline(
+    outer: *NistTracker,
+    params: *const NistCurveParams,
+    result_name: []const u8,
+) !void {
+    // The ladder runs on its OWN tracker seeded with just its two operands, so
+    // it cannot see — and cannot pool against — anything the caller left below
+    // them. That is why it pools its own copies of p and n.
+    var bundle = try buildScalarMulBundle(outer.allocator, params, outer.opts);
     errdefer bundle.deinit();
 
     // Transfer owned_bytes pointers to outer tracker, then free the outer slice.
@@ -1294,7 +1336,310 @@ fn emitScalarMulInline(outer: *NistTracker, result_name: []const u8) !void {
     outer.allocator.free(bundle.ops);
     bundle.ops = &.{}; // prevent double-free in errdefer/deinit
 
-    try outer.names.append(outer.allocator, result_name);
+    try outer.pushTracked(result_name, .unknown);
+}
+
+// ===========================================================================
+// Fixed-base comb (P-256 / P-384)
+// ===========================================================================
+
+/// Render a comb table coordinate as a `len`-byte big-endian buffer.
+fn combCoordBeAlloc(allocator: Allocator, v: comb.Big, len: usize) ![]u8 {
+    const out = try allocator.alloc(u8, len);
+    var x = v;
+    var i: usize = len;
+    while (i > 0) {
+        i -= 1;
+        out[i] = @truncate(@as(u1024, @intCast(x)) & 0xff);
+        x >>= 8;
+    }
+    return out;
+}
+
+/// Push a comb table coordinate as an unsigned script number.
+fn pushCombCoord(t: *NistTracker, name: []const u8, v: comb.Big, len: usize) !void {
+    const be = try combCoordBeAlloc(t.allocator, v, len);
+    defer t.allocator.free(be);
+    const encoded = try beToUnsignedScriptNumAlloc(t.allocator, be);
+    try t.pushOwnedBytes(name, encoded);
+}
+
+/// Round `i`'s digit and the selected table entry, as `ax`/`ay`/`_flag`.
+///
+/// Exactly one equality holds, so `sum(eq_j * T_j)` is that entry's coordinate
+/// and every term is non-negative and below p — no reduction is needed, and the
+/// result is `.reduced` by construction. When the digit is zero every term
+/// vanishes and `_flag` is 0, so no add runs.
+fn combEmitSelect(t: *NistTracker, i: usize, w: usize, d: usize) !void {
+    var buf: [24]u8 = undefined;
+    const entries = (@as(usize, 1) << @intCast(w)) - 1;
+
+    var b: usize = 0;
+    while (b < w) : (b += 1) {
+        const shift = i + b * d;
+        const kc = try t.internName(try std.fmt.bufPrint(&buf, "_kc{d}", .{b}));
+        const sh = try t.internName(try std.fmt.bufPrint(&buf, "_sh{d}", .{b}));
+        try t.copyToTop("_k", kc);
+        if (shift == 0) {
+            t.renameTop(sh);
+        } else if (shift == 1) {
+            try t.rawBlock(1, sh, emit2DivOpcode);
+        } else {
+            const sd = try t.internName(try std.fmt.bufPrint(&buf, "_sd{d}", .{b}));
+            try t.pushInt(sd, @intCast(shift));
+            try t.rawBlock(2, sh, emitRshiftnumOpcode);
+        }
+        const two = try t.internName(try std.fmt.bufPrint(&buf, "_two{d}", .{b}));
+        const bit = try t.internName(try std.fmt.bufPrint(&buf, "_b{d}", .{b}));
+        try t.pushInt(two, 2);
+        try t.rawBlock(2, bit, emitModOpcode);
+        t.setDomain(bit, .reduced);
+    }
+
+    try t.toTop("_b0");
+    t.renameTop("_idx");
+    b = 1;
+    while (b < w) : (b += 1) {
+        const bit = try t.internName(try std.fmt.bufPrint(&buf, "_b{d}", .{b}));
+        const wt = try t.internName(try std.fmt.bufPrint(&buf, "_wt{d}", .{b}));
+        const bw = try t.internName(try std.fmt.bufPrint(&buf, "_bw{d}", .{b}));
+        try t.toTop(bit);
+        try t.pushInt(wt, @as(i64, 1) << @intCast(b));
+        try t.rawBlock(2, bw, emitMulOpcode);
+        try t.toTop("_idx");
+        try t.rawBlock(2, "_idx", emitAddOpcode);
+    }
+    t.setDomain("_idx", .reduced);
+
+    var j: usize = 1;
+    while (j <= entries) : (j += 1) {
+        const ic = try t.internName(try std.fmt.bufPrint(&buf, "_ic{d}", .{j}));
+        const jv = try t.internName(try std.fmt.bufPrint(&buf, "_jv{d}", .{j}));
+        const eq = try t.internName(try std.fmt.bufPrint(&buf, "_eq{d}", .{j}));
+        try t.copyToTop("_idx", ic);
+        try t.pushInt(jv, @intCast(j));
+        try t.rawBlock(2, eq, emitNumEqualOpcode);
+        t.setDomain(eq, .reduced);
+    }
+
+    for ([_][]const u8{ "x", "y" }) |coord| {
+        const acc: []const u8 = if (coord[0] == 'x') "ax" else "ay";
+        j = 1;
+        while (j <= entries) : (j += 1) {
+            const ec_n = try t.internName(try std.fmt.bufPrint(&buf, "_e{s}{d}", .{ coord, j }));
+            const tc = try t.internName(try std.fmt.bufPrint(&buf, "_t{s}{d}", .{ coord, j }));
+            const pr = try t.internName(try std.fmt.bufPrint(&buf, "_pr{s}{d}", .{ coord, j }));
+            const eq = try t.internName(try std.fmt.bufPrint(&buf, "_eq{d}", .{j}));
+            const tj = try t.internName(try std.fmt.bufPrint(&buf, "_T{s}{d}", .{ coord, j }));
+            try t.copyToTop(eq, ec_n);
+            try t.copyToTop(tj, tc);
+            try t.rawBlock(2, pr, emitMulOpcode);
+            if (j == 1) {
+                t.renameTop(acc);
+            } else {
+                try t.toTop(acc);
+                try t.rawBlock(2, acc, emitAddOpcode);
+            }
+        }
+        t.setDomain(acc, .reduced);
+    }
+
+    j = entries;
+    while (j >= 1) : (j -= 1) {
+        const eq = try t.internName(try std.fmt.bufPrint(&buf, "_eq{d}", .{j}));
+        try t.toTop(eq);
+        try t.drop();
+        if (j == 1) break;
+    }
+
+    try t.toTop("_idx");
+    try t.rawBlock(1, "_flag", emit0NotEqualOpcode);
+}
+
+/// `k*G` by a Lim-Lee fixed-base comb instead of the binary ladder.
+///
+/// The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+/// the scalar into `w` blocks of `d` bits and reads one bit from each block per
+/// round, so it performs one doubling and one conditional add per COLUMN: the
+/// round count falls from `w*d` to `d` at the price of a `2^w - 1` entry table.
+/// G is a compile-time constant here, so the table costs nothing to build.
+///
+/// SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+/// accumulator equal to the addend, its negation, or the point at infinity.
+/// `buildJacobianAddOrDoubleInline`'s comment justifies using it everywhere but
+/// the ladder's LAST step by an interval argument over `c_i mod n`, and insists
+/// that argument be re-derived by anything changing the offset or the iteration
+/// count. A comb changes both, so it is re-derived: `comb.combSafeRounds`
+/// evaluates the same argument as executable interval arithmetic over the comb's
+/// own geometry, and any round it cannot prove gets the complete add-or-double
+/// form instead. Nothing is assumed safe.
+///
+/// The other half of that argument is that the accumulator never starts at
+/// infinity, which needs the first digit non-zero. `comb.combGeometry` searches
+/// for the scalar offset that guarantees it rather than reusing the ladder's
+/// hardcoded `+3n` — right for P-256 at w=3 (m=3), WRONG for P-384 at w=3,
+/// where the search returns m=5. Assuming `+3n` there would let the leading
+/// digit vanish and start the accumulator at infinity.
+///
+/// Stack in: [_k]. Stack out: [_result]. False when no geometry exists for `w`.
+fn emitCombMulGen(t: *NistTracker, c: *const NistCurveParams, w: usize) !bool {
+    const curve = c.comb_curve;
+    const params = comb.combGeometry(w, curve) orelse return false;
+    const d = params.d;
+    if (d > comb.MAX_D) return false;
+    var table: [1 << comb.MAX_W]?comb.Point = undefined;
+    comb.combTable(w, d, curve, &table);
+    var safe: [comb.MAX_D]bool = undefined;
+    comb.combSafeRounds(params, curve, &safe);
+    const entries = (@as(usize, 1) << @intCast(w)) - 1;
+    const p_be = c.field_p_be;
+    var buf: [24]u8 = undefined;
+
+    try t.poolConstant(POOL_FIELD_P, c.field_p_be);
+    try t.poolConstant(POOL_GROUP_N, c.group_n_be);
+
+    // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+    // what makes the interval argument apply at all.
+    try t.toTop("_k");
+    try groupMod(t, "_k", c.group_n_be, "_kr");
+    t.renameTop("_k");
+    var i: usize = 0;
+    while (i < params.offset_multiple) : (i += 1) {
+        const off = try t.internName(try std.fmt.bufPrint(&buf, "_off{d}", .{i}));
+        try pushGroupN(t, off, c.group_n_be);
+        try t.rawBlock(2, "_k", emitAddOpcode);
+    }
+    t.setDomain("_k", .non_negative);
+
+    // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+    // against a 33 / 49-byte literal push, and every round reads all of them.
+    var j: usize = 1;
+    while (j <= entries) : (j += 1) {
+        const pt = table[j].?;
+        const tx = try t.internName(try std.fmt.bufPrint(&buf, "_Tx{d}", .{j}));
+        const ty = try t.internName(try std.fmt.bufPrint(&buf, "_Ty{d}", .{j}));
+        try pushCombCoord(t, tx, pt.x, c.coord_bytes);
+        try pushCombCoord(t, ty, pt.y, c.coord_bytes);
+        t.setDomain(tx, .reduced);
+        t.setDomain(ty, .reduced);
+    }
+
+    // Round d-1 initialises the accumulator. The first digit is non-zero by
+    // construction (combGeometry), so this is a real point, never infinity.
+    try combEmitSelect(t, d - 1, w, d);
+    try t.toTop("_flag");
+    try t.drop();
+    try t.toTop("ax");
+    t.renameTop("jx");
+    try t.toTop("ay");
+    t.renameTop("jy");
+    try t.pushInt("jz", 1);
+    t.setDomain("jz", .reduced);
+
+    var round: usize = d - 1;
+    while (round > 0) {
+        round -= 1;
+        try jacobianDouble(t, p_be);
+        try combEmitSelect(t, round, w, d);
+
+        // `jacobianAddAffineBody` documents its layout as
+        // [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at the
+        // top. The selection leaves ax/ay above jz, so restore the contract
+        // before the branch — otherwise the add arm would reorder the stack and
+        // the empty else arm would not, leaving the two arms with different
+        // layouts at OP_ENDIF.
+        try t.toTop("_flag");
+        try t.toAlt();
+        try t.toTop("jx");
+        try t.toTop("jy");
+        try t.toTop("jz");
+        try t.fromAlt("_flag");
+
+        t.popNames(1); // consumed by OP_IF
+        var add_bundle = if (safe[round])
+            try buildJacobianAddAffineInline(t.allocator, t.names.items, c, t.opts, t.doms.items)
+        else
+            try buildJacobianAddOrDoubleInline(t.allocator, t.names.items, c, t.opts, t.doms.items);
+        errdefer add_bundle.deinit();
+
+        try t.owned_bytes.appendSlice(t.allocator, add_bundle.owned_bytes);
+        t.allocator.free(add_bundle.owned_bytes);
+        add_bundle.owned_bytes = &.{};
+        try t.emitRaw(.{ .@"if" = .{ .then = add_bundle.ops, .@"else" = null } });
+        add_bundle.ops = &.{};
+
+        // The addend was selected fresh for this round; the add only copied it.
+        try t.toTop("ay");
+        try t.drop();
+        try t.toTop("ax");
+        try t.drop();
+    }
+
+    try jacobianToAffine(t, "_rx", "_ry", p_be, c.field_p_minus_2_be);
+
+    j = entries;
+    while (j >= 1) : (j -= 1) {
+        const ty = try t.internName(try std.fmt.bufPrint(&buf, "_Ty{d}", .{j}));
+        const tx = try t.internName(try std.fmt.bufPrint(&buf, "_Tx{d}", .{j}));
+        try t.toTop(ty);
+        try t.drop();
+        try t.toTop(tx);
+        try t.drop();
+        if (j == 1) break;
+    }
+    try t.toTop("_k");
+    try t.drop();
+
+    try composePoint(t, c, "_rx", "_ry", "_result");
+    try t.releaseConstant(POOL_GROUP_N);
+    try t.releaseConstant(POOL_FIELD_P);
+    return true;
+}
+
+/// Emit the cheapest comb over the candidate window widths into `t`.
+///
+/// Each candidate is rendered in full and scored with the same byte-cost model
+/// the emitter is measured by, and the smallest wins — the window width is not
+/// hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the `2^w`
+/// selection logic outgrows the saving.
+///
+/// Returns false when no candidate could be built, so the caller falls back to
+/// the ladder rather than emitting nothing.
+fn emitCombBest(t: *NistTracker, c: *const NistCurveParams) !bool {
+    var best_w: ?usize = null;
+    var best_bytes: usize = 0;
+    for ([_]usize{ 2, 3, 4 }) |w| {
+        var probe = try NistTracker.initOpts(t.allocator, t.names.items, t.opts, t.doms.items);
+        defer probe.deinit();
+        const built = emitCombMulGen(&probe, c, w) catch continue;
+        if (!built) continue;
+        const bytes = ec.estimateScriptBytes(probe.ops.items);
+        if (best_w == null or bytes < best_bytes) {
+            best_w = w;
+            best_bytes = bytes;
+        }
+    }
+    const w = best_w orelse return false;
+    return emitCombMulGen(t, c, w);
+}
+
+/// The comb as a standalone bundle, for `emitVerifyECDSA`'s `u1*G` half.
+///
+/// Null when no candidate builds, so the caller falls back to pushing G and
+/// running the ladder. Like the ladder, it runs on its own tracker seeded with
+/// just `_k` and cannot see the verifier's stack.
+fn buildCombBundle(
+    allocator: Allocator,
+    c: *const NistCurveParams,
+    opts: EcCodegenOptions,
+) !?EcOpBundle {
+    var t = try NistTracker.initOpts(allocator, &.{"_k"}, opts, null);
+    errdefer t.deinit();
+    if (!try emitCombBest(&t, c)) {
+        t.deinit();
+        return null;
+    }
+    return try t.takeBundle();
 }
 
 // ===========================================================================
@@ -1360,17 +1705,22 @@ fn fieldPow(t: *NistTracker, base_name: []const u8, exp_be: []const u8, p_be: []
 /// boolean-valued builtin and turning attacker-chosen bytes into a script abort
 /// would be a liveness regression — the same argument the scalar reduce makes
 /// for reducing rather than rejecting.
-fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, qy_name: []const u8) !void {
-    const c = t.params;
+fn decompressPubKey(
+    t: *NistTracker,
+    c: *const NistCurveParams,
+    pk_name: []const u8,
+    qx_name: []const u8,
+    qy_name: []const u8,
+) !void {
     const p_be = c.field_p_be;
 
     try t.toTop(pk_name);
     t.popNames(1);
     // Split: [prefix_byte, x_bytes]
-    try t.emitPushInt(1);
+    try t.emitPushIntRaw(1);
     try t.emitOpcode("OP_SPLIT");
-    try t.names.append(t.allocator, "_dk_prefix");
-    try t.names.append(t.allocator, "_dk_xbytes");
+    try t.pushTracked("_dk_prefix", .unknown);
+    try t.pushTracked("_dk_xbytes", .unknown);
 
     // SEC1 §2.3.4 requires the prefix to be exactly 0x02 or 0x03. The parity
     // reduction below is `BIN2NUM, 2 MOD`, which accepts far more than that:
@@ -1387,15 +1737,15 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
     try t.emitRaw(.{ .push = .{ .bytes = &.{0x03} } });
     try t.emitOpcode("OP_EQUAL");
     try t.emitOpcode("OP_BOOLOR");
-    try t.names.append(t.allocator, "_dk_pfx_ok");
+    try t.pushTracked("_dk_pfx_ok", .unknown);
 
     // Convert prefix to parity: 0x02 -> 0, 0x03 -> 1
     try t.toTop("_dk_prefix");
     t.popNames(1);
     try t.emitOpcode("OP_BIN2NUM");
-    try t.emitPushInt(2);
+    try t.emitPushIntRaw(2);
     try t.emitOpcode("OP_MOD");
-    try t.names.append(t.allocator, "_dk_parity");
+    try t.pushTracked("_dk_parity", .unknown);
 
     // Stash parity on altstack
     try t.toAlt();
@@ -1404,7 +1754,7 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
     try t.toTop("_dk_xbytes");
     t.popNames(1);
     try emitBytesToUnsignedNum(t, c.coord_bytes);
-    try t.names.append(t.allocator, "_dk_x");
+    try t.pushTracked("_dk_x", .unknown);
 
     // Save x for later
     try t.copyToTop("_dk_x", "_dk_x_save");
@@ -1421,7 +1771,7 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
     // x^3 - 3x
     try fieldSub(t, "_dk_x3", "_dk_3x", p_be, "_dk_x3m3x");
     // + b
-    try t.pushBigIntBE("_dk_b", c.curve_b_be);
+    try pushBigIntBE(t, "_dk_b", c.curve_b_be);
     try fieldAdd(t, "_dk_x3m3x", "_dk_b", p_be, "_dk_y2");
 
     // y = (y^2)^sqrtExp mod p. fieldPow CONSUMES its base, so keep a copy of
@@ -1434,9 +1784,9 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
     // Check if candidate y has the right parity
     try t.copyToTop("_dk_y_cand", "_dk_y_check");
     t.popNames(1);
-    try t.emitPushInt(2);
+    try t.emitPushIntRaw(2);
     try t.emitOpcode("OP_MOD");
-    try t.names.append(t.allocator, "_dk_y_par");
+    try t.pushTracked("_dk_y_par", .unknown);
 
     // Retrieve parity from altstack
     try t.fromAlt("_dk_parity");
@@ -1446,15 +1796,15 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
     try t.toTop("_dk_parity");
     t.popNames(2);
     try t.emitOpcode("OP_EQUAL");
-    try t.names.append(t.allocator, "_dk_match");
+    try t.pushTracked("_dk_match", .unknown);
 
     // Compute p - y_cand
     try t.copyToTop("_dk_y_cand", "_dk_y_for_neg");
-    try t.pushBigIntBE("_dk_pfn", p_be);
+    try pushFieldP(t, "_dk_pfn", p_be);
     try t.toTop("_dk_y_for_neg");
     t.popNames(2);
     try t.emitOpcode("OP_SUB");
-    try t.names.append(t.allocator, "_dk_neg_y");
+    try t.pushTracked("_dk_neg_y", .unknown);
 
     // Use OP_IF to select: if match, use y_cand (drop neg_y), else use neg_y (drop y_cand)
     try t.toTop("_dk_match");
@@ -1481,7 +1831,7 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
         }
     }
     if (neg_idx) |idx| {
-        _ = t.names.orderedRemove(idx);
+        _ = t.removeSlotAt(idx);
     }
 
     // Rename _dk_y_cand -> qyName and _dk_x_save -> qxName
@@ -1523,24 +1873,24 @@ fn decompressPubKey(t: *NistTracker, pk_name: []const u8, qx_name: []const u8, q
     try t.toTop("_dk_y2_keep");
     t.popNames(2);
     try t.emitOpcode("OP_NUMEQUAL");
-    try t.names.append(t.allocator, "_dk_res_ok");
+    try t.pushTracked("_dk_res_ok", .unknown);
 
     try t.copyToTop(qx_name, "_dk_x_lt");
-    try t.pushBigIntBE("_dk_p_lt", p_be);
+    try pushFieldP(t, "_dk_p_lt", p_be);
     t.popNames(2);
     try t.emitOpcode("OP_LESSTHAN");
-    try t.names.append(t.allocator, "_dk_x_ok");
+    try t.pushTracked("_dk_x_ok", .unknown);
 
     try t.toTop("_dk_res_ok");
     try t.toTop("_dk_x_ok");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_dk_curve_ok");
+    try t.pushTracked("_dk_curve_ok", .unknown);
 
     try t.toTop("_dk_pfx_ok");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_dk_valid");
+    try t.pushTracked("_dk_valid", .unknown);
 }
 
 // ===========================================================================
@@ -1569,7 +1919,7 @@ fn emitLengthGate(t: *NistTracker, name: []const u8, want: usize, flag_name: []c
     try t.toTop(name);
     t.popNames(1);
     try t.emitOpcode("OP_SIZE");
-    try t.emitPushInt(@intCast(want));
+    try t.emitPushIntRaw(@intCast(want));
     try t.emitOpcode("OP_NUMEQUAL");
     try t.emitRaw(.{ .swap = {} });
     const pad = try t.allocator.alloc(u8, want);
@@ -1577,11 +1927,11 @@ fn emitLengthGate(t: *NistTracker, name: []const u8, want: usize, flag_name: []c
     try t.owned_bytes.append(t.allocator, pad);
     try t.emitRaw(.{ .push = .{ .bytes = pad } });
     try t.emitOpcode("OP_CAT");
-    try t.emitPushInt(@intCast(want));
+    try t.emitPushIntRaw(@intCast(want));
     try t.emitOpcode("OP_SPLIT");
     try t.emitRaw(.{ .drop = {} });
-    try t.names.append(t.allocator, flag_name);
-    try t.names.append(t.allocator, name);
+    try t.pushTracked(flag_name, .unknown);
+    try t.pushTracked(name, .unknown);
 }
 
 /// SEC1 §4.1.4 step 1 / FIPS 186-5 §6.4.2: verify 1 <= r <= n-1 and
@@ -1620,44 +1970,49 @@ fn emitSigRangeGate(t: *NistTracker, n_be: []const u8) !void {
     try t.copyToTop("_r", "_r_nz_in");
     t.popNames(1);
     try t.emitOpcode("OP_0NOTEQUAL");
-    try t.names.append(t.allocator, "_r_nz");
+    try t.pushTracked("_r_nz", .unknown);
 
     try t.copyToTop("_r", "_r_lt_in");
-    try t.pushBigIntBE("_n_for_r", n_be);
+    try pushGroupN(t, "_n_for_r", n_be);
     t.popNames(2);
     try t.emitOpcode("OP_LESSTHAN");
-    try t.names.append(t.allocator, "_r_lt");
+    try t.pushTracked("_r_lt", .unknown);
 
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_r_ok");
+    try t.pushTracked("_r_ok", .unknown);
 
     try t.copyToTop("_s", "_s_nz_in");
     t.popNames(1);
     try t.emitOpcode("OP_0NOTEQUAL");
-    try t.names.append(t.allocator, "_s_nz");
+    try t.pushTracked("_s_nz", .unknown);
 
     try t.copyToTop("_s", "_s_lt_in");
-    try t.pushBigIntBE("_n_for_s", n_be);
+    try pushGroupN(t, "_n_for_s", n_be);
     t.popNames(2);
     try t.emitOpcode("OP_LESSTHAN");
-    try t.names.append(t.allocator, "_s_lt");
+    try t.pushTracked("_s_lt", .unknown);
 
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_s_ok");
+    try t.pushTracked("_s_ok", .unknown);
 
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_range_ok");
+    try t.pushTracked("_range_ok", .unknown);
 }
 
-fn emitVerifyECDSA(t: *NistTracker) !void {
-    const c = t.params;
-    const p_be = c.field_p_be;
+fn emitVerifyECDSA(t: *NistTracker, c: *const NistCurveParams) !void {
     const n_be = c.group_n_be;
     const n_minus_2_be = c.group_n_minus_2_be;
     const cb = c.coord_bytes;
+
+    // The verifier does hundreds of reductions OUTSIDE the two ladders — the
+    // decompression sqrt chain, groupInv, affineAdd, the final groupMod. Each
+    // ladder pools separately: it runs on its own tracker that deliberately
+    // cannot see this stack, so it cannot reach this slot.
+    try t.poolConstant(POOL_FIELD_P, c.field_p_be);
+    try t.poolConstant(POOL_GROUP_N, c.group_n_be);
 
     // Step 0: length gate. `_sig` and `_pk` are bare ByteString in the builtin
     // table and the type checker imposes no width, so both arrive attacker-sized.
@@ -1671,7 +2026,7 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.toTop("_sig_len_ok");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_len_ok");
+    try t.pushTracked("_len_ok", .unknown);
 
     // Step 1: e = SHA-256(msg) as integer
     try t.toTop("_msg");
@@ -1682,27 +2037,27 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.emitRaw(.{ .push = .{ .bytes = &.{0x00} } });
     try t.emitOpcode("OP_CAT");
     try t.emitOpcode("OP_BIN2NUM");
-    try t.names.append(t.allocator, "_e");
+    try t.pushTracked("_e", .unknown);
 
     // Step 2: Parse sig into (r, s) — each coord_bytes bytes
     try t.toTop("_sig");
     t.popNames(1);
-    try t.emitPushInt(@intCast(cb));
+    try t.emitPushIntRaw(@intCast(cb));
     try t.emitOpcode("OP_SPLIT");
-    try t.names.append(t.allocator, "_r_bytes");
-    try t.names.append(t.allocator, "_s_bytes");
+    try t.pushTracked("_r_bytes", .unknown);
+    try t.pushTracked("_s_bytes", .unknown);
 
     // Convert r_bytes to integer
     try t.toTop("_r_bytes");
     t.popNames(1);
     try emitBytesToUnsignedNum(t, cb);
-    try t.names.append(t.allocator, "_r");
+    try t.pushTracked("_r", .unknown);
 
     // Convert s_bytes to integer
     try t.toTop("_s_bytes");
     t.popNames(1);
     try emitBytesToUnsignedNum(t, cb);
-    try t.names.append(t.allocator, "_s");
+    try t.pushTracked("_s", .unknown);
 
     // Step 2b: 1 <= r, s <= n-1. Without this an all-zero signature verifies for
     // any message under any pubkey — see emitSigRangeGate.
@@ -1711,7 +2066,7 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     // Step 3: Decompress pubkey. Also yields `_dk_valid`: 0 when the pubkey
     // bytes do not decompress to a canonical on-curve point, which is ANDed into
     // the result below so such a key can never verify.
-    try decompressPubKey(t, "_pk", "_qx", "_qy");
+    try decompressPubKey(t, c, "_pk", "_qx", "_qy");
 
     // Collapse the three argument verdicts into one flag. Everything below then
     // carries a single item, as it did when `_dk_valid` was the only one.
@@ -1719,11 +2074,11 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.toTop("_range_ok");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_arg_ok");
+    try t.pushTracked("_arg_ok", .unknown);
     try t.toTop("_dk_valid");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_input_ok");
+    try t.pushTracked("_input_ok", .unknown);
 
     // Step 4: w = s^{-1} mod n
     try groupInv(t, "_s", n_minus_2_be, n_be, "_w");
@@ -1739,10 +2094,25 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     // Step 7: R1 = u1*G
     // Push G point, bring u1 to top, stash everything else on altstack
     const point_bytes = cb * 2;
-    const g_point = try t.allocator.alloc(u8, point_bytes);
-    @memcpy(g_point[0..cb], c.gen_x_be);
-    @memcpy(g_point[cb..point_bytes], c.gen_y_be);
-    try t.pushOwnedBytes("_G", g_point);
+    // u1*G. G is a compile-time constant, so THIS half can use a fixed-base comb
+    // — one doubling and one add per COLUMN instead of per bit. u2*Q below
+    // cannot: Q arrives in the witness, and the comb's interval argument is
+    // stated for a base of known order.
+    //
+    // Rendered before the `_G` push is decided, because whether that push
+    // happens at all is what the comb changes.
+    var comb_bundle: ?EcOpBundle = if (t.opts.fixed_base_comb)
+        try buildCombBundle(t.allocator, c, t.opts)
+    else
+        null;
+    errdefer if (comb_bundle) |*b| b.deinit();
+
+    if (comb_bundle == null) {
+        const g_point = try t.allocator.alloc(u8, point_bytes);
+        @memcpy(g_point[0..cb], c.gen_x_be);
+        @memcpy(g_point[cb..point_bytes], c.gen_y_be);
+        try t.pushOwnedBytes("_G", g_point);
+    }
     try t.toTop("_u1");
 
     // Stash items on altstack (pushed in reverse retrieval order).
@@ -1758,11 +2128,22 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.toTop("_qx");
     try t.toAlt();
 
-    // Stack now has: [..., _G, _u1]
-    // Pop those names and emit scalar mul inline (consuming _G and _u1)
+    // Stack now has: [..., (_G,) _u1]
+    // Pop those names and emit the multiply (consuming _G and _u1, or just _u1
+    // for the comb, which takes the scalar alone).
     t.popNames(1); // _u1
-    t.popNames(1); // _G
-    try emitScalarMulInline(t, "_R1_point");
+    if (comb_bundle) |*bundle| {
+        try t.owned_bytes.appendSlice(t.allocator, bundle.owned_bytes);
+        t.allocator.free(bundle.owned_bytes);
+        bundle.owned_bytes = &.{};
+        try t.ops.appendSlice(t.allocator, bundle.ops);
+        t.allocator.free(bundle.ops);
+        bundle.ops = &.{};
+        try t.pushTracked("_R1_point", .unknown);
+    } else {
+        t.popNames(1); // _G
+        try emitScalarMulInline(t, c, "_R1_point");
+    }
 
     // Pop qx/qy/u2 from altstack (LIFO order)
     try t.fromAlt("_qx");
@@ -1774,7 +2155,7 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.toAlt();
 
     // Compose Q point from qx, qy
-    try composePoint(t, "_qx", "_qy", "_Q_point");
+    try composePoint(t, c, "_qx", "_qy", "_Q_point");
 
     // Stack now has: [..., _Q_point, _u2]
     // Bring _Q_point below _u2 to match expected [point, scalar] order
@@ -1784,7 +2165,7 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     // Pop those names and emit scalar mul inline (consuming _Q_point and _u2)
     t.popNames(1); // _u2
     t.popNames(1); // _Q_point
-    try emitScalarMulInline(t, "_R2_point");
+    try emitScalarMulInline(t, c, "_R2_point");
 
     // Restore R1 point
     try t.fromAlt("_R1_point");
@@ -1793,10 +2174,10 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.swap();
 
     // Decompose both points and do affine addition
-    try decomposePoint(t, "_R1_point", "px", "py");
-    try decomposePoint(t, "_R2_point", "qx", "qy");
+    try decomposePoint(t, c, "_R1_point", "px", "py");
+    try decomposePoint(t, c, "_R2_point", "qx", "qy");
 
-    try affineAdd(t, p_be);
+    try affineAdd(t, c);
 
     // Step 8: x_R mod n == r
     try t.toTop("ry");
@@ -1813,7 +2194,7 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.toTop("_r_save");
     t.popNames(2);
     try t.emitOpcode("OP_EQUAL");
-    try t.names.append(t.allocator, "_sig_ok");
+    try t.pushTracked("_sig_ok", .unknown);
 
     // Arguments that were the wrong length, out of range, or did not decompress
     // to a canonical on-curve point can never verify, whatever the ladder made
@@ -1822,242 +2203,207 @@ fn emitVerifyECDSA(t: *NistTracker) !void {
     try t.toTop("_sig_ok");
     t.popNames(2);
     try t.emitOpcode("OP_BOOLAND");
-    try t.names.append(t.allocator, "_result");
+    try t.pushTracked("_result", .unknown);
+    try t.releaseConstant(POOL_GROUP_N);
+    try t.releaseConstant(POOL_FIELD_P);
 }
 
 // ===========================================================================
 // Public API — build EcOpBundle for each builtin
 // ===========================================================================
+//
+// The per-builtin bodies below are curve-generic: P-256 and P-384 differ only
+// in their `NistCurveParams`. They were two verbatim copies until the size
+// flags landed, and every copy is one more place the comb could be wired to one
+// curve and not the other.
+
+fn emitAdd(t: *NistTracker, c: *const NistCurveParams) !void {
+    try t.poolConstant(POOL_FIELD_P, c.field_p_be);
+    try decomposePoint(t, c, "_pa", "px", "py");
+    try decomposePoint(t, c, "_pb", "qx", "qy");
+    try affineAdd(t, c);
+    try composePoint(t, c, "rx", "ry", "_result");
+    try t.releaseConstant(POOL_FIELD_P);
+}
+
+fn emitMulGen(t: *NistTracker, c: *const NistCurveParams) !void {
+    // G is a compile-time constant, so this is the one NIST scalar-mul call
+    // site where a fixed-base comb applies. `p256Mul` / `p384Mul` cannot use it:
+    // their base arrives at run time.
+    if (t.opts.fixed_base_comb) {
+        if (try emitCombBest(t, c)) return;
+    }
+
+    const point_bytes = c.coord_bytes * 2;
+    const g_point = try t.allocator.alloc(u8, point_bytes);
+    @memcpy(g_point[0..c.coord_bytes], c.gen_x_be);
+    @memcpy(g_point[c.coord_bytes..point_bytes], c.gen_y_be);
+    try t.pushOwnedBytes("_pt", g_point);
+    try t.swap();
+    try emitScalarMulOnTracker(t, c);
+}
+
+fn emitNegate(t: *NistTracker, c: *const NistCurveParams) !void {
+    try t.poolConstant(POOL_FIELD_P, c.field_p_be);
+    try decomposePoint(t, c, "_pt", "_nx", "_ny");
+    try pushFieldP(t, "_fp", c.field_p_be);
+    try fieldSub(t, "_fp", "_ny", c.field_p_be, "_neg_y");
+    try composePoint(t, c, "_nx", "_neg_y", "_result");
+    try t.releaseConstant(POOL_FIELD_P);
+}
+
+fn emitOnCurve(t: *NistTracker, c: *const NistCurveParams) !void {
+    const p_be = c.field_p_be;
+    try t.poolConstant(POOL_FIELD_P, p_be);
+    try decomposePoint(t, c, "_pt", "_x", "_y");
+    try emitCanonicityGuard(t, "_x", "_y", p_be);
+
+    // lhs = y^2
+    try fieldSqr(t, "_y", p_be, "_y2");
+
+    // rhs = x^3 - 3x + b
+    try t.copyToTop("_x", "_x_copy");
+    try t.copyToTop("_x", "_x_copy2");
+    try fieldSqr(t, "_x", p_be, "_x2");
+    try fieldMul(t, "_x2", "_x_copy", p_be, "_x3");
+    try fieldMulConst(t, "_x_copy2", 3, p_be, "_3x");
+    try fieldSub(t, "_x3", "_3x", p_be, "_x3m3x");
+    try pushBigIntBE(t, "_b", c.curve_b_be);
+    try fieldAdd(t, "_x3m3x", "_b", p_be, "_rhs");
+
+    try t.toTop("_y2");
+    try t.toTop("_rhs");
+    t.popNames(2);
+    try t.emitOpcode("OP_EQUAL");
+    try t.pushTracked("_curve_eq", .unknown);
+
+    // on-curve = canonical AND curve-equation
+    try t.toTop("_canon");
+    try t.toTop("_curve_eq");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.pushTracked("_result", .unknown);
+    try t.releaseConstant(POOL_FIELD_P);
+}
+
+/// Point compression. No field arithmetic, so no flag reaches it — the three
+/// options leave this emitter byte-identical, as they do in the reference.
+fn emitEncodeCompressed(t: *NistTracker, c: *const NistCurveParams) !void {
+    // Split at coord_bytes: [x_bytes, y_bytes]
+    try t.toTop("_pt");
+    t.popNames(1);
+    try t.emitPushIntRaw(@intCast(c.coord_bytes));
+    try t.emitOpcode("OP_SPLIT");
+    try t.pushTracked("_x_bytes", .unknown);
+    try t.pushTracked("_y_bytes", .unknown);
+    // Get last byte of y for parity
+    try t.toTop("_y_bytes");
+    t.popNames(1);
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushIntRaw(1);
+    try t.emitOpcode("OP_SUB");
+    try t.emitOpcode("OP_SPLIT");
+    try t.pushTracked("_y_prefix", .unknown);
+    try t.pushTracked("_last_byte", .unknown);
+    // Parity
+    try t.toTop("_last_byte");
+    t.popNames(1);
+    try t.emitOpcode("OP_BIN2NUM");
+    try t.emitPushIntRaw(2);
+    try t.emitOpcode("OP_MOD");
+    try t.pushTracked("_parity", .unknown);
+    try t.toTop("_y_prefix");
+    try t.drop();
+    // [x_bytes, parity]
+    const then_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x03} } }});
+    errdefer t.allocator.free(then_ops);
+    const else_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x02} } }});
+    errdefer t.allocator.free(else_ops);
+    try t.toTop("_parity");
+    t.popNames(1);
+    try t.emitRaw(.{ .@"if" = .{ .then = then_ops, .@"else" = else_ops } });
+    try t.pushTracked("_prefix", .unknown);
+    // [x_bytes, prefix] -> swap -> prefix || x_bytes
+    try t.swap();
+    t.popNames(2);
+    try t.emitOpcode("OP_CAT");
+    try t.pushTracked("_result", .unknown);
+}
 
 pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !EcOpBundle {
-    switch (builtin) {
-        .verify_ecdsa_p256 => {
-            var t = try NistTracker.init(allocator, &.{ "_msg", "_sig", "_pk" }, &p256_params);
-            errdefer t.deinit();
-            try emitVerifyECDSA(&t);
-            return t.takeBundle();
-        },
-        .p256_add => {
-            var t = try NistTracker.init(allocator, &.{ "_pa", "_pb" }, &p256_params);
-            errdefer t.deinit();
-            try decomposePoint(&t, "_pa", "px", "py");
-            try decomposePoint(&t, "_pb", "qx", "qy");
-            try affineAdd(&t, p256_field_p_be[0..]);
-            try composePoint(&t, "rx", "ry", "_result");
-            return t.takeBundle();
-        },
-        .p256_mul => {
-            var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, &p256_params);
-            errdefer t.deinit();
-            try emitScalarMulOnTracker(&t);
-            return t.takeBundle();
-        },
-        .p256_mul_gen => {
-            var t = try NistTracker.init(allocator, &.{"_k"}, &p256_params);
-            errdefer t.deinit();
-            const g_point = try allocator.alloc(u8, 64);
-            @memcpy(g_point[0..32], p256_gx_be[0..]);
-            @memcpy(g_point[32..64], p256_gy_be[0..]);
-            try t.pushOwnedBytes("_pt", g_point);
-            try t.swap();
-            try emitScalarMulOnTracker(&t);
-            return t.takeBundle();
-        },
-        .p256_negate => {
-            var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
-            errdefer t.deinit();
-            try decomposePoint(&t, "_pt", "_nx", "_ny");
-            try t.pushBigIntBE("_fp", p256_field_p_be[0..]);
-            try fieldSub(&t, "_fp", "_ny", p256_field_p_be[0..], "_neg_y");
-            try composePoint(&t, "_nx", "_neg_y", "_result");
-            return t.takeBundle();
-        },
-        .p256_on_curve => {
-            var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
-            errdefer t.deinit();
-            try decomposePoint(&t, "_pt", "_x", "_y");
-            try emitCanonicityGuard(&t, "_x", "_y", p256_field_p_be[0..]);
-            try fieldSqr(&t, "_y", p256_field_p_be[0..], "_y2");
-            try t.copyToTop("_x", "_x_copy");
-            try t.copyToTop("_x", "_x_copy2");
-            try fieldSqr(&t, "_x", p256_field_p_be[0..], "_x2");
-            try fieldMul(&t, "_x2", "_x_copy", p256_field_p_be[0..], "_x3");
-            try fieldMulConst(&t, "_x_copy2", 3, p256_field_p_be[0..], "_3x");
-            try fieldSub(&t, "_x3", "_3x", p256_field_p_be[0..], "_x3m3x");
-            try t.pushBigIntBE("_b", p256_b_be[0..]);
-            try fieldAdd(&t, "_x3m3x", "_b", p256_field_p_be[0..], "_rhs");
-            try t.toTop("_y2");
-            try t.toTop("_rhs");
-            t.popNames(2);
-            try t.emitOpcode("OP_EQUAL");
-            try t.names.append(t.allocator, "_curve_eq");
-            // on-curve = canonical AND curve-equation
-            try t.toTop("_canon");
-            try t.toTop("_curve_eq");
-            t.popNames(2);
-            try t.emitOpcode("OP_BOOLAND");
-            try t.names.append(t.allocator, "_result");
-            return t.takeBundle();
-        },
-        .p256_encode_compressed => {
-            var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
-            errdefer t.deinit();
-            // Split at 32: [x_bytes, y_bytes]
-            try t.toTop("_pt");
-            t.popNames(1);
-            try t.emitPushInt(32);
-            try t.emitOpcode("OP_SPLIT");
-            try t.names.append(t.allocator, "_x_bytes");
-            try t.names.append(t.allocator, "_y_bytes");
-            // Get last byte of y for parity
-            try t.toTop("_y_bytes");
-            t.popNames(1);
-            try t.emitOpcode("OP_SIZE");
-            try t.emitPushInt(1);
-            try t.emitOpcode("OP_SUB");
-            try t.emitOpcode("OP_SPLIT");
-            try t.names.append(t.allocator, "_y_prefix");
-            try t.names.append(t.allocator, "_last_byte");
-            // Parity
-            try t.toTop("_last_byte");
-            t.popNames(1);
-            try t.emitOpcode("OP_BIN2NUM");
-            try t.emitPushInt(2);
-            try t.emitOpcode("OP_MOD");
-            try t.names.append(t.allocator, "_parity");
-            try t.toTop("_y_prefix");
-            try t.drop();
-            // [x_bytes, parity]
-            const then_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x03} } }});
-            errdefer t.allocator.free(then_ops);
-            const else_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x02} } }});
-            errdefer t.allocator.free(else_ops);
-            try t.toTop("_parity");
-            t.popNames(1);
-            try t.emitRaw(.{ .@"if" = .{ .then = then_ops, .@"else" = else_ops } });
-            try t.names.append(t.allocator, "_prefix");
-            // [x_bytes, prefix] -> swap -> prefix || x_bytes
-            try t.swap();
-            t.popNames(2);
-            try t.emitOpcode("OP_CAT");
-            try t.names.append(t.allocator, "_result");
-            return t.takeBundle();
-        },
-        // P-384
-        .verify_ecdsa_p384 => {
-            var t = try NistTracker.init(allocator, &.{ "_msg", "_sig", "_pk" }, &p384_params);
-            errdefer t.deinit();
-            try emitVerifyECDSA(&t);
-            return t.takeBundle();
-        },
-        .p384_add => {
-            var t = try NistTracker.init(allocator, &.{ "_pa", "_pb" }, &p384_params);
-            errdefer t.deinit();
-            try decomposePoint(&t, "_pa", "px", "py");
-            try decomposePoint(&t, "_pb", "qx", "qy");
-            try affineAdd(&t, p384_field_p_be[0..]);
-            try composePoint(&t, "rx", "ry", "_result");
-            return t.takeBundle();
-        },
-        .p384_mul => {
-            var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, &p384_params);
-            errdefer t.deinit();
-            try emitScalarMulOnTracker(&t);
-            return t.takeBundle();
-        },
-        .p384_mul_gen => {
-            var t = try NistTracker.init(allocator, &.{"_k"}, &p384_params);
-            errdefer t.deinit();
-            const g_point = try allocator.alloc(u8, 96);
-            @memcpy(g_point[0..48], p384_gx_be[0..]);
-            @memcpy(g_point[48..96], p384_gy_be[0..]);
-            try t.pushOwnedBytes("_pt", g_point);
-            try t.swap();
-            try emitScalarMulOnTracker(&t);
-            return t.takeBundle();
-        },
-        .p384_negate => {
-            var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
-            errdefer t.deinit();
-            try decomposePoint(&t, "_pt", "_nx", "_ny");
-            try t.pushBigIntBE("_fp", p384_field_p_be[0..]);
-            try fieldSub(&t, "_fp", "_ny", p384_field_p_be[0..], "_neg_y");
-            try composePoint(&t, "_nx", "_neg_y", "_result");
-            return t.takeBundle();
-        },
-        .p384_on_curve => {
-            var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
-            errdefer t.deinit();
-            try decomposePoint(&t, "_pt", "_x", "_y");
-            try emitCanonicityGuard(&t, "_x", "_y", p384_field_p_be[0..]);
-            try fieldSqr(&t, "_y", p384_field_p_be[0..], "_y2");
-            try t.copyToTop("_x", "_x_copy");
-            try t.copyToTop("_x", "_x_copy2");
-            try fieldSqr(&t, "_x", p384_field_p_be[0..], "_x2");
-            try fieldMul(&t, "_x2", "_x_copy", p384_field_p_be[0..], "_x3");
-            try fieldMulConst(&t, "_x_copy2", 3, p384_field_p_be[0..], "_3x");
-            try fieldSub(&t, "_x3", "_3x", p384_field_p_be[0..], "_x3m3x");
-            try t.pushBigIntBE("_b", p384_b_be[0..]);
-            try fieldAdd(&t, "_x3m3x", "_b", p384_field_p_be[0..], "_rhs");
-            try t.toTop("_y2");
-            try t.toTop("_rhs");
-            t.popNames(2);
-            try t.emitOpcode("OP_EQUAL");
-            try t.names.append(t.allocator, "_curve_eq");
-            // on-curve = canonical AND curve-equation
-            try t.toTop("_canon");
-            try t.toTop("_curve_eq");
-            t.popNames(2);
-            try t.emitOpcode("OP_BOOLAND");
-            try t.names.append(t.allocator, "_result");
-            return t.takeBundle();
-        },
-        .p384_encode_compressed => {
-            var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
-            errdefer t.deinit();
-            // Split at 48: [x_bytes, y_bytes]
-            try t.toTop("_pt");
-            t.popNames(1);
-            try t.emitPushInt(48);
-            try t.emitOpcode("OP_SPLIT");
-            try t.names.append(t.allocator, "_x_bytes");
-            try t.names.append(t.allocator, "_y_bytes");
-            // Get last byte of y for parity
-            try t.toTop("_y_bytes");
-            t.popNames(1);
-            try t.emitOpcode("OP_SIZE");
-            try t.emitPushInt(1);
-            try t.emitOpcode("OP_SUB");
-            try t.emitOpcode("OP_SPLIT");
-            try t.names.append(t.allocator, "_y_prefix");
-            try t.names.append(t.allocator, "_last_byte");
-            // Parity
-            try t.toTop("_last_byte");
-            t.popNames(1);
-            try t.emitOpcode("OP_BIN2NUM");
-            try t.emitPushInt(2);
-            try t.emitOpcode("OP_MOD");
-            try t.names.append(t.allocator, "_parity");
-            try t.toTop("_y_prefix");
-            try t.drop();
-            // [x_bytes, parity]
-            const then_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x03} } }});
-            errdefer t.allocator.free(then_ops);
-            const else_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x02} } }});
-            errdefer t.allocator.free(else_ops);
-            try t.toTop("_parity");
-            t.popNames(1);
-            try t.emitRaw(.{ .@"if" = .{ .then = then_ops, .@"else" = else_ops } });
-            try t.names.append(t.allocator, "_prefix");
-            // [x_bytes, prefix] -> swap -> prefix || x_bytes
-            try t.swap();
-            t.popNames(2);
-            try t.emitOpcode("OP_CAT");
-            try t.names.append(t.allocator, "_result");
-            return t.takeBundle();
-        },
+    return buildBuiltinOpsOpts(allocator, builtin, .{});
+}
+
+/// Render the comb at one window width, for the width-selection test.
+///
+/// The emitter picks `w` by rendering every candidate and keeping the smallest;
+/// this exposes a single candidate so the test can pin WHICH width wins rather
+/// than only that the total matches.
+pub fn buildCombProbeForTest(allocator: Allocator, p384: bool, w: usize) !EcOpBundle {
+    const c: *const NistCurveParams = if (p384) &p384_params else &p256_params;
+    var t = try NistTracker.initOpts(allocator, &.{"_k"}, .{
+        .constant_pool = true,
+        .reduction_sinking = true,
+        .fixed_base_comb = true,
+    }, null);
+    errdefer t.deinit();
+    _ = try emitCombMulGen(&t, c, w);
+    return t.takeBundle();
+}
+
+/// `buildBuiltinOps` with the EXPERIMENTAL EC script-size options.
+///
+/// An all-false value keeps every emitter byte-identical to the shipping output;
+/// see `ec_emitters.EcCodegenOptions` and
+/// docs/experiments/script-size-optimizer-results.md.
+pub fn buildBuiltinOpsOpts(
+    allocator: Allocator,
+    builtin: registry.CryptoBuiltin,
+    opts: EcCodegenOptions,
+) !EcOpBundle {
+    const c: *const NistCurveParams = switch (builtin) {
+        .verify_ecdsa_p256,
+        .p256_add,
+        .p256_mul,
+        .p256_mul_gen,
+        .p256_negate,
+        .p256_on_curve,
+        .p256_encode_compressed,
+        => &p256_params,
+        .verify_ecdsa_p384,
+        .p384_add,
+        .p384_mul,
+        .p384_mul_gen,
+        .p384_negate,
+        .p384_on_curve,
+        .p384_encode_compressed,
+        => &p384_params,
         else => return error.UnsupportedBuiltin,
+    };
+
+    const initial: []const ?[]const u8 = switch (builtin) {
+        .verify_ecdsa_p256, .verify_ecdsa_p384 => &.{ "_msg", "_sig", "_pk" },
+        .p256_add, .p384_add => &.{ "_pa", "_pb" },
+        .p256_mul, .p384_mul => &.{ "_pt", "_k" },
+        .p256_mul_gen, .p384_mul_gen => &.{"_k"},
+        else => &.{"_pt"},
+    };
+
+    var t = try NistTracker.initOpts(allocator, initial, opts, null);
+    errdefer t.deinit();
+
+    switch (builtin) {
+        .verify_ecdsa_p256, .verify_ecdsa_p384 => try emitVerifyECDSA(&t, c),
+        .p256_add, .p384_add => try emitAdd(&t, c),
+        .p256_mul, .p384_mul => try emitScalarMulOnTracker(&t, c),
+        .p256_mul_gen, .p384_mul_gen => try emitMulGen(&t, c),
+        .p256_negate, .p384_negate => try emitNegate(&t, c),
+        .p256_on_curve, .p384_on_curve => try emitOnCurve(&t, c),
+        .p256_encode_compressed, .p384_encode_compressed => try emitEncodeCompressed(&t, c),
+        else => unreachable,
     }
+
+    return t.takeBundle();
 }
 
 // ===========================================================================

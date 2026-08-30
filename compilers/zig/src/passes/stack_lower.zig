@@ -2075,7 +2075,7 @@ const LowerCtx = struct {
             _ = self.stack.pop();
         }
 
-        var bundle = nist_ec_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+        var bundle = nist_ec_emitters.buildBuiltinOpsOpts(self.allocator, builtin, self.ec_opts) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.UnsupportedOperation,
         };
