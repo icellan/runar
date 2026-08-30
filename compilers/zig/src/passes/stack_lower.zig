@@ -228,6 +228,11 @@ const LowerCtx = struct {
     renamed_params: std.StringHashMapUnmanaged([]const u8),
     /// Current ANF binding's source location — set before processing each binding.
     current_source_loc: ?types.SourceLocation = null,
+    /// EXPERIMENTAL EC size options (constant pool, sign lattice / reduction
+    /// sinking, fixed-base comb), handed down to the EC emitters. All-false —
+    /// the default — makes them take their untouched path, so the emitted bytes
+    /// are provably identical to the shipping ones.
+    ec_opts: ec_emitters.EcCodegenOptions = .{},
 
     fn init(allocator: Allocator, program: types.ANFProgram) LowerCtx {
         return .{
@@ -2045,7 +2050,7 @@ const LowerCtx = struct {
             _ = self.stack.pop();
         }
 
-        var bundle = ec_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+        var bundle = ec_emitters.buildBuiltinOpsOpts(self.allocator, builtin, self.ec_opts) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.UnsupportedBuiltin => return error.InvalidBuiltin,
             else => return error.UnsupportedOperation,
@@ -4120,6 +4125,7 @@ const LowerCtx = struct {
         then_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         then_ctx.in_branch = true;
         then_ctx.copy_ref_aliases = self.copy_ref_aliases;
+        then_ctx.ec_opts = self.ec_opts;
         then_ctx.max_depth = self.max_depth;
         then_ctx.outer_protected_refs = &protected_refs;
         try then_ctx.lowerBindings(ie.then_bindings, terminal_assert);
@@ -4140,6 +4146,7 @@ const LowerCtx = struct {
         else_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         else_ctx.in_branch = true;
         else_ctx.copy_ref_aliases = self.copy_ref_aliases;
+        else_ctx.ec_opts = self.ec_opts;
         else_ctx.max_depth = self.max_depth;
         else_ctx.outer_protected_refs = &protected_refs;
         const else_bindings = ie.else_bindings orelse &.{};
@@ -5098,6 +5105,19 @@ const check_preimage_sighash_tail = "7e210279be667ef9dcbbac55a06295ce870b07029bf
 /// `OP_DUP, OP_NOT, OP_IF, OP_DROP` (which is semantically equivalent
 /// but byte-divergent from the canonical TS output).
 pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgram {
+    return lowerOpts(allocator, program, .{});
+}
+
+/// `lower` with the EXPERIMENTAL EC script-size options.
+///
+/// An all-false value keeps every EC emitter byte-identical to the shipping
+/// output; see `ec_emitters.EcCodegenOptions` and
+/// docs/experiments/script-size-optimizer-results.md.
+pub fn lowerOpts(
+    allocator: Allocator,
+    program: types.ANFProgram,
+    ec_opts: ec_emitters.EcCodegenOptions,
+) !types.StackProgram {
     var methods = std.ArrayListUnmanaged(types.StackMethod).empty;
     defer methods.deinit(allocator);
     var owned_push_data = std.ArrayListUnmanaged([]u8).empty;
@@ -5111,6 +5131,7 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
 
         try setupMethodStack(&ctx, program, method);
         ctx.copy_ref_aliases = false;
+        ctx.ec_opts = ec_opts;
 
         // Use body or bindings (whichever is populated)
         const bindings = if (method.body.len > 0) method.body else method.bindings;

@@ -36,3 +36,25 @@ review rather than as a silently stale pin.
 Each compiler's test suite reads this file and asserts that its own emitters,
 under the same flags, hash to the same value. See
 `compilers/go/codegen/ec_flag_parity_test.go` for the reference consumer.
+
+## Raw vs post-peephole
+
+Each entry carries two measurements:
+
+- the top-level `bytes` / `sha256` — the **raw emitter output**, before the
+  peephole pass;
+- `postPeephole` — the same script after `optimizeStackIR`, i.e. what the
+  compiler actually ships.
+
+Six tiers reproduce the raw output op for op, so they assert the raw SHA-256:
+the sharpest gate available. The **Zig tier cannot**, in exactly one place.
+`emitEcMul` there emits `k + 3n` pre-folded, because that tier's peephole
+reassociates only `i64` `push_int` chains (`peephole.zig` rule 27) and a 256-bit
+constant is a `push_data` blob in Zig's IR. The reference emits three `+n` steps
+that its own peephole collapses to the same thing — identical shipped bytes,
+different pre-peephole spelling.
+
+So the Zig consumer gates on the raw byte COUNT with that one divergence
+asserted exactly (`ec_flag_parity_test.zig#allowedDelta`), and whole-script byte
+identity is covered end to end by compiling the same contract through the Zig
+CLI and the TypeScript one and diffing the hex.

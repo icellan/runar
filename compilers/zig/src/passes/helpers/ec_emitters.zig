@@ -1,5 +1,7 @@
 const std = @import("std");
 const registry = @import("crypto_builtins.zig");
+const opcodes = @import("../../codegen/opcodes.zig");
+const comb = @import("comb.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -69,6 +71,83 @@ const gen_y_be = [_]u8{
 
 pub const EcEmitterError = anyerror;
 
+/// Codegen options shared by every EC / NIST-curve emitter.
+///
+/// Off by default: with an all-false value each emitter is byte-identical to
+/// what the seven tiers ship today, so no golden, size baseline, or cross-tier
+/// parity gate can move.
+pub const EcCodegenOptions = struct {
+    /// Park large repeated constants (the field prime, the group order) in a
+    /// stack slot and copy them with `OP_PICK` instead of re-pushing the
+    /// literal.
+    ///
+    /// `fieldMod` pushes the 256-bit prime at every modular reduction — 34 bytes
+    /// a time, 20,025 times in `p256-wallet` (71 % of that fixture). A pick from
+    /// a slot a dozen deep costs 2.
+    constant_pool: bool = false,
+
+    /// Emit `a mod p` without the sign fix-up wherever the dividend is provably
+    /// non-negative, and the cheap `a - b + p` form for subtraction wherever the
+    /// subtrahend is provably reduced.
+    ///
+    /// Which reductions qualify is decided by the sign lattice below — never
+    /// assumed. Only useful alongside `constant_pool`: the cheap subtraction
+    /// references the prime twice, so without a pooled slot it does not pay (and
+    /// the emitters compare the two costs, so it is never taken when it does
+    /// not).
+    reduction_sinking: bool = false,
+
+    /// Use a fixed-base comb instead of the binary ladder wherever the base
+    /// point is a compile-time constant. The window width is not fixed here: the
+    /// emitter renders each candidate and keeps whichever the byte-cost model
+    /// scores smallest.
+    fixed_base_comb: bool = false,
+
+    pub fn any(self: EcCodegenOptions) bool {
+        return self.constant_pool or self.reduction_sinking or self.fixed_base_comb;
+    }
+};
+
+/// What is known about a tracked value's sign and range.
+///
+/// `.reduced` implies `.non_negative`; the ordering is what the transfer
+/// functions meet over. `.unknown` is the default for every slot the analysis
+/// has not explicitly proved something about — including everything a `rawBlock`
+/// or an `OP_IF` produces — so an un-analysed value can only ever fall back to
+/// the shipping reduction.
+///
+/// The distinction is not academic. `OP_BIN2NUM` of 32 unsigned coordinate bytes
+/// gives `.non_negative` but NOT `.reduced`: a coordinate may legitimately be up
+/// to `2^256 - 1` while p is `2^32 + 977` smaller. Multiplication and addition
+/// need only `.non_negative`; subtraction's cheap form needs the subtrahend
+/// `.reduced`, and conflating the two produces a script that passes 256 EC
+/// oracle assertions and is still wrong on `ecAdd((0,1), (2^256-1,1))`.
+pub const Dom = enum(u2) {
+    /// Nothing known. May be negative.
+    unknown = 0,
+    /// Provably >= 0. May be >= p.
+    non_negative = 1,
+    /// Provably in [0, p).
+    reduced = 2,
+
+    /// True when this proves the value is >= 0.
+    pub fn isNonNegative(self: Dom) bool {
+        return self != .unknown;
+    }
+};
+
+/// Stack slot names reserved for pooled constants.
+pub const POOL_FIELD_P = "_pool$p";
+
+/// Length of the field prime's unsigned script-number encoding.
+///
+/// secp256k1's p is 32 big-endian bytes whose most significant byte is 0xff, so
+/// the little-endian sign-magnitude form needs a trailing 0x00 sign byte: 33.
+/// Used by `cheapSubPays` to price the pooled constant without allocating.
+pub const FIELD_P_SCRIPT_NUM_LEN: usize = 33;
+pub const POOL_GROUP_N = "_pool$n";
+
+
 pub const EcOpBundle = struct {
     allocator: Allocator,
     ops: []StackOp,
@@ -84,7 +163,19 @@ pub const EcOpBundle = struct {
 };
 
 pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) EcEmitterError!EcOpBundle {
-    var tracker = try ECTracker.init(allocator, initialNames(builtin));
+    return buildBuiltinOpsOpts(allocator, builtin, .{});
+}
+
+/// `buildBuiltinOps` with the EXPERIMENTAL EC script-size options.
+///
+/// An all-false value keeps every emitter byte-identical to the shipping output;
+/// see `EcCodegenOptions` and docs/experiments/script-size-optimizer-results.md.
+pub fn buildBuiltinOpsOpts(
+    allocator: Allocator,
+    builtin: registry.CryptoBuiltin,
+    opts: EcCodegenOptions,
+) EcEmitterError!EcOpBundle {
+    var tracker = try ECTracker.initOpts(allocator, initialNames(builtin), opts, null);
     errdefer tracker.deinit();
 
     switch (builtin) {
@@ -126,21 +217,153 @@ pub fn deinitOpsRecursive(allocator: Allocator, ops: []StackOp) void {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Byte-cost helpers for the constant pool
+// ---------------------------------------------------------------------------
+//
+// These route through the SAME encoders `emit.zig` uses, so the pool's
+// cheaper-of-two comparison is exact rather than estimated and can never make a
+// call site bigger. `ec_cost_model.zig` is the full model and is pinned against
+// the real emitter over every EC emitter; these two are the slice of it the
+// tracker itself needs, and are the same functions that model calls.
+
+/// A writer that counts bytes and discards them.
+const CostWriter = struct {
+    n: usize = 0,
+
+    pub const Error = error{};
+
+    pub fn writeByte(self: *CostWriter, _: u8) Error!void {
+        self.n += 1;
+    }
+
+    pub fn writeAll(self: *CostWriter, bytes: []const u8) Error!void {
+        self.n += bytes.len;
+    }
+
+    pub fn writeInt(self: *CostWriter, comptime T: type, _: T, _: std.builtin.Endian) Error!void {
+        self.n += @sizeOf(T);
+    }
+};
+
+/// Serialized byte cost of a bare script number.
+pub fn scriptNumberCost(n: i64) usize {
+    var w = CostWriter{};
+    opcodes.encodeScriptNumber(&w, n) catch unreachable;
+    return w.n;
+}
+
+/// Serialized byte cost of pushing `len` bytes of push data.
+pub fn pushDataCost(len: usize) usize {
+    if (len == 0) return 1;
+    if (len <= 75) return 1 + len;
+    if (len <= 255) return 2 + len;
+    if (len <= 65535) return 3 + len;
+    return 5 + len;
+}
+
+/// Serialized byte cost of a single push value.
+pub fn sizeOfPushValue(pv: PushValue) usize {
+    return switch (pv) {
+        .bytes => |data| pushDataCost(data.len),
+        .integer => |n| scriptNumberCost(n),
+        // OP_TRUE (0x51) / OP_FALSE (0x00).
+        .boolean => 1,
+    };
+}
+
+/// Serialized byte cost of one Stack IR operation, including nested `if` arms.
+///
+/// ONE THING DIFFERS FROM THE OTHER TIERS. There the tracker emits a separate
+/// depth `push` op immediately before a `roll` / `pick`, and the cost model
+/// charges the roll ONE byte so the depth is not double-counted. This tier's
+/// `StackOp.roll` / `.pick` carry the depth in the op itself and `emitStackOp`
+/// writes the depth push as part of emitting them — so here they cost
+/// `scriptNumberCost(depth) + 1`. Same emitted bytes; the cost-model test is
+/// what keeps the two spellings honest.
+pub fn sizeOfStackOp(op: StackOp) usize {
+    return switch (op) {
+        .push => |pv| sizeOfPushValue(pv),
+        .dup, .swap, .drop, .nip, .over, .rot, .tuck => 1,
+        .roll => |d| scriptNumberCost(@intCast(d)) + 1,
+        .pick => |d| scriptNumberCost(@intCast(d)) + 1,
+        .opcode => 1,
+        // OP_IF + then + [OP_ELSE + else] + OP_ENDIF. The emitter writes
+        // OP_ELSE only for a NON-EMPTY else arm.
+        .@"if" => |if_op| blk: {
+            var total: usize = 2;
+            total += estimateScriptBytes(if_op.then);
+            if (if_op.@"else") |else_ops| {
+                if (else_ops.len > 0) total += 1 + estimateScriptBytes(else_ops);
+            }
+            break :blk total;
+        },
+    };
+}
+
+/// Serialized byte cost of a Stack IR sequence.
+pub fn estimateScriptBytes(ops: []const StackOp) usize {
+    var total: usize = 0;
+    for (ops) |op| total += sizeOfStackOp(op);
+    return total;
+}
+
 const ECTracker = struct {
     allocator: Allocator,
     names: std.ArrayListUnmanaged(?[]const u8),
+    /// Sign-lattice fact per stack SLOT, kept parallel to `names`.
+    ///
+    /// Slot-parallel rather than keyed by name on purpose: names are reused
+    /// (`_fmul_prod` is written by every multiply) and the same name can be
+    /// resident twice, so a name-keyed map would go stale in exactly the cases
+    /// that matter. Every mutation of `names` below mirrors into `doms` with the
+    /// same splice, so the two cannot drift.
+    doms: std.ArrayListUnmanaged(Dom),
+    /// Lattice facts for values parked on the alt stack, bottom -> top.
+    alt_doms: std.ArrayListUnmanaged(Dom),
     ops: std.ArrayListUnmanaged(StackOp),
     owned_bytes: std.ArrayListUnmanaged([]u8),
+    /// Heap copies of generated slot names (`_Tx3`, `_eq5`, ...).
+    ///
+    /// The comb builds names by formatting into a stack buffer, which would
+    /// dangle the moment the buffer is reused. `internName` copies into here and
+    /// the copies live exactly as long as the tracker's name list does — nothing
+    /// in the emitted ops refers to them.
+    owned_names: std.ArrayListUnmanaged([]u8),
+    opts: EcCodegenOptions,
 
     fn init(allocator: Allocator, initial_names: []const ?[]const u8) !ECTracker {
+        return initOpts(allocator, initial_names, .{}, null);
+    }
+
+    /// Create a tracker carrying codegen options and, optionally, initial
+    /// lattice facts for the pre-existing slots.
+    fn initOpts(
+        allocator: Allocator,
+        initial_names: []const ?[]const u8,
+        opts: EcCodegenOptions,
+        initial_doms: ?[]const Dom,
+    ) !ECTracker {
         var names: std.ArrayListUnmanaged(?[]const u8) = .empty;
         errdefer names.deinit(allocator);
         try names.appendSlice(allocator, initial_names);
+        var doms: std.ArrayListUnmanaged(Dom) = .empty;
+        errdefer doms.deinit(allocator);
+        if (initial_doms) |d| {
+            try doms.appendSlice(allocator, d);
+        } else {
+            try doms.appendNTimes(allocator, .unknown, initial_names.len);
+        }
         return .{
             .allocator = allocator,
             .names = names,
+            .doms = doms,
+            .alt_doms = .empty,
             .ops = .empty,
             .owned_bytes = .empty,
+            .owned_names = .empty,
+            .opts = opts,
         };
     }
 
@@ -148,8 +371,69 @@ const ECTracker = struct {
         deinitOpsRecursive(self.allocator, self.ops.items);
         self.ops.deinit(self.allocator);
         self.names.deinit(self.allocator);
+        self.doms.deinit(self.allocator);
+        self.alt_doms.deinit(self.allocator);
         for (self.owned_bytes.items) |bytes| self.allocator.free(bytes);
         self.owned_bytes.deinit(self.allocator);
+        for (self.owned_names.items) |name| self.allocator.free(name);
+        self.owned_names.deinit(self.allocator);
+    }
+
+    /// Copy a formatted slot name into tracker-owned storage.
+    fn internName(self: *ECTracker, name: []const u8) ![]const u8 {
+        const copy = try self.allocator.dupe(u8, name);
+        try self.owned_names.append(self.allocator, copy);
+        return copy;
+    }
+
+    // -- sign lattice --------------------------------------------------------
+
+    /// What is known about the named value. `.unknown` when the name is absent.
+    fn domainOf(self: *const ECTracker, name: []const u8) Dom {
+        // A silent desync here would hand a transfer function a fact about the
+        // WRONG slot, which is the one failure mode that produces a smaller
+        // script that quietly computes something else. Fail loudly instead.
+        std.debug.assert(self.doms.items.len == self.names.items.len);
+        var i = self.names.items.len;
+        while (i > 0) {
+            i -= 1;
+            const slot = self.names.items[i] orelse continue;
+            if (std.mem.eql(u8, slot, name)) return self.doms.items[i];
+        }
+        return .unknown;
+    }
+
+    /// Record a fact about the named value's slot.
+    fn setDomain(self: *ECTracker, name: []const u8, d: Dom) void {
+        var i = self.names.items.len;
+        while (i > 0) {
+            i -= 1;
+            const slot = self.names.items[i] orelse continue;
+            if (std.mem.eql(u8, slot, name)) {
+                self.doms.items[i] = d;
+                return;
+            }
+        }
+    }
+
+    /// Push a slot the caller tracks itself (used where raw opcodes create items).
+    fn pushTracked(self: *ECTracker, name: ?[]const u8, d: Dom) !void {
+        try self.names.append(self.allocator, name);
+        try self.doms.append(self.allocator, d);
+    }
+
+    /// Pop a slot the caller tracks itself. Mirror of `pushTracked`.
+    fn popTracked(self: *ECTracker) void {
+        if (self.names.items.len == 0) return;
+        _ = self.names.pop();
+        _ = self.doms.pop();
+    }
+
+    /// Remove the slot at an absolute (bottom-relative) index.
+    fn removeSlotAt(self: *ECTracker, index: usize) struct { name: ?[]const u8, dom: Dom } {
+        const n = self.names.orderedRemove(index);
+        const d = self.doms.orderedRemove(index);
+        return .{ .name = n, .dom = d };
     }
 
     fn takeBundle(self: *ECTracker) !EcOpBundle {
@@ -157,7 +441,16 @@ const ECTracker = struct {
         errdefer self.allocator.free(ops);
         const owned_bytes = try self.owned_bytes.toOwnedSlice(self.allocator);
         self.names.deinit(self.allocator);
+        self.doms.deinit(self.allocator);
+        self.alt_doms.deinit(self.allocator);
+        // Names are referenced only while building; nothing in `ops` points at
+        // them, so they can go now rather than riding along in the bundle.
+        for (self.owned_names.items) |name| self.allocator.free(name);
+        self.owned_names.deinit(self.allocator);
         self.names = .empty;
+        self.doms = .empty;
+        self.alt_doms = .empty;
+        self.owned_names = .empty;
         self.ops = .empty;
         self.owned_bytes = .empty;
         return .{
@@ -201,28 +494,30 @@ const ECTracker = struct {
 
     fn pushInt(self: *ECTracker, name: ?[]const u8, value: i64) !void {
         try self.emitPushIntRaw(value);
-        try self.names.append(self.allocator, name);
+        try self.pushTracked(name, if (value >= 0) .non_negative else .unknown);
     }
 
     fn pushOwnedBytes(self: *ECTracker, name: ?[]const u8, value: []u8) !void {
         try self.owned_bytes.append(self.allocator, value);
         try self.emitPushBytesRaw(value);
-        try self.names.append(self.allocator, name);
+        // A byte blob is not a number until BIN2NUM decides how to read it.
+        try self.pushTracked(name, .unknown);
     }
 
     fn pushStaticBytes(self: *ECTracker, name: ?[]const u8, value: []const u8) !void {
         try self.emitPushBytesRaw(value);
-        try self.names.append(self.allocator, name);
+        try self.pushTracked(name, .unknown);
     }
 
     fn dup(self: *ECTracker, name: ?[]const u8) !void {
         try self.emitRaw(.{ .dup = {} });
-        try self.names.append(self.allocator, name);
+        const d: Dom = if (self.doms.items.len > 0) self.doms.items[self.doms.items.len - 1] else .unknown;
+        try self.pushTracked(name, d);
     }
 
     fn drop(self: *ECTracker) !void {
         try self.emitRaw(.{ .drop = {} });
-        _ = self.names.pop();
+        self.popTracked();
     }
 
     fn swap(self: *ECTracker) !void {
@@ -232,6 +527,9 @@ const ECTracker = struct {
             const tmp = self.names.items[len - 1];
             self.names.items[len - 1] = self.names.items[len - 2];
             self.names.items[len - 2] = tmp;
+            const dtmp = self.doms.items[len - 1];
+            self.doms.items[len - 1] = self.doms.items[len - 2];
+            self.doms.items[len - 2] = dtmp;
         }
     }
 
@@ -239,14 +537,15 @@ const ECTracker = struct {
         try self.emitRaw(.{ .rot = {} });
         const len = self.names.items.len;
         if (len >= 3) {
-            const rolled = self.names.orderedRemove(len - 3);
-            try self.names.append(self.allocator, rolled);
+            const rolled = self.removeSlotAt(len - 3);
+            try self.pushTracked(rolled.name, rolled.dom);
         }
     }
 
     fn over(self: *ECTracker, name: ?[]const u8) !void {
         try self.emitRaw(.{ .over = {} });
-        try self.names.append(self.allocator, name);
+        const d: Dom = if (self.doms.items.len >= 2) self.doms.items[self.doms.items.len - 2] else .unknown;
+        try self.pushTracked(name, d);
     }
 
     fn roll(self: *ECTracker, depth_from_top: usize) !void {
@@ -255,15 +554,20 @@ const ECTracker = struct {
         if (depth_from_top == 2) return self.rot();
         try self.emitRaw(.{ .roll = @intCast(depth_from_top) });
         const idx = self.names.items.len - 1 - depth_from_top;
-        const rolled = self.names.orderedRemove(idx);
-        try self.names.append(self.allocator, rolled);
+        const rolled = self.removeSlotAt(idx);
+        try self.pushTracked(rolled.name, rolled.dom);
     }
 
     fn pick(self: *ECTracker, depth_from_top: usize, name: ?[]const u8) !void {
         if (depth_from_top == 0) return self.dup(name);
         if (depth_from_top == 1) return self.over(name);
         try self.emitRaw(.{ .pick = @intCast(depth_from_top) });
-        try self.names.append(self.allocator, name);
+        // The copied slot sits at depth `depth_from_top` from the top.
+        const src: Dom = if (self.doms.items.len > depth_from_top)
+            self.doms.items[self.doms.items.len - 1 - depth_from_top]
+        else
+            .unknown;
+        try self.pushTracked(name, src);
     }
 
     fn toTop(self: *ECTracker, name: []const u8) !void {
@@ -283,7 +587,7 @@ const ECTracker = struct {
     fn popNames(self: *ECTracker, count: usize) void {
         var i: usize = 0;
         while (i < count and self.names.items.len > 0) : (i += 1) {
-            _ = self.names.pop();
+            self.popTracked();
         }
     }
 
@@ -296,8 +600,87 @@ const ECTracker = struct {
         self.popNames(consume_count);
         try body(self);
         if (produce_name) |name| {
-            try self.names.append(self.allocator, name);
+            // Opaque opcodes: nothing is known about the result unless the
+            // caller proves it and records that with `setDomain` afterwards.
+            try self.pushTracked(name, .unknown);
         }
+    }
+
+    // -- constant pool -------------------------------------------------------
+    //
+    // A pooled constant is an ordinary tracked slot; nothing about the stack
+    // model changes. `pushConst` just chooses, per call site and by emitted
+    // bytes, between copying that slot and re-pushing the literal. Nested
+    // trackers seeded from `names.items` inherit the slot for free, so pooled
+    // constants work unchanged inside an `OP_IF` arm.
+
+    fn hasSlot(self: *const ECTracker, slot: []const u8) bool {
+        for (self.names.items) |n| {
+            const name = n orelse continue;
+            if (std.mem.eql(u8, name, slot)) return true;
+        }
+        return false;
+    }
+
+    /// Park the script-number encoding of `value_be` in `slot` for the lifetime
+    /// of this emitter. No-op when pooling is off.
+    fn poolConstant(self: *ECTracker, slot: []const u8, value_be: []const u8) !void {
+        if (!self.opts.constant_pool or self.hasSlot(slot)) return;
+        const encoded = try beToUnsignedScriptNumAlloc(self.allocator, value_be);
+        try self.pushOwnedBytes(slot, encoded);
+    }
+
+    /// Remove a pooled slot. No-op when pooling is off or the slot is absent.
+    fn releaseConstant(self: *ECTracker, slot: []const u8) !void {
+        if (!self.opts.constant_pool or !self.hasSlot(slot)) return;
+        try self.toTop(slot);
+        try self.drop();
+    }
+
+    /// Emitted bytes a `pushConst` of this constant would cost right now.
+    ///
+    /// The comparison is exact — the same encoders the emit pass uses — so
+    /// pooling can never make a call site bigger. A pick at depth d costs
+    /// `sizeOfScriptNumber(d) + 1`; depths 0 and 1 are OP_DUP / OP_OVER,
+    /// 1 byte each.
+    fn constCost(self: *const ECTracker, slot: []const u8, encoded_len: usize) usize {
+        const literal = pushDataCost(encoded_len);
+        if (self.opts.constant_pool and self.hasSlot(slot)) {
+            const d = self.findDepth(slot) catch return literal;
+            const pick_cost: usize = if (d <= 1) 1 else scriptNumberCost(@intCast(d)) + 1;
+            if (pick_cost < literal) return pick_cost;
+        }
+        return literal;
+    }
+
+    /// Materialize the constant on top as `name`, from the pooled slot when that
+    /// is cheaper in emitted bytes than pushing the literal.
+    fn pushConst(self: *ECTracker, slot: []const u8, value_be: []const u8, name: []const u8) !void {
+        const encoded = try beToUnsignedScriptNumAlloc(self.allocator, value_be);
+        if (self.opts.constant_pool and self.hasSlot(slot)) {
+            const d = try self.findDepth(slot);
+            const pick_cost: usize = if (d <= 1) 1 else scriptNumberCost(@intCast(d)) + 1;
+            if (pick_cost < pushDataCost(encoded.len)) {
+                self.allocator.free(encoded);
+                try self.pick(d, name);
+                return;
+            }
+        }
+        try self.pushOwnedBytes(name, encoded);
+    }
+
+    fn toAlt(self: *ECTracker) !void {
+        try self.emitOpcode("OP_TOALTSTACK");
+        if (self.names.items.len == 0) return;
+        const d = self.doms.items[self.doms.items.len - 1];
+        self.popTracked();
+        try self.alt_doms.append(self.allocator, d);
+    }
+
+    fn fromAlt(self: *ECTracker, name: ?[]const u8) !void {
+        try self.emitOpcode("OP_FROMALTSTACK");
+        const d: Dom = if (self.alt_doms.items.len > 0) self.alt_doms.pop().? else .unknown;
+        try self.pushTracked(name, d);
     }
 };
 
@@ -319,6 +702,7 @@ fn emitNumEqualOpcode(t: *ECTracker) !void {
 fn emitAddOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_ADD");
 }
+
 
 fn emitSubOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_SUB");
@@ -350,6 +734,10 @@ fn emitRshiftnumOpcode(t: *ECTracker) !void {
 
 fn emitModOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_MOD");
+}
+
+fn emit0NotEqualOpcode(t: *ECTracker) !void {
+    try t.emitOpcode("OP_0NOTEQUAL");
 }
 
 fn emitLessThanOpcode(t: *ECTracker) !void {
@@ -442,13 +830,11 @@ fn pow2ScriptNumAlloc(allocator: Allocator, bit: usize) ![]u8 {
 }
 
 fn pushFieldPNum(t: *ECTracker, name: []const u8) !void {
-    const encoded = try beToUnsignedScriptNumAlloc(t.allocator, field_p_be[0..]);
-    try t.pushOwnedBytes(name, encoded);
+    try t.pushConst(POOL_FIELD_P, field_p_be[0..], name);
 }
 
 fn pushCurveNNum(t: *ECTracker, name: []const u8) !void {
-    const encoded = try beToUnsignedScriptNumAlloc(t.allocator, curve_n_be[0..]);
-    try t.pushOwnedBytes(name, encoded);
+    try t.pushConst(POOL_GROUP_N, curve_n_be[0..], name);
 }
 
 fn pushPow2Divisor(t: *ECTracker, name: []const u8, bit: usize) !void {
@@ -468,30 +854,93 @@ fn generatorPointAlloc(allocator: Allocator) ![]u8 {
     return point;
 }
 
+/// `a mod p` with no sign fix-up: 1 opcode instead of 7.
+///
+/// Sound only when the dividend is provably >= 0, because `OP_MOD` takes the
+/// sign of the dividend. The caller proves that; this function does not check.
+fn fieldModShort(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
+    try t.toTop(a_name);
+    try pushFieldPNum(t, "_fmods_p");
+    try t.rawBlock(2, result_name, emitModOpcode);
+    t.setDomain(result_name, .reduced);
+}
+
+/// Does the cheap `a - b + p` subtraction shape pay here?
+///
+/// It references the prime TWICE where the shipping shape references it once and
+/// pays six more opcodes, so it only wins when the prime is cheap to materialise
+/// — i.e. when it is pooled. Without a pool this rewrite makes p256-wallet
+/// LARGER (958,792 -> 999,371 measured), which is why it is a cost comparison
+/// and not a flag.
+fn cheapSubPays(t: *const ECTracker) bool {
+    const c = t.constCost(POOL_FIELD_P, FIELD_P_SCRIPT_NUM_LEN);
+    return 2 * c + 2 < c + 8;
+}
+
 fn fieldMod(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
+    if (t.opts.reduction_sinking and t.domainOf(a_name).isNonNegative()) {
+        try fieldModShort(t, a_name, result_name);
+        return;
+    }
     try t.toTop(a_name);
     try pushFieldPNum(t, "_fmod_p");
     try t.rawBlock(2, result_name, emitFieldModSequence);
+    t.setDomain(result_name, .reduced);
 }
 
 fn fieldAdd(t: *ECTracker, a_name: []const u8, b_name: []const u8, result_name: []const u8) !void {
+    // Read the operand facts BEFORE rawBlock consumes their slots.
+    const sum_non_neg = t.domainOf(a_name).isNonNegative() and t.domainOf(b_name).isNonNegative();
     try t.toTop(a_name);
     try t.toTop(b_name);
     try t.rawBlock(2, "_fadd_sum", emitAddOpcode);
+    if (sum_non_neg) t.setDomain("_fadd_sum", .non_negative);
     try fieldMod(t, "_fadd_sum", result_name);
 }
 
 fn fieldSub(t: *ECTracker, a_name: []const u8, b_name: []const u8, result_name: []const u8) !void {
     try t.toTop(a_name);
     try t.toTop(b_name);
+    // The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a single
+    // shifted reduction is exact. `b >= 0` alone is NOT enough — a coordinate
+    // decoded from 32 unsigned bytes can exceed p by up to 2^32 + 977, which is
+    // precisely the `ecAdd((0,1), (2^256-1,1))` counterexample.
+    const cheap = t.opts.reduction_sinking and
+        t.domainOf(a_name).isNonNegative() and
+        t.domainOf(b_name) == .reduced and
+        cheapSubPays(t);
+
     try t.rawBlock(2, "_fsub_diff", emitSubOpcode);
+
+    if (cheap) {
+        try pushFieldPNum(t, "_fsub_p");
+        try t.rawBlock(2, "_fsub_shift", emitAddOpcode);
+        t.setDomain("_fsub_shift", .non_negative);
+        try fieldModShort(t, "_fsub_shift", result_name);
+        return;
+    }
     try fieldMod(t, "_fsub_diff", result_name);
 }
 
 fn fieldMul(t: *ECTracker, a_name: []const u8, b_name: []const u8, result_name: []const u8) !void {
+    try fieldMulSigned(t, a_name, b_name, result_name, false);
+}
+
+/// `fieldMul` with an explicit assertion about the product's sign, independent
+/// of the operands — `fieldSqr` uses it, since a*a >= 0 for any a whatsoever.
+fn fieldMulSigned(
+    t: *ECTracker,
+    a_name: []const u8,
+    b_name: []const u8,
+    result_name: []const u8,
+    product_non_negative: bool,
+) !void {
+    const non_neg = product_non_negative or
+        (t.domainOf(a_name).isNonNegative() and t.domainOf(b_name).isNonNegative());
     try t.toTop(a_name);
     try t.toTop(b_name);
     try t.rawBlock(2, "_fmul_prod", emitMulOpcode);
+    if (non_neg) t.setDomain("_fmul_prod", .non_negative);
     try fieldMod(t, "_fmul_prod", result_name);
 }
 
@@ -500,6 +949,8 @@ fn emit2MulOpcode(t: *ECTracker) !void {
 }
 
 fn fieldMulConst(t: *ECTracker, a_name: []const u8, c: i64, result_name: []const u8) !void {
+    // Every call site passes a small positive c, so the product keeps a's sign.
+    const non_neg = c > 0 and t.domainOf(a_name).isNonNegative();
     try t.toTop(a_name);
     if (c == 2) {
         // Use OP_2MUL (single opcode, no push needed)
@@ -508,12 +959,14 @@ fn fieldMulConst(t: *ECTracker, a_name: []const u8, c: i64, result_name: []const
         try t.pushInt("_fmc_c", c);
         try t.rawBlock(2, "_fmc_prod", emitMulOpcode);
     }
+    if (non_neg) t.setDomain("_fmc_prod", .non_negative);
     try fieldMod(t, "_fmc_prod", result_name);
 }
 
+/// `(a * a) mod p`. A square is non-negative whatever a's sign is.
 fn fieldSqr(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
     try t.copyToTop(a_name, "_fsqr_copy");
-    try fieldMul(t, a_name, "_fsqr_copy", result_name);
+    try fieldMulSigned(t, a_name, "_fsqr_copy", result_name, true);
 }
 
 fn fieldInv(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
@@ -552,14 +1005,19 @@ fn decomposePoint(t: *ECTracker, point_name: []const u8, x_name: []const u8, y_n
     try t.toTop(point_name);
     t.popNames(1);
     try emitSplit32Sequence(t);
-    try t.names.append(t.allocator, "_dp_xb");
-    try t.names.append(t.allocator, "_dp_yb");
+    try t.pushTracked("_dp_xb", .unknown);
+    try t.pushTracked("_dp_yb", .unknown);
 
     try t.toTop("_dp_yb");
     try t.rawBlock(1, y_name, emitBytesToUnsignedNumSequence);
+    // A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+    // UNSIGNED: >= 0, but it may be up to 2^256 - 1 and therefore >= p. That gap
+    // is exactly what the subtraction precondition turns on.
+    t.setDomain(y_name, .non_negative);
 
     try t.toTop("_dp_xb");
     try t.rawBlock(1, x_name, emitBytesToUnsignedNumSequence);
+    t.setDomain(x_name, .non_negative);
     try t.swap();
 }
 
@@ -750,8 +1208,16 @@ fn jacobianToAffine(t: *ECTracker, rx_name: []const u8, ry_name: []const u8) !vo
     try fieldMul(t, "jy", "_zinv3", ry_name);
 }
 
-fn buildJacobianAddAffineInline(allocator: Allocator, base_names: []const ?[]const u8) !EcOpBundle {
-    var inner = try ECTracker.init(allocator, base_names);
+fn buildJacobianAddAffineInline(
+    allocator: Allocator,
+    base_names: []const ?[]const u8,
+    opts: EcCodegenOptions,
+    base_doms: []const Dom,
+) !EcOpBundle {
+    // The inner tracker inherits the stack state AND the lattice facts: the
+    // operands' proved domains are what decide which reduction shape the body
+    // emits, so dropping them here would silently fall back everywhere.
+    var inner = try ECTracker.initOpts(allocator, base_names, opts, base_doms);
     errdefer inner.deinit();
 
     try jacobianAddAffineBody(&inner, false);
@@ -889,8 +1355,13 @@ fn selectCoord(
 /// ecOnCurve first.
 ///
 /// Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
-fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]const u8) !EcOpBundle {
-    var inner = try ECTracker.init(allocator, base_names);
+fn buildJacobianAddOrDoubleInline(
+    allocator: Allocator,
+    base_names: []const ?[]const u8,
+    opts: EcCodegenOptions,
+    base_doms: []const Dom,
+) !EcOpBundle {
+    var inner = try ECTracker.initOpts(allocator, base_names, opts, base_doms);
     errdefer inner.deinit();
 
     // Keep the pre-add accumulator: it is what must be DOUBLED in the
@@ -948,10 +1419,12 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
 }
 
 fn emitEcAdd(t: *ECTracker) !void {
+    try t.poolConstant(POOL_FIELD_P, field_p_be[0..]);
     try decomposePoint(t, "_pa", "px", "py");
     try decomposePoint(t, "_pb", "qx", "qy");
     try affineAdd(t);
     try composePoint(t, "rx", "ry", "_result");
+    try t.releaseConstant(POOL_FIELD_P);
 }
 
 /// Reduce a scalar to [0, n-1]: ((k mod n) + n) mod n.
@@ -973,14 +1446,36 @@ fn emitScalarReduce(t: *ECTracker, k_name: []const u8, result_name: []const u8) 
 }
 
 fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !void {
+    try t.poolConstant(POOL_FIELD_P, field_p_be[0..]);
+    try t.poolConstant(POOL_GROUP_N, curve_n_be[0..]);
     try decomposePoint(t, point_name, "ax", "ay");
 
     // "k in [1, n-1]" is a PRECONDITION the caller cannot enforce — the scalar is
     // usually an unlock argument — so reduce it first. See emitScalarReduce.
     try t.toTop(scalar_name);
     try emitScalarReduce(t, scalar_name, "_kr");
-    try t.pushStaticBytes("_3n", curve_3n_script_num_le[0..]);
-    try t.rawBlock(2, "_kn3", emitAddOpcode);
+    if (t.opts.constant_pool) {
+        // Three separate `+n` steps, each served from the pooled slot — the
+        // shape the reference emits.
+        try pushCurveNNum(t, "_n");
+        try t.rawBlock(2, "_kn", emitAddOpcode);
+        try pushCurveNNum(t, "_n2");
+        try t.rawBlock(2, "_kn2", emitAddOpcode);
+        try pushCurveNNum(t, "_n3");
+        try t.rawBlock(2, "_kn3", emitAddOpcode);
+    } else {
+        // Pre-folded `3n` on the DEFAULT path, and only there.
+        //
+        // The reference emits three literal `+n` steps and lets its peephole
+        // reassociate them back to `push 3n; OP_ADD`. This tier's peephole folds
+        // only i64 `push_int` chains (see peephole.zig rule 27), and a 256-bit
+        // constant is a `push_data` blob here — so emitting three steps would
+        // ship 68 extra bytes rather than collapsing. Same shipped bytes as the
+        // reference, different pre-peephole spelling, which is exactly why the
+        // Zig parity test is gated on the POST-peephole hash.
+        try t.pushStaticBytes("_3n", curve_3n_script_num_le[0..]);
+        try t.rawBlock(2, "_kn3", emitAddOpcode);
+    }
     t.renameTop("_k");
 
     try t.copyToTop("ax", "jx");
@@ -1011,9 +1506,9 @@ fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !vo
         // Only the final step can be handed two equal operands — see
         // buildJacobianAddOrDoubleInline for why, and for what it costs not to.
         var add_bundle = if (bit == 0)
-            try buildJacobianAddOrDoubleInline(t.allocator, t.names.items)
+            try buildJacobianAddOrDoubleInline(t.allocator, t.names.items, t.opts, t.doms.items)
         else
-            try buildJacobianAddAffineInline(t.allocator, t.names.items);
+            try buildJacobianAddAffineInline(t.allocator, t.names.items, t.opts, t.doms.items);
         errdefer add_bundle.deinit();
 
         try t.owned_bytes.appendSlice(t.allocator, add_bundle.owned_bytes);
@@ -1034,9 +1529,314 @@ fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !vo
     try t.drop();
 
     try composePoint(t, "_rx", "_ry", "_result");
+    try t.releaseConstant(POOL_GROUP_N);
+    try t.releaseConstant(POOL_FIELD_P);
+}
+
+// ===========================================================================
+// Fixed-base comb (secp256k1)
+// ===========================================================================
+
+/// Render a comb table coordinate as a 32-byte big-endian buffer.
+fn combCoordBeAlloc(allocator: Allocator, v: comb.Big) ![]u8 {
+    const out = try allocator.alloc(u8, 32);
+    var x = v;
+    var i: usize = 32;
+    while (i > 0) {
+        i -= 1;
+        out[i] = @intCast(@as(u8, @truncate(@as(u256, @intCast(x)) & 0xff)));
+        x >>= 8;
+    }
+    return out;
+}
+
+/// Push a comb table coordinate as an unsigned script number.
+fn pushCombCoord(t: *ECTracker, name: []const u8, v: comb.Big) !void {
+    const be = try combCoordBeAlloc(t.allocator, v);
+    defer t.allocator.free(be);
+    const encoded = try beToUnsignedScriptNumAlloc(t.allocator, be);
+    try t.pushOwnedBytes(name, encoded);
+}
+
+/// Round `i`'s digit and the selected table entry, as `ax`/`ay`/`_flag`.
+///
+/// Exactly one equality holds, so `sum(eq_j * T_j)` is that entry's coordinate
+/// and every term is non-negative and below p — no reduction is needed, and the
+/// result is `.reduced` by construction. When the digit is zero every term
+/// vanishes and `_flag` is 0, so no add runs.
+fn combEmitSelect(t: *ECTracker, i: usize, w: usize, d: usize) !void {
+    var buf: [24]u8 = undefined;
+    const entries = (@as(usize, 1) << @intCast(w)) - 1;
+
+    var b: usize = 0;
+    while (b < w) : (b += 1) {
+        const shift = i + b * d;
+        const kc = try t.internName(try std.fmt.bufPrint(&buf, "_kc{d}", .{b}));
+        const sh = try t.internName(try std.fmt.bufPrint(&buf, "_sh{d}", .{b}));
+        try t.copyToTop("_k", kc);
+        if (shift == 0) {
+            t.renameTop(sh);
+        } else if (shift == 1) {
+            try t.rawBlock(1, sh, emit2DivOpcode);
+        } else {
+            const sd = try t.internName(try std.fmt.bufPrint(&buf, "_sd{d}", .{b}));
+            try t.pushInt(sd, @intCast(shift));
+            try t.rawBlock(2, sh, emitRshiftnumOpcode);
+        }
+        const two = try t.internName(try std.fmt.bufPrint(&buf, "_two{d}", .{b}));
+        const bit = try t.internName(try std.fmt.bufPrint(&buf, "_b{d}", .{b}));
+        try t.pushInt(two, 2);
+        try t.rawBlock(2, bit, emitModOpcode);
+        t.setDomain(bit, .reduced);
+    }
+
+    try t.toTop("_b0");
+    t.renameTop("_idx");
+    b = 1;
+    while (b < w) : (b += 1) {
+        const bit = try t.internName(try std.fmt.bufPrint(&buf, "_b{d}", .{b}));
+        const wt = try t.internName(try std.fmt.bufPrint(&buf, "_wt{d}", .{b}));
+        const bw = try t.internName(try std.fmt.bufPrint(&buf, "_bw{d}", .{b}));
+        try t.toTop(bit);
+        try t.pushInt(wt, @as(i64, 1) << @intCast(b));
+        try t.rawBlock(2, bw, emitMulOpcode);
+        try t.toTop("_idx");
+        try t.rawBlock(2, "_idx", emitAddOpcode);
+    }
+    t.setDomain("_idx", .reduced);
+
+    var j: usize = 1;
+    while (j <= entries) : (j += 1) {
+        const ic = try t.internName(try std.fmt.bufPrint(&buf, "_ic{d}", .{j}));
+        const jv = try t.internName(try std.fmt.bufPrint(&buf, "_jv{d}", .{j}));
+        const eq = try t.internName(try std.fmt.bufPrint(&buf, "_eq{d}", .{j}));
+        try t.copyToTop("_idx", ic);
+        try t.pushInt(jv, @intCast(j));
+        try t.rawBlock(2, eq, emitNumEqualOpcode);
+        t.setDomain(eq, .reduced);
+    }
+
+    for ([_][]const u8{ "x", "y" }) |coord| {
+        const acc: []const u8 = if (coord[0] == 'x') "ax" else "ay";
+        j = 1;
+        while (j <= entries) : (j += 1) {
+            const ec_n = try t.internName(try std.fmt.bufPrint(&buf, "_e{s}{d}", .{ coord, j }));
+            const tc = try t.internName(try std.fmt.bufPrint(&buf, "_t{s}{d}", .{ coord, j }));
+            const pr = try t.internName(try std.fmt.bufPrint(&buf, "_pr{s}{d}", .{ coord, j }));
+            const eq = try t.internName(try std.fmt.bufPrint(&buf, "_eq{d}", .{j}));
+            const tj = try t.internName(try std.fmt.bufPrint(&buf, "_T{s}{d}", .{ coord, j }));
+            try t.copyToTop(eq, ec_n);
+            try t.copyToTop(tj, tc);
+            try t.rawBlock(2, pr, emitMulOpcode);
+            if (j == 1) {
+                t.renameTop(acc);
+            } else {
+                try t.toTop(acc);
+                try t.rawBlock(2, acc, emitAddOpcode);
+            }
+        }
+        t.setDomain(acc, .reduced);
+    }
+
+    j = entries;
+    while (j >= 1) : (j -= 1) {
+        const eq = try t.internName(try std.fmt.bufPrint(&buf, "_eq{d}", .{j}));
+        try t.toTop(eq);
+        try t.drop();
+        if (j == 1) break;
+    }
+
+    try t.toTop("_idx");
+    try t.rawBlock(1, "_flag", emit0NotEqualOpcode);
+}
+
+/// `k*G` by a Lim-Lee fixed-base comb instead of the 257-round binary ladder.
+///
+/// The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+/// the scalar into `w` blocks of `d` bits and reads one bit from each block per
+/// round, so it performs one doubling and one conditional add per COLUMN: the
+/// round count falls from `w*d` to `d` at the price of a `2^w - 1` entry table.
+/// G is a compile-time constant here, so the table costs nothing to build.
+///
+/// SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+/// accumulator equal to the addend, its negation, or the point at infinity.
+/// `buildJacobianAddOrDoubleInline`'s comment justifies using it everywhere but
+/// the ladder's LAST step by an interval argument over `c_i mod n`, and insists
+/// that argument be re-derived by anything changing the offset or the iteration
+/// count. A comb changes both, so it is re-derived: `comb.combSafeRounds`
+/// evaluates the same argument as executable interval arithmetic over the comb's
+/// own geometry, and any round it cannot prove gets the complete add-or-double
+/// form instead. Nothing is assumed safe.
+///
+/// The other half of that argument is that the accumulator never starts at
+/// infinity, which needs the first digit non-zero. `comb.combGeometry` searches
+/// for the scalar offset that guarantees it rather than reusing the ladder's
+/// hardcoded `+3n` — right for secp256k1 at w=3, wrong for P-384.
+///
+/// Stack in: [_k]. Stack out: [_result]. False when no geometry exists for `w`.
+fn emitCombMulGen(t: *ECTracker, w: usize) !bool {
+    const curve = comb.SECP256K1_COMB_CURVE;
+    const params = comb.combGeometry(w, curve) orelse return false;
+    const d = params.d;
+    var table: [1 << comb.MAX_W]?comb.Point = undefined;
+    comb.combTable(w, d, curve, &table);
+    var safe: [comb.MAX_D]bool = undefined;
+    comb.combSafeRounds(params, curve, &safe);
+    const entries = (@as(usize, 1) << @intCast(w)) - 1;
+    var buf: [24]u8 = undefined;
+
+    try t.poolConstant(POOL_FIELD_P, field_p_be[0..]);
+    try t.poolConstant(POOL_GROUP_N, curve_n_be[0..]);
+
+    // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+    // what makes the interval argument apply at all; see emitScalarReduce.
+    try t.toTop("_k");
+    try emitScalarReduce(t, "_k", "_kr");
+    t.renameTop("_k");
+    var i: usize = 0;
+    while (i < params.offset_multiple) : (i += 1) {
+        const off = try t.internName(try std.fmt.bufPrint(&buf, "_off{d}", .{i}));
+        try pushCurveNNum(t, off);
+        try t.rawBlock(2, "_k", emitAddOpcode);
+    }
+    t.setDomain("_k", .non_negative);
+
+    // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+    // against a 34-byte literal push, and every round reads all of them.
+    var j: usize = 1;
+    while (j <= entries) : (j += 1) {
+        const pt = table[j].?;
+        const tx = try t.internName(try std.fmt.bufPrint(&buf, "_Tx{d}", .{j}));
+        const ty = try t.internName(try std.fmt.bufPrint(&buf, "_Ty{d}", .{j}));
+        try pushCombCoord(t, tx, pt.x);
+        try pushCombCoord(t, ty, pt.y);
+        t.setDomain(tx, .reduced);
+        t.setDomain(ty, .reduced);
+    }
+
+    // Round d-1 initialises the accumulator. The first digit is non-zero by
+    // construction (combGeometry), so this is a real point, never infinity.
+    try combEmitSelect(t, d - 1, w, d);
+    try t.toTop("_flag");
+    try t.drop();
+    try t.toTop("ax");
+    t.renameTop("jx");
+    try t.toTop("ay");
+    t.renameTop("jy");
+    try t.pushInt("jz", 1);
+    t.setDomain("jz", .reduced);
+
+    var round: usize = d - 1;
+    while (round > 0) {
+        round -= 1;
+        try jacobianDouble(t);
+        try combEmitSelect(t, round, w, d);
+
+        // `jacobianAddAffineBody` documents its layout as
+        // [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at the
+        // top. The selection leaves ax/ay above jz, so restore the contract
+        // before the branch — otherwise the add arm would reorder the stack and
+        // the empty else arm would not, leaving the two arms with different
+        // layouts at OP_ENDIF.
+        try t.toTop("_flag");
+        try t.toAlt();
+        try t.toTop("jx");
+        try t.toTop("jy");
+        try t.toTop("jz");
+        try t.fromAlt("_flag");
+
+        t.popNames(1); // consumed by OP_IF
+        var add_bundle = if (safe[round])
+            try buildJacobianAddAffineInline(t.allocator, t.names.items, t.opts, t.doms.items)
+        else
+            try buildJacobianAddOrDoubleInline(t.allocator, t.names.items, t.opts, t.doms.items);
+        errdefer add_bundle.deinit();
+
+        try t.owned_bytes.appendSlice(t.allocator, add_bundle.owned_bytes);
+        t.allocator.free(add_bundle.owned_bytes);
+        add_bundle.owned_bytes = &.{};
+        try t.emitRaw(.{ .@"if" = .{ .then = add_bundle.ops, .@"else" = null } });
+        add_bundle.ops = &.{};
+
+        // The addend was selected fresh for this round; the add only copied it.
+        try t.toTop("ay");
+        try t.drop();
+        try t.toTop("ax");
+        try t.drop();
+    }
+
+    try jacobianToAffine(t, "_rx", "_ry");
+
+    j = entries;
+    while (j >= 1) : (j -= 1) {
+        const ty = try t.internName(try std.fmt.bufPrint(&buf, "_Ty{d}", .{j}));
+        const tx = try t.internName(try std.fmt.bufPrint(&buf, "_Tx{d}", .{j}));
+        try t.toTop(ty);
+        try t.drop();
+        try t.toTop(tx);
+        try t.drop();
+        if (j == 1) break;
+    }
+    try t.toTop("_k");
+    try t.drop();
+
+    try composePoint(t, "_rx", "_ry", "_result");
+    try t.releaseConstant(POOL_GROUP_N);
+    try t.releaseConstant(POOL_FIELD_P);
+    return true;
+}
+
+/// Emit the cheapest comb over the candidate window widths into `t`.
+///
+/// Each candidate is rendered in full and scored with the same byte-cost model
+/// the emitter is measured by, and the smallest wins — the window width is not
+/// hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the `2^w`
+/// selection logic outgrows the saving.
+///
+/// Returns false when no candidate could be built, so the caller falls back to
+/// the ladder rather than emitting nothing.
+fn emitCombBest(t: *ECTracker) !bool {
+    var best_w: ?usize = null;
+    var best_bytes: usize = 0;
+    for ([_]usize{ 2, 3, 4 }) |w| {
+        var probe = try ECTracker.initOpts(t.allocator, t.names.items, t.opts, t.doms.items);
+        defer probe.deinit();
+        const built = emitCombMulGen(&probe, w) catch continue;
+        if (!built) continue;
+        const bytes = estimateScriptBytes(probe.ops.items);
+        if (best_w == null or bytes < best_bytes) {
+            best_w = w;
+            best_bytes = bytes;
+        }
+    }
+    const w = best_w orelse return false;
+    return emitCombMulGen(t, w);
+}
+
+/// Render the comb at one window width, for the width-selection test.
+///
+/// The emitter picks `w` by rendering every candidate and keeping the smallest;
+/// this exposes a single candidate so the test can pin WHICH width wins rather
+/// than only that the total matches.
+pub fn buildCombProbeForTest(allocator: Allocator, w: usize) !EcOpBundle {
+    var t = try ECTracker.initOpts(allocator, &.{"_k"}, .{
+        .constant_pool = true,
+        .reduction_sinking = true,
+        .fixed_base_comb = true,
+    }, null);
+    errdefer t.deinit();
+    _ = try emitCombMulGen(&t, w);
+    return t.takeBundle();
 }
 
 fn emitEcMulGen(t: *ECTracker) !void {
+    // G is a compile-time constant, so this is the one secp256k1 call site where
+    // a fixed-base comb applies. `emitEcMul` cannot use it: its base arrives at
+    // run time.
+    if (t.opts.fixed_base_comb) {
+        if (try emitCombBest(t)) return;
+    }
+
     const point = try generatorPointAlloc(t.allocator);
     try t.pushOwnedBytes("_pt", point);
     try t.swap();
@@ -1044,13 +1844,16 @@ fn emitEcMulGen(t: *ECTracker) !void {
 }
 
 fn emitEcNegate(t: *ECTracker) !void {
+    try t.poolConstant(POOL_FIELD_P, field_p_be[0..]);
     try decomposePoint(t, "_pt", "_nx", "_ny");
     try pushFieldPNum(t, "_fp");
     try fieldSub(t, "_fp", "_ny", "_neg_y");
     try composePoint(t, "_nx", "_neg_y", "_result");
+    try t.releaseConstant(POOL_FIELD_P);
 }
 
 fn emitEcOnCurve(t: *ECTracker) !void {
+    try t.poolConstant(POOL_FIELD_P, field_p_be[0..]);
     try decomposePoint(t, "_pt", "_x", "_y");
 
     // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1084,6 +1887,7 @@ fn emitEcOnCurve(t: *ECTracker) !void {
     try t.toTop("_canon");
     try t.toTop("_curve_eq");
     try t.rawBlock(2, "_result", emitBoolAndOpcode);
+    try t.releaseConstant(POOL_FIELD_P);
 }
 
 fn containsOpcode(ops: []const StackOp, opcode: []const u8) bool {

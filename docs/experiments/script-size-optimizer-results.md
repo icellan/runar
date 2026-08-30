@@ -18,7 +18,7 @@ pnpm --filter runar-conformance run script-metrics -- --compare current,all`.
 **`conformance/tests/p256-wallet`: 958,792 → 147,113 bytes (−84.7 %)** — the fixture the brief
 calls its "959,592 B reference implementation". `p384-wallet`: 1,963,300 → 223,204 (−88.6 %).
 
-Across the whole corpus, with every flag on: **13,526,563 → 4,906,225 bytes (−63.7 %)**,
+Across the whole corpus, with every flag on: **13,526,563 → 4,726,567 bytes (−65.1 %)**,
 43 of 72 fixtures changed, **none grown**.
 
 | stage | p256-wallet | p384-wallet | corpus |
@@ -26,16 +26,27 @@ Across the whole corpus, with every flag on: **13,526,563 → 4,906,225 bytes (�
 | shipping | 958,792 | 1,963,300 | 13,526,563 |
 | + EC constant pool | 304,463 (−68.2 %) | 463,435 (−76.4 %) | 6,285,154 (−53.5 %) |
 | + reduction sinking | 179,890 (−81.2 %) | 272,678 (−86.1 %) | — |
-| + fixed-base comb | **147,113 (−84.7 %)** | **223,204 (−88.6 %)** | **4,906,225 (−63.7 %)** |
+| + fixed-base comb (NIST) | **147,113 (−84.7 %)** | **223,204 (−88.6 %)** | 4,906,225 (−63.7 %) |
+| + fixed-base comb (secp256k1) | — | — | **4,726,567 (−65.1 %)** |
+
+The secp256k1 comb is the last stage: `ecMulGen` was the remaining
+compile-time-known base still on the 257-round binary ladder. It goes 84,203 →
+52,237 bytes (−38.0 %), which is 179,658 bytes off the corpus — the six
+secp256k1 fixtures (`ec-primitives`, `ec-demo`, `ec-unit`, `schnorr-zkp`,
+`convergence-proof`, and the two wallet fixtures' shared helpers). `ecMul` is
+deliberately NOT combed: its base arrives at run time, and the comb's interval
+argument does not cover an attacker-chosen point.
+
+**All seven tiers ship all four optimizations, byte-identically.** See §8.
 
 The liveness scheduler moves 34 fixtures but −0.0 % of corpus bytes; it is reported separately
 in §2 because its value is qualitative, not numeric.
 
-Default output is unchanged at every stage: all 72 fixtures reproduce their checked-in
-`expected-script.hex` byte-for-byte
+Default output is unchanged at every stage and in every tier: all 72 fixtures reproduce their
+checked-in `expected-script.hex` byte-for-byte
 (`packages/runar-compiler/src/__tests__/golden-invariance.test.ts`), `script-size-check` is
-72/72 ok, and the Go and Rust cross-compiler golden tests still pass. Every optimization is
-opt-in.
+72/72 ok, and every tier's own suite — including its crypto op-count goldens — still passes.
+Every optimization is opt-in.
 
 ## 2. What was built
 
@@ -431,3 +442,105 @@ npx vitest run packages/runar-compiler/src/__tests__/comb-table.test.ts
 node --import tsx packages/runar-cli/src/bin.ts compile <file> --hex \
   --ec-constant-pool --ec-reduction-sinking --ec-fixed-base-comb --stack-scheduler liveness
 ```
+
+## 8. The seven-tier port
+
+All four optimizations ship in TypeScript, Go, Rust, Python, Zig, Ruby and Java, behind the same
+three flags in every tier:
+
+```
+--ec-constant-pool  --ec-reduction-sinking  --ec-fixed-base-comb
+```
+
+### 8.1 Why a new gate was needed
+
+The flags default off, so the ordinary conformance suite — which compiles with defaults — cannot
+see them at all. Seven tiers could each ship a *different* `--ec-constant-pool` and the suite would
+stay green.
+
+That is not a hypothetical. The flags change which reduction form is emitted and which addition
+formula each ladder round uses. A tier that ports the constant pool but not the sign lattice's
+`Reduced` precondition produces a script that is **smaller**, passes every test it has, and is
+wrong on `ecAdd((0,1), (2^256−1,1))` — the counterexample from §3.8.
+
+`conformance/ec-flag-parity/expected.json` pins the exact script the TypeScript reference emits for
+all 24 EC emitters under all 4 flag combinations, as a byte count plus a SHA-256. It is derived,
+never hand-edited, and `parity.test.ts` re-derives it in-process so it cannot go stale.
+
+### 8.2 What the gate caught
+
+Six real defects, none of which any tier-local test could have found:
+
+| tier | defect | symptom |
+|---|---|---|
+| Go | `cDecomposePoint` never recorded that BIN2NUM of an unsigned coordinate is `NonNegative` | NIST tier emitted a **larger** script under `--ec-reduction-sinking` (P256Mul 94,137 vs 90,610) |
+| Go | six NIST entry points never released the pooled prime | 2 bytes per emitter |
+| Go | the three `+n` pushes in `cEmitMul` were routed through the pool | strictly smaller (−96 B/ladder) but the reference pushes literals — the tiers would have diverged |
+| Rust | `compile_from_source_str_with_options` built backend options with `..Default::default()` | `--ec-constant-pool` reached the frontend and vanished; the compile succeeded and emitted the unoptimized script |
+| Python | the second (`u2·Q`) ladder in `_c_emit_verify_ecdsa` was called without options | verifier came out at 628,923 bytes where the reference emits 319,693 — the flag applied to exactly half of it |
+| Python / Ruby / Java | verifier never released its two pooled constants | 4 bytes |
+
+Two of those (the Go `NonNegative` fact and the Rust `..Default::default()`) are the interesting
+ones: both produce a compiler that *works*, passes its suite, and silently does not do what the
+flag says.
+
+### 8.3 Tier-specific findings
+
+**Rust** pushed the EC constants as pre-encoded script-number BYTE blobs because they exceed
+`i128`. `PushValue::Int` carries a `BigInt`, so the blob was never necessary — and it cost real
+things: a `Bytes` push is invisible to the peephole's constant folding (which is why `k + 3n` had
+to be hand-folded there and only there) and invisible to the sign lattice. Switching to `Int` and
+emitting the reference's three `+n` steps left the shipped bytes unchanged and brought the raw
+op-count goldens into agreement with Go, where they had been 4 ops short.
+
+**Rust** also carried a hand-copy of `ECTracker` in `p256_p384.rs`, commented "duplicated since
+it's private there". Tolerable for 200 lines of stack bookkeeping; not tolerable once the tracker
+carries a sign lattice whose transfer functions decide which reduction shape is emitted — two
+copies is two chances to prove `Reduced` where only `NonNegative` holds. Deleted; the tiers share
+one tracker.
+
+**Zig** is the one tier that cannot assert the raw hash. Its peephole reassociates only `i64`
+`push_int` chains, and a 256-bit constant is a `push_data` blob in its IR, so `k + 3n` stays
+pre-folded there while the reference emits three `+n` steps its own peephole collapses. Identical
+shipped bytes, different pre-peephole spelling. Zig therefore gates on the raw byte *count* with
+that single divergence asserted exactly (`allowedDelta`), plus end-to-end hex identity through the
+CLI. The fixture carries a `postPeephole` measurement alongside the raw one for exactly this.
+
+Zig's cost model also differs by construction: its `roll` / `pick` ops carry the depth themselves
+and the emitter writes the depth push while emitting them, so they cost `sizeOfScriptNumber(depth)
++ 1` where every other tier charges 1 and counts a separate `push`. Same bytes; the cost-model
+test is what keeps the two spellings honest.
+
+**Ruby** needed an explicit extended-Euclid `mod_inverse` in `comb.rb`: `Integer#pow` rejects a
+negative exponent, so there is no `x.pow(-1, m)` shortcut as in Python.
+
+### 8.4 End-to-end
+
+For the same `ecMulGen` contract compiled with all three flags, **all seven compilers emit
+byte-identical hex** (50,157 bytes, down from 424,567 with the flags off).
+
+Per-tier gates:
+
+| tier | parity test | assertions |
+|---|---|---|
+| TypeScript | `conformance/ec-flag-parity/parity.test.ts` | fixture re-derived in-process |
+| Go | `codegen/ec_flag_parity_test.go` | 120 subtests |
+| Rust | `tests/ec_flag_parity_tests.rs` | 24 emitters × 4 variants, ×2 tests |
+| Python | `tests/test_ec_flag_parity.py` | 48 |
+| Ruby | `test/codegen/test_ec_flag_parity.rb` | 24 emitters × 4 variants |
+| Java | `codegen/EcFlagParityTest` | 3 tests over 24 × 4 |
+| Zig | `passes/helpers/ec_flag_parity_test.zig` | 4 tests, byte counts + width selection |
+
+Every tier additionally pins that the flags OFF reproduce the shipping hash for every emitter, so
+the experimental work cannot move default output.
+
+### 8.5 What is still not done
+
+The ports are complete and gated, but this is still not a merge candidate:
+
+- The checked-in EC goldens were stamped under flags-off and are unchanged, which is correct — but
+  nothing regenerates them for a flags-on world, and `conformance/script-size-baseline.json` would
+  trip its 50 % shrink guard by design if the flags ever became default.
+- `nist_ec_emitters.zig` (the Zig NIST tier) is not ported; only Zig's secp256k1 side is. The
+  parity fixture covers what is ported, and the NIST emitters there keep their shipping path.
+- No golden-provenance entries exist for a flags-on stamping, because nothing has been stamped.

@@ -41,6 +41,13 @@ export const VARIANTS = {
   comb: { constantPool: true, reductionSinking: true, fixedBaseComb: true },
 };
 
+function measure(scriptHex) {
+  return {
+    bytes: scriptHex.length / 2,
+    sha256: createHash('sha256').update(Buffer.from(scriptHex, 'hex')).digest('hex'),
+  };
+}
+
 export function buildParity() {
   const out = { variants: VARIANTS, emitters: {} };
   for (const [name, emit] of Object.entries(EMITTERS)) {
@@ -48,10 +55,19 @@ export function buildParity() {
     for (const [vn, vo] of Object.entries(VARIANTS)) {
       const ops = [];
       emit(op => ops.push(op), vo);
-      const { scriptHex } = C.emitMethod({ name: 't', ops });
+      const raw = measure(C.emitMethod({ name: 't', ops }).scriptHex);
+      // Post-peephole bytes: what the compiler actually ships.
+      //
+      // Six tiers reproduce the RAW emitter output op for op, so the raw hash is
+      // the sharpest gate available to them. The Zig tier cannot: its peephole
+      // folds only i64 `push_int` chains, so it emits `k + 3n` pre-folded where
+      // the reference emits three `+n` steps that its own peephole collapses.
+      // Same shipped bytes, different pre-peephole spelling — so Zig is gated on
+      // this hash instead. See conformance/ec-flag-parity/README.md.
+      const optimised = C.optimizeStackIR(ops);
       out.emitters[name][vn] = {
-        bytes: scriptHex.length / 2,
-        sha256: createHash('sha256').update(Buffer.from(scriptHex, 'hex')).digest('hex'),
+        ...raw,
+        postPeephole: measure(C.emitMethod({ name: 't', ops: optimised }).scriptHex),
       };
     }
   }
