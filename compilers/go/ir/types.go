@@ -118,10 +118,10 @@ type ANFValue struct {
 	RawValue json.RawMessage `json:"value,omitempty"`
 
 	// Decoded constant value (populated by decodeConstValue)
-	ConstString *string  `json:"-"`
-	ConstBigInt *big.Int `json:"-"`
-	ConstBool   *bool    `json:"-"`
-	ConstInt    *int64   `json:"-"` // small integers from JSON numbers
+	ConstString *string   `json:"-"`
+	ConstBigInt *big.Int  `json:"-"`
+	ConstBool   *bool     `json:"-"`
+	ConstInt    *int64    `json:"-"` // small integers from JSON numbers
 
 	// bin_op
 	Op         string `json:"op,omitempty"`

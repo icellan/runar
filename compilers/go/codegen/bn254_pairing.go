@@ -5,9 +5,9 @@
 // named stack state tracking.
 //
 // The pairing e: G1 x G2 -> Fp12 is computed as:
-//  1. Miller loop over the NAF of |6x+2| (x = BN254 parameter)
-//  2. Two correction steps for Q1 = π(Q), Q2 = -π²(Q)
-//  3. Final exponentiation: f^((p^12 - 1) / r)
+//   1. Miller loop over the NAF of |6x+2| (x = BN254 parameter)
+//   2. Two correction steps for Q1 = π(Q), Q2 = -π²(Q)
+//   3. Final exponentiation: f^((p^12 - 1) / r)
 //
 // G1 point: affine (x, y) in Fp — 2 Fp values.
 // G2 point: affine (x, y) in Fp2 — 4 Fp values.
@@ -141,18 +141,15 @@ func bn254G2Negate(t *BN254Tracker, prefix, rPrefix string) {
 // slots set to 0. For sparse-mul use the sparse variant below.
 //
 // Input on tracker:
-//
-//	T: tx0, tx1, ty0, ty1 (affine G2 point)
-//	P: px, py (affine G1 point)
-//
+//   T: tx0, tx1, ty0, ty1 (affine G2 point)
+//   P: px, py (affine G1 point)
 // Output on tracker:
-//
-//	T': updated T (doubled)
-//	line: 12 Fp values laid out in Fp12 = Fp6[w]/(w² - v) order with
-//	      C0.B0 = c0 = (Py, 0),
-//	      C1.B0 = c3 = -λ*Px,
-//	      C1.B1 = c4 = λ*Tx - Ty,
-//	      all other components zero.
+//   T': updated T (doubled)
+//   line: 12 Fp values laid out in Fp12 = Fp6[w]/(w² - v) order with
+//         C0.B0 = c0 = (Py, 0),
+//         C1.B0 = c3 = -λ*Px,
+//         C1.B1 = c4 = λ*Tx - Ty,
+//         all other components zero.
 //
 // λ = 3*Tx² / (2*Ty) in Fp2; Tx' = λ² - 2*Tx; Ty' = λ(Tx - Tx') - Ty.
 func bn254LineEvalDouble(t *BN254Tracker, tPrefix, pxName, pyName, rTPrefix, linePrefix string) {
@@ -601,13 +598,10 @@ func bn254G2FrobeniusP2(t *BN254Tracker, prefix, rPrefix string) {
 // bn254MillerLoop computes the Miller loop for the optimal Ate pairing.
 //
 // Input on tracker:
-//
-//	P: px, py (G1 affine, 2 Fp values)
-//	Q: qx0, qx1, qy0, qy1 (G2 affine, 4 Fp values)
-//
+//   P: px, py (G1 affine, 2 Fp values)
+//   Q: qx0, qx1, qy0, qy1 (G2 affine, 4 Fp values)
 // Output on tracker:
-//
-//	f: 12 Fp values (Fp12 element, the Miller loop result)
+//   f: 12 Fp values (Fp12 element, the Miller loop result)
 //
 // Uses sparse Fp12 multiplication for line evaluations (saves ~28% of Fp2 muls
 // per line multiply vs the full Fp12Mul).
@@ -820,18 +814,16 @@ func bn254RenameG2(t *BN254Tracker, srcPrefix, dstPrefix string) {
 // intermediate Fp12 product landed outside the Devegili kernel.
 //
 // Easy part:
-//
-//	f1 = f_conj * f_inv         (= f^(p^6 - 1))
-//	f2 = f1 * frob_p2(f1)       (= f1^(p^2 + 1))
+//   f1 = f_conj * f_inv         (= f^(p^6 - 1))
+//   f2 = f1 * frob_p2(f1)       (= f1^(p^2 + 1))
 //
 // Hard part (FC exponent, reusing emitWAFinalExp formula):
-//
-//	a = f2^x, b = f2^x², c = f2^x³
-//	P0 = f2 · a^6 · b^12 · c^12
-//	P1 = a^4 · b^6 · c^12
-//	P2 = a^6 · b^6 · c^12
-//	P3 = conj(f2) · a^4 · b^6 · c^12
-//	result = P0 · Frob(P1) · FrobSq(P2) · FrobCube(P3)
+//   a = f2^x, b = f2^x², c = f2^x³
+//   P0 = f2 · a^6 · b^12 · c^12
+//   P1 = a^4 · b^6 · c^12
+//   P2 = a^6 · b^6 · c^12
+//   P3 = conj(f2) · a^4 · b^6 · c^12
+//   result = P0 · Frob(P1) · FrobSq(P2) · FrobCube(P3)
 func bn254FinalExp(t *BN254Tracker, fPrefix, rPrefix string) {
 	// === Easy part ===
 
@@ -954,14 +946,12 @@ func bn254FinalExp(t *BN254Tracker, fPrefix, rPrefix string) {
 // EmitBN254Pairing computes the BN254 optimal Ate pairing e(P, Q).
 //
 // Stack in: [P_point(64B), Q_x0, Q_x1, Q_y0, Q_y1]
-//
-//	P is a 64-byte G1 point (x[32]||y[32], big-endian)
-//	Q_x0, Q_x1 are the Fp components of G2 x-coordinate (Fp2)
-//	Q_y0, Q_y1 are the Fp components of G2 y-coordinate (Fp2)
+//   P is a 64-byte G1 point (x[32]||y[32], big-endian)
+//   Q_x0, Q_x1 are the Fp components of G2 x-coordinate (Fp2)
+//   Q_y0, Q_y1 are the Fp components of G2 y-coordinate (Fp2)
 //
 // Stack out: 12 Fp values representing the Fp12 pairing result.
-//
-//	The result is the final exponentiated value in GT = Fp12.
+//   The result is the final exponentiated value in GT = Fp12.
 //
 // WARNING: This produces an enormous script (millions of opcodes when fully
 // unrolled). It is intended for use in Bitcoin SV where script size limits
@@ -1031,20 +1021,16 @@ func EmitBN254PairingRaw(emit func(StackOp)) {
 // sharing the Fp12 squaring across all 4 pairs.
 //
 // Input on tracker:
-//
-//	P1: p1x, p1y  (G1 affine)
-//	Q1: q1x0, q1x1, q1y0, q1y1  (G2 affine)
-//	P2: p2x, p2y
-//	Q2: q2x0, q2x1, q2y0, q2y1
-//	P3: p3x, p3y
-//	Q3: q3x0, q3x1, q3y0, q3y1
-//	P4: p4x, p4y
-//	Q4: q4x0, q4x1, q4y0, q4y1
-//
+//   P1: p1x, p1y  (G1 affine)
+//   Q1: q1x0, q1x1, q1y0, q1y1  (G2 affine)
+//   P2: p2x, p2y
+//   Q2: q2x0, q2x1, q2y0, q2y1
+//   P3: p3x, p3y
+//   Q3: q3x0, q3x1, q3y0, q3y1
+//   P4: p4x, p4y
+//   Q4: q4x0, q4x1, q4y0, q4y1
 // Output on tracker:
-//
-//	_f: 12 Fp values (Fp12 element, the combined Miller loop result)
-//
+//   _f: 12 Fp values (Fp12 element, the combined Miller loop result)
 // NOTE: MultiMillerLoop3 and MultiMillerLoop4 share ~95% of their code.
 // They are kept separate intentionally: parameterizing on pair count would
 // add runtime branching in a performance-critical codegen hot path.
@@ -1461,17 +1447,14 @@ func bn254Fp12IsOne(t *BN254Tracker, prefix, resultName string) {
 // simultaneously, sharing the Fp12 squaring across all 3 pairs.
 //
 // Input on tracker:
-//
-//	P1: p1x, p1y  (G1 affine)
-//	Q1: q1x0, q1x1, q1y0, q1y1  (G2 affine)
-//	P2: p2x, p2y
-//	Q2: q2x0, q2x1, q2y0, q2y1
-//	P3: p3x, p3y
-//	Q3: q3x0, q3x1, q3y0, q3y1
-//
+//   P1: p1x, p1y  (G1 affine)
+//   Q1: q1x0, q1x1, q1y0, q1y1  (G2 affine)
+//   P2: p2x, p2y
+//   Q2: q2x0, q2x1, q2y0, q2y1
+//   P3: p3x, p3y
+//   Q3: q3x0, q3x1, q3y0, q3y1
 // Output on tracker:
-//
-//	_f: 12 Fp values (Fp12 element, the combined Miller loop result)
+//   _f: 12 Fp values (Fp12 element, the combined Miller loop result)
 func bn254MultiMillerLoop3(t *BN254Tracker) {
 	naf := bn254SixXPlus2NAF
 	msbIdx := len(naf) - 1

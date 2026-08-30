@@ -8,26 +8,26 @@
 //
 // Each rule has a match pattern and a replace template:
 //
-//	match forms:
-//	  "$name"                    pattern variable (binds on first use,
-//	                             must equal on repeat use)
-//	  0, 1, ...                  integer literal (matches load_const bigint)
-//	  { "func": F, "args": [...] }   nested call; resolves the arg through
-//	                             the ANF value map
-//	  { "const": "INFINITY" | "G" }  named constant (matches load_const
-//	                             with the corresponding hex payload)
+//   match forms:
+//     "$name"                    pattern variable (binds on first use,
+//                                must equal on repeat use)
+//     0, 1, ...                  integer literal (matches load_const bigint)
+//     { "func": F, "args": [...] }   nested call; resolves the arg through
+//                                the ANF value map
+//     { "const": "INFINITY" | "G" }  named constant (matches load_const
+//                                with the corresponding hex payload)
 //
-//	replace forms:
-//	  "$name"                    alias to the binding bound at match time
-//	                             (emitted as load_const "@ref:<name>")
-//	  { "const": "INFINITY" | "G" }  INFINITY or generator constant
-//	  { "func": F, "args": [...] }   new call binding; args may be "$name"
-//	                             or { "op": "+"|"*", "args": [A, B] }
-//	                             which emits a helper binding for the
-//	                             scalar sum/product (compile-time folded
-//	                             when both operands are constants, modulo
-//	                             the curve order; otherwise emitted as a
-//	                             runtime bin_op).
+//   replace forms:
+//     "$name"                    alias to the binding bound at match time
+//                                (emitted as load_const "@ref:<name>")
+//     { "const": "INFINITY" | "G" }  INFINITY or generator constant
+//     { "func": F, "args": [...] }   new call binding; args may be "$name"
+//                                or { "op": "+"|"*", "args": [A, B] }
+//                                which emits a helper binding for the
+//                                scalar sum/product (compile-time folded
+//                                when both operands are constants, modulo
+//                                the curve order; otherwise emitted as a
+//                                runtime bin_op).
 //
 // A rule may carry an optional "supported" list of compiler targets. If
 // present and it does not contain "go", the rule is skipped by this engine.

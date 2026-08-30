@@ -295,10 +295,10 @@ func TestCompile_BooleanLogic(t *testing.T) {
 
 func TestEncodeScriptNumber(t *testing.T) {
 	tests := []struct {
-		name    string
-		value   *big.Int
-		wantHex string
-		wantAsm string
+		name     string
+		value    *big.Int
+		wantHex  string
+		wantAsm  string
 	}{
 		{"zero", big.NewInt(0), "00", "OP_0"},
 		{"one", big.NewInt(1), "51", "OP_1"},

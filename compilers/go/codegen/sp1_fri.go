@@ -739,7 +739,7 @@ func emitAbsorbExt4(fs *FiatShamirState, t *KBTracker) {
 //   - EmitPoseidon2MerkleRoot (poseidon2_merkle.go) walks the depth-many
 //     Poseidon2-KB compress steps with index-bit-driven sibling ordering.
 //     Its stack contract is exactly:
-//     [leaf(8), sib_0(8), ..., sib_(d-1)(8), index] → [root(8)]
+//        [leaf(8), sib_0(8), ..., sib_(d-1)(8), index] → [root(8)]
 //   - 8 × OP_EQUALVERIFY then asserts the computed root against the
 //     caller-supplied expectedRoot (deepest 8 elements).
 //
@@ -946,7 +946,7 @@ func emitFriFoldRowConditional(
 	// signed difference component, named _fcc_d_signed_i.
 	for i := 0; i < 4; i++ {
 		dName := fmt.Sprintf("_fcc_d_unsigned_%d", i)
-		t.toTop(dName) // d_unsigned_i on top
+		t.toTop(dName)               // d_unsigned_i on top
 		t.copyToTop(bitName, "_fcc_bit_copy")
 		// Emit the OP_IF block. Tracker net effect: consumes 1 (bit), value on
 		// top stays in same slot named dName (we do not produce a new slot here
@@ -1295,9 +1295,7 @@ func emitObserveByteString(fs *FiatShamirState, t *KBTracker, byteSize int) {
 // Mirrors `packages/runar-go/sp1fri/challenger.go::ObserveDigest`.
 //
 // Stack in:  [..., fs0..fs15, d0, d1, ..., d7]   (d7 on top, d0 deepest of
-//
-//	the digest block)
-//
+//                                                 the digest block)
 // Stack out: [..., fs0'..fs15']                   (digest fully consumed)
 //
 // Caller must have pushed the 8 elements through the tracker with names
@@ -1396,7 +1394,7 @@ func emitObserveOpenedValues(fs *FiatShamirState, t *KBTracker, params SP1FriVer
 //   - trace digest (8 KB elements):       _obs_dig_0 .. _obs_dig_7
 //   - quotient digest (8 KB elements):    _obs_qdig_0 .. _obs_qdig_7
 //   - opened values (Ext4 components):    _obs_open_*_c*  (see
-//     emitObserveOpenedValues)
+//                                          emitObserveOpenedValues)
 //
 // The SP1FriVerifierParams.PublicValuesByteSize and SP1VKeyHashByteSize
 // fields control the chunking lengths.
@@ -1519,9 +1517,9 @@ func emitTranscriptInit(fs *FiatShamirState, t *KBTracker, params SP1FriVerifier
 // fixture's `total_log_reduction = sum(log_arity_r)`. With `LogFinalPolyLen=2`
 // and `LogBlowup=2` and trace `degreeBits=3`:
 //
-//	logGlobalMaxHeight = degreeBits + LogBlowup = 5
-//	logFinalHeight     = LogBlowup + LogFinalPolyLen = 4
-//	total_log_reduction = logGlobalMaxHeight - logFinalHeight = 1
+//   logGlobalMaxHeight = degreeBits + LogBlowup = 5
+//   logFinalHeight     = LogBlowup + LogFinalPolyLen = 4
+//   total_log_reduction = logGlobalMaxHeight - logFinalHeight = 1
 //
 // At max_log_arity = 1 (binary folding), total_log_reduction = 1 means there is
 // exactly ONE FRI commit-phase round.
@@ -1920,20 +1918,20 @@ func emitFibAirConstraintEval(
 // + the final equality at lines 172-174. For the PoC's single quotient chunk
 // (numQuotientChunks=1), zps[0] = 1 (empty product), so the recompose collapses to:
 //
-//	quotient = sum over e in 0..3 of basisExt4(e) * chunk[e]
+//   quotient = sum over e in 0..3 of basisExt4(e) * chunk[e]
 //
 // Where basisExt4(e) is the e-th unit vector. This is just a polynomial-shift
 // (mul by X^e) followed by Ext4 sum. Because X^4 = W = 3 in the binomial
 // extension, mul-by-X^e is a pure permutation + scale-by-W:
 //
-//	chunk[0]: identity (no shift)
-//	chunk[1] * X:    (c0,c1,c2,c3) → (W*c3, c0, c1, c2)
-//	chunk[2] * X^2:  (c0,c1,c2,c3) → (W*c2, W*c3, c0, c1)
-//	chunk[3] * X^3:  (c0,c1,c2,c3) → (W*c1, W*c2, W*c3, c0)
+//   chunk[0]: identity (no shift)
+//   chunk[1] * X:    (c0,c1,c2,c3) → (W*c3, c0, c1, c2)
+//   chunk[2] * X^2:  (c0,c1,c2,c3) → (W*c2, W*c3, c0, c1)
+//   chunk[3] * X^3:  (c0,c1,c2,c3) → (W*c1, W*c2, W*c3, c0)
 //
 // Sum 4 Ext4s component-wise. Then the final check:
 //
-//	assert(folded_constraints * inv_vanishing == quotient)   (Ext4 equality)
+//   assert(folded_constraints * inv_vanishing == quotient)   (Ext4 equality)
 //
 // Which requires one full Ext4 mul (sum of 4 EmitKBExt4Mul calls) + 4 ×
 // OP_NUMEQUALVERIFY against the recomposed quotient.
@@ -1958,7 +1956,7 @@ func emitFibAirConstraintEval(
 // Inputs (named tracker slots):
 //
 //   - chunkPrefix_<e>_<j>  for e in 0..3 (the 4 Ext4 coefficients of the chunk)
-//     and j in 0..3 (the 4 base-field components per Ext4)
+//                          and j in 0..3 (the 4 base-field components per Ext4)
 //
 // Output:
 //

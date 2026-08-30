@@ -92,34 +92,34 @@ const (
 	javaTokColon
 	javaTokQuestion
 	// Operators
-	javaTokAssign     // =
-	javaTokEqEq       // ==
-	javaTokBangEq     // !=
-	javaTokLt         // <
-	javaTokLtEq       // <=
-	javaTokGt         // >
-	javaTokGtEq       // >=
-	javaTokPlus       // +
-	javaTokMinus      // -
-	javaTokStar       // *
-	javaTokSlash      // /
-	javaTokPercent    // %
-	javaTokBang       // !
-	javaTokTilde      // ~
-	javaTokAmp        // &
-	javaTokPipe       // |
-	javaTokCaret      // ^
-	javaTokAmpAmp     // &&
-	javaTokPipePipe   // ||
-	javaTokPlusEq     // +=
-	javaTokMinusEq    // -=
-	javaTokStarEq     // *=
-	javaTokSlashEq    // /=
-	javaTokPercentEq  // %=
-	javaTokPlusPlus   // ++
+	javaTokAssign    // =
+	javaTokEqEq      // ==
+	javaTokBangEq    // !=
+	javaTokLt        // <
+	javaTokLtEq      // <=
+	javaTokGt        // >
+	javaTokGtEq      // >=
+	javaTokPlus      // +
+	javaTokMinus     // -
+	javaTokStar      // *
+	javaTokSlash     // /
+	javaTokPercent   // %
+	javaTokBang      // !
+	javaTokTilde     // ~
+	javaTokAmp       // &
+	javaTokPipe      // |
+	javaTokCaret     // ^
+	javaTokAmpAmp    // &&
+	javaTokPipePipe  // ||
+	javaTokPlusEq    // +=
+	javaTokMinusEq   // -=
+	javaTokStarEq    // *=
+	javaTokSlashEq   // /=
+	javaTokPercentEq // %=
+	javaTokPlusPlus  // ++
 	javaTokMinusMinus // --
-	javaTokShl        // <<
-	javaTokShr        // >>
+	javaTokShl       // <<
+	javaTokShr       // >>
 )
 
 type javaToken struct {

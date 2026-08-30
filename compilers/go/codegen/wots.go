@@ -52,7 +52,7 @@ func emitWOTSOneChainOp(emit func(StackOp), chainIndex int) {
 			Else: []StackOp{
 				{Op: "swap"}, // pubSeed digit X
 				{Op: "push", Value: bigIntPush(2)},
-				{Op: "opcode", Code: "OP_PICK"}, // copy pubSeed
+				{Op: "opcode", Code: "OP_PICK"},                                // copy pubSeed
 				{Op: "push", Value: PushValue{Kind: "bytes", Bytes: adrsBytes}}, // ADRS [chainIndex, j]
 				{Op: "opcode", Code: "OP_CAT"},                                  // pubSeed || adrs
 				{Op: "swap"},                                                    // bring X to top
@@ -92,13 +92,13 @@ func EmitVerifyWOTS(emit func(StackOp)) {
 
 	// Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
-	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})      // msg sig pubSeed pkRoot
+	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})       // msg sig pubSeed pkRoot
 	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"}) // pkRoot → alt
 
 	// Rearrange: put pubSeed at bottom, hash msg
 	emit(StackOp{Op: "opcode", Code: "OP_ROT"})    // sig pubSeed msg
 	emit(StackOp{Op: "opcode", Code: "OP_ROT"})    // pubSeed msg sig
-	emit(StackOp{Op: "swap"})                      // pubSeed sig msg
+	emit(StackOp{Op: "swap"})                       // pubSeed sig msg
 	emit(StackOp{Op: "opcode", Code: "OP_SHA256"}) // pubSeed sig msgHash
 
 	// Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)

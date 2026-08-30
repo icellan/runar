@@ -115,7 +115,7 @@ func TestTypeCheck_UnknownFunction_MathFloor(t *testing.T) {
 
 	foundUnknownError := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "unknown function") || strings.Contains(e.Message, "Math.floor") {
+		if strings.Contains(e.Message,"unknown function") || strings.Contains(e.Message,"Math.floor") {
 			foundUnknownError = true
 			break
 		}
@@ -179,7 +179,7 @@ func TestTypeCheck_UnknownFunction_ConsoleLog(t *testing.T) {
 
 	foundError := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "unknown function") || strings.Contains(e.Message, "console.log") {
+		if strings.Contains(e.Message,"unknown function") || strings.Contains(e.Message,"console.log") {
 			foundError = true
 			break
 		}
@@ -248,7 +248,7 @@ func TestTypeCheck_TypeMismatch_ArithmeticOnBoolean(t *testing.T) {
 
 	foundTypeError := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "must be bigint") || strings.Contains(e.Message, "boolean") {
+		if strings.Contains(e.Message,"must be bigint") || strings.Contains(e.Message,"boolean") {
 			foundTypeError = true
 			break
 		}
@@ -433,7 +433,7 @@ class HashCheck extends SmartContract {
 	tcResult := TypeCheck(contract)
 	// Filter out errors that are NOT about subtype/argument type issues
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "argument") && strings.Contains(e.Message, "PubKey") {
+		if strings.Contains(e.Message,"argument") && strings.Contains(e.Message,"PubKey") {
 			t.Errorf("PubKey should be assignable to ByteString, but got error: %s", e.Message)
 		}
 	}
@@ -495,7 +495,7 @@ func TestTypeCheck_UnknownStandaloneFunction(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "unknown function") || strings.Contains(e.Message, "unknownFunc") {
+		if strings.Contains(e.Message,"unknown function") || strings.Contains(e.Message,"unknownFunc") {
 			found = true
 			break
 		}
@@ -533,7 +533,7 @@ class BSArith extends SmartContract {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "type") || strings.Contains(e.Message, "ByteString") || strings.Contains(e.Message, "bigint") {
+		if strings.Contains(e.Message,"type") || strings.Contains(e.Message,"ByteString") || strings.Contains(e.Message,"bigint") {
 			found = true
 			break
 		}
@@ -641,7 +641,7 @@ class SigTwice extends SmartContract {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "affine") || strings.Contains(e.Message, "Sig") || strings.Contains(e.Message, "once") || strings.Contains(e.Message, "linear") {
+		if strings.Contains(e.Message,"affine") || strings.Contains(e.Message,"Sig") || strings.Contains(e.Message,"once") || strings.Contains(e.Message,"linear") {
 			found = true
 			break
 		}
@@ -682,7 +682,7 @@ class IfNonBool extends SmartContract {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "boolean") || strings.Contains(e.Message, "condition") {
+		if strings.Contains(e.Message,"boolean") || strings.Contains(e.Message,"condition") {
 			found = true
 			break
 		}
@@ -926,7 +926,7 @@ func TestTypeCheck_BitwiseOnBoolean_Error(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "boolean") || strings.Contains(e.Message, "bigint") || strings.Contains(e.Message, "&") {
+		if strings.Contains(e.Message,"boolean") || strings.Contains(e.Message,"bigint") || strings.Contains(e.Message,"&") {
 			found = true
 			break
 		}
@@ -1090,7 +1090,7 @@ func TestTypeCheck_LogicalNotOnBigint_Error(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "boolean") || strings.Contains(e.Message, "bigint") || strings.Contains(e.Message, "!") {
+		if strings.Contains(e.Message,"boolean") || strings.Contains(e.Message,"bigint") || strings.Contains(e.Message,"!") {
 			found = true
 			break
 		}
@@ -1220,7 +1220,7 @@ func TestTypeCheck_IncompatibleEquality_Error(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "compare") || strings.Contains(e.Message, "bigint") || strings.Contains(e.Message, "ByteString") || strings.Contains(e.Message, "===") {
+		if strings.Contains(e.Message,"compare") || strings.Contains(e.Message,"bigint") || strings.Contains(e.Message,"ByteString") || strings.Contains(e.Message,"===") {
 			found = true
 			break
 		}
@@ -1311,7 +1311,7 @@ func TestTypeCheck_CheckSigWrongFirstArgType_Error(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "Sig") || strings.Contains(e.Message, "argument") || strings.Contains(e.Message, "type") {
+		if strings.Contains(e.Message,"Sig") || strings.Contains(e.Message,"argument") || strings.Contains(e.Message,"type") {
 			found = true
 			break
 		}
@@ -1367,7 +1367,7 @@ func TestTypeCheck_CheckSigWrongSecondArgType_Error(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "PubKey") || strings.Contains(e.Message, "argument") || strings.Contains(e.Message, "type") {
+		if strings.Contains(e.Message,"PubKey") || strings.Contains(e.Message,"argument") || strings.Contains(e.Message,"type") {
 			found = true
 			break
 		}
@@ -1646,7 +1646,7 @@ func TestTypeCheck_BigintInLogicalAnd_Error(t *testing.T) {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "boolean") || strings.Contains(e.Message, "&&") || strings.Contains(e.Message, "bigint") {
+		if strings.Contains(e.Message,"boolean") || strings.Contains(e.Message,"&&") || strings.Contains(e.Message,"bigint") {
 			found = true
 			break
 		}
@@ -1684,7 +1684,7 @@ class WrongAssign extends SmartContract {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "boolean") || strings.Contains(e.Message, "bigint") || strings.Contains(e.Message, "type") {
+		if strings.Contains(e.Message,"boolean") || strings.Contains(e.Message,"bigint") || strings.Contains(e.Message,"type") {
 			found = true
 			break
 		}
@@ -1761,7 +1761,7 @@ class ReuseKey extends SmartContract {
 
 	// PubKey is not an affine type — it can be used multiple times
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "affine") || strings.Contains(e.Message, "once") || (strings.Contains(e.Message, "PubKey") && strings.Contains(e.Message, "consumed")) {
+		if strings.Contains(e.Message,"affine") || strings.Contains(e.Message,"once") || (strings.Contains(e.Message,"PubKey") && strings.Contains(e.Message,"consumed")) {
 			t.Errorf("expected PubKey to be reusable, but got affine/linear error: %s", e.Message)
 		}
 	}
@@ -1839,7 +1839,7 @@ class SplitTest extends SmartContract {
 
 	// split() must not produce an "unknown function" error
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "split") && strings.Contains(e.Message, "unknown") {
+		if strings.Contains(e.Message,"split") && strings.Contains(e.Message,"unknown") {
 			t.Errorf("split() was rejected as unknown function: %s", e.Message)
 		}
 	}
@@ -1882,7 +1882,7 @@ class PrivateMethod extends SmartContract {
 
 	// Calling a private method should not produce an "unknown function" error
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "unknown") && (strings.Contains(e.Message, "helper") || strings.Contains(e.Message, "method")) {
+		if strings.Contains(e.Message,"unknown") && (strings.Contains(e.Message,"helper") || strings.Contains(e.Message,"method")) {
 			t.Errorf("expected private method call to be allowed, but got unknown-function error: %s", e.Message)
 		}
 	}
@@ -1916,7 +1916,7 @@ class PreimageTwice extends SmartContract {
 
 	found := false
 	for _, e := range tcResult.Errors {
-		if strings.Contains(e.Message, "affine") || strings.Contains(e.Message, "consumed") || strings.Contains(e.Message, "SigHashPreimage") || strings.Contains(e.Message, "once") {
+		if strings.Contains(e.Message,"affine") || strings.Contains(e.Message,"consumed") || strings.Contains(e.Message,"SigHashPreimage") || strings.Contains(e.Message,"once") {
 			found = true
 			break
 		}

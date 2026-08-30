@@ -114,20 +114,20 @@ func (ctx *validationContext) addErrorWithLoc(msg string, loc *SourceLocation) {
 // ---------------------------------------------------------------------------
 
 var validPropTypes = map[string]bool{
-	"bigint":          true,
-	"boolean":         true,
-	"ByteString":      true,
-	"PubKey":          true,
-	"Sig":             true,
-	"Sha256":          true,
-	"Ripemd160":       true,
-	"Addr":            true,
+	"bigint":         true,
+	"boolean":        true,
+	"ByteString":     true,
+	"PubKey":         true,
+	"Sig":            true,
+	"Sha256":         true,
+	"Ripemd160":      true,
+	"Addr":           true,
 	"SigHashPreimage": true,
-	"RabinSig":        true,
-	"RabinPubKey":     true,
-	"Point":           true,
-	"P256Point":       true,
-	"P384Point":       true,
+	"RabinSig":       true,
+	"RabinPubKey":    true,
+	"Point":          true,
+	"P256Point":      true,
+	"P384Point":      true,
 }
 
 func (ctx *validationContext) validateProperties() {

@@ -42,7 +42,7 @@ func p2pkhProgram() *ir.ANFProgram {
 					{Name: "sig", Type: "Sig"},
 					{Name: "pubKey", Type: "PubKey"},
 				},
-				Body:     buildP2PKHBody(),
+				Body: buildP2PKHBody(),
 				IsPublic: true,
 			},
 		},
@@ -479,7 +479,7 @@ func TestTerminalIf_NoVerifyInBranches(t *testing.T) {
 				IsPublic: false,
 			},
 			{
-				Name: "check",
+				Name:   "check",
 				Params: []ir.ANFParam{
 					{Name: "cond", Type: "bigint"},
 					{Name: "x", Type: "bigint"},
@@ -1111,7 +1111,7 @@ func TestLowerToStack_RefAliasing(t *testing.T) {
 				IsPublic: false,
 			},
 			{
-				Name: "check",
+				Name:   "check",
 				Params: []ir.ANFParam{
 					{Name: "cond", Type: "boolean"},
 					{Name: "x", Type: "bigint"},

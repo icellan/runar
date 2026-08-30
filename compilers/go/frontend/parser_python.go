@@ -44,41 +44,41 @@ const (
 	pyTokIdent
 	pyTokNumber
 	pyTokString
-	pyTokLBrace     // { (not used in Python syntax, but kept for consistency)
-	pyTokRBrace     // }
-	pyTokLParen     // (
-	pyTokRParen     // )
-	pyTokLBracket   // [
-	pyTokRBracket   // ]
-	pyTokSemicolon  // ; (rare in Python)
-	pyTokComma      // ,
-	pyTokDot        // .
-	pyTokColon      // :
-	pyTokAssign     // =
-	pyTokEqEq       // ==
-	pyTokNotEq      // !=
-	pyTokLt         // <
-	pyTokLtEq       // <=
-	pyTokGt         // >
-	pyTokGtEq       // >=
-	pyTokPlus       // +
-	pyTokMinus      // -
-	pyTokStar       // *
-	pyTokSlash      // /
-	pyTokPercent    // %
-	pyTokBang       // !
-	pyTokTilde      // ~
-	pyTokAmp        // &
-	pyTokPipe       // |
-	pyTokCaret      // ^
-	pyTokAmpAmp     // && (synthetic — produced from 'and')
-	pyTokPipePipe   // || (synthetic — produced from 'or')
-	pyTokPlusEq     // +=
-	pyTokMinusEq    // -=
-	pyTokStarEq     // *=
-	pyTokSlashEq    // /= (maps to integer div assign, since // is int-div)
-	pyTokPercentEq  // %=
-	pyTokAt         // @
+	pyTokLBrace    // { (not used in Python syntax, but kept for consistency)
+	pyTokRBrace    // }
+	pyTokLParen    // (
+	pyTokRParen    // )
+	pyTokLBracket  // [
+	pyTokRBracket  // ]
+	pyTokSemicolon // ; (rare in Python)
+	pyTokComma     // ,
+	pyTokDot       // .
+	pyTokColon     // :
+	pyTokAssign    // =
+	pyTokEqEq      // ==
+	pyTokNotEq     // !=
+	pyTokLt        // <
+	pyTokLtEq      // <=
+	pyTokGt        // >
+	pyTokGtEq      // >=
+	pyTokPlus      // +
+	pyTokMinus     // -
+	pyTokStar      // *
+	pyTokSlash     // /
+	pyTokPercent   // %
+	pyTokBang      // !
+	pyTokTilde     // ~
+	pyTokAmp       // &
+	pyTokPipe      // |
+	pyTokCaret     // ^
+	pyTokAmpAmp    // && (synthetic — produced from 'and')
+	pyTokPipePipe  // || (synthetic — produced from 'or')
+	pyTokPlusEq    // +=
+	pyTokMinusEq   // -=
+	pyTokStarEq    // *=
+	pyTokSlashEq   // /= (maps to integer div assign, since // is int-div)
+	pyTokPercentEq // %=
+	pyTokAt        // @
 	pyTokSlashSlash // // (integer division)
 	pyTokStarStar   // **
 	pyTokArrow      // ->
@@ -525,14 +525,14 @@ var pySpecialNames = map[string]string{
 	"check_preimage":  "checkPreimage",
 
 	// Post-quantum
-	"verify_wots":              "verifyWOTS",
-	"verify_slh_dsa_sha2_128s": "verifySLHDSA_SHA2_128s",
-	"verify_slh_dsa_sha2_128f": "verifySLHDSA_SHA2_128f",
-	"verify_slh_dsa_sha2_192s": "verifySLHDSA_SHA2_192s",
-	"verify_slh_dsa_sha2_192f": "verifySLHDSA_SHA2_192f",
-	"verify_slh_dsa_sha2_256s": "verifySLHDSA_SHA2_256s",
-	"verify_slh_dsa_sha2_256f": "verifySLHDSA_SHA2_256f",
-	"verify_rabin_sig":         "verifyRabinSig",
+	"verify_wots":                "verifyWOTS",
+	"verify_slh_dsa_sha2_128s":  "verifySLHDSA_SHA2_128s",
+	"verify_slh_dsa_sha2_128f":  "verifySLHDSA_SHA2_128f",
+	"verify_slh_dsa_sha2_192s":  "verifySLHDSA_SHA2_192s",
+	"verify_slh_dsa_sha2_192f":  "verifySLHDSA_SHA2_192f",
+	"verify_slh_dsa_sha2_256s":  "verifySLHDSA_SHA2_256s",
+	"verify_slh_dsa_sha2_256f":  "verifySLHDSA_SHA2_256f",
+	"verify_rabin_sig":          "verifyRabinSig",
 
 	// EC builtins
 	"ec_add":               "ecAdd",
@@ -571,10 +571,10 @@ var pySpecialNames = map[string]string{
 	"get_state_script": "getStateScript",
 
 	// Transaction intrinsics
-	"extract_locktime":    "extractLocktime",
-	"extract_output_hash": "extractOutputHash",
-	"extract_sequence":    "extractSequence",
-	"extract_version":     "extractVersion",
+	"extract_locktime":     "extractLocktime",
+	"extract_output_hash":  "extractOutputHash",
+	"extract_sequence":     "extractSequence",
+	"extract_version":      "extractVersion",
 
 	// Math builtins
 	"mul_div":       "mulDiv",
@@ -590,8 +590,8 @@ var pySpecialNames = map[string]string{
 	"hash256":   "hash256",
 
 	// Misc
-	"num2bin": "num2bin",
-	"bin2num": "bin2num",
+	"num2bin":  "num2bin",
+	"bin2num":  "bin2num",
 	"log2":    "log2",
 	"div_mod": "divmod",
 

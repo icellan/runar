@@ -365,77 +365,61 @@ func bbExt4MulComponent(emit func(StackOp), component int) {
 	switch component {
 	case 0:
 		// r0 = a0*b0 + 11*(a1*b3 + a2*b2 + a3*b1)
-		t.copyToTop("a0", "_a0")
-		t.copyToTop("b0", "_b0")
-		bbFieldMul(t, "_a0", "_b0", "_t0") // a0*b0
-		t.copyToTop("a1", "_a1")
-		t.copyToTop("b3", "_b3")
-		bbFieldMul(t, "_a1", "_b3", "_t1") // a1*b3
-		t.copyToTop("a2", "_a2")
-		t.copyToTop("b2", "_b2")
-		bbFieldMul(t, "_a2", "_b2", "_t2")  // a2*b2
-		bbFieldAdd(t, "_t1", "_t2", "_t12") // a1*b3 + a2*b2
-		t.copyToTop("a3", "_a3")
-		t.copyToTop("b1", "_b1")
-		bbFieldMul(t, "_a3", "_b1", "_t3")                // a3*b1
-		bbFieldAdd(t, "_t12", "_t3", "_cross")            // a1*b3 + a2*b2 + a3*b1
+		t.copyToTop("a0", "_a0"); t.copyToTop("b0", "_b0")
+		bbFieldMul(t, "_a0", "_b0", "_t0")     // a0*b0
+		t.copyToTop("a1", "_a1"); t.copyToTop("b3", "_b3")
+		bbFieldMul(t, "_a1", "_b3", "_t1")     // a1*b3
+		t.copyToTop("a2", "_a2"); t.copyToTop("b2", "_b2")
+		bbFieldMul(t, "_a2", "_b2", "_t2")     // a2*b2
+		bbFieldAdd(t, "_t1", "_t2", "_t12")    // a1*b3 + a2*b2
+		t.copyToTop("a3", "_a3"); t.copyToTop("b1", "_b1")
+		bbFieldMul(t, "_a3", "_b1", "_t3")     // a3*b1
+		bbFieldAdd(t, "_t12", "_t3", "_cross") // a1*b3 + a2*b2 + a3*b1
 		bbFieldMulConst(t, "_cross", bbFieldW, "_wcross") // W * cross
-		bbFieldAdd(t, "_t0", "_wcross", "_r")             // a0*b0 + W*cross
+		bbFieldAdd(t, "_t0", "_wcross", "_r")  // a0*b0 + W*cross
 
 	case 1:
 		// r1 = a0*b1 + a1*b0 + 11*(a2*b3 + a3*b2)
-		t.copyToTop("a0", "_a0")
-		t.copyToTop("b1", "_b1")
-		bbFieldMul(t, "_a0", "_b1", "_t0") // a0*b1
-		t.copyToTop("a1", "_a1")
-		t.copyToTop("b0", "_b0")
+		t.copyToTop("a0", "_a0"); t.copyToTop("b1", "_b1")
+		bbFieldMul(t, "_a0", "_b1", "_t0")     // a0*b1
+		t.copyToTop("a1", "_a1"); t.copyToTop("b0", "_b0")
 		bbFieldMul(t, "_a1", "_b0", "_t1")     // a1*b0
 		bbFieldAdd(t, "_t0", "_t1", "_direct") // a0*b1 + a1*b0
-		t.copyToTop("a2", "_a2")
-		t.copyToTop("b3", "_b3")
-		bbFieldMul(t, "_a2", "_b3", "_t2") // a2*b3
-		t.copyToTop("a3", "_a3")
-		t.copyToTop("b2", "_b2")
-		bbFieldMul(t, "_a3", "_b2", "_t3")                // a3*b2
-		bbFieldAdd(t, "_t2", "_t3", "_cross")             // a2*b3 + a3*b2
+		t.copyToTop("a2", "_a2"); t.copyToTop("b3", "_b3")
+		bbFieldMul(t, "_a2", "_b3", "_t2")     // a2*b3
+		t.copyToTop("a3", "_a3"); t.copyToTop("b2", "_b2")
+		bbFieldMul(t, "_a3", "_b2", "_t3")     // a3*b2
+		bbFieldAdd(t, "_t2", "_t3", "_cross")  // a2*b3 + a3*b2
 		bbFieldMulConst(t, "_cross", bbFieldW, "_wcross") // W * cross
 		bbFieldAdd(t, "_direct", "_wcross", "_r")
 
 	case 2:
 		// r2 = a0*b2 + a1*b1 + a2*b0 + 11*(a3*b3)
-		t.copyToTop("a0", "_a0")
-		t.copyToTop("b2", "_b2")
-		bbFieldMul(t, "_a0", "_b2", "_t0") // a0*b2
-		t.copyToTop("a1", "_a1")
-		t.copyToTop("b1", "_b1")
-		bbFieldMul(t, "_a1", "_b1", "_t1") // a1*b1
+		t.copyToTop("a0", "_a0"); t.copyToTop("b2", "_b2")
+		bbFieldMul(t, "_a0", "_b2", "_t0")     // a0*b2
+		t.copyToTop("a1", "_a1"); t.copyToTop("b1", "_b1")
+		bbFieldMul(t, "_a1", "_b1", "_t1")     // a1*b1
 		bbFieldAdd(t, "_t0", "_t1", "_sum01")
-		t.copyToTop("a2", "_a2")
-		t.copyToTop("b0", "_b0")
-		bbFieldMul(t, "_a2", "_b0", "_t2") // a2*b0
+		t.copyToTop("a2", "_a2"); t.copyToTop("b0", "_b0")
+		bbFieldMul(t, "_a2", "_b0", "_t2")     // a2*b0
 		bbFieldAdd(t, "_sum01", "_t2", "_direct")
-		t.copyToTop("a3", "_a3")
-		t.copyToTop("b3", "_b3")
-		bbFieldMul(t, "_a3", "_b3", "_t3")             // a3*b3
+		t.copyToTop("a3", "_a3"); t.copyToTop("b3", "_b3")
+		bbFieldMul(t, "_a3", "_b3", "_t3")     // a3*b3
 		bbFieldMulConst(t, "_t3", bbFieldW, "_wcross") // W * a3*b3
 		bbFieldAdd(t, "_direct", "_wcross", "_r")
 
 	case 3:
 		// r3 = a0*b3 + a1*b2 + a2*b1 + a3*b0
-		t.copyToTop("a0", "_a0")
-		t.copyToTop("b3", "_b3")
-		bbFieldMul(t, "_a0", "_b3", "_t0") // a0*b3
-		t.copyToTop("a1", "_a1")
-		t.copyToTop("b2", "_b2")
-		bbFieldMul(t, "_a1", "_b2", "_t1") // a1*b2
+		t.copyToTop("a0", "_a0"); t.copyToTop("b3", "_b3")
+		bbFieldMul(t, "_a0", "_b3", "_t0")     // a0*b3
+		t.copyToTop("a1", "_a1"); t.copyToTop("b2", "_b2")
+		bbFieldMul(t, "_a1", "_b2", "_t1")     // a1*b2
 		bbFieldAdd(t, "_t0", "_t1", "_sum01")
-		t.copyToTop("a2", "_a2")
-		t.copyToTop("b1", "_b1")
-		bbFieldMul(t, "_a2", "_b1", "_t2") // a2*b1
+		t.copyToTop("a2", "_a2"); t.copyToTop("b1", "_b1")
+		bbFieldMul(t, "_a2", "_b1", "_t2")     // a2*b1
 		bbFieldAdd(t, "_sum01", "_t2", "_sum012")
-		t.copyToTop("a3", "_a3")
-		t.copyToTop("b0", "_b0")
-		bbFieldMul(t, "_a3", "_b0", "_t3") // a3*b0
+		t.copyToTop("a3", "_a3"); t.copyToTop("b0", "_b0")
+		bbFieldMul(t, "_a3", "_b0", "_t3")     // a3*b0
 		bbFieldAdd(t, "_sum012", "_t3", "_r")
 
 	default:
@@ -472,16 +456,16 @@ func bbExt4InvComponent(emit func(StackOp), component int) {
 
 	// Step 1: Compute norm_0 = a0² + W*a2² - 2*W*a1*a3
 	t.copyToTop("a0", "_a0c")
-	bbFieldSqr(t, "_a0c", "_a0sq") // a0²
+	bbFieldSqr(t, "_a0c", "_a0sq")           // a0²
 	t.copyToTop("a2", "_a2c")
-	bbFieldSqr(t, "_a2c", "_a2sq")                  // a2²
+	bbFieldSqr(t, "_a2c", "_a2sq")           // a2²
 	bbFieldMulConst(t, "_a2sq", bbFieldW, "_wa2sq") // W*a2²
-	bbFieldAdd(t, "_a0sq", "_wa2sq", "_n0a")        // a0² + W*a2²
+	bbFieldAdd(t, "_a0sq", "_wa2sq", "_n0a")    // a0² + W*a2²
 	t.copyToTop("a1", "_a1c")
 	t.copyToTop("a3", "_a3c")
-	bbFieldMul(t, "_a1c", "_a3c", "_a1a3")             // a1*a3
+	bbFieldMul(t, "_a1c", "_a3c", "_a1a3")   // a1*a3
 	bbFieldMulConst(t, "_a1a3", 2*bbFieldW, "_2wa1a3") // 2*W*a1*a3
-	bbFieldSub(t, "_n0a", "_2wa1a3", "_norm0")         // norm_0
+	bbFieldSub(t, "_n0a", "_2wa1a3", "_norm0") // norm_0
 
 	// Step 2: Compute norm_1 = 2*a0*a2 - a1² - W*a3²
 	t.copyToTop("a0", "_a0d")
@@ -492,18 +476,18 @@ func bbExt4InvComponent(emit func(StackOp), component int) {
 	bbFieldSqr(t, "_a1d", "_a1sq")           // a1²
 	bbFieldSub(t, "_2a0a2", "_a1sq", "_n1a") // 2*a0*a2 - a1²
 	t.copyToTop("a3", "_a3d")
-	bbFieldSqr(t, "_a3d", "_a3sq")                  // a3²
+	bbFieldSqr(t, "_a3d", "_a3sq")           // a3²
 	bbFieldMulConst(t, "_a3sq", bbFieldW, "_wa3sq") // W*a3²
-	bbFieldSub(t, "_n1a", "_wa3sq", "_norm1")       // norm_1
+	bbFieldSub(t, "_n1a", "_wa3sq", "_norm1") // norm_1
 
 	// Step 3: Quadratic inverse: scalar = (norm_0² - W*norm_1²)^(-1)
 	t.copyToTop("_norm0", "_n0copy")
-	bbFieldSqr(t, "_n0copy", "_n0sq") // norm_0²
+	bbFieldSqr(t, "_n0copy", "_n0sq")        // norm_0²
 	t.copyToTop("_norm1", "_n1copy")
-	bbFieldSqr(t, "_n1copy", "_n1sq")               // norm_1²
+	bbFieldSqr(t, "_n1copy", "_n1sq")        // norm_1²
 	bbFieldMulConst(t, "_n1sq", bbFieldW, "_wn1sq") // W*norm_1²
-	bbFieldSub(t, "_n0sq", "_wn1sq", "_det")        // norm_0² - W*norm_1²
-	bbFieldInv(t, "_det", "_scalar")                // scalar = det^(-1)
+	bbFieldSub(t, "_n0sq", "_wn1sq", "_det") // norm_0² - W*norm_1²
+	bbFieldInv(t, "_det", "_scalar")         // scalar = det^(-1)
 
 	// Step 4: inv_n0 = norm_0 * scalar, inv_n1 = -norm_1 * scalar
 	t.copyToTop("_scalar", "_sc0")
@@ -525,10 +509,10 @@ func bbExt4InvComponent(emit func(StackOp), component int) {
 		// r0 = out_even[0] = a0*inv_n0 + W*a2*inv_n1
 		t.copyToTop("a0", "_ea0")
 		t.copyToTop("_inv_n0", "_ein0")
-		bbFieldMul(t, "_ea0", "_ein0", "_ep0") // a0*inv_n0
+		bbFieldMul(t, "_ea0", "_ein0", "_ep0")   // a0*inv_n0
 		t.copyToTop("a2", "_ea2")
 		t.copyToTop("_inv_n1", "_ein1")
-		bbFieldMul(t, "_ea2", "_ein1", "_ep1")        // a2*inv_n1
+		bbFieldMul(t, "_ea2", "_ein1", "_ep1")   // a2*inv_n1
 		bbFieldMulConst(t, "_ep1", bbFieldW, "_wep1") // W*a2*inv_n1
 		bbFieldAdd(t, "_ep0", "_wep1", "_r")
 
@@ -538,10 +522,10 @@ func bbExt4InvComponent(emit func(StackOp), component int) {
 		// r1 = -odd0 = (0 - odd0) mod p
 		t.copyToTop("a1", "_oa1")
 		t.copyToTop("_inv_n0", "_oin0")
-		bbFieldMul(t, "_oa1", "_oin0", "_op0") // a1*inv_n0
+		bbFieldMul(t, "_oa1", "_oin0", "_op0")   // a1*inv_n0
 		t.copyToTop("a3", "_oa3")
 		t.copyToTop("_inv_n1", "_oin1")
-		bbFieldMul(t, "_oa3", "_oin1", "_op1")        // a3*inv_n1
+		bbFieldMul(t, "_oa3", "_oin1", "_op1")   // a3*inv_n1
 		bbFieldMulConst(t, "_op1", bbFieldW, "_wop1") // W*a3*inv_n1
 		bbFieldAdd(t, "_op0", "_wop1", "_odd0")
 		// Negate: r = (0 - odd0) mod p
@@ -552,10 +536,10 @@ func bbExt4InvComponent(emit func(StackOp), component int) {
 		// r2 = out_even[1] = a0*inv_n1 + a2*inv_n0
 		t.copyToTop("a0", "_ea0")
 		t.copyToTop("_inv_n1", "_ein1")
-		bbFieldMul(t, "_ea0", "_ein1", "_ep0") // a0*inv_n1
+		bbFieldMul(t, "_ea0", "_ein1", "_ep0")   // a0*inv_n1
 		t.copyToTop("a2", "_ea2")
 		t.copyToTop("_inv_n0", "_ein0")
-		bbFieldMul(t, "_ea2", "_ein0", "_ep1") // a2*inv_n0
+		bbFieldMul(t, "_ea2", "_ein0", "_ep1")   // a2*inv_n0
 		bbFieldAdd(t, "_ep0", "_ep1", "_r")
 
 	case 3:
@@ -563,10 +547,10 @@ func bbExt4InvComponent(emit func(StackOp), component int) {
 		// r3 = -odd1 = (0 - odd1) mod p
 		t.copyToTop("a1", "_oa1")
 		t.copyToTop("_inv_n1", "_oin1")
-		bbFieldMul(t, "_oa1", "_oin1", "_op0") // a1*inv_n1
+		bbFieldMul(t, "_oa1", "_oin1", "_op0")   // a1*inv_n1
 		t.copyToTop("a3", "_oa3")
 		t.copyToTop("_inv_n0", "_oin0")
-		bbFieldMul(t, "_oa3", "_oin0", "_op1") // a3*inv_n0
+		bbFieldMul(t, "_oa3", "_oin0", "_op1")   // a3*inv_n0
 		bbFieldAdd(t, "_op0", "_op1", "_odd1")
 		// Negate: r = (0 - odd1) mod p
 		t.pushInt("_zero3", 0)

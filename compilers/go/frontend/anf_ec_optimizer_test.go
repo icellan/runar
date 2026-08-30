@@ -611,8 +611,8 @@ func TestANFECOptimizer_SideEffectCallPreserved(t *testing.T) {
 // 2. ecMulGen(0) is then rewritten to INFINITY by Rule 5
 func TestANFECOptimizer_ChainedRules_Rule12ThenRule5(t *testing.T) {
 	bindings := []ir.ANFBinding{
-		loadConstHex("t0", gHex), // G
-		loadConstBigInt("t1", 0), // k = 0
+		loadConstHex("t0", gHex),       // G
+		loadConstBigInt("t1", 0),       // k = 0
 		callBinding("t2", "ecMul", []string{"t0", "t1"}),
 		assertBinding("t3", "t2"),
 	}

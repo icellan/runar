@@ -15,7 +15,6 @@ import (
 //   - packages/runar-go/bn254witness/witness_test.go
 //     TestEmitFp12FrobeniusP_ScriptMatchesGnark
 //     TestEmitFp12FrobeniusP2_ScriptMatchesGnark
-//
 // Those tests run the emitted script against gnark's E12.Frobenius /
 // E12.FrobeniusSquare and assert byte-equality of the 12 Fp slots.
 func TestBN254_FrobeniusCoefficients(t *testing.T) {

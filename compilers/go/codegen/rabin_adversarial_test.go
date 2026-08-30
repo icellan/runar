@@ -533,3 +533,4 @@ func TestEmitVerifyRabinSig_AcceptsRealSmallPadding(t *testing.T) {
 			"with padding=%v (< 1000): %v", padding, err)
 	}
 }
+
