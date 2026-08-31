@@ -101,8 +101,68 @@ export async function mineUntilConfirmed(txid: string, maxBlocks = 5): Promise<n
   }
   throw new Error(
     `tx ${txid} still unconfirmed after mining ${maxBlocks} blocks — ` +
-      `it was accepted to the mempool but never selected into a block`,
+      `it was accepted to the mempool but never selected into a block\n` +
+      (await describeUnmined(txid)),
   );
+}
+
+/**
+ * Explain why a mempool tx is not being mined.
+ *
+ * On bitcoin-sv, mempool membership does NOT imply mining eligibility. The
+ * block assembler builds from the *journal*, and `getmempoolinfo` reports the
+ * two sizes separately — a tx below `minminingtxfee` is accepted by
+ * `sendrawtransaction`, is visible to `getrawtransaction`, and is still never
+ * selected into a block. (Observed on a live regtest node: a zero-fee tx sat
+ * in the mempool for ~1000 blocks.) Non-final txs are held in a third pool and
+ * are not even visible to `getrawtransaction`.
+ *
+ * Without this, the failure reads as an unexplained flake. With it, the
+ * message names the pool, the fee, and the unconfirmed ancestors.
+ *
+ * Best-effort: every probe is individually guarded, because a diagnostic that
+ * throws would replace the real failure with its own.
+ */
+export async function describeUnmined(txid: string): Promise<string> {
+  const lines: string[] = [];
+  const probe = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
+    try {
+      lines.push(`  ${label}: ${JSON.stringify(await fn())}`);
+    } catch (e) {
+      lines.push(`  ${label}: <unavailable: ${(e as Error).message}>`);
+    }
+  };
+
+  // size > journalsize means the node is holding txs back from block assembly.
+  await probe('getmempoolinfo', () => rpcCall('getmempoolinfo'));
+  // fee/modifiedfee vs size decides journal eligibility; depends lists ancestors.
+  await probe('getmempoolentry', () => rpcCall('getmempoolentry', txid));
+  await probe('in getrawmempool', async () =>
+    ((await rpcCall('getrawmempool')) as string[]).includes(txid),
+  );
+  await probe('in getrawnonfinalmempool', async () =>
+    ((await rpcCall('getrawnonfinalmempool')) as string[]).includes(txid),
+  );
+
+  // An unconfirmed ancestor that is itself unminable blocks the whole chain.
+  try {
+    const tx = (await rpcCall('getrawtransaction', txid, true)) as {
+      vin?: Array<{ txid?: string }>;
+    };
+    for (const vin of tx.vin ?? []) {
+      if (!vin.txid) continue;
+      await probe(`parent ${vin.txid.slice(0, 12)} confirmations`, async () => {
+        const p = (await rpcCall('getrawtransaction', vin.txid, true)) as {
+          confirmations?: number;
+        };
+        return p.confirmations ?? 0;
+      });
+    }
+  } catch (e) {
+    lines.push(`  parents: <unavailable: ${(e as Error).message}>`);
+  }
+
+  return lines.join('\n');
 }
 
 export async function getBlockCount(): Promise<number> {

@@ -119,6 +119,24 @@ const SYNTHETIC_SOURCE_TXID = '00'.repeat(32);
 const SYNTHETIC_SOURCE_SATOSHIS = 100_000;
 const SYNTHETIC_TX_VERSION = 1;
 
+/**
+ * The synthetic spend context, exported so anything that needs to SIGN for this
+ * VM derives the BIP-143 preimage from the same values the VM verifies against
+ * instead of copying them. The version differs from
+ * `oracle/real-crypto-execution.ts` (1 here, 2 there) and version is part of the
+ * preimage, so a signature built against the wrong one silently fails to verify
+ * — a copy that drifts would look like a codegen defect.
+ */
+export const SYNTHETIC_SPEND_CONTEXT = {
+  sourceTXID: SYNTHETIC_SOURCE_TXID,
+  sourceOutputIndex: 0,
+  sourceSatoshis: SYNTHETIC_SOURCE_SATOSHIS,
+  transactionVersion: SYNTHETIC_TX_VERSION,
+  inputIndex: 0,
+  inputSequence: 0xffffffff,
+  lockTime: 0,
+} as const;
+
 /** Opcodes above OP_16 count towards the operation limit (consensus rule). */
 const OP_16 = 0x60;
 const OP_PUSHDATA1 = 0x4c;

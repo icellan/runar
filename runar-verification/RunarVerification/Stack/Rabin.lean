@@ -116,7 +116,17 @@ def rabinBodyOps : List StackOp :=
   , rOpc "OP_MOD"
   , .swap
   , rOpc "OP_SHA256"
-  , rOpc "OP_EQUAL"
+  -- BUG-011 digest-encoding normalization (`rabin-codegen.ts`). `OP_MOD` leaves
+  -- a MINIMAL Script number, which carries a trailing 0x00 sign byte whenever
+  -- the digest's most-significant byte has its high bit set (~50% of messages),
+  -- while `OP_SHA256` pushes exactly 32 raw bytes. The old `OP_EQUAL` was a
+  -- BYTE compare and refused about half of all honest signatures on a real
+  -- consensus VM. Append an explicit sign byte, collapse to minimal form, and
+  -- compare NUMERICALLY.
+  , .push (.bytes (ByteArray.mk #[0x00]))
+  , rOpc "OP_CAT"
+  , rOpc "OP_BIN2NUM"
+  , rOpc "OP_NUMEQUAL"
   ]
 
 /-! ## Codegen bridge
@@ -171,8 +181,10 @@ theorem lowerVerifyRabinSigOpsLive_body
         ++ rabinBodyOps := by
   rfl
 
-/-- The body is exactly 15 opcodes long (10 + BUG-010's 5-opcode gate). -/
-theorem rabinBodyOps_length : rabinBodyOps.length = 15 := rfl
+/-- The body is exactly 18 opcodes long (10 + BUG-010's 5-opcode gate
++ BUG-011's 4-opcode digest normalization, less the `OP_EQUAL` that
+`OP_NUMEQUAL` replaced). -/
+theorem rabinBodyOps_length : rabinBodyOps.length = 18 := rfl
 
 /-! ## Codegen-to-spec equivalence (theorem, Phase B10)
 
@@ -352,6 +364,55 @@ private theorem runOpcode_VERIFY_true
   unfold StackState.pop?
   rw [hStk]
   simp only [asBool?]
+
+/-- `OP_CAT` on a 2-bytes prefix: pushes `a ++ b`. Local mirror of
+`Sim.runOpcode_CAT_bytesBytes` — `Stack.Sim` is not in this file's import
+closure, which is why every opcode lemma in this module is restated locally. -/
+private theorem runOpcode_CAT_bytes
+    (s : StackState) (a b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest) :
+    runOpcode "OP_CAT" s
+    = Except.ok ({ s with stack := rest }.push (.vBytes (a ++ b))) := by
+  have h : runOpcode "OP_CAT" s
+      = liftBytesBin s (fun a b => .vBytes (a ++ b)) := rfl
+  rw [h]
+  unfold liftBytesBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asBytes?]
+
+/-- `OP_BIN2NUM` on a bytes top: pushes `decodeMinimalLE b`. This is the step
+that makes the BUG-011 comparison NUMERIC — the digest bytes are read as a
+minimal Script number, so the sign byte `encodeMinimalLE` may carry no longer
+decides the result. -/
+private theorem runOpcode_BIN2NUM_bytesLocal
+    (s : StackState) (b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: rest) :
+    runOpcode "OP_BIN2NUM" s
+    = Except.ok ({ s with stack := rest }.push (.vBigint (decodeMinimalLE b))) := by
+  -- OP_BIN2NUM is INLINED in `runOpcode` (Eval.lean:646) rather than routed
+  -- through `liftBytesUnary`, so this unfolds the match directly.
+  show (match s.pop? with
+        | none => _
+        | some (v, s') =>
+            match asBytes? v with
+            | some b => Except.ok (s'.push (.vBigint (decodeMinimalLE b)))
+            | none => _) = _
+  unfold StackState.pop?
+  rw [hStk]
+  rfl
+
+/-- `OP_NUMEQUAL` on a 2-int prefix: pushes `decide (a = b)`. -/
+private theorem runOpcode_NUMEQUAL_ints
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_NUMEQUAL" s
+    = Except.ok ({ s with stack := rest }.push (.vBool (decide (a = b)))) := by
+  have h : runOpcode "OP_NUMEQUAL" s
+      = liftIntBinNum s (fun a b => .vBool (decide (a = b))) := rfl
+  rw [h]
+  unfold liftIntBinNum
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
 
 /-- `OP_SHA256` on a 1-bytes prefix. -/
 private theorem runOpcode_SHA256_bytes
@@ -590,16 +651,44 @@ theorem runOps_rabinBodyOps_eq (msg : ByteArray)
       stepNonIf_opcode,
       runOpcode_SHA256_bytes _ msg _ rfl]
   simp only [StackState.push]
-  -- Step 15: OP_EQUAL (mixed int↔bytes via the B10-prep coercion arm).
+  -- Steps 15-18: BUG-011 digest-encoding normalization, replacing the single
+  -- OP_EQUAL byte compare. The digest gets an explicit 0x00 sign byte
+  -- (OP_CAT), collapses to a minimal Script number (OP_BIN2NUM), and is
+  -- compared NUMERICALLY (OP_NUMEQUAL) against OP_MOD's residue.
+  --
+  -- Step 15: push the 0x00 sign byte.
   rw [show (rabinBodyOps.drop 14 : List StackOp)
-        = .opcode "OP_EQUAL" :: (rabinBodyOps.drop 15) from rfl,
-      runOps_cons_nonIf_eq (.opcode "OP_EQUAL") _ _ (notIfOp_opcode _),
+        = .push (.bytes (ByteArray.mk #[0x00])) :: (rabinBodyOps.drop 15) from rfl,
+      runOps_cons_nonIf_eq (.push _) _ _ (notIfOp_push _),
+      stepNonIf_push_bytes]
+  simp only [StackState.push]
+  -- Step 16: OP_CAT — digest ++ 0x00.
+  rw [show (rabinBodyOps.drop 15 : List StackOp)
+        = .opcode "OP_CAT" :: (rabinBodyOps.drop 16) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_CAT") _ _ (notIfOp_opcode _),
       stepNonIf_opcode,
-      runOpcode_EQUAL_intBytes _
+      runOpcode_CAT_bytes _
+        (RunarVerification.ANF.Eval.Crypto.sha256 msg)
+        (ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Step 17: OP_BIN2NUM — read those bytes as a minimal Script number.
+  rw [show (rabinBodyOps.drop 16 : List StackOp)
+        = .opcode "OP_BIN2NUM" :: (rabinBodyOps.drop 17) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_BIN2NUM") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_BIN2NUM_bytesLocal _
+        (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]) _ rfl]
+  simp only [StackState.push]
+  -- Step 18: OP_NUMEQUAL — the numeric compare the spec now states.
+  rw [show (rabinBodyOps.drop 17 : List StackOp)
+        = .opcode "OP_NUMEQUAL" :: (rabinBodyOps.drop 18) from rfl,
+      runOps_cons_nonIf_eq (.opcode "OP_NUMEQUAL") _ _ (notIfOp_opcode _),
+      stepNonIf_opcode,
+      runOpcode_NUMEQUAL_ints _
         ((padding + sig * sig) % pubKey)
-        (RunarVerification.ANF.Eval.Crypto.sha256 msg) _ rfl]
-  -- After OP_EQUAL the residual op list is empty.
-  rw [show (rabinBodyOps.drop 15 : List StackOp) = [] from rfl]
+        (decodeMinimalLE (RunarVerification.ANF.Eval.Crypto.sha256 msg ++ ByteArray.mk #[0x00]))
+        _ rfl]
+  rw [show (rabinBodyOps.drop 18 : List StackOp) = [] from rfl]
   simp only []
   rw [runOps_nil]
   -- Reconcile algebraic form: `padding + sig*sig = sig*sig + padding`.

@@ -2029,7 +2029,7 @@ then emits (`emitVerifyRabinSig`, `rabin-codegen.ts:53-70`):
   OP_SWAP
   OP_DUP  OP_0  <65536>  OP_WITHIN  OP_VERIFY   -- BUG-010 padding gate
   OP_ROT  OP_DUP  OP_MUL  OP_ADD
-  OP_SWAP  OP_MOD  OP_SWAP  OP_SHA256  OP_EQUAL
+  OP_SWAP  OP_MOD  OP_SWAP  OP_SHA256  <push 0x00>  OP_CAT  OP_BIN2NUM  OP_NUMEQUAL
 
 Net stack-map effect: pop 4 arg slots, push the boolean result under
 `bindingName`. -/
@@ -2069,7 +2069,15 @@ def lowerVerifyRabinSigOpsLive (sm : StackMap) (bindingName : String)
     , StackOp.opcode "OP_MOD"         -- msg ((sig^2+padding) mod pubKey)
     , StackOp.swap                    -- ((sig^2+padding) mod pubKey) msg
     , StackOp.opcode "OP_SHA256"
-    , StackOp.opcode "OP_EQUAL"
+    -- BUG-011 digest-encoding normalization: the raw 32-byte digest is given an
+    -- explicit sign byte, collapsed to minimal form and compared NUMERICALLY.
+    -- The old OP_EQUAL was a byte compare against OP_MOD's minimal Script
+    -- number, which carries a trailing 0x00 whenever the digest's
+    -- most-significant byte has its high bit set — ~50% of honest signatures.
+    , StackOp.push (.bytes (ByteArray.mk #[0x00]))
+    , StackOp.opcode "OP_CAT"
+    , StackOp.opcode "OP_BIN2NUM"
+    , StackOp.opcode "OP_NUMEQUAL"
     ]
   -- Net: pop 4 args, push 1 result under bindingName.
   let smFinal := (sm4.popN 4).push bindingName

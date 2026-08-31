@@ -37,7 +37,10 @@ RABIN_GOLDEN: list[str | None] = [
     "OP_MOD",
     "OP_SWAP",
     "OP_SHA256",
-    "OP_EQUAL",
+    None,  # push 0x00 (BUG-011 digest sign byte)
+    "OP_CAT",
+    "OP_BIN2NUM",
+    "OP_NUMEQUAL",
 ]
 
 
@@ -51,10 +54,18 @@ def test_emit_verify_rabin_sig_byte_frozen_golden() -> None:
         if expected is None:
             assert op.op == "push", f"op {i}: expected push, got {op.op!r}"
             assert op.value is not None, f"op {i}: push must have value"
-            assert op.value.kind == "bigint", f"op {i}: push kind"
-            assert op.value.big_int == RABIN_PADDING_LIMIT, (
-                f"op {i}: BUG-010 padding limit"
-            )
+            if i == 3:
+                assert op.value.kind == "bigint", f"op {i}: push kind"
+                assert op.value.big_int == RABIN_PADDING_LIMIT, (
+                    f"op {i}: BUG-010 padding limit"
+                )
+            else:
+                # BUG-011: the explicit sign byte that makes the digest read as
+                # a non-negative Script number before the numeric compare.
+                assert op.value.kind == "bytes", f"op {i}: push kind"
+                assert op.value.bytes_val == b"\x00", (
+                    f"op {i}: BUG-011 digest sign byte"
+                )
         else:
             assert op.op == "opcode", f"op {i}: expected opcode, got {op.op!r}"
             assert op.code == expected, f"op {i}: expected {expected!r}"

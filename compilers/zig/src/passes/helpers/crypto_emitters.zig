@@ -66,7 +66,7 @@ pub fn appendBuiltinInstructions(
 }
 
 /// Rabin signature verification — delegates to the standalone
-/// `rabin_emitter.zig` module so the 10-opcode sequence is owned in one place
+/// `rabin_emitter.zig` module so the 18-opcode sequence is owned in one place
 /// (mirrors the standalone Rabin modules in the other compiler tiers).
 pub fn appendVerifyRabinSig(builder: *Builder) !void {
     try rabin_emitter.append(&builder.instructions, builder.allocator);
@@ -191,7 +191,9 @@ test "implemented crypto emitters append instructions" {
     try appendBuiltinInstructions(&list, allocator, .verify_rabin_sig);
     try std.testing.expect(list.items.len > 0);
     try std.testing.expectEqualStrings("OP_SWAP", list.items[0].op_name);
-    try std.testing.expectEqualStrings("OP_EQUAL", list.items[list.items.len - 1].op_name);
+    // BUG-011: the sequence now ends with the NUMERIC compare, not the byte
+    // compare it used to — see rabin_emitter.zig.
+    try std.testing.expectEqualStrings("OP_NUMEQUAL", list.items[list.items.len - 1].op_name);
 
     var negate_list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
     defer negate_list.deinit(allocator);

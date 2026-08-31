@@ -1,0 +1,52 @@
+{
+  "fixture": "oracle-price",
+  "_note": "Execution witness for verifyRabinSig. This fixture had NO witness until 2026-08-28, which is why the BUG-011 digest-encoding defect reached RC: the 72-fixture corpus pinned its BYTES across seven tiers, but nothing ever RAN the emitted script. It had no witness because `settle` calls checkSig and the differential harness could not express a signature; that limitation is lifted by the {\"signWith\"} marker, which fills the arg with a REAL secp256k1 signature over ScriptVM's own synthetic BIP-143 context.",
+  "goldenHashes": {
+    "expected-script.hex": "606b482f8c8030dbfcdcbba52c1765cadf15633777da990d7b3bdc05341264e7"
+  },
+  "constructorArgs": {
+    "oraclePubKey": "1852673427797059126777135760139020137744618460251467317973768694675137031965589n",
+    "receiver": "0x03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd"
+  },
+  "spends": [
+    {
+      "method": "settle",
+      "args": [
+        "50003n",
+        "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03",
+        "0x1b",
+        {
+          "signWith": "alice"
+        }
+      ],
+      "expect": "accept",
+      "note": "Real Rabin signature from packages/runar-go RabinSign over num2bin(50003, 8) = 53c3000000000000. The price is chosen so the digest's most-significant byte (h[31], read little-endian) has its high bit set \u2014 that is the ~50% of messages where OP_MOD's minimal Script number carries a 0x00 sign byte the raw 32-byte digest does not, so the pre-BUG-011 OP_EQUAL byte compare REJECTED this spend. A price without that property would pass against the buggy code and pin nothing."
+    },
+    {
+      "method": "settle",
+      "args": [
+        "50003n",
+        "0x406deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03",
+        "0x1b",
+        {
+          "signWith": "alice"
+        }
+      ],
+      "expect": "reject",
+      "note": "Forged Rabin signature (sig+1): the numeric compare must still refuse it, so the BUG-011 repair is not vacuous."
+    },
+    {
+      "method": "settle",
+      "args": [
+        "50001n",
+        "0x3f6deb7baa60ec851fba8b4224be3127a01f3b696e6ed7acf69fff42c61d440c03",
+        "0x1b",
+        {
+          "signWith": "alice"
+        }
+      ],
+      "expect": "reject",
+      "note": "Valid signature over a DIFFERENT price: the oracle attestation must bind to the settled price."
+    }
+  ]
+}

@@ -32,7 +32,10 @@ class TestRabinCodegen < Minitest::Test
     'OP_MOD',
     'OP_SWAP',
     'OP_SHA256',
-    'OP_EQUAL'
+    nil, # BUG-011 digest sign byte (0x00)
+    'OP_CAT',
+    'OP_BIN2NUM',
+    'OP_NUMEQUAL'
   ].freeze
 
   def test_rabin_module_emits_byte_frozen_golden
@@ -42,10 +45,16 @@ class TestRabinCodegen < Minitest::Test
     assert_equal RABIN_GOLDEN.length, ops.length
     ops.each_with_index do |op, i|
       expected = RABIN_GOLDEN[i]
-      if expected.nil?
+      if expected.nil? && i == 3
         assert_equal 'push', op[:op], "op #{i}: expected push"
         assert_equal 'bigint', op[:value][:kind], "op #{i}: push kind"
         assert_equal 65_536, op[:value][:big_int], "op #{i}: BUG-010 padding limit"
+      elsif expected.nil?
+        # BUG-011: the explicit sign byte that makes the raw digest read as a
+        # NON-NEGATIVE Script number before the numeric compare.
+        assert_equal 'push', op[:op], "op #{i}: expected push"
+        assert_equal 'bytes', op[:value][:kind], "op #{i}: push kind"
+        assert_equal "\x00".b, op[:value][:bytes_val], "op #{i}: BUG-011 digest sign byte"
       else
         assert_equal 'opcode', op[:op], "op #{i}: expected opcode"
         assert_equal expected, op[:code], "op #{i}"

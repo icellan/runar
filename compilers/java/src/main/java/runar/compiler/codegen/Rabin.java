@@ -27,7 +27,8 @@ import runar.compiler.ir.stack.StackOp;
  * <pre>
  *   OP_SWAP
  *   OP_DUP OP_0 &lt;push 65536&gt; OP_WITHIN OP_VERIFY   // 0 &lt;= padding &lt; 65536 (BUG-010)
- *   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+ *   OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD
+ *   OP_SWAP OP_SHA256 &lt;push 0x00&gt; OP_CAT OP_BIN2NUM OP_NUMEQUAL
  * </pre>
  *
  * <p>It computes {@code (sig*sig + padding) mod pubkey == sha256(msg)},
@@ -76,7 +77,18 @@ public final class Rabin {
         emit.accept(new OpcodeOp("OP_MOD"));
         emit.accept(new OpcodeOp("OP_SWAP"));
         emit.accept(new OpcodeOp("OP_SHA256"));
-        emit.accept(new OpcodeOp("OP_EQUAL"));
+        // BUG-011 digest-encoding normalization: OP_MOD leaves a MINIMAL Script
+        // number, which carries a trailing 0x00 sign byte whenever the digest's
+        // most-significant byte has its high bit set (~50% of messages), while
+        // OP_SHA256 pushes exactly 32 raw bytes. A bare OP_EQUAL is a BYTE
+        // compare and refused about half of all honest signatures on a real
+        // consensus VM. Give the digest an explicit 0x00 sign byte, collapse to
+        // minimal form, and compare NUMERICALLY. OP_NUMEQUAL never aborts, so
+        // the any-of-N pattern still yields false rather than killing the script.
+        emit.accept(new PushOp(PushValue.ofHex("00")));
+        emit.accept(new OpcodeOp("OP_CAT"));
+        emit.accept(new OpcodeOp("OP_BIN2NUM"));
+        emit.accept(new OpcodeOp("OP_NUMEQUAL"));
     }
 
     /**

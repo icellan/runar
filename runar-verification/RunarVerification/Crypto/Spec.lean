@@ -1393,7 +1393,26 @@ identity `(sig² + padding) mod pubKey == SHA256(msg)` with the
 implicit Script-number ↔ bytes coercion made explicit. -/
 def verifyRabinSig_spec (msg : ByteArray) (sig padding pubKey : Int) : Bool :=
   let lhs := (sig * sig + padding) % pubKey
-  decide ((RunarVerification.Stack.encodeMinimalLE lhs).toList = (Crypto.sha256 msg).toList)
+  -- BUG-011: the on-chain comparison is NUMERIC, not byte-wise.
+  --
+  -- This spec previously compared `encodeMinimalLE lhs` to the raw digest
+  -- BYTES, faithfully modelling the old `OP_EQUAL` codegen — which is why the
+  -- discharged theorem `Stack.Rabin.runOps_rabinBodyOps_eq` proved the
+  -- compiler correct while the emitted script rejected ~50% of honest
+  -- signatures on a real VM. The proof was sound; the SPEC encoded the defect.
+  -- A codegen-to-spec equivalence can only ever say "the compiler computes what
+  -- this predicate says", never "this predicate is what anyone wanted".
+  --
+  -- The digest is now read as a non-negative Script NUMBER (the `<0x00> OP_CAT
+  -- OP_BIN2NUM` normalization) and compared numerically, so the sign byte the
+  -- minimal encoding may carry no longer decides the result.
+  -- The `++ 0x00` is LOAD-BEARING and must not be simplified away: without it
+  -- a digest whose most-significant byte has its high bit set decodes NEGATIVE
+  -- (sign-and-magnitude), which is precisely the ~50% of messages the old
+  -- byte compare rejected. The script appends the sign byte before OP_BIN2NUM
+  -- for exactly this reason, so the spec states the same bytes.
+  decide (lhs = RunarVerification.Stack.decodeMinimalLE
+                  (Crypto.sha256 msg ++ ByteArray.mk #[0x00]))
 
 /-! ## 11. SLH-DSA-SHA2 verification — concrete specs (Phase B9-a)
 

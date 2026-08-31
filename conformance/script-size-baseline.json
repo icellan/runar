@@ -43,7 +43,7 @@
     "merkle-proof": 201,
     "multi-method": 19,
     "multisig": 17,
-    "oracle-price": 44,
+    "oracle-price": 48,
     "oversize-bigint-shift": 940,
     "p256-primitives": 928219,
     "p256-wallet": 958792,

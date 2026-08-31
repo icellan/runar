@@ -2,18 +2,26 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runFoldEquivalence, type WitnessArg } from '../../packages/runar-testing/src/index.js';
+import {
+  runFoldEquivalence,
+  isWitnessSignMarker,
+  type WitnessArg,
+  type WitnessSignMarker,
+} from '../../packages/runar-testing/src/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TESTS_DIR = join(__dirname, '..', 'tests');
 
 /** Decode a method-argument literal: bigint ("27n"), boolean, or bytes ("0x…"). */
-function decodeArg(v: unknown): WitnessArg {
+function decodeArg(v: unknown): WitnessArg | WitnessSignMarker {
   if (typeof v === 'boolean') return v;
   if (typeof v === 'string') {
     if (/^-?\d+n$/.test(v)) return BigInt(v.slice(0, -1));
     if (v.startsWith('0x')) return Uint8Array.from(Buffer.from(v.slice(2), 'hex'));
   }
+  // `{"signWith": "<key>"}` — resolved per fold mode inside the differential
+  // oracle, so each mode signs over its own locking script.
+  if (isWitnessSignMarker(v)) return v;
   throw new Error(`unencodable witness arg: ${JSON.stringify(v)}`);
 }
 
@@ -54,7 +62,7 @@ describe('fold-OFF ≡ fold-ON execution equivalence (per witnessed fixture)', (
 
     // Group every declared spend (accept AND reject) by method — a fold that
     // changes accept/reject on EITHER kind of witness is a real fold bug.
-    const byMethod = new Map<string, WitnessArg[][]>();
+    const byMethod = new Map<string, (WitnessArg | WitnessSignMarker)[][]>();
     for (const s of spec.spends) {
       const arr = byMethod.get(s.method) ?? [];
       arr.push((s.args as unknown[]).map(decodeArg));

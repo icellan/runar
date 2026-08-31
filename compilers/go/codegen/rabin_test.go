@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
-// rabinGolden is the fixed 15-opcode Rabin verification sequence:
-// (sig^2 + padding) mod pubKey == SHA256(msg) AND 0 <= padding < 65536.
-// See _review/BUG-010-rfc.md.
+// rabinGolden is the fixed 18-op Rabin verification sequence:
+// (sig^2 + padding) mod pubKey == SHA256(msg) (numeric compare, BUG-011)
+// AND 0 <= padding < 65536 (BUG-010). See _review/BUG-010-rfc.md.
 var rabinGolden = []struct {
 	op    string
 	code  string
-	value int64 // only meaningful for op="push" (always bigint, int64-representable)
+	value int64  // only meaningful for op="push" kind=bigint
+	bytes []byte // only meaningful for op="push" kind=bytes
 }{
 	{op: "opcode", code: "OP_SWAP"},
 	{op: "opcode", code: "OP_DUP"},
@@ -27,7 +28,10 @@ var rabinGolden = []struct {
 	{op: "opcode", code: "OP_MOD"},
 	{op: "opcode", code: "OP_SWAP"},
 	{op: "opcode", code: "OP_SHA256"},
-	{op: "opcode", code: "OP_EQUAL"},
+	{op: "push", bytes: []byte{0x00}},
+	{op: "opcode", code: "OP_CAT"},
+	{op: "opcode", code: "OP_BIN2NUM"},
+	{op: "opcode", code: "OP_NUMEQUAL"},
 }
 
 // TestEmitVerifyRabinSig_ByteFrozenGolden pins the exact opcode sequence
@@ -51,6 +55,14 @@ func TestEmitVerifyRabinSig_ByteFrozenGolden(t *testing.T) {
 				t.Errorf("op %d: expected Code=%q, got %q", i, want.code, op.Code)
 			}
 		case "push":
+			if want.bytes != nil {
+				if op.Value.Kind != "bytes" {
+					t.Errorf("op %d: expected push Kind=bytes, got %q", i, op.Value.Kind)
+				} else if len(op.Value.Bytes) != len(want.bytes) || op.Value.Bytes[0] != want.bytes[0] {
+					t.Errorf("op %d: expected push bytes=%v, got %v", i, want.bytes, op.Value.Bytes)
+				}
+				break
+			}
 			if op.Value.Kind != "bigint" {
 				t.Errorf("op %d: expected push Kind=bigint, got %q", i, op.Value.Kind)
 			}

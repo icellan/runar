@@ -37,8 +37,23 @@ describe('BIP-143 cross-tier broadcast (P2PKH, TS reference path)', () => {
     const address = priv.toAddress([0x6f]); // regtest p2pkh version byte
 
     await rpcCall('importaddress', address, '', false);
-    const fundTxid = (await rpcCall('sendtoaddress', address, 0.001)) as string;
+    // Mine before funding so the node wallet selects CONFIRMED coins.
+    //
+    // Under a full-suite run the wallet's own change outputs are still
+    // unconfirmed, and `sendtoaddress` happily chains onto them: measured on a
+    // live regtest node, funding without this line produced a tx whose parents
+    // both had 0 confirmations, while funding right after a block produced one
+    // whose parents had 1. An unconfirmed ancestor puts the whole group in
+    // bitcoin-sv's CPFP/secondary mempool instead of the journal, and the
+    // funding tx then never confirms — which is the exact state this test hit.
     await mine(1);
+    const fundTxid = (await rpcCall('sendtoaddress', address, 0.001)) as string;
+    // Confirm the funding tx before spending it, rather than assuming one block
+    // contains it. An unconfirmed parent makes the spend a mempool descendant,
+    // and on bitcoin-sv a descendant cannot enter the journal ahead of its
+    // ancestor — so a lagging parent would surface as the child "never being
+    // selected into a block", which is not what this test is asserting.
+    await mineUntilConfirmed(fundTxid);
 
     // Locate the funded output.
     const fundTx = Transaction.fromHex((await rpcCall('getrawtransaction', fundTxid)) as string);

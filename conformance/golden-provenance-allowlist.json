@@ -69,12 +69,12 @@
     },
     {
       "path": "conformance/script-size-baseline.json",
-      "sha256": "57ebd9fde8a5177a91607a8140cc3df59517d4a6e8665c097b5013f8c298c551",
+      "sha256": "7908a7f1181cfd6cf60eb2aa5a9cda64c1db9cd194fdbd2c86d5d5b150913ccb",
       "verified-against": "differential-oracle",
-      "reason": "Two changes, one entry, because the merged tree carries both and the hash is neither side's. (1) ADDITION for the imported oversize-bigint-shift fixture: 71 -> 72 entries. The value is 940, not compiler self-report -- it is len(conformance/tests/oversize-bigint-shift/expected-script.hex)/2 read off the checked-in golden after that golden was restamped to main's bytes (see this file's entry for that hex: the branch-stamped 941 carried one extra OP_BIN2NUM that main's seven tiers do not emit). (2) RE-STAMP of one existing fixture: assert-false-guard 2019 -> 2033 bytes (+0.69%, inside the file's own 10% tolerance), the mechanical size consequence of the issue-#149 layout fix that ships on main as sinkBelow; the size checker named exactly that fixture and all seven compilers independently regenerate the new bytes. No other fixture value moved. A wrong entry here is caught rather than absorbed: perturbing oversize-bigint-shift to 500 fails runner/__tests__/script-size-check.test.ts at +88% against the +10% tolerance.",
+      "reason": "Re-stamped for ONE fixture: oracle-price 44 -> 48 bytes (+9.1%, inside the file's own 10% tolerance). The mechanical size consequence of the BUG-011 Rabin digest-encoding fix, which appends exactly four bytes to the verifier tail (<push 0x00> OP_CAT OP_BIN2NUM, with OP_EQUAL -> OP_NUMEQUAL being 1:1). The value is not a compiler self-report: it is len(conformance/tests/oracle-price/expected-script.hex)/2 read off the checked-in golden, and that golden is independently cross-checked by conformance/witnesses/oracle-price.json, which EXECUTES the fixture — a real Rabin signature from packages/runar-go RabinSign plus a real secp256k1 signature, accepted by @bsv/sdk's Spend engine, with a forged signature and a wrong-price signature both rejected. The other 71 fixture sizes are byte-unchanged: the size checker reports ok=72 warn=0 fail=0.",
       "reviewer": "gh:icellan",
       "review-status": "reviewed",
-      "date": "2026-08-23"
+      "date": "2026-08-28"
     },
     {
       "path": "conformance/sdk-output/tests/assert-false-guard/expected-locking.hex",

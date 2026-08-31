@@ -40,6 +40,10 @@ import { compile } from 'runar-compiler';
 import { ScriptVM, hexToBytes, bytesToHex } from '../vm/index.js';
 import { TestContract } from '../test-contract.js';
 import { buildWitness, type WitnessArg } from './witness.js';
+import { Hash, LockingScript, PrivateKey, TransactionSignature } from '@bsv/sdk';
+import { SYNTHETIC_SPEND_CONTEXT } from '../vm/script-vm.js';
+import { testKey } from './real-crypto-execution.js';
+import { signTestMessage } from '../crypto/ecdsa.js';
 
 export type { WitnessArg };
 
@@ -47,7 +51,7 @@ export interface DiffExecOptions {
   source: string;
   fileName: string; // selects the frontend parser
   method: string; // public method to spend through
-  args: WitnessArg[]; // method arguments (interpreter + witness order)
+  args: (WitnessArg | WitnessSignMarker)[]; // method arguments (interpreter + witness order)
   constructorArgs?: Record<string, unknown>;
   disableConstantFolding?: boolean; // default false → fold-ON deployed bytes
 }
@@ -78,6 +82,55 @@ function normaliseCtor(
     else throw new Error(`unconvertible constructor arg ${k}: ${typeof v}`);
   }
   return out;
+}
+
+/**
+ * A witness arg that must be filled with a REAL secp256k1 signature.
+ *
+ * The differential oracle runs the compiled script on `ScriptVM`, whose
+ * OP_CHECKSIG is real secp256k1 — there is no mock. Before this, a witness
+ * could only carry literal bytes, so no contract calling `checkSig` could have
+ * one: any literal would fail the VM while the ANF interpreter (which mocks
+ * checkSig) accepted, and the oracle would report a divergence that is an
+ * artefact of the harness rather than a defect. That is why `oracle-price` —
+ * the fixture pinning `verifyRabinSig` — had no witness, and why the BUG-011
+ * digest-encoding defect went unexecuted all the way to RC.
+ *
+ * `signWith` names a key from `oracle/real-crypto-execution.ts`'s test-key
+ * table, so a witness and a real-crypto witness can use the same identities.
+ */
+export interface WitnessSignMarker {
+  signWith: string;
+}
+
+export function isWitnessSignMarker(v: unknown): v is WitnessSignMarker {
+  return typeof v === 'object' && v !== null && typeof (v as WitnessSignMarker).signWith === 'string';
+}
+
+/**
+ * Build the DER checksig-format signature the VM will accept for `lockingHex`.
+ *
+ * The preimage is derived from `SYNTHETIC_SPEND_CONTEXT` — the very object
+ * `ScriptVM` constructs its `Spend` from — rather than a local copy, because
+ * the two contexts differ from the real-crypto oracle's in
+ * `transactionVersion`, and version is part of the BIP-143 preimage. A copied
+ * constant that drifted would produce signatures that fail to verify and read
+ * as a codegen defect.
+ */
+function signForVm(keyName: string, lockingHex: string): Uint8Array {
+  const scope = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
+  const preimage = TransactionSignature.formatBytes({
+    ...SYNTHETIC_SPEND_CONTEXT,
+    otherInputs: [],
+    outputs: [],
+    subscript: LockingScript.fromHex(lockingHex),
+    scope,
+  });
+  // OP_CHECKSIG hashes twice; `sign()` does one sha256 internally, so pre-hash once.
+  const digest = Hash.sha256(Array.from(preimage));
+  const key = PrivateKey.fromHex(testKey(keyName).privKey);
+  const sig = key.sign(digest);
+  return new Uint8Array(new TransactionSignature(sig.r, sig.s, scope).toChecksigFormat());
 }
 
 export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult {
@@ -119,8 +172,13 @@ export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult 
     (m) => m.visibility === 'public' && m.name !== 'constructor',
   );
   const publicIndex = publicMethods.findIndex((m) => m.name === opts.method);
+  // Resolve sign markers against the DEPLOYED bytes: the sighash subscript is
+  // the locking script, so the signature can only be built after compiling.
+  const resolvedArgs: WitnessArg[] = opts.args.map((a) =>
+    isWitnessSignMarker(a) ? signForVm(a.signWith, lockingHex) : a,
+  );
   const witnessArgs: WitnessArg[] =
-    publicMethods.length > 1 ? [...opts.args, BigInt(publicIndex)] : [...opts.args];
+    publicMethods.length > 1 ? [...resolvedArgs, BigInt(publicIndex)] : [...resolvedArgs];
 
   // 2. Source-semantics oracle: run the method through the ANF interpreter.
   //    TestContract.call reports a failed assert via `success: false` (it does
@@ -131,7 +189,19 @@ export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult 
     const tc = TestContract.fromSource(opts.source, ctor, opts.fileName);
     const named: Record<string, unknown> = {};
     methodNode.params.forEach((p, i) => {
-      named[p.name] = opts.args[i];
+      const a = opts.args[i];
+      // The two oracles verify a signature against DIFFERENT messages, so one
+      // signature cannot satisfy both:
+      //   * interpreter — real ECDSA over the fixed TEST_MESSAGE
+      //     (`crypto/ecdsa.ts`, NOT a mock despite older docs saying so);
+      //   * ScriptVM    — real secp256k1 over the BIP-143 sighash of the
+      //     synthetic spend context.
+      // A sign marker is therefore resolved per side, each valid in its own
+      // domain. Handing one side the other's signature would report a signing
+      // convention mismatch as a source-vs-script divergence.
+      named[p.name] = isWitnessSignMarker(a)
+        ? hexToBytes(signTestMessage(testKey(a.signWith).privKey))
+        : a;
     });
     const res = tc.call(opts.method, named);
     interpreterAccepted = res.success;

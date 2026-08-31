@@ -39,11 +39,12 @@ class RabinTest {
     }
 
     @Test
-    void emitsExactly15Ops() {
+    void emitsExactly18Ops() {
         List<StackOp> ops = capture();
-        assertEquals(15, ops.size(),
-            "Rabin verifier must emit exactly 15 opcodes (cross-compiler reference; "
-                + "10 original + 5 BUG-010 range-check ops)");
+        assertEquals(18, ops.size(),
+            "Rabin verifier must emit exactly 18 opcodes (cross-compiler reference; "
+                + "10 original + 5 BUG-010 range-check ops + 4 BUG-011 "
+                + "digest-encoding ops, less the OP_EQUAL that OP_NUMEQUAL replaced)");
     }
 
     @Test
@@ -51,9 +52,10 @@ class RabinTest {
         List<StackOp> ops = capture();
         for (int i = 0; i < ops.size(); i++) {
             StackOp op = ops.get(i);
-            if (i == 3) {
+            if (i == 3 || i == 14) {
+                // 3 = BUG-010 padding limit, 14 = BUG-011 digest sign byte.
                 assertTrue(op instanceof PushOp,
-                    "Rabin op 3 must be the BUG-010 padding-limit push; got "
+                    "Rabin op " + i + " must be a push; got "
                         + op.getClass().getSimpleName());
             } else {
                 assertTrue(op instanceof OpcodeOp,
@@ -83,16 +85,25 @@ class RabinTest {
             "OP_MOD",
             "OP_SWAP",
             "OP_SHA256",
-            "OP_EQUAL"
+            null, // BUG-011 digest sign byte (0x00)
+            "OP_CAT",
+            "OP_BIN2NUM",
+            "OP_NUMEQUAL"
         );
         assertEquals(expected.size(), ops.size());
         for (int i = 0; i < expected.size(); i++) {
             String want = expected.get(i);
-            if (want == null) {
+            if (want == null && i == 3) {
                 PushOp p = (PushOp) ops.get(i);
                 assertEquals(BigInteger.valueOf(Rabin.RABIN_PADDING_LIMIT),
                     p.value().raw(),
                     "Rabin op " + i + " must push the BUG-010 padding limit");
+            } else if (want == null) {
+                // BUG-011: the explicit sign byte that makes the raw digest read
+                // as a NON-NEGATIVE Script number before the numeric compare.
+                PushOp p = (PushOp) ops.get(i);
+                assertEquals("00", p.value().raw(),
+                    "Rabin op " + i + " must push the BUG-011 digest sign byte");
             } else {
                 OpcodeOp actual = (OpcodeOp) ops.get(i);
                 assertEquals(want, actual.code(),
@@ -117,7 +128,7 @@ class RabinTest {
     void dispatchRoutesKnownName() {
         List<StackOp> ops = new ArrayList<>();
         Rabin.dispatch("verifyRabinSig", ops::add);
-        assertEquals(15, ops.size());
+        assertEquals(18, ops.size());
     }
 
     @Test

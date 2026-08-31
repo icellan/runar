@@ -15,6 +15,7 @@
  * normalisation, interpreter execution and `ScriptVM` execution. Folding is
  * just its `disableConstantFolding` toggle, flipped per run.
  */
+import type { WitnessSignMarker } from './differential-execution.js';
 import { runDifferentialExecution, type WitnessArg } from './differential-execution.js';
 
 export type { WitnessArg };
@@ -24,7 +25,14 @@ export interface FoldEqOptions {
   fileName: string; // selects the frontend parser
   method: string; // public method to spend through
   constructorArgs?: Record<string, unknown>;
-  witnesses: WitnessArg[][]; // each inner array is one spend attempt (method args)
+  // Each inner array is one spend attempt (method args). A `WitnessSignMarker`
+  // is resolved INSIDE `runDifferentialExecution`, once per fold mode — which is
+  // what makes signed contracts work here at all: the sighash subscript is the
+  // locking script, and folding changes those bytes, so fold-OFF and fold-ON
+  // need signatures over their OWN scripts. Resolving per mode gives that for
+  // free; a single pre-resolved signature would fail on whichever mode it was
+  // not built for and read as a fold divergence.
+  witnesses: (WitnessArg | WitnessSignMarker)[][];
 }
 
 export interface FoldEqDivergence {

@@ -1,7 +1,7 @@
 export { buildWitness } from './witness.js';
 export type { WitnessArg } from './witness.js';
-export { runDifferentialExecution } from './differential-execution.js';
-export type { DiffExecOptions, DiffExecResult } from './differential-execution.js';
+export { runDifferentialExecution, isWitnessSignMarker } from './differential-execution.js';
+export type { DiffExecOptions, DiffExecResult, WitnessSignMarker } from './differential-execution.js';
 export { runTriModalExecution } from './tri-modal-execution.js';
 export type { TriModalExecResult } from './tri-modal-execution.js';
 export { runFoldEquivalence } from './fold-equivalence.js';

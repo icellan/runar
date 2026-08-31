@@ -2,18 +2,29 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runDifferentialExecution, type WitnessArg } from '../../packages/runar-testing/src/index.js';
+import {
+  runDifferentialExecution,
+  isWitnessSignMarker,
+  type WitnessArg,
+  type WitnessSignMarker,
+} from '../../packages/runar-testing/src/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TESTS_DIR = join(__dirname, '..', 'tests');
 
 /** Decode a method-argument literal: bigint ("27n"), boolean, or bytes ("0x…"). */
-function decodeArg(v: unknown): WitnessArg {
+function decodeArg(v: unknown): WitnessArg | WitnessSignMarker {
   if (typeof v === 'boolean') return v;
   if (typeof v === 'string') {
     if (/^-?\d+n$/.test(v)) return BigInt(v.slice(0, -1));
     if (v.startsWith('0x')) return Uint8Array.from(Buffer.from(v.slice(2), 'hex'));
   }
+  // `{"signWith": "<key>"}` — the oracle fills this with a REAL secp256k1
+  // signature over ScriptVM's synthetic BIP-143 context. Without it no
+  // checkSig contract could carry a witness at all: a literal signature fails
+  // the VM's real OP_CHECKSIG while the interpreter mocks it, so the oracle
+  // would report a harness artefact as a divergence.
+  if (isWitnessSignMarker(v)) return v;
   throw new Error(`unencodable witness arg: ${JSON.stringify(v)}`);
 }
 

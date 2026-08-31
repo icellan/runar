@@ -56,6 +56,7 @@ export type {
 export {
   buildWitness,
   runDifferentialExecution,
+  isWitnessSignMarker,
   runTriModalExecution,
   runFoldEquivalence,
   runStatelessSigned,
@@ -64,6 +65,7 @@ export {
 } from './oracle/index.js';
 export type {
   WitnessArg,
+  WitnessSignMarker,
   DiffExecOptions,
   DiffExecResult,
   TriModalExecResult,
