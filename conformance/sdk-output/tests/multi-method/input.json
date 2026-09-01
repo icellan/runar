@@ -62,13 +62,47 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 11
+        "byteOffset": 11,
+        "name": "owner",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 1,
-        "byteOffset": 16
+        "byteOffset": 16,
+        "name": "backup",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 11,
+          "slot": "owner"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 16,
+          "slot": "backup"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

@@ -30,17 +30,47 @@
         }
       ]
     },
-    "script": "007c637c0093677c00946800a077",
+    "script": "007c637c00937677677c0094767768517a7500a0",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 4
+        "byteOffset": 4,
+        "name": "limit",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 8
+        "byteOffset": 10,
+        "name": "limit",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 4,
+          "slot": "limit"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 10,
+          "slot": "limit"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

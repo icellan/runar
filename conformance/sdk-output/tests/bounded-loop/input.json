@@ -30,9 +30,28 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 40
+        "byteOffset": 40,
+        "name": "expectedSum",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 40,
+          "slot": "expectedSum"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

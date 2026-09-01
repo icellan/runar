@@ -52,7 +52,7 @@ axiom.
 `statefulPrologue_successAgrees_under_validTxContext` (which bridged the ANF
 `checkPreimage` verdict to a spender-supplied `_opPushTxSig` witness via
 `OP_CHECKSIGVERIFY`) are GONE. The emitted `checkPreimage` no longer accepts a
-spender witness: the compiler injects a fixed 760-byte OP_PUSH_TX blob that
+spender witness: the compiler injects a fixed 428-byte OP_PUSH_TX blob that
 DERIVES the ECDSA signature on-chain from `hash256(preimage)` and runs
 `OP_CHECKSIGVERIFY` against `G`, so the preimage↔transaction binding is
 **ENFORCED BY CODEGEN**. The Stack-side runtime characterisation now lives in

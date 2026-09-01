@@ -60,13 +60,47 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 8
+        "byteOffset": 8,
+        "name": "sourceScriptHash",
+        "type": "Sha256",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 32,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 0,
-        "byteOffset": 29
+        "byteOffset": 29,
+        "name": "sourceScriptHash",
+        "type": "Sha256",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 32,
+        "fixedPushHeaderBytes": 1
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 8,
+          "slot": "sourceScriptHash"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 29,
+          "slot": "sourceScriptHash"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

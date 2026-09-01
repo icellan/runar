@@ -34,9 +34,28 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 11230
+        "byteOffset": 11230,
+        "name": "pubKeyHash",
+        "type": "ByteString",
+        "valueEncoding": "data"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 11230,
+          "slot": "pubKeyHash"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

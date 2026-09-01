@@ -329,9 +329,10 @@ class TestExpandFixedArrays < Minitest::Test
     # fix re-emits it as `assert(cond0 || ... || cond8)` (+27 bytes). Matches the
     # fixed TS reference fold-ON output. Re-updated for the C17 fix: `not-not-elim`
     # is now guarded on a canonical-bool producer, so the 9 `if (this.cN != 0n)`
-    # tests each keep their OP_NOT OP_NOT normalisation (+18 bytes, 9476 -> 9494).
-    assert_equal 9494, v1.script.length / 2, "v1 script must be 9494 bytes"
-    assert_equal 9494, v2.script.length / 2, "v2 script must be 9494 bytes"
+    # tests each keep their OP_NOT OP_NOT normalisation (+18 bytes); the Any-S
+    # preimage blob (428 bytes vs the legacy 760) puts the total at 7502.
+    assert_equal 7502, v1.script.length / 2, "v1 script must be 7502 bytes"
+    assert_equal 7502, v2.script.length / 2, "v2 script must be 7502 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 
