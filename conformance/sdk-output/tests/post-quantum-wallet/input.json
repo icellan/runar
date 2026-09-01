@@ -46,13 +46,45 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 2
+        "byteOffset": 2,
+        "name": "ecdsaPubKeyHash",
+        "type": "Addr",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 20,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 1,
-        "byteOffset": 9
+        "byteOffset": 9,
+        "name": "wotsPubKeyHash",
+        "type": "ByteString",
+        "valueEncoding": "data"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 2,
+          "slot": "ecdsaPubKeyHash"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 9,
+          "slot": "wotsPubKeyHash"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

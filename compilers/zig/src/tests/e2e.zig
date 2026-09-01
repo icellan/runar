@@ -667,10 +667,10 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
 
     try std.testing.expectEqualStrings(v1_hex, v2_hex);
 
-    // Byte-count lock-in: the canonical TS compiler produces 9494 bytes for
+    // Byte-count lock-in: the canonical TS compiler produces 7502 bytes for
     // both TicTacToe variants. Any divergence from this length indicates a
     // regression in Zig's stack lowering or branch-reconciliation logic.
-    // (BUG-100 fix: checkPreimage now emits the 760-byte on-chain OP_PUSH_TX
+    // (BUG-100 fix: checkPreimage now emits the 428-byte on-chain OP_PUSH_TX
     // binding blob per call site, so the canonical size grew from 5087.)
     // (#116: the change-output segment is now gated behind a runtime
     // `if (_changeAmount != 0)` guard, growing the canonical size from 9425.)
@@ -681,7 +681,7 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // a provably-canonical boolean producer, so the 9 × `if (this.cN != 0n)`
     // sites each regain their `OP_NOT OP_NOT` pair — +18 bytes from 9476.
     // Behaviour is unchanged; the booleans only feed OP_IF.)
-    const expected_bytes: usize = 9494;
+    const expected_bytes: usize = 7502;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 
@@ -691,7 +691,7 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // (BUG-100 fix: the checkPreimage binding blob now follows the dispatch
     // prologue, replacing the old push-G / OP_CHECKSIG tail.)
     const expected_prefix =
-        "76009c637576ab76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b";
+        "76009c637576ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f51";
     try std.testing.expectEqualStrings(expected_prefix, v1_hex[0..expected_prefix.len]);
 }
 

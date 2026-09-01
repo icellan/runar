@@ -13,7 +13,7 @@
 //! against the BSV interpreter in oppushtx-binding.test.ts). Emitted as a single
 //! opaque raw_bytes op (peephole barrier). The cross-tier conformance suite
 //! guards that this constant matches every other tier byte-for-byte.
-pub(crate) const CHECK_PREIMAGE_BINDING_HEX: &str = "76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f04c6009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f9521414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b7578937c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7fa07821414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d7c949594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e7c7e01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad";
+pub(crate) const CHECK_PREIMAGE_BINDING_HEX: &str = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad";
 
 /// Decode the canonical binding construction into bytes. Panics only if the
 /// compile-time constant is malformed (which the tests guard against).
@@ -36,11 +36,12 @@ pub(crate) fn check_preimage_binding_bytes_with_flag(flag: Option<i64>) -> Vec<u
         Some(v) if (v & 0xff) as u8 == SIGHASH_FLAG_DEFAULT => return bytes,
         Some(v) => (v & 0xff) as u8,
     };
-    // The sighash flag sits immediately before the `OP_PUSHBYTES_33 <G>` push
-    // that appends the OP_PUSH_TX pubkey: the tail is
-    // `.. 01 <flag> 7e 21 02 79 be 66 7e f9 ..` (push-1 flag, OP_CAT, push-33 G).
+    // The sighash flag sits immediately before the `OP_PUSHBYTES_33 <pubkey>`
+    // push that appends the OP_PUSH_TX pubkey (P = d*G for the Any-S key
+    // d = 2^248 * Gx^-1 mod n): the tail is
+    // `.. 01 <flag> 7e 21 02 b4 05 d7 f0 ..` (push-1 flag, OP_CAT, push-33 P).
     // Anchor on the unique pubkey-push prefix and rewrite the flag byte in place.
-    const PUBKEY_ANCHOR: &[u8] = &[0x21, 0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9];
+    const PUBKEY_ANCHOR: &[u8] = &[0x21, 0x02, 0xb4, 0x05, 0xd7, 0xf0, 0x32];
     let pos = find_subslice(&bytes, PUBKEY_ANCHOR)
         .expect("OP_PUSH_TX pubkey anchor not found in binding blob");
     assert!(pos >= 3, "unexpected binding blob layout (pubkey too early)");

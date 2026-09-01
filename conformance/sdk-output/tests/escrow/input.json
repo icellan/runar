@@ -56,21 +56,81 @@
     "constructorSlots": [
       {
         "paramIndex": 1,
-        "byteOffset": 6
+        "byteOffset": 6,
+        "name": "seller",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 2,
-        "byteOffset": 8
+        "byteOffset": 8,
+        "name": "arbiter",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 0,
-        "byteOffset": 14
+        "byteOffset": 14,
+        "name": "buyer",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 2,
-        "byteOffset": 16
+        "byteOffset": 16,
+        "name": "arbiter",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 6,
+          "slot": "seller"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 8,
+          "slot": "arbiter"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 14,
+          "slot": "buyer"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 16,
+          "slot": "arbiter"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

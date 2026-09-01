@@ -34,9 +34,28 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 26
+        "byteOffset": 26,
+        "name": "target",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 26,
+          "slot": "target"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

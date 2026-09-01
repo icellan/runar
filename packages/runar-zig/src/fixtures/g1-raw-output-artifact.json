@@ -1,1 +1,572 @@
-{"version":"runar-v1.0.0-rc.1","compilerVersion":"1.0.0-rc.1-zig","contractName":"RawOutputTest","parentClass":"StatefulSmartContract","abi":{"constructor":{"params":[{"name":"count","type":"bigint"}]},"methods":[{"name":"sendToScript","params":[{"name":"scriptBytes","type":"ByteString"},{"name":"_changePKH","type":"Ripemd160"},{"name":"_changeAmount","type":"bigint"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true,"usesCodePart":true}]},"script":"76ab76aa007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c7501007e8121e59e705cb909acaba73cef8c4b8e775cd87cc0956e4045306d7ded41947f04c6009320a1201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7f9521414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e977b7578937c977620a0201b68462fe9df1d50a457736e575dffffffffffffffffffffffffffffff7fa07821414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007c8d7c949594826b012080007c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c517f7b7b7c7e7c756c01207c947f777682775180527c7e7c7e768277012393518023022100c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50130527a7e7c7e7c7e01417e210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad69768254947f778101419d7601687f7782012c947f758258947f758258947f778102e803557a827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e788b527a7500785779016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e557a557a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b757768537a7b7e7c7eaa7b820128947f7701207f75877777","asm":"OP_DUP OP_CODESEPARATOR <raw 760 bytes> OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM 65 OP_NUMEQUALVERIFY OP_DUP 104 OP_SPLIT OP_NIP OP_SIZE 44 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM 1000 OP_5 OP_ROLL OP_SIZE OP_DUP 253 OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP 65536 OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP fd OP_SWAP OP_CAT OP_ELSE OP_DUP 4294967296 OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP fe OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP ff OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_OVER OP_1ADD OP_2 OP_ROLL OP_DROP OP_0 OP_OVER OP_7 OP_PICK 6a OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP 253 OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP 65536 OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP fd OP_SWAP OP_CAT OP_ELSE OP_DUP 4294967296 OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP fe OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP ff OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_5 OP_ROLL OP_5 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF 1976a914 OP_ROT OP_CAT 88ac OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_3 OP_ROLL OP_ROT OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_ROT OP_SIZE 40 OP_SUB OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP","constructorSlots":[],"stateFields":[{"name":"count","type":"bigint","index":0}],"codeSeparatorIndex":1,"codeSeparatorIndices":[1],"anf":{"contractName":"RawOutputTest","properties":[{"name":"count","type":"bigint","readonly":false}],"methods":[{"name":"constructor","params":[{"name":"count","type":"bigint"}],"body":[{"name":"t0","value":{"kind":"load_prop","name":"count"}},{"name":"t1","value":{"kind":"call","func":"super","args":["t0"]}},{"name":"t2","value":{"kind":"load_prop","name":"count"}},{"name":"t3","value":{"kind":"update_prop","name":"count","value":"t2"}}],"isPublic":false},{"name":"sendToScript","params":[{"name":"scriptBytes","type":"ByteString"},{"name":"_changePKH","type":"Ripemd160"},{"name":"_changeAmount","type":"bigint"},{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"t0","value":{"kind":"load_param","name":"txPreimage"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t1","value":{"kind":"check_preimage","preimage":"t0"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t2","value":{"kind":"assert","value":"t1"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t3","value":{"kind":"load_param","name":"txPreimage"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t4","value":{"kind":"call","func":"extractSigHashType","args":["t3"]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t5","value":{"kind":"load_const","value":65},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t6","value":{"kind":"bin_op","op":"===","left":"t4","right":"t5"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t7","value":{"kind":"assert","value":"t6"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t8","value":{"kind":"load_param","name":"txPreimage"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t9","value":{"kind":"deserialize_state","preimage":"t8"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t10","value":{"kind":"load_const","value":1000},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t11","value":{"kind":"load_param","name":"scriptBytes"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t12","value":{"kind":"add_raw_output","satoshis":"t10","scriptBytes":"t11"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t13","value":{"kind":"load_prop","name":"count"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":14,"column":9}},{"name":"t14","value":{"kind":"load_const","value":1},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":14,"column":9}},{"name":"t15","value":{"kind":"bin_op","op":"+","left":"t13","right":"t14"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":14,"column":9}},{"name":"t16","value":{"kind":"update_prop","name":"count","value":"t15"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":14,"column":9}},{"name":"t17","value":{"kind":"load_const","value":0},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t18","value":{"kind":"load_prop","name":"count"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t19","value":{"kind":"add_output","satoshis":"t17","stateValues":["t18"]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t20","value":{"kind":"load_param","name":"_changePKH"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t21","value":{"kind":"load_param","name":"_changeAmount"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t22","value":{"kind":"load_const","value":0},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t23","value":{"kind":"bin_op","op":"!==","left":"t21","right":"t22"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t26","value":{"kind":"if","cond":"t23","then":[{"name":"t24","value":{"kind":"call","func":"buildChangeOutput","args":["t20","t21"]}}],"else":[{"name":"t25","value":{"kind":"load_const","value":""}}]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t27","value":{"kind":"call","func":"cat","args":["t12","t19"]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t28","value":{"kind":"call","func":"cat","args":["t27","t26"]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t29","value":{"kind":"call","func":"hash256","args":["t28"]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t30","value":{"kind":"load_param","name":"txPreimage"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t31","value":{"kind":"call","func":"extractOutputHash","args":["t30"]},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t32","value":{"kind":"bin_op","op":"===","left":"t29","right":"t31","result_type":"bytes"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}},{"name":"t33","value":{"kind":"assert","value":"t32"},"sourceLoc":{"file":"examples/zig/add-raw-output/RawOutputTest.runar.zig","line":12,"column":24}}],"isPublic":true}]}}
+{
+  "version": "runar-v1.0.0-rc.1",
+  "compilerVersion": "1.0.0-rc.1-zig",
+  "contractName": "RawOutputTest",
+  "parentClass": "StatefulSmartContract",
+  "abi": {
+    "constructor": {
+      "params": [
+        {
+          "name": "count",
+          "type": "bigint"
+        }
+      ]
+    },
+    "methods": [
+      {
+        "name": "sendToScript",
+        "params": [
+          {
+            "name": "scriptBytes",
+            "type": "ByteString"
+          },
+          {
+            "name": "_changePKH",
+            "type": "Ripemd160"
+          },
+          {
+            "name": "_changeAmount",
+            "type": "bigint"
+          },
+          {
+            "name": "txPreimage",
+            "type": "SigHashPreimage"
+          }
+        ],
+        "isPublic": true,
+        "usesCodePart": true
+      }
+    ]
+  },
+  "script": "76ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad69768254947f778101419d7601687f7782012c947f758258947f758258947f778102e803557a827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e788b527a7500785779016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e557a557a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b757768537a7b7e7c7eaa7b820128947f7701207f75877777",
+  "asm": "OP_DUP OP_CODESEPARATOR <raw 428 bytes> OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <e803> OP_5 OP_ROLL OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_OVER OP_1ADD OP_2 OP_ROLL OP_DROP OP_0 OP_OVER OP_7 OP_PICK <6a> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_5 OP_ROLL OP_5 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_3 OP_ROLL OP_ROT OP_CAT OP_SWAP OP_CAT OP_HASH256 OP_ROT OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP",
+  "constructorSlots": [],
+  "stateFields": [
+    {
+      "name": "count",
+      "type": "bigint",
+      "index": 0
+    }
+  ],
+  "codeSeparatorIndex": 1,
+  "codeSeparatorIndices": [
+    1
+  ],
+  "anf": {
+    "contractName": "RawOutputTest",
+    "properties": [
+      {
+        "name": "count",
+        "type": "bigint",
+        "readonly": false
+      }
+    ],
+    "methods": [
+      {
+        "name": "constructor",
+        "params": [
+          {
+            "name": "count",
+            "type": "bigint"
+          }
+        ],
+        "body": [
+          {
+            "name": "t0",
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            }
+          },
+          {
+            "name": "t1",
+            "value": {
+              "kind": "call",
+              "func": "super",
+              "args": [
+                "t0"
+              ]
+            }
+          },
+          {
+            "name": "t2",
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            }
+          },
+          {
+            "name": "t3",
+            "value": {
+              "kind": "update_prop",
+              "name": "count",
+              "value": "t2"
+            }
+          }
+        ],
+        "isPublic": false
+      },
+      {
+        "name": "sendToScript",
+        "params": [
+          {
+            "name": "scriptBytes",
+            "type": "ByteString"
+          },
+          {
+            "name": "_changePKH",
+            "type": "Ripemd160"
+          },
+          {
+            "name": "_changeAmount",
+            "type": "bigint"
+          },
+          {
+            "name": "txPreimage",
+            "type": "SigHashPreimage"
+          }
+        ],
+        "body": [
+          {
+            "name": "t0",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t1",
+            "value": {
+              "kind": "check_preimage",
+              "preimage": "t0"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t2",
+            "value": {
+              "kind": "assert",
+              "value": "t1"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t3",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t4",
+            "value": {
+              "kind": "call",
+              "func": "extractSigHashType",
+              "args": [
+                "t3"
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t5",
+            "value": {
+              "kind": "load_const",
+              "value": 65
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t6",
+            "value": {
+              "kind": "bin_op",
+              "op": "===",
+              "left": "t4",
+              "right": "t5"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t7",
+            "value": {
+              "kind": "assert",
+              "value": "t6"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t8",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t9",
+            "value": {
+              "kind": "deserialize_state",
+              "preimage": "t8"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t10",
+            "value": {
+              "kind": "load_const",
+              "value": 1000
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t11",
+            "value": {
+              "kind": "load_param",
+              "name": "scriptBytes"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t12",
+            "value": {
+              "kind": "add_raw_output",
+              "satoshis": "t10",
+              "scriptBytes": "t11"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t13",
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 14,
+              "column": 9
+            }
+          },
+          {
+            "name": "t14",
+            "value": {
+              "kind": "load_const",
+              "value": 1
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 14,
+              "column": 9
+            }
+          },
+          {
+            "name": "t15",
+            "value": {
+              "kind": "bin_op",
+              "op": "+",
+              "left": "t13",
+              "right": "t14"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 14,
+              "column": 9
+            }
+          },
+          {
+            "name": "t16",
+            "value": {
+              "kind": "update_prop",
+              "name": "count",
+              "value": "t15"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 14,
+              "column": 9
+            }
+          },
+          {
+            "name": "t17",
+            "value": {
+              "kind": "load_const",
+              "value": 0
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t18",
+            "value": {
+              "kind": "load_prop",
+              "name": "count"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t19",
+            "value": {
+              "kind": "add_output",
+              "satoshis": "t17",
+              "stateValues": [
+                "t18"
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t20",
+            "value": {
+              "kind": "load_param",
+              "name": "_changePKH"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t21",
+            "value": {
+              "kind": "load_param",
+              "name": "_changeAmount"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t22",
+            "value": {
+              "kind": "load_const",
+              "value": 0
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t23",
+            "value": {
+              "kind": "bin_op",
+              "op": "!==",
+              "left": "t21",
+              "right": "t22"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t26",
+            "value": {
+              "kind": "if",
+              "cond": "t23",
+              "then": [
+                {
+                  "name": "t24",
+                  "value": {
+                    "kind": "call",
+                    "func": "buildChangeOutput",
+                    "args": [
+                      "t20",
+                      "t21"
+                    ]
+                  }
+                }
+              ],
+              "else": [
+                {
+                  "name": "t25",
+                  "value": {
+                    "kind": "load_const",
+                    "value": ""
+                  }
+                }
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t27",
+            "value": {
+              "kind": "call",
+              "func": "cat",
+              "args": [
+                "t12",
+                "t19"
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t28",
+            "value": {
+              "kind": "call",
+              "func": "cat",
+              "args": [
+                "t27",
+                "t26"
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t29",
+            "value": {
+              "kind": "call",
+              "func": "hash256",
+              "args": [
+                "t28"
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t30",
+            "value": {
+              "kind": "load_param",
+              "name": "txPreimage"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t31",
+            "value": {
+              "kind": "call",
+              "func": "extractOutputHash",
+              "args": [
+                "t30"
+              ]
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t32",
+            "value": {
+              "kind": "bin_op",
+              "op": "===",
+              "left": "t29",
+              "right": "t31",
+              "result_type": "bytes"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          },
+          {
+            "name": "t33",
+            "value": {
+              "kind": "assert",
+              "value": "t32"
+            },
+            "sourceLoc": {
+              "file": "examples/zig/add-raw-output/RawOutputTest.runar.zig",
+              "line": 12,
+              "column": 24
+            }
+          }
+        ],
+        "isPublic": true
+      }
+    ]
+  }
+}

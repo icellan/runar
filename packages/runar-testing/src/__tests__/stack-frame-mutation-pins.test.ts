@@ -214,8 +214,8 @@ export class SinkDistance extends StatefulSmartContract {
   // Stateful: ~1 KB of preimage machinery, so the pin is `sha256(scriptHex)`
   // rather than a kilobyte of literal hex. Same detection power; when it fires,
   // diff the two scripts rather than reading the digest.
-  foldOff: '915cf178a2cbba9446763033542d66895d9fdf417268d59bb6be494cf3306642',
-  foldOn: 'a7bd4ce7bbae35ebd2b0abbad03c603351f0d3af9654ca816551e38707c86b83',
+  foldOff: '5702a5b2755c59ea57fee5b59b9304d0447868cc2793f3d75e0d122dc1baebf6',
+  foldOn: 'd8c752ee2160480f1b3e87aedad6144a21aec4f160162813a4bf3cbea4c709b0',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -234,8 +234,8 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
       const off = hexOf(p, true);
       const on = hexOf(p, false);
       if (p === W4) {
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1946);
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1964);
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1282);
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1300);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

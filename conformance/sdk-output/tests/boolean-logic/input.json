@@ -38,13 +38,43 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 1
+        "byteOffset": 1,
+        "name": "threshold",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 4
+        "byteOffset": 4,
+        "name": "threshold",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 1,
+          "slot": "threshold"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 4,
+          "slot": "threshold"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

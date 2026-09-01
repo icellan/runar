@@ -56,13 +56,43 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 99
+        "byteOffset": 99,
+        "name": "expectedRoot",
+        "type": "ByteString",
+        "valueEncoding": "data"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 198
+        "byteOffset": 198,
+        "name": "expectedRoot",
+        "type": "ByteString",
+        "valueEncoding": "data"
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 99,
+          "slot": "expectedRoot"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 198,
+          "slot": "expectedRoot"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {

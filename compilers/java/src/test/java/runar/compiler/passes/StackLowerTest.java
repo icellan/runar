@@ -233,15 +233,15 @@ class StackLowerTest {
                 if ("OP_CODESEPARATOR".equals(o.code())) sawCodeSep = true;
             }
             // BUG-100: checkPreimage now derives AND verifies the OP_PUSH_TX
-            // signature on-chain as one fixed 760-byte opaque raw_bytes blob.
+            // signature on-chain as one fixed 428-byte opaque raw_bytes blob.
             // OP_CHECKSIG is INSIDE the blob (a peephole barrier), so it is no
             // longer a discrete OP_CHECKSIGVERIFY StackOp. The binding blob is
             // byte-identical across all seven tiers.
-            if (op instanceof RawBytesOp rb && rb.bytes().length == 760) sawPreimageBinding = true;
+            if (op instanceof RawBytesOp rb && rb.bytes().length == 428) sawPreimageBinding = true;
         }
         assertTrue(sawCodeSep, "stateful method must emit OP_CODESEPARATOR via checkPreimage");
         assertTrue(sawPreimageBinding,
-            "checkPreimage must emit the 760-byte OP_PUSH_TX sig-derivation raw_bytes blob");
+            "checkPreimage must emit the 428-byte OP_PUSH_TX sig-derivation raw_bytes blob");
     }
 
     @Test

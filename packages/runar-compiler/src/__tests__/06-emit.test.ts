@@ -720,7 +720,7 @@ describe('Pass 6: Emit', () => {
       // Stateful contract with implicit txPreimage / state-continuation /
       // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
       // injection (0xab at position 2), the BUG-100 on-chain OP_PUSH_TX
-      // preimage-binding construction (the opaque 760-byte blob starting `76aa00…`
+      // preimage-binding construction (the opaque 428-byte blob starting `76aa51…`
       // and ending `…ad` OP_CHECKSIGVERIFY — see oppushtx-codegen.ts; the BIP-143
       // generator pubkey 0279be…f81798 lives inside it), the GAP-302 sighash-type
       // pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <0x41> OP_NUMEQUALVERIFY,

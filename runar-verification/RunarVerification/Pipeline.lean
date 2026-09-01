@@ -6954,7 +6954,7 @@ asserts a witness EXISTS per valid context, and powers the smoke).  No
 sub-omnibus axiom appears in the discharge. -/
 
 /-- The 4-pass peephole pipeline is the identity on the constant stateful
-prologue ops (BUG-100: `OP_CODESEPARATOR` followed by the opaque 760-byte
+prologue ops (BUG-100: `OP_CODESEPARATOR` followed by the opaque 428-byte
 `.rawBytes` binding blob — a hard peephole barrier, no fusable adjacency). -/
 theorem peepholeMethodOps_statefulPrologue :
     peepholeMethodOps AgreesStateful.statefulPrologueOps

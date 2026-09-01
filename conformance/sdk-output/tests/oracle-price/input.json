@@ -42,17 +42,49 @@
         }
       ]
     },
-    "script": "53795880537a537a00537a537a537a537a7c760003000001a5697b7695937c977ca8887c0350c300a06900ac",
+    "script": "53795880537a537a00537a537a537a537a7c760003000001a5697b7695937c977ca801007e819d7c0350c300a06900ac",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 8
+        "byteOffset": 8,
+        "name": "oraclePubKey",
+        "type": "RabinPubKey",
+        "valueEncoding": "data"
       },
       {
         "paramIndex": 1,
-        "byteOffset": 42
+        "byteOffset": 46,
+        "name": "receiver",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
       }
-    ]
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 8,
+          "slot": "oraclePubKey"
+        },
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 46,
+          "slot": "receiver"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    }
   },
   "constructorArgs": [
     {
