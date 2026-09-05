@@ -93,6 +93,50 @@ describe('scheduler mode "liveness"', () => {
     expect(after.opcodes['OP_TOALTSTACK'] ?? 0).toBeGreaterThan(0);
   });
 
+  it('every rescheduled fixture is either witnessed or explicitly allowlisted', () => {
+    // The scheduler moves bytes in far more fixtures than anything executes.
+    // Measured: it reschedules 34 of the conformance fixtures, and exactly
+    // three of them (arithmetic, bounded-loop, if-without-else-multi-temp)
+    // appear in `conformance/witnesses/`, which is the only corpus that runs a
+    // rescheduled script against the interpreter and the real engine.
+    //
+    // That gap is not hypothetical. The comment at 05-stack-lower.ts:1250
+    // records that this scheduler ALREADY miscompiled if-without-else-multi-temp
+    // into a script that ACCEPTED a witness the shipping compiler rejects — and
+    // it was caught only because that fixture happens to be witnessed. The
+    // stateful and covenant fixtures below get rescheduled with no acceptance
+    // check at all.
+    //
+    // Witnessing them needs tx context and preimages, which is real work and is
+    // not done here. What this test does instead is refuse to let the gap be
+    // SILENT: the uncovered set is enumerated on disk, and adding a fixture to
+    // it is a deliberate edit. A newly-rescheduled fixture fails here until
+    // someone either witnesses it or writes it down.
+    const allowPath = join(CONFORMANCE_DIR, '..', 'liveness-unwitnessed-allowlist.json');
+    const allow = JSON.parse(readFileSync(allowPath, 'utf-8')) as
+      { unwitnessed: string[] };
+
+    const witnessDir = join(CONFORMANCE_DIR, '..', 'witnesses');
+    const witnessed = new Set(
+      readdirSync(witnessDir)
+        .filter(f => f.endsWith('.json') && f !== 'coverage-ledger.json')
+        .map(f => (JSON.parse(readFileSync(join(witnessDir, f), 'utf-8')) as
+          { fixture: string }).fixture),
+    );
+
+    const rescheduled = ALL_FIXTURES.filter(f => hexFor(f, false) !== hexFor(f, true));
+    const uncovered = rescheduled.filter(f => !witnessed.has(f)).sort();
+
+    expect(uncovered, 'rescheduled fixtures with no execution gate changed — '
+      + 'witness the new one, or add it to liveness-unwitnessed-allowlist.json')
+      .toEqual([...allow.unwitnessed].sort());
+
+    // And the allowlist must not rot: an entry that is now witnessed, or that
+    // the scheduler no longer touches, has to be removed.
+    const stale = allow.unwitnessed.filter(f => !uncovered.includes(f));
+    expect(stale, 'allowlist entries that are now covered or unaffected').toEqual([]);
+  });
+
   it('balances every spill it introduces', () => {
     // A static count is NOT a balance proof on its own: `sha256-finalize`
     // already emits 896 OP_TOALTSTACK against 897 OP_FROMALTSTACK, because

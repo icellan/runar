@@ -78,6 +78,89 @@ const VARIANTS = [
   },
 ];
 
+
+// ---------------------------------------------------------------------------
+// EC corpus.
+//
+// The witness corpus in `conformance/witnesses/` contains no EC builtin — it is
+// arithmetic, bitwise, boolean, loops, if/else and shifts. So `ec-pool`, `both`
+// and `all` compiled the SAME script as the baseline for all 10 specs and every
+// assertion in this file was `x === x`: three of the four variants were proving
+// nothing. A sign-lattice bug in fieldSub's cheap path — the
+// `ecAdd((0,1), (2^256-1,1))` class this whole optimization exists to avoid —
+// would have left the file green.
+//
+// These specs are declared here rather than added to `conformance/witnesses/`
+// because that corpus feeds other consumers (the CI `witnesses/` step, the
+// coverage ledger) with their own expectations about its contents. The EC
+// variants need coverage in THIS oracle; they do not need to change what the
+// shared corpus means.
+//
+// The points are the real secp256k1 generator and its small multiples, so the
+// accept cases are arithmetic facts, not recorded outputs:
+//   G + 2G = 3G, and every one of them is on the curve.
+// `ecAdd(G, G)` is deliberately absent: the affine formula cannot double, which
+// is a documented property of the emitter and not what this file tests.
+// ---------------------------------------------------------------------------
+
+const G = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+        + '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8';
+const TWO_G = 'c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5'
+            + '1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a';
+const THREE_G = 'f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9'
+              + '388f7b0f632de8140fe337e62a37f3566500a99934c2231b6cb9fd7584b8e672';
+
+const EC_SOURCE = `
+import { SmartContract, assert, ecAdd, ecOnCurve, type Point } from 'runar-lang';
+
+class EcSum extends SmartContract {
+  readonly want: Point;
+  constructor(want: Point) {
+    super(want);
+    this.want = want;
+  }
+  public unlock(a: Point, b: Point): void {
+    assert(ecOnCurve(a));
+    assert(ecOnCurve(b));
+    const s: Point = ecAdd(a, b);
+    assert(s === this.want);
+  }
+}
+`;
+
+const hexBytes = (h: string) => Uint8Array.from(Buffer.from(h, 'hex'));
+
+interface InlineSpec {
+  name: string;
+  source: string;
+  fileName: string;
+  constructorArgs: Record<string, bigint | boolean | string>;
+  spends: Array<{ method: string; args: WitnessArg[]; expect: 'accept' | 'reject'; note: string }>;
+}
+
+const EC_SPECS: InlineSpec[] = [
+  {
+    name: 'ec-sum',
+    source: EC_SOURCE,
+    fileName: 'EcSum.runar.ts',
+    constructorArgs: { want: THREE_G },
+    spends: [
+      {
+        method: 'unlock', args: [hexBytes(G), hexBytes(TWO_G)], expect: 'accept',
+        note: 'G + 2G = 3G, both operands on the curve',
+      },
+      {
+        method: 'unlock', args: [hexBytes(TWO_G), hexBytes(G)], expect: 'accept',
+        note: 'addition commutes; exercises the other operand order',
+      },
+      {
+        method: 'unlock', args: [hexBytes(G), hexBytes(THREE_G)], expect: 'reject',
+        note: 'G + 3G = 4G != 3G — near miss, still two on-curve points',
+      },
+    ],
+  },
+];
+
 describe('experimental backends preserve acceptance', () => {
   it('found the witness corpus', () => {
     expect(SPECS.length).toBeGreaterThanOrEqual(10);
@@ -120,10 +203,45 @@ describe('experimental backends preserve acceptance', () => {
     });
   }
 
-  it('the liveness scheduler really does change bytes somewhere in this corpus', () => {
-    // Guards against the whole suite passing because every variant compiled to
-    // the identical script.
-    const changed: string[] = [];
+  for (const spec of EC_SPECS) {
+    describe(spec.name, () => {
+      for (const s of spec.spends) {
+        for (const variant of VARIANTS) {
+          it(`${variant.name}: ${s.method} → ${s.expect} (${s.note})`, () => {
+            const common = {
+              source: spec.source, fileName: spec.fileName, method: s.method,
+              args: s.args, constructorArgs: spec.constructorArgs,
+            };
+            const base = runDifferentialExecution(common);
+            const other = runDifferentialExecution({ ...common, ...variant.opts });
+
+            expect(base.vmAccepted, 'EC spec disagrees with the shipping compiler')
+              .toBe(s.expect === 'accept');
+            expect(other.vmAccepted).toBe(base.vmAccepted);
+            expect(base.vmAccepted).toBe(base.interpreterAccepted);
+            expect(other.vmAccepted).toBe(other.interpreterAccepted);
+            expect(other.vmError ?? null).toBe(base.vmError ?? null);
+          });
+        }
+      }
+    });
+  }
+
+  /**
+   * Every variant must actually change bytes somewhere in the combined corpus.
+   *
+   * This guard used to cover `schedulerMode: 'liveness'` ONLY. The other three
+   * variants all enable EC flags, the witness corpus has no EC builtin, and so
+   * they compiled a byte-identical script for all 10 specs — every assertion
+   * above was comparing a script against itself, and the file would have stayed
+   * green through any EC codegen bug whatsoever.
+   *
+   * Checking each variant by name is the point: a variant that stops firing
+   * fails HERE with its own name, instead of silently becoming decoration.
+   */
+  it('every variant changes bytes somewhere in the corpus', () => {
+    const probes: Array<{ label: string; common: Parameters<typeof runDifferentialExecution>[0] }> = [];
+
     for (const spec of SPECS) {
       const fixtureDir = join(TESTS_DIR, spec.fixture);
       const srcCfg = JSON.parse(readFileSync(join(fixtureDir, 'source.json'), 'utf-8')) as
@@ -134,23 +252,48 @@ describe('experimental backends preserve acceptance', () => {
       const ctor: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(spec.constructorArgs ?? {})) ctor[k] = decodeCtor(v);
       const first = spec.spends[0]!;
-      const common = {
-        source: readFileSync(srcPath, 'utf-8'),
-        fileName: srcPath.split('/').pop()!,
-        method: first.method,
-        args: first.args.map(decodeArg),
-        constructorArgs: ctor,
-      };
-      const base = runDifferentialExecution(common);
-      const sched = runDifferentialExecution({ ...common, schedulerMode: 'liveness' });
-      if (sched.lockingHex !== base.lockingHex) {
-        changed.push(spec.fixture);
-        // And it must never be bigger — the cost model picks per method.
-        expect(sched.lockingHex.length, `${spec.fixture} grew`)
-          .toBeLessThan(base.lockingHex.length);
-      }
+      probes.push({
+        label: spec.fixture,
+        common: {
+          source: readFileSync(srcPath, 'utf-8'),
+          fileName: srcPath.split('/').pop()!,
+          method: first.method,
+          args: first.args.map(decodeArg),
+          constructorArgs: ctor as Record<string, bigint | boolean | string>,
+        },
+      });
     }
-    expect(changed.length, 'scheduler was a no-op on every witnessed fixture').toBeGreaterThan(0);
-    console.log(`  scheduler changed bytes on: ${changed.join(', ')}`);
+    for (const spec of EC_SPECS) {
+      const first = spec.spends[0]!;
+      probes.push({
+        label: spec.name,
+        common: {
+          source: spec.source, fileName: spec.fileName,
+          method: first.method, args: first.args,
+          constructorArgs: spec.constructorArgs,
+        },
+      });
+    }
+
+    const report: string[] = [];
+    for (const variant of VARIANTS) {
+      const changed: string[] = [];
+      for (const probe of probes) {
+        const base = runDifferentialExecution(probe.common);
+        const other = runDifferentialExecution({ ...probe.common, ...variant.opts });
+        if (other.lockingHex !== base.lockingHex) {
+          changed.push(probe.label);
+          // And it must never be bigger — every optimization compares measured
+          // bytes before choosing, so a growth is a cost-model defect.
+          expect(other.lockingHex.length, `${variant.name} grew ${probe.label}`)
+            .toBeLessThan(base.lockingHex.length);
+        }
+      }
+      expect(changed.length, `variant "${variant.name}" was a no-op on the ENTIRE corpus — `
+        + 'its assertions above compared a script against itself')
+        .toBeGreaterThan(0);
+      report.push(`  ${variant.name}: ${changed.join(', ')}`);
+    }
+    console.log(report.join('\n'));
   });
 });

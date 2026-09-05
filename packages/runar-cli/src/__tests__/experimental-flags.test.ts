@@ -98,9 +98,40 @@ describe('experimental size-optimizer flags', () => {
   });
 
   it('--stack-scheduler liveness reschedules and shrinks', async () => {
-    const out = await hexWith({ stackScheduler: 'liveness' }, 'liveness');
+    const out = await hexWith(
+      { stackScheduler: 'liveness', acknowledgeSingleTierSchedule: true },
+      'liveness',
+    );
     expect(out).toBe('6e936b6e946b6e956b966c6c6c939393009c');
     expect(out.length / 2).toBe(18);
+  });
+
+  it('refuses liveness without the single-tier acknowledgement', async () => {
+    // The mode exists in this compiler ONLY, and it moves emitted bytes — which
+    // shifts the constructorSlots offsets and codeSeparatorIndex the SDKs read
+    // back out of the artifact. A contract compiled this way has a funding
+    // address no other tier reproduces, so reaching it must be deliberate.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const originalExitCode = process.exitCode;
+
+    const srcPath = path.join(workDir, 'Arithmetic-unack.runar.ts');
+    fs.writeFileSync(srcPath, ARITHMETIC);
+    const outDir = path.join(workDir, 'out-unack');
+    await compileCommand([srcPath], {
+      output: outDir, stackScheduler: 'liveness',
+    } as Parameters<typeof compileCommand>[1]);
+
+    expect(process.exitCode).toBe(1);
+    const said = errSpy.mock.calls.flat().join('\n');
+    expect(said).toContain('TypeScript compiler ONLY');
+    expect(said).toContain('--acknowledge-single-tier-schedule');
+    // And it must not have written an artifact.
+    expect(fs.existsSync(outDir) && fs.readdirSync(outDir).length > 0).toBe(false);
+
+    process.exitCode = originalExitCode;
+    vi.restoreAllMocks();
   });
 
   it('rejects an unknown scheduler mode instead of silently using the default', async () => {

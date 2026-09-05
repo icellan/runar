@@ -16,6 +16,8 @@ interface CompileOptions {
   ecReductionSinking?: boolean;
   ecFixedBaseComb?: boolean;
   stackScheduler?: string;
+  /** Required alongside `stackScheduler: 'liveness'`. See `schedulerMode`. */
+  acknowledgeSingleTierSchedule?: boolean;
   fromIr?: string;
   hex?: boolean;
   parseOnly?: boolean;
@@ -81,10 +83,41 @@ function repoRelativeFileName(absSourcePath: string): string {
  * silent fall back to the default: a benchmark run that quietly measured the
  * shipping compiler while reporting an experiment would be worse than a crash.
  */
-function schedulerMode(options: { stackScheduler?: string }): 'current' | 'liveness' {
+function schedulerMode(
+  options: { stackScheduler?: string; acknowledgeSingleTierSchedule?: boolean },
+): 'current' | 'liveness' {
   const mode = options.stackScheduler ?? 'current';
   if (mode !== 'current' && mode !== 'liveness') {
     throw new Error(`--stack-scheduler: unknown mode '${mode}' (expected current|liveness)`);
+  }
+  // `liveness` exists in the TypeScript compiler ONLY. Grepping
+  // scheduler/schedulerMode/liveness across the other six returns nothing, and
+  // `altSpills`/`maybeSpill`/`restoreSpills` live in 05-stack-lower.ts alone.
+  //
+  // That makes it categorically different from the three `--ec-*` flags, which
+  // every tier implements with identical spelling and which
+  // `conformance/ec-flag-parity/expected.json` pins across all seven. Nothing
+  // pins the scheduler dimension, because there is nothing to pin it against.
+  //
+  // The output is not merely unusual, it is undeployable-by-consensus: the mode
+  // moves emitted bytes, which shifts the `constructorSlots` offsets and
+  // `codeSeparatorIndex` the SDKs read back out of the artifact. A contract
+  // compiled this way has a locking script — and therefore a funding address —
+  // that no other tier can reproduce, so a redeploy from any other tier lands
+  // somewhere else.
+  //
+  // So it is gated the way this repo gates its other "this compiles but you
+  // should not ship it" path (`@acknowledgeUnsoundSP1FriVerifier`): a hard
+  // error unless the caller says the words. Benchmarks pass the flag; a user
+  // reaching for a size win cannot do it by accident.
+  if (mode === 'liveness' && options.acknowledgeSingleTierSchedule !== true) {
+    throw new Error(
+      '--stack-scheduler liveness is implemented in the TypeScript compiler ONLY.\n'
+      + 'The emitted script differs from every other tier, and the shifted\n'
+      + 'constructorSlots / codeSeparatorIndex mean the deployed contract has a\n'
+      + 'funding address no other tier reproduces.\n'
+      + 'Pass --acknowledge-single-tier-schedule if that is what you want.',
+    );
   }
   return mode;
 }
