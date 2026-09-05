@@ -142,11 +142,37 @@ export function analyzeScriptHex(scriptHex: string): ScriptMetrics {
 
   const bump = (name: string) => { opcodes[name] = (opcodes[name] ?? 0) + 1; };
 
+  /**
+   * Record the pending data push as a constant and clear it.
+   *
+   * A data push IS a constant unless the very next opcode consumes it as a
+   * stack depth (OP_PICK / OP_ROLL). So the commit point is "we are moving past
+   * this push without it having been reclassified" — which is every following
+   * push, every non-PICK/ROLL opcode, and end-of-script.
+   *
+   * Small-int pushes carry `dataHex: null` and are counted only in the byte
+   * categories, never in the constants census.
+   */
+  const commitPending = () => {
+    if (prevPush && prevPush.dataHex !== null) {
+      const entry = constants.get(prevPush.dataHex) ?? { count: 0, bytes: 0 };
+      entry.count += 1;
+      entry.bytes += prevPush.size;
+      constants.set(prevPush.dataHex, entry);
+    }
+    prevPush = null;
+  };
+
   let i = 0;
   while (i < n) {
     const op = bytes[i]!;
 
     // --- direct pushes -----------------------------------------------------
+    // Commit the pending push (if any) as a constant. Called before a push
+    // OVERWRITES `prevPush`, and from the opcode branch for any opcode that is
+    // not PICK/ROLL. A push is a constant unless the very next opcode consumes
+    // it as a stack depth, so "not reclassified by the time we move on" is
+    // exactly the commit condition.
     if (op >= 0x01 && op <= 0x4b) {
       const len = op;
       if (i + 1 + len > n) {
@@ -157,6 +183,7 @@ export function analyzeScriptHex(scriptHex: string): ScriptMetrics {
       categories['const-push'] += size;
       bump('PUSH');
       pushCount++; opcodeCount++;
+      commitPending();
       prevPush = { size, category: 'const-push', dataHex };
       i += size;
       continue;
@@ -180,6 +207,7 @@ export function analyzeScriptHex(scriptHex: string): ScriptMetrics {
       categories['const-push'] += size;
       bump('PUSH');
       pushCount++; opcodeCount++;
+      commitPending();
       prevPush = { size, category: 'const-push', dataHex };
       i += size;
       continue;
@@ -190,6 +218,7 @@ export function analyzeScriptHex(scriptHex: string): ScriptMetrics {
       categories['small-int-push'] += 1;
       bump(OPCODE_NAMES.get(op) ?? `OP_UNKNOWN_${op.toString(16)}`);
       pushCount++; opcodeCount++;
+      commitPending();
       prevPush = { size: 1, category: 'small-int-push', dataHex: null };
       i += 1;
       continue;
@@ -203,37 +232,23 @@ export function analyzeScriptHex(scriptHex: string): ScriptMetrics {
     opcodeCount++;
 
     // A depth push consumed by PICK/ROLL is stack-access cost, not a constant.
+    // It is DISCARDED rather than un-recorded: `commitPending` has not run for
+    // it yet, so subtracting here would decrement an unrelated earlier entry
+    // that happens to share the payload, and could drive a count negative.
     if ((name === 'OP_PICK' || name === 'OP_ROLL') && prevPush) {
       categories[prevPush.category] -= prevPush.size;
       categories['stack-shuffle'] += prevPush.size;
-      if (prevPush.dataHex !== null) {
-        // It was recorded as a data push; un-record it from the constants tally.
-        const existing = constants.get(prevPush.dataHex);
-        if (existing) {
-          existing.count -= 1;
-          existing.bytes -= prevPush.size;
-          if (existing.count === 0) constants.delete(prevPush.dataHex);
-        }
-      }
-    } else if (prevPush && prevPush.dataHex !== null) {
-      // Only now is the previous data push confirmed to be a real constant.
-      const entry = constants.get(prevPush.dataHex) ?? { count: 0, bytes: 0 };
-      entry.count += 1;
-      entry.bytes += prevPush.size;
-      constants.set(prevPush.dataHex, entry);
+    } else {
+      commitPending();
     }
 
     prevPush = null;
     i += 1;
   }
 
-  // A data push in final position was never confirmed by the loop above.
-  if (prevPush && prevPush.dataHex !== null) {
-    const entry = constants.get(prevPush.dataHex) ?? { count: 0, bytes: 0 };
-    entry.count += 1;
-    entry.bytes += prevPush.size;
-    constants.set(prevPush.dataHex, entry);
-  }
+  // A data push in final position: no opcode followed, so nothing could have
+  // reclassified it. It is a constant.
+  commitPending();
 
   const constantList: ConstantUse[] = [...constants.entries()]
     .map(([h, v]) => ({ hex: h, count: v.count, bytes: v.bytes }))
