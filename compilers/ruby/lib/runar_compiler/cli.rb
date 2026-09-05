@@ -230,7 +230,10 @@ module RunarCompiler
         else
           artifact = RunarCompiler.compile_from_ir(
             options[:ir],
-            disable_constant_folding: disable_cf
+            disable_constant_folding: disable_cf,
+            ec_constant_pool: options[:ec_constant_pool] || false,
+            ec_reduction_sinking: options[:ec_reduction_sinking] || false,
+            ec_fixed_base_comb: options[:ec_fixed_base_comb] || false
           )
         end
       rescue RunarCompiler::CompilationError => e

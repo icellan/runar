@@ -461,9 +461,20 @@ module RunarCompiler
   # dead-binding elimination), which stack-lowering emits as wasteful push+drop
   # sequences — diverging from the fold-OFF goldens and from the Zig tier, whose
   # compileFromIR never folds IR input. Force folding off here; peephole still folds.
-  def self.compile_from_ir(ir_path, disable_constant_folding: false)
+  #
+  # `disable_constant_folding` is accepted for signature parity with
+  # compile_from_source but is not honoured — the ANF fold is forced OFF for
+  # pre-lowered IR input (see the comment above). The EC size flags ARE
+  # honoured: they act in stack lowering, downstream of the IR, so the `--ir`
+  # path reaches them exactly like `--source`.
+  def self.compile_from_ir(ir_path, disable_constant_folding: false,
+                           ec_constant_pool: false, ec_reduction_sinking: false,
+                           ec_fixed_base_comb: false)
     program = _load_ir(ir_path)
-    compile_from_program(program, disable_constant_folding: true)
+    compile_from_program(program, disable_constant_folding: true,
+                         ec_constant_pool: ec_constant_pool,
+                         ec_reduction_sinking: ec_reduction_sinking,
+                         ec_fixed_base_comb: ec_fixed_base_comb)
   end
 
   # Compile from raw ANF IR JSON bytes.
@@ -471,9 +482,14 @@ module RunarCompiler
   # @param data [String] raw ANF IR JSON
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @return [Artifact]
-  def self.compile_from_ir_bytes(data, disable_constant_folding: false)
+  def self.compile_from_ir_bytes(data, disable_constant_folding: false,
+                                 ec_constant_pool: false, ec_reduction_sinking: false,
+                                 ec_fixed_base_comb: false)
     program = _load_ir_from_bytes(data)
-    compile_from_program(program, disable_constant_folding: true)
+    compile_from_program(program, disable_constant_folding: true,
+                         ec_constant_pool: ec_constant_pool,
+                         ec_reduction_sinking: ec_reduction_sinking,
+                         ec_fixed_base_comb: ec_fixed_base_comb)
   end
 
   # Compile a parsed ANF program to a Runar artifact.

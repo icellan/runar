@@ -448,16 +448,47 @@ def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -
 # wasteful push+drop sequences — diverging from both the fold-OFF goldens and
 # the Zig tier, whose compileFromIR never folds IR input. So the IR entry points
 # force folding off regardless of the flag; the peephole optimizer still folds.
-def compile_from_ir(ir_path: str, disable_constant_folding: bool = False) -> Artifact:
-    """Read an ANF IR JSON file and compile it to a Runar artifact."""
+def compile_from_ir(
+    ir_path: str,
+    disable_constant_folding: bool = False,
+    ec_constant_pool: bool = False,
+    ec_reduction_sinking: bool = False,
+    ec_fixed_base_comb: bool = False,
+) -> Artifact:
+    """Read an ANF IR JSON file and compile it to a Runar artifact.
+
+    ``disable_constant_folding`` is accepted for signature parity with
+    ``compile_from_source`` but is not honoured: the ANF fold is forced OFF for
+    pre-lowered IR input, matching Go's ``disableFoldForIRInput``. The EC size
+    flags ARE honoured -- they act in stack lowering, downstream of the IR, so
+    the ``--ir`` path can reach them exactly like the ``--source`` path.
+    """
     program = _load_ir(ir_path)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program,
+        disable_constant_folding=True,
+        ec_constant_pool=ec_constant_pool,
+        ec_reduction_sinking=ec_reduction_sinking,
+        ec_fixed_base_comb=ec_fixed_base_comb,
+    )
 
 
-def compile_from_ir_bytes(data: bytes, disable_constant_folding: bool = False) -> Artifact:
-    """Compile from raw ANF IR JSON bytes."""
+def compile_from_ir_bytes(
+    data: bytes,
+    disable_constant_folding: bool = False,
+    ec_constant_pool: bool = False,
+    ec_reduction_sinking: bool = False,
+    ec_fixed_base_comb: bool = False,
+) -> Artifact:
+    """Compile from raw ANF IR JSON bytes. See :func:`compile_from_ir`."""
     program = _load_ir_from_bytes(data)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program,
+        disable_constant_folding=True,
+        ec_constant_pool=ec_constant_pool,
+        ec_reduction_sinking=ec_reduction_sinking,
+        ec_fixed_base_comb=ec_fixed_base_comb,
+    )
 
 
 def compile_from_program(

@@ -14,6 +14,14 @@
 #   estimate_script_bytes(ops) == emit_method(...).script_hex.length / 2
 #
 # holds exactly. test_cost_model.rb asserts that over every crypto emitter.
+#
+# emit.rb is required explicitly rather than assumed loaded: `encode_push_value`
+# lives there, and the `--ir` entry point reaches stack lowering (and therefore
+# this cost model) without going through the source pipeline that happens to
+# load emit.rb first. Without this require, `--ir` plus any EC size flag died
+# with "undefined method 'encode_push_value'". emit.rb requires nothing, so
+# there is no cycle.
+require_relative "emit"
 
 module RunarCompiler
   module Codegen

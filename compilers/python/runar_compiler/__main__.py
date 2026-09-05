@@ -245,6 +245,9 @@ def main() -> None:
             artifact = compile_from_ir(
                 args.ir,
                 disable_constant_folding=args.disable_constant_folding,
+                ec_constant_pool=args.ec_constant_pool,
+                ec_reduction_sinking=args.ec_reduction_sinking,
+                ec_fixed_base_comb=args.ec_fixed_base_comb,
             )
     except CompilationError as e:
         print(f"Compilation error: {e}", file=sys.stderr)
