@@ -261,7 +261,10 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
     let mut embed_injected = false;
 
     // Lower constructor (the TS reference includes the constructor in output)
+    let reserved_temps = std::rc::Rc::new(collect_reserved_temps(contract));
+
     let mut ctor_ctx = LoweringContext::with_effects(contract, Some(side_effects.clone()));
+    ctor_ctx.reserved_temps = std::rc::Rc::clone(&reserved_temps);
     for p in &contract.constructor.params {
         ctor_ctx.register_param_type(&p.name, &type_node_to_string(&p.param_type));
     }
@@ -277,6 +280,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
     // Lower each method (including private methods as separate entries)
     for method in &contract.methods {
         let mut method_ctx = LoweringContext::with_effects(contract, Some(side_effects.clone()));
+        method_ctx.reserved_temps = std::rc::Rc::clone(&reserved_temps);
         // Issue #123: a non-default @sighash mode drives the OP_PUSH_TX binding
         // flag for any checkPreimage (auto-injected below, or a manual call) in
         // this method. Default ALL|FORKID leaves the flag `None` so the pinned
@@ -720,9 +724,84 @@ impl MethodScope {
     }
 }
 
+/// True for exactly the names `fresh_temp` can mint.
+fn is_temp_shaped(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.len() < 2 || b[0] != b't' {
+        return false;
+    }
+    b[1..].iter().all(|c| c.is_ascii_digit())
+}
+
+/// Collect `t<digits>` variable-declaration names from a statement list.
+fn collect_decl_names(stmts: &[Statement], out: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDecl { name, .. } => {
+                if is_temp_shaped(name) {
+                    out.insert(name.clone());
+                }
+            }
+            Statement::IfStatement { then_branch, else_branch, .. } => {
+                collect_decl_names(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_decl_names(eb, out);
+                }
+            }
+            Statement::ForStatement { init, update, body, .. } => {
+                collect_decl_names(std::slice::from_ref(init), out);
+                collect_decl_names(std::slice::from_ref(update), out);
+                collect_decl_names(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every `t<digits>` identifier the contract's own source binds, so `fresh_temp`
+/// can never mint a name that shadows one.
+///
+/// `fresh_temp` mints t0, t1, t2, … while `emit_named` binds the developer's own
+/// locals into the SAME binding namespace. Nothing reserved them against each
+/// other, so a contract with a local named `t3` got a compiler temp named `t3`
+/// written on top of it, and the reference that read the user's value silently
+/// resolved to the compiler's.
+///
+/// That deletes asserts. `const t3 = z - y; const t5 = y - t3;
+/// assert(t5 === this.want)` lowered `t5 := load_prop want` over the user's
+/// `t5`, leaving `assert(want === want)` — always true, so the locking script
+/// carried no guard and any witness could spend it. FAIL-OPEN, and reachable
+/// with no branch involved.
+///
+/// CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED into
+/// their callers: a helper local named `t3` is `emit_named` into the CALLER's
+/// binding stream, so a per-method set would miss it.
+///
+/// Only declarations and parameters are collected. An assignment target or a
+/// `++`/`--` operand must name something already declared or a parameter, so
+/// those are covered transitively. Only `t<digits>` names can ever collide, so
+/// nothing else is reserved and temp numbering is unchanged for every contract
+/// that does not already miscompile — which is what leaves the goldens and the
+/// cross-tier hex parity untouched. All seven tiers implement this same rule.
+fn collect_reserved_temps(contract: &ContractNode) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for m in std::iter::once(&contract.constructor).chain(contract.methods.iter()) {
+        for p in &m.params {
+            if is_temp_shaped(&p.name) {
+                out.insert(p.name.clone());
+            }
+        }
+        collect_decl_names(&m.body, &mut out);
+    }
+    out
+}
+
 struct LoweringContext<'a> {
     bindings: Vec<ANFBinding>,
     counter: usize,
+    /// `t<digits>` identifiers the contract's own source binds, so `fresh_temp`
+    /// never mints a name that shadows one. See `collect_reserved_temps`.
+    reserved_temps: std::rc::Rc<HashSet<String>>,
     contract: &'a ContractNode,
     param_names: HashSet<String>,
     local_names: HashSet<String>,
@@ -787,6 +866,7 @@ impl<'a> LoweringContext<'a> {
         LoweringContext {
             bindings: Vec::new(),
             counter: 0,
+            reserved_temps: std::rc::Rc::new(HashSet::new()),
             contract,
             param_names: HashSet::new(),
             local_names: HashSet::new(),
@@ -865,10 +945,14 @@ impl<'a> LoweringContext<'a> {
         })
     }
 
-    /// Generate a fresh temporary name.
+    /// Generate a fresh temporary name that no user identifier can shadow.
     fn fresh_temp(&mut self) -> String {
-        let name = format!("t{}", self.counter);
+        let mut name = format!("t{}", self.counter);
         self.counter += 1;
+        while self.reserved_temps.contains(&name) {
+            name = format!("t{}", self.counter);
+            self.counter += 1;
+        }
         name
     }
 
@@ -948,6 +1032,9 @@ impl<'a> LoweringContext<'a> {
     fn sub_context(&self) -> LoweringContext<'a> {
         let mut sub = LoweringContext::with_effects(self.contract, self.side_effects.clone());
         sub.counter = self.counter;
+        // Same contract, same namespace: an arm's temps must dodge the same
+        // user identifiers the enclosing body does.
+        sub.reserved_temps = std::rc::Rc::clone(&self.reserved_temps);
         sub.param_names = self.param_names.clone();
         sub.local_names = self.local_names.clone();
         sub.local_aliases = self.local_aliases.clone();

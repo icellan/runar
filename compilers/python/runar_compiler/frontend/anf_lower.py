@@ -310,7 +310,10 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
     embed_injected = False
 
     # Lower constructor
+    reserved_temps = _collect_reserved_temps(contract)
+
     ctor_ctx = _LowerCtx(contract, side_effects)
+    ctor_ctx.reserved_temps = reserved_temps
     for p in contract.constructor.params:
         ctor_ctx.register_param_type(p.name, _type_node_to_string(p.type))
     ctor_ctx.lower_statements(contract.constructor.body)
@@ -324,6 +327,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
     # Lower each method
     for method in contract.methods:
         method_ctx = _LowerCtx(contract, side_effects)
+        method_ctx.reserved_temps = reserved_temps
         # Issue #123: non-default @sighash mode drives the OP_PUSH_TX binding
         # flag for any checkPreimage (auto-injected below, or a manual call) in
         # this method.
@@ -615,6 +619,61 @@ class _MethodScope:
         self.auto_injected_params.append(ANFParam(name=name, type=typ))
 
 
+def _is_temp_shaped(name: str) -> bool:
+    """True for exactly the names ``_LowerCtx.fresh_temp`` can mint."""
+    return len(name) >= 2 and name[0] == "t" and name[1:].isdigit()
+
+
+def _collect_decl_names(stmts: list, out: set[str]) -> None:
+    """Collect ``t<digits>`` variable-declaration names from a statement list."""
+    for stmt in stmts:
+        if isinstance(stmt, VariableDeclStmt):
+            if _is_temp_shaped(stmt.name):
+                out.add(stmt.name)
+        elif isinstance(stmt, IfStmt):
+            _collect_decl_names(stmt.then, out)
+            _collect_decl_names(stmt.else_ or [], out)
+        elif isinstance(stmt, ForStmt):
+            _collect_decl_names([x for x in (stmt.init, stmt.update) if x is not None], out)
+            _collect_decl_names(stmt.body, out)
+
+
+def _collect_reserved_temps(contract) -> set[str]:
+    """Every ``t<digits>`` identifier the contract's own source binds.
+
+    ``fresh_temp`` mints ``t0, t1, t2, …`` while ``emit_named`` binds the
+    developer's own locals into the SAME binding namespace. Nothing reserved
+    them against each other, so a contract with a local named ``t3`` got a
+    compiler temp named ``t3`` written on top of it, and the reference that read
+    the user's value silently resolved to the compiler's.
+
+    That deletes asserts. ``const t3 = z - y; const t5 = y - t3;
+    assert(t5 === this.want)`` lowered ``t5 := load_prop want`` over the user's
+    ``t5``, leaving ``assert(want === want)`` — always true, so the locking
+    script carried no guard and any witness could spend it. FAIL-OPEN, and
+    reachable with no branch involved.
+
+    CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED into
+    their callers: a helper local named ``t3`` is ``emit_named`` into the
+    CALLER's binding stream, so a per-method set would miss it.
+
+    Only declarations and parameters are collected. An assignment target or a
+    ``++``/``--`` operand must name something already declared or a parameter,
+    so those are covered transitively. Only ``t<digits>`` names can ever collide,
+    so nothing else is reserved and temp numbering is unchanged for every
+    contract that does not already miscompile — which is what leaves the goldens
+    and the cross-tier hex parity untouched. All seven tiers implement this same
+    rule.
+    """
+    out: set[str] = set()
+    for m in [contract.constructor, *contract.methods]:
+        for param in m.params:
+            if _is_temp_shaped(param.name):
+                out.add(param.name)
+        _collect_decl_names(m.body, out)
+    return out
+
+
 class _LowerCtx:
     """Manages temp variable generation and binding emission.
 
@@ -629,6 +688,9 @@ class _LowerCtx:
     ) -> None:
         self.bindings: list[ANFBinding] = []
         self._counter: int = 0
+        # `t<digits>` identifiers the contract's own source binds, so fresh_temp
+        # never mints a name that shadows one. See _collect_reserved_temps.
+        self.reserved_temps: set[str] = set()
         self._contract: ContractNode = contract
         self._local_names: set[str] = set()
         self._param_names: set[str] = set()
@@ -721,8 +783,12 @@ class _LowerCtx:
         return None
 
     def fresh_temp(self) -> str:
+        """A fresh temporary name that no user identifier can shadow."""
         name = f"t{self._counter}"
         self._counter += 1
+        while name in self.reserved_temps:
+            name = f"t{self._counter}"
+            self._counter += 1
         return name
 
     def emit(self, value: ANFValue) -> str:
@@ -811,6 +877,9 @@ class _LowerCtx:
         """
         sub = _LowerCtx(self._contract, side_effects=self._side_effects, method_scope=self.method_scope)
         sub._counter = self._counter
+        # Same contract, same namespace: an arm's temps must dodge the same
+        # user identifiers the enclosing body does.
+        sub.reserved_temps = self.reserved_temps
         sub._local_names = set(self._local_names)
         sub._param_names = set(self._param_names)
         # Issue #123: a manual checkPreimage() inside a nested block must bind

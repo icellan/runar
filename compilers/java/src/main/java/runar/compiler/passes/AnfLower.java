@@ -204,8 +204,11 @@ public final class AnfLower {
         List<AnfMethod> out = new ArrayList<>();
 
         // Constructor
+        Set<String> reservedTemps = collectReservedTemps(contract);
+
         if (contract.constructor() != null) {
             LowerCtx ctx = new LowerCtx(contract);
+            ctx.reservedTemps = reservedTemps;
             for (ParamNode p : contract.constructor().params()) {
                 ctx.registerParamType(p.name(), typeToString(p.type()));
             }
@@ -237,6 +240,7 @@ public final class AnfLower {
         // Methods
         for (MethodNode method : contract.methods()) {
             LowerCtx ctx = new LowerCtx(contract);
+            ctx.reservedTemps = reservedTemps;
             for (ParamNode p : method.params()) {
                 ctx.registerParamType(p.name(), typeToString(p.type()));
             }
@@ -471,7 +475,101 @@ public final class AnfLower {
         }
     }
 
+    /** True for exactly the names {@code LowerCtx.freshTemp} can mint. */
+    private static boolean isTempShaped(String name) {
+        if (name.length() < 2 || name.charAt(0) != 't') {
+            return false;
+        }
+        for (int i = 1; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Collect {@code t<digits>} variable-declaration names from a statement list. */
+    private static void collectDeclNames(List<Statement> stmts, Set<String> out) {
+        if (stmts == null) {
+            return;
+        }
+        for (Statement stmt : stmts) {
+            if (stmt instanceof VariableDeclStatement vd) {
+                if (isTempShaped(vd.name())) {
+                    out.add(vd.name());
+                }
+            } else if (stmt instanceof IfStatement ifs) {
+                collectDeclNames(ifs.thenBody(), out);
+                collectDeclNames(ifs.elseBody(), out);
+            } else if (stmt instanceof ForStatement fs) {
+                List<Statement> head = new ArrayList<>();
+                if (fs.init() != null) {
+                    head.add(fs.init());
+                }
+                if (fs.update() != null) {
+                    head.add(fs.update());
+                }
+                collectDeclNames(head, out);
+                collectDeclNames(fs.body(), out);
+            }
+        }
+    }
+
+    /**
+     * Every {@code t<digits>} identifier the contract's own source binds, so
+     * {@code freshTemp} can never mint a name that shadows one.
+     *
+     * <p>{@code freshTemp} mints t0, t1, t2, … while {@code emitNamed} binds the
+     * developer's own locals into the SAME binding namespace. Nothing reserved
+     * them against each other, so a contract with a local named {@code t3} got a
+     * compiler temp named {@code t3} written on top of it, and the reference
+     * that read the user's value silently resolved to the compiler's.
+     *
+     * <p>That deletes asserts. {@code const t3 = z - y; const t5 = y - t3;
+     * assert(t5 === this.want)} lowered {@code t5 := load_prop want} over the
+     * user's {@code t5}, leaving {@code assert(want === want)} — always true, so
+     * the locking script carried no guard and any witness could spend it.
+     * FAIL-OPEN, and reachable with no branch involved.
+     *
+     * <p>CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED
+     * into their callers: a helper local named {@code t3} is {@code emitNamed}
+     * into the CALLER's binding stream, so a per-method set would miss it.
+     *
+     * <p>Only declarations and parameters are collected. An assignment target or
+     * a {@code ++}/{@code --} operand must name something already declared or a
+     * parameter, so those are covered transitively. Only {@code t<digits>} names
+     * can ever collide, so nothing else is reserved and temp numbering is
+     * unchanged for every contract that does not already miscompile — which is
+     * what leaves the goldens and the cross-tier hex parity untouched. All seven
+     * tiers implement this same rule.
+     */
+    private static Set<String> collectReservedTemps(ContractNode contract) {
+        Set<String> out = new HashSet<>();
+        List<MethodNode> methods = new ArrayList<>();
+        if (contract.constructor() != null) {
+            methods.add(contract.constructor());
+        }
+        methods.addAll(contract.methods());
+        for (MethodNode m : methods) {
+            for (ParamNode p : m.params()) {
+                if (isTempShaped(p.name())) {
+                    out.add(p.name());
+                }
+            }
+            collectDeclNames(m.body(), out);
+        }
+        return out;
+    }
+
     private static final class LowerCtx {
+        /**
+         * {@code t<digits>} identifiers the contract's own source binds, so
+         * {@code freshTemp} never mints a name that shadows one.
+         * See {@link #collectReservedTemps}.
+         */
+        Set<String> reservedTemps = Set.of();
+
         final List<AnfBinding> bindings = new ArrayList<>();
         int counter = 0;
         final ContractNode contract;
@@ -617,8 +715,12 @@ public final class AnfLower {
             return emit(makeLoadConstString("@void"));
         }
 
+        /** A fresh temporary name that no user identifier can shadow. */
         String freshTemp() {
             String name = "t" + counter++;
+            while (reservedTemps.contains(name)) {
+                name = "t" + counter++;
+            }
             return name;
         }
 
@@ -678,6 +780,9 @@ public final class AnfLower {
         LowerCtx subContext() {
             LowerCtx sub = new LowerCtx(contract);
             sub.counter = this.counter;
+            // Same contract, same namespace: an arm's temps must dodge the same
+            // user identifiers the enclosing body does.
+            sub.reservedTemps = this.reservedTemps;
             sub.localNames.addAll(this.localNames);
             sub.paramNames.addAll(this.paramNames);
             sub.localAliases.putAll(this.localAliases);

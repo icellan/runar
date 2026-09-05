@@ -349,8 +349,13 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
     // Lower constructor — do NOT register constructor params with addParam;
     // the TS/Go/Rust/Python compilers treat constructor param names as property
     // references (load_prop) rather than parameter references (load_param).
+    var reserved_temps: std.StringHashMapUnmanaged(void) = .empty;
+    defer reserved_temps.deinit(allocator);
+    try collectReservedTemps(allocator, contract, &reserved_temps);
+
     {
         var ctor_ctx = LowerCtx.init(allocator, contract);
+        ctor_ctx.reserved_temps = &reserved_temps;
         ctor_ctx.diagnostic = diag;
         defer ctor_ctx.deinit();
         for (contract.constructor.params) |param| {
@@ -380,6 +385,7 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
     // Lower each method
     for (contract.methods) |method| {
         var method_ctx = LowerCtx.init(allocator, contract);
+        method_ctx.reserved_temps = &reserved_temps;
         method_ctx.diagnostic = diag;
         defer method_ctx.deinit();
         // Use the method's source location as default for all bindings in the method.
@@ -766,11 +772,102 @@ fn lowerStatefulPublicMethod(
 // LowerCtx -- manages temp variable generation and binding emission
 // ============================================================================
 
+/// Shared empty reserved set, so the common contract allocates nothing.
+var empty_reserved: std.StringHashMapUnmanaged(void) = .empty;
+
+/// True for exactly the names `LowerCtx.freshTemp` can mint.
+fn isTempShaped(name: []const u8) bool {
+    if (name.len < 2 or name[0] != 't') return false;
+    for (name[1..]) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
+/// Collect `t<digits>` declaration names from a statement list.
+fn collectDeclNames(
+    allocator: Allocator,
+    stmts: []const types.Statement,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .const_decl => |d| if (isTempShaped(d.name)) try out.put(allocator, d.name, {}),
+            .let_decl => |d| if (isTempShaped(d.name)) try out.put(allocator, d.name, {}),
+            .if_stmt => |s| {
+                try collectDeclNames(allocator, s.then_body, out);
+                if (s.else_body) |eb| try collectDeclNames(allocator, eb, out);
+            },
+            .for_stmt => |s| {
+                // The loop variable is a declaration too: the other six tiers
+                // model `for` init as a VariableDecl node and pick it up there.
+                if (isTempShaped(s.var_name)) try out.put(allocator, s.var_name, {});
+                try collectDeclNames(allocator, s.body, out);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Every `t<digits>` identifier the contract's own source binds, so `freshTemp`
+/// can never mint a name that shadows one.
+///
+/// `freshTemp` mints t0, t1, t2, … while `emitNamed` binds the developer's own
+/// locals into the SAME binding namespace. Nothing reserved them against each
+/// other, so a contract with a local named `t3` got a compiler temp named `t3`
+/// written on top of it, and the reference that read the user's value silently
+/// resolved to the compiler's.
+///
+/// That deletes asserts. `const t3 = z - y; const t5 = y - t3;
+/// assert(t5 === this.want)` lowered `t5 := load_prop want` over the user's
+/// `t5`, leaving `assert(want === want)` — always true, so the locking script
+/// carried no guard and any witness could spend it. FAIL-OPEN, and reachable
+/// with no branch involved.
+///
+/// CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED into
+/// their callers: a helper local named `t3` is `emitNamed` into the CALLER's
+/// binding stream, so a per-method set would miss it.
+///
+/// Only declarations and parameters are collected. An assignment target must
+/// name something already declared or a parameter, so those are covered
+/// transitively. Only `t<digits>` names can ever collide, so nothing else is
+/// reserved and temp numbering is unchanged for every contract that does not
+/// already miscompile — which is what leaves the goldens and the cross-tier hex
+/// parity untouched. All seven tiers implement this same rule.
+fn collectReservedTemps(
+    allocator: Allocator,
+    contract: ContractNode,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    // Zig models the constructor as params + assignments, with no statement
+    // body, so there are no declarations to walk there — only its params. The
+    // other six tiers walk a constructor body that the validator forbids from
+    // holding declarations, so the collected set is the same.
+    for (contract.constructor.params) |p| {
+        if (isTempShaped(p.name)) try out.put(allocator, p.name, {});
+    }
+    for (contract.methods) |m| try collectMethodReserved(allocator, m, out);
+}
+
+fn collectMethodReserved(
+    allocator: Allocator,
+    m: MethodNode,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    for (m.params) |p| {
+        if (isTempShaped(p.name)) try out.put(allocator, p.name, {});
+    }
+    try collectDeclNames(allocator, m.body, out);
+}
+
 const LowerCtx = struct {
     allocator: Allocator,
     contract: ContractNode,
     bindings: std.ArrayListUnmanaged(ANFBinding),
     counter: u32,
+    /// `t<digits>` identifiers the contract's own source binds, so `freshTemp`
+    /// never mints a name that shadows one. See `collectReservedTemps`.
+    reserved_temps: *const std.StringHashMapUnmanaged(void) = &empty_reserved,
     local_names: std.StringHashMapUnmanaged(void),
     param_names: std.StringHashMapUnmanaged(void),
     local_aliases: std.StringHashMapUnmanaged([]const u8),
@@ -832,9 +929,15 @@ const LowerCtx = struct {
         };
     }
 
+    /// A fresh temporary name that no user identifier can shadow.
     fn freshTemp(self: *LowerCtx) ![]const u8 {
-        const name = try std.fmt.allocPrint(self.allocator, "t{d}", .{self.counter});
+        var name = try std.fmt.allocPrint(self.allocator, "t{d}", .{self.counter});
         self.counter += 1;
+        while (self.reserved_temps.contains(name)) {
+            self.allocator.free(name);
+            name = try std.fmt.allocPrint(self.allocator, "t{d}", .{self.counter});
+            self.counter += 1;
+        }
         return name;
     }
 
@@ -941,6 +1044,9 @@ const LowerCtx = struct {
     fn subContext(self: *LowerCtx) LowerCtx {
         var sub = LowerCtx.init(self.allocator, self.contract);
         sub.counter = self.counter;
+        // Same contract, same namespace: an arm's temps must dodge the same
+        // user identifiers the enclosing body does.
+        sub.reserved_temps = self.reserved_temps;
         // #123: nested manual checkPreimage inherits the method's mode.
         sub.sighash_flag = self.sighash_flag;
         sub.nested = true;
