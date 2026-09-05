@@ -1290,6 +1290,27 @@ class LoweringContext {
   }
 
   /**
+   * The options an `if`/`else` arm context inherits.
+   *
+   * The EC size flags have to cross into the arm: `if (usePQ) { ... } else {
+   * verifyECDSA_P256(...) }` is the shape a contract that needs the bytes back
+   * actually has, and dropping them here made the flags a no-op for it. Java
+   * (`StackLower.java`) and Zig already copied them, so omitting them was also
+   * a cross-tier divergence — the same source and flags produced locking
+   * scripts tens of kilobytes apart, i.e. different funding addresses.
+   *
+   * `schedulerMode` is forced back to `'current'`. `lowerIf` reconciles the two
+   * arms by MAIN-stack depth alone, so an arm must neither begin nor end with a
+   * non-empty alt stack. `schedulingByLiveness` already refuses inside a branch
+   * via `_insideBranch`, but `shouldSwapOperands` checks only the mode — so
+   * inheriting it verbatim would newly reorder commutative operands inside arms.
+   * Pin it here instead of relying on each call site to re-derive the rule.
+   */
+  private armOptions(): LoweringOptions {
+    return { ...this.opts, schedulerMode: 'current' };
+  }
+
+  /**
    * Options handed to the EC / NIST codegen modules.
    *
    * Returns `undefined` — not `{}` — when nothing is enabled, so the emitters
@@ -2531,7 +2552,10 @@ class LoweringContext {
     const preIfNames = this.stackMap.namedSlots();
 
     // Lower then-branch
-    const thenCtx = new LoweringContext([], this._properties, this.privateMethods);
+    // `armOptions()`, not `this.opts`: the EC size flags MUST reach the arm
+    // (an arm is where branch-guarded crypto lives), the liveness scheduler
+    // must NOT — see the comment on `armOptions`.
+    const thenCtx = new LoweringContext([], this._properties, this.privateMethods, this.armOptions());
     thenCtx.stackMap = this.stackMap.clone();
     thenCtx.outerProtectedRefs = protectedRefs;
     thenCtx._insideBranch = true;
@@ -2566,7 +2590,10 @@ class LoweringContext {
     }
 
     // Lower else-branch
-    const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
+    // `armOptions()`, not `this.opts`: the EC size flags MUST reach the arm
+    // (an arm is where branch-guarded crypto lives), the liveness scheduler
+    // must NOT — see the comment on `armOptions`.
+    const elseCtx = new LoweringContext([], this._properties, this.privateMethods, this.armOptions());
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx._insideBranch = true;

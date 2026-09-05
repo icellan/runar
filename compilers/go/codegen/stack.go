@@ -2044,6 +2044,10 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 
 	// Lower then-branch
 	thenCtx := newLoweringContext(nil, ctx.properties)
+	// Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives in
+	// the arms, so dropping them here made the flags a no-op for exactly the
+	// shape that needs them — and diverged from Java/Zig, which do inherit.
+	thenCtx.ecCodegen = ctx.ecCodegen
 	thenCtx.sm = ctx.sm.clone()
 	thenCtx.outerProtectedRefs = protectedRefs
 	thenCtx.insideBranch = true
@@ -2061,6 +2065,10 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 
 	// Lower else-branch
 	elseCtx := newLoweringContext(nil, ctx.properties)
+	// Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives in
+	// the arms, so dropping them here made the flags a no-op for exactly the
+	// shape that needs them — and diverged from Java/Zig, which do inherit.
+	elseCtx.ecCodegen = ctx.ecCodegen
 	elseCtx.sm = ctx.sm.clone()
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.insideBranch = true

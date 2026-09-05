@@ -2118,6 +2118,10 @@ module RunarCompiler::Codegen
 
       # Lower then-branch
       then_ctx = LoweringContext.new(nil, @properties)
+      # Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives
+      # in the arms, so dropping them here made the flags a no-op for exactly
+      # the shape that needs them — and diverged from Java/Zig, which inherit.
+      then_ctx.ec_codegen = @ec_codegen
       then_ctx.sm = @sm.clone
       then_ctx.outer_protected_refs = protected_refs
       then_ctx.inside_branch = true
@@ -2136,6 +2140,10 @@ module RunarCompiler::Codegen
 
       # Lower else-branch
       else_ctx = LoweringContext.new(nil, @properties)
+      # Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives
+      # in the arms, so dropping them here made the flags a no-op for exactly
+      # the shape that needs them — and diverged from Java/Zig, which inherit.
+      else_ctx.ec_codegen = @ec_codegen
       else_ctx.sm = @sm.clone
       else_ctx.outer_protected_refs = protected_refs
       else_ctx.inside_branch = true
