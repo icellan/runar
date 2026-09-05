@@ -40,6 +40,7 @@ const ec = @import("ec_emitters.zig");
 const nist = @import("nist_ec_emitters.zig");
 const cost_model = @import("ec_cost_model.zig");
 const registry = @import("crypto_builtins.zig");
+const crypto_emitters = @import("crypto_emitters.zig");
 
 const Variant = struct { name: []const u8, opts: ec.EcCodegenOptions };
 
@@ -63,6 +64,44 @@ const CASES = [_]Case{
     .{ .name = "EcNegate", .builtin = .ec_negate },
     .{ .name = "EcOnCurve", .builtin = .ec_on_curve },
 };
+
+/// The five EC accessors that reach no flag.
+///
+/// They are not in `CASES` because this tier does not lower them through the
+/// flag-aware `ec_emitters` path at all: `stack_lower.lowerCryptoBuiltin` feeds
+/// them from `crypto_emitters.appendBuiltinInstructions`, a fixed instruction
+/// list with no tracker and no options. That is exactly why they were missing
+/// from this gate, and exactly why they still need one — being flag-independent
+/// is a CLAIM about them, and the fixture is the only thing that checks it.
+///
+/// `EcEncodeCompressed` matters most: it pushes `[0x02]`/`[0x03]`, the one place
+/// the MINIMALDATA encoder divergence bites, and it was previously unpinned.
+const ACCESSOR_CASES = [_]Case{
+    .{ .name = "EcModReduce", .builtin = .ec_mod_reduce },
+    .{ .name = "EcEncodeCompressed", .builtin = .ec_encode_compressed },
+    .{ .name = "EcMakePoint", .builtin = .ec_make_point },
+    .{ .name = "EcPointX", .builtin = .ec_point_x },
+    .{ .name = "EcPointY", .builtin = .ec_point_y },
+};
+
+/// Build StackOps for an accessor from its fixed crypto-emitter instruction
+/// list, so the same cost model can price it.
+fn accessorOps(
+    allocator: std.mem.Allocator,
+    builtin: registry.CryptoBuiltin,
+    out: *std.ArrayListUnmanaged(ec.StackOp),
+) !void {
+    var emitted: std.ArrayListUnmanaged(crypto_emitters.CryptoInstruction) = .empty;
+    defer emitted.deinit(allocator);
+    try crypto_emitters.appendBuiltinInstructions(&emitted, allocator, builtin);
+    for (emitted.items) |inst| {
+        try out.append(allocator, switch (inst) {
+            .op_name => |nm| ec.StackOp{ .opcode = nm },
+            .push_int => |n| ec.StackOp{ .push = .{ .integer = n } },
+            .push_data => |d| ec.StackOp{ .push = .{ .bytes = d } },
+        });
+    }
+}
 
 const NIST_CASES = [_]Case{
     .{ .name = "P256Add", .builtin = .p256_add },
@@ -137,20 +176,24 @@ fn ladderCount(name: []const u8, variant: []const u8) i64 {
 fn allowedDelta(name: []const u8, variant: []const u8) i64 {
     var delta: i64 = 0;
 
-    // secp256k1 spells its `3n` with POOLED pushes in the reference, so this
-    // tier matches it raw-for-raw as soon as the pool is on and diverges only
-    // under `off`. The NIST reference uses raw literals under every variant, so
-    // its divergence is constant. Do not merge these two cases.
-    if (std.mem.eql(u8, name, "EcMul") or std.mem.eql(u8, name, "EcMulGen")) {
-        if (std.mem.eql(u8, variant, "off")) delta += ladderCount(name, variant) * P256_THREE_N;
-    } else if (std.mem.startsWith(u8, name, "P256") or
-        std.mem.eql(u8, name, "VerifyECDSA_P256"))
-    {
-        delta += ladderCount(name, variant) * P256_THREE_N;
-    } else if (std.mem.startsWith(u8, name, "P384") or
-        std.mem.eql(u8, name, "VerifyECDSA_P384"))
-    {
-        delta += ladderCount(name, variant) * P384_THREE_N;
+    // Every curve spells `3n` with POOLED pushes in the reference now, so this
+    // tier matches raw-for-raw as soon as the pool is on and diverges only
+    // under `off`, where both sides fall back to literals and this tier
+    // pre-folds. secp256k1 and the NIST curves used to need separate cases
+    // (the NIST reference pushed raw literals under every variant); routing its
+    // `+n` chain through the pool — which is what made its pooled group order
+    // pay for itself at all — collapsed them into one rule.
+    if (std.mem.eql(u8, variant, "off")) {
+        if (std.mem.eql(u8, name, "EcMul") or std.mem.eql(u8, name, "EcMulGen") or
+            std.mem.startsWith(u8, name, "P256") or
+            std.mem.eql(u8, name, "VerifyECDSA_P256"))
+        {
+            delta += ladderCount(name, variant) * P256_THREE_N;
+        } else if (std.mem.startsWith(u8, name, "P384") or
+            std.mem.eql(u8, name, "VerifyECDSA_P384"))
+        {
+            delta += ladderCount(name, variant) * P384_THREE_N;
+        }
     }
 
     // The `0x02` / `0x03` prefix pair: `decompressPubKey`'s SEC1 check, and the
@@ -234,6 +277,17 @@ test "NIST curve flag parity against the TypeScript reference" {
             var bundle = try nist.buildBuiltinOpsOpts(arena.allocator(), c.builtin, v.opts);
             defer bundle.deinit();
             try checkParity(json, c, v, bundle.ops);
+        }
+    }
+    // The flag-independent accessors. Same fixture, same pricing; only the
+    // source of the ops differs (see `accessorOps`). Every variant must price
+    // identically, which is the flag-independence claim made concrete.
+    for (ACCESSOR_CASES) |c| {
+        for (VARIANTS) |v| {
+            defer _ = arena.reset(.retain_capacity);
+            var ops: std.ArrayListUnmanaged(ec.StackOp) = .empty;
+            try accessorOps(arena.allocator(), c.builtin, &ops);
+            try checkParity(json, c, v, ops.items);
         }
     }
 }

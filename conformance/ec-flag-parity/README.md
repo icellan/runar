@@ -47,14 +47,32 @@ Each entry carries two measurements:
   compiler actually ships.
 
 Six tiers reproduce the raw output op for op, so they assert the raw SHA-256:
-the sharpest gate available. The **Zig tier cannot**, in exactly one place.
-`emitEcMul` there emits `k + 3n` pre-folded, because that tier's peephole
-reassociates only `i64` `push_int` chains (`peephole.zig` rule 27) and a 256-bit
-constant is a `push_data` blob in Zig's IR. The reference emits three `+n` steps
-that its own peephole collapses to the same thing — identical shipped bytes,
-different pre-peephole spelling.
+the sharpest gate available.
 
-So the Zig consumer gates on the raw byte COUNT with that one divergence
-asserted exactly (`ec_flag_parity_test.zig#allowedDelta`), and whole-script byte
-identity is covered end to end by compiling the same contract through the Zig
-CLI and the TypeScript one and diffing the hex.
+The **Zig tier cannot**, and it is worth being precise about how much of it
+cannot, because an earlier version of this file said "in exactly one place" and
+that was wrong — `ec_flag_parity_test.zig#allowedDelta` carries a non-zero delta
+for `EcMul`, `EcMulGen`, every `P256*`/`P384*` ladder, both `VerifyECDSA_*` and
+both `*EncodeCompressed`. Two distinct causes:
+
+1. **`k + 3n`.** Zig emits it pre-folded, because that tier's peephole
+   reassociates only `i64` `push_int` chains (`peephole.zig` rule 27) and a
+   256/384-bit constant is a `push_data` blob in its IR. The reference emits
+   three `+n` steps its own peephole collapses to the same thing. On secp256k1
+   the reference pools those pushes, so Zig matches raw-for-raw once pooling is
+   on; on the NIST curves the reference uses raw literals under *every* variant,
+   so there the divergence is constant.
+2. **MINIMALDATA on one-byte blobs.** The reference writes `push [0x02]` as
+   `OP_2`; Zig's encoder always length-prefixes. Flag-independent and
+   pre-existing — visible with every flag off, on emitters no flag reaches.
+
+Both are differences in spelling that Zig's own peephole or emitter normalises
+before the script ships, so the shipped hex still agrees. The Zig consumer
+therefore gates on the raw byte COUNT with each divergence priced exactly, so
+one that widens — or appears on an emitter it does not name — fails.
+
+Whole-script byte identity across tiers is covered by the ordinary conformance
+suite (`conformance:multi`), which compiles every fixture through every tier and
+compares hex. Note that it runs with the flags OFF, since they are experimental
+and default off: there is no automated flags-ON whole-script cross-tier diff.
+An earlier version of this file claimed one existed. It does not.

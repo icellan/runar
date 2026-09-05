@@ -17,7 +17,16 @@
 //!
 //!     estimateScriptBytes(ops) == emitted hex length / 2
 //!
-//! holds exactly. `ec_cost_model_test.zig` asserts that over every EC emitter.
+//! holds exactly.
+//!
+//! NOTE: this used to cite `ec_cost_model_test.zig` as asserting that identity
+//! over every EC emitter. No such file exists and none ever did. What actually
+//! checks this model is `ec_flag_parity_test.zig`, which prices every emitter
+//! with it and compares against the byte counts in
+//! `conformance/ec-flag-parity/expected.json` — the reference compiler's real
+//! emitted sizes. That is a weaker statement than the exact identity above (it
+//! is a comparison against another compiler's bytes, not against this tier's
+//! own emitter), and the difference is worth knowing when trusting it.
 
 const ec = @import("ec_emitters.zig");
 
