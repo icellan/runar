@@ -149,14 +149,15 @@ fn test_emit_reverse_32_deterministic() {
 // The existing _nontrivial tests above only assert `ops.len() > 0` (or > N).
 // These goldens lock the exact op count for each Rust emitter so codegen
 // drift surfaces as a localized regression rather than only as a cross-tier
-// hex mismatch in the conformance harness. The counts match the Python /
-// TS / Java peers for every emitter EXCEPT ecMul / ecMulGen — those two
-// emit 4 fewer raw StackOps in the Rust tier than the other six (63824 /
-// 63826 vs the peer 63828 / 63830). The final compiled hex is still
-// byte-identical across all 7 tiers (enforced by the conformance harness),
-// so the divergence is in the pre-peephole StackOp granularity, not in
-// emitted opcodes — but it is real and pinned here so any further drift
-// fails locally.
+// hex mismatch in the conformance harness. The counts match the Go / Python
+// / TS / Java peers for every emitter.
+//
+// They did not always: ecMul / ecMulGen used to emit 4 fewer raw StackOps
+// here than the other six tiers, because this tier pre-folded `k + 3n` into
+// one `push 3n; OP_ADD` where everyone else emits three `push n; OP_ADD`
+// steps. That private shortcut is gone (it is what made the cross-tier
+// flag-parity comparison impossible to run in this tier), so the op tree now
+// agrees with Go op-for-op.
 //
 // To update goldens after an intentional codegen change, run the Java peer
 // EcTest and the Python peer test_ec.py, copy the new numbers, and update
@@ -177,17 +178,23 @@ fn test_ec_add_op_count_golden() {
 #[test]
 fn test_ec_mul_op_count_golden() {
     let ops = collect(|s| emit_ec_mul(s, None));
-    // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
-    // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130511, "ecMul op count drift");
+    // +4 ops against the previous golden: `emit_ec_mul`'s `k + 3n` offset is
+    // now three `push n; OP_ADD` steps instead of one pre-folded
+    // `push 3n; OP_ADD`. The peephole's fold-chain-add collapses them back, so
+    // the SCRIPT BYTES are unchanged (the conformance hex goldens are
+    // untouched) and this count now matches Go's table entry exactly.
+    assert_eq!(count_op_tree(&ops), 130515, "ecMul op count drift");
 }
 
 #[test]
 fn test_ec_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_ec_mul_gen(s, None));
-    // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
-    // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130513, "ecMulGen op count drift");
+    // +4 ops against the previous golden: `emit_ec_mul`'s `k + 3n` offset is
+    // now three `push n; OP_ADD` steps instead of one pre-folded
+    // `push 3n; OP_ADD`. The peephole's fold-chain-add collapses them back, so
+    // the SCRIPT BYTES are unchanged (the conformance hex goldens are
+    // untouched) and this count now matches Go's table entry exactly.
+    assert_eq!(count_op_tree(&ops), 130517, "ecMulGen op count drift");
 }
 
 #[test]

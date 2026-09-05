@@ -346,10 +346,7 @@ fn test_p256_add_op_count_golden() {
 #[test]
 fn test_p256_mul_op_count_golden() {
     let ops = collect(|s| emit_p256_mul(s, None));
-    // Rust emits 4 fewer raw StackOps than Python/Java peers; same pattern
-    // as ecMul (see ec_codegen_tests.rs module comment). Final hex is
-    // byte-identical (enforced by the conformance harness).
-        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
     // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
     // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
     // unchanged (the conformance hex goldens are untouched) — and the raw op
@@ -363,7 +360,7 @@ fn test_p256_mul_op_count_golden() {
 fn test_p256_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_p256_mul_gen(s, None));
     // See p256_mul_op_count_golden comment.
-        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
     // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
     // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
     // unchanged (the conformance hex goldens are untouched) — and the raw op
@@ -394,9 +391,6 @@ fn test_p256_encode_compressed_op_count_golden() {
 #[test]
 fn test_verify_ecdsa_p256_op_count_golden() {
     let ops = collect(|s| emit_verify_ecdsa_p256(s, None));
-    // Rust emits 8 fewer raw StackOps than Python/Java peers (a verify
-    // computes two mul/mul_gen invocations × the 4-op divergence).
-    //
     // 297180 -> 297265 (+85 ops / +151 script bytes) for the `_dk_valid`
     // pubkey-validity gate, which decomposes as:
     //   * 52 curve-independent 1-byte ops — 21 for the affine-add P == -Q mask
@@ -433,7 +427,7 @@ fn test_verify_ecdsa_p256_op_count_golden() {
     // it pays 306 bytes rather than 225 purely on wider constants — +49 in the
     // length gates (49/96-byte pads) and +32 in the range gate (two 50-byte
     // pushes of n). Both totals match the TS reference.
-        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
     // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
     // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
     // unchanged (the conformance hex goldens are untouched) — and the raw op
@@ -457,7 +451,7 @@ fn test_p384_add_op_count_golden() {
 fn test_p384_mul_op_count_golden() {
     let ops = collect(|s| emit_p384_mul(s, None));
     // See ec_codegen_tests.rs module comment for the 4-op divergence pattern.
-        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
     // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
     // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
     // unchanged (the conformance hex goldens are untouched) — and the raw op
@@ -471,7 +465,7 @@ fn test_p384_mul_op_count_golden() {
 fn test_p384_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_p384_mul_gen(s, None));
     // See p384_mul_op_count_golden comment.
-        // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
+    // +4 ops against the previous golden: `c_emit_mul` now emits `k + 3n` as
     // three `push n; OP_ADD` steps instead of one pre-folded `push 3n; OP_ADD`.
     // The peephole's fold-chain-add collapses them back, so the SCRIPT BYTES are
     // unchanged (the conformance hex goldens are untouched) — and the raw op
