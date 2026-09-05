@@ -1241,8 +1241,32 @@ fn emitScalarMulOnTracker(t: *NistTracker, c: *const NistCurveParams) !void {
     // groupMod IS ((k mod n) + n) mod n, which is exactly that.
     try t.toTop("_k");
     try groupMod(t, "_k", c.group_n_be, "_kr");
-    try pushBigIntBE(t, "_3n", c.three_n_be);
-    try t.rawBlock(2, "_k", emitAddOpcode);
+    if (t.opts.constant_pool) {
+        // Three separate `+n` steps, each served from the pooled slot — the
+        // shape the reference emits, and the shape `emitEcMul` already uses for
+        // secp256k1 in this tier.
+        //
+        // The reference used to push three raw literals here, so pre-folding
+        // `3n` made this tier 70 bytes SMALLER per P-256 ladder. It now pools
+        // them (a pooled constant redeemed once was a strict loss for it), and
+        // pre-folding would make this tier 26 bytes LARGER instead: one 34-byte
+        // `push 3n` against three ~3-byte picks. Follow the reference.
+        try pushGroupN(t, "_n", c.group_n_be);
+        try t.rawBlock(2, "_kn", emitAddOpcode);
+        try pushGroupN(t, "_n2", c.group_n_be);
+        try t.rawBlock(2, "_kn2", emitAddOpcode);
+        try pushGroupN(t, "_n3", c.group_n_be);
+        try t.rawBlock(2, "_k", emitAddOpcode);
+    } else {
+        // Pre-folded `3n` on the DEFAULT path, and only there. With no pool to
+        // draw from, the reference emits three literal pushes and lets its
+        // peephole reassociate them; this tier's peephole folds only i64
+        // `push_int` chains (peephole.zig rule 27) and a 256/384-bit constant is
+        // a `push_data` blob here, so it pre-folds instead. Same shipped bytes,
+        // different pre-peephole spelling — the divergence `allowedDelta` prices.
+        try pushBigIntBE(t, "_3n", c.three_n_be);
+        try t.rawBlock(2, "_k", emitAddOpcode);
+    }
 
     // Determine iteration count based on 3n bit length.
     // The max value of k+3n is 4n-1 which has the same MSB as 3n.
@@ -1842,6 +1866,15 @@ fn decompressPubKey(
             if (t.names.items[idx]) |n| {
                 if (std.mem.eql(u8, n, "_dk_y_cand")) {
                     t.names.items[idx] = qy_name;
+                    // FORGET what was known about the slot: `_dk_y_cand` carries Reduced
+                    // from cFieldPow, but that fact describes only the THEN path. The else
+                    // arm leaves `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this
+                    // same slot, and p - 0 = p is not < p. This is the join emitIf refuses
+                    // to make, and the raw `if` here bypasses that rule, so the reset must
+                    // be explicit. Sound today only via an unwritten argument (y_cand = 0
+                    // needs an order-2 point, impossible on a prime-order curve) and
+                    // unexploited only because nothing uses qy as a fieldSub subtrahend.
+                    t.setDomain(qy_name, .unknown);
                     break;
                 }
             }

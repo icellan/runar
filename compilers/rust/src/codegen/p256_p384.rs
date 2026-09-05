@@ -958,15 +958,21 @@ fn c_emit_mul(
     // scalar is usually an unlock argument — so reduce it first.
     t.to_top("_k");
     c_emit_scalar_reduce(&mut t, "_k", "_kr", g);
-    t.push_big("_n", &g.n);
+    // These three route through the POOL, matching the secp256k1 twin.
+    // They used to be raw literal pushes, which made the poolConstant of the
+    // group order above a strict LOSS: the slot was redeemed exactly once, by
+    // cEmitScalarReduce, so under --ec-constant-pool P-256 paid park 34 +
+    // pick 2 + release 2-3 = 38-39 bytes where a bare literal costs 34.
+    // Break-even is two redemptions; this is now four.
+    t.push_const(POOL_GROUP_N, &g.n, "_n");
     t.raw_block(&["_kr", "_n"], Some("_kn"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
-    t.push_big("_n2", &g.n);
+    t.push_const(POOL_GROUP_N, &g.n, "_n2");
     t.raw_block(&["_kn", "_n2"], Some("_kn2"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
-    t.push_big("_n3", &g.n);
+    t.push_const(POOL_GROUP_N, &g.n, "_n3");
     t.raw_block(&["_kn2", "_n3"], Some("_kn3"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
@@ -1382,6 +1388,15 @@ fn c_decompress_pub_key(
     }
     if let Some(yc_idx) = t.nm.iter().rposition(|n| n == "_dk_y_cand") {
         t.nm[yc_idx] = qy_name.to_string();
+        // FORGET what was known about the slot: `_dk_y_cand` carries Reduced from
+// cFieldPow, but that fact describes only the THEN path. The else arm leaves
+// `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this same slot, and
+// p - 0 = p is not < p. This is the join ECTracker.emitIf refuses to make, and
+// the raw `if` here bypasses that rule, so the reset must be explicit. Sound
+// today only via an unwritten argument (y_cand = 0 needs an order-2 point,
+// impossible on a prime-order curve) and unexploited only because nothing uses
+// qy as a fieldSub subtrahend yet.
+        t.set_domain(qy_name, Dom::Unknown);
     }
     if let Some(xs_idx) = t.nm.iter().rposition(|n| n == "_dk_x_save") {
         t.nm[xs_idx] = qx_name.to_string();

@@ -915,13 +915,19 @@ public final class P256P384 {
         // scalar is usually an unlock argument — so reduce it first.
         t.toTop("_k");
         cEmitScalarReduce(t, "_k", "_kr", curveN);
-        t.pushBigInt("_n", curveN);
+        // These three route through the POOL, matching the secp256k1 twin.
+        // They used to be raw literal pushes, which made the poolConstant of
+        // the group order above a strict LOSS: the slot was redeemed exactly
+        // once, by cEmitScalarReduce, so under --ec-constant-pool P-256 paid
+        // park 34 + pick 2 + release 2-3 = 38-39 bytes where a bare literal
+        // costs 34. Break-even is two redemptions; this is now four.
+        t.pushConst(Ec.POOL_GROUP_N, curveN, "_n");
         t.rawBlock(List.of("_kr", "_n"), "_kn",
             e -> e.accept(new OpcodeOp("OP_ADD")));
-        t.pushBigInt("_n2", curveN);
+        t.pushConst(Ec.POOL_GROUP_N, curveN, "_n2");
         t.rawBlock(List.of("_kn", "_n2"), "_kn2",
             e -> e.accept(new OpcodeOp("OP_ADD")));
-        t.pushBigInt("_n3", curveN);
+        t.pushConst(Ec.POOL_GROUP_N, curveN, "_n3");
         t.rawBlock(List.of("_kn2", "_n3"), "_kn3",
             e -> e.accept(new OpcodeOp("OP_ADD")));
         t.rename("_k");
@@ -1156,6 +1162,15 @@ public final class P256P384 {
         for (int i = t.nm.size() - 1; i >= 0; i--) {
             if ("_dk_y_cand".equals(t.nm.get(i))) {
                 t.nm.set(i, qyName);
+                // FORGET what was known about the slot: `_dk_y_cand` carries Reduced
+        // from cFieldPow, but that fact describes only the THEN path. The else
+        // arm leaves `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this
+        // same slot, and p - 0 = p is not < p. This is the join emitIf refuses
+        // to make, and the raw `if` here bypasses that rule, so the reset must
+        // be explicit. Sound today only via an unwritten argument (y_cand = 0
+        // needs an order-2 point, impossible on a prime-order curve) and
+        // unexploited only because nothing uses qy as a fieldSub subtrahend.
+                t.setDomain(qyName, Ec.Dom.UNKNOWN);
                 break;
             }
         }

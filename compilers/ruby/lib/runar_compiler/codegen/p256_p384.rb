@@ -897,11 +897,17 @@ module RunarCompiler
         # the scalar is usually an unlock argument -- so reduce it first.
         t.to_top("_k")
         c_emit_scalar_reduce(t, "_k", "_kr", g)
-        t.push_big_int("_n", g.n)
+        # These three route through the POOL, matching the secp256k1 twin.
+        # They used to be raw literal pushes, which made the pool_constant of
+        # the group order above a strict LOSS: the slot was redeemed exactly
+        # once, by c_emit_scalar_reduce, so under --ec-constant-pool P-256 paid
+        # park 34 + pick 2 + release 2-3 = 38-39 bytes where a bare literal
+        # costs 34. Break-even is two redemptions; this is now four.
+        t.push_const(EC::POOL_GROUP_N, g.n, "_n")
         t.raw_block(["_kr", "_n"], "_kn", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_ADD")) })
-        t.push_big_int("_n2", g.n)
+        t.push_const(EC::POOL_GROUP_N, g.n, "_n2")
         t.raw_block(["_kn", "_n2"], "_kn2", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_ADD")) })
-        t.push_big_int("_n3", g.n)
+        t.push_const(EC::POOL_GROUP_N, g.n, "_n3")
         t.raw_block(["_kn2", "_n3"], "_kn3", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_ADD")) })
         t.rename("_k")
 
@@ -1127,7 +1133,18 @@ module RunarCompiler
         t.remove_slot_at(neg_idx) if neg_idx
 
         yc_idx = t.nm.rindex("_dk_y_cand")
-        t.nm[yc_idx] = qy_name if yc_idx
+        if yc_idx
+          t.nm[yc_idx] = qy_name
+          # FORGET what was known about the slot: `_dk_y_cand` carries Reduced from
+        # cFieldPow, but that fact describes only the THEN path. The else arm
+        # leaves `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this same
+        # slot, and p - 0 = p is not < p. This is the join emit_if refuses to
+        # make, and the raw `if` here bypasses that rule, so the reset must be
+        # explicit. Sound today only via an unwritten argument (y_cand = 0 needs
+        # an order-2 point, impossible on a prime-order curve) and unexploited
+        # only because nothing uses qy as a fieldSub subtrahend yet.
+          t.set_domain(qy_name, EC::DOM_UNKNOWN)
+        end
 
         xs_idx = t.nm.rindex("_dk_x_save")
         t.nm[xs_idx] = qx_name if xs_idx

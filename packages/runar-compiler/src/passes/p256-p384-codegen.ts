@@ -947,15 +947,22 @@ function cEmitMul(
   // scalar is usually an unlock argument. Reduce it here — see cEmitScalarReduce.
   t.toTop('_k');
   cEmitScalarReduce(t, '_k', '_kr', g);
-  t.pushInt('_n', g.n);
+  // These three route through the POOL, matching the secp256k1 twin
+  // (ec-codegen.ts). They used to be raw `pushInt`, which made the
+  // `poolConstant(POOL_GROUP_N, ...)` above a strict LOSS: the slot was redeemed
+  // exactly once, by cEmitScalarReduce, so under --ec-constant-pool P-256 paid
+  // park 34 + pick 2 + release 2-3 = 38-39 bytes where a bare literal costs 34.
+  // Break-even for a pooled constant is two redemptions; this is now four, and
+  // it is the only cost decision in this file that was never measured.
+  t.pushConst(POOL_GROUP_N, g.n, '_n');
   t.rawBlock(['_kr', '_n'], '_kn', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
-  t.pushInt('_n2', g.n);
+  t.pushConst(POOL_GROUP_N, g.n, '_n2');
   t.rawBlock(['_kn', '_n2'], '_kn2', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
-  t.pushInt('_n3', g.n);
+  t.pushConst(POOL_GROUP_N, g.n, '_n3');
   t.rawBlock(['_kn2', '_n3'], '_kn3', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
@@ -1439,6 +1446,21 @@ function decompressPubKey(
   // The surviving item is _dk_y_cand — rename it
   const ycIdx = t.nm.lastIndexOf('_dk_y_cand');
   if (ycIdx >= 0) t.nm[ycIdx] = qyName;
+  // ...and FORGET what was known about it. `_dk_y_cand` carries Dom.Reduced
+  // from cFieldPow, but that fact describes only the THEN path. The else arm
+  // leaves `p - y_cand` (the bare OP_SUB above, Dom.Unknown, range (0, p]) in
+  // this same slot, and `p - 0 = p` is not < p.
+  //
+  // This is the join `ECTracker.emitIf` refuses to make — "a join over two arms
+  // this tracker did not analyse: nothing is known" — and the raw `t._e({op:
+  // 'if'})` here bypasses that rule, so the reset has to be explicit.
+  //
+  // Sound today only via an unwritten argument (y_cand = 0 needs a point of
+  // order 2, impossible on a prime-order curve) and unexploited only because no
+  // consumer currently uses qy as a fieldSub subtrahend. Both are true by
+  // accident, and neither is checked by anything. The first `cFieldSub(a, qy)`
+  // written under --ec-reduction-sinking would emit a reduction off by p.
+  t.setDomain(qyName, Dom.Unknown);
 
   // Rename saved x to qxName
   const xsIdx = t.nm.lastIndexOf('_dk_x_save');

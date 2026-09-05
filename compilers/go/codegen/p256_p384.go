@@ -955,15 +955,21 @@ func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams, opts *
 	// (Pooling these three would save 96 B per P-256 ladder and 144 B per P-384
 	// one — a real missed opportunity, but one that has to be taken in the
 	// reference first, or the tiers diverge.)
-	t.pushBigInt("_n", g.n)
+	// These three route through the POOL, matching the secp256k1 twin.
+	// They used to be raw literal pushes, which made the poolConstant of the
+	// group order above a strict LOSS: the slot was redeemed exactly once, by
+	// cEmitScalarReduce, so under --ec-constant-pool P-256 paid park 34 +
+	// pick 2 + release 2-3 = 38-39 bytes where a bare literal costs 34.
+	// Break-even is two redemptions; this is now four.
+	t.pushConst(ecPoolGroupN, g.n, "_n")
 	t.rawBlock([]string{"_kr", "_n"}, "_kn", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
-	t.pushBigInt("_n2", g.n)
+	t.pushConst(ecPoolGroupN, g.n, "_n2")
 	t.rawBlock([]string{"_kn", "_n2"}, "_kn2", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
-	t.pushBigInt("_n3", g.n)
+	t.pushConst(ecPoolGroupN, g.n, "_n3")
 	t.rawBlock([]string{"_kn2", "_n3"}, "_kn3", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
@@ -1488,6 +1494,15 @@ func cDecompressPubKey(
 	}
 	if ycIdx >= 0 {
 		t.nm[ycIdx] = qyName
+		// FORGET what was known about the slot: `_dk_y_cand` carries Reduced from
+// cFieldPow, but that fact describes only the THEN path. The else arm leaves
+// `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this same slot, and
+// p - 0 = p is not < p. This is the join ECTracker.emitIf refuses to make, and
+// the raw `if` here bypasses that rule, so the reset must be explicit. Sound
+// today only via an unwritten argument (y_cand = 0 needs an order-2 point,
+// impossible on a prime-order curve) and unexploited only because nothing uses
+// qy as a fieldSub subtrahend yet.
+		t.setDomain(qyName, domUnknown)
 	}
 
 	xsIdx := -1
