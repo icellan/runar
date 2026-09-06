@@ -137,6 +137,97 @@ class Environment {
   }
 }
 
+/**
+ * A property slot holds the MINIMAL script-number encoding — always (NEW-007).
+ *
+ * `scriptBytes` carries a byte-array op's REAL, possibly NON-minimal stack
+ * bytes so that a chained `& | ^ << >> ~` sees the operand's true WIDTH (PR
+ * #141). That carry has one hard boundary: a PROPERTY. `lowerUpdateProp` in
+ * `packages/runar-compiler/src/passes/05-stack-lower.ts` brings the value to
+ * the top with `allowRaw` false, so the compiler emits `OP_BIN2NUM` and the
+ * deployed property slot holds the minimal encoding.
+ *
+ * Dropping `scriptBytes` here is exactly that `OP_BIN2NUM`: `value` was
+ * already decoded from the raw bytes, so the NUMBER is unchanged and only the
+ * WIDTH a later byte-array op sees moves — from the raw buffer's width to the
+ * minimal one. `(-25n << 3n) & -17n` leaves the 1-byte `0x80`; on-chain the
+ * property that receives it is the EMPTY buffer, not `0x80`.
+ *
+ * The opposite fix — threading width THROUGH a property — is the one to avoid:
+ * it would reintroduce NEW-006. See
+ * `packages/runar-sdk/docs/anf-interpreter-contract.md`, "Raw stack bytes must
+ * follow the value across an ALIAS", whose closing paragraph states this same
+ * boundary for the seven ANF interpreters.
+ */
+function bin2num(value: RunarValue): RunarValue {
+  if (value.kind === 'bigint' && value.scriptBytes !== undefined) {
+    return { kind: 'bigint', value: value.value };
+  }
+  return value;
+}
+
+/**
+ * `OP_SPLIT` aborts on an out-of-range index — it does not clamp (NEW-010).
+ *
+ * `Uint8Array.slice` clamps an out-of-range range and reads a NEGATIVE start
+ * from the END of the array, so forwarding a caller's bounds to it made the
+ * interpreter accept three families of call the chain aborts on: `start > len`,
+ * `start + len > len`, and a negative bound.
+ *
+ * The guard is the engine's own, verbatim — `@bsv/sdk`'s `Spend` for
+ * `OP_SPLIT`:
+ *
+ *     if (splitIndexBigInt < 0n || splitIndexBigInt > BigInt(dataToSplit.length))
+ *
+ * Callers must apply it once per `OP_SPLIT` the compiler actually emits, with
+ * the size of the buffer THAT split sees — `substr` lowers to two of them, and
+ * the second sees only the remainder.
+ */
+function checkSplitIndex(size: bigint, index: bigint): void {
+  if (index < 0n || index > size) {
+    throw new Error(
+      'OP_SPLIT requires the first stack item to be a non-negative number ' +
+        'less than or equal to the size of the second-from-top stack item.',
+    );
+  }
+}
+
+/** `@bsv/sdk`'s `Spend` push/element ceiling, which `OP_NUM2BIN` also enforces. */
+const MAX_SCRIPT_ELEMENT_SIZE = 1024n * 1024n * 1024n;
+
+/**
+ * `OP_NUM2BIN` aborts when the requested width cannot hold the value — it does
+ * not truncate (NEW-011).
+ *
+ * The old code kept `encoded.slice(0, min(encoded.length, byteLen))`, so
+ * `num2bin(70000n, 1n)` returned the bytes of 112 with no error: not merely a
+ * wrong accept/reject bit, but a VALUE the chain never produces, silently fed
+ * to every downstream comparison in the test.
+ *
+ * The engine minimally-encodes the number it pops before measuring it, which is
+ * what `encodeScriptNumber` already returns here — so comparing the minimal
+ * width against the requested one is the same test `Spend` makes:
+ *
+ *     rawnum = minimallyEncode(rawnum); if (rawnum.length > size) abort
+ *
+ * The size bound is the engine's too: a negative width, or one past the element
+ * ceiling, aborts before the width comparison.
+ */
+function checkNum2BinWidth(minimalWidth: number, byteLen: bigint): void {
+  if (byteLen < 0n || byteLen > MAX_SCRIPT_ELEMENT_SIZE) {
+    throw new Error(
+      `It's not currently possible to push data larger than ${MAX_SCRIPT_ELEMENT_SIZE} ` +
+        'bytes or negative size.',
+    );
+  }
+  if (BigInt(minimalWidth) > byteLen) {
+    throw new Error(
+      'OP_NUM2BIN requires that the size expressed in the top stack item is ' +
+        'large enough to hold the value expressed in the second-from-top stack item.',
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // RunarInterpreter
 // ---------------------------------------------------------------------------
@@ -275,7 +366,7 @@ export class RunarInterpreter {
         if (stmt.target.kind === 'identifier') {
           env.set(stmt.target.name, value);
         } else if (stmt.target.kind === 'property_access') {
-          this.props.set(stmt.target.property, value);
+          this.props.set(stmt.target.property, bin2num(value));
         } else {
           throw new Error(`Cannot assign to expression of kind: ${stmt.target.kind}`);
         }
@@ -791,9 +882,14 @@ export class RunarInterpreter {
       }
 
       case 'substr': {
+        // `lowerSubstr` emits <data> <start> OP_SPLIT OP_NIP <length> OP_SPLIT
+        // OP_DROP, so there are TWO bounds checks: the first against the whole
+        // buffer, the second against the remainder the first split left.
         const data = this.toBytes(args[0]!);
         const start = this.toBigInt(args[1]!);
         const length = this.toBigInt(args[2]!);
+        checkSplitIndex(BigInt(data.length), start);
+        checkSplitIndex(BigInt(data.length) - start, length);
         return {
           kind: 'bytes',
           value: data.slice(Number(start), Number(start) + Number(length)),
@@ -801,14 +897,19 @@ export class RunarInterpreter {
       }
 
       case 'left': {
+        // OP_SPLIT OP_DROP — the split index is `length`.
         const data = this.toBytes(args[0]!);
         const length = this.toBigInt(args[1]!);
+        checkSplitIndex(BigInt(data.length), length);
         return { kind: 'bytes', value: data.slice(0, Number(length)) };
       }
 
       case 'right': {
+        // OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP — the split index is
+        // `size - length`, so `length > size` makes it NEGATIVE and aborts.
         const data = this.toBytes(args[0]!);
         const length = this.toBigInt(args[1]!);
+        checkSplitIndex(BigInt(data.length), BigInt(data.length) - length);
         return {
           kind: 'bytes',
           value: data.slice(data.length - Number(length)),
@@ -821,6 +922,7 @@ export class RunarInterpreter {
         // result. The interpreter must match this convention.
         const data = this.toBytes(args[0]!);
         const index = this.toBigInt(args[1]!);
+        checkSplitIndex(BigInt(data.length), index);
         return { kind: 'bytes', value: data.slice(Number(index)) };
       }
 
@@ -836,9 +938,11 @@ export class RunarInterpreter {
       case 'num2bin': {
         const value = this.toBigInt(args[0]!);
         const byteLen = this.toBigInt(args[1]!);
-        // Simple implementation: encode as script number, then pad/trim.
+        // Encode as a minimal script number, then pad — never TRIM: a width
+        // too small for the value aborts (NEW-011).
         const { encodeScriptNumber: encode } = await_import_utils();
         const encoded = encode(value);
+        checkNum2BinWidth(encoded.length, byteLen);
         const result = new Uint8Array(Number(byteLen));
         result.set(encoded.slice(0, Math.min(encoded.length, result.length)), 0);
         if (encoded.length > 0 && encoded.length < result.length) {
@@ -858,11 +962,12 @@ export class RunarInterpreter {
       }
 
       case 'int2str': {
-        // Alias for num2bin.
+        // Alias for num2bin — same OP_NUM2BIN, same width guard (NEW-011).
         const value = this.toBigInt(args[0]!);
         const byteLen = this.toBigInt(args[1]!);
         const { encodeScriptNumber: encode } = await_import_utils();
         const encoded = encode(value);
+        checkNum2BinWidth(encoded.length, byteLen);
         const result = new Uint8Array(Number(byteLen));
         result.set(encoded.slice(0, Math.min(encoded.length, result.length)), 0);
         if (encoded.length > 0 && encoded.length < result.length) {
@@ -1493,7 +1598,7 @@ export class RunarInterpreter {
     if (expr.kind === 'identifier') {
       env.set(expr.name, value);
     } else if (expr.kind === 'property_access') {
-      this.props.set(expr.property, value);
+      this.props.set(expr.property, bin2num(value));
     } else {
       throw new Error(`Cannot assign to expression of kind: ${expr.kind}`);
     }

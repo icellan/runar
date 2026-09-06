@@ -20,6 +20,7 @@ import type { OrderedOutputEntry } from './anf-interpreter.js';
 import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript, Spend } from '@bsv/sdk';
 import { WalletProvider } from './providers/wallet-provider.js';
+import { detachUnlockingScript } from './spend-safety.js';
 
 /**
  * Deep-review finding C8: opt-out for `finalizeCall`'s pre-broadcast local
@@ -227,7 +228,12 @@ function dryRunContractInput(
       otherInputs: otherInputs as unknown as ConstructorParameters<typeof Spend>[0]['otherInputs'],
       outputs: tx.outputs,
       inputIndex,
-      unlockingScript: input.unlockingScript!,
+      // NEW-005: `Spend` mutates the script it executes in place, so it must
+      // never be handed the live in-flight input's own object — the dry-run
+      // would corrupt every evaluation that follows it (including
+      // `MockProvider.validateBroadcastTx`, one line later in `finalizeCall`).
+      // See spend-safety.ts.
+      unlockingScript: detachUnlockingScript(input.unlockingScript!),
       inputSequence: input.sequence ?? 0xffffffff,
       lockTime: tx.lockTime,
     });
@@ -1206,8 +1212,22 @@ export class RunarContract {
             satoshis: Number(d.satoshis),
           }));
         }
-      } catch {
-        // ANF interp failures fall through to the legacy newState-only path.
+      } catch (err) {
+        // FAIL CLOSED (NEW-006). The legacy behaviour was to swallow this and
+        // build the continuation from the CURRENT state, which the covenant's
+        // hashOutputs binding then rejects — a silent "your call cannot be
+        // broadcast", plus silent loss of the method's data / raw outputs.
+        // The interpreter is the only thing that knows this method's post-state
+        // and its addDataOutput/addRawOutput payloads, so there is nothing to
+        // fall back TO: an explicit `newState` covers only the state field and
+        // still leaves the outputs missing.
+        throw new Error(
+          `RunarContract.call('${methodName}'): the ANF interpreter could not evaluate ` +
+            `the method body, so the state continuation and data outputs this call would ` +
+            `commit cannot be derived. Refusing to broadcast a transaction built from the ` +
+            `pre-call state. Cause: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
       }
     }
 

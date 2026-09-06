@@ -147,6 +147,36 @@ each implementation.
 | `get_state_script` | **skipped** (`anf-interpreter.ts:257`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
 | `array_literal` | **default-undefined** — no explicit case in the switch; consumers receive arrays through `args` instead (`anf-interpreter.ts:261-262`) | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` | **default-undefined** — `array_literal` is listed in `CHAIN_ONLY_KINDS` and falls through to the no-op skip (`AnfInterpreter.java:370-372`) |
 
+### Raw stack bytes must follow the value across an ALIAS (NEW-006)
+
+All seven interpreters carry each numeric byte-array op's (`& | ^ << >> ~`)
+REAL stack bytes in a per-binding side map, so a chained length-sensitive op
+sees the operand's true — possibly NON-minimal — width instead of re-deriving
+it from the numeric value. `2 << 8` leaves a 1-byte `0x00` on the stack; the
+minimal encoding of `0` is zero bytes, and `OP_AND`/`OP_OR`/`OP_XOR` abort on a
+width mismatch.
+
+Three ANF kinds produce a binding whose value IS another binding's stack slot.
+The side-map entry MUST follow the value across each of them, and MUST be
+CLEARED when the source has no entry (the slot then holds a freshly pushed,
+minimal value, and a stale entry from an earlier binding of the same name would
+be read as this slot's width — a silently wrong value rather than an abort):
+
+| alias | source of the bytes |
+|---|---|
+| `load_const` with value `"@ref:<name>"` — what every local rebind lowers to | `<name>` |
+| `if` | the LAST binding of the TAKEN branch |
+| `loop` | the LAST binding of the body |
+
+This mirrors `packages/runar-compiler/src/passes/05-stack-lower.ts`, which
+carries its own `rawSlots` marker across the same constructs.
+
+The rule stops at a PROPERTY: `lowerUpdateProp` brings the value to the top with
+`allowRaw` false, so the compiler emits `OP_BIN2NUM` and the property slot holds
+the MINIMAL encoding. An interpreter must therefore NOT carry a width through
+`update_prop` → `load_prop`; falling back to the value's minimal bytes there is
+the correct model.
+
 ### Per-kind behaviour for the four ANF-only SDKs
 
 The Go, Rust, Python, and Ruby SDKs implement the lenient AND strict modes

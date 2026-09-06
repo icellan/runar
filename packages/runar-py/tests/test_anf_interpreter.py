@@ -388,3 +388,240 @@ class TestAddOutputStateTracking:
         new_state = compute_new_state(anf, 'increment', {'count': 0}, {})
         # count should be updated to 1
         assert new_state['count'] == 1
+
+
+# ---------------------------------------------------------------------------
+# NEW-006: a byte-op's RAW stack bytes must follow the value across an ALIAS
+# ---------------------------------------------------------------------------
+#
+# The interpreter threads each numeric byte-array op's real stack bytes
+# (& | ^ << >> ~) through a per-binding side map so a chained length-sensitive
+# op sees the true, possibly NON-minimal width. That entry has to travel with
+# the value across every binding that merely aliases another binding's stack
+# slot -- the `load_const "@ref:<name>"` a local rebind lowers to, an `if`
+# adopting its taken arm's last value, a `loop` adopting its body's -- because
+# `05-stack-lower` carries its `rawSlots` marker across exactly those
+# constructs. Ported from the TS fix (packages/runar-sdk/src/anf-interpreter.ts,
+# `aliasScriptBytes`).
+
+def _byte_op_anf(body: list) -> dict:
+    """One-property contract wrapping a raw method body of byte ops."""
+    return {
+        "contractName": "ByteOps",
+        "properties": [
+            {"name": "result", "type": "bigint", "readonly": False},
+        ],
+        "methods": [
+            {"name": "constructor", "params": [], "body": [], "isPublic": False},
+            {"name": "compute", "params": [], "body": body, "isPublic": True},
+        ],
+    }
+
+
+# `2 << 8` on a 1-byte operand shifts every bit out and leaves a NON-minimal
+# 1-byte 0x00 on the stack -- the minimal encoding of 0 is the EMPTY push, so
+# re-minimising this value loses a byte of width.
+_SHIFT_TO_NONMINIMAL_ZERO = [
+    {"name": "t0", "value": {"kind": "load_const", "value": 2}},
+    {"name": "t1", "value": {"kind": "load_const", "value": 8}},
+    {"name": "t2", "value": {"kind": "bin_op", "op": "<<", "left": "t0", "right": "t1"}},
+]
+
+
+class TestAliasCarriesScriptBytes:
+    def test_ref_alias_propagates_raw_bytes(self):
+        """`let m0 = 2n << 8n; m0 | 5n` == 5 -- the alias keeps the 1-byte width.
+
+        Every local rebind lowers to `load_const "@ref:<temp>"`. Without the
+        alias carry the map has no entry for `m0`, so OP_OR re-minimises 0 to
+        the empty push and aborts on a 0-vs-1 byte length mismatch.
+        """
+        body = _SHIFT_TO_NONMINIMAL_ZERO + [
+            {"name": "m0", "value": {"kind": "load_const", "value": "@ref:t2"}},
+            {"name": "t3", "value": {"kind": "load_const", "value": 5}},
+            {"name": "t4", "value": {"kind": "bin_op", "op": "|", "left": "m0", "right": "t3"}},
+            {"name": "t5", "value": {"kind": "update_prop", "name": "result", "value": "t4"}},
+        ]
+        new_state = compute_new_state(_byte_op_anf(body), 'compute', {'result': 0}, {})
+        assert new_state['result'] == 5
+
+    def test_ref_alias_clears_stale_bytes_on_rebind(self):
+        """`m0 = 2n << 8n; m0 = 300n; m0 & 255n` == 44 -- the alias CLEARS.
+
+        HONESTY NOTE: this passes on the UNFIXED interpreter (nothing keys the
+        map by a re-bound name yet). It is the guard that forces the clear half
+        of the fix: a copy-only `aliasScriptBytes` would leave the dead 1-byte
+        0x00 from the first binding of `m0` as the recorded width of a slot that
+        now holds the 2-byte 0x2c01, and this test goes RED.
+        """
+        body = _SHIFT_TO_NONMINIMAL_ZERO + [
+            {"name": "m0", "value": {"kind": "load_const", "value": "@ref:t2"}},
+            # `m0 = 300n` -- the value is a fresh minimal push, so the slot's
+            # recorded width must be dropped, not inherited.
+            {"name": "t3", "value": {"kind": "load_const", "value": 300}},
+            {"name": "m0", "value": {"kind": "load_const", "value": "@ref:t3"}},
+            {"name": "t4", "value": {"kind": "load_const", "value": 255}},
+            {"name": "t5", "value": {"kind": "bin_op", "op": "&", "left": "m0", "right": "t4"}},
+            {"name": "t6", "value": {"kind": "update_prop", "name": "result", "value": "t5"}},
+        ]
+        new_state = compute_new_state(_byte_op_anf(body), 'compute', {'result': 0}, {})
+        # 0x2c01 & 0xff00 == 0x2c00 == 44
+        assert new_state['result'] == 44
+
+    def test_ref_alias_clear_prevents_silently_wrong_value(self):
+        """Same clear, in the shape where copy-only returns a WRONG value.
+
+        The stale entry here is a 2-byte 0x0000 (`300n ^ 300n`), the same width
+        as the value that replaces it, so a copy-only fix does not abort on a
+        length mismatch -- it computes 0x0000 & 0xff00 == 0 and reports 0 as the
+        state. Also passes unfixed, RED under copy-only.
+        """
+        body = [
+            {"name": "t0", "value": {"kind": "load_const", "value": 300}},
+            {"name": "t1", "value": {"kind": "load_const", "value": 300}},
+            {"name": "t2", "value": {"kind": "bin_op", "op": "^", "left": "t0", "right": "t1"}},
+            {"name": "m0", "value": {"kind": "load_const", "value": "@ref:t2"}},
+            {"name": "t3", "value": {"kind": "load_const", "value": 300}},
+            {"name": "m0", "value": {"kind": "load_const", "value": "@ref:t3"}},
+            {"name": "t4", "value": {"kind": "load_const", "value": 255}},
+            {"name": "t5", "value": {"kind": "bin_op", "op": "&", "left": "m0", "right": "t4"}},
+            {"name": "t6", "value": {"kind": "update_prop", "name": "result", "value": "t5"}},
+        ]
+        new_state = compute_new_state(_byte_op_anf(body), 'compute', {'result': 0}, {})
+        assert new_state['result'] == 44
+
+    def test_if_result_propagates_taken_arm_raw_bytes(self):
+        """An `if` adopts its taken arm's last value -- and that value's width."""
+        body = [
+            {"name": "c0", "value": {"kind": "load_const", "value": 1}},
+            {
+                "name": "t3",
+                "value": {
+                    "kind": "if",
+                    "cond": "c0",
+                    "then": [
+                        {"name": "a0", "value": {"kind": "load_const", "value": 2}},
+                        {"name": "a1", "value": {"kind": "load_const", "value": 8}},
+                        {"name": "a2", "value": {"kind": "bin_op", "op": "<<", "left": "a0", "right": "a1"}},
+                    ],
+                    "else": [
+                        {"name": "b0", "value": {"kind": "load_const", "value": 0}},
+                    ],
+                },
+            },
+            {"name": "t4", "value": {"kind": "load_const", "value": 5}},
+            {"name": "t5", "value": {"kind": "bin_op", "op": "|", "left": "t3", "right": "t4"}},
+            {"name": "t6", "value": {"kind": "update_prop", "name": "result", "value": "t5"}},
+        ]
+        new_state = compute_new_state(_byte_op_anf(body), 'compute', {'result': 0}, {})
+        assert new_state['result'] == 5
+
+    def test_loop_result_propagates_body_raw_bytes(self):
+        """A `loop` adopts its body's last value -- and that value's width."""
+        body = [
+            {
+                "name": "t0",
+                "value": {
+                    "kind": "loop",
+                    "count": 1,
+                    "iterVar": "i",
+                    "body": [
+                        {"name": "a0", "value": {"kind": "load_const", "value": 2}},
+                        {"name": "a1", "value": {"kind": "load_const", "value": 8}},
+                        {"name": "a2", "value": {"kind": "bin_op", "op": "<<", "left": "a0", "right": "a1"}},
+                    ],
+                },
+            },
+            {"name": "t1", "value": {"kind": "load_const", "value": 5}},
+            {"name": "t2", "value": {"kind": "bin_op", "op": "|", "left": "t0", "right": "t1"}},
+            {"name": "t3", "value": {"kind": "update_prop", "name": "result", "value": "t2"}},
+        ]
+        new_state = compute_new_state(_byte_op_anf(body), 'compute', {'result': 0}, {})
+        assert new_state['result'] == 5
+
+
+# ---------------------------------------------------------------------------
+# NEW-013 -- `num2bin` sign-bit placement
+# ---------------------------------------------------------------------------
+#
+# The ANF interpreter models what the DEPLOYED SCRIPT computes. For negative
+# values it used to set the sign bit on the last MAGNITUDE byte and pad zeros
+# AFTER it, so ``num2bin(-1, 2)`` came out ``8100`` where OP_NUM2BIN yields
+# ``0180``. Those bytes go into the call transaction, so a legal method built a
+# continuation the script rejects.
+#
+# Every expectation below is the output of OP_NUM2BIN on the real ``@bsv/sdk``
+# Spend interpreter, derived by
+# ``conformance/anf-interpreter/num2bin-engine-parity.test.ts``, which re-runs
+# the engine live rather than trusting a table. Do NOT re-stamp these from this
+# implementation's own output -- that is precisely how six of seven SDKs agreed
+# on the wrong answer.
+
+_NUM2BIN_ENGINE_VECTORS = [
+    # (value, width, expected, why)
+    # Negative, padded -- the NEW-013 corner. The sign bit belongs on the byte
+    # that is most significant AFTER padding, not before it.
+    (-1, 2, "0180", "negative padded"),
+    (-1, 4, "01000080", "negative padded"),
+    (-1, 8, "0100000000000080", "negative padded"),
+    (-5, 4, "05000080", "negative padded"),
+    (-1000, 4, "e8030080", "negative padded"),
+    (-1000, 8, "e803000000000080", "negative padded"),
+    (-255, 3, "ff0080", "negative padded"),
+    (-256, 3, "000180", "negative padded"),
+    # Negative, exact width -- the minimal encoding already fills the field, so
+    # it is pushed unchanged and the sign bit does not move.
+    (-1, 1, "81", "negative exact width"),
+    (-127, 1, "ff", "negative exact width"),
+    (-1000, 2, "e883", "negative exact width"),
+    (-256, 2, "0081", "negative exact width"),
+    # Negative, sign-bit carry -- the top magnitude byte already uses bit 7, so
+    # the minimal encoding grows a byte before any padding happens.
+    (-128, 2, "8080", "negative carry, exact width"),
+    (-128, 3, "800080", "negative carry, padded"),
+    (-128, 8, "8000000000000080", "negative carry, padded"),
+    (-32768, 3, "008080", "negative carry, exact width"),
+    (-32768, 4, "00800080", "negative carry, padded"),
+    # Positive at the same widths -- must be untouched by the fix.
+    (1, 1, "01", "positive exact width"),
+    (1, 2, "0100", "positive padded"),
+    (1, 8, "0100000000000000", "positive padded"),
+    (1000, 2, "e803", "positive exact width"),
+    (1000, 4, "e8030000", "positive padded"),
+    (1000, 8, "e803000000000000", "positive padded"),
+    (127, 1, "7f", "positive exact width"),
+    (128, 2, "8000", "positive carry, exact width"),
+    (128, 3, "800000", "positive carry, padded"),
+    (255, 2, "ff00", "positive carry, exact width"),
+    # Zero -- an all-zero field, no sign bit anywhere.
+    (0, 1, "00", "zero"),
+    (0, 4, "00000000", "zero"),
+    (0, 8, "0000000000000000", "zero"),
+]
+
+
+@pytest.mark.parametrize("n,width,expected,why", _NUM2BIN_ENGINE_VECTORS)
+def test_num2bin_hex_matches_op_num2bin(n, width, expected, why):
+    from runar.sdk.anf_interpreter import _num2bin_hex
+
+    assert _num2bin_hex(n, width) == expected, f"num2bin({n}, {width}) [{why}]"
+
+
+def test_num2bin_hex_is_not_the_pre_fix_encoding():
+    """Non-vacuity: the table only earns its keep if it can see the old answer.
+
+    ``8100`` is exactly what ``_num2bin_hex(-1, 2)`` used to return.
+    """
+    from runar.sdk.anf_interpreter import _num2bin_hex
+
+    assert _num2bin_hex(-1, 2) != "8100"
+
+
+def test_num2bin_round_trip_is_smoke_test_only():
+    """bin2num is this interpreter's own inverse, so a round trip proves only
+    self-consistency -- it held throughout the bug. Kept as a smoke test; the
+    vector table above is the evidence."""
+    from runar.sdk.anf_interpreter import _bin2num_int, _num2bin_hex
+
+    for n in (-1000, -128, -1, 0, 1, 128, 1000):
+        assert _bin2num_int(_num2bin_hex(n, 8)) == n

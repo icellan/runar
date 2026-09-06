@@ -813,17 +813,35 @@ impl RunarContract {
         if is_stateful {
             if let Some(ref anf) = self.artifact.anf {
                 let named_args = build_named_args(&user_params, &resolved_args);
-                if let Ok((state, data_outs, _raw_outs, ordered_outs)) = anf_interpreter::compute_new_state_and_data_outputs(
-                    anf, method_name, &self.state, &named_args,
-                    &self.constructor_args,
-                ) {
-                    auto_computed_state = Some(state);
-                    anf_ordered_outputs = ordered_outs;
-                    resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
-                        script: d.script,
-                        satoshis: d.satoshis,
-                    }).collect();
-                }
+                // FAIL CLOSED (NEW-006). The legacy behaviour was to swallow
+                // this and build the continuation from the CURRENT state, which
+                // the covenant's hashOutputs binding then rejects — a silent
+                // "your call cannot be broadcast", plus silent loss of the
+                // method's data / raw outputs. The interpreter is the only
+                // thing that knows this method's post-state and its
+                // addDataOutput/addRawOutput payloads, so there is nothing to
+                // fall back TO: an explicit `new_state` covers only the state
+                // field and still leaves the outputs missing.
+                let (state, data_outs, _raw_outs, ordered_outs) =
+                    anf_interpreter::compute_new_state_and_data_outputs(
+                        anf, method_name, &self.state, &named_args,
+                        &self.constructor_args,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "RunarContract.call('{}'): the ANF interpreter could not evaluate \
+                             the method body, so the state continuation and data outputs this \
+                             call would commit cannot be derived. Refusing to broadcast a \
+                             transaction built from the pre-call state. Cause: {}",
+                            method_name, e
+                        )
+                    })?;
+                auto_computed_state = Some(state);
+                anf_ordered_outputs = ordered_outs;
+                resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
+                    script: d.script,
+                    satoshis: d.satoshis,
+                }).collect();
             }
         }
         if let Some(explicit) = options.and_then(|o| o.data_outputs.as_ref()) {
@@ -3200,6 +3218,83 @@ mod tests {
         // Call should succeed (not throw "not deployed")
         let result = contract.call("spend", &[], &mut provider, &signer, None);
         assert!(result.is_ok());
+    }
+
+    /// NEW-006 (b): an ANF interpreter failure must FAIL CLOSED.
+    ///
+    /// The legacy behaviour swallowed the error and built the stateful
+    /// continuation from the CURRENT (pre-call) state, which the covenant's
+    /// hashOutputs binding then rejects — a silent "your call cannot be
+    /// broadcast", plus silent loss of the method's data / raw outputs. There
+    /// is nothing to fall back TO: the interpreter is the only thing that
+    /// knows the post-state and the output payloads.
+    ///
+    /// The artifact here advertises `spend` in its ABI but omits it from the
+    /// ANF, so the interpreter provably cannot evaluate the body.
+    #[test]
+    fn call_fails_closed_when_anf_interpreter_cannot_evaluate() {
+        let mut artifact = make_artifact(
+            "51",
+            abi_with_methods(vec![AbiMethod {
+                name: "spend".to_string(),
+                params: vec![],
+                is_public: true, is_terminal: None, uses_code_part: None,
+                sig_hash_type: None,
+            }]),
+        );
+        artifact.state_fields = Some(vec![StateField {
+            name: "count".to_string(),
+            field_type: "bigint".to_string(),
+            index: 0,
+            initial_value: None,
+            fixed_array: None,
+        }]);
+        artifact.anf = Some(anf_interpreter::ANFProgram {
+            contract_name: "Test".to_string(),
+            properties: vec![anf_interpreter::ANFProperty {
+                name: "count".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: false,
+                initial_value: None,
+            }],
+            // The ABI advertises `spend`; the ANF does not describe it.
+            methods: vec![],
+        });
+
+        let mut contract = RunarContract::new(artifact, vec![]);
+
+        let signer = MockSigner::new();
+        let mut provider = MockProvider::always_ack("testnet");
+        let address = signer.get_address().unwrap();
+        provider.add_utxo(&address, Utxo {
+            txid: "aa".repeat(32),
+            output_index: 0,
+            satoshis: 100_000,
+            script: format!("76a914{}88ac", "00".repeat(20)),
+        });
+
+        contract.deploy(&mut provider, &signer, &DeployOptions {
+            satoshis: 50_000,
+            change_address: None,
+            funding_signer: None,
+        }).unwrap();
+
+        let broadcast_count_after_deploy = provider.get_broadcasted_txs().len();
+
+        let err = contract
+            .call("spend", &[], &mut provider, &signer, None)
+            .expect_err(
+                "call() returned Ok having built the continuation from the PRE-CALL state \
+                 (the interpreter could not evaluate the body)",
+            );
+        assert!(
+            err.contains("ANF interpreter could not evaluate"),
+            "expected a fail-closed diagnostic naming the interpreter, got: {}",
+            err
+        );
+        assert!(err.contains("spend"), "error must name the method: {}", err);
+        // Nothing beyond the deploy may reach the network.
+        assert_eq!(provider.get_broadcasted_txs().len(), broadcast_count_after_deploy);
     }
 
     #[test]

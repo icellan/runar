@@ -1,0 +1,22 @@
+{
+  "anfPath": "conformance/anf-interpreter/programs/num2bin-widths.anf.json",
+  "methodName": "publish",
+  "currentState": {
+    "count": "0n"
+  },
+  "args": {
+    "v": "-1000n"
+  },
+  "constructorArgs": [
+    "0n"
+  ],
+  "scriptOracle": {
+    "source": "conformance/anf-interpreter/programs/Num2BinWidths.runar.ts",
+    "constructorArgs": [
+      "0n"
+    ],
+    "methodArgs": [
+      "-1000n"
+    ]
+  }
+}

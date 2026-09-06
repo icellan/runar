@@ -461,9 +461,25 @@ public final class RunarContract {
                         );
                     }
                     orderedOutputs = new ArrayList<>(execResult.outputs);
-                } catch (RuntimeException ignore) {
-                    // Best-effort — caller can pre-supply stateUpdates if
-                    // the body uses primitives the interpreter can't run.
+                } catch (RuntimeException err) {
+                    // FAIL CLOSED (NEW-006). The legacy behaviour was to
+                    // swallow this and build the continuation from the CURRENT
+                    // (pre-call) state, which the covenant's hashOutputs
+                    // binding then rejects — a silent "your call cannot be
+                    // broadcast", plus silent loss of the method's data / raw
+                    // outputs. The interpreter is the only thing that knows
+                    // this method's post-state AND its addDataOutput /
+                    // addRawOutput payloads, so there is nothing to fall back
+                    // TO: an explicit `newState` covers only the state field
+                    // and still leaves the outputs missing.
+                    throw new IllegalStateException(
+                        "RunarContract.call('" + methodName + "'): the ANF interpreter could not"
+                            + " evaluate the method body, so the state continuation and data"
+                            + " outputs this call would commit cannot be derived. Refusing to"
+                            + " broadcast a transaction built from the pre-call state. Cause: "
+                            + err.getMessage(),
+                        err
+                    );
                 }
             }
             // Explicit state always applies, including when there is no ANF to

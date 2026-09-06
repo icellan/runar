@@ -489,3 +489,48 @@ class TestAnfDataOutputExtraction:
         prepared = contract.prepare_call('emit', [], options=opts)
         assert override_hex in prepared.tx_hex
         assert self.EMIT_PAYLOAD_HEX not in prepared.tx_hex
+
+
+# ---------------------------------------------------------------------------
+# NEW-006 (b): an ANF interpreter failure must FAIL CLOSED.
+#
+# The interpreter is the only thing that knows a method's post-state and its
+# addDataOutput/addRawOutput payloads. Swallowing its failure made the SDK
+# build the stateful continuation from the CURRENT (pre-call) state and
+# broadcast it: the covenant's hashOutputs binding rejects that spend and the
+# method's data / raw outputs are silently dropped. There is nothing to fall
+# back TO, so the call must raise instead.
+# ---------------------------------------------------------------------------
+
+class TestAnfInterpreterFailsClosed(TestAnfDataOutputExtraction):
+    def _data_emitter_artifact(self) -> RunarArtifact:
+        """Same contract, but with an ANF whose method name does not match the
+        ABI — the realistic shape of an artifact whose ANF is out of sync. The
+        interpreter raises ValueError("... not found in ANF IR").
+        """
+        artifact = super()._data_emitter_artifact()
+        artifact.anf['methods'][0]['name'] = 'emitRenamed'
+        return artifact
+
+    def test_extracts_data_outputs_from_anf_when_new_state_is_none(self):
+        with pytest.raises(RuntimeError, match="could not evaluate the method body"):
+            self._connect_and_deploy().prepare_call('emit', [])
+
+    def test_extracts_data_outputs_from_anf_when_new_state_supplied(self):
+        """An explicit new_state does NOT license the fallback: it covers the
+        state field only and still leaves the data outputs missing."""
+        from runar.sdk.types import CallOptions
+
+        contract = self._connect_and_deploy()
+        with pytest.raises(RuntimeError, match=r"RunarContract\.call\('emit'\)"):
+            contract.prepare_call('emit', [], options=CallOptions(new_state={'counter': 1}))
+
+    def test_explicit_data_outputs_override_anf(self):
+        """Even with caller-supplied data outputs the post-state is still
+        unknown, so the call stays closed."""
+        from runar.sdk.types import CallOptions
+
+        contract = self._connect_and_deploy()
+        opts = CallOptions(data_outputs=[{'script': '6a02cafe', 'satoshis': 0}])
+        with pytest.raises(RuntimeError, match="Refusing to broadcast"):
+            contract.prepare_call('emit', [], options=opts)

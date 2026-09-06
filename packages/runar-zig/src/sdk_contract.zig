@@ -647,7 +647,7 @@ pub const RunarContract = struct {
             const has_explicit_state = if (options) |o| o.new_state != null else false;
             if (has_multi_output) {
                 if (needs_change and self.artifact.anf_json != null) {
-                    anf_data_outputs = self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs) catch &.{};
+                    anf_data_outputs = try self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs);
                 }
                 const code_part = try self.getCodePartHex();
                 defer self.allocator.free(code_part);
@@ -681,7 +681,7 @@ pub const RunarContract = struct {
                 // tx builder via stateful_contract_outputs below.
             } else if (has_explicit_state) {
                 if (needs_change and self.artifact.anf_json != null) {
-                    anf_data_outputs = self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs) catch &.{};
+                    anf_data_outputs = try self.autoComputeDataOutputs(method_name, user_params, resolved_args, &anf_ordered_outputs);
                 }
                 const ns = options.?.new_state.?;
                 for (self.state) |*s| s.deinit(self.allocator);
@@ -694,7 +694,7 @@ pub const RunarContract = struct {
                 new_locking_script = try self.getLockingScript();
             } else if (needs_change and self.artifact.anf_json != null) {
                 // Auto-compute new state + data outputs from ANF IR
-                anf_data_outputs = self.autoComputeState(method_name, user_params, resolved_args, &anf_ordered_outputs) catch &.{};
+                anf_data_outputs = try self.autoComputeState(method_name, user_params, resolved_args, &anf_ordered_outputs);
                 new_locking_script = try self.getLockingScript();
             } else {
                 new_locking_script = try self.getLockingScript();
@@ -2793,9 +2793,17 @@ pub const RunarContract = struct {
         }
 
         // Compute new state AND data outputs.
-        const result = anf_interp.computeNewStateAndDataOutputs(
+        //
+        // FAIL CLOSED (NEW-006). Swallowing this built the stateful
+        // continuation from the CURRENT (pre-call) state, which the covenant's
+        // hashOutputs binding then rejects — a silent "your call cannot be
+        // broadcast", plus silent loss of the method's data / raw outputs. The
+        // interpreter is the only thing that knows the post-state and those
+        // payloads, so there is nothing to fall back TO. Matches the TS, Go and
+        // Rust tiers.
+        const result = try anf_interp.computeNewStateAndDataOutputs(
             self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
-        ) catch return empty;
+        );
         var state_map = result.state;
         defer {
             var it = state_map.iterator();
@@ -2897,9 +2905,10 @@ pub const RunarContract = struct {
             if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
         }
 
-        const result = anf_interp.computeNewStateAndDataOutputs(
+        // FAIL CLOSED (NEW-006) — see the matching note in autoComputeState.
+        const result = try anf_interp.computeNewStateAndDataOutputs(
             self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
-        ) catch return empty;
+        );
         var state_map = result.state;
         {
             var it = state_map.iterator();

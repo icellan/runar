@@ -71,6 +71,10 @@ export { computeOpPushTx } from './oppushtx.js';
 // Script utilities
 export { buildP2PKHScript, extractConstructorArgs, matchesArtifact, pubkeyToPKH } from './script-utils.js';
 
+// Spend-safety (NEW-005): @bsv/sdk's `Spend` mutates the scripts it executes,
+// so any harness that replays a live transaction must detach them first.
+export { detachLockingScript, detachUnlockingScript } from './spend-safety.js';
+
 // Verification-descriptor resolution (value-dependent half of the artifact's
 // constructorSlots/stateFields/templateDigest descriptors)
 export {

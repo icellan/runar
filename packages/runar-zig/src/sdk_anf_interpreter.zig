@@ -810,17 +810,12 @@ fn evalNode(
             switch (lc.value) {
                 .bytes => |b| {
                     if (b.len > 5 and std.mem.startsWith(u8, b, "@ref:")) {
-                        // An alias is a pure rename — the lowering emits one
-                        // for every named local (`const left = a << 3n`
-                        // becomes `t2 = a << 3n` plus `left = @ref:t2`). It
-                        // occupies the SAME stack bytes as its target, so the
-                        // side-map entry must travel with it or both the
-                        // non-minimal numeric check and the chained byte-op
-                        // threading go blind on real compiler output.
-                        if (eval_ctx.script_bytes.get(b[5..])) |bytes| {
-                            try eval_ctx.script_bytes.put(binding_name, bytes);
-                        }
-                        return env.get(b[5..]) orelse anf_none;
+                        // ALIAS: this binding IS the target's stack slot, so it
+                        // inherits (or, when the target has none, drops) the
+                        // target's raw byte-op width. See `aliasScriptBytes`.
+                        const target = b[5..];
+                        try aliasScriptBytes(eval_ctx.script_bytes, target, binding_name);
+                        return env.get(target) orelse anf_none;
                     }
                     if (std.mem.eql(u8, b, "@this")) {
                         return anf_none;
@@ -926,7 +921,10 @@ fn evalNode(
             const branch = if (isTruthy(cond)) ifn.then_branch else ifn.else_branch;
             try evalBindings(allocator, branch, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
             if (branch.len > 0) {
-                return env.get(branch[branch.len - 1].name) orelse anf_none;
+                // ALIAS: the `if` binding adopts the taken arm's last slot.
+                const last_name = branch[branch.len - 1].name;
+                try aliasScriptBytes(eval_ctx.script_bytes, last_name, binding_name);
+                return env.get(last_name) orelse anf_none;
             }
             return anf_none;
         },
@@ -937,7 +935,10 @@ fn evalNode(
                 try env.put(ln.iter_var, .{ .int = ln.start + @as(i64, @intCast(i)) * ln.step });
                 try evalBindings(allocator, ln.body, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
                 if (ln.body.len > 0) {
-                    last_val = env.get(ln.body[ln.body.len - 1].name) orelse anf_none;
+                    // ALIAS: the `loop` binding adopts the body's last slot.
+                    const last_name = ln.body[ln.body.len - 1].name;
+                    try aliasScriptBytes(eval_ctx.script_bytes, last_name, binding_name);
+                    last_val = env.get(last_name) orelse anf_none;
                 }
             }
             return last_val;
@@ -1190,6 +1191,35 @@ fn isNumericByteOp(op: []const u8, result_type: []const u8, left: ANFValue, righ
     return std.mem.eql(u8, op, "&") or std.mem.eql(u8, op, "|") or
         std.mem.eql(u8, op, "^") or std.mem.eql(u8, op, "<<") or
         std.mem.eql(u8, op, ">>");
+}
+
+/// Carry a binding's raw stack bytes across an ALIAS — a binding whose value IS
+/// another binding's slot: the `load_const "@ref:<name>"` every local rebind
+/// lowers to, an `if` adopting its taken arm's last value, a `loop` adopting its
+/// body's. Without this, a chained length-sensitive op re-minimises the aliased
+/// value and disagrees with the deployed script (NEW-006: `2 << 8` is a 1-byte
+/// `0x00` on the stack but `[]` when re-minimised from `0`).
+///
+/// Mirrors `05-stack-lower.ts`, which carries its `rawSlots` marker across the
+/// same constructs, and `aliasScriptBytes` in
+/// packages/runar-sdk/src/anf-interpreter.ts.
+///
+/// CLEARS when `from` has no entry: the alias target is a freshly pushed,
+/// minimal value, so a stale entry left by an earlier binding of the SAME name
+/// (`let m0 = 2n << 8n; m0 = 300n;`) would otherwise be read as this slot's
+/// width. `to` is the binding name, a slice into the ANF program's own storage,
+/// so the key outlives the arena exactly like the `put` sites in `.bin_op` /
+/// `.unary_op`; the value is the arena slice already held by `from`.
+fn aliasScriptBytes(
+    script_bytes: *std.StringHashMap([]const u8),
+    from: []const u8,
+    to: []const u8,
+) error{OutOfMemory}!void {
+    if (script_bytes.get(from)) |bytes| {
+        try script_bytes.put(to, bytes);
+    } else {
+        _ = script_bytes.remove(to);
+    }
 }
 
 /// Minimal little-endian sign-magnitude bytes of an i64, duped onto `allocator`.
@@ -1973,51 +2003,70 @@ fn asHex(v: ANFValue) []const u8 {
 // Byte encoding helpers
 // ---------------------------------------------------------------------------
 
+/// `num2bin(n, byte_len)` — exactly what OP_NUM2BIN computes (NEW-013).
+///
+/// The order of the two steps below is load-bearing. This used to set the sign
+/// bit on the last MAGNITUDE byte and pad zeros AFTER it, so `num2bin(-1, 2)`
+/// produced `8100` while the script produces `0180`. The result is the bytes
+/// the SDK puts in the call transaction, so the wrong order built continuations
+/// the deployed script rejects — and six of the seven SDKs shared the mistake,
+/// which is why tier-vs-tier parity never caught it.
+///
+/// The engine pads FIRST and then puts the sign bit on the new most-significant
+/// byte.
 fn num2binHex(allocator: std.mem.Allocator, n: i64, byte_len: usize) ANFValue {
     if (byte_len == 0) return .{ .bytes = "" };
-    if (n == 0) {
-        const result = allocator.alloc(u8, byte_len * 2) catch return .{ .bytes = "" };
-        @memset(result, '0');
-        return .{ .bytes = result };
-    }
 
+    // 1. Minimal BSV script-number encoding: little-endian magnitude with the
+    //    sign in bit 7 of the top byte, growing one byte when magnitude data
+    //    already occupies that bit.
     const negative = n < 0;
-    var abs_val: u64 = if (negative) @intCast(-n) else @intCast(n);
+    var abs_val: u64 = @abs(n);
 
-    var bytes_buf: [16]u8 = undefined;
+    var bytes_buf: [17]u8 = undefined;
     var num_bytes: usize = 0;
     while (abs_val > 0 and num_bytes < bytes_buf.len) : (num_bytes += 1) {
         bytes_buf[num_bytes] = @intCast(abs_val & 0xff);
         abs_val >>= 8;
     }
-
-    // Sign bit handling
     if (num_bytes > 0) {
-        if (negative) {
-            if ((bytes_buf[num_bytes - 1] & 0x80) == 0) {
-                bytes_buf[num_bytes - 1] |= 0x80;
-            } else if (num_bytes < bytes_buf.len) {
-                bytes_buf[num_bytes] = 0x80;
+        if ((bytes_buf[num_bytes - 1] & 0x80) != 0) {
+            if (num_bytes < bytes_buf.len) {
+                bytes_buf[num_bytes] = if (negative) 0x80 else 0x00;
                 num_bytes += 1;
             }
-        } else {
-            if ((bytes_buf[num_bytes - 1] & 0x80) != 0 and num_bytes < bytes_buf.len) {
-                bytes_buf[num_bytes] = 0x00;
-                num_bytes += 1;
-            }
+        } else if (negative) {
+            bytes_buf[num_bytes - 1] |= 0x80;
         }
+    }
+
+    // 2b. Padded: lift the sign bit off the magnitude so it can be re-applied
+    //     to the byte that is now most significant. 2a (field narrower than the
+    //     value, which OP_NUM2BIN rejects outright as an impossible encoding)
+    //     keeps the historical truncation: the encoding is used as-is.
+    var sign_bit: u8 = 0;
+    if (num_bytes > 0 and num_bytes < byte_len) {
+        sign_bit = bytes_buf[num_bytes - 1] & 0x80;
+        bytes_buf[num_bytes - 1] &= 0x7f;
     }
 
     const result = allocator.alloc(u8, byte_len * 2) catch return .{ .bytes = "" };
     @memset(result, '0');
 
-    // Write LE bytes as hex
+    // Write LE bytes as hex; everything past `write_len` stays zero-padded.
+    const hex_chars = "0123456789abcdef";
     const write_len = @min(num_bytes, byte_len);
     for (0..write_len) |i| {
         const b = bytes_buf[i];
-        const hex_chars = "0123456789abcdef";
         result[i * 2] = hex_chars[b >> 4];
         result[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+
+    // The sign lands on the new most-significant byte, which is pure padding
+    // here (`num_bytes < byte_len` guarded above), so it is exactly 0x80.
+    if (sign_bit != 0) {
+        result[(byte_len - 1) * 2] = '8';
+        result[(byte_len - 1) * 2 + 1] = '0';
     }
 
     return .{ .bytes = result };
@@ -2674,7 +2723,212 @@ test "chained bigint byte-ops thread raw stack bytes through the interpreter" {
     }
 }
 
-test "num2bin and bin2num roundtrip" {
+// ---------------------------------------------------------------------------
+// NEW-006 — a byte-op's raw stack bytes must follow the value across an ALIAS.
+//
+// An ALIAS is a binding whose value IS another binding's stack slot: the
+// `load_const "@ref:<name>"` every local rebind lowers to, an `if` adopting its
+// taken arm's last value, a `loop` adopting its body's. The side map
+// (EvalCtx.script_bytes) is keyed by the PRODUCING binding's name, so without an
+// explicit carry the alias loses the width and the next length-sensitive op
+// re-minimises the value — diverging from the deployed script. Port of the TS
+// fix in packages/runar-sdk/src/anf-interpreter.ts (`aliasScriptBytes`).
+// ---------------------------------------------------------------------------
+
+/// Run `body` as the sole public method of a one-property contract and return
+/// the final `result` (or propagate the on-chain ScriptNumberError abort).
+fn runAliasBody(a: std.mem.Allocator, body: []ANFBinding) !i64 {
+    var props = [_]ANFProperty{
+        .{ .name = "result", .type_name = "int", .readonly = false },
+    };
+    var methods = [_]ANFMethod{
+        .{ .name = "run", .params = &.{}, .body = body, .is_public = true },
+    };
+    const anf = ANFProgram{
+        .contract_name = "Alias",
+        .properties = &props,
+        .methods = &methods,
+    };
+    var cs = std.StringHashMap(ANFValue).init(a);
+    defer cs.deinit();
+    try cs.put("result", .{ .int = 0 });
+    var args = std.StringHashMap(ANFValue).init(a);
+    defer args.deinit();
+    var ns = try computeNewState(a, &anf, "run", cs, args, &.{});
+    defer ns.deinit();
+    return ns.get("result").?.int;
+}
+
+test "NEW-006 alias PROPAGATE — load_const @ref: carries the byte-op width" {
+    // The shape a local rebind (`let m0 = 2n << 8n; m0 = m0 | 5n;`) lowers to.
+    // On-chain: OP_OR([0x00],[0x05]) = [0x05] = 5.
+    // Unfixed: `m0` has no side-map entry, so `2 << 8` re-minimises to the
+    // EMPTY encoding of 0 and OP_OR aborts on the 0-vs-1 length mismatch.
+    var body = [_]ANFBinding{
+        .{ .name = "c2", .value = .{ .load_const = .{ .value = .{ .int = 2 } } } },
+        .{ .name = "c8", .value = .{ .load_const = .{ .value = .{ .int = 8 } } } },
+        .{ .name = "sh", .value = .{ .bin_op = .{ .op = "<<", .left = "c2", .right = "c8", .result_type = "int" } } },
+        .{ .name = "m0", .value = .{ .load_const = .{ .value = .{ .bytes = "@ref:sh" } } } },
+        .{ .name = "c5", .value = .{ .load_const = .{ .value = .{ .int = 5 } } } },
+        .{ .name = "orr", .value = .{ .bin_op = .{ .op = "|", .left = "m0", .right = "c5", .result_type = "int" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "orr" } } },
+    };
+    try std.testing.expectEqual(@as(i64, 5), try runAliasBody(std.testing.allocator, &body));
+}
+
+test "NEW-006 alias CLEAR — a re-bound name must not inherit a dead width" {
+    // `m0` is re-bound to an alias of a plain `load_const 300`, so its slot now
+    // holds the minimal 2-byte [0x2c,0x01]; the stale 1-byte [0x00] left by the
+    // earlier `2 << 8` binding of the SAME name must NOT be read as its width.
+    // On-chain: OP_AND([0x2c,0x01],[0xff,0x00]) = [0x2c,0x00] = 44.
+    //
+    // HONEST NOTE: this case PASSES against the unfixed interpreter — nothing
+    // keys the side map by a re-bound name yet, so the lookup already misses.
+    // It is here as the guard that makes a COPY-ONLY fix go RED: copy-only
+    // leaves the dead [0x00] under "m0" and OP_AND then aborts on a 1-vs-2
+    // length mismatch. In TS the same shape against a 1-byte second operand
+    // yields a silently WRONG value rather than an abort — the worse failure
+    // the clear half exists to prevent.
+    var body = [_]ANFBinding{
+        .{ .name = "c2", .value = .{ .load_const = .{ .value = .{ .int = 2 } } } },
+        .{ .name = "c8", .value = .{ .load_const = .{ .value = .{ .int = 8 } } } },
+        .{ .name = "sh", .value = .{ .bin_op = .{ .op = "<<", .left = "c2", .right = "c8", .result_type = "int" } } },
+        .{ .name = "m0", .value = .{ .load_const = .{ .value = .{ .bytes = "@ref:sh" } } } },
+        .{ .name = "c300", .value = .{ .load_const = .{ .value = .{ .int = 300 } } } },
+        .{ .name = "m0", .value = .{ .load_const = .{ .value = .{ .bytes = "@ref:c300" } } } },
+        .{ .name = "c255", .value = .{ .load_const = .{ .value = .{ .int = 255 } } } },
+        .{ .name = "andd", .value = .{ .bin_op = .{ .op = "&", .left = "m0", .right = "c255", .result_type = "int" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "andd" } } },
+    };
+    try std.testing.expectEqual(@as(i64, 44), try runAliasBody(std.testing.allocator, &body));
+}
+
+test "NEW-006 alias PROPAGATE — an `if` adopts its taken arm's byte-op width" {
+    // The taken arm ends in `2 << 8`; the `if` binding adopts that slot.
+    var then_branch = [_]ANFBinding{
+        .{ .name = "c2", .value = .{ .load_const = .{ .value = .{ .int = 2 } } } },
+        .{ .name = "c8", .value = .{ .load_const = .{ .value = .{ .int = 8 } } } },
+        .{ .name = "sh", .value = .{ .bin_op = .{ .op = "<<", .left = "c2", .right = "c8", .result_type = "int" } } },
+    };
+    var else_branch = [_]ANFBinding{
+        .{ .name = "z", .value = .{ .load_const = .{ .value = .{ .int = 0 } } } },
+    };
+    var body = [_]ANFBinding{
+        .{ .name = "cond", .value = .{ .load_const = .{ .value = .{ .boolean = true } } } },
+        .{ .name = "iv", .value = .{ .if_node = .{ .cond = "cond", .then_branch = &then_branch, .else_branch = &else_branch } } },
+        .{ .name = "c5", .value = .{ .load_const = .{ .value = .{ .int = 5 } } } },
+        .{ .name = "orr", .value = .{ .bin_op = .{ .op = "|", .left = "iv", .right = "c5", .result_type = "int" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "orr" } } },
+    };
+    try std.testing.expectEqual(@as(i64, 5), try runAliasBody(std.testing.allocator, &body));
+}
+
+test "NEW-006 alias PROPAGATE — a `loop` adopts its body's byte-op width" {
+    // The body's last binding is `2 << 8`; the loop binding adopts it.
+    var loop_body = [_]ANFBinding{
+        .{ .name = "c2", .value = .{ .load_const = .{ .value = .{ .int = 2 } } } },
+        .{ .name = "c8", .value = .{ .load_const = .{ .value = .{ .int = 8 } } } },
+        .{ .name = "sh", .value = .{ .bin_op = .{ .op = "<<", .left = "c2", .right = "c8", .result_type = "int" } } },
+    };
+    var body = [_]ANFBinding{
+        .{ .name = "lv", .value = .{ .loop_node = .{ .count = 1, .iter_var = "i", .body = &loop_body } } },
+        .{ .name = "c5", .value = .{ .load_const = .{ .value = .{ .int = 5 } } } },
+        .{ .name = "orr", .value = .{ .bin_op = .{ .op = "|", .left = "lv", .right = "c5", .result_type = "int" } } },
+        .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "orr" } } },
+    };
+    try std.testing.expectEqual(@as(i64, 5), try runAliasBody(std.testing.allocator, &body));
+}
+
+// NEW-013 — `num2bin` sign-bit placement.
+//
+// The ANF interpreter models what the DEPLOYED SCRIPT computes. For negative
+// values it used to set the sign bit on the last MAGNITUDE byte and pad zeros
+// AFTER it, so `num2bin(-1, 2)` came out `8100` where OP_NUM2BIN yields `0180`.
+// Those bytes go into the call transaction, so a legal method built a
+// continuation the script rejects.
+//
+// Every expectation below is the output of OP_NUM2BIN on the real `@bsv/sdk`
+// Spend interpreter, derived by
+// `conformance/anf-interpreter/num2bin-engine-parity.test.ts`, which re-runs
+// the engine live rather than trusting a table. Do NOT re-stamp these from this
+// implementation's own output — that is precisely how six of seven SDKs agreed
+// on the wrong answer.
+test "num2bin matches OP_NUM2BIN" {
+    const allocator = std.testing.allocator;
+
+    const Case = struct { n: i64, byte_len: usize, want: []const u8, why: []const u8 };
+    const cases = [_]Case{
+        // Negative, padded — the NEW-013 corner. The sign bit belongs on the
+        // byte that is most significant AFTER padding, not before it.
+        .{ .n = -1, .byte_len = 2, .want = "0180", .why = "negative padded" },
+        .{ .n = -1, .byte_len = 4, .want = "01000080", .why = "negative padded" },
+        .{ .n = -1, .byte_len = 8, .want = "0100000000000080", .why = "negative padded" },
+        .{ .n = -5, .byte_len = 4, .want = "05000080", .why = "negative padded" },
+        .{ .n = -1000, .byte_len = 4, .want = "e8030080", .why = "negative padded" },
+        .{ .n = -1000, .byte_len = 8, .want = "e803000000000080", .why = "negative padded" },
+        .{ .n = -255, .byte_len = 3, .want = "ff0080", .why = "negative padded" },
+        .{ .n = -256, .byte_len = 3, .want = "000180", .why = "negative padded" },
+        // Negative, exact width — the minimal encoding already fills the field,
+        // so it is pushed unchanged and the sign bit does not move.
+        .{ .n = -1, .byte_len = 1, .want = "81", .why = "negative exact width" },
+        .{ .n = -127, .byte_len = 1, .want = "ff", .why = "negative exact width" },
+        .{ .n = -1000, .byte_len = 2, .want = "e883", .why = "negative exact width" },
+        .{ .n = -256, .byte_len = 2, .want = "0081", .why = "negative exact width" },
+        // Negative, sign-bit carry — the top magnitude byte already uses bit 7,
+        // so the minimal encoding grows a byte before any padding happens.
+        .{ .n = -128, .byte_len = 2, .want = "8080", .why = "negative carry, exact" },
+        .{ .n = -128, .byte_len = 3, .want = "800080", .why = "negative carry, padded" },
+        .{ .n = -128, .byte_len = 8, .want = "8000000000000080", .why = "negative carry, padded" },
+        .{ .n = -32768, .byte_len = 3, .want = "008080", .why = "negative carry, exact" },
+        .{ .n = -32768, .byte_len = 4, .want = "00800080", .why = "negative carry, padded" },
+        // Positive at the same widths — must be untouched by the fix.
+        .{ .n = 1, .byte_len = 1, .want = "01", .why = "positive exact width" },
+        .{ .n = 1, .byte_len = 2, .want = "0100", .why = "positive padded" },
+        .{ .n = 1, .byte_len = 8, .want = "0100000000000000", .why = "positive padded" },
+        .{ .n = 1000, .byte_len = 2, .want = "e803", .why = "positive exact width" },
+        .{ .n = 1000, .byte_len = 4, .want = "e8030000", .why = "positive padded" },
+        .{ .n = 1000, .byte_len = 8, .want = "e803000000000000", .why = "positive padded" },
+        .{ .n = 127, .byte_len = 1, .want = "7f", .why = "positive exact width" },
+        .{ .n = 128, .byte_len = 2, .want = "8000", .why = "positive carry, exact" },
+        .{ .n = 128, .byte_len = 3, .want = "800000", .why = "positive carry, padded" },
+        .{ .n = 255, .byte_len = 2, .want = "ff00", .why = "positive carry, exact" },
+        // Zero — an all-zero field, no sign bit anywhere.
+        .{ .n = 0, .byte_len = 1, .want = "00", .why = "zero" },
+        .{ .n = 0, .byte_len = 4, .want = "00000000", .why = "zero" },
+        .{ .n = 0, .byte_len = 8, .want = "0000000000000000", .why = "zero" },
+    };
+
+    for (cases) |c| {
+        const got = num2binHex(allocator, c.n, c.byte_len);
+        switch (got) {
+            .bytes => |hex| {
+                defer allocator.free(hex);
+                std.testing.expectEqualStrings(c.want, hex) catch |err| {
+                    std.debug.print("num2bin({d}, {d}) [{s}]\n", .{ c.n, c.byte_len, c.why });
+                    return err;
+                };
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    // Non-vacuity: this table only earns its keep if it can see the pre-fix
+    // answer. `8100` is exactly what this function used to return.
+    const pre_fix = num2binHex(allocator, -1, 2);
+    switch (pre_fix) {
+        .bytes => |hex| {
+            defer allocator.free(hex);
+            try std.testing.expect(!std.mem.eql(u8, hex, "8100"));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// bin2num is this interpreter's own inverse, so this proves only
+// self-consistency — it passed throughout the NEW-013 bug and is the reason
+// nothing here saw it. Kept as a smoke test; "num2bin matches OP_NUM2BIN"
+// above is the evidence.
+test "num2bin and bin2num roundtrip (smoke test only, NOT the evidence)" {
     const allocator = std.testing.allocator;
 
     // num2bin(42, 4) -> hex LE with 4 bytes

@@ -94,6 +94,11 @@ module Runar
       # Implicit params injected by the compiler — never required from the caller.
       IMPLICIT_PARAMS = %w[_changePKH _changeAmount _newAmount txPreimage].freeze
 
+      # The on-disk ANF spelling of a bigint literal: decimal digits with a
+      # trailing +n+. Unambiguous against a hex ByteString literal, which never
+      # contains +n+.
+      BIGINT_LITERAL_RE = /\A-?\d+n\z/
+
       # Maximum number of iterations allowed for a single loop node.
       #
       # Bitcoin Script loops (unrolled at compile time) are bounded by script size
@@ -451,18 +456,28 @@ module Runar
 
         when 'load_const'
           v = value['value']
-          # Handle @ref: aliases — resolve to the named env variable.
+          # Handle @ref: aliases — resolve to the named env variable. The alias
+          # also carries (or clears) the target's raw stack bytes so a chained
+          # length-sensitive op sees this slot's real width (NEW-006); every
+          # local rebind lowers to exactly this shape.
           if v.is_a?(String) && v.start_with?('@ref:')
             target = v[5..]
-            # An alias is a pure rename — the lowering emits one for every
-            # named local (+const left = a << 3n+ becomes +t2 = a << 3n+ plus
-            # +left = @ref:t2+). It occupies the SAME stack bytes as its
-            # target, so the side-map entry must travel with it or both the
-            # non-minimal numeric check and the chained byte-op threading go
-            # blind on real compiler output.
-            sbytes = Thread.current[:runar_script_bytes]
-            sbytes[binding_name] = sbytes[target] if sbytes && binding_name && sbytes.key?(target)
+            alias_script_bytes(target, binding_name) if binding_name
             env[target]
+          elsif v.is_a?(String) && v.match?(BIGINT_LITERAL_RE)
+            # On-disk ANF spells every bigint as a +"<decimal>n"+ STRING (see
+            # +jsonWithBigInt+ in runar-cli's compile command) -- that is the
+            # artifact every SDK loads with a bare +JSON.parse+. Decode it here
+            # so a const operand is an Integer, not a String: the byte-op paths
+            # below gate on +!_.is_a?(String)+, so leaving it a string silently
+            # routes +<< >> & | ^ ~+ down the ByteString branch and the SDK
+            # builds a continuation the deployed script disagrees with
+            # (NEW-008). Go / Rust / Zig already decode this shape; this makes
+            # all seven agree with the script.
+            #
+            # Unambiguous: ANF ByteString literals are hex and +n+ is not a hex
+            # digit, so +\A-?\d+n\z+ cannot be a bytestring.
+            v.chomp('n').to_i
           else
             v
           end
@@ -576,7 +591,13 @@ module Runar
           child_env = env.dup
           eval_bindings(Array(branch), child_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf)
           env.merge!(child_env)
-          branch && !branch.empty? ? child_env[branch.last['name']] : nil
+          # The node's value IS the taken arm's last binding — an alias, so the
+          # raw stack bytes follow it out of the branch (NEW-006).
+          if branch && !branch.empty?
+            last_name = branch.last['name']
+            alias_script_bytes(last_name, binding_name) if binding_name
+            child_env[last_name]
+          end
 
         when 'loop'
           count    = (value['count'] || 0).to_i
@@ -597,7 +618,14 @@ module Runar
             loop_env = env.dup
             eval_bindings(body, loop_env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf)
             env.merge!(loop_env)
-            last_val = body.empty? ? nil : loop_env[body.last['name']]
+            # Same alias rule as the +if+ node: the loop's value IS its body's
+            # last binding, so the raw stack bytes follow it out (NEW-006).
+            last_val = nil
+            unless body.empty?
+              last_name = body.last['name']
+              alias_script_bytes(last_name, binding_name) if binding_name
+              last_val = loop_env[last_name]
+            end
           end
           last_val
 
@@ -1281,42 +1309,60 @@ module Runar
       # Byte encoding helpers
       # ---------------------------------------------------------------------------
 
-      # Convert an integer to a little-endian sign-magnitude hex string.
+      # Convert an integer to a little-endian sign-magnitude hex string --
+      # exactly what OP_NUM2BIN computes (NEW-013).
       #
-      # This matches Bitcoin Script's num2bin semantics: the sign bit occupies
-      # the MSB of the last byte, and the value is padded (or truncated) to the
-      # requested byte length.
+      # The order of the two steps below is load-bearing. This used to set the
+      # sign bit on the last MAGNITUDE byte and pad zeros AFTER it, so
+      # +num2bin(-1, 2)+ produced +8100+ while the script produces +0180+. The
+      # result is the bytes the SDK puts in the call transaction, so the wrong
+      # order built continuations the deployed script rejects -- and six of the
+      # seven SDKs shared the mistake, which is why tier-vs-tier parity never
+      # caught it.
+      #
+      # The engine pads FIRST and then puts the sign bit on the new
+      # most-significant byte.
       #
       # @param n        [Integer]
       # @param byte_len [Integer]
       # @return [String] hex-encoded bytes (2 * byte_len characters)
       def num2bin_hex(n, byte_len)
-        return '00' * byte_len if n == 0
-
+        # 1. Minimal BSV script-number encoding: little-endian magnitude with
+        #    the sign in bit 7 of the top byte, growing one byte when magnitude
+        #    data already occupies that bit.
         negative = n < 0
-        abs_n    = n.abs
 
         result_bytes = []
-        tmp = abs_n
+        tmp = n.abs
         while tmp > 0
           result_bytes << (tmp & 0xff)
           tmp >>= 8
         end
-
-        # Encode sign bit into the last byte, adding an extra byte if needed.
-        if negative
-          if (result_bytes.last & 0x80) == 0
+        unless result_bytes.empty?
+          if (result_bytes.last & 0x80) != 0
+            result_bytes << (negative ? 0x80 : 0x00)
+          elsif negative
             result_bytes[-1] |= 0x80
-          else
-            result_bytes << 0x80
           end
-        else
-          result_bytes << 0x00 if (result_bytes.last & 0x80) != 0
         end
 
-        # Pad to requested length, then truncate.
+        # 2a. Field too narrow for the value: OP_NUM2BIN rejects this outright
+        #     ("impossible encoding"). The interpreter keeps its historical
+        #     truncation rather than growing a new failure mode here; an
+        #     equal-length encoding is already final and needs no sign-bit move.
+        if result_bytes.length >= byte_len
+          return result_bytes[0, byte_len].map { |b| format('%02x', b) }.join
+        end
+
+        # 2b. Padded: lift the sign bit off the magnitude, zero-extend, and
+        #     re-apply it to the byte that is now most significant.
+        sign_bit = 0
+        unless result_bytes.empty?
+          sign_bit = result_bytes.last & 0x80
+          result_bytes[-1] &= 0x7f
+        end
         result_bytes << 0x00 while result_bytes.length < byte_len
-        result_bytes = result_bytes[0, byte_len]
+        result_bytes[byte_len - 1] |= 0x80 if sign_bit != 0
 
         result_bytes.map { |b| format('%02x', b) }.join
       end
@@ -1485,6 +1531,32 @@ module Runar
       # are minimal on-chain, so their bytes are re-derived via
       # #encode_scriptnum_bytes. Mirrors the TS anf-interpreter scriptNumber*Bytes.
       # ---------------------------------------------------------------------------
+
+      # Carry a binding's raw stack bytes across an ALIAS — a binding whose value
+      # IS another binding's slot: the +load_const "@ref:<name>"+ every local
+      # rebind lowers to, an +if+ adopting its taken arm's last value, a +loop+
+      # adopting its body's. Without this a chained length-sensitive op
+      # re-minimises the aliased value and disagrees with the deployed script
+      # (NEW-006: +2 << 8+ leaves a 1-byte +0x00+ on the stack but +[]+ when
+      # re-minimised from the integer 0). Mirrors the stack-lowering pass, which
+      # carries its +raw_slots+ marker across the same constructs.
+      #
+      # CLEARS when the source has no entry: the alias target is then a freshly
+      # pushed, minimal value, so a stale entry left by an EARLIER binding of the
+      # SAME name (+let m0 = 2 << 8; m0 = 300;+) would otherwise be read as this
+      # slot's width.
+      #
+      # @param from [String] name of the aliased (source) binding
+      # @param to   [String] name of the aliasing (target) binding
+      # @return [void]
+      def alias_script_bytes(from, to)
+        sbytes = (Thread.current[:runar_script_bytes] ||= {})
+        if sbytes.key?(from)
+          sbytes[to] = sbytes[from]
+        else
+          sbytes.delete(to)
+        end
+      end
 
       # OP_AND/OP_OR/OP_XOR on two raw byte arrays. Aborts on a length mismatch,
       # exactly like the on-chain opcodes.

@@ -62,6 +62,14 @@ public final class AnfInterpreter {
         "_changePKH", "_changeAmount", "_newAmount", "txPreimage"
     );
 
+    /**
+     * The on-disk ANF spelling of a bigint literal: decimal digits with a
+     * trailing {@code n}. Unambiguous against a hex ByteString literal, which
+     * never contains {@code n}.
+     */
+    private static final java.util.regex.Pattern BIGINT_LITERAL =
+        java.util.regex.Pattern.compile("-?\\d+n");
+
     private static final Set<String> CHAIN_ONLY_KINDS = Set.of(
         "check_preimage", "deserialize_state", "get_state_script"
     );
@@ -695,16 +703,24 @@ public final class AnfInterpreter {
                 Object v = value.get("value");
                 if (v instanceof String s && s.startsWith("@ref:")) {
                     String target = s.substring(5);
-                    // An alias is a pure rename — the lowering emits one for
-                    // every named local (`const left = a << 3n` becomes
-                    // `t2 = a << 3n` plus `left = @ref:t2`). It occupies the
-                    // SAME stack bytes as its target, so the side-map entry
-                    // must travel with it or both the non-minimal numeric
-                    // check and the chained byte-op threading go blind on real
-                    // compiler output.
-                    byte[] aliased = scriptBytes.get(target);
-                    if (aliased != null) scriptBytes.put(bindingName, aliased);
+                    aliasScriptBytes(scriptBytes, target, bindingName);
                     return env.get(target);
+                }
+                // On-disk ANF spells every bigint as a `"<decimal>n"` STRING
+                // (see `jsonWithBigInt` in runar-cli's compile command) — that
+                // is the artifact every SDK loads with a bare JSON parse.
+                // Decode it here so a const operand is a BigInteger, not a
+                // String: the byte-op paths below gate on
+                // `!(operand instanceof String)`, so leaving it a string
+                // silently routes `<< >> & | ^ ~` down the ByteString branch
+                // and the SDK builds a continuation the deployed script
+                // disagrees with (NEW-008). Go / Rust / Zig already decode
+                // this shape; this makes all seven agree with the script.
+                //
+                // Unambiguous: ANF ByteString literals are hex and `n` is not
+                // a hex digit, so `^-?\d+n$` cannot be a bytestring.
+                if (v instanceof String s && BIGINT_LITERAL.matcher(s).matches()) {
+                    return new BigInteger(s.substring(0, s.length() - 1));
                 }
                 return v;
             }
@@ -832,7 +848,9 @@ public final class AnfInterpreter {
                 evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
-                    return childEnv.get((String) branch.get(branch.size() - 1).get("name"));
+                    String lastName = (String) branch.get(branch.size() - 1).get("name");
+                    aliasScriptBytes(scriptBytes, lastName, bindingName);
+                    return childEnv.get(lastName);
                 }
                 return null;
             }
@@ -854,7 +872,9 @@ public final class AnfInterpreter {
                     evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
-                        lastVal = loopEnv.get((String) body.get(body.size() - 1).get("name"));
+                        String lastName = (String) body.get(body.size() - 1).get("name");
+                        aliasScriptBytes(scriptBytes, lastName, bindingName);
+                        lastVal = loopEnv.get(lastName);
                     }
                 }
                 return lastVal;
@@ -1100,6 +1120,34 @@ public final class AnfInterpreter {
     // values from other sources (literals, arithmetic) are minimal on-chain. The
     // BigInteger wrappers below re-encode operands to their minimal bytes and are
     // used by the single-op truth-table tests only.
+
+    /**
+     * Carry a binding's raw stack bytes across an ALIAS — a binding whose value
+     * IS another binding's slot: the {@code load_const "@ref:<name>"} every
+     * local rebind lowers to, an {@code if} adopting its taken arm's last
+     * value, a {@code loop} adopting its body's. Without this, a chained
+     * length-sensitive op re-minimises the aliased value and disagrees with the
+     * deployed script (NEW-006: {@code (4n ^ 4n)} is a 1-byte {@code 0x00} on
+     * the stack but empty when re-minimised from {@code 0n}).
+     *
+     * <p>Mirrors {@code aliasScriptBytes} in the TS SDK's anf-interpreter, and
+     * the {@code rawSlots} marker StackLower already carries across the same
+     * constructs.
+     *
+     * <p>CLEARS when the source has no entry: the alias target is then a
+     * freshly pushed, minimal value, so a stale entry left by an earlier
+     * binding of the SAME name ({@code let m0 = 4n ^ 4n; m0 = 300n;}) would
+     * otherwise be read as this slot's width — a silently wrong value rather
+     * than a throw.
+     */
+    private static void aliasScriptBytes(Map<String, byte[]> scriptBytes, String from, String to) {
+        byte[] bytes = scriptBytes.get(from);
+        if (bytes != null) {
+            scriptBytes.put(to, bytes);
+        } else {
+            scriptBytes.remove(to);
+        }
+    }
 
     /** OP_AND/OP_OR/OP_XOR on raw stack bytes. Aborts (throws) on a length
      *  mismatch, exactly like the on-chain opcodes. */

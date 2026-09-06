@@ -1,0 +1,12 @@
+{
+  "state": {
+    "count": "1n"
+  },
+  "dataOutputs": [
+    {
+      "satoshis": "0n",
+      "script": "e803000000000000e803e8030000"
+    }
+  ],
+  "rawOutputs": []
+}

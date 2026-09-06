@@ -48,7 +48,15 @@ import {
   Hash,
   TransactionSignature,
 } from '@bsv/sdk';
-import { RunarContract, MockProvider, LocalSigner, extractStateFromScript, buildP2PKHScript } from 'runar-sdk';
+import {
+  RunarContract,
+  MockProvider,
+  LocalSigner,
+  extractStateFromScript,
+  buildP2PKHScript,
+  detachLockingScript,
+  detachUnlockingScript,
+} from 'runar-sdk';
 import type { RunarArtifact, ABIMethod, ABIParam } from 'runar-ir-schema';
 import { TestContract } from '../test-contract.js';
 import { TEST_KEYS } from '../test-keys.js';
@@ -395,7 +403,10 @@ function validateSpend(
     sourceTXID: input.sourceTXID!,
     sourceOutputIndex: input.sourceOutputIndex,
     sourceSatoshis: sourceOutput.satoshis!,
-    lockingScript: sourceOutput.lockingScript,
+    // NEW-005: `Spend` mutates the scripts it executes in place, so replaying a
+    // live transaction with its own script objects makes the replay one-shot.
+    // Detach both (see runar-sdk/spend-safety.ts).
+    lockingScript: detachLockingScript(sourceOutput.lockingScript),
     transactionVersion: tx.version,
     otherInputs: tx.inputs
       .filter((_: unknown, i: number) => i !== inputIdx)
@@ -414,7 +425,7 @@ function validateSpend(
         }),
       ),
     outputs,
-    unlockingScript: input.unlockingScript!,
+    unlockingScript: detachUnlockingScript(input.unlockingScript!),
     inputIndex: inputIdx,
     inputSequence: input.sequence ?? 0xffffffff,
     lockTime: tx.lockTime,

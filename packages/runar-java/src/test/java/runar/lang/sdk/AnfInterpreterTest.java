@@ -170,6 +170,159 @@ class AnfInterpreterTest {
     }
 
     // ------------------------------------------------------------------
+    // NEW-006 (a): a byte-op's REAL stack bytes must follow the value across
+    // an ALIAS — a binding whose value simply IS another binding's stack slot.
+    // Every local rebind (`m0 = ...`) lowers to `load_const "@ref:<temp>"`, and
+    // a value-`if` / `loop` adopts its taken arm's / body's last binding.
+    // Without that, a chained length-sensitive op (& | ^ << >>) re-minimises
+    // the aliased value and disagrees with the deployed script.
+    // ------------------------------------------------------------------
+
+    /**
+     * PROPAGATE. `2 << 8` leaves a NON-minimal 1-byte 0x00 on the stack
+     * (minimal encoding of 0 is empty). Alias it through a rebind, then OR it
+     * with 5: on-chain OP_OR sees 1 byte vs 1 byte and yields 5.
+     *
+     * <p>Fails before the fix — the alias drops the width, so the interpreter
+     * re-minimises 0 to zero bytes and OP_OR aborts on a 0-vs-1 length
+     * mismatch.
+     */
+    @Test
+    void aliasCarriesByteOpWidthAcrossARebind() {
+        BigInteger result = runBodyToResult("""
+            { "name": "t0", "value": { "kind": "load_const", "value": 2 } },
+            { "name": "t1", "value": { "kind": "load_const", "value": 8 } },
+            { "name": "t2", "value": { "kind": "bin_op", "op": "<<", "left": "t0", "right": "t1" } },
+            { "name": "m0", "value": { "kind": "load_const", "value": "@ref:t2" } },
+            { "name": "t3", "value": { "kind": "load_const", "value": 5 } },
+            { "name": "t4", "value": { "kind": "bin_op", "op": "|", "left": "m0", "right": "t3" } },
+            { "name": "t5", "value": { "kind": "update_prop", "name": "result", "value": "t4" } }
+            """);
+        assertEquals(BigInteger.valueOf(5), result,
+            "(2 << 8) is a 1-byte 0x00; aliased then OR'd with 5 that is 5");
+    }
+
+    /**
+     * CLEAR, silently-wrong variant. The alias target is a plain constant with
+     * no width entry of its own, so the alias must ERASE whatever the same
+     * binding name carried before it.
+     *
+     * <p>Honest status: this PASSES against the unfixed interpreter (nothing
+     * ever keys the side map by a re-bound name today). It goes RED under a
+     * COPY-ONLY fix, which would leave the dead 1-byte 0x00 from `2 << 8`
+     * attached to `m0` and compute `0x00 | 0x03` = 3 instead of `0x05 | 0x03`
+     * = 7 — a silently wrong value, the worst failure mode. It is the guard
+     * that forces the clear half.
+     */
+    @Test
+    void aliasClearsAStaleWidthWhenTheTargetHasNone() {
+        BigInteger result = runBodyToResult("""
+            { "name": "t0", "value": { "kind": "load_const", "value": 2 } },
+            { "name": "t1", "value": { "kind": "load_const", "value": 8 } },
+            { "name": "t2", "value": { "kind": "bin_op", "op": "<<", "left": "t0", "right": "t1" } },
+            { "name": "m0", "value": { "kind": "load_const", "value": "@ref:t2" } },
+            { "name": "t3", "value": { "kind": "load_const", "value": 5 } },
+            { "name": "m0", "value": { "kind": "load_const", "value": "@ref:t3" } },
+            { "name": "t4", "value": { "kind": "load_const", "value": 3 } },
+            { "name": "t5", "value": { "kind": "bin_op", "op": "|", "left": "m0", "right": "t4" } },
+            { "name": "t6", "value": { "kind": "update_prop", "name": "result", "value": "t5" } }
+            """);
+        assertEquals(BigInteger.valueOf(7), result,
+            "m0 was re-bound to a plain 5; 5 | 3 is 7 — a stale 1-byte 0x00 would give 3");
+    }
+
+    /**
+     * CLEAR, width-mismatch variant (the shape from the TS fix's commit
+     * message): `m0` re-bound to 300, whose minimal encoding is TWO bytes.
+     * 300 &amp; 255 = 44.
+     *
+     * <p>Also PASSES today and goes RED under a copy-only fix, where the stale
+     * 1-byte width would make OP_AND abort against 255's 2-byte encoding.
+     */
+    @Test
+    void aliasClearsAStaleWidthOfADifferentLength() {
+        BigInteger result = runBodyToResult("""
+            { "name": "t0", "value": { "kind": "load_const", "value": 2 } },
+            { "name": "t1", "value": { "kind": "load_const", "value": 8 } },
+            { "name": "t2", "value": { "kind": "bin_op", "op": "<<", "left": "t0", "right": "t1" } },
+            { "name": "m0", "value": { "kind": "load_const", "value": "@ref:t2" } },
+            { "name": "t3", "value": { "kind": "load_const", "value": 300 } },
+            { "name": "m0", "value": { "kind": "load_const", "value": "@ref:t3" } },
+            { "name": "t4", "value": { "kind": "load_const", "value": 255 } },
+            { "name": "t5", "value": { "kind": "bin_op", "op": "&", "left": "m0", "right": "t4" } },
+            { "name": "t6", "value": { "kind": "update_prop", "name": "result", "value": "t5" } }
+            """);
+        assertEquals(BigInteger.valueOf(44), result, "300 & 255 == 44");
+    }
+
+    /**
+     * PROPAGATE across a value-{@code if}: the binding adopts its taken arm's
+     * last value, so it must adopt that value's width too. Fails before the
+     * fix for the same reason as the rebind case.
+     */
+    @Test
+    void aliasCarriesByteOpWidthOutOfATakenIfBranch() {
+        BigInteger result = runBodyToResult("""
+            { "name": "c0", "value": { "kind": "load_const", "value": 1 } },
+            { "name": "r0", "value": { "kind": "if", "cond": "c0", "then": [
+                { "name": "i0", "value": { "kind": "load_const", "value": 2 } },
+                { "name": "i1", "value": { "kind": "load_const", "value": 8 } },
+                { "name": "i2", "value": { "kind": "bin_op", "op": "<<", "left": "i0", "right": "i1" } }
+              ], "else": [
+                { "name": "e0", "value": { "kind": "load_const", "value": 0 } }
+              ] } },
+            { "name": "t1", "value": { "kind": "load_const", "value": 5 } },
+            { "name": "t2", "value": { "kind": "bin_op", "op": "|", "left": "r0", "right": "t1" } },
+            { "name": "t3", "value": { "kind": "update_prop", "name": "result", "value": "t2" } }
+            """);
+        assertEquals(BigInteger.valueOf(5), result,
+            "the taken arm ends in (2 << 8), a 1-byte 0x00; OR'd with 5 that is 5");
+    }
+
+    /**
+     * PROPAGATE across a {@code loop}: the binding adopts the body's last
+     * value, so it must adopt that value's width too.
+     */
+    @Test
+    void aliasCarriesByteOpWidthOutOfALoopBody() {
+        BigInteger result = runBodyToResult("""
+            { "name": "r0", "value": { "kind": "loop", "count": 1, "iterVar": "i", "body": [
+                { "name": "b0", "value": { "kind": "load_const", "value": 2 } },
+                { "name": "b1", "value": { "kind": "load_const", "value": 8 } },
+                { "name": "b2", "value": { "kind": "bin_op", "op": "<<", "left": "b0", "right": "b1" } }
+              ] } },
+            { "name": "t1", "value": { "kind": "load_const", "value": 5 } },
+            { "name": "t2", "value": { "kind": "bin_op", "op": "|", "left": "r0", "right": "t1" } },
+            { "name": "t3", "value": { "kind": "update_prop", "name": "result", "value": "t2" } }
+            """);
+        assertEquals(BigInteger.valueOf(5), result,
+            "the loop body ends in (2 << 8), a 1-byte 0x00; OR'd with 5 that is 5");
+    }
+
+    /**
+     * Run a synthetic single-method ANF body that ends by writing temp
+     * {@code result} into the contract's one mutable property, and return that
+     * property's post-call value.
+     */
+    private static BigInteger runBodyToResult(String bodyBindingsJson) {
+        String json = """
+            {"anf": {
+              "contractName": "AliasWidth",
+              "properties": [ { "name": "result", "type": "bigint", "readonly": false } ],
+              "methods": [
+                { "name": "test", "params": [], "isPublic": true, "body": [
+            """ + bodyBindingsJson + """
+                ] }
+              ]
+            }}
+            """;
+        Map<String, Object> anf = AnfInterpreter.loadAnf(json);
+        Map<String, Object> newState = AnfInterpreter.computeNewState(
+            anf, "test", Map.of("result", BigInteger.ZERO), Map.of(), List.of());
+        return asBigInt(newState.get("result"));
+    }
+
+    // ------------------------------------------------------------------
 
     private static Map<String, Object> loadFixtureAnf(String name) throws Exception {
         Path fixture = locateFixture(name);

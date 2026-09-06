@@ -376,15 +376,22 @@ function evalValue(
       // Handle @ref: aliases (load_const with "@ref:targetName")
       if (typeof v === 'string' && v.startsWith('@ref:')) {
         const target = v.slice(5);
-        // Carry the threaded stack bytes across the alias. ANF lowering emits
-        // an alias binding for EVERY named local, and `scriptBytes` is keyed by
-        // binding NAME, so returning the value alone silently drops them. That
-        // both blinds the minimal-encoding check below and breaks the chained
-        // byte-op threading itself: `(2 << 8) | 5` then FALSE-aborts on an
-        // OP_OR length mismatch the chain never raises.
-        const carried = scriptBytes[target];
-        if (carried !== undefined) scriptBytes[bindingName] = carried;
+        aliasScriptBytes(scriptBytes, target, bindingName);
         return env[target];
+      }
+      // On-disk ANF spells every bigint as a `"<decimal>n"` STRING (see
+      // `jsonWithBigInt` in runar-cli's compile command) — that is the artifact
+      // every SDK loads with a bare `JSON.parse`. Decode it here so a const
+      // operand is a `bigint`, not a `string`: the byte-op paths below gate on
+      // `typeof !== 'string'`, so leaving it a string silently routes `<< >> &
+      // | ^ ~` down the ByteString branch and the SDK builds a continuation the
+      // deployed script disagrees with (NEW-008). Go / Rust / Zig already
+      // decode this shape; this makes all seven agree with the script.
+      //
+      // Unambiguous: ANF ByteString literals are hex and `n` is not a hex
+      // digit, so `^-?\d+n$` cannot be a bytestring.
+      if (typeof v === 'string' && /^-?\d+n$/.test(v)) {
+        return BigInt(v.slice(0, -1));
       }
       return v;
     }
@@ -478,7 +485,9 @@ function evalValue(
       Object.assign(env, childEnv);
       // Return the last binding's value from the branch
       if (branch.length > 0) {
-        return childEnv[branch[branch.length - 1]!.name];
+        const lastName = branch[branch.length - 1]!.name;
+        aliasScriptBytes(scriptBytes, lastName, bindingName);
+        return childEnv[lastName];
       }
       return undefined;
     }
@@ -497,7 +506,9 @@ function evalValue(
         // Copy loop bindings back
         Object.assign(env, loopEnv);
         if (body.length > 0) {
-          lastVal = loopEnv[body[body.length - 1]!.name];
+          const lastName = body[body.length - 1]!.name;
+          aliasScriptBytes(scriptBytes, lastName, bindingName);
+          lastVal = loopEnv[lastName];
         }
       }
       return lastVal;
@@ -674,6 +685,34 @@ function minimalScriptNumberBytes(n: bigint): number[] {
 // a length-sensitive `& | ^`/shift must see that real length to agree with the
 // deployed script. The interpreter threads these bytes via a per-binding side
 // map (see `evalBindings`); values from other sources are minimal on-chain.
+
+/**
+ * Carry a binding's raw stack bytes across an ALIAS — a binding whose value IS
+ * another binding's slot: the `load_const "@ref:<name>"` every local rebind
+ * lowers to, an `if` adopting its taken arm's last value, a `loop` adopting its
+ * body's. Without this, a chained length-sensitive op re-minimises the aliased
+ * value and disagrees with the deployed script (NEW-006: `(4n ^ 4n)` is a
+ * 1-byte `0x00` on the stack but `[]` when re-minimised from `0n`).
+ *
+ * Mirrors `05-stack-lower.ts`, which carries its `rawSlots` marker across the
+ * same two constructs.
+ *
+ * CLEARS when the source has no entry: the alias target is a freshly pushed,
+ * minimal value, so a stale entry left by an earlier binding of the SAME name
+ * (`let m0 = 4n ^ 4n; m0 = 300n;`) would otherwise be read as this slot's width.
+ */
+function aliasScriptBytes(
+  scriptBytes: Record<string, number[]>,
+  from: string,
+  to: string,
+): void {
+  const bytes = scriptBytes[from];
+  if (bytes !== undefined) {
+    scriptBytes[to] = bytes;
+  } else {
+    delete scriptBytes[to];
+  }
+}
 
 /** OP_AND/OP_OR/OP_XOR on raw stack bytes. Throws on length mismatch. */
 function scriptNumberBitwiseBytes(op: '&' | '|' | '^', av: number[], bv: number[]): number[] {
@@ -1061,9 +1100,23 @@ function isTruthy(v: unknown): boolean {
 // Byte encoding helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * `num2bin(n, byteLen)` — exactly what OP_NUM2BIN computes (NEW-013).
+ *
+ * The order of the two steps below is load-bearing. This function used to set
+ * the sign bit on the last MAGNITUDE byte and pad zeros AFTER it, so
+ * `num2bin(-1n, 2n)` produced `8100` while the script produces `0180`. The
+ * result is the bytes the SDK puts in the call transaction, so the wrong order
+ * built continuations the deployed script rejects — and six of the seven SDKs
+ * shared the mistake, which is why tier-vs-tier parity never caught it.
+ *
+ * The engine (`@bsv/sdk` `Spend`, and BSV consensus) pads FIRST and then puts
+ * the sign bit on the new most-significant byte.
+ */
 function num2binHex(n: bigint, byteLen: number): string {
-  if (n === 0n) return '00'.repeat(byteLen);
-
+  // 1. Minimal BSV script-number encoding: little-endian magnitude with the
+  //    sign in bit 7 of the top byte, growing one byte when magnitude data
+  //    already occupies that bit.
   const negative = n < 0n;
   let abs = negative ? -n : n;
 
@@ -1072,26 +1125,34 @@ function num2binHex(n: bigint, byteLen: number): string {
     bytes.push(Number(abs & 0xffn));
     abs >>= 8n;
   }
-
-  // Sign bit handling: if MSB has sign bit set and number is positive,
-  // or vice versa, add a padding byte
   if (bytes.length > 0) {
-    if (negative) {
-      if ((bytes[bytes.length - 1]! & 0x80) === 0) {
-        bytes[bytes.length - 1]! |= 0x80;
-      } else {
-        bytes.push(0x80);
-      }
-    } else {
-      if ((bytes[bytes.length - 1]! & 0x80) !== 0) {
-        bytes.push(0x00);
-      }
+    if ((bytes[bytes.length - 1]! & 0x80) !== 0) {
+      bytes.push(negative ? 0x80 : 0x00);
+    } else if (negative) {
+      bytes[bytes.length - 1]! |= 0x80;
     }
   }
 
-  // Pad or truncate to requested length
+  // 2a. Field too narrow for the value: OP_NUM2BIN rejects this outright
+  //     ("impossible encoding"). The interpreter keeps its historical
+  //     truncation rather than growing a new failure mode here; an equal-length
+  //     encoding is already final and needs no sign-bit move.
+  if (bytes.length >= byteLen) {
+    return bytes
+      .slice(0, byteLen)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  // 2b. Padded: lift the sign bit off the magnitude, zero-extend, and re-apply
+  //     it to the byte that is now most significant.
+  let signBit = 0;
+  if (bytes.length > 0) {
+    signBit = bytes[bytes.length - 1]! & 0x80;
+    bytes[bytes.length - 1]! &= 0x7f;
+  }
   while (bytes.length < byteLen) bytes.push(0x00);
-  bytes.length = byteLen;
+  if (signBit !== 0) bytes[byteLen - 1]! |= 0x80;
 
   return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
 }

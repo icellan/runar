@@ -727,13 +727,25 @@ func (c *RunarContract) PrepareCall(
 	var anfOrderedOutputs []OrderedOutput
 	if isStateful && c.Artifact.ANF != nil {
 		namedArgs := buildNamedArgs(userParams, resolvedArgs)
-		if state, dataOuts, _, ordered, err := ComputeNewStateAndDataOutputs(
+		state, dataOuts, _, ordered, err := ComputeNewStateAndDataOutputs(
 			c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs,
-		); err == nil {
-			autoComputedState = state
-			resolvedDataOutputs = dataOuts
-			anfOrderedOutputs = ordered
+		)
+		if err != nil {
+			// FAIL CLOSED (NEW-006). Swallowing this built the stateful
+			// continuation from the CURRENT state, which the covenant's
+			// hashOutputs binding then rejects -- a silent "your call cannot be
+			// broadcast", plus silent loss of the method's data / raw outputs.
+			// The interpreter is the only thing that knows the post-state and
+			// those payloads, so there is nothing to fall back to.
+			return nil, fmt.Errorf(
+				"RunarContract.PrepareCall(%q): the ANF interpreter could not evaluate the "+
+					"method body, so the state continuation and data outputs this call would "+
+					"commit cannot be derived. Refusing to build a transaction from the "+
+					"pre-call state: %w", methodName, err)
 		}
+		autoComputedState = state
+		resolvedDataOutputs = dataOuts
+		anfOrderedOutputs = ordered
 	}
 	if options != nil && options.DataOutputs != nil {
 		resolvedDataOutputs = options.DataOutputs

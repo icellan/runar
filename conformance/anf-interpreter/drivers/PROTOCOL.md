@@ -33,8 +33,15 @@ output on error — print full output on stdout only after a successful run.
   `<repo-root>/conformance/tests/<case>/expected-ir.json`. The driver SHOULD
   walk up from its own location until it finds a directory named `conformance`
   to anchor the lookup, so it works no matter which working directory the
-  caller is in. (`anfPath` is also accepted as a fully-qualified absolute path
-  alternative — drivers that support both can be invoked either way.)
+  caller is in.
+- `anfPath` — alternative to `case`, and PREFERRED by every driver when both
+  are present: a path to the ANF IR, resolved against the process working
+  directory (the parity tests spawn drivers with cwd = repo root, so the
+  checked-in inputs use repo-root-relative paths; an absolute path also works).
+  Use it for a case whose program is not a conformance fixture — e.g. the
+  `num2bin-*` cases, whose program lives in `../programs/` because no fixture
+  routes a `num2bin` result anywhere the lenient envelope can observe it.
+  Exactly one of `case` / `anfPath` must be present.
 - `methodName` — public method name to execute
 - `currentState` — map of property name → value
 - `args` — map of param name → value

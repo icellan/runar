@@ -1,7 +1,20 @@
 {
   "case": "add-data-output",
   "methodName": "publish",
-  "currentState": { "count": "0n" },
-  "args": { "payload": "deadbeef" },
-  "constructorArgs": []
+  "currentState": {
+    "count": "0n"
+  },
+  "args": {
+    "payload": "deadbeef"
+  },
+  "constructorArgs": [],
+  "scriptOracle": {
+    "source": "examples/ts/add-data-output/DataOutputTest.runar.ts",
+    "constructorArgs": [
+      "0n"
+    ],
+    "methodArgs": [
+      "deadbeef"
+    ]
+  }
 }
