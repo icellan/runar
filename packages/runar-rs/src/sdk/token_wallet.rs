@@ -289,6 +289,7 @@ mod tests {
                 ],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,

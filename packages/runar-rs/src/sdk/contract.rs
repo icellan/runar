@@ -88,13 +88,33 @@ pub const AUTO_PREVOUTS_PARAM_NAME: &str = "allPrevouts";
 /// ByteString param is a caller error, not a stub request.
 /// True for OR-CHECKSIG; false when script looks like OP_CHECKMULTISIG (0xae/af).
 fn is_likely_or_checksig(artifact: &RunarArtifact) -> bool {
+    // Prefer ASM: it is opcode-accurate, where a hex substring test is not.
+    if let Some(asm) = artifact.asm.as_deref() {
+        let asm = asm.to_ascii_uppercase();
+        if asm.contains("OP_CHECKMULTISIG") {
+            return false;
+        }
+        if asm.contains("OP_BOOLOR") && asm.contains("OP_CHECKSIG") {
+            return true;
+        }
+        // NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+        // OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES
+        // that change: when the FIRST branch fails, its OP_CHECKSIG has already
+        // run with a non-empty signature, which is exactly what BIP146 rejects.
+        // Short-circuiting removes the hazard only when the first branch
+        // succeeds, so the warning must still fire for the branch-shaped form.
+        return asm.contains("OP_IF") && asm.contains("OP_CHECKSIG");
+    }
+    // No ASM (older artifact): fall back to the coarse hex probe. It cannot see
+    // the branch-shaped form — OP_IF is 0x63, which matches far too much push
+    // data to test for — so this path stays as it was rather than becoming a
+    // spam generator.
     let script = artifact.script.to_ascii_lowercase();
     // OP_CHECKMULTISIG = 0xae, OP_CHECKMULTISIGVERIFY = 0xaf
     if script.contains("ae") || script.contains("af") {
         return false;
     }
-    // OP_BOOLOR = 0x9b (not 0x9a which is OP_BOOLAND). Coarse hex probe only —
-    // may false-positive inside push data; prefer ASM when available.
+    // OP_BOOLOR = 0x9b (not 0x9a which is OP_BOOLAND).
     script.contains("9b")
 }
 
@@ -2723,6 +2743,7 @@ mod tests {
             parent_class: None,
             abi,
             script: script.to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2730,6 +2751,37 @@ mod tests {
             code_separator_indices: None,
             anf: None,
         }
+    }
+
+    /// The issue #106 OR-CHECKSIG gate must recognise BOTH lowerings of `||`.
+    ///
+    /// It went blind once already: the gate tested for OP_BOOLOR, and NEW-014
+    /// stopped the compiler emitting that opcode, so the NULLFAIL warning
+    /// silently never fired. The `OP_CHECKMULTISIG` row is the counterweight: a
+    /// gate that warns on everything is as useless as one that warns on nothing.
+    #[test]
+    fn or_checksig_gate_sees_both_lowerings() {
+        let cases: &[(&str, bool)] = &[
+            ("OP_DUP OP_BOOLOR OP_CHECKSIG", true),
+            ("OP_IF OP_CHECKSIG OP_ELSE OP_CHECKSIG OP_ENDIF", true),
+            ("OP_IF OP_CHECKSIG OP_CHECKMULTISIG", false),
+            ("OP_IF OP_DUP OP_ELSE OP_DROP OP_ENDIF", false),
+            ("OP_DUP OP_HASH160 OP_CHECKSIG", false),
+            ("op_if op_checksig op_endif", true),
+        ];
+        for (asm, want) in cases {
+            let mut artifact = make_artifact("5100", simple_abi());
+            artifact.asm = Some((*asm).to_string());
+            assert_eq!(
+                super::is_likely_or_checksig(&artifact),
+                *want,
+                "asm = {asm:?}"
+            );
+        }
+        // No ASM: falls back to the coarse hex probe, which cannot see the
+        // branch-shaped form. Documented limit, pinned so it stays deliberate.
+        let artifact = make_artifact("5100", simple_abi());
+        assert!(!super::is_likely_or_checksig(&artifact));
     }
 
     fn simple_abi() -> Abi {
@@ -2783,6 +2835,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2819,6 +2872,7 @@ mod tests {
                 }],
             },
             script: "76a90088ac".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot {
                 param_index: 0,
@@ -2858,6 +2912,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "unlock".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "007c00ac".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![
                 ConstructorSlot { param_index: 0, byte_offset: 0 },
@@ -2896,6 +2951,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "unlock".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "76a90088ac".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2932,6 +2988,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "check".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "009c69".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
@@ -2960,6 +3017,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "check".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "00930088".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2 }]),
             code_sep_index_slots: None,
@@ -3482,6 +3540,7 @@ mod tests {
                 methods: vec![],
             },
             script: code_hex.to_string(),
+            asm: None,
             state_fields: Some(state_fields),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -3560,6 +3619,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None, fixed_array: None }]),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -3599,6 +3659,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![
                 StateField { name: "genesisOutpoint".to_string(), field_type: "ByteString".to_string(), index: 0, initial_value: None, fixed_array: None },
                 StateField { name: "rollingHash".to_string(), field_type: "ByteString".to_string(), index: 1, initial_value: None, fixed_array: None },
@@ -3824,6 +3885,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
@@ -3852,6 +3914,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "amount".to_string(),
                 field_type: "bigint".to_string(),
@@ -3880,6 +3943,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "offset".to_string(),
                 field_type: "bigint".to_string(),
@@ -3908,6 +3972,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
@@ -3963,6 +4028,7 @@ mod tests {
                 }],
             },
             script: script.to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "count".to_string(), field_type: "bigint".to_string(), index: 0,
                 initial_value: None, fixed_array: None,
@@ -4095,6 +4161,7 @@ mod tests {
                 methods: vec![],
             },
             script: "0093".to_string(), // template: OP_0 placeholder + OP_ADD
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
@@ -4294,6 +4361,7 @@ mod tests {
             // offsets 1 and 3. A constructor slot at offset 0 would shift these
             // under adjust_code_sep_offset, but the byte-walk ignores args.
             script: "51ab52ab".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,

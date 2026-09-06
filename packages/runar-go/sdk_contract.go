@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,34 @@ type emptySigMarker struct{}
 // hex-bytes value. Coexists with nil at the same call — Call("execute", []any{
 // nil, EmptySig}) signs only slot 0.
 var EmptySig interface{} = emptySigMarker{}
+
+// isLikelyOrChecksig reports whether the locking script looks like OR-CHECKSIG
+// rather than genuine multi-sig, scoping the issue #106 soft warning so
+// checkMultiSig unlocks are not spammed.
+//
+// ASM, not a hex substring test: `strings.Contains(script, "9b")` matches any
+// byte pair anywhere, push data included, and even straddles two adjacent
+// opcodes' nibbles.
+//
+// NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+// OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES that
+// change: when the FIRST branch fails, its OP_CHECKSIG has already run with a
+// non-empty signature, which is exactly what BIP146 rejects. Short-circuiting
+// removes the hazard only when the first branch succeeds, so both the legacy
+// and the branch-shaped forms must warn.
+func isLikelyOrChecksig(artifact *RunarArtifact) bool {
+	asm := strings.ToUpper(artifact.ASM)
+	if asm == "" {
+		return false
+	}
+	if strings.Contains(asm, "OP_CHECKMULTISIG") {
+		return false
+	}
+	if !strings.Contains(asm, "OP_CHECKSIG") {
+		return false
+	}
+	return strings.Contains(asm, "OP_BOOLOR") || strings.Contains(asm, "OP_IF")
+}
 
 // IsEmptySig reports whether a call arg is the EmptySig marker (issue #106).
 func IsEmptySig(value interface{}) bool {
@@ -638,6 +667,22 @@ func (c *RunarContract) PrepareCall(
 			estimatedInputs := 1 + nExtra + 1
 			resolvedArgs[i] = strings.Repeat("00", 36*estimatedInputs)
 		}
+	}
+
+	// Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not genuine
+	// multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG method means
+	// every branch gets a real signature, and the branch that fails then carries a
+	// non-empty invalid one — which BIP146 NULLFAIL rejects, taking the whole
+	// spend with it. Pass EmptySig for the non-matching branch instead.
+	//
+	// The other six SDKs have carried this warning since issue #106; Go, Ruby,
+	// Java and Zig documented the hazard in a comment but never emitted it.
+	if len(sigIndices) >= 2 && isLikelyOrChecksig(c.Artifact) {
+		fmt.Fprintf(os.Stderr,
+			"runar-sdk: warning: %s.Call(%q) has %d auto-signed Sig slots. "+
+				"If this is an OR-CHECKSIG method, pass EmptySig for the "+
+				"non-matching branch(es) to satisfy BIP146 NULLFAIL (issue #106).\n",
+			c.Artifact.ContractName, methodName, len(sigIndices))
 	}
 
 	needsOpPushTx := preimageIndex >= 0 || isStateful

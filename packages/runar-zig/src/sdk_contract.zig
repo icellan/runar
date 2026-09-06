@@ -18,6 +18,48 @@ const script_utils = @import("sdk_script_utils.zig");
 /// sentinel is an auto-resolve request rather than a legitimate empty value.
 pub const AUTO_PREVOUTS_PARAM_NAME = "allPrevouts";
 
+/// Does the locking script look like OR-CHECKSIG rather than genuine multi-sig?
+/// Scopes the issue #106 soft warning.
+///
+/// ASM, not a hex substring test: searching the hex for "9b" matches any byte
+/// pair anywhere, push data included, and even straddles two adjacent opcodes'
+/// nibbles.
+///
+/// NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+/// OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES that
+/// change: when the FIRST branch fails, its OP_CHECKSIG has already run with a
+/// non-empty signature, which is exactly what BIP146 rejects. Short-circuiting
+/// removes the hazard only when the first branch succeeds, so both the legacy
+/// and the branch-shaped forms must warn.
+fn isLikelyOrChecksig(artifact: types.RunarArtifact) bool {
+    const asm_text = artifact.asm_text;
+    if (asm_text.len == 0) return false;
+    if (std.mem.indexOf(u8, asm_text, "OP_CHECKMULTISIG") != null) return false;
+    if (std.mem.indexOf(u8, asm_text, "OP_CHECKSIG") == null) return false;
+    return std.mem.indexOf(u8, asm_text, "OP_BOOLOR") != null or
+        std.mem.indexOf(u8, asm_text, "OP_IF") != null;
+}
+
+// The issue #106 OR-CHECKSIG gate must recognise BOTH lowerings of `||`.
+//
+// It went blind once already: it tested for OP_BOOLOR, and NEW-014 stopped the
+// compiler emitting that opcode, so the NULLFAIL warning silently never fired.
+test "isLikelyOrChecksig recognises both `||` lowerings and excludes multi-sig" {
+    const cases = [_]struct { text: []const u8, want: bool }{
+        .{ .text = "OP_DUP OP_BOOLOR OP_CHECKSIG", .want = true },
+        .{ .text = "OP_IF OP_CHECKSIG OP_ELSE OP_CHECKSIG OP_ENDIF", .want = true },
+        .{ .text = "OP_IF OP_CHECKSIG OP_CHECKMULTISIG", .want = false },
+        .{ .text = "OP_IF OP_DUP OP_ELSE OP_DROP OP_ENDIF", .want = false },
+        .{ .text = "OP_DUP OP_HASH160 OP_CHECKSIG", .want = false },
+        .{ .text = "", .want = false },
+    };
+    for (cases) |c| {
+        var artifact: types.RunarArtifact = .{ .allocator = std.testing.allocator };
+        artifact.asm_text = c.text;
+        try std.testing.expectEqual(c.want, isLikelyOrChecksig(artifact));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Call-path funding fee-sizing helpers (findings C2 + C15)
 // ---------------------------------------------------------------------------
@@ -523,6 +565,21 @@ pub const RunarContract = struct {
             } else {
                 resolved_args[i] = try arg.clone(self.allocator);
             }
+        }
+
+        // Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not
+        // genuine multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG
+        // method means every branch gets a real signature, and the branch that
+        // fails then carries a non-empty invalid one — which BIP146 NULLFAIL
+        // rejects, taking the whole spend with it. Pass the empty-sig marker for
+        // the non-matching branch instead.
+        if (sig_indices.items.len >= 2 and isLikelyOrChecksig(self.artifact.*)) {
+            std.debug.print(
+                "runar-sdk: warning: {s}.call(\"{s}\") has {d} auto-signed Sig slots. " ++
+                    "If this is an OR-CHECKSIG method, pass an empty sig for the " ++
+                    "non-matching branch(es) to satisfy BIP146 NULLFAIL (issue #106).\n",
+                .{ self.artifact.contract_name, method_name, sig_indices.items.len },
+            );
         }
 
         const address = try sign.getAddress(self.allocator);

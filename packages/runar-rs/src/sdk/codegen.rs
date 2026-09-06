@@ -921,6 +921,7 @@ mod tests {
                 methods,
             },
             script: "5151".to_string(),
+            asm: None,
             state_fields,
             constructor_slots: None,
             code_sep_index_slots: None,

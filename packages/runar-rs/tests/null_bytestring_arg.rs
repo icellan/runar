@@ -47,6 +47,7 @@ fn make_artifact(byte_string_param_name: &str) -> RunarArtifact {
             }],
         },
         script: "51".to_string(),
+        asm: None,
         state_fields: Some(vec![StateField {
             name: "count".into(),
             field_type: "bigint".into(),
