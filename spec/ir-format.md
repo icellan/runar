@@ -181,13 +181,28 @@ Supported operators:
 | `"<="` | bigint | Less than or equal |
 | `">"` | bigint | Greater than |
 | `">="` | bigint | Greater than or equal |
-| `"&&"` | boolean | Logical AND (eager; lowered to `OP_BOOLAND`, not short-circuit) |
-| `"\|\|"` | boolean | Logical OR (eager; lowered to `OP_BOOLOR`, not short-circuit) |
+| `"&&"` | boolean | Logical AND. **Compiler-synthesised only** — source-level `&&` short-circuits and never reaches this node (see below) |
+| `"\|\|"` | boolean | Logical OR. **Compiler-synthesised only** — source-level `\|\|` short-circuits and never reaches this node (see below) |
 | `"&"` | bigint | Bitwise AND |
 | `"\|"` | bigint | Bitwise OR |
 | `"^"` | bigint | Bitwise XOR |
 | `"<<"` | bigint | Left shift |
 | `">>"` | bigint | Right shift |
+
+**On `"&&"` / `"||"`.** These operators SHORT-CIRCUIT at the source level
+(`spec/semantics.md` §3.7), so ANF lowering desugars them to the conditional —
+`a && b` to `a ? b : false`, `a || b` to `a ? true : b` — and a source-level
+`&&` / `||` therefore appears in the IR as an `if` node, never as a `bin_op`.
+They must, because an operand the source skips may be *partial*: division by
+zero, an out-of-range `OP_SPLIT` and an undersized `OP_NUM2BIN` all abort the
+script, so evaluating it is not free.
+
+A `bin_op` carrying `"&&"` / `"||"` is still legal in the wire format and is
+still lowered to `OP_BOOLAND` / `OP_BOOLOR`: the compiler synthesises one when
+folding if/else-chain guard conditions, where both operands are already-bound
+refs to plain comparison results and so cannot abort. A consumer of this format
+must therefore still handle the node — it just will not originate from `&&` /
+`||` in a contract's source.
 
 ### 4.5 `unary_op`
 

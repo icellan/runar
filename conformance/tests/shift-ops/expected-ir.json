@@ -124,83 +124,101 @@
           }
         },
         {
-          "name": "t8",
-          "value": {
-            "kind": "load_const",
-            "value": 0
-          }
-        },
-        {
-          "name": "t9",
-          "value": {
-            "kind": "bin_op",
-            "left": "left",
-            "op": "<",
-            "right": "t8"
-          }
-        },
-        {
-          "name": "t10",
-          "value": {
-            "kind": "bin_op",
-            "left": "t7",
-            "op": "||",
-            "right": "t9"
-          }
-        },
-        {
           "name": "t11",
           "value": {
-            "kind": "assert",
-            "value": "t10"
+            "cond": "t7",
+            "else": [
+              {
+                "name": "t9",
+                "value": {
+                  "kind": "load_const",
+                  "value": 0
+                }
+              },
+              {
+                "name": "t10",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "left",
+                  "op": "<",
+                  "right": "t9"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t8",
+                "value": {
+                  "kind": "load_const",
+                  "value": true
+                }
+              }
+            ]
           }
         },
         {
           "name": "t12",
           "value": {
-            "kind": "load_const",
-            "value": 0
+            "kind": "assert",
+            "value": "t11"
           }
         },
         {
           "name": "t13",
           "value": {
-            "kind": "bin_op",
-            "left": "right",
-            "op": ">=",
-            "right": "t12"
-          }
-        },
-        {
-          "name": "t14",
-          "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t15",
+          "name": "t14",
           "value": {
             "kind": "bin_op",
             "left": "right",
-            "op": "<",
-            "right": "t14"
+            "op": ">=",
+            "right": "t13"
           }
         },
         {
-          "name": "t16",
+          "name": "t18",
           "value": {
-            "kind": "bin_op",
-            "left": "t13",
-            "op": "||",
-            "right": "t15"
+            "cond": "t14",
+            "else": [
+              {
+                "name": "t16",
+                "value": {
+                  "kind": "load_const",
+                  "value": 0
+                }
+              },
+              {
+                "name": "t17",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "right",
+                  "op": "<",
+                  "right": "t16"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t15",
+                "value": {
+                  "kind": "load_const",
+                  "value": true
+                }
+              }
+            ]
           }
         },
         {
-          "name": "t17",
+          "name": "t19",
           "value": {
             "kind": "assert",
-            "value": "t16"
+            "value": "t18"
           }
         }
       ],

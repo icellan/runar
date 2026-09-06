@@ -261,10 +261,19 @@ Both `==` and `===` have identical semantics in Rúnar (no type coercion). The c
 
 | Operator | Description | Opcode |
 |----------|-------------|--------|
-| `&&` | Logical AND | `OP_BOOLAND` |
-| `\|\|` | Logical OR | `OP_BOOLOR` |
+| `&&` | Logical AND | `OP_IF` / `OP_ELSE` / `OP_ENDIF` |
+| `\|\|` | Logical OR | `OP_IF` / `OP_ELSE` / `OP_ENDIF` |
 
-Both operands are always evaluated (eager evaluation). At the ANF IR level, both sides are lowered as flat `bin_op` nodes -- there is no short-circuit lowering. At the Stack IR/opcode level, these compile to `OP_BOOLAND` and `OP_BOOLOR` respectively.
+**These short-circuit**, exactly as in TypeScript: the right operand is evaluated only when the left does not already decide the result. `a && b` lowers as `a ? b : false` and `a || b` as `a ? true : b`, which become real branches, so the skipped operand's opcodes never run.
+
+This matters because skipping is not merely an optimisation here -- an operand that *would* have run can abort the whole script. Division by zero, an out-of-range `substr` and an undersized `num2bin` all fail on-chain, so the ordinary guard idiom depends on the left operand actually preventing the right from executing:
+
+```typescript
+assert(d === 0n || (100n / d) > 1n);          // safe: no division when d == 0
+assert(len(b) < 4n || substr(b, 4n, 1n) === tail);  // safe: no split when too short
+```
+
+The cost is size: a branch is larger than the single `OP_BOOLAND` / `OP_BOOLOR` byte these used to compile to. If you need the cheap form and both operands are provably total, compute them into locals first and combine the results.
 
 ### Bitwise (operands: `bigint` or `ByteString`)
 

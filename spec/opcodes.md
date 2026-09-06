@@ -187,10 +187,20 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `-a` | `OP_NEGATE` |
 | `abs(a)` | `OP_ABS` |
 | `!a` | `OP_NOT` |
-| `a && b` (eager evaluation) | `OP_BOOLAND` |
-| `a \|\| b` (eager evaluation) | `OP_BOOLOR` |
+| `a && b` (short-circuits — see note) | `OP_IF` / `OP_ELSE` / `OP_ENDIF` |
+| `a \|\| b` (short-circuits — see note) | `OP_IF` / `OP_ELSE` / `OP_ENDIF` |
 | `a << b` | `OP_LSHIFT` |
 | `a >> b` | `OP_RSHIFT` |
+
+**Note on `&&` / `||`.** These do NOT compile to `OP_BOOLAND` / `OP_BOOLOR`.
+Those are binary stack ops, so both operands must already be on the stack and
+are therefore both evaluated — and an operand the source meant to skip can
+*abort*: `OP_DIV` by zero, `OP_SPLIT` out of range and `OP_NUM2BIN` undersized
+all fail the script. `&&` / `||` therefore desugar to the conditional
+(`a && b` ≡ `a ? b : false`, `a || b` ≡ `a ? true : b`) and emit real branching,
+so the skipped operand's opcodes are never executed. See `spec/semantics.md`
+§3.7. `OP_BOOLAND` / `OP_BOOLOR` still appear in compiler-synthesised guard
+conditions, where both operands are already-computed comparison results.
 
 ### 5.2 Bitwise Operations
 

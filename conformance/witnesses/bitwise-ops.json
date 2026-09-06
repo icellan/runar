@@ -1,9 +1,25 @@
 {
   "fixture": "bitwise-ops",
   "acceptOnly": true,
-  "constructorArgs": { "a": "12n", "b": "10n" },
+  "constructorArgs": {
+    "a": "12n",
+    "b": "10n"
+  },
   "spends": [
-    { "method": "testShift", "args": [], "expect": "accept", "note": "left/right shifts; asserts are tautologies (x>=0 || x<0). No rejecting witness exists — accept-only." },
-    { "method": "testBitwise", "args": [], "expect": "accept", "note": "and/or/xor/not; tautological asserts. No rejecting witness exists — accept-only." }
-  ]
+    {
+      "method": "testShift",
+      "args": [],
+      "expect": "accept",
+      "note": "left/right shifts; asserts are tautologies (x>=0 || x<0). No rejecting witness exists \u2014 accept-only."
+    },
+    {
+      "method": "testBitwise",
+      "args": [],
+      "expect": "accept",
+      "note": "and/or/xor/not; tautological asserts. No rejecting witness exists \u2014 accept-only."
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "c4b769c133a8f60a24a2023b5b701bdb51a0c962e4153fc4937823a8892804f5"
+  }
 }

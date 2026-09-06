@@ -72,7 +72,7 @@ class Escrow extends SmartContract {
 
 - **`release`**: The seller can release funds to themselves, or the arbiter can authorize release. Either signature suffices.
 - **`refund`**: The buyer can reclaim funds, or the arbiter can authorize a refund.
-- The `||` operator uses eager evaluation: both `checkSig` calls are always executed, and their results are combined with `OP_BOOLOR`.
+- The `||` operator SHORT-CIRCUITS: it lowers to a branch, so the second `checkSig` only runs when the first returns false. Both branches are present in the locking script, but only one is executed for any given spend.
 
 Because this contract has two public methods, the compiler generates a dispatch table. The unlocking script includes a method index (`0n` for `release`, `1n` for `refund`) in addition to the signature.
 

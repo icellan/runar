@@ -1859,6 +1859,47 @@ function lowerBinaryExpr(
   expr: Extract<Expression, { kind: 'binary_expr' }>,
   ctx: LoweringContext,
 ): string {
+  // NEW-014: `&&` and `||` SHORT-CIRCUIT. They desugar to the ternary, which
+  // 05-stack-lower already emits as real OP_IF / OP_ELSE control flow:
+  //
+  //     a && b   ==>   a ? b : false
+  //     a || b   ==>   a ? true : b
+  //
+  // They used to lower to `bin_op`, i.e. OP_BOOLAND / OP_BOOLOR — binary stack
+  // ops, so BOTH operands were pushed and therefore both evaluated.
+  // `spec/semantics.md` §3.7 licensed that with "This is safe in Rúnar because
+  // all expressions are pure (no side effects beyond `assert`)". Purity is not
+  // TOTALITY: the same document's §10 and §11.3 list division by zero as a
+  // runtime failure, and OP_SPLIT / OP_NUM2BIN abort out of range. Evaluating
+  // the operand the source skipped therefore aborted the script, and the
+  // ordinary defensive guard —
+  //
+  //     assert(d === 0n || (100n / d) > 1n);
+  //
+  // — compiled to a locking script the chain rejects for exactly the input the
+  // guard exists to protect, while `TestContract` (which short-circuits, like
+  // every surface syntax the frontends accept) reported success. §3.9 already
+  // specifies the ternary's untaken arm as unevaluated, so laziness was
+  // already in the language; `&&` / `||` were the sole eager outlier.
+  //
+  // Only SOURCE-level `&&` / `||` desugar here. The compiler still synthesises
+  // `bin_op` `&&` / `||` internally to fold if/else-chain guard conditions
+  // (see `lowerIfStatement`); those operands are already-bound refs to plain
+  // comparison results, so they cannot abort and stay on the cheap opcodes.
+  if (expr.op === '&&' || expr.op === '||') {
+    const constant: Expression = { kind: 'bool_literal', value: expr.op === '||' };
+    return lowerTernaryExpr(
+      {
+        kind: 'ternary_expr',
+        condition: expr.left,
+        consequent: expr.op === '||' ? constant : expr.right,
+        alternate: expr.op === '||' ? expr.right : constant,
+        ...(expr.sourceLocation !== undefined ? { sourceLocation: expr.sourceLocation } : {}),
+      },
+      ctx,
+    );
+  }
+
   const leftRef = lowerExprToRef(expr.left, ctx);
   const rightRef = lowerExprToRef(expr.right, ctx);
 

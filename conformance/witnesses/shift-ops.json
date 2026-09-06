@@ -1,8 +1,18 @@
 {
   "fixture": "shift-ops",
   "acceptOnly": true,
-  "constructorArgs": { "a": "12n" },
+  "constructorArgs": {
+    "a": "12n"
+  },
   "spends": [
-    { "method": "testShift", "args": [], "expect": "accept", "note": "a<<3 and a>>2; asserts are tautologies (x>=0 || x<0). No rejecting witness exists — accept-only." }
-  ]
+    {
+      "method": "testShift",
+      "args": [],
+      "expect": "accept",
+      "note": "a<<3 and a>>2; asserts are tautologies (x>=0 || x<0). No rejecting witness exists \u2014 accept-only."
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "5c8a6a51a8cfd3c769c67eed8deff91b3e63b7ef173dcf90c63017833a43ead5"
+  }
 }
