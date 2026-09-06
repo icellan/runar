@@ -11,6 +11,8 @@ Direct port of ``compilers/go/codegen/ec.go``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +33,9 @@ EC_GEN_X: int = int("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f
 
 # secp256k1 generator y-coordinate
 EC_GEN_Y: int = int("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8", 16)
+
+# secp256k1 curve order
+EC_CURVE_N: int = int("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)
 
 
 def _bigint_to_bytes32(n: int) -> bytes:
@@ -64,15 +69,171 @@ def _big_int_push(n: int) -> "PushValue":
 
 
 # ===========================================================================
+# Codegen options and sign lattice
+# ===========================================================================
+
+@dataclass(frozen=True)
+class EcCodegenOptions:
+    """Codegen options shared by every EC / NIST-curve emitter.
+
+    Off by default: with ``None`` (or an all-false instance) each emitter is
+    byte-identical to what the seven tiers ship today, so no golden, size
+    baseline, or cross-tier parity gate can move.
+    """
+
+    constant_pool: bool = False
+    """Park large repeated constants (the field prime, the group order) in a
+    stack slot and copy them with ``OP_PICK`` instead of re-pushing the literal.
+
+    ``_ec_field_mod`` pushes the 256-bit prime at every modular reduction -- 34
+    bytes a time, 20,025 times in ``p256-wallet`` (71 % of that fixture). A pick
+    from a slot a dozen deep costs 2.
+    """
+
+    reduction_sinking: bool = False
+    """Emit ``a mod p`` without the sign fix-up wherever the dividend is provably
+    non-negative, and the cheap ``a - b + p`` form for subtraction wherever the
+    subtrahend is provably reduced.
+
+    Which reductions qualify is decided by the sign lattice below -- never
+    assumed. Only useful alongside ``constant_pool``: the cheap subtraction
+    references the prime twice, so without a pooled slot it does not pay (and the
+    emitters compare the two costs, so it is never taken when it does not).
+    """
+
+    fixed_base_comb: bool = False
+    """Use a fixed-base comb instead of the binary ladder wherever the base point
+    is a compile-time constant (``ecMulGen``, ``p256MulGen``, ``p384MulGen``, and
+    the ``u1*G`` half of ECDSA verification).
+
+    The window width is not fixed here: the emitter renders each candidate and
+    keeps whichever the byte-cost model scores smallest.
+    """
+
+
+class Dom(IntEnum):
+    """What is known about a tracked value's sign and range.
+
+    ``REDUCED`` implies ``NON_NEGATIVE``; the ordering is what the transfer
+    functions meet over. ``UNKNOWN`` is the default for every slot the analysis
+    has not explicitly proved something about -- including everything a
+    ``raw_block`` or an ``OP_IF`` produces -- so an un-analysed value can only
+    ever fall back to the shipping reduction.
+
+    The distinction is not academic. ``OP_BIN2NUM`` of 32 unsigned coordinate
+    bytes gives ``NON_NEGATIVE`` but NOT ``REDUCED``: a coordinate may
+    legitimately be up to ``2^256 - 1`` while p is ``2^32 + 977`` smaller.
+    Multiplication and addition need only ``NON_NEGATIVE``; subtraction's cheap
+    form needs the subtrahend ``REDUCED``, and conflating the two produces a
+    script that passes 256 EC oracle assertions and is still wrong on
+    ``ecAdd((0,1), (2^256-1,1))``.
+    """
+
+    UNKNOWN = 0
+    """Nothing known. May be negative."""
+    NON_NEGATIVE = 1
+    """Provably >= 0. May be >= p."""
+    REDUCED = 2
+    """Provably in [0, p)."""
+
+
+def is_non_negative(d: Dom) -> bool:
+    """True when *d* proves the value is >= 0."""
+    return d >= Dom.NON_NEGATIVE
+
+
+# Stack slot names reserved for pooled constants.
+POOL_FIELD_P = "_pool$p"
+POOL_GROUP_N = "_pool$n"
+
+
+# ===========================================================================
 # ECTracker -- named stack state tracker (mirrors TS ECTracker)
 # ===========================================================================
 
 class ECTracker:
     """Tracks named stack positions and emits StackOps for EC codegen."""
 
-    def __init__(self, init: list[str], emit: Callable[["StackOp"], None]) -> None:
+    def __init__(
+        self,
+        init: list[str],
+        emit: Callable[["StackOp"], None],
+        opts: "EcCodegenOptions | None" = None,
+        init_domains: "list[Dom] | None" = None,
+    ) -> None:
         self.nm: list[str] = list(init)
+        # Sign-lattice fact per stack SLOT, kept parallel to `nm`.
+        #
+        # Slot-parallel rather than keyed by name on purpose: names are reused
+        # (`_fmul_prod` is written by every multiply) and the same name can be
+        # resident twice, so a name-keyed dict would go stale in exactly the
+        # cases that matter. Every mutation of `nm` below mirrors into `dm` with
+        # the same splice, so the two cannot drift.
+        self.dm: list[Dom] = (list(init_domains) if init_domains is not None
+                              else [Dom.UNKNOWN] * len(self.nm))
+        # Lattice facts for values parked on the alt stack, bottom -> top.
+        self.alt_dm: list[Dom] = []
         self.e = emit
+        o = opts or EcCodegenOptions()
+        self.pooling = o.constant_pool
+        self.sinking = o.reduction_sinking
+        self.comb = o.fixed_base_comb
+
+    @property
+    def options(self) -> EcCodegenOptions:
+        """The options this tracker was built with, for a nested tracker."""
+        return EcCodegenOptions(
+            constant_pool=self.pooling,
+            reduction_sinking=self.sinking,
+            fixed_base_comb=self.comb,
+        )
+
+    # -- sign lattice -------------------------------------------------------
+
+    def domain_of(self, name: str) -> Dom:
+        """What is known about *name*. ``UNKNOWN`` when absent."""
+        # A silent desync here would hand a transfer function a fact about the
+        # WRONG slot, which is the one failure mode that produces a smaller
+        # script that quietly computes something else. Fail loudly instead.
+        if len(self.dm) != len(self.nm):
+            raise RuntimeError(
+                f"ECTracker: lattice desynchronised ({len(self.nm)} slots, "
+                f"{len(self.dm)} facts). Every nm mutation must go through a "
+                "tracker method or push_tracked/pop_tracked."
+            )
+        for i in range(len(self.nm) - 1, -1, -1):
+            if self.nm[i] == name:
+                return self.dm[i]
+        return Dom.UNKNOWN
+
+    def set_domain(self, name: str, d: Dom) -> None:
+        """Record a fact about *name*'s slot."""
+        for i in range(len(self.nm) - 1, -1, -1):
+            if self.nm[i] == name:
+                self.dm[i] = d
+                return
+
+    def push_tracked(self, name: str, d: Dom = Dom.UNKNOWN) -> None:
+        """Push a slot the caller tracks itself (where raw opcodes create items)."""
+        self.nm.append(name)
+        self.dm.append(d)
+
+    def pop_tracked(self) -> str:
+        """Pop a slot the caller tracks itself. Mirror of ``push_tracked``."""
+        if not self.nm:
+            return ""
+        self.dm.pop()
+        return self.nm.pop()
+
+    def remove_slot_at(self, index: int) -> tuple[str, Dom]:
+        """Remove the slot at an absolute (bottom-relative) index."""
+        n = self.nm.pop(index)
+        d = self.dm.pop(index)
+        return (n, d)
+
+    @property
+    def depth(self) -> int:
+        return len(self.nm)
 
     def find_depth(self, name: str) -> int:
         for i in range(len(self.nm) - 1, -1, -1):
@@ -82,48 +243,48 @@ class ECTracker:
 
     def push_bytes(self, n: str, v: bytes) -> None:
         self.e(_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=v)))
-        self.nm.append(n)
+        # A byte blob is not a number until BIN2NUM decides how to read it.
+        self.push_tracked(n, Dom.UNKNOWN)
 
     def push_big_int(self, n: str, v: int) -> None:
         self.e(_make_stack_op(op="push", value=_make_push_value(kind="bigint", big_int=v)))
-        self.nm.append(n)
+        self.push_tracked(n, Dom.NON_NEGATIVE if v >= 0 else Dom.UNKNOWN)
 
     def push_int(self, n: str, v: int) -> None:
         self.e(_make_stack_op(op="push", value=_big_int_push(v)))
-        self.nm.append(n)
+        self.push_tracked(n, Dom.NON_NEGATIVE if v >= 0 else Dom.UNKNOWN)
 
     def dup(self, n: str) -> None:
         self.e(_make_stack_op(op="dup"))
-        self.nm.append(n)
+        self.push_tracked(n, self.dm[-1] if self.dm else Dom.UNKNOWN)
 
     def drop(self) -> None:
         self.e(_make_stack_op(op="drop"))
-        if self.nm:
-            self.nm.pop()
+        self.pop_tracked()
 
     def nip(self) -> None:
         self.e(_make_stack_op(op="nip"))
         L = len(self.nm)
         if L >= 2:
-            self.nm[L - 2:L] = [self.nm[L - 1]]
+            self.remove_slot_at(L - 2)
 
     def over(self, n: str) -> None:
         self.e(_make_stack_op(op="over"))
-        self.nm.append(n)
+        self.push_tracked(n, self.dm[-2] if len(self.dm) >= 2 else Dom.UNKNOWN)
 
     def swap(self) -> None:
         self.e(_make_stack_op(op="swap"))
         L = len(self.nm)
         if L >= 2:
             self.nm[L - 1], self.nm[L - 2] = self.nm[L - 2], self.nm[L - 1]
+            self.dm[L - 1], self.dm[L - 2] = self.dm[L - 2], self.dm[L - 1]
 
     def rot(self) -> None:
         self.e(_make_stack_op(op="rot"))
         L = len(self.nm)
         if L >= 3:
-            r = self.nm[L - 3]
-            del self.nm[L - 3]
-            self.nm.append(r)
+            r, rd = self.remove_slot_at(L - 3)
+            self.push_tracked(r, rd)
 
     def op(self, code: str) -> None:
         self.e(_make_stack_op(op="opcode", code=code))
@@ -138,13 +299,12 @@ class ECTracker:
             self.rot()
             return
         self.e(_make_stack_op(op="push", value=_big_int_push(d)))
-        self.nm.append("")
+        self.push_tracked("", Dom.NON_NEGATIVE)
         self.e(_make_stack_op(op="roll", depth=d))
-        self.nm.pop()  # pop the push placeholder
+        self.pop_tracked()  # the depth literal
         idx = len(self.nm) - 1 - d
-        r = self.nm[idx]
-        del self.nm[idx]
-        self.nm.append(r)
+        r, rd = self.remove_slot_at(idx)
+        self.push_tracked(r, rd)
 
     def pick(self, d: int, n: str) -> None:
         if d == 0:
@@ -154,10 +314,12 @@ class ECTracker:
             self.over(n)
             return
         self.e(_make_stack_op(op="push", value=_big_int_push(d)))
-        self.nm.append("")
+        self.push_tracked("", Dom.NON_NEGATIVE)
         self.e(_make_stack_op(op="pick", depth=d))
-        self.nm.pop()  # pop the push placeholder
-        self.nm.append(n)
+        self.pop_tracked()  # the depth literal
+        # Once the depth literal is gone the copied slot sits at depth d.
+        src = self.dm[len(self.dm) - 1 - d] if len(self.dm) > d else Dom.UNKNOWN
+        self.push_tracked(n, src)
 
     def to_top(self, name: str) -> None:
         self.roll(self.find_depth(name))
@@ -165,14 +327,68 @@ class ECTracker:
     def copy_to_top(self, name: str, n: str) -> None:
         self.pick(self.find_depth(name), n)
 
+    # -- constant pool ------------------------------------------------------
+    #
+    # A pooled constant is an ordinary tracked slot; nothing about the stack
+    # model changes. `push_const` just chooses, per call site and by emitted
+    # bytes, between copying that slot and re-pushing the literal. Nested
+    # trackers built from `list(t.nm)` inherit the slot for free, so pooled
+    # constants work unchanged inside an `OP_IF` arm.
+
+    def pool_constant(self, slot: str, value: int) -> None:
+        """Park *value* in *slot* for this emitter. No-op when pooling is off."""
+        if not self.pooling or slot in self.nm:
+            return
+        self.push_big_int(slot, value)
+
+    def release_constant(self, slot: str) -> None:
+        """Remove a pooled slot. No-op when pooling is off or the slot is absent."""
+        if not self.pooling or slot not in self.nm:
+            return
+        self.to_top(slot)
+        self.drop()
+
+    def const_cost(self, slot: str, value: int) -> int:
+        """Emitted bytes a ``push_const`` of this constant would cost right now.
+
+        The comparison is exact -- ``size_of_push_int`` is the same encoder the
+        emit pass uses -- so pooling can never make a call site bigger. A pick at
+        depth d costs ``size_of_push_int(d) + 1``; depths 0 and 1 are OP_DUP /
+        OP_OVER, 1 byte each.
+        """
+        from runar_compiler.codegen.cost_model import size_of_push_int
+
+        if self.pooling and slot in self.nm:
+            d = self.find_depth(slot)
+            pick_cost = 1 if d <= 1 else size_of_push_int(d) + 1
+            if pick_cost < size_of_push_int(value):
+                return pick_cost
+        return size_of_push_int(value)
+
+    def push_const(self, slot: str, value: int, name: str) -> None:
+        """Materialize *value* on top as *name*, from the pooled slot when that
+        is cheaper in emitted bytes than pushing the literal."""
+        from runar_compiler.codegen.cost_model import size_of_push_int
+
+        if self.pooling and slot in self.nm:
+            d = self.find_depth(slot)
+            pick_cost = 1 if d <= 1 else size_of_push_int(d) + 1
+            if pick_cost < size_of_push_int(value):
+                self.pick(d, name)
+                return
+        self.push_big_int(name, value)
+
     def to_alt(self) -> None:
         self.op("OP_TOALTSTACK")
         if self.nm:
-            self.nm.pop()
+            d = self.dm[-1]
+            self.pop_tracked()
+            self.alt_dm.append(d)
 
     def from_alt(self, n: str) -> None:
         self.op("OP_FROMALTSTACK")
-        self.nm.append(n)
+        d = self.alt_dm.pop() if self.alt_dm else Dom.UNKNOWN
+        self.push_tracked(n, d)
 
     def rename(self, n: str) -> None:
         if self.nm:
@@ -189,11 +405,12 @@ class ECTracker:
         *produce* = "" means no output pushed.
         """
         for _ in reversed(consume):
-            if self.nm:
-                self.nm.pop()
+            self.pop_tracked()
         fn(self.e)
         if produce:
-            self.nm.append(produce)
+            # Opaque opcodes: nothing is known about the result unless the caller
+            # proves it and records that with `set_domain` afterwards.
+            self.push_tracked(produce, Dom.UNKNOWN)
 
     def emit_if(
         self,
@@ -207,16 +424,15 @@ class ECTracker:
         *result_name* = "" means no result pushed.
         """
         self.to_top(cond_name)
-        # condition consumed
-        if self.nm:
-            self.nm.pop()
+        self.pop_tracked()  # condition consumed
         then_ops: list["StackOp"] = []
         else_ops: list["StackOp"] = []
         then_fn(lambda op: then_ops.append(op))
         else_fn(lambda op: else_ops.append(op))
         self.e(_make_stack_op(op="if", then=then_ops, else_=else_ops))
         if result_name:
-            self.nm.append(result_name)
+            # A join over two arms this tracker did not analyse: nothing is known.
+            self.push_tracked(result_name, Dom.UNKNOWN)
 
 
 # ===========================================================================
@@ -225,11 +441,40 @@ class ECTracker:
 
 def _ec_push_field_p(t: ECTracker, name: str) -> None:
     """Push the field prime p onto the stack as a script number."""
-    t.push_big_int(name, EC_FIELD_P)
+    t.push_const(POOL_FIELD_P, EC_FIELD_P, name)
+
+
+def _ec_field_mod_short(t: ECTracker, a_name: str, result_name: str) -> None:
+    """``a mod p`` with no sign fix-up: 1 opcode instead of 7.
+
+    Sound only when the dividend is provably >= 0, because ``OP_MOD`` takes the
+    sign of the dividend. The caller proves that; this does not check.
+    """
+    t.to_top(a_name)
+    _ec_push_field_p(t, "_fmods_p")
+    t.raw_block([a_name, "_fmods_p"], result_name,
+                lambda e: e(_make_stack_op(op="opcode", code="OP_MOD")))
+    t.set_domain(result_name, Dom.REDUCED)
+
+
+def _ec_cheap_sub_pays(t: ECTracker) -> bool:
+    """Does the cheap ``a - b + p`` subtraction shape pay here?
+
+    It references the prime TWICE where the shipping shape references it once and
+    pays six more opcodes, so it only wins when the prime is cheap to
+    materialise -- i.e. when it is pooled. Without a pool this rewrite makes
+    p256-wallet LARGER (958,792 -> 999,371 measured), which is why it is a cost
+    comparison and not a flag.
+    """
+    c = t.const_cost(POOL_FIELD_P, EC_FIELD_P)
+    return 2 * c + 2 < c + 8
 
 
 def _ec_field_mod(t: ECTracker, a_name: str, result_name: str) -> None:
     """Reduce TOS mod p, ensuring non-negative result."""
+    if t.sinking and is_non_negative(t.domain_of(a_name)):
+        _ec_field_mod_short(t, a_name, result_name)
+        return
     t.to_top(a_name)
     _ec_push_field_p(t, "_fmod_p")
     # (a % p + p) % p
@@ -243,13 +488,18 @@ def _ec_field_mod(t: ECTracker, a_name: str, result_name: str) -> None:
         e(_make_stack_op(op="swap"))                       # (a%p+p) p
         e(_make_stack_op(op="opcode", code="OP_MOD"))      # ((a%p+p)%p)
     t.raw_block([a_name, "_fmod_p"], result_name, _fn)
+    t.set_domain(result_name, Dom.REDUCED)
 
 
 def _ec_field_add(t: ECTracker, a_name: str, b_name: str, result_name: str) -> None:
     """Compute (a + b) mod p."""
+    # Read the operand facts BEFORE raw_block consumes their slots.
+    sum_non_neg = is_non_negative(t.domain_of(a_name)) and is_non_negative(t.domain_of(b_name))
     t.to_top(a_name)
     t.to_top(b_name)
     t.raw_block([a_name, b_name], "_fadd_sum", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
+    if sum_non_neg:
+        t.set_domain("_fadd_sum", Dom.NON_NEGATIVE)
     _ec_field_mod(t, "_fadd_sum", result_name)
 
 
@@ -257,20 +507,48 @@ def _ec_field_sub(t: ECTracker, a_name: str, b_name: str, result_name: str) -> N
     """Compute (a - b) mod p (non-negative)."""
     t.to_top(a_name)
     t.to_top(b_name)
+    # The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a single
+    # shifted reduction is exact. `b >= 0` alone is NOT enough -- a coordinate
+    # decoded from 32 unsigned bytes can exceed p by up to 2^32 + 977, which is
+    # precisely the ecAdd((0,1), (2^256-1,1)) counterexample.
+    cheap = (t.sinking
+             and is_non_negative(t.domain_of(a_name))
+             and t.domain_of(b_name) == Dom.REDUCED
+             and _ec_cheap_sub_pays(t))
+
     t.raw_block([a_name, b_name], "_fsub_diff", lambda e: e(_make_stack_op(op="opcode", code="OP_SUB")))
+
+    if cheap:
+        _ec_push_field_p(t, "_fsub_p")
+        t.raw_block(["_fsub_diff", "_fsub_p"], "_fsub_shift",
+                    lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
+        t.set_domain("_fsub_shift", Dom.NON_NEGATIVE)
+        _ec_field_mod_short(t, "_fsub_shift", result_name)
+        return
     _ec_field_mod(t, "_fsub_diff", result_name)
 
 
-def _ec_field_mul(t: ECTracker, a_name: str, b_name: str, result_name: str) -> None:
-    """Compute (a * b) mod p."""
+def _ec_field_mul(t: ECTracker, a_name: str, b_name: str, result_name: str,
+                  product_non_negative: bool = False) -> None:
+    """Compute (a * b) mod p.
+
+    *product_non_negative* lets a caller assert the product's sign independently
+    of the operands -- ``_ec_field_sqr`` uses it, since a*a >= 0 for any a.
+    """
+    non_neg = product_non_negative or (
+        is_non_negative(t.domain_of(a_name)) and is_non_negative(t.domain_of(b_name)))
     t.to_top(a_name)
     t.to_top(b_name)
     t.raw_block([a_name, b_name], "_fmul_prod", lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
+    if non_neg:
+        t.set_domain("_fmul_prod", Dom.NON_NEGATIVE)
     _ec_field_mod(t, "_fmul_prod", result_name)
 
 
 def _ec_field_mul_const(t: ECTracker, a_name: str, c: int, result_name: str) -> None:
     """Compute (a * c) mod p where c is a small constant."""
+    # Every call site passes a small positive c, so the product keeps a's sign.
+    non_neg = c > 0 and is_non_negative(t.domain_of(a_name))
     t.to_top(a_name)
 
     def _fmc_body(e: Callable[["StackOp"], None]) -> None:
@@ -282,13 +560,15 @@ def _ec_field_mul_const(t: ECTracker, a_name: str, c: int, result_name: str) -> 
             e(_make_stack_op(op="opcode", code="OP_MUL"))
 
     t.raw_block([a_name], "_fmc_prod", _fmc_body)
+    if non_neg:
+        t.set_domain("_fmc_prod", Dom.NON_NEGATIVE)
     _ec_field_mod(t, "_fmc_prod", result_name)
 
 
 def _ec_field_sqr(t: ECTracker, a_name: str, result_name: str) -> None:
-    """Compute (a * a) mod p."""
+    """Compute (a * a) mod p. A square is non-negative whatever a's sign is."""
     t.copy_to_top(a_name, "_fsqr_copy")
-    _ec_field_mul(t, a_name, "_fsqr_copy", result_name)
+    _ec_field_mul(t, a_name, "_fsqr_copy", result_name, product_non_negative=True)
 
 
 def _ec_field_inv(t: ECTracker, a_name: str, result_name: str) -> None:
@@ -369,8 +649,8 @@ def _ec_decompose_point(t: ECTracker, point_name: str, x_name: str, y_name: str)
         e(_make_stack_op(op="opcode", code="OP_SPLIT"))
     t.raw_block([point_name], "", _split)
     # Manually track the two new items
-    t.nm.append("_dp_xb")
-    t.nm.append("_dp_yb")
+    t.push_tracked("_dp_xb", Dom.UNKNOWN)
+    t.push_tracked("_dp_yb", Dom.UNKNOWN)
 
     # Convert y_bytes (on top) to num
     # Reverse from BE to LE, append 0x00 sign byte to ensure unsigned, then BIN2NUM
@@ -380,6 +660,10 @@ def _ec_decompose_point(t: ECTracker, point_name: str, x_name: str, y_name: str)
         e(_make_stack_op(op="opcode", code="OP_CAT"))
         e(_make_stack_op(op="opcode", code="OP_BIN2NUM"))
     t.raw_block(["_dp_yb"], y_name, _convert_y)
+    # A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+    # UNSIGNED: >= 0, but it may be up to 2^256 - 1 and therefore >= p. That gap
+    # is exactly what the subtraction precondition turns on.
+    t.set_domain(y_name, Dom.NON_NEGATIVE)
 
     # Convert x_bytes to num
     t.to_top("_dp_xb")
@@ -389,6 +673,7 @@ def _ec_decompose_point(t: ECTracker, point_name: str, x_name: str, y_name: str)
         e(_make_stack_op(op="opcode", code="OP_CAT"))
         e(_make_stack_op(op="opcode", code="OP_BIN2NUM"))
     t.raw_block(["_dp_xb"], x_name, _convert_x)
+    t.set_domain(x_name, Dom.NON_NEGATIVE)
 
     # Stack: [yName, xName] -- swap to standard order [xName, yName]
     t.swap()
@@ -665,7 +950,11 @@ def _ec_build_jacobian_add_affine_inline(e: Callable, t: ECTracker) -> None:
     After:        [..., ax, ay, _k, jx', jy', jz']
     """
     # Create inner tracker with cloned stack state
-    _ec_jacobian_add_affine_body(ECTracker(list(t.nm), e), False)
+    # The inner tracker inherits the stack state AND the lattice facts: the
+    # operands' proved domains are what decide which reduction shape the body
+    # emits, so dropping them here would silently fall back everywhere.
+    _ec_jacobian_add_affine_body(
+        ECTracker(list(t.nm), e, t.options, list(t.dm)), False)
 
 
 def _ec_jacobian_add_affine_body(it: ECTracker, keep_hr: bool) -> None:
@@ -819,7 +1108,7 @@ def _ec_build_jacobian_add_or_double_inline(e: Callable, t: ECTracker) -> None:
 
     Stack layout: [..., ax, ay, _k, jx, jy, jz] -- same in and out.
     """
-    it = ECTracker(list(t.nm), e)
+    it = ECTracker(list(t.nm), e, t.options, list(t.dm))
 
     # Keep the pre-add accumulator: it is what must be DOUBLED in the
     # exceptional case, and the add below consumes jx/jy/jz.
@@ -880,17 +1169,19 @@ def _ec_build_jacobian_add_or_double_inline(e: Callable, t: ECTracker) -> None:
 # Public entry points (called from stack lowerer)
 # ===========================================================================
 
-def emit_ec_add(emit: Callable) -> None:
+def emit_ec_add(emit: Callable, opts: "EcCodegenOptions | None" = None) -> None:
     """Add two points.
 
     Stack in: [point_a, point_b] (b on top)
     Stack out: [result_point]
     """
-    t = ECTracker(["_pa", "_pb"], emit)
+    t = ECTracker(["_pa", "_pb"], emit, opts)
+    t.pool_constant(POOL_FIELD_P, EC_FIELD_P)
     _ec_decompose_point(t, "_pa", "px", "py")
     _ec_decompose_point(t, "_pb", "qx", "qy")
     _ec_affine_add(t)
     _ec_compose_point(t, "rx", "ry", "_result")
+    t.release_constant(POOL_FIELD_P)
 
 
 def _ec_emit_scalar_reduce(t: ECTracker, k_name: str, result_name: str, curve_n: int) -> None:
@@ -907,7 +1198,7 @@ def _ec_emit_scalar_reduce(t: ECTracker, k_name: str, result_name: str, curve_n:
     Reducing costs 1 push + 8 opcodes (42 bytes) against a ~429 KB script, and
     makes k >= n, k < 0 and k = 0 all well defined.
     """
-    t.push_big_int("_n_red", curve_n)
+    t.push_const(POOL_GROUP_N, curve_n, "_n_red")
 
     def _body(e: Callable) -> None:
         e(_make_stack_op(op="opcode", code="OP_2DUP"))
@@ -922,7 +1213,7 @@ def _ec_emit_scalar_reduce(t: ECTracker, k_name: str, result_name: str, curve_n:
     t.raw_block([k_name, "_n_red"], result_name, _body)
 
 
-def emit_ec_mul(emit: Callable) -> None:
+def emit_ec_mul(emit: Callable, opts: "EcCodegenOptions | None" = None) -> None:
     """Perform scalar multiplication P * k.
 
     Stack in: [point, scalar] (scalar on top)
@@ -930,7 +1221,9 @@ def emit_ec_mul(emit: Callable) -> None:
 
     Uses 256-iteration double-and-add with Jacobian coordinates.
     """
-    t = ECTracker(["_pt", "_k"], emit)
+    t = ECTracker(["_pt", "_k"], emit, opts)
+    t.pool_constant(POOL_FIELD_P, EC_FIELD_P)
+    t.pool_constant(POOL_GROUP_N, EC_CURVE_N)
     # Decompose to affine base point
     _ec_decompose_point(t, "_pt", "ax", "ay")
 
@@ -940,14 +1233,13 @@ def emit_ec_mul(emit: Callable) -> None:
     #
     # "k in [1, n-1]" is a PRECONDITION the caller cannot enforce -- the scalar
     # is usually an unlock argument -- so reduce it first.
-    curve_n = int("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)
     t.to_top("_k")
-    _ec_emit_scalar_reduce(t, "_k", "_kr", curve_n)
-    t.push_big_int("_n", curve_n)
+    _ec_emit_scalar_reduce(t, "_k", "_kr", EC_CURVE_N)
+    t.push_const(POOL_GROUP_N, EC_CURVE_N, "_n")
     t.raw_block(["_kr", "_n"], "_kn", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
-    t.push_big_int("_n2", curve_n)
+    t.push_const(POOL_GROUP_N, EC_CURVE_N, "_n2")
     t.raw_block(["_kn", "_n2"], "_kn2", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
-    t.push_big_int("_n3", curve_n)
+    t.push_const(POOL_GROUP_N, EC_CURVE_N, "_n3")
     t.raw_block(["_kn2", "_n3"], "_kn3", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
     t.rename("_k")
 
@@ -978,7 +1270,7 @@ def emit_ec_mul(emit: Callable) -> None:
         # Move _bit to TOS and remove from tracker BEFORE generating add ops,
         # because OP_IF consumes _bit and the add ops run with _bit already gone.
         t.to_top("_bit")
-        t.nm.pop()  # _bit consumed by IF
+        t.pop_tracked()  # _bit consumed by IF
         add_ops: list = []
         add_emit = lambda op: add_ops.append(op)
         # Only the final step can be handed two equal operands -- see
@@ -1003,41 +1295,283 @@ def emit_ec_mul(emit: Callable) -> None:
 
     # Compose result
     _ec_compose_point(t, "_rx", "_ry", "_result")
+    t.release_constant(POOL_GROUP_N)
+    t.release_constant(POOL_FIELD_P)
 
 
-def emit_ec_mul_gen(emit: Callable) -> None:
+# ===========================================================================
+# Fixed-base comb (secp256k1)
+# ===========================================================================
+
+def _comb_emit_select(t: ECTracker, i: int, w: int, d: int) -> None:
+    """Round *i*'s digit and the selected table entry, as ``ax``/``ay``/``_flag``.
+
+    Exactly one equality holds, so ``sum(eq_j * T_j)`` is that entry's coordinate
+    and every term is non-negative and below p -- no reduction is needed, and the
+    result is ``REDUCED`` by construction. When the digit is zero every term
+    vanishes and ``_flag`` is 0, so no add runs.
+
+    Shared by both comb emitters: the selection is pure scalar bit-twiddling and
+    table indexing, with no curve arithmetic in it at all.
+    """
+    entries = (1 << w) - 1
+    for b in range(w):
+        shift = i + b * d
+        kc, sh = f"_kc{b}", f"_sh{b}"
+        t.copy_to_top("_k", kc)
+        if shift == 0:
+            t.rename(sh)
+        elif shift == 1:
+            t.raw_block([kc], sh, lambda e: e(_make_stack_op(op="opcode", code="OP_2DIV")))
+        else:
+            sd = f"_sd{b}"
+            t.push_int(sd, shift)
+            t.raw_block([kc, sd], sh, lambda e: e(_make_stack_op(op="opcode", code="OP_RSHIFTNUM")))
+        two, bit = f"_two{b}", f"_b{b}"
+        t.push_int(two, 2)
+        t.raw_block([sh, two], bit, lambda e: e(_make_stack_op(op="opcode", code="OP_MOD")))
+        t.set_domain(bit, Dom.REDUCED)
+
+    t.to_top("_b0")
+    t.rename("_idx")
+    for b in range(1, w):
+        bit, wt, bw = f"_b{b}", f"_wt{b}", f"_bw{b}"
+        t.to_top(bit)
+        t.push_int(wt, 1 << b)
+        t.raw_block([bit, wt], bw, lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
+        t.to_top("_idx")
+        t.raw_block([bw, "_idx"], "_idx", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
+    t.set_domain("_idx", Dom.REDUCED)
+
+    for j in range(1, entries + 1):
+        ic, jv, eq = f"_ic{j}", f"_jv{j}", f"_eq{j}"
+        t.copy_to_top("_idx", ic)
+        t.push_int(jv, j)
+        t.raw_block([ic, jv], eq, lambda e: e(_make_stack_op(op="opcode", code="OP_NUMEQUAL")))
+        t.set_domain(eq, Dom.REDUCED)
+
+    for coord in ("x", "y"):
+        acc = "ax" if coord == "x" else "ay"
+        for j in range(1, entries + 1):
+            ecn, tc, pr = f"_e{coord}{j}", f"_t{coord}{j}", f"_pr{coord}{j}"
+            t.copy_to_top(f"_eq{j}", ecn)
+            t.copy_to_top(f"_T{coord}{j}", tc)
+            t.raw_block([ecn, tc], pr, lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
+            if j == 1:
+                t.rename(acc)
+            else:
+                t.to_top(acc)
+                t.raw_block([pr, acc], acc, lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
+        t.set_domain(acc, Dom.REDUCED)
+
+    for j in range(entries, 0, -1):
+        t.to_top(f"_eq{j}")
+        t.drop()
+
+    t.to_top("_idx")
+    t.raw_block(["_idx"], "_flag", lambda e: e(_make_stack_op(op="opcode", code="OP_0NOTEQUAL")))
+
+
+def _ec_emit_comb_mul_gen(emit: Callable, w: int,
+                          opts: "EcCodegenOptions | None" = None) -> bool:
+    """``k*G`` by a Lim-Lee fixed-base comb instead of the 257-round ladder.
+
+    The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+    the scalar into ``w`` blocks of ``d`` bits and reads one bit from each block
+    per round, so it performs one doubling and one conditional add per COLUMN:
+    the round count falls from ``w*d`` to ``d`` at the price of a ``2^w - 1``
+    entry table. G is a compile-time constant here, so the table costs nothing to
+    build -- ``2*(2^w - 1)`` literal pushes, resident for the whole emitter, read
+    by every round with a 2-3 byte ``OP_PICK``.
+
+    This is the secp256k1 twin of ``_c_emit_comb_mul_gen`` in ``p256_p384.py``.
+    The curve arithmetic is NOT shared: secp256k1 has ``a = 0``, so
+    ``_ec_jacobian_double`` computes ``D = 3X^2`` where the NIST version computes
+    ``3(X-Z^2)(X+Z^2)``. Only ``comb.py`` -- the compile-time table and the
+    interval checker -- is common, and it takes ``a`` from the curve record.
+
+    SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+    accumulator equal to the addend, its negation, or the point at infinity.
+    ``_ec_build_jacobian_add_or_double_inline``'s comment justifies using it
+    everywhere but the ladder's LAST step by an interval argument over
+    ``c_i mod n``, and insists that argument be re-derived by anything changing
+    the offset or the iteration count. A comb changes both, so it is re-derived:
+    ``comb_safe_rounds`` evaluates the same argument as executable interval
+    arithmetic over the comb's own geometry, and any round it cannot prove gets
+    the complete add-or-double form instead. Nothing is assumed safe.
+
+    The other half of that argument is that the accumulator never starts at
+    infinity, which needs the first digit non-zero. ``comb_geometry`` searches
+    for the scalar offset that guarantees it rather than reusing the ladder's
+    hardcoded ``+3n`` -- right for secp256k1 at w=3, wrong for P-384.
+
+    Stack in: [_k]. Stack out: [_result]. False when no geometry exists.
+    """
+    from runar_compiler.codegen.comb import (
+        SECP256K1_COMB_CURVE, comb_geometry, comb_safe_rounds, comb_table,
+    )
+
+    curve = SECP256K1_COMB_CURVE
+    params = comb_geometry(w, curve)
+    if params is None:
+        return False
+    d = params.d
+    table = comb_table(w, d, curve)
+    safe = comb_safe_rounds(params, curve)
+    entries = (1 << w) - 1
+
+    t = ECTracker(["_k"], emit, opts)
+    t.pool_constant(POOL_FIELD_P, EC_FIELD_P)
+    t.pool_constant(POOL_GROUP_N, EC_CURVE_N)
+
+    # k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so what
+    # makes the interval argument apply at all; see _ec_emit_scalar_reduce.
+    t.to_top("_k")
+    _ec_emit_scalar_reduce(t, "_k", "_kr", EC_CURVE_N)
+    t.rename("_k")
+    for i in range(params.offset_multiple):
+        off = f"_off{i}"
+        t.push_const(POOL_GROUP_N, EC_CURVE_N, off)
+        t.raw_block(["_k", off], "_k", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
+    t.set_domain("_k", Dom.NON_NEGATIVE)
+
+    # Table, resident for the whole comb: picking an entry costs 2-3 bytes
+    # against a 34-byte literal push, and every round reads all of them.
+    for j in range(1, entries + 1):
+        pt = table[j]
+        t.push_big_int(f"_Tx{j}", pt.x)
+        t.push_big_int(f"_Ty{j}", pt.y)
+        t.set_domain(f"_Tx{j}", Dom.REDUCED)
+        t.set_domain(f"_Ty{j}", Dom.REDUCED)
+
+    # Round d-1 initialises the accumulator. The first digit is non-zero by
+    # construction (comb_geometry), so this is a real point and never infinity.
+    _comb_emit_select(t, d - 1, w, d)
+    t.to_top("_flag")
+    t.drop()
+    t.to_top("ax")
+    t.rename("jx")
+    t.to_top("ay")
+    t.rename("jy")
+    t.push_int("jz", 1)
+    t.set_domain("jz", Dom.REDUCED)
+
+    for i in range(d - 2, -1, -1):
+        _ec_jacobian_double(t)
+        _comb_emit_select(t, i, w, d)
+
+        # `_ec_jacobian_add_affine_body` documents its layout as
+        # [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at the
+        # top. The selection leaves ax/ay above jz, so restore the contract
+        # before the branch -- otherwise the add arm would reorder the stack and
+        # the empty else arm would not, leaving the two arms with different
+        # layouts at OP_ENDIF.
+        t.to_top("_flag")
+        t.to_alt()
+        t.to_top("jx")
+        t.to_top("jy")
+        t.to_top("jz")
+        t.from_alt("_flag")
+
+        t.pop_tracked()  # consumed by OP_IF
+        add_ops: list = []
+        if safe[i]:
+            _ec_build_jacobian_add_affine_inline(add_ops.append, t)
+        else:
+            _ec_build_jacobian_add_or_double_inline(add_ops.append, t)
+        emit(_make_stack_op(op="if", then=add_ops, else_=[]))
+
+        # The addend was selected fresh for this round; the add only copied it.
+        t.to_top("ay")
+        t.drop()
+        t.to_top("ax")
+        t.drop()
+
+    _ec_jacobian_to_affine(t, "_rx", "_ry")
+
+    for j in range(entries, 0, -1):
+        t.to_top(f"_Ty{j}")
+        t.drop()
+        t.to_top(f"_Tx{j}")
+        t.drop()
+    t.to_top("_k")
+    t.drop()
+
+    _ec_compose_point(t, "_rx", "_ry", "_result")
+    t.release_constant(POOL_GROUP_N)
+    t.release_constant(POOL_FIELD_P)
+    return True
+
+
+def _ec_emit_comb_best(opts: "EcCodegenOptions | None" = None):
+    """Emit the cheapest comb over the candidate window widths.
+
+    Each candidate is rendered in full and scored with the same byte-cost model
+    the emitter is measured by, and the smallest wins -- the window width is not
+    hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the ``2^w``
+    selection logic outgrows the saving.
+
+    ``None`` when no candidate could be built, so the caller falls back to the
+    ladder rather than emitting nothing.
+    """
+    from runar_compiler.codegen.cost_model import estimate_script_bytes
+
+    best = None
+    for w in (2, 3, 4):
+        ops: list = []
+        if not _ec_emit_comb_mul_gen(ops.append, w, opts):
+            continue
+        if best is None or estimate_script_bytes(ops) < estimate_script_bytes(best):
+            best = ops
+    return best
+
+
+def emit_ec_mul_gen(emit: Callable, opts: "EcCodegenOptions | None" = None) -> None:
     """Perform scalar multiplication G * k.
 
     Stack in: [scalar]
     Stack out: [result_point]
     """
+    # G is a compile-time constant, so this is the one secp256k1 call site where
+    # a fixed-base comb applies. `emit_ec_mul` cannot use it: its base arrives at
+    # run time.
+    if opts is not None and opts.fixed_base_comb:
+        ops = _ec_emit_comb_best(opts)
+        if ops is not None:
+            for op in ops:
+                emit(op)
+            return
+
     # Push generator point as 64-byte blob, then delegate to ecMul
     g_point = _bigint_to_bytes32(EC_GEN_X) + _bigint_to_bytes32(EC_GEN_Y)
     emit(_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=g_point)))
     emit(_make_stack_op(op="swap"))  # [point, scalar]
-    emit_ec_mul(emit)
+    emit_ec_mul(emit, opts)
 
 
-def emit_ec_negate(emit: Callable) -> None:
+def emit_ec_negate(emit: Callable, opts: "EcCodegenOptions | None" = None) -> None:
     """Negate a point (x, p - y).
 
     Stack in: [point]
     Stack out: [negated_point]
     """
-    t = ECTracker(["_pt"], emit)
+    t = ECTracker(["_pt"], emit, opts)
+    t.pool_constant(POOL_FIELD_P, EC_FIELD_P)
     _ec_decompose_point(t, "_pt", "_nx", "_ny")
     _ec_push_field_p(t, "_fp")
     _ec_field_sub(t, "_fp", "_ny", "_neg_y")
     _ec_compose_point(t, "_nx", "_neg_y", "_result")
+    t.release_constant(POOL_FIELD_P)
 
 
-def emit_ec_on_curve(emit: Callable) -> None:
+def emit_ec_on_curve(emit: Callable, opts: "EcCodegenOptions | None" = None) -> None:
     """Check if point is on secp256k1 (y^2 = x^3 + 7 mod p).
 
     Stack in: [point]
     Stack out: [boolean]
     """
-    t = ECTracker(["_pt"], emit)
+    t = ECTracker(["_pt"], emit, opts)
+    t.pool_constant(POOL_FIELD_P, EC_FIELD_P)
     _ec_decompose_point(t, "_pt", "_x", "_y")
 
     # GAP-301: coordinate canonicity. ``_ec_decompose_point`` BIN2NUMs each
@@ -1076,6 +1610,7 @@ def emit_ec_on_curve(emit: Callable) -> None:
     t.to_top("_canon")
     t.to_top("_curve_eq")
     t.raw_block(["_canon", "_curve_eq"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.release_constant(POOL_FIELD_P)
 
 
 def emit_ec_mod_reduce(emit: Callable) -> None:

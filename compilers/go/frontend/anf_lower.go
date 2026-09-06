@@ -314,7 +314,10 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	sideEffects := ComputeSideEffectSummary(contract)
 
 	// Lower constructor (the TS reference includes the constructor in output)
+	reservedTemps := collectReservedTemps(contract)
+
 	ctorCtx := newLowerCtxWithEffects(contract, sideEffects)
+	ctorCtx.reservedTemps = reservedTemps
 	ctorCtx.setMethodParamTypes(contract.Constructor.Params)
 	ctorCtx.lowerStatements(contract.Constructor.Body)
 	result = append(result, ir.ANFMethod{
@@ -344,6 +347,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	// Lower each method (including private methods as separate entries)
 	for _, method := range contract.Methods {
 		methodCtx := newLowerCtxWithEffects(contract, sideEffects)
+		methodCtx.reservedTemps = reservedTemps
 		methodCtx.setMethodParamTypes(method.Params)
 
 		// Issue #123: a non-default @sighash mode drives the OP_PUSH_TX binding
@@ -640,8 +644,11 @@ func lowerParams(params []ParamNode) []ir.ANFParam {
 // ---------------------------------------------------------------------------
 
 type lowerCtx struct {
-	bindings          []ir.ANFBinding
-	counter           int
+	bindings []ir.ANFBinding
+	counter  int
+	// reservedTemps holds `t<digits>` identifiers the user's own source binds,
+	// so freshTemp never mints a name that shadows one. See reserveUserNames.
+	reservedTemps     map[string]bool
 	contract          *ContractNode
 	localNames        map[string]bool    // tracks variable names registered via addLocal
 	paramNames        map[string]bool    // tracks parameter names registered via addParam
@@ -793,10 +800,97 @@ func (ctx *lowerCtx) getPrivateMethod(name string) (MethodNode, bool) {
 	return MethodNode{}, false
 }
 
-// freshTemp generates a fresh temporary variable name.
+// isTempShaped reports whether name is one freshTemp can mint.
+func isTempShaped(name string) bool {
+	if len(name) < 2 || name[0] != 't' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// collectDeclNames collects `t<digits>` variable-declaration names from stmts.
+func collectDeclNames(stmts []Statement, out map[string]bool) {
+	for _, stmt := range stmts {
+		switch st := stmt.(type) {
+		case VariableDeclStmt:
+			if isTempShaped(st.Name) {
+				out[st.Name] = true
+			}
+		case *VariableDeclStmt:
+			if isTempShaped(st.Name) {
+				out[st.Name] = true
+			}
+		case IfStmt:
+			collectDeclNames(st.Then, out)
+			collectDeclNames(st.Else, out)
+		case *IfStmt:
+			collectDeclNames(st.Then, out)
+			collectDeclNames(st.Else, out)
+		case ForStmt:
+			collectDeclNames([]Statement{st.Init, st.Update}, out)
+			collectDeclNames(st.Body, out)
+		case *ForStmt:
+			collectDeclNames([]Statement{st.Init, st.Update}, out)
+			collectDeclNames(st.Body, out)
+		}
+	}
+}
+
+// collectReservedTemps returns every `t<digits>` identifier the contract's own
+// source binds, so freshTemp can never mint a name that shadows one.
+//
+// freshTemp mints t0, t1, t2, … while emitNamed binds the developer's own
+// locals into the SAME binding namespace. Nothing reserved them against each
+// other, so a contract with a local named `t3` got a compiler temp named `t3`
+// written on top of it, and the reference that read the user's value silently
+// resolved to the compiler's.
+//
+// That deletes asserts. `const t3 = z - y; const t5 = y - t3;
+// assert(t5 === this.want)` lowered `t5 := load_prop want` over the user's
+// `t5`, leaving `assert(want === want)` — always true, so the locking script
+// carried no guard and any witness could spend it. FAIL-OPEN, and reachable
+// with no branch involved.
+//
+// CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED into
+// their callers: a helper local named `t3` is emitNamed into the CALLER's
+// binding stream, so a per-method set would miss it.
+//
+// Only declarations and parameters are collected. An assignment target or a
+// ++/-- operand must name something already declared or a parameter, so those
+// are covered transitively. Only `t<digits>` names can ever collide, so nothing
+// else is reserved and temp numbering is unchanged for every contract that does
+// not already miscompile — which is what leaves the goldens and the cross-tier
+// hex parity untouched. All seven tiers implement this same rule.
+func collectReservedTemps(contract *ContractNode) map[string]bool {
+	out := make(map[string]bool)
+	methods := make([]MethodNode, 0, len(contract.Methods)+1)
+	methods = append(methods, contract.Constructor)
+	methods = append(methods, contract.Methods...)
+	for _, m := range methods {
+		for _, param := range m.Params {
+			if isTempShaped(param.Name) {
+				out[param.Name] = true
+			}
+		}
+		collectDeclNames(m.Body, out)
+	}
+	return out
+}
+
+// freshTemp generates a fresh temporary variable name that no user identifier
+// can shadow.
 func (ctx *lowerCtx) freshTemp() string {
 	name := fmt.Sprintf("t%d", ctx.counter)
 	ctx.counter++
+	for ctx.reservedTemps[name] {
+		name = fmt.Sprintf("t%d", ctx.counter)
+		ctx.counter++
+	}
 	return name
 }
 
@@ -944,6 +1038,9 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		sighashFlag:      ctx.sighashFlag, // #123: nested manual checkPreimage inherits the method's mode
 		nested:           true,
 	}
+	// Same contract, same namespace: an arm's temps must dodge the same user
+	// identifiers the enclosing body does.
+	sub.reservedTemps = ctx.reservedTemps
 	// Share local name set
 	for k := range ctx.localNames {
 		sub.localNames[k] = true

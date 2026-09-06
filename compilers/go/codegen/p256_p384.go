@@ -14,6 +14,7 @@
 package codegen
 
 import (
+	"fmt"
 	"math/big"
 )
 
@@ -159,10 +160,34 @@ func bigIntBitLen(n *big.Int) int {
 // ===========================================================================
 
 func cPushFieldP(t *ECTracker, name string, c *nistCurveParams) {
-	t.pushBigInt(name, c.fieldP)
+	t.pushConst(ecPoolFieldP, c.fieldP, name)
+}
+
+// cFieldModShort emits `a mod p` with no sign fix-up: 1 opcode instead of 7.
+// Sound only when the dividend is provably >= 0 — the caller proves that, this
+// does not check.
+func cFieldModShort(t *ECTracker, aName, resultName string, c *nistCurveParams) {
+	t.toTop(aName)
+	cPushFieldP(t, "_fmods_p", c)
+	t.rawBlock([]string{aName, "_fmods_p"}, resultName, func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MOD"})
+	})
+	t.setDomain(resultName, domReduced)
+}
+
+// cCheapSubPays reports whether the cheap `a - b + p` subtraction pays. It
+// references the prime TWICE where the shipping shape references it once and
+// pays six more opcodes, so it only wins when the prime is pooled.
+func cCheapSubPays(t *ECTracker, c *nistCurveParams) bool {
+	cost := t.constCost(ecPoolFieldP, c.fieldP)
+	return 2*cost+2 < cost+8
 }
 
 func cFieldMod(t *ECTracker, aName, resultName string, c *nistCurveParams) {
+	if t.sinking && isNonNegative(t.domainOf(aName)) {
+		cFieldModShort(t, aName, resultName, c)
+		return
+	}
 	t.toTop(aName)
 	cPushFieldP(t, "_fmod_p", c)
 	t.rawBlock([]string{aName, "_fmod_p"}, resultName, func(e func(StackOp)) {
@@ -175,36 +200,73 @@ func cFieldMod(t *ECTracker, aName, resultName string, c *nistCurveParams) {
 		e(StackOp{Op: "swap"})
 		e(StackOp{Op: "opcode", Code: "OP_MOD"})
 	})
+	t.setDomain(resultName, domReduced)
 }
 
 func cFieldAdd(t *ECTracker, aName, bName, resultName string, c *nistCurveParams) {
+	// Read the operand facts before rawBlock consumes their slots.
+	sumNonNeg := isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName))
 	t.toTop(aName)
 	t.toTop(bName)
 	t.rawBlock([]string{aName, bName}, "_fadd_sum", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
+	if sumNonNeg {
+		t.setDomain("_fadd_sum", domNonNegative)
+	}
 	cFieldMod(t, "_fadd_sum", resultName, c)
 }
 
 func cFieldSub(t *ECTracker, aName, bName, resultName string, c *nistCurveParams) {
 	t.toTop(aName)
 	t.toTop(bName)
+	// Needs a >= 0 AND b in [0, p): then a - b > -p and one shifted reduction is
+	// exact. `b >= 0` alone is not enough — a coordinate decoded from 32 unsigned
+	// bytes may exceed p by up to 2^32 + 977.
+	cheap := t.sinking &&
+		isNonNegative(t.domainOf(aName)) &&
+		t.domainOf(bName) == domReduced &&
+		cCheapSubPays(t, c)
+
 	t.rawBlock([]string{aName, bName}, "_fsub_diff", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_SUB"})
 	})
+
+	if cheap {
+		cPushFieldP(t, "_fsub_p", c)
+		t.rawBlock([]string{"_fsub_diff", "_fsub_p"}, "_fsub_shift", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_ADD"})
+		})
+		t.setDomain("_fsub_shift", domNonNegative)
+		cFieldModShort(t, "_fsub_shift", resultName, c)
+		return
+	}
 	cFieldMod(t, "_fsub_diff", resultName, c)
 }
 
 func cFieldMul(t *ECTracker, aName, bName, resultName string, c *nistCurveParams) {
+	cFieldMulSigned(t, aName, bName, resultName, c, false)
+}
+
+// cFieldMulSigned lets cFieldSqr assert the product's sign independently of the
+// operand: a*a >= 0 for any a whatsoever.
+func cFieldMulSigned(t *ECTracker, aName, bName, resultName string, c *nistCurveParams, productNonNegative bool) {
+	nonNeg := productNonNegative ||
+		(isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName)))
 	t.toTop(aName)
 	t.toTop(bName)
 	t.rawBlock([]string{aName, bName}, "_fmul_prod", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_MUL"})
 	})
+	if nonNeg {
+		t.setDomain("_fmul_prod", domNonNegative)
+	}
 	cFieldMod(t, "_fmul_prod", resultName, c)
 }
 
 func cFieldMulConst(t *ECTracker, aName string, cv int64, resultName string, c *nistCurveParams) {
+	// Every call site passes a small positive cv, so the product keeps a's sign.
+	nonNeg := cv > 0 && isNonNegative(t.domainOf(aName))
 	t.toTop(aName)
 	t.rawBlock([]string{aName}, "_fmc_prod", func(e func(StackOp)) {
 		if cv == 2 {
@@ -214,12 +276,15 @@ func cFieldMulConst(t *ECTracker, aName string, cv int64, resultName string, c *
 			e(StackOp{Op: "opcode", Code: "OP_MUL"})
 		}
 	})
+	if nonNeg {
+		t.setDomain("_fmc_prod", domNonNegative)
+	}
 	cFieldMod(t, "_fmc_prod", resultName, c)
 }
 
 func cFieldSqr(t *ECTracker, aName, resultName string, c *nistCurveParams) {
 	t.copyToTop(aName, "_fsqr_copy")
-	cFieldMul(t, aName, "_fsqr_copy", resultName, c)
+	cFieldMulSigned(t, aName, "_fsqr_copy", resultName, c, true)
 }
 
 // cFieldInv computes a^(p-2) mod p via generic square-and-multiply.
@@ -251,7 +316,7 @@ func cFieldInv(t *ECTracker, aName, resultName string, c *nistCurveParams) {
 // ===========================================================================
 
 func cPushGroupN(t *ECTracker, name string, g *nistGroupParams) {
-	t.pushBigInt(name, g.n)
+	t.pushConst(ecPoolGroupN, g.n, name)
 }
 
 func cGroupMod(t *ECTracker, aName, resultName string, g *nistGroupParams) {
@@ -339,8 +404,8 @@ func cDecomposePoint(t *ECTracker, pointName, xName, yName string, c *nistCurveP
 		e(StackOp{Op: "push", Value: bigIntPush(int64(c.coordBytes))})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
-	t.nm = append(t.nm, "_dp_xb")
-	t.nm = append(t.nm, "_dp_yb")
+	t.pushTracked("_dp_xb", domUnknown)
+	t.pushTracked("_dp_yb", domUnknown)
 
 	// Convert y_bytes (on top) to num
 	t.rawBlock([]string{"_dp_yb"}, yName, func(e func(StackOp)) {
@@ -349,6 +414,10 @@ func cDecomposePoint(t *ECTracker, pointName, xName, yName string, c *nistCurveP
 		e(StackOp{Op: "opcode", Code: "OP_CAT"})
 		e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	})
+	// A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+	// UNSIGNED: >= 0, but it may be up to 2^(8*coordBytes) - 1 and therefore
+	// >= p. That gap is exactly what the subtraction precondition turns on.
+	t.setDomain(yName, domNonNegative)
 
 	// Convert x_bytes to num
 	t.toTop("_dp_xb")
@@ -358,6 +427,7 @@ func cDecomposePoint(t *ECTracker, pointName, xName, yName string, c *nistCurveP
 		e(StackOp{Op: "opcode", Code: "OP_CAT"})
 		e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	})
+	t.setDomain(xName, domNonNegative)
 
 	// Swap to standard order [xName, yName]
 	t.swap()
@@ -659,7 +729,7 @@ func cJacobianToAffine(t *ECTracker, rxName, ryName string, c *nistCurveParams) 
 func cBuildJacobianAddAffineInline(e func(StackOp), t *ECTracker, c *nistCurveParams) {
 	initNm := make([]string, len(t.nm))
 	copy(initNm, t.nm)
-	cJacobianAddAffineBody(NewECTracker(initNm, e), false, c)
+	cJacobianAddAffineBody(NewECTrackerOpts(t.namesCopy(), e, t.options(), t.domainsCopy()), false, c)
 }
 
 // cJacobianAddAffineBody is the mixed-add itself, emitting through a tracker
@@ -805,7 +875,7 @@ func cSelectCoord(t *ECTracker, addName, dblName, condName, resultName string, c
 func cBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker, c *nistCurveParams) {
 	initNm := make([]string, len(t.nm))
 	copy(initNm, t.nm)
-	it := NewECTracker(initNm, e)
+	it := NewECTrackerOpts(t.namesCopy(), e, t.options(), t.domainsCopy())
 
 	// Keep the pre-add accumulator: it is what must be DOUBLED in the
 	// exceptional case, and the add below consumes jx/jy/jz.
@@ -869,8 +939,10 @@ func cBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker, c *nistCurve
 // Scalar multiplication (generic for both P-256 and P-384)
 // ===========================================================================
 
-func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams) {
-	t := NewECTracker([]string{"_pt", "_k"}, emit)
+func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams, opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt", "_k"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, c.fieldP)
+	t.poolConstant(ecPoolGroupN, g.n)
 	cDecomposePoint(t, "_pt", "ax", "ay", c)
 
 	// k' = k + 3n
@@ -879,15 +951,25 @@ func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams) {
 	// scalar is usually an unlock argument — so reduce it first.
 	t.toTop("_k")
 	cEmitScalarReduce(t, "_k", "_kr", g)
-	t.pushBigInt("_n", g.n)
+	// Literal, NOT pooled: this matches the TypeScript reference byte for byte.
+	// (Pooling these three would save 96 B per P-256 ladder and 144 B per P-384
+	// one — a real missed opportunity, but one that has to be taken in the
+	// reference first, or the tiers diverge.)
+	// These three route through the POOL, matching the secp256k1 twin.
+	// They used to be raw literal pushes, which made the poolConstant of the
+	// group order above a strict LOSS: the slot was redeemed exactly once, by
+	// cEmitScalarReduce, so under --ec-constant-pool P-256 paid park 34 +
+	// pick 2 + release 2-3 = 38-39 bytes where a bare literal costs 34.
+	// Break-even is two redemptions; this is now four.
+	t.pushConst(ecPoolGroupN, g.n, "_n")
 	t.rawBlock([]string{"_kr", "_n"}, "_kn", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
-	t.pushBigInt("_n2", g.n)
+	t.pushConst(ecPoolGroupN, g.n, "_n2")
 	t.rawBlock([]string{"_kn", "_n2"}, "_kn2", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
-	t.pushBigInt("_n3", g.n)
+	t.pushConst(ecPoolGroupN, g.n, "_n3")
 	t.rawBlock([]string{"_kn2", "_n3"}, "_kn3", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
@@ -930,7 +1012,7 @@ func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams) {
 
 		// Conditional add
 		t.toTop("_bit")
-		t.nm = t.nm[:len(t.nm)-1] // _bit consumed by IF
+		t.popTracked() // _bit consumed by IF
 		var addOps []StackOp
 		addEmit := func(op StackOp) { addOps = append(addOps, op) }
 		// Only the final step can be handed two equal operands — see
@@ -954,6 +1036,271 @@ func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams) {
 	t.drop()
 
 	cComposePoint(t, "_rx", "_ry", "_result", c)
+	t.releaseConstant(ecPoolGroupN)
+	t.releaseConstant(ecPoolFieldP)
+}
+
+// ===========================================================================
+// Fixed-base comb (the base is a compile-time constant)
+// ===========================================================================
+
+// cEmitCombMulGen emits k*G by a Lim-Lee comb, for a base known at compile time.
+//
+// The binary ladder runs one doubling and one conditional add per scalar BIT. A
+// comb splits the scalar into w blocks of d bits and runs one doubling and one
+// conditional add per COLUMN, so the round count falls from w*d to d at the
+// price of a 2^w - 1 entry table — which costs nothing to build here, because G
+// is a constant. Measured optimum is w=3: the selection logic grows as 2^w and
+// overtakes the saving by w=5.
+//
+//	P-256 u1*G:  90,610 B binary  ->  ~44,600 B comb (w=3, 86 rounds)
+//
+// SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+// accumulator equal to the addend, its negation, or the point at infinity.
+// cBuildJacobianAddOrDoubleInline's comment justifies using it everywhere but
+// the last step of the BINARY ladder by an interval argument over c_i mod n,
+// and insists that argument be re-derived by anything changing the offset or
+// the iteration count. A comb changes both, so it is re-derived — as executable
+// interval arithmetic in CombSafeRounds, evaluated here. Rounds it cannot prove
+// get the complete add-or-double form instead; nothing is assumed. For P-256 at
+// w=3 it proves 81 of 86 rounds, so the fallback costs ~1.2 kB.
+//
+// The other half of that argument is that the accumulator never starts at
+// infinity, which needs the first digit to be non-zero. CombGeometry searches
+// for the scalar offset that guarantees it rather than reusing the ladder's
+// hardcoded +3n — which happens to be right for P-256 at w=3 and WRONG for
+// P-384.
+//
+// Stack in: [_k]. Stack out: [_result].
+func cEmitCombMulGen(
+	emit func(StackOp),
+	c *nistCurveParams,
+	g *nistGroupParams,
+	curve *CombCurve,
+	w int,
+	opts *EcCodegenOptions,
+) bool {
+	params := CombGeometry(w, curve)
+	if params == nil {
+		return false
+	}
+	d := params.D
+	table := CombTable(w, d, curve)
+	safe := CombSafeRounds(params, curve)
+	entries := (1 << w) - 1
+
+	t := NewECTrackerOpts([]string{"_k"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, c.fieldP)
+	t.poolConstant(ecPoolGroupN, g.n)
+
+	// k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+	// what makes the interval argument apply at all; see cEmitScalarReduce.
+	t.toTop("_k")
+	cEmitScalarReduce(t, "_k", "_kr", g)
+	t.rename("_k")
+	for i := int64(0); i < params.OffsetMultiple.Int64(); i++ {
+		off := fmt.Sprintf("_off%d", i)
+		t.pushConst(ecPoolGroupN, g.n, off)
+		t.rawBlock([]string{"_k", off}, "_k", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_ADD"})
+		})
+	}
+	t.setDomain("_k", domNonNegative)
+
+	// Table, resident for the whole comb: picking an entry costs 2-3 bytes
+	// against a 34-byte literal push, and every round reads all of them.
+	for j := 1; j <= entries; j++ {
+		t.pushBigInt(fmt.Sprintf("_Tx%d", j), table[j].X)
+		t.pushBigInt(fmt.Sprintf("_Ty%d", j), table[j].Y)
+		t.setDomain(fmt.Sprintf("_Tx%d", j), domReduced)
+		t.setDomain(fmt.Sprintf("_Ty%d", j), domReduced)
+	}
+
+	// emitSelect materializes round i's digit and the selected table entry as
+	// ax/ay/_flag.
+	//
+	// Exactly one equality holds, so sum(eq_j * T_j) is that entry's coordinate
+	// and every term is non-negative and below p — no reduction is needed, and
+	// the result is domReduced by construction. When the digit is zero every
+	// term vanishes and _flag is 0, so no add runs.
+	emitSelect := func(i int) {
+		for b := 0; b < w; b++ {
+			shift := i + b*d
+			kc := fmt.Sprintf("_kc%d", b)
+			sh := fmt.Sprintf("_sh%d", b)
+			t.copyToTop("_k", kc)
+			if shift == 0 {
+				t.rename(sh)
+			} else if shift == 1 {
+				t.rawBlock([]string{kc}, sh, func(e func(StackOp)) {
+					e(StackOp{Op: "opcode", Code: "OP_2DIV"})
+				})
+			} else {
+				sd := fmt.Sprintf("_sd%d", b)
+				t.pushInt(sd, int64(shift))
+				t.rawBlock([]string{kc, sd}, sh, func(e func(StackOp)) {
+					e(StackOp{Op: "opcode", Code: "OP_RSHIFTNUM"})
+				})
+			}
+			two := fmt.Sprintf("_two%d", b)
+			bit := fmt.Sprintf("_b%d", b)
+			t.pushInt(two, 2)
+			t.rawBlock([]string{sh, two}, bit, func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_MOD"})
+			})
+			t.setDomain(bit, domReduced)
+		}
+
+		t.toTop("_b0")
+		t.rename("_idx")
+		for b := 1; b < w; b++ {
+			bit := fmt.Sprintf("_b%d", b)
+			wt := fmt.Sprintf("_wt%d", b)
+			bw := fmt.Sprintf("_bw%d", b)
+			t.toTop(bit)
+			t.pushInt(wt, int64(1<<b))
+			t.rawBlock([]string{bit, wt}, bw, func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_MUL"})
+			})
+			t.toTop("_idx")
+			t.rawBlock([]string{bw, "_idx"}, "_idx", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_ADD"})
+			})
+		}
+		t.setDomain("_idx", domReduced)
+
+		for j := 1; j <= entries; j++ {
+			ic := fmt.Sprintf("_ic%d", j)
+			jv := fmt.Sprintf("_jv%d", j)
+			eq := fmt.Sprintf("_eq%d", j)
+			t.copyToTop("_idx", ic)
+			t.pushInt(jv, int64(j))
+			t.rawBlock([]string{ic, jv}, eq, func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+			})
+			t.setDomain(eq, domReduced)
+		}
+
+		for _, coord := range []string{"x", "y"} {
+			acc := "ax"
+			if coord == "y" {
+				acc = "ay"
+			}
+			for j := 1; j <= entries; j++ {
+				ec := fmt.Sprintf("_e%s%d", coord, j)
+				tc := fmt.Sprintf("_t%s%d", coord, j)
+				pr := fmt.Sprintf("_pr%s%d", coord, j)
+				t.copyToTop(fmt.Sprintf("_eq%d", j), ec)
+				t.copyToTop(fmt.Sprintf("_T%s%d", coord, j), tc)
+				t.rawBlock([]string{ec, tc}, pr, func(e func(StackOp)) {
+					e(StackOp{Op: "opcode", Code: "OP_MUL"})
+				})
+				if j == 1 {
+					t.rename(acc)
+				} else {
+					t.toTop(acc)
+					t.rawBlock([]string{pr, acc}, acc, func(e func(StackOp)) {
+						e(StackOp{Op: "opcode", Code: "OP_ADD"})
+					})
+				}
+			}
+			t.setDomain(acc, domReduced)
+		}
+
+		for j := entries; j >= 1; j-- {
+			t.toTop(fmt.Sprintf("_eq%d", j))
+			t.drop()
+		}
+
+		t.toTop("_idx")
+		t.rawBlock([]string{"_idx"}, "_flag", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
+		})
+	}
+
+	// Round d-1 initialises the accumulator. The first digit is non-zero by
+	// construction (CombGeometry), so this is a real point and never infinity.
+	emitSelect(d - 1)
+	t.toTop("_flag")
+	t.drop()
+	t.toTop("ax")
+	t.rename("jx")
+	t.toTop("ay")
+	t.rename("jy")
+	t.pushInt("jz", 1)
+	t.setDomain("jz", domReduced)
+
+	for i := d - 2; i >= 0; i-- {
+		cJacobianDouble(t, c)
+		emitSelect(i)
+
+		// cJacobianAddAffineBody documents its layout as [..., ax, ay, jx, jy,
+		// jz] and replaces the accumulator IN PLACE at the top. The selection
+		// leaves ax/ay above jz, so restore the contract before the branch —
+		// otherwise the add arm would reorder the stack and the empty else arm
+		// would not, leaving the two arms with different layouts at OP_ENDIF.
+		t.toTop("_flag")
+		t.toAlt()
+		t.toTop("jx")
+		t.toTop("jy")
+		t.toTop("jz")
+		t.fromAlt("_flag")
+
+		t.popTracked() // consumed by OP_IF
+		var addOps []StackOp
+		addEmit := func(op StackOp) { addOps = append(addOps, op) }
+		if safe[i] {
+			cBuildJacobianAddAffineInline(addEmit, t, c)
+		} else {
+			cBuildJacobianAddOrDoubleInline(addEmit, t, c)
+		}
+		emit(StackOp{Op: "if", Then: addOps, Else: []StackOp{}})
+
+		// The addend was selected fresh for this round; the add only copied it.
+		t.toTop("ay")
+		t.drop()
+		t.toTop("ax")
+		t.drop()
+	}
+
+	cJacobianToAffine(t, "_rx", "_ry", c)
+
+	for j := entries; j >= 1; j-- {
+		t.toTop(fmt.Sprintf("_Ty%d", j))
+		t.drop()
+		t.toTop(fmt.Sprintf("_Tx%d", j))
+		t.drop()
+	}
+	t.toTop("_k")
+	t.drop()
+
+	cComposePoint(t, "_rx", "_ry", "_result", c)
+	t.releaseConstant(ecPoolGroupN)
+	t.releaseConstant(ecPoolFieldP)
+	return true
+}
+
+// cEmitCombBest emits the cheapest comb over the candidate window widths.
+//
+// The instruction is not to hardcode a winner: each candidate is rendered in
+// full and scored with the same byte-cost model the emitter is measured by, and
+// the smallest wins. w=1 is the binary ladder and is excluded; beyond w=4 the
+// 2^w selection logic dominates.
+//
+// Returns nil when no candidate could be built, so the caller falls back to the
+// ladder rather than emitting nothing.
+func cEmitCombBest(c *nistCurveParams, g *nistGroupParams, curve *CombCurve, opts *EcCodegenOptions) []StackOp {
+	var best []StackOp
+	for _, w := range []int{2, 3, 4} {
+		var ops []StackOp
+		if !cEmitCombMulGen(func(op StackOp) { ops = append(ops, op) }, c, g, curve, w, opts) {
+			continue
+		}
+		if best == nil || EstimateScriptBytes(ops) < EstimateScriptBytes(best) {
+			best = ops
+		}
+	}
+	return best
 }
 
 // ===========================================================================
@@ -1027,8 +1374,8 @@ func cDecompressPubKey(
 		e(StackOp{Op: "push", Value: bigIntPush(1)})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
-	t.nm = append(t.nm, "_dk_prefix")
-	t.nm = append(t.nm, "_dk_xbytes")
+	t.pushTracked("_dk_prefix", domUnknown)
+	t.pushTracked("_dk_xbytes", domUnknown)
 
 	// SEC1 §2.3.4 requires the prefix to be exactly 0x02 or 0x03. The parity
 	// reduction below is BIN2NUM, 2 MOD, which accepts far more than that:
@@ -1120,7 +1467,7 @@ func cDecompressPubKey(
 
 	// Use OP_IF to select: if match, use y_cand (drop neg_y), else use neg_y (drop y_cand)
 	t.toTop("_dk_match")
-	t.nm = t.nm[:len(t.nm)-1] // condition consumed by IF
+	t.popTracked() // condition consumed by IF
 
 	thenOps := []StackOp{{Op: "drop"}} // remove neg_y, leaving y_cand
 	elseOps := []StackOp{{Op: "nip"}}  // remove y_cand, leaving neg_y
@@ -1135,7 +1482,7 @@ func cDecompressPubKey(
 		}
 	}
 	if negIdx >= 0 {
-		t.nm = append(t.nm[:negIdx], t.nm[negIdx+1:]...)
+		t.removeSlotAt(negIdx)
 	}
 
 	ycIdx := -1
@@ -1147,6 +1494,15 @@ func cDecompressPubKey(
 	}
 	if ycIdx >= 0 {
 		t.nm[ycIdx] = qyName
+		// FORGET what was known about the slot: `_dk_y_cand` carries Reduced from
+// cFieldPow, but that fact describes only the THEN path. The else arm leaves
+// `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this same slot, and
+// p - 0 = p is not < p. This is the join ECTracker.emitIf refuses to make, and
+// the raw `if` here bypasses that rule, so the reset must be explicit. Sound
+// today only via an unwritten argument (y_cand = 0 needs an order-2 point,
+// impossible on a prime-order curve) and unexploited only because nothing uses
+// qy as a fieldSub subtrahend yet.
+		t.setDomain(qyName, domUnknown)
 	}
 
 	xsIdx := -1
@@ -1226,8 +1582,8 @@ func cEmitLengthGate(t *ECTracker, name string, want int, flagName string) {
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 		e(StackOp{Op: "drop"})
 	})
-	t.nm = append(t.nm, flagName)
-	t.nm = append(t.nm, name)
+	t.pushTracked(flagName, domUnknown)
+	t.pushTracked(name, domUnknown)
 }
 
 // cEmitSigRangeGate is SEC1 §4.1.4 step 1 / FIPS 186-5 §6.4.2: verify
@@ -1301,8 +1657,16 @@ func cEmitVerifyECDSA(
 	c *nistCurveParams,
 	g *nistGroupParams,
 	curveB, sqrtExp, gx, gy *big.Int,
+	combCurve *CombCurve,
+	opts *EcCodegenOptions,
 ) {
-	t := NewECTracker([]string{"_msg", "_sig", "_pk"}, emit)
+	t := NewECTrackerOpts([]string{"_msg", "_sig", "_pk"}, emit, opts, nil)
+	// The verifier does hundreds of reductions OUTSIDE the two ladders —
+	// decompression's sqrt ladder, cGroupInv, cAffineAdd, the final cGroupMod.
+	// Each ladder pools separately: cEmitMul runs on its own tracker that
+	// deliberately cannot see this stack, so it cannot reach this slot.
+	t.poolConstant(ecPoolFieldP, c.fieldP)
+	t.poolConstant(ecPoolGroupN, g.n)
 
 	// Step 0: length gate. _sig and _pk are bare ByteString in the builtin
 	// table and the type checker imposes no width, so both arrive
@@ -1336,8 +1700,8 @@ func cEmitVerifyECDSA(
 		e(StackOp{Op: "push", Value: bigIntPush(int64(c.coordBytes))})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
-	t.nm = append(t.nm, "_r_bytes")
-	t.nm = append(t.nm, "_s_bytes")
+	t.pushTracked("_r_bytes", domUnknown)
+	t.pushTracked("_s_bytes", domUnknown)
 
 	// Convert r_bytes to integer
 	t.toTop("_r_bytes")
@@ -1395,7 +1759,17 @@ func cEmitVerifyECDSA(
 	copy(gPointData[0:c.coordBytes], bigintToNBytes(gx, c.coordBytes))
 	copy(gPointData[c.coordBytes:pointBytes], bigintToNBytes(gy, c.coordBytes))
 
-	t.pushBytes("_G", gPointData)
+	// u1*G. G is a compile-time constant, so this half can use a fixed-base
+	// comb — one doubling and one add per COLUMN instead of per bit. u2*Q below
+	// cannot: Q arrives in the witness.
+	var combOps []StackOp
+	if opts != nil && opts.FixedBaseComb {
+		combOps = cEmitCombBest(c, g, combCurve, opts)
+	}
+
+	if combOps == nil {
+		t.pushBytes("_G", gPointData)
+	}
 	t.toTop("_u1")
 
 	// Stash items on altstack. _input_ok goes DEEPEST — the altstack is LIFO
@@ -1411,14 +1785,23 @@ func cEmitVerifyECDSA(
 	t.toTop("_qx")
 	t.toAlt()
 
-	// Remove _G and _u1 from tracker before cEmitMul
-	t.nm = t.nm[:len(t.nm)-1] // _u1
-	t.nm = t.nm[:len(t.nm)-1] // _G
+	// The multiply creates its own ECTracker and cannot see items below its
+	// operands. Remove them from ours.
+	t.popTracked() // _u1
+	if combOps == nil {
+		t.popTracked() // _G
+	}
 
-	cEmitMul(emit, c, g)
+	if combOps != nil {
+		for _, op := range combOps {
+			emit(op)
+		}
+	} else {
+		cEmitMul(emit, c, g, opts)
+	}
 
 	// After mul, one result point is on the stack
-	t.nm = append(t.nm, "_R1_point")
+	t.pushTracked("_R1_point", domUnknown)
 
 	// Pop qx/qy/u2 from altstack (LIFO order)
 	t.fromAlt("_qx")
@@ -1435,10 +1818,10 @@ func cEmitVerifyECDSA(
 	t.toTop("_u2")
 
 	// Remove from tracker, emit mul, push result
-	t.nm = t.nm[:len(t.nm)-1] // _u2
-	t.nm = t.nm[:len(t.nm)-1] // _Q_point
-	cEmitMul(emit, c, g)
-	t.nm = append(t.nm, "_R2_point")
+	t.popTracked() // _u2
+	t.popTracked() // _Q_point
+	cEmitMul(emit, c, g, opts)
+	t.pushTracked("_R2_point", domUnknown)
 
 	// Restore R1 point
 	t.fromAlt("_R1_point")
@@ -1503,6 +1886,8 @@ func cEmitVerifyECDSA(
 	t.rawBlock([]string{"_input_ok", "_sig_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
+	t.releaseConstant(ecPoolGroupN)
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // ===========================================================================
@@ -1510,41 +1895,54 @@ func cEmitVerifyECDSA(
 // ===========================================================================
 
 // EmitP256Add adds two P-256 points.
-func EmitP256Add(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pa", "_pb"}, emit)
+func EmitP256Add(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pa", "_pb"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, p256CurveParams.fieldP)
 	cDecomposePoint(t, "_pa", "px", "py", p256CurveParams)
 	cDecomposePoint(t, "_pb", "qx", "qy", p256CurveParams)
 	cAffineAdd(t, p256CurveParams)
 	cComposePoint(t, "rx", "ry", "_result", p256CurveParams)
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitP256Mul performs P-256 scalar multiplication.
-func EmitP256Mul(emit func(StackOp)) {
-	cEmitMul(emit, p256CurveParams, p256GroupParams)
+func EmitP256Mul(emit func(StackOp), opts *EcCodegenOptions) {
+	cEmitMul(emit, p256CurveParams, p256GroupParams, opts)
 }
 
 // EmitP256MulGen performs P-256 generator multiplication.
-func EmitP256MulGen(emit func(StackOp)) {
+func EmitP256MulGen(emit func(StackOp), opts *EcCodegenOptions) {
+	if opts != nil && opts.FixedBaseComb {
+		if ops := cEmitCombBest(p256CurveParams, p256GroupParams, P256CombCurve, opts); ops != nil {
+			for _, op := range ops {
+				emit(op)
+			}
+			return
+		}
+	}
 	gPoint := make([]byte, 64)
 	copy(gPoint[0:32], bigintToNBytes(p256GX, 32))
 	copy(gPoint[32:64], bigintToNBytes(p256GY, 32))
 	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: gPoint}})
 	emit(StackOp{Op: "swap"}) // [point, scalar]
-	EmitP256Mul(emit)
+	EmitP256Mul(emit, opts)
 }
 
 // EmitP256Negate negates a P-256 point.
-func EmitP256Negate(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt"}, emit)
+func EmitP256Negate(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, p256CurveParams.fieldP)
 	cDecomposePoint(t, "_pt", "_nx", "_ny", p256CurveParams)
 	cPushFieldP(t, "_fp", p256CurveParams)
 	cFieldSub(t, "_fp", "_ny", "_neg_y", p256CurveParams)
 	cComposePoint(t, "_nx", "_neg_y", "_result", p256CurveParams)
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitP256OnCurve checks if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p).
-func EmitP256OnCurve(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt"}, emit)
+func EmitP256OnCurve(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, p256CurveParams.fieldP)
 	cDecomposePoint(t, "_pt", "_x", "_y", p256CurveParams)
 	cEmitCanonicityGuard(t, "_x", "_y", p256CurveParams)
 
@@ -1574,6 +1972,7 @@ func EmitP256OnCurve(emit func(StackOp)) {
 	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitP256EncodeCompressed encodes a P-256 point as 33-byte compressed pubkey.
@@ -1604,8 +2003,8 @@ func EmitP256EncodeCompressed(emit func(StackOp)) {
 }
 
 // EmitVerifyECDSA_P256 verifies an ECDSA signature on P-256.
-func EmitVerifyECDSA_P256(emit func(StackOp)) {
-	cEmitVerifyECDSA(emit, p256CurveParams, p256GroupParams, p256B, p256SqrtExp, p256GX, p256GY)
+func EmitVerifyECDSA_P256(emit func(StackOp), opts *EcCodegenOptions) {
+	cEmitVerifyECDSA(emit, p256CurveParams, p256GroupParams, p256B, p256SqrtExp, p256GX, p256GY, P256CombCurve, opts)
 }
 
 // ===========================================================================
@@ -1613,41 +2012,54 @@ func EmitVerifyECDSA_P256(emit func(StackOp)) {
 // ===========================================================================
 
 // EmitP384Add adds two P-384 points.
-func EmitP384Add(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pa", "_pb"}, emit)
+func EmitP384Add(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pa", "_pb"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, p384CurveParams.fieldP)
 	cDecomposePoint(t, "_pa", "px", "py", p384CurveParams)
 	cDecomposePoint(t, "_pb", "qx", "qy", p384CurveParams)
 	cAffineAdd(t, p384CurveParams)
 	cComposePoint(t, "rx", "ry", "_result", p384CurveParams)
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitP384Mul performs P-384 scalar multiplication.
-func EmitP384Mul(emit func(StackOp)) {
-	cEmitMul(emit, p384CurveParams, p384GroupParams)
+func EmitP384Mul(emit func(StackOp), opts *EcCodegenOptions) {
+	cEmitMul(emit, p384CurveParams, p384GroupParams, opts)
 }
 
 // EmitP384MulGen performs P-384 generator multiplication.
-func EmitP384MulGen(emit func(StackOp)) {
+func EmitP384MulGen(emit func(StackOp), opts *EcCodegenOptions) {
+	if opts != nil && opts.FixedBaseComb {
+		if ops := cEmitCombBest(p384CurveParams, p384GroupParams, P384CombCurve, opts); ops != nil {
+			for _, op := range ops {
+				emit(op)
+			}
+			return
+		}
+	}
 	gPoint := make([]byte, 96)
 	copy(gPoint[0:48], bigintToNBytes(p384GX, 48))
 	copy(gPoint[48:96], bigintToNBytes(p384GY, 48))
 	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: gPoint}})
 	emit(StackOp{Op: "swap"}) // [point, scalar]
-	EmitP384Mul(emit)
+	EmitP384Mul(emit, opts)
 }
 
 // EmitP384Negate negates a P-384 point.
-func EmitP384Negate(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt"}, emit)
+func EmitP384Negate(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, p384CurveParams.fieldP)
 	cDecomposePoint(t, "_pt", "_nx", "_ny", p384CurveParams)
 	cPushFieldP(t, "_fp", p384CurveParams)
 	cFieldSub(t, "_fp", "_ny", "_neg_y", p384CurveParams)
 	cComposePoint(t, "_nx", "_neg_y", "_result", p384CurveParams)
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitP384OnCurve checks if a P-384 point is on the curve.
-func EmitP384OnCurve(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt"}, emit)
+func EmitP384OnCurve(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, p384CurveParams.fieldP)
 	cDecomposePoint(t, "_pt", "_x", "_y", p384CurveParams)
 	cEmitCanonicityGuard(t, "_x", "_y", p384CurveParams)
 
@@ -1677,6 +2089,7 @@ func EmitP384OnCurve(emit func(StackOp)) {
 	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitP384EncodeCompressed encodes a P-384 point as 49-byte compressed pubkey.
@@ -1707,6 +2120,6 @@ func EmitP384EncodeCompressed(emit func(StackOp)) {
 }
 
 // EmitVerifyECDSA_P384 verifies an ECDSA signature on P-384.
-func EmitVerifyECDSA_P384(emit func(StackOp)) {
-	cEmitVerifyECDSA(emit, p384CurveParams, p384GroupParams, p384B, p384SqrtExp, p384GX, p384GY)
+func EmitVerifyECDSA_P384(emit func(StackOp), opts *EcCodegenOptions) {
+	cEmitVerifyECDSA(emit, p384CurveParams, p384GroupParams, p384B, p384SqrtExp, p384GX, p384GY, P384CombCurve, opts)
 }

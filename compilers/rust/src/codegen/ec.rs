@@ -7,7 +7,11 @@
 //! Internal arithmetic uses Jacobian coordinates for scalar multiplication.
 
 use num_bigint::BigInt;
+use std::sync::LazyLock;
+use num_traits::ToPrimitive;
 use super::stack::{PushValue, StackOp};
+use super::cost_model::{estimate_script_bytes, size_of_push_int};
+use super::comb::{comb_geometry, comb_safe_rounds, comb_table, SECP256K1_COMB_CURVE};
 
 // ===========================================================================
 // Constants
@@ -57,25 +61,192 @@ fn collect_ops(f: impl FnOnce(&mut dyn FnMut(StackOp))) -> Vec<StackOp> {
 // ECTracker — named stack state tracker (mirrors SLHTracker)
 // ===========================================================================
 
-struct ECTracker<'a> {
-    nm: Vec<String>,
-    e: &'a mut dyn FnMut(StackOp),
+/// Codegen options shared by every EC / NIST-curve emitter.
+///
+/// Off by default: with `None` (or an all-false struct) each emitter is
+/// byte-identical to what the seven tiers ship today, so no golden, size
+/// baseline, or cross-tier parity gate can move.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EcCodegenOptions {
+    /// Park large repeated constants (the field prime, the group order) in a
+    /// stack slot and copy them with `OP_PICK` instead of re-pushing the
+    /// literal.
+    ///
+    /// `field_mod` pushes the 256-bit prime at every modular reduction — 34
+    /// bytes a time, 20,025 times in `p256-wallet` (71 % of that fixture). A
+    /// pick from a slot a dozen deep costs 2.
+    pub constant_pool: bool,
+
+    /// Emit `a mod p` without the sign fix-up wherever the dividend is provably
+    /// non-negative, and the cheap `a - b + p` form for subtraction wherever the
+    /// subtrahend is provably reduced.
+    ///
+    /// Which reductions qualify is decided by the sign lattice below — never
+    /// assumed. Only useful alongside `constant_pool`: the cheap subtraction
+    /// references the prime twice, so without a pooled slot it does not pay (and
+    /// the emitters compare the two costs, so it is never taken when it does
+    /// not).
+    pub reduction_sinking: bool,
+
+    /// Use a fixed-base comb instead of the binary ladder wherever the base
+    /// point is a compile-time constant (`ecMulGen`, `p256MulGen`,
+    /// `p384MulGen`, and the `u1·G` half of ECDSA verification).
+    ///
+    /// The window width is not fixed here: the emitter renders each candidate
+    /// and keeps whichever the byte-cost model scores smallest.
+    pub fixed_base_comb: bool,
+}
+
+/// What is known about a tracked value's sign and range.
+///
+/// `Reduced` implies `NonNegative`; the ordering is what the transfer functions
+/// meet over. `Unknown` is the default for every slot the analysis has not
+/// explicitly proved something about — including everything a `raw_block` or an
+/// `OP_IF` produces — so an un-analysed value can only ever fall back to the
+/// shipping reduction.
+///
+/// The distinction is not academic. `OP_BIN2NUM` of 32 unsigned coordinate bytes
+/// gives `NonNegative` but NOT `Reduced`: a coordinate may legitimately be up to
+/// `2^256 - 1` while p is `2^32 + 977` smaller. Multiplication and addition need
+/// only `NonNegative`; subtraction's cheap form needs the subtrahend `Reduced`,
+/// and conflating the two produces a script that passes 256 EC oracle assertions
+/// and is still wrong on `ecAdd((0,1), (2^256-1,1))`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Dom {
+    /// Nothing known. May be negative.
+    #[default]
+    Unknown,
+    /// Provably >= 0. May be >= p.
+    NonNegative,
+    /// Provably in [0, p).
+    Reduced,
+}
+
+impl Dom {
+    /// True when this proves the value is >= 0.
+    pub(crate) fn is_non_negative(self) -> bool {
+        self >= Dom::NonNegative
+    }
+}
+
+/// Stack slot names reserved for pooled constants.
+pub const POOL_FIELD_P: &str = "_pool$p";
+pub const POOL_GROUP_N: &str = "_pool$n";
+
+pub(crate) struct ECTracker<'a> {
+    pub(crate) nm: Vec<String>,
+    /// Sign-lattice fact per stack SLOT, kept parallel to `nm`.
+    ///
+    /// Slot-parallel rather than keyed by name on purpose: names are reused
+    /// (`_fmul_prod` is written by every multiply) and the same name can be
+    /// resident twice, so a name-keyed map would go stale in exactly the cases
+    /// that matter. Every mutation of `nm` below mirrors into `dm` with the same
+    /// splice, so the two cannot drift.
+    pub(crate) dm: Vec<Dom>,
+    /// Lattice facts for values parked on the alt stack, bottom -> top.
+    alt_dm: Vec<Dom>,
+    pub(crate) e: &'a mut dyn FnMut(StackOp),
+    /// True when this tracker may serve constants from a pooled slot.
+    pub(crate) pooling: bool,
+    /// True when this tracker may emit sunk reductions.
+    pub(crate) sinking: bool,
+    /// True when a compile-time-known base may use a fixed-base comb.
+    pub(crate) comb: bool,
 }
 
 #[allow(dead_code)]
 impl<'a> ECTracker<'a> {
-    fn new(init: &[&str], emit: &'a mut dyn FnMut(StackOp)) -> Self {
+    pub(crate) fn new(init: &[&str], emit: &'a mut dyn FnMut(StackOp)) -> Self {
+        Self::with_opts(init, emit, None, None)
+    }
+
+    /// Create a tracker carrying codegen options and, optionally, initial
+    /// lattice facts for the pre-existing slots.
+    pub(crate) fn with_opts(
+        init: &[&str],
+        emit: &'a mut dyn FnMut(StackOp),
+        opts: Option<&EcCodegenOptions>,
+        init_domains: Option<&[Dom]>,
+    ) -> Self {
+        let nm: Vec<String> = init.iter().map(|s| s.to_string()).collect();
+        let dm: Vec<Dom> = match init_domains {
+            Some(d) => d.to_vec(),
+            None => vec![Dom::Unknown; nm.len()],
+        };
+        let o = opts.copied().unwrap_or_default();
         ECTracker {
-            nm: init.iter().map(|s| s.to_string()).collect(),
+            nm,
+            dm,
+            alt_dm: Vec::new(),
             e: emit,
+            pooling: o.constant_pool,
+            sinking: o.reduction_sinking,
+            comb: o.fixed_base_comb,
         }
     }
 
-    fn depth(&self) -> usize {
+    /// The options this tracker was built with, for handing to a nested tracker.
+    pub(crate) fn options(&self) -> EcCodegenOptions {
+        EcCodegenOptions {
+            constant_pool: self.pooling,
+            reduction_sinking: self.sinking,
+            fixed_base_comb: self.comb,
+        }
+    }
+
+    // -- sign lattice --------------------------------------------------------
+
+    /// What is known about the named value. `Unknown` when the name is absent.
+    pub(crate) fn domain_of(&self, name: &str) -> Dom {
+        // A silent desync here would hand a transfer function a fact about the
+        // WRONG slot, which is the one failure mode that produces a smaller
+        // script that quietly computes something else. Fail loudly instead.
+        assert_eq!(
+            self.dm.len(),
+            self.nm.len(),
+            "ECTracker: lattice desynchronised. Every nm mutation must go through \
+             a tracker method or push_tracked/pop_tracked."
+        );
+        for i in (0..self.nm.len()).rev() {
+            if self.nm[i] == name {
+                return self.dm[i];
+            }
+        }
+        Dom::Unknown
+    }
+
+    /// Record a fact about the named value's slot.
+    pub(crate) fn set_domain(&mut self, name: &str, d: Dom) {
+        for i in (0..self.nm.len()).rev() {
+            if self.nm[i] == name {
+                self.dm[i] = d;
+                return;
+            }
+        }
+    }
+
+    /// Push a slot the caller tracks itself (used where raw opcodes create items).
+    pub(crate) fn push_tracked(&mut self, name: &str, d: Dom) {
+        self.nm.push(name.to_string());
+        self.dm.push(d);
+    }
+
+    /// Pop a slot the caller tracks itself. Mirror of `push_tracked`.
+    pub(crate) fn pop_tracked(&mut self) -> Option<String> {
+        self.dm.pop();
+        self.nm.pop()
+    }
+
+    /// Remove the slot at an absolute (bottom-relative) index.
+    pub(crate) fn remove_slot_at(&mut self, index: usize) -> (String, Dom) {
+        (self.nm.remove(index), self.dm.remove(index))
+    }
+
+    pub(crate) fn depth(&self) -> usize {
         self.nm.len()
     }
 
-    fn find_depth(&self, name: &str) -> usize {
+    pub(crate) fn find_depth(&self, name: &str) -> usize {
         for i in (0..self.nm.len()).rev() {
             if self.nm[i] == name {
                 return self.nm.len() - 1 - i;
@@ -84,63 +255,78 @@ impl<'a> ECTracker<'a> {
         panic!("ECTracker: '{}' not on stack {:?}", name, self.nm);
     }
 
-    fn push_bytes(&mut self, n: &str, v: Vec<u8>) {
+    pub(crate) fn push_bytes(&mut self, n: &str, v: Vec<u8>) {
         (self.e)(StackOp::Push(PushValue::Bytes(v)));
-        self.nm.push(n.to_string());
+        // A byte blob is not a number until BIN2NUM decides how to read it.
+        self.push_tracked(n, Dom::Unknown);
     }
 
-    fn push_int(&mut self, n: &str, v: i128) {
+    pub(crate) fn push_int(&mut self, n: &str, v: i128) {
         (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v))));
-        self.nm.push(n.to_string());
+        self.push_tracked(n, if v >= 0 { Dom::NonNegative } else { Dom::Unknown });
     }
 
-    fn dup(&mut self, n: &str) {
+    /// Push an arbitrary-precision integer.
+    ///
+    /// The EC constants exceed `i128`, and the tier used to push them as
+    /// pre-encoded script-number BYTE blobs. Encoded hex is identical either
+    /// way, but a `Bytes` push is invisible to the peephole's constant folding
+    /// and to the lattice, so a repeated constant could neither be folded nor
+    /// proved non-negative. Pushing them as `Int` restores both.
+    pub(crate) fn push_big(&mut self, n: &str, v: &BigInt) {
+        (self.e)(StackOp::Push(PushValue::Int(v.clone())));
+        let d = if v.sign() == num_bigint::Sign::Minus { Dom::Unknown } else { Dom::NonNegative };
+        self.push_tracked(n, d);
+    }
+
+    pub(crate) fn dup(&mut self, n: &str) {
         (self.e)(StackOp::Dup);
-        self.nm.push(n.to_string());
+        let d = self.dm.last().copied().unwrap_or_default();
+        self.push_tracked(n, d);
     }
 
-    fn drop(&mut self) {
+    pub(crate) fn drop(&mut self) {
         (self.e)(StackOp::Drop);
-        if !self.nm.is_empty() {
-            self.nm.pop();
-        }
+        self.pop_tracked();
     }
 
-    fn nip(&mut self) {
+    pub(crate) fn nip(&mut self) {
         (self.e)(StackOp::Nip);
         let len = self.nm.len();
         if len >= 2 {
-            self.nm.remove(len - 2);
+            self.remove_slot_at(len - 2);
         }
     }
 
-    fn over(&mut self, n: &str) {
+    pub(crate) fn over(&mut self, n: &str) {
         (self.e)(StackOp::Over);
-        self.nm.push(n.to_string());
+        let d = if self.dm.len() >= 2 { self.dm[self.dm.len() - 2] } else { Dom::Unknown };
+        self.push_tracked(n, d);
     }
 
-    fn swap(&mut self) {
+    pub(crate) fn swap(&mut self) {
         (self.e)(StackOp::Swap);
         let len = self.nm.len();
         if len >= 2 {
             self.nm.swap(len - 1, len - 2);
+            self.dm.swap(len - 1, len - 2);
         }
     }
 
-    fn rot(&mut self) {
+    pub(crate) fn rot(&mut self) {
         (self.e)(StackOp::Rot);
         let len = self.nm.len();
         if len >= 3 {
-            let r = self.nm.remove(len - 3);
-            self.nm.push(r);
+            let (r, rd) = self.remove_slot_at(len - 3);
+            self.push_tracked(&r, rd);
         }
     }
 
-    fn op(&mut self, code: &str) {
+    pub(crate) fn op(&mut self, code: &str) {
         (self.e)(StackOp::Opcode(code.into()));
     }
 
-    fn roll(&mut self, d: usize) {
+    pub(crate) fn roll(&mut self, d: usize) {
         if d == 0 {
             return;
         }
@@ -153,15 +339,15 @@ impl<'a> ECTracker<'a> {
             return;
         }
         (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
-        self.nm.push(String::new());
+        self.push_tracked("", Dom::NonNegative);
         (self.e)(StackOp::Opcode("OP_ROLL".into()));
-        self.nm.pop(); // pop the push
+        self.pop_tracked(); // the depth literal
         let idx = self.nm.len() - 1 - d;
-        let r = self.nm.remove(idx);
-        self.nm.push(r);
+        let (r, rd) = self.remove_slot_at(idx);
+        self.push_tracked(&r, rd);
     }
 
-    fn pick(&mut self, d: usize, n: &str) {
+    pub(crate) fn pick(&mut self, d: usize, n: &str) {
         if d == 0 {
             self.dup(n);
             return;
@@ -171,60 +357,126 @@ impl<'a> ECTracker<'a> {
             return;
         }
         (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
-        self.nm.push(String::new());
+        self.push_tracked("", Dom::NonNegative);
         (self.e)(StackOp::Opcode("OP_PICK".into()));
-        self.nm.pop(); // pop the push
-        self.nm.push(n.to_string());
+        self.pop_tracked(); // the depth literal
+        // Once the depth literal is gone the copied slot sits at depth d.
+        let src = if self.dm.len() > d { self.dm[self.dm.len() - 1 - d] } else { Dom::Unknown };
+        self.push_tracked(n, src);
     }
 
-    fn to_top(&mut self, name: &str) {
+    pub(crate) fn to_top(&mut self, name: &str) {
         let d = self.find_depth(name);
         self.roll(d);
     }
 
-    fn copy_to_top(&mut self, name: &str, n: &str) {
+    pub(crate) fn copy_to_top(&mut self, name: &str, n: &str) {
         let d = self.find_depth(name);
         self.pick(d, n);
     }
 
-    fn to_alt(&mut self) {
+    // -- constant pool -------------------------------------------------------
+    //
+    // A pooled constant is an ordinary tracked slot; nothing about the stack
+    // model changes. `push_const` just chooses, per call site and by emitted
+    // bytes, between copying that slot and re-pushing the literal. Nested
+    // trackers built from `nm.clone()` inherit the slot for free, so pooled
+    // constants work unchanged inside an `OP_IF` arm.
+
+    pub(crate) fn has_slot(&self, slot: &str) -> bool {
+        self.nm.iter().any(|n| n == slot)
+    }
+
+    /// Park `value` in `slot` for the lifetime of this emitter. No-op when
+    /// pooling is off.
+    pub(crate) fn pool_constant(&mut self, slot: &str, value: &BigInt) {
+        if !self.pooling || self.has_slot(slot) {
+            return;
+        }
+        self.push_big(slot, value);
+    }
+
+    /// Remove a pooled slot. No-op when pooling is off or the slot is absent.
+    pub(crate) fn release_constant(&mut self, slot: &str) {
+        if !self.pooling || !self.has_slot(slot) {
+            return;
+        }
+        self.to_top(slot);
+        self.drop();
+    }
+
+    /// Emitted bytes a `push_const` of this constant would cost right now.
+    ///
+    /// The comparison is exact — `size_of_push_int` is the same encoder the emit
+    /// pass uses — so pooling can never make a call site bigger. A pick at depth
+    /// d costs `size_of_push_int(d) + 1`; depths 0 and 1 are OP_DUP / OP_OVER, 1
+    /// byte each.
+    pub(crate) fn const_cost(&self, slot: &str, value: &BigInt) -> usize {
+        if self.pooling && self.has_slot(slot) {
+            let d = self.find_depth(slot);
+            let pick_cost = if d <= 1 { 1 } else { size_of_push_int(&BigInt::from(d)) + 1 };
+            if pick_cost < size_of_push_int(value) {
+                return pick_cost;
+            }
+        }
+        size_of_push_int(value)
+    }
+
+    /// Materialize `value` on top as `name`, from the pooled `slot` when that is
+    /// cheaper in emitted bytes than pushing the literal.
+    pub(crate) fn push_const(&mut self, slot: &str, value: &BigInt, name: &str) {
+        if self.pooling && self.has_slot(slot) {
+            let d = self.find_depth(slot);
+            let pick_cost = if d <= 1 { 1 } else { size_of_push_int(&BigInt::from(d)) + 1 };
+            if pick_cost < size_of_push_int(value) {
+                self.pick(d, name);
+                return;
+            }
+        }
+        self.push_big(name, value);
+    }
+
+    pub(crate) fn to_alt(&mut self) {
         self.op("OP_TOALTSTACK");
         if !self.nm.is_empty() {
-            self.nm.pop();
+            let d = self.dm[self.dm.len() - 1];
+            self.pop_tracked();
+            self.alt_dm.push(d);
         }
     }
 
-    fn from_alt(&mut self, n: &str) {
+    pub(crate) fn from_alt(&mut self, n: &str) {
         self.op("OP_FROMALTSTACK");
-        self.nm.push(n.to_string());
+        let d = self.alt_dm.pop().unwrap_or_default();
+        self.push_tracked(n, d);
     }
 
-    fn rename(&mut self, n: &str) {
+    pub(crate) fn rename(&mut self, n: &str) {
         if let Some(last) = self.nm.last_mut() {
             *last = n.to_string();
         }
     }
 
     /// Emit raw opcodes; tracker only records net stack effect.
-    fn raw_block(
+    pub(crate) fn raw_block(
         &mut self,
         consume: &[&str],
         produce: Option<&str>,
         f: impl FnOnce(&mut dyn FnMut(StackOp)),
     ) {
         for _ in consume {
-            if !self.nm.is_empty() {
-                self.nm.pop();
-            }
+            self.pop_tracked();
         }
         f(self.e);
         if let Some(p) = produce {
-            self.nm.push(p.to_string());
+            // Opaque opcodes: nothing is known about the result unless the
+            // caller proves it and records that with `set_domain` afterwards.
+            self.push_tracked(p, Dom::Unknown);
         }
     }
 
     /// Emit if/else with tracked stack effect.
-    fn emit_if(
+    pub(crate) fn emit_if(
         &mut self,
         cond_name: &str,
         then_fn: impl FnOnce(&mut dyn FnMut(StackOp)),
@@ -232,7 +484,7 @@ impl<'a> ECTracker<'a> {
         result_name: Option<&str>,
     ) {
         self.to_top(cond_name);
-        self.nm.pop(); // condition consumed
+        self.pop_tracked(); // condition consumed
         let then_ops = collect_ops(then_fn);
         let else_ops = collect_ops(else_fn);
         (self.e)(StackOp::If {
@@ -240,7 +492,8 @@ impl<'a> ECTracker<'a> {
             else_ops,
         });
         if let Some(rn) = result_name {
-            self.nm.push(rn.to_string());
+            // A join over two arms this tracker did not analyse: nothing is known.
+            self.push_tracked(rn, Dom::Unknown);
         }
     }
 }
@@ -262,16 +515,61 @@ const FIELD_P_SCRIPT_NUM: [u8; 33] = [
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
 ];
 
+/// secp256k1 field prime p, as an integer.
+///
+/// The tier used to push this (and the group order) as a pre-encoded
+/// script-number BYTE blob, because the value exceeds `i128`. `PushValue::Int`
+/// carries a `BigInt`, so the blob was never necessary — and it cost real
+/// things: a `Bytes` push is invisible to the peephole's constant folding (which
+/// is why the `+3n` chain had to be pre-folded by hand) and to the sign lattice.
+pub(crate) static FIELD_P: LazyLock<BigInt> = LazyLock::new(|| {
+    BigInt::parse_bytes(
+        b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16).unwrap()
+});
+
+/// secp256k1 curve order n.
+pub(crate) static CURVE_N: LazyLock<BigInt> = LazyLock::new(|| {
+    BigInt::parse_bytes(
+        b"fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16).unwrap()
+});
+
 /// Push the field prime p onto the stack as a script number.
 fn push_field_p(t: &mut ECTracker, name: &str) {
-    // Push p as pre-encoded script number bytes — equivalent to pushInt(FIELD_P)
-    // in the TS implementation, but using bytes since FIELD_P exceeds i128.
-    t.push_bytes(name, FIELD_P_SCRIPT_NUM.to_vec());
+    t.push_const(POOL_FIELD_P, &FIELD_P, name);
+}
+
+/// `a mod p` with no sign fix-up: 1 opcode instead of 7.
+///
+/// Sound only when the dividend is provably >= 0, because `OP_MOD` takes the
+/// sign of the dividend. The caller proves that; this function does not check.
+fn field_mod_short(t: &mut ECTracker, a_name: &str, result_name: &str) {
+    t.to_top(a_name);
+    push_field_p(t, "_fmods_p");
+    t.raw_block(&[a_name, "_fmods_p"], Some(result_name), |e| {
+        e(StackOp::Opcode("OP_MOD".into()));
+    });
+    t.set_domain(result_name, Dom::Reduced);
+}
+
+/// Does the cheap `a - b + p` subtraction shape pay here?
+///
+/// It references the prime TWICE where the shipping shape references it once and
+/// pays six more opcodes, so it only wins when the prime is cheap to
+/// materialise — i.e. when it is pooled. Without a pool this rewrite makes
+/// p256-wallet LARGER (958,792 -> 999,371 measured), which is why it is a cost
+/// comparison and not a flag.
+fn cheap_sub_pays(t: &ECTracker) -> bool {
+    let c = t.const_cost(POOL_FIELD_P, &FIELD_P);
+    2 * c + 2 < c + 8
 }
 
 /// fieldMod: reduce TOS mod p, ensure non-negative.
 /// Expects `a_name` to be on the tracker stack.
 fn field_mod(t: &mut ECTracker, a_name: &str, result_name: &str) {
+    if t.sinking && t.domain_of(a_name).is_non_negative() {
+        field_mod_short(t, a_name, result_name);
+        return;
+    }
     t.to_top(a_name);
     push_field_p(t, "_fmod_p");
     // (a % p + p) % p
@@ -285,15 +583,22 @@ fn field_mod(t: &mut ECTracker, a_name: &str, result_name: &str) {
         e(StackOp::Swap);                       // (a%p+p) p
         e(StackOp::Opcode("OP_MOD".into()));    // ((a%p+p)%p)
     });
+    t.set_domain(result_name, Dom::Reduced);
 }
 
 /// fieldAdd: (a + b) mod p.
 fn field_add(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str) {
+    // Read the operand facts BEFORE raw_block consumes their slots.
+    let sum_non_neg =
+        t.domain_of(a_name).is_non_negative() && t.domain_of(b_name).is_non_negative();
     t.to_top(a_name);
     t.to_top(b_name);
     t.raw_block(&[a_name, b_name], Some("_fadd_sum"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
+    if sum_non_neg {
+        t.set_domain("_fadd_sum", Dom::NonNegative);
+    }
     field_mod(t, "_fadd_sum", result_name);
 }
 
@@ -301,24 +606,59 @@ fn field_add(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str) {
 fn field_sub(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str) {
     t.to_top(a_name);
     t.to_top(b_name);
+    // The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a single
+    // shifted reduction is exact. `b >= 0` alone is NOT enough — a coordinate
+    // decoded from 32 unsigned bytes can exceed p by up to 2^32 + 977, which is
+    // precisely the `ecAdd((0,1), (2^256-1,1))` counterexample.
+    let cheap = t.sinking
+        && t.domain_of(a_name).is_non_negative()
+        && t.domain_of(b_name) == Dom::Reduced
+        && cheap_sub_pays(t);
+
     t.raw_block(&[a_name, b_name], Some("_fsub_diff"), |e| {
         e(StackOp::Opcode("OP_SUB".into()));
     });
+
+    if cheap {
+        push_field_p(t, "_fsub_p");
+        t.raw_block(&["_fsub_diff", "_fsub_p"], Some("_fsub_shift"), |e| {
+            e(StackOp::Opcode("OP_ADD".into()));
+        });
+        t.set_domain("_fsub_shift", Dom::NonNegative);
+        field_mod_short(t, "_fsub_shift", result_name);
+        return;
+    }
     field_mod(t, "_fsub_diff", result_name);
 }
 
 /// fieldMul: (a * b) mod p.
 fn field_mul(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str) {
+    field_mul_signed(t, a_name, b_name, result_name, false);
+}
+
+/// `field_mul` with an explicit assertion about the product's sign, independent
+/// of the operands — `field_sqr` uses it, since a*a >= 0 for any a whatsoever.
+fn field_mul_signed(
+    t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str,
+    product_non_negative: bool,
+) {
+    let non_neg = product_non_negative
+        || (t.domain_of(a_name).is_non_negative() && t.domain_of(b_name).is_non_negative());
     t.to_top(a_name);
     t.to_top(b_name);
     t.raw_block(&[a_name, b_name], Some("_fmul_prod"), |e| {
         e(StackOp::Opcode("OP_MUL".into()));
     });
+    if non_neg {
+        t.set_domain("_fmul_prod", Dom::NonNegative);
+    }
     field_mod(t, "_fmul_prod", result_name);
 }
 
 /// fieldMulConst: (a * c) mod p where c is a small constant.
 fn field_mul_const(t: &mut ECTracker, a_name: &str, c: i128, result_name: &str) {
+    // Every call site passes a small positive c, so the product keeps a's sign.
+    let non_neg = c > 0 && t.domain_of(a_name).is_non_negative();
     t.to_top(a_name);
     t.raw_block(&[a_name], Some("_fmc_prod"), |e| {
         if c == 2 {
@@ -329,13 +669,16 @@ fn field_mul_const(t: &mut ECTracker, a_name: &str, c: i128, result_name: &str) 
             e(StackOp::Opcode("OP_MUL".into()));
         }
     });
+    if non_neg {
+        t.set_domain("_fmc_prod", Dom::NonNegative);
+    }
     field_mod(t, "_fmc_prod", result_name);
 }
 
-/// fieldSqr: (a * a) mod p.
+/// fieldSqr: (a * a) mod p. A square is non-negative whatever a's sign is.
 fn field_sqr(t: &mut ECTracker, a_name: &str, result_name: &str) {
     t.copy_to_top(a_name, "_fsqr_copy");
-    field_mul(t, a_name, "_fsqr_copy", result_name);
+    field_mul_signed(t, a_name, "_fsqr_copy", result_name, true);
 }
 
 /// fieldInv: a^(p-2) mod p via square-and-multiply.
@@ -390,8 +733,8 @@ fn decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &s
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
     // Manually track the two new items
-    t.nm.push("_dp_xb".to_string());
-    t.nm.push("_dp_yb".to_string());
+    t.push_tracked("_dp_xb", Dom::Unknown);
+    t.push_tracked("_dp_yb", Dom::Unknown);
 
     // Convert y_bytes (on top) to num
     // Reverse from BE to LE, append 0x00 sign byte to ensure unsigned, then BIN2NUM
@@ -401,6 +744,10 @@ fn decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &s
         e(StackOp::Opcode("OP_CAT".into()));
         e(StackOp::Opcode("OP_BIN2NUM".into()));
     });
+    // A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+    // UNSIGNED: >= 0, but it may be up to 2^256 - 1 and therefore >= p. That gap
+    // is exactly what the subtraction precondition turns on.
+    t.set_domain(y_name, Dom::NonNegative);
 
     // Convert x_bytes to num
     t.to_top("_dp_xb");
@@ -410,6 +757,7 @@ fn decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &s
         e(StackOp::Opcode("OP_CAT".into()));
         e(StackOp::Opcode("OP_BIN2NUM".into()));
     });
+    t.set_domain(x_name, Dom::NonNegative);
 
     // Stack: [yName, xName] — swap to standard order [xName, yName]
     t.swap();
@@ -696,10 +1044,13 @@ fn jacobian_to_affine(t: &mut ECTracker, rx_name: &str, ry_name: &str) {
 /// Stack layout: [..., ax, ay, _k, jx, jy, jz]
 /// After:        [..., ax, ay, _k, jx', jy', jz']
 fn build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &ECTracker) {
-    // Create inner tracker with cloned stack state
+    // Create the inner tracker with cloned stack state AND lattice facts: the
+    // operands' proved domains are what decide which reduction shape the body
+    // emits, so dropping them here would silently fall back everywhere.
     let cloned_nm: Vec<String> = t.nm.clone();
     let init_strs: Vec<&str> = cloned_nm.iter().map(|s| s.as_str()).collect();
-    let mut it = ECTracker::new(&init_strs, e);
+    let opts = t.options();
+    let mut it = ECTracker::with_opts(&init_strs, e, Some(&opts), Some(&t.dm));
     jacobian_add_affine_body(&mut it, false);
 }
 
@@ -851,7 +1202,8 @@ fn select_coord(t: &mut ECTracker, add_name: &str, dbl_name: &str, cond_name: &s
 fn build_jacobian_add_or_double_inline(e: &mut dyn FnMut(StackOp), t: &ECTracker) {
     let cloned_nm: Vec<String> = t.nm.clone();
     let init_strs: Vec<&str> = cloned_nm.iter().map(|s| s.as_str()).collect();
-    let mut it = ECTracker::new(&init_strs, e);
+    let opts = t.options();
+    let mut it = ECTracker::with_opts(&init_strs, e, Some(&opts), Some(&t.dm));
     let it = &mut it;
 
     // Keep the pre-add accumulator: it is what must be DOUBLED in the
@@ -909,12 +1261,14 @@ fn build_jacobian_add_or_double_inline(e: &mut dyn FnMut(StackOp), t: &ECTracker
 /// ecAdd: add two points.
 /// Stack in: [point_a, point_b] (b on top)
 /// Stack out: [result_point]
-pub fn emit_ec_add(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pa", "_pb"], emit);
+pub fn emit_ec_add(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pa", "_pb"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &FIELD_P);
     decompose_point(&mut t, "_pa", "px", "py");
     decompose_point(&mut t, "_pb", "qx", "qy");
     affine_add(&mut t);
     compose_point(&mut t, "rx", "ry", "_result");
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// Reduce a scalar to [0, n-1]: ((k mod n) + n) mod n.
@@ -930,7 +1284,7 @@ pub fn emit_ec_add(emit: &mut dyn FnMut(StackOp)) {
 /// costs 1 push + 8 opcodes (42 bytes) against a ~429 KB script, and makes
 /// k >= n, k < 0 and k = 0 all well defined.
 fn emit_scalar_reduce(t: &mut ECTracker, k_name: &str, result_name: &str) {
-    t.push_bytes("_n_red", CURVE_N_SCRIPT_NUM.to_vec());
+    t.push_const(POOL_GROUP_N, &CURVE_N, "_n_red");
     t.raw_block(&[k_name, "_n_red"], Some(result_name), |e| {
         e(StackOp::Opcode("OP_2DUP".into()));
         e(StackOp::Opcode("OP_MOD".into()));
@@ -948,8 +1302,10 @@ fn emit_scalar_reduce(t: &mut ECTracker, k_name: &str, result_name: &str) {
 /// Stack out: [result_point]
 ///
 /// Uses 256-iteration double-and-add with Jacobian coordinates.
-pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt", "_k"], emit);
+pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt", "_k"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &FIELD_P);
+    t.pool_constant(POOL_GROUP_N, &CURVE_N);
     // Decompose to affine base point
     decompose_point(&mut t, "_pt", "ax", "ay");
 
@@ -962,8 +1318,20 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
     // usually an unlock argument — so reduce it first. See `emit_scalar_reduce`.
     t.to_top("_k");
     emit_scalar_reduce(&mut t, "_k", "_kr");
-    t.push_bytes("_3n", THREE_CURVE_N_SCRIPT_NUM.to_vec());
-    t.raw_block(&["_kr", "_3n"], Some("_k3n"), |e| {
+    // THREE separate `+n` steps, not a pre-folded `3n`. The peephole's
+    // fold-chain-add collapses them back to the same `push 3n, ADD`, so the
+    // shipped bytes are unchanged — but the pre-peephole form now matches the
+    // reference, and each step can come from the pooled slot.
+    t.push_const(POOL_GROUP_N, &CURVE_N, "_n");
+    t.raw_block(&["_kr", "_n"], Some("_kn"), |e| {
+        e(StackOp::Opcode("OP_ADD".into()));
+    });
+    t.push_const(POOL_GROUP_N, &CURVE_N, "_n2");
+    t.raw_block(&["_kn", "_n2"], Some("_kn2"), |e| {
+        e(StackOp::Opcode("OP_ADD".into()));
+    });
+    t.push_const(POOL_GROUP_N, &CURVE_N, "_n3");
+    t.raw_block(&["_kn2", "_n3"], Some("_kn3"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
     t.rename("_k");
@@ -1002,7 +1370,7 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
         // Move _bit to TOS and remove from tracker BEFORE generating add ops,
         // because OP_IF consumes _bit and the add ops run with _bit already gone.
         t.to_top("_bit");
-        t.nm.pop(); // _bit consumed by IF
+        t.pop_tracked(); // _bit consumed by IF
         // Only the final step can be handed two equal operands — see
         // build_jacobian_add_or_double_inline for why, and for what it costs
         // not to.
@@ -1029,37 +1397,331 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
 
     // Compose result
     compose_point(&mut t, "_rx", "_ry", "_result");
+    t.release_constant(POOL_GROUP_N);
+    t.release_constant(POOL_FIELD_P);
+}
+
+
+// ===========================================================================
+// Fixed-base comb (secp256k1)
+// ===========================================================================
+
+/// Round `i`'s digit and the selected table entry, as `ax`/`ay`/`_flag`.
+///
+/// Exactly one equality holds, so `Σ eq_j · T_j` is that entry's coordinate and
+/// every term is non-negative and below p — no reduction is needed, and the
+/// result is `Reduced` by construction. When the digit is zero every term
+/// vanishes and `_flag` is 0, so no add runs.
+///
+/// Shared by both comb emitters: the selection is pure scalar bit-twiddling and
+/// table indexing, with no curve arithmetic in it at all.
+pub(crate) fn comb_emit_select(t: &mut ECTracker, i: usize, w: usize, d: usize) {
+    let entries = (1usize << w) - 1;
+    for b in 0..w {
+        let shift = i + b * d;
+        let kc = format!("_kc{}", b);
+        let sh = format!("_sh{}", b);
+        t.copy_to_top("_k", &kc);
+        if shift == 0 {
+            t.rename(&sh);
+        } else if shift == 1 {
+            t.raw_block(&[&kc], Some(&sh), |e| {
+                e(StackOp::Opcode("OP_2DIV".into()));
+            });
+        } else {
+            let sd = format!("_sd{}", b);
+            t.push_int(&sd, shift as i128);
+            t.raw_block(&[&kc, &sd], Some(&sh), |e| {
+                e(StackOp::Opcode("OP_RSHIFTNUM".into()));
+            });
+        }
+        let two = format!("_two{}", b);
+        let bit = format!("_b{}", b);
+        t.push_int(&two, 2);
+        t.raw_block(&[&sh, &two], Some(&bit), |e| {
+            e(StackOp::Opcode("OP_MOD".into()));
+        });
+        t.set_domain(&bit, Dom::Reduced);
+    }
+
+    t.to_top("_b0");
+    t.rename("_idx");
+    for b in 1..w {
+        let bit = format!("_b{}", b);
+        let wt = format!("_wt{}", b);
+        let bw = format!("_bw{}", b);
+        t.to_top(&bit);
+        t.push_int(&wt, 1i128 << b);
+        t.raw_block(&[&bit, &wt], Some(&bw), |e| {
+            e(StackOp::Opcode("OP_MUL".into()));
+        });
+        t.to_top("_idx");
+        t.raw_block(&[&bw, "_idx"], Some("_idx"), |e| {
+            e(StackOp::Opcode("OP_ADD".into()));
+        });
+    }
+    t.set_domain("_idx", Dom::Reduced);
+
+    for j in 1..=entries {
+        let ic = format!("_ic{}", j);
+        let jv = format!("_jv{}", j);
+        let eq = format!("_eq{}", j);
+        t.copy_to_top("_idx", &ic);
+        t.push_int(&jv, j as i128);
+        t.raw_block(&[&ic, &jv], Some(&eq), |e| {
+            e(StackOp::Opcode("OP_NUMEQUAL".into()));
+        });
+        t.set_domain(&eq, Dom::Reduced);
+    }
+
+    for coord in ["x", "y"] {
+        let acc = if coord == "x" { "ax" } else { "ay" };
+        for j in 1..=entries {
+            let ec = format!("_e{}{}", coord, j);
+            let tc = format!("_t{}{}", coord, j);
+            let pr = format!("_pr{}{}", coord, j);
+            t.copy_to_top(&format!("_eq{}", j), &ec);
+            t.copy_to_top(&format!("_T{}{}", coord, j), &tc);
+            t.raw_block(&[&ec, &tc], Some(&pr), |e| {
+                e(StackOp::Opcode("OP_MUL".into()));
+            });
+            if j == 1 {
+                t.rename(acc);
+            } else {
+                t.to_top(acc);
+                t.raw_block(&[&pr, acc], Some(acc), |e| {
+                    e(StackOp::Opcode("OP_ADD".into()));
+                });
+            }
+        }
+        t.set_domain(acc, Dom::Reduced);
+    }
+
+    for j in (1..=entries).rev() {
+        t.to_top(&format!("_eq{}", j));
+        t.drop();
+    }
+
+    t.to_top("_idx");
+    t.raw_block(&["_idx"], Some("_flag"), |e| {
+        e(StackOp::Opcode("OP_0NOTEQUAL".into()));
+    });
+}
+
+/// `k·G` by a Lim-Lee fixed-base comb instead of the 257-round binary ladder.
+///
+/// The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+/// the scalar into `w` blocks of `d` bits and reads one bit from each block per
+/// round, so it performs one doubling and one conditional add per COLUMN: the
+/// round count falls from `w*d` to `d` at the price of a `2^w - 1` entry table.
+/// G is a compile-time constant here, so the table costs nothing to build.
+///
+/// This is the secp256k1 twin of `c_emit_comb_mul_gen` in `p256_p384.rs`. The
+/// curve arithmetic is NOT shared: secp256k1 has `a = 0`, so `jacobian_double`
+/// computes `D = 3X²` where the NIST version computes `3(X-Z²)(X+Z²)`. Only
+/// `comb.rs` — the compile-time table and the interval checker — is common, and
+/// it takes `a` from the curve record rather than assuming it.
+///
+/// SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+/// accumulator equal to the addend, its negation, or the point at infinity.
+/// `build_jacobian_add_or_double_inline`'s comment justifies using it everywhere
+/// but the ladder's LAST step by an interval argument over `c_i mod n`, and
+/// insists that argument be re-derived by anything changing the offset or the
+/// iteration count. A comb changes both, so it is re-derived: `comb_safe_rounds`
+/// evaluates the same argument as executable interval arithmetic over the comb's
+/// own geometry, and any round it cannot prove gets the complete add-or-double
+/// form instead. Nothing is assumed safe.
+///
+/// The other half of that argument is that the accumulator never starts at
+/// infinity, which needs the first digit non-zero. `comb_geometry` searches for
+/// the scalar offset that guarantees it rather than reusing the ladder's
+/// hardcoded `+3n` — which happens to be right for secp256k1 at w=3 and is wrong
+/// for P-384.
+///
+/// Stack in: [_k]. Stack out: [_result]. Returns false when no geometry exists.
+fn emit_comb_mul_gen(
+    emit: &mut dyn FnMut(StackOp),
+    w: usize,
+    opts: Option<&EcCodegenOptions>,
+) -> bool {
+    let curve = &*SECP256K1_COMB_CURVE;
+    let params = match comb_geometry(w, curve) {
+        Some(p) => p,
+        None => return false,
+    };
+    let d = params.d;
+    let table = comb_table(w, d, curve);
+    let safe = comb_safe_rounds(&params, curve);
+    let entries = (1usize << w) - 1;
+
+    let mut t = ECTracker::with_opts(&["_k"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &FIELD_P);
+    t.pool_constant(POOL_GROUP_N, &CURVE_N);
+
+    // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+    // what makes the interval argument apply at all; see `emit_scalar_reduce`.
+    t.to_top("_k");
+    emit_scalar_reduce(&mut t, "_k", "_kr");
+    t.rename("_k");
+    let offset = params.offset_multiple.to_u32().expect("comb offset fits u32");
+    for i in 0..offset {
+        let off = format!("_off{}", i);
+        t.push_const(POOL_GROUP_N, &CURVE_N, &off);
+        t.raw_block(&["_k", &off], Some("_k"), |e| {
+            e(StackOp::Opcode("OP_ADD".into()));
+        });
+    }
+    t.set_domain("_k", Dom::NonNegative);
+
+    // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+    // against a 34-byte literal push, and every round reads all of them.
+    for j in 1..=entries {
+        let pt = table[j].as_ref().expect("comb table entry is never infinity");
+        t.push_big(&format!("_Tx{}", j), &pt.x);
+        t.push_big(&format!("_Ty{}", j), &pt.y);
+        t.set_domain(&format!("_Tx{}", j), Dom::Reduced);
+        t.set_domain(&format!("_Ty{}", j), Dom::Reduced);
+    }
+
+    // Round d-1 initialises the accumulator. The first digit is non-zero by
+    // construction (`comb_geometry`), so this is a real point, never infinity.
+    comb_emit_select(&mut t, d - 1, w, d);
+    t.to_top("_flag");
+    t.drop();
+    t.to_top("ax");
+    t.rename("jx");
+    t.to_top("ay");
+    t.rename("jy");
+    t.push_int("jz", 1);
+    t.set_domain("jz", Dom::Reduced);
+
+    for i in (0..=(d - 2)).rev() {
+        jacobian_double(&mut t);
+        comb_emit_select(&mut t, i, w, d);
+
+        // `jacobian_add_affine_body` documents its layout as
+        // [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at the
+        // top. The selection leaves ax/ay above jz, so restore the contract
+        // before the branch — otherwise the add arm would reorder the stack and
+        // the empty else arm would not, leaving the two arms with different
+        // layouts at OP_ENDIF.
+        t.to_top("_flag");
+        t.to_alt();
+        t.to_top("jx");
+        t.to_top("jy");
+        t.to_top("jz");
+        t.from_alt("_flag");
+
+        t.pop_tracked(); // consumed by OP_IF
+        let safe_i = safe[i];
+        let add_ops = collect_ops(|add_emit| {
+            if safe_i {
+                build_jacobian_add_affine_inline(add_emit, &t);
+            } else {
+                build_jacobian_add_or_double_inline(add_emit, &t);
+            }
+        });
+        (t.e)(StackOp::If { then_ops: add_ops, else_ops: vec![] });
+
+        // The addend was selected fresh for this round; the add only copied it.
+        t.to_top("ay");
+        t.drop();
+        t.to_top("ax");
+        t.drop();
+    }
+
+    jacobian_to_affine(&mut t, "_rx", "_ry");
+
+    for j in (1..=entries).rev() {
+        t.to_top(&format!("_Ty{}", j));
+        t.drop();
+        t.to_top(&format!("_Tx{}", j));
+        t.drop();
+    }
+    t.to_top("_k");
+    t.drop();
+
+    compose_point(&mut t, "_rx", "_ry", "_result");
+    t.release_constant(POOL_GROUP_N);
+    t.release_constant(POOL_FIELD_P);
+    true
+}
+
+/// Emit the cheapest comb over the candidate window widths.
+///
+/// Each candidate is rendered in full and scored with the same byte-cost model
+/// the emitter is measured by, and the smallest wins — the window width is not
+/// hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the `2^w`
+/// selection logic outgrows the saving.
+///
+/// `None` when no candidate could be built, so the caller falls back to the
+/// ladder rather than emitting nothing.
+fn emit_comb_best(opts: Option<&EcCodegenOptions>) -> Option<Vec<StackOp>> {
+    let mut best: Option<Vec<StackOp>> = None;
+    for w in [2usize, 3, 4] {
+        let mut ops: Vec<StackOp> = Vec::new();
+        let built = {
+            let mut sink = |op: StackOp| ops.push(op);
+            emit_comb_mul_gen(&mut sink, w, opts)
+        };
+        if !built {
+            continue;
+        }
+        let better = match &best {
+            None => true,
+            Some(b) => estimate_script_bytes(&ops) < estimate_script_bytes(b),
+        };
+        if better {
+            best = Some(ops);
+        }
+    }
+    best
 }
 
 /// ecMulGen: scalar multiplication G * k.
 /// Stack in: [scalar]
 /// Stack out: [result_point]
-pub fn emit_ec_mul_gen(emit: &mut dyn FnMut(StackOp)) {
+pub fn emit_ec_mul_gen(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    // G is a compile-time constant, so this is the one secp256k1 call site where
+    // a fixed-base comb applies. `emit_ec_mul` cannot use it: its base arrives at
+    // run time.
+    if opts.map(|o| o.fixed_base_comb).unwrap_or(false) {
+        if let Some(ops) = emit_comb_best(opts) {
+            for op in ops {
+                emit(op);
+            }
+            return;
+        }
+    }
+
     // Push generator point as 64-byte blob, then delegate to ecMul
     let mut g_point = Vec::with_capacity(64);
     g_point.extend_from_slice(&GEN_X_BYTES);
     g_point.extend_from_slice(&GEN_Y_BYTES);
     emit(StackOp::Push(PushValue::Bytes(g_point)));
     emit(StackOp::Swap); // [point, scalar]
-    emit_ec_mul(emit);
+    emit_ec_mul(emit, opts);
 }
 
 /// ecNegate: negate a point (x, p - y).
 /// Stack in: [point]
 /// Stack out: [negated_point]
-pub fn emit_ec_negate(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt"], emit);
+pub fn emit_ec_negate(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &FIELD_P);
     decompose_point(&mut t, "_pt", "_nx", "_ny");
     push_field_p(&mut t, "_fp");
     field_sub(&mut t, "_fp", "_ny", "_neg_y");
     compose_point(&mut t, "_nx", "_neg_y", "_result");
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// ecOnCurve: check if point is on secp256k1 (y^2 = x^3 + 7 mod p).
 /// Stack in: [point]
 /// Stack out: [boolean]
-pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt"], emit);
+pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &FIELD_P);
     decompose_point(&mut t, "_pt", "_x", "_y");
 
     // GAP-301: coordinate canonicity. `decompose_point` BIN2NUMs each coordinate
@@ -1107,6 +1769,7 @@ pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp)) {
     t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// ecModReduce: ((value % mod) + mod) % mod

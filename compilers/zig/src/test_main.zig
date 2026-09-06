@@ -57,6 +57,7 @@ test {
     _ = @import("passes/helpers/sha256_emitters.zig");
     _ = @import("passes/helpers/blake3_emitters.zig");
     _ = @import("passes/helpers/ec_emitters.zig");
+    _ = @import("passes/helpers/ec_flag_parity_test.zig");
     _ = @import("passes/helpers/pq_emitters.zig");
     _ = @import("passes/helpers/crypto_emitters.zig");
     _ = @import("passes/helpers/rabin_emitter.zig");

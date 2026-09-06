@@ -247,7 +247,10 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
   let embedInjected = false;
 
   // Lower constructor
+  const reservedTemps = collectReservedTemps(contract);
+
   const ctorCtx = new LoweringContext(contract, sideEffects);
+  ctorCtx.reservedTemps = reservedTemps;
   ctorCtx.setMethodParamTypes(contract.constructor.params);
   lowerStatements(contract.constructor.body, ctorCtx);
   result.push({
@@ -260,6 +263,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
   // Lower each method
   for (const method of contract.methods) {
     const methodCtx = new LoweringContext(contract, sideEffects);
+    methodCtx.reservedTemps = reservedTemps;
     methodCtx.setMethodParamTypes(method.params);
     // Issue #123: non-default @sighash mode drives the OP_PUSH_TX binding flag
     // for any checkPreimage (auto-injected below, or a manual call) in this method.
@@ -582,6 +586,72 @@ class MethodScope {
   }
 }
 
+/** Shared empty reserved set, so the common contract allocates nothing. */
+const EMPTY_RESERVED: ReadonlySet<string> = new Set<string>();
+
+/** True for exactly the names `LoweringContext.freshTemp` can mint. */
+function isTempShaped(name: string): boolean {
+  if (name.length < 2 || name[0] !== 't') return false;
+  for (let i = 1; i < name.length; i++) {
+    const ch = name[i]!;
+    if (ch < '0' || ch > '9') return false;
+  }
+  return true;
+}
+
+/** Collect `t<digits>` variable-declaration names from a statement list. */
+function collectDeclNames(stmts: Statement[], out: Set<string>): void {
+  for (const stmt of stmts) {
+    switch (stmt.kind) {
+      case 'variable_decl':
+        if (isTempShaped(stmt.name)) out.add(stmt.name);
+        break;
+      case 'if_statement':
+        collectDeclNames(stmt.then, out);
+        if (stmt.else) collectDeclNames(stmt.else, out);
+        break;
+      case 'for_statement':
+        collectDeclNames([stmt.init], out);
+        collectDeclNames([stmt.update], out);
+        collectDeclNames(stmt.body, out);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+/**
+ * Every `t<digits>` identifier the contract's own source binds.
+ *
+ * CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED into
+ * their callers (`inlinePrivateMethodCall`): a helper local named `t3` is
+ * `emitNamed` into the CALLER's binding stream, so a per-method set would miss
+ * it and the miscompile would survive inside any contract that uses helpers.
+ *
+ * Only declarations and parameters are collected. An assignment target or a
+ * `++`/`--` operand must name something already declared or a parameter, so
+ * those are covered transitively and do not need their own walk — which is what
+ * keeps this rule short enough to state, and therefore to reimplement
+ * identically, in all seven tiers.
+ *
+ * Only `t<digits>` names can ever collide, so nothing else is reserved and temp
+ * numbering is unchanged for every contract that does not already miscompile.
+ * That is what leaves the checked-in goldens and the cross-tier hex parity
+ * untouched.
+ */
+function collectReservedTemps(contract: ContractNode): ReadonlySet<string> {
+  const out = new Set<string>();
+  const methods = [contract.constructor, ...contract.methods];
+  for (const m of methods) {
+    for (const p of m.params) {
+      if (isTempShaped(p.name)) out.add(p.name);
+    }
+    collectDeclNames(m.body, out);
+  }
+  return out.size === 0 ? EMPTY_RESERVED : out;
+}
+
 class LoweringContext {
   bindings: ANFBinding[] = [];
   private counter = 0;
@@ -653,9 +723,31 @@ class LoweringContext {
     this.sideEffects = sideEffects;
   }
 
-  /** Generate a fresh temporary name. */
+  /**
+   * User identifiers that `freshTemp` must not hand out.
+   *
+   * `freshTemp` mints `t0, t1, t2, …` while `emitNamed` binds the developer's
+   * own locals into the SAME binding namespace. Nothing reserved them against
+   * each other, so a contract with a local named `t3` got a compiler temp named
+   * `t3` written on top of it — and the reference that read the user's value
+   * silently resolved to the compiler's.
+   *
+   * That is not cosmetic shadowing: it deletes asserts. `const t3 = z - y;
+   * const t5 = y - t3; assert(t5 === this.want)` lowered `t5 := load_prop want`
+   * over the user's `t5`, leaving `assert(want === want)` — always true, so the
+   * locking script carried no guard at all and any witness could spend it.
+   * FAIL-OPEN, and reachable with no branch involved.
+   *
+   * Populated by `collectReservedTemps` and shared by every context in the
+   * contract; see that function for why the set is contract-wide.
+   */
+  reservedTemps: ReadonlySet<string> = EMPTY_RESERVED;
+
+  /** Generate a fresh temporary name that no user identifier can shadow. */
   freshTemp(): string {
-    return `t${this.counter++}`;
+    let name = `t${this.counter++}`;
+    while (this.reservedTemps.has(name)) name = `t${this.counter++}`;
+    return name;
   }
 
   /** Emit a binding and return the bound name. */
@@ -844,6 +936,9 @@ class LoweringContext {
   subContext(): LoweringContext {
     const sub = new LoweringContext(this.contract);
     sub.counter = this.counter;
+    // Same contract, same namespace: an arm's temps must dodge the same user
+    // identifiers the enclosing body does.
+    sub.reservedTemps = this.reservedTemps;
     // Share the parameter, local name sets, and aliases
     for (const p of this.paramNames) sub.paramNames.add(p);
     for (const [k, v] of this.methodParamTypes) sub.methodParamTypes.set(k, v);

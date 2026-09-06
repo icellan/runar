@@ -56,31 +56,31 @@ fn test_emit_reverse_32_nontrivial() {
 
 #[test]
 fn test_emit_ec_add_nontrivial() {
-    let ops = collect(|s| emit_ec_add(s));
+    let ops = collect(|s| emit_ec_add(s, None));
     assert!(ops.len() > 10, "ec_add should emit a substantial program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_ec_mul_nontrivial() {
-    let ops = collect(|s| emit_ec_mul(s));
+    let ops = collect(|s| emit_ec_mul(s, None));
     assert!(ops.len() > 100, "ec_mul should emit a large program, got {}", ops.len());
 }
 
 #[test]
 fn test_emit_ec_mul_gen_nontrivial() {
-    let ops = collect(|s| emit_ec_mul_gen(s));
+    let ops = collect(|s| emit_ec_mul_gen(s, None));
     assert!(!ops.is_empty(), "ec_mul_gen should not be empty");
 }
 
 #[test]
 fn test_emit_ec_negate_nontrivial() {
-    let ops = collect(|s| emit_ec_negate(s));
+    let ops = collect(|s| emit_ec_negate(s, None));
     assert!(!ops.is_empty(), "ec_negate should not be empty");
 }
 
 #[test]
 fn test_emit_ec_on_curve_nontrivial() {
-    let ops = collect(|s| emit_ec_on_curve(s));
+    let ops = collect(|s| emit_ec_on_curve(s, None));
     assert!(!ops.is_empty(), "ec_on_curve should not be empty");
 }
 
@@ -124,15 +124,15 @@ fn sig(ops: &[StackOp]) -> String {
 
 #[test]
 fn test_emit_ec_add_deterministic() {
-    let a = collect(|s| emit_ec_add(s));
-    let b = collect(|s| emit_ec_add(s));
+    let a = collect(|s| emit_ec_add(s, None));
+    let b = collect(|s| emit_ec_add(s, None));
     assert_eq!(sig(&a), sig(&b), "emit_ec_add should be deterministic");
 }
 
 #[test]
 fn test_emit_ec_mul_deterministic() {
-    let a = collect(|s| emit_ec_mul(s));
-    let b = collect(|s| emit_ec_mul(s));
+    let a = collect(|s| emit_ec_mul(s, None));
+    let b = collect(|s| emit_ec_mul(s, None));
     assert_eq!(sig(&a), sig(&b), "emit_ec_mul should be deterministic");
 }
 
@@ -149,14 +149,15 @@ fn test_emit_reverse_32_deterministic() {
 // The existing _nontrivial tests above only assert `ops.len() > 0` (or > N).
 // These goldens lock the exact op count for each Rust emitter so codegen
 // drift surfaces as a localized regression rather than only as a cross-tier
-// hex mismatch in the conformance harness. The counts match the Python /
-// TS / Java peers for every emitter EXCEPT ecMul / ecMulGen — those two
-// emit 4 fewer raw StackOps in the Rust tier than the other six (63824 /
-// 63826 vs the peer 63828 / 63830). The final compiled hex is still
-// byte-identical across all 7 tiers (enforced by the conformance harness),
-// so the divergence is in the pre-peephole StackOp granularity, not in
-// emitted opcodes — but it is real and pinned here so any further drift
-// fails locally.
+// hex mismatch in the conformance harness. The counts match the Go / Python
+// / TS / Java peers for every emitter.
+//
+// They did not always: ecMul / ecMulGen used to emit 4 fewer raw StackOps
+// here than the other six tiers, because this tier pre-folded `k + 3n` into
+// one `push 3n; OP_ADD` where everyone else emits three `push n; OP_ADD`
+// steps. That private shortcut is gone (it is what made the cross-tier
+// flag-parity comparison impossible to run in this tier), so the op tree now
+// agrees with Go op-for-op.
 //
 // To update goldens after an intentional codegen change, run the Java peer
 // EcTest and the Python peer test_ec.py, copy the new numbers, and update
@@ -165,7 +166,7 @@ fn test_emit_reverse_32_deterministic() {
 
 #[test]
 fn test_ec_add_op_count_golden() {
-    let ops = collect(|s| emit_ec_add(s));
+    let ops = collect(|s| emit_ec_add(s, None));
     // 8202 -> 8223 (+21 ops / +21 bytes) over the pre-P==-Q-fix shape: the
     // second OP_NUMEQUAL on y, the OP_BOOLAND that folds it into `cond`, the
     // OP_SUB/OP_NOT that build `notinf`, the two OP_MULs that mask rx/ry, and
@@ -176,29 +177,35 @@ fn test_ec_add_op_count_golden() {
 
 #[test]
 fn test_ec_mul_op_count_golden() {
-    let ops = collect(|s| emit_ec_mul(s));
-    // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
-    // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130511, "ecMul op count drift");
+    let ops = collect(|s| emit_ec_mul(s, None));
+    // +4 ops against the previous golden: `emit_ec_mul`'s `k + 3n` offset is
+    // now three `push n; OP_ADD` steps instead of one pre-folded
+    // `push 3n; OP_ADD`. The peephole's fold-chain-add collapses them back, so
+    // the SCRIPT BYTES are unchanged (the conformance hex goldens are
+    // untouched) and this count now matches Go's table entry exactly.
+    assert_eq!(count_op_tree(&ops), 130515, "ecMul op count drift");
 }
 
 #[test]
 fn test_ec_mul_gen_op_count_golden() {
-    let ops = collect(|s| emit_ec_mul_gen(s));
-    // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
-    // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130513, "ecMulGen op count drift");
+    let ops = collect(|s| emit_ec_mul_gen(s, None));
+    // +4 ops against the previous golden: `emit_ec_mul`'s `k + 3n` offset is
+    // now three `push n; OP_ADD` steps instead of one pre-folded
+    // `push 3n; OP_ADD`. The peephole's fold-chain-add collapses them back, so
+    // the SCRIPT BYTES are unchanged (the conformance hex goldens are
+    // untouched) and this count now matches Go's table entry exactly.
+    assert_eq!(count_op_tree(&ops), 130517, "ecMulGen op count drift");
 }
 
 #[test]
 fn test_ec_negate_op_count_golden() {
-    let ops = collect(|s| emit_ec_negate(s));
+    let ops = collect(|s| emit_ec_negate(s, None));
     assert_eq!(count_op_tree(&ops), 945, "ecNegate op count drift");
 }
 
 #[test]
 fn test_ec_on_curve_op_count_golden() {
-    let ops = collect(|s| emit_ec_on_curve(s));
+    let ops = collect(|s| emit_ec_on_curve(s, None));
     assert_eq!(count_op_tree(&ops), 533, "ecOnCurve op count drift");
 }
 

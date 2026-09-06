@@ -994,6 +994,20 @@ jobs:
         # pubKeyHash + sighash); the fail fixture should produce
         # AssertionFailureError at the assert(checkSig(...)) binding.
         run: pnpm run conformance:anf-parity:real-crypto
+      - name: Run EC flag-parity fixture (24 emitters x 4 flag combinations)
+        # The three --ec-* size flags default OFF, so the ordinary conformance
+        # suite -- which compiles with defaults -- cannot see them at all, and
+        # seven tiers could each ship a DIFFERENT --ec-constant-pool while
+        # staying green. expected.json pins the exact script the TypeScript
+        # reference emits for every (emitter, flag-combination) pair; each
+        # tier's own suite asserts against the same fixture. Without this step
+        # the fixture is generated, committed, consumed by six tier tests --
+        # and never checked against the reference compiler in CI.
+        run: pnpm run conformance:ec-flag-parity
+      - name: Run script-metrics unit tests
+        # Guards the byte-category census (analyzeScriptHex) that the
+        # size-optimization work is measured with. Nothing else runs this file.
+        run: pnpm run conformance:script-metrics
 
   runar-verification:
     name: Runar Verification (Lean 4)

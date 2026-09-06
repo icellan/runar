@@ -46,22 +46,22 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"Sha256Finalize", EmitSha256Finalize, 63941},
 		{"Blake3Compress", EmitBlake3Compress, 10373},
 		{"Blake3Hash", EmitBlake3Hash, 10387},
-		{"EcAdd", EmitEcAdd, 8223},
-		{"EcMul", EmitEcMul, 130515},
-		{"EcMulGen", EmitEcMulGen, 130517},
-		{"EcNegate", EmitEcNegate, 945},
-		{"EcOnCurve", EmitEcOnCurve, 533},
-		{"P256Add", EmitP256Add, 6663},
-		{"P256Mul", EmitP256Mul, 140036},
+		{"EcAdd", ecNoOpts(EmitEcAdd), 8223},
+		{"EcMul", ecNoOpts(EmitEcMul), 130515},
+		{"EcMulGen", ecNoOpts(EmitEcMulGen), 130517},
+		{"EcNegate", ecNoOpts(EmitEcNegate), 945},
+		{"EcOnCurve", ecNoOpts(EmitEcOnCurve), 533},
+		{"P256Add", ecNoOpts(EmitP256Add), 6663},
+		{"P256Mul", ecNoOpts(EmitP256Mul), 140036},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
 		// (cEmitLengthGate), signature range gate 1<=r,s<=n-1
 		// (cEmitSigRangeGate), and the pubkey prefix-byte check folded into
 		// cDecompressPubKey's _dk_valid. P-384 carries the identical fix but
 		// has no golden entry in this table.
-		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297331},
-		{"P384Add", EmitP384Add, 11469},
-		{"P384Mul", EmitP384Mul, 211178},
+		{"VerifyECDSA_P256", ecNoOpts(EmitVerifyECDSA_P256), 297331},
+		{"P384Add", ecNoOpts(EmitP384Add), 11469},
+		{"P384Mul", ecNoOpts(EmitP384Mul), 211178},
 		{"VerifyWOTS", EmitVerifyWOTS, 15488},
 	}
 	for _, tc := range cases {

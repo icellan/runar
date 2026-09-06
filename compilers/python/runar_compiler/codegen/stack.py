@@ -634,6 +634,12 @@ class _LoweringContext:
         self.array_lengths: dict[str, int] = {}
         # Element refs for array_literal bindings (used by checkMultiSig).
         self.array_elements: dict[str, list[str]] = {}
+        # EXPERIMENTAL EC size options (constant pool, sign lattice / reduction
+        # sinking, fixed-base comb), handed down to the EC and NIST curve
+        # emitters. None -- not an all-false instance -- when nothing is
+        # enabled, so those emitters take their untouched default path and the
+        # emitted bytes are provably identical to the shipping ones.
+        self.ec_codegen = None
 
         # Issue #130 (stack layer): a method param whose name collides with a
         # MUTABLE property gets a duplicate stackMap slot once
@@ -1854,6 +1860,10 @@ class _LoweringContext:
 
         # Lower then-branch
         then_ctx = _LoweringContext(None, self.properties)
+        # Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives
+        # in the arms, so dropping them here made the flags a no-op for exactly
+        # the shape that needs them — and diverged from Java/Zig, which inherit.
+        then_ctx.ec_codegen = self.ec_codegen
         then_ctx.sm = self.sm.clone()
         then_ctx.outer_protected_refs = protected_refs
         then_ctx.inside_branch = True
@@ -1869,6 +1879,10 @@ class _LoweringContext:
 
         # Lower else-branch
         else_ctx = _LoweringContext(None, self.properties)
+        # Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives
+        # in the arms, so dropping them here made the flags a no-op for exactly
+        # the shape that needs them — and diverged from Java/Zig, which inherit.
+        else_ctx.ec_codegen = self.ec_codegen
         else_ctx.sm = self.sm.clone()
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.inside_branch = True
@@ -4405,7 +4419,10 @@ class _LoweringContext:
         fn = dispatch.get(func_name)
         if fn is None:
             raise RuntimeError(f"unknown EC builtin: {func_name}")
-        fn(emit_fn)
+        if func_name in ("ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecOnCurve"):
+            fn(emit_fn, self.ec_codegen)
+        else:
+            fn(emit_fn)
 
         self.sm.push(binding_name)
         self._track_depth()
@@ -4443,7 +4460,10 @@ class _LoweringContext:
         fn = dispatch.get(func_name)
         if fn is None:
             raise RuntimeError(f"unknown NIST EC builtin: {func_name}")
-        fn(lambda op: self.emit_op(op))
+        if func_name.endswith("EncodeCompressed"):
+            fn(lambda op: self.emit_op(op))
+        else:
+            fn(lambda op: self.emit_op(op), self.ec_codegen)
 
         self.sm.push(binding_name)
         self._track_depth()
@@ -4461,9 +4481,9 @@ class _LoweringContext:
 
         emit_fn = lambda op: self.emit_op(op)
         if func_name == "verifyECDSA_P256":
-            nist_mod.emit_verify_ecdsa_p256(emit_fn)
+            nist_mod.emit_verify_ecdsa_p256(emit_fn, self.ec_codegen)
         else:
-            nist_mod.emit_verify_ecdsa_p384(emit_fn)
+            nist_mod.emit_verify_ecdsa_p384(emit_fn, self.ec_codegen)
 
         self.sm.push(binding_name)
         self._track_depth()
@@ -4855,7 +4875,7 @@ def _method_reads_var_len_state(
 # Public API
 # ---------------------------------------------------------------------------
 
-def lower_to_stack(program: ANFProgram) -> list[StackMethod]:
+def lower_to_stack(program: ANFProgram, ec_codegen=None) -> list[StackMethod]:
     """Convert an ANF program to a list of StackMethods.
 
     Private methods are inlined at call sites rather than compiled separately.
@@ -4867,7 +4887,7 @@ def lower_to_stack(program: ANFProgram) -> list[StackMethod]:
     """
     from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
     try:
-        return _lower_to_stack_inner(program)
+        return _lower_to_stack_inner(program, ec_codegen)
     except RuntimeError:
         # RuntimeError messages are already descriptive (e.g. "stack underflow",
         # "unknown binary operator: ...", "value 'x' not found on stack").
@@ -4881,7 +4901,7 @@ def lower_to_stack(program: ANFProgram) -> list[StackMethod]:
         raise RuntimeError(f"stack lowering: {e}") from e
 
 
-def _lower_to_stack_inner(program: ANFProgram) -> list[StackMethod]:
+def _lower_to_stack_inner(program: ANFProgram, ec_codegen=None) -> list[StackMethod]:
     """Inner implementation of lower_to_stack (unwrapped)."""
     # Build map of private methods for inlining
     private_methods: dict[str, ANFMethod] = {}
@@ -4895,7 +4915,8 @@ def _lower_to_stack_inner(program: ANFProgram) -> list[StackMethod]:
         # Skip constructor and private methods
         if method.name == "constructor" or (not method.is_public and method.name != "constructor"):
             continue
-        sm = _lower_method_with_private_methods(method, program.properties, private_methods)
+        sm = _lower_method_with_private_methods(
+            method, program.properties, private_methods, ec_codegen)
         methods.append(sm)
 
     return methods
@@ -4905,6 +4926,7 @@ def _lower_method_with_private_methods(
     method: ANFMethod,
     properties: list[ANFProperty],
     private_methods: dict[str, ANFMethod],
+    ec_codegen=None,
 ) -> StackMethod:
     param_names = [p.name for p in method.params]
 
@@ -4930,6 +4952,7 @@ def _lower_method_with_private_methods(
         param_names = ["_codePart"] + param_names
 
     ctx = _LoweringContext(param_names, properties)
+    ctx.ec_codegen = ec_codegen
     ctx.private_methods = private_methods
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
@@ -4962,10 +4985,12 @@ def _lower_method_with_private_methods(
 def _lower_method(
     method: ANFMethod,
     properties: list[ANFProperty],
+    ec_codegen=None,
 ) -> StackMethod:
     param_names = [p.name for p in method.params]
 
     ctx = _LoweringContext(param_names, properties)
+    ctx.ec_codegen = ec_codegen
     ctx.lower_bindings(method.body, method.is_public)
 
     # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).

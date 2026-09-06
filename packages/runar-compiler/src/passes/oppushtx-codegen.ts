@@ -148,9 +148,9 @@ export function emitCheckPreimageBinding(
   // --- DER content of s = last SIZE(s) bytes of reverse32(NUM2BIN(s,32)) ----
   t.toTop('_ppt_slow');
   t._e({ op: 'opcode', code: 'OP_SIZE' }); // [slow, L]
-  t.nm.push('_ppt_L');
+  t.pushTracked('_ppt_L');
   t._e({ op: 'opcode', code: 'OP_TOALTSTACK' }); // alt=[L]; [slow]
-  t.nm.pop();
+  t.popTracked();
   t.rawBlock(['_ppt_slow'], '_ppt_sbe', (e) => {
     e({ op: 'push', value: 32n });
     e({ op: 'opcode', code: 'OP_NUM2BIN' }); // 32-byte LE

@@ -123,10 +123,33 @@ public final class P256P384 {
     // ===================================================================
 
     private static void cPushFieldP(ECTracker t, String name, BigInteger fieldP) {
-        t.pushBigInt(name, fieldP);
+        t.pushConst(Ec.POOL_FIELD_P, fieldP, name);
+    }
+
+    /**
+     * {@code a mod p} with no sign fix-up: 1 opcode instead of 7. Sound only when the dividend is
+     * provably &gt;= 0 — the caller proves that, this does not check.
+     */
+    private static void cFieldModShort(ECTracker t, String aName, String resultName,
+                                       BigInteger fieldP) {
+        t.toTop(aName);
+        cPushFieldP(t, "_fmods_p", fieldP);
+        t.rawBlock(List.of(aName, "_fmods_p"), resultName,
+            e -> e.accept(new OpcodeOp("OP_MOD")));
+        t.setDomain(resultName, Ec.Dom.REDUCED);
+    }
+
+    /** Does the cheap {@code a - b + p} subtraction pay? Only when p is pooled. */
+    private static boolean cCheapSubPays(ECTracker t, BigInteger fieldP) {
+        int cost = t.constCost(Ec.POOL_FIELD_P, fieldP);
+        return 2 * cost + 2 < cost + 8;
     }
 
     private static void cFieldMod(ECTracker t, String aName, String resultName, BigInteger fieldP) {
+        if (t.sinking && t.domainOf(aName).isNonNegative()) {
+            cFieldModShort(t, aName, resultName, fieldP);
+            return;
+        }
         t.toTop(aName);
         cPushFieldP(t, "_fmod_p", fieldP);
         t.rawBlock(List.of(aName, "_fmod_p"), resultName, e -> {
@@ -139,33 +162,72 @@ public final class P256P384 {
             e.accept(new SwapOp());
             e.accept(new OpcodeOp("OP_MOD"));
         });
+        t.setDomain(resultName, Ec.Dom.REDUCED);
     }
 
     private static void cFieldAdd(ECTracker t, String aName, String bName, String resultName, BigInteger fieldP) {
+        // Read the operand facts before rawBlock consumes their slots.
+        boolean sumNonNeg =
+                t.domainOf(aName).isNonNegative() && t.domainOf(bName).isNonNegative();
         t.toTop(aName);
         t.toTop(bName);
         t.rawBlock(List.of(aName, bName), "_fadd_sum",
             e -> e.accept(new OpcodeOp("OP_ADD")));
+        if (sumNonNeg) t.setDomain("_fadd_sum", Ec.Dom.NON_NEGATIVE);
         cFieldMod(t, "_fadd_sum", resultName, fieldP);
     }
 
     private static void cFieldSub(ECTracker t, String aName, String bName, String resultName, BigInteger fieldP) {
         t.toTop(aName);
         t.toTop(bName);
+        // Needs a >= 0 AND b in [0, p): then a - b > -p and one shifted
+        // reduction is exact. `b >= 0` alone is not enough — a coordinate
+        // decoded from 32 unsigned bytes may exceed p by up to 2^32 + 977.
+        boolean cheap =
+                t.sinking
+                        && t.domainOf(aName).isNonNegative()
+                        && t.domainOf(bName) == Ec.Dom.REDUCED
+                        && cCheapSubPays(t, fieldP);
+
         t.rawBlock(List.of(aName, bName), "_fsub_diff",
             e -> e.accept(new OpcodeOp("OP_SUB")));
+
+        if (cheap) {
+            cPushFieldP(t, "_fsub_p", fieldP);
+            t.rawBlock(List.of("_fsub_diff", "_fsub_p"), "_fsub_shift",
+                e -> e.accept(new OpcodeOp("OP_ADD")));
+            t.setDomain("_fsub_shift", Ec.Dom.NON_NEGATIVE);
+            cFieldModShort(t, "_fsub_shift", resultName, fieldP);
+            return;
+        }
         cFieldMod(t, "_fsub_diff", resultName, fieldP);
     }
 
     private static void cFieldMul(ECTracker t, String aName, String bName, String resultName, BigInteger fieldP) {
+        cFieldMul(t, aName, bName, resultName, fieldP, false);
+    }
+
+    /**
+     * {@code cFieldMul} with an explicit assertion about the product's sign, independent of the
+     * operands: a*a &gt;= 0 for any a whatsoever.
+     */
+    private static void cFieldMul(ECTracker t, String aName, String bName, String resultName,
+                                  BigInteger fieldP, boolean productNonNegative) {
+        boolean nonNeg =
+                productNonNegative
+                        || (t.domainOf(aName).isNonNegative()
+                                && t.domainOf(bName).isNonNegative());
         t.toTop(aName);
         t.toTop(bName);
         t.rawBlock(List.of(aName, bName), "_fmul_prod",
             e -> e.accept(new OpcodeOp("OP_MUL")));
+        if (nonNeg) t.setDomain("_fmul_prod", Ec.Dom.NON_NEGATIVE);
         cFieldMod(t, "_fmul_prod", resultName, fieldP);
     }
 
     private static void cFieldMulConst(ECTracker t, String aName, long cv, String resultName, BigInteger fieldP) {
+        // Every call site passes a small positive cv, so the product keeps a's sign.
+        boolean nonNeg = cv > 0 && t.domainOf(aName).isNonNegative();
         t.toTop(aName);
         t.rawBlock(List.of(aName), "_fmc_prod", e -> {
             if (cv == 2L) {
@@ -175,12 +237,13 @@ public final class P256P384 {
                 e.accept(new OpcodeOp("OP_MUL"));
             }
         });
+        if (nonNeg) t.setDomain("_fmc_prod", Ec.Dom.NON_NEGATIVE);
         cFieldMod(t, "_fmc_prod", resultName, fieldP);
     }
 
     private static void cFieldSqr(ECTracker t, String aName, String resultName, BigInteger fieldP) {
         t.copyToTop(aName, "_fsqr_copy");
-        cFieldMul(t, aName, "_fsqr_copy", resultName, fieldP);
+        cFieldMul(t, aName, "_fsqr_copy", resultName, fieldP, true);
     }
 
     /** Compute a^(p-2) mod p via generic square-and-multiply. */
@@ -212,7 +275,7 @@ public final class P256P384 {
     // ===================================================================
 
     private static void cPushGroupN(ECTracker t, String name, BigInteger n) {
-        t.pushBigInt(name, n);
+        t.pushConst(Ec.POOL_GROUP_N, n, name);
     }
 
     private static void cGroupMod(ECTracker t, String aName, String resultName, BigInteger n) {
@@ -304,8 +367,8 @@ public final class P256P384 {
             e.accept(new PushOp(PushValue.of(coordBytes)));
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
-        t.nm.add("_dp_xb");
-        t.nm.add("_dp_yb");
+        t.pushTracked("_dp_xb", Ec.Dom.UNKNOWN);
+        t.pushTracked("_dp_yb", Ec.Dom.UNKNOWN);
 
         // Convert y_bytes (on top) to num
         t.rawBlock(List.of("_dp_yb"), yName, e -> {
@@ -314,6 +377,11 @@ public final class P256P384 {
             e.accept(new OpcodeOp("OP_CAT"));
             e.accept(new OpcodeOp("OP_BIN2NUM"));
         });
+        // A 0x00 sign byte is appended before BIN2NUM, so the coordinate
+        // decodes UNSIGNED: >= 0, but it may be up to 2^(8*coordBytes) - 1 and
+        // therefore >= p. That gap is exactly what the subtraction precondition
+        // turns on.
+        t.setDomain(yName, Ec.Dom.NON_NEGATIVE);
 
         // Convert x_bytes to num
         t.toTop("_dp_xb");
@@ -323,6 +391,7 @@ public final class P256P384 {
             e.accept(new OpcodeOp("OP_CAT"));
             e.accept(new OpcodeOp("OP_BIN2NUM"));
         });
+        t.setDomain(xName, Ec.Dom.NON_NEGATIVE);
 
         // Stack: [yName, xName] -> swap to [xName, yName]
         t.swap();
@@ -627,7 +696,11 @@ public final class P256P384 {
 
     private static void cBuildJacobianAddAffineInline(Consumer<StackOp> e, ECTracker t,
                                                        BigInteger fieldP, BigInteger pMinus2) {
-        cJacobianAddAffineBody(new ECTracker(t.nm, e), false, fieldP, pMinus2);
+        // The inner tracker inherits the stack state AND the lattice facts: the
+        // operands' proved domains are what decide which reduction shape the
+        // body emits, so dropping them here would silently fall back everywhere.
+        cJacobianAddAffineBody(
+                new ECTracker(t.nm, e, t.options(), t.dm), false, fieldP, pMinus2);
     }
 
     /**
@@ -776,7 +849,7 @@ public final class P256P384 {
      */
     private static void cBuildJacobianAddOrDoubleInline(Consumer<StackOp> e, ECTracker t,
                                                         BigInteger fieldP, BigInteger pMinus2) {
-        ECTracker it = new ECTracker(t.nm, e);
+        ECTracker it = new ECTracker(t.nm, e, t.options(), t.dm);
 
         // Keep the pre-add accumulator: it is what must be DOUBLED in the
         // exceptional case, and the add below consumes jx/jy/jz.
@@ -829,8 +902,11 @@ public final class P256P384 {
 
     private static void cEmitMul(Consumer<StackOp> emit, int coordBytes,
                                   ReverseBytesFn revFn, BigInteger fieldP,
-                                  BigInteger pMinus2, BigInteger curveN, BigInteger nMinus2) {
-        ECTracker t = new ECTracker(List.of("_pt", "_k"), emit);
+                                  BigInteger pMinus2, BigInteger curveN, BigInteger nMinus2,
+                                  Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt", "_k"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, fieldP);
+        t.poolConstant(Ec.POOL_GROUP_N, curveN);
         cDecomposePoint(t, "_pt", "ax", "ay", coordBytes, revFn);
 
         // k' = k + 3n (three separate adds, matches Go reference)
@@ -839,13 +915,19 @@ public final class P256P384 {
         // scalar is usually an unlock argument — so reduce it first.
         t.toTop("_k");
         cEmitScalarReduce(t, "_k", "_kr", curveN);
-        t.pushBigInt("_n", curveN);
+        // These three route through the POOL, matching the secp256k1 twin.
+        // They used to be raw literal pushes, which made the poolConstant of
+        // the group order above a strict LOSS: the slot was redeemed exactly
+        // once, by cEmitScalarReduce, so under --ec-constant-pool P-256 paid
+        // park 34 + pick 2 + release 2-3 = 38-39 bytes where a bare literal
+        // costs 34. Break-even is two redemptions; this is now four.
+        t.pushConst(Ec.POOL_GROUP_N, curveN, "_n");
         t.rawBlock(List.of("_kr", "_n"), "_kn",
             e -> e.accept(new OpcodeOp("OP_ADD")));
-        t.pushBigInt("_n2", curveN);
+        t.pushConst(Ec.POOL_GROUP_N, curveN, "_n2");
         t.rawBlock(List.of("_kn", "_n2"), "_kn2",
             e -> e.accept(new OpcodeOp("OP_ADD")));
-        t.pushBigInt("_n3", curveN);
+        t.pushConst(Ec.POOL_GROUP_N, curveN, "_n3");
         t.rawBlock(List.of("_kn2", "_n3"), "_kn3",
             e -> e.accept(new OpcodeOp("OP_ADD")));
         t.rename("_k");
@@ -881,7 +963,7 @@ public final class P256P384 {
 
             // Conditional add
             t.toTop("_bit");
-            t.nm.remove(t.nm.size() - 1); // _bit consumed by IF
+            t.popTracked(); // _bit consumed by IF
             List<StackOp> addOps = new ArrayList<>();
             // Only the final step can be handed two equal operands — see
             // cBuildJacobianAddOrDoubleInline for why, and for what it costs not to.
@@ -901,6 +983,8 @@ public final class P256P384 {
         t.toTop("_k"); t.drop();
 
         cComposePoint(t, "_rx", "_ry", "_result", coordBytes, revFn);
+        t.releaseConstant(Ec.POOL_GROUP_N);
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     // ===================================================================
@@ -975,8 +1059,8 @@ public final class P256P384 {
             e.accept(new PushOp(PushValue.of(1)));
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
-        t.nm.add("_dk_prefix");
-        t.nm.add("_dk_xbytes");
+        t.pushTracked("_dk_prefix", Ec.Dom.UNKNOWN);
+        t.pushTracked("_dk_xbytes", Ec.Dom.UNKNOWN);
 
         // SEC1 §2.3.4 requires the prefix to be exactly 0x02 or 0x03. The parity
         // reduction below is `BIN2NUM, 2 MOD`, which accepts far more than that:
@@ -1061,7 +1145,7 @@ public final class P256P384 {
 
         // OP_IF select: match → use y_cand (drop neg_y), else → use neg_y (nip y_cand)
         t.toTop("_dk_match");
-        t.nm.remove(t.nm.size() - 1); // condition consumed by IF
+        t.popTracked(); // condition consumed by IF
 
         List<StackOp> thenOps = List.of(new DropOp());
         List<StackOp> elseOps = List.of(new NipOp());
@@ -1070,7 +1154,7 @@ public final class P256P384 {
         // Remove _dk_neg_y from tracker (one of the two was consumed)
         for (int i = t.nm.size() - 1; i >= 0; i--) {
             if ("_dk_neg_y".equals(t.nm.get(i))) {
-                t.nm.remove(i);
+                t.removeSlotAt(i);
                 break;
             }
         }
@@ -1078,6 +1162,15 @@ public final class P256P384 {
         for (int i = t.nm.size() - 1; i >= 0; i--) {
             if ("_dk_y_cand".equals(t.nm.get(i))) {
                 t.nm.set(i, qyName);
+                // FORGET what was known about the slot: `_dk_y_cand` carries Reduced
+        // from cFieldPow, but that fact describes only the THEN path. The else
+        // arm leaves `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this
+        // same slot, and p - 0 = p is not < p. This is the join emitIf refuses
+        // to make, and the raw `if` here bypasses that rule, so the reset must
+        // be explicit. Sound today only via an unwritten argument (y_cand = 0
+        // needs an order-2 point, impossible on a prime-order curve) and
+        // unexploited only because nothing uses qy as a fieldSub subtrahend.
+                t.setDomain(qyName, Ec.Dom.UNKNOWN);
                 break;
             }
         }
@@ -1153,8 +1246,8 @@ public final class P256P384 {
             e.accept(new OpcodeOp("OP_SPLIT"));
             e.accept(new DropOp());
         });
-        t.nm.add(flagName);
-        t.nm.add(name);
+        t.pushTracked(flagName, Ec.Dom.UNKNOWN);
+        t.pushTracked(name, Ec.Dom.UNKNOWN);
     }
 
     /**
@@ -1223,12 +1316,177 @@ public final class P256P384 {
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
+    // ==================================================================
+    // Fixed-base comb (the base is a compile-time constant)
+    // ==================================================================
+
+    /**
+     * {@code k*G} by a Lim-Lee comb, for a base known at compile time.
+     *
+     * <p>The binary ladder runs one doubling and one conditional add per scalar BIT. A comb splits
+     * the scalar into {@code w} blocks of {@code d} bits and runs one doubling and one conditional
+     * add per COLUMN, so the round count falls from {@code w*d} to {@code d} at the price of a
+     * {@code 2^w - 1} entry table — which costs nothing to build here, because {@code G} is a
+     * constant. Measured optimum is w=3: the selection logic grows as {@code 2^w} and overtakes the
+     * saving by w=5.
+     *
+     * <p>SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add accumulator equal to
+     * the addend, its negation, or the point at infinity. {@code cBuildJacobianAddOrDoubleInline}'s
+     * comment justifies using it everywhere but the last step of the BINARY ladder by an interval
+     * argument over {@code c_i mod n}, and insists that argument be re-derived by anything changing
+     * the offset or the iteration count. A comb changes both, so it is re-derived — as executable
+     * interval arithmetic in {@code Comb.combSafeRounds}, evaluated here. Rounds it cannot prove get
+     * the complete add-or-double form instead; nothing is assumed. For P-256 at w=3 it proves 81 of
+     * 86 rounds.
+     *
+     * <p>The other half of that argument is that the accumulator never starts at infinity, which
+     * needs the first digit non-zero. {@code Comb.combGeometry} searches for the scalar offset that
+     * guarantees it rather than reusing the ladder's hardcoded {@code +3n} — right for P-256 at w=3
+     * and WRONG for P-384.
+     *
+     * <p>Stack in: [_k]. Stack out: [_result].
+     *
+     * @return false when no geometry exists for {@code w}
+     */
+    private static boolean cEmitCombMulGen(Consumer<StackOp> emit, int coordBytes,
+                                           ReverseBytesFn revFn, BigInteger fieldP,
+                                           BigInteger pMinus2, BigInteger curveN,
+                                           Comb.Curve curve, int w,
+                                           Ec.EcCodegenOptions opts) {
+        Comb.Params params = Comb.combGeometry(w, curve);
+        if (params == null) return false;
+        int d = params.d();
+        List<Comb.Point> table = Comb.combTable(w, d, curve);
+        boolean[] safe = Comb.combSafeRounds(params, curve);
+        int entries = (1 << w) - 1;
+
+        ECTracker t = new ECTracker(List.of("_k"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, fieldP);
+        t.poolConstant(Ec.POOL_GROUP_N, curveN);
+
+        // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+        // what makes the interval argument apply at all; see cEmitScalarReduce.
+        t.toTop("_k");
+        cEmitScalarReduce(t, "_k", "_kr", curveN);
+        t.rename("_k");
+        for (int i = 0; i < params.offsetMultiple(); i++) {
+            String off = "_off" + i;
+            t.pushConst(Ec.POOL_GROUP_N, curveN, off);
+            t.rawBlock(List.of("_k", off), "_k", e -> e.accept(new OpcodeOp("OP_ADD")));
+        }
+        t.setDomain("_k", Ec.Dom.NON_NEGATIVE);
+
+        // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+        // against a 34-byte literal push, and every round reads all of them.
+        for (int j = 1; j <= entries; j++) {
+            Comb.Point pt = table.get(j);
+            t.pushBigInt("_Tx" + j, pt.x());
+            t.pushBigInt("_Ty" + j, pt.y());
+            t.setDomain("_Tx" + j, Ec.Dom.REDUCED);
+            t.setDomain("_Ty" + j, Ec.Dom.REDUCED);
+        }
+
+        // Round d-1 initialises the accumulator. The first digit is non-zero by
+        // construction (combGeometry), so this is a real point, never infinity.
+        Ec.combEmitSelect(t, d - 1, w, d);
+        t.toTop("_flag");
+        t.drop();
+        t.toTop("ax");
+        t.rename("jx");
+        t.toTop("ay");
+        t.rename("jy");
+        t.pushInt("jz", 1);
+        t.setDomain("jz", Ec.Dom.REDUCED);
+
+        for (int i = d - 2; i >= 0; i--) {
+            cJacobianDouble(t, fieldP, pMinus2);
+            Ec.combEmitSelect(t, i, w, d);
+
+            // cJacobianAddAffineBody documents its layout as
+            // [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at
+            // the top. The selection leaves ax/ay above jz, so restore the
+            // contract before the branch — otherwise the add arm would reorder
+            // the stack and the empty else arm would not, leaving the two arms
+            // with different layouts at OP_ENDIF.
+            t.toTop("_flag");
+            t.toAlt();
+            t.toTop("jx");
+            t.toTop("jy");
+            t.toTop("jz");
+            t.fromAlt("_flag");
+
+            t.popTracked(); // consumed by OP_IF
+            List<StackOp> addOps = new ArrayList<>();
+            if (safe[i]) {
+                cBuildJacobianAddAffineInline(addOps::add, t, fieldP, pMinus2);
+            } else {
+                cBuildJacobianAddOrDoubleInline(addOps::add, t, fieldP, pMinus2);
+            }
+            emit.accept(new IfOp(addOps, List.of()));
+
+            // The addend was selected fresh for this round; the add only copied it.
+            t.toTop("ay");
+            t.drop();
+            t.toTop("ax");
+            t.drop();
+        }
+
+        cJacobianToAffine(t, "_rx", "_ry", fieldP, pMinus2);
+
+        for (int j = entries; j >= 1; j--) {
+            t.toTop("_Ty" + j);
+            t.drop();
+            t.toTop("_Tx" + j);
+            t.drop();
+        }
+        t.toTop("_k");
+        t.drop();
+
+        cComposePoint(t, "_rx", "_ry", "_result", coordBytes, revFn);
+        t.releaseConstant(Ec.POOL_GROUP_N);
+        t.releaseConstant(Ec.POOL_FIELD_P);
+        return true;
+    }
+
+    /**
+     * Emit the cheapest comb over the candidate window widths.
+     *
+     * <p>Each candidate is rendered in full and scored with the same byte-cost model the emitter is
+     * measured by, and the smallest wins.
+     */
+    private static List<StackOp> cEmitCombBest(int coordBytes, ReverseBytesFn revFn,
+                                               BigInteger fieldP, BigInteger pMinus2,
+                                               BigInteger curveN, Comb.Curve curve,
+                                               Ec.EcCodegenOptions opts) {
+        List<StackOp> best = null;
+        for (int w : new int[] {2, 3, 4}) {
+            List<StackOp> ops = new ArrayList<>();
+            if (!cEmitCombMulGen(ops::add, coordBytes, revFn, fieldP, pMinus2, curveN,
+                    curve, w, opts)) {
+                continue;
+            }
+            if (best == null
+                    || CostModel.estimateScriptBytes(ops) < CostModel.estimateScriptBytes(best)) {
+                best = ops;
+            }
+        }
+        return best;
+    }
+
     private static void cEmitVerifyECDSA(Consumer<StackOp> emit, int coordBytes,
                                          ReverseBytesFn revFn, BigInteger fieldP,
                                          BigInteger pMinus2, BigInteger curveN,
                                          BigInteger nMinus2, BigInteger curveB,
-                                         BigInteger sqrtExp, BigInteger gx, BigInteger gy) {
-        ECTracker t = new ECTracker(List.of("_msg", "_sig", "_pk"), emit);
+                                         BigInteger sqrtExp, BigInteger gx, BigInteger gy,
+                                         Comb.Curve combCurve, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_msg", "_sig", "_pk"), emit, opts, null);
+        // The verifier does hundreds of reductions OUTSIDE the two ladders —
+        // decompression's sqrt ladder, cGroupInv, cAffineAdd, the final
+        // cGroupMod. Each ladder pools separately: cEmitMul runs on its own
+        // tracker that deliberately cannot see this stack, so it cannot reach
+        // this slot.
+        t.poolConstant(Ec.POOL_FIELD_P, fieldP);
+        t.poolConstant(Ec.POOL_GROUP_N, curveN);
 
         // Step 0: length gate. `_sig` and `_pk` are bare ByteString in the builtin
         // table and the type checker imposes no width, so both arrive attacker-sized.
@@ -1259,8 +1517,8 @@ public final class P256P384 {
             e.accept(new PushOp(PushValue.of(coordBytes)));
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
-        t.nm.add("_r_bytes");
-        t.nm.add("_s_bytes");
+        t.pushTracked("_r_bytes", Ec.Dom.UNKNOWN);
+        t.pushTracked("_s_bytes", Ec.Dom.UNKNOWN);
 
         // r_bytes → integer
         t.toTop("_r_bytes");
@@ -1316,7 +1574,17 @@ public final class P256P384 {
         System.arraycopy(bigintToNBytes(gx, coordBytes), 0, gPointData, 0, coordBytes);
         System.arraycopy(bigintToNBytes(gy, coordBytes), 0, gPointData, coordBytes, coordBytes);
 
-        t.pushBytes("_G", gPointData);
+        // u1*G. G is a compile-time constant, so this half can use a fixed-base
+        // comb — one doubling and one add per COLUMN instead of per bit. u2*Q
+        // below cannot: Q arrives in the witness.
+        List<StackOp> combOps = null;
+        if (opts != null && opts.fixedBaseComb() && combCurve != null) {
+            combOps = cEmitCombBest(coordBytes, revFn, fieldP, pMinus2, curveN, combCurve, opts);
+        }
+
+        if (combOps == null) {
+            t.pushBytes("_G", gPointData);
+        }
         t.toTop("_u1");
 
         // Stash items on altstack. _input_ok goes DEEPEST — the altstack is LIFO
@@ -1328,13 +1596,21 @@ public final class P256P384 {
         t.toTop("_qx");     t.toAlt();
 
         // Remove _G and _u1 from tracker before cEmitMul
-        t.nm.remove(t.nm.size() - 1); // _u1
-        t.nm.remove(t.nm.size() - 1); // _G
+        // The multiply creates its own ECTracker and cannot see items below its
+        // operands. Remove them from ours.
+        t.popTracked(); // _u1
+        if (combOps == null) {
+            t.popTracked(); // _G
+        }
 
-        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2);
+        if (combOps != null) {
+            for (StackOp op : combOps) emit.accept(op);
+        } else {
+            cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2, opts);
+        }
 
         // After mul, one result point is on the stack
-        t.nm.add("_R1_point");
+        t.pushTracked("_R1_point", Ec.Dom.UNKNOWN);
 
         // Pop qx/qy/u2 from altstack (LIFO)
         t.fromAlt("_qx");
@@ -1350,10 +1626,10 @@ public final class P256P384 {
         t.toTop("_u2");
 
         // Remove from tracker, emit mul, push result
-        t.nm.remove(t.nm.size() - 1); // _u2
-        t.nm.remove(t.nm.size() - 1); // _Q_point
-        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2);
-        t.nm.add("_R2_point");
+        t.popTracked(); // _u2
+        t.popTracked(); // _Q_point
+        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2, opts);
+        t.pushTracked("_R2_point", Ec.Dom.UNKNOWN);
 
         // Restore R1 point
         t.fromAlt("_R1_point");
@@ -1403,6 +1679,8 @@ public final class P256P384 {
         t.toTop("_sig_ok");
         t.rawBlock(List.of("_input_ok", "_sig_ok"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.releaseConstant(Ec.POOL_GROUP_N);
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     // ===================================================================
@@ -1410,36 +1688,69 @@ public final class P256P384 {
     // ===================================================================
 
     public static void emitP256Add(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
+        emitP256Add(emit, null);
+    }
+
+    public static void emitP256Add(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, P256_P);
         cDecomposePoint(t, "_pa", "px", "py", 32, REV32);
         cDecomposePoint(t, "_pb", "qx", "qy", 32, REV32);
         cAffineAdd(t, P256_P, P256_P_MINUS_2);
         cComposePoint(t, "rx", "ry", "_result", 32, REV32);
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     public static void emitP256Mul(Consumer<StackOp> emit) {
-        cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2);
+        emitP256Mul(emit, null);
+    }
+
+    public static void emitP256Mul(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2, opts);
     }
 
     public static void emitP256MulGen(Consumer<StackOp> emit) {
+        emitP256MulGen(emit, null);
+    }
+
+    public static void emitP256MulGen(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        if (opts != null && opts.fixedBaseComb()) {
+            List<StackOp> ops =
+                    cEmitCombBest(32, REV32, P256_P, P256_P_MINUS_2, P256_N, Comb.P256_COMB_CURVE, opts);
+            if (ops != null) {
+                for (StackOp op : ops) emit.accept(op);
+                return;
+            }
+        }
         byte[] gPoint = new byte[64];
         System.arraycopy(bigintToNBytes(P256_GX, 32), 0, gPoint, 0, 32);
         System.arraycopy(bigintToNBytes(P256_GY, 32), 0, gPoint, 32, 32);
         emit.accept(new PushOp(PushValue.ofHex(Ec.hexOf(gPoint))));
         emit.accept(new SwapOp()); // [point, scalar]
-        emitP256Mul(emit);
+        emitP256Mul(emit, opts);
     }
 
     public static void emitP256Negate(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt"), emit);
+        emitP256Negate(emit, null);
+    }
+
+    public static void emitP256Negate(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, P256_P);
         cDecomposePoint(t, "_pt", "_nx", "_ny", 32, REV32);
         cPushFieldP(t, "_fp", P256_P);
         cFieldSub(t, "_fp", "_ny", "_neg_y", P256_P);
         cComposePoint(t, "_nx", "_neg_y", "_result", 32, REV32);
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     public static void emitP256OnCurve(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt"), emit);
+        emitP256OnCurve(emit, null);
+    }
+
+    public static void emitP256OnCurve(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, P256_P);
         cDecomposePoint(t, "_pt", "_x", "_y", 32, REV32);
         cEmitCanonicityGuard(t, "_x", "_y", P256_P);
 
@@ -1466,6 +1777,7 @@ public final class P256P384 {
         t.toTop("_curve_eq");
         t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     public static void emitP256EncodeCompressed(Consumer<StackOp> emit) {
@@ -1493,9 +1805,13 @@ public final class P256P384 {
     }
 
     public static void emitVerifyECDSA_P256(Consumer<StackOp> emit) {
+        emitVerifyECDSA_P256(emit, null);
+    }
+
+    public static void emitVerifyECDSA_P256(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
         cEmitVerifyECDSA(emit, 32, REV32,
             P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2,
-            P256_B, P256_SQRT_EXP, P256_GX, P256_GY);
+            P256_B, P256_SQRT_EXP, P256_GX, P256_GY, Comb.P256_COMB_CURVE, opts);
     }
 
     // ===================================================================
@@ -1503,36 +1819,69 @@ public final class P256P384 {
     // ===================================================================
 
     public static void emitP384Add(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
+        emitP384Add(emit, null);
+    }
+
+    public static void emitP384Add(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, P384_P);
         cDecomposePoint(t, "_pa", "px", "py", 48, REV48);
         cDecomposePoint(t, "_pb", "qx", "qy", 48, REV48);
         cAffineAdd(t, P384_P, P384_P_MINUS_2);
         cComposePoint(t, "rx", "ry", "_result", 48, REV48);
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     public static void emitP384Mul(Consumer<StackOp> emit) {
-        cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2);
+        emitP384Mul(emit, null);
+    }
+
+    public static void emitP384Mul(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2, opts);
     }
 
     public static void emitP384MulGen(Consumer<StackOp> emit) {
+        emitP384MulGen(emit, null);
+    }
+
+    public static void emitP384MulGen(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        if (opts != null && opts.fixedBaseComb()) {
+            List<StackOp> ops =
+                    cEmitCombBest(48, REV48, P384_P, P384_P_MINUS_2, P384_N, Comb.P384_COMB_CURVE, opts);
+            if (ops != null) {
+                for (StackOp op : ops) emit.accept(op);
+                return;
+            }
+        }
         byte[] gPoint = new byte[96];
         System.arraycopy(bigintToNBytes(P384_GX, 48), 0, gPoint, 0, 48);
         System.arraycopy(bigintToNBytes(P384_GY, 48), 0, gPoint, 48, 48);
         emit.accept(new PushOp(PushValue.ofHex(Ec.hexOf(gPoint))));
         emit.accept(new SwapOp()); // [point, scalar]
-        emitP384Mul(emit);
+        emitP384Mul(emit, opts);
     }
 
     public static void emitP384Negate(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt"), emit);
+        emitP384Negate(emit, null);
+    }
+
+    public static void emitP384Negate(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, P384_P);
         cDecomposePoint(t, "_pt", "_nx", "_ny", 48, REV48);
         cPushFieldP(t, "_fp", P384_P);
         cFieldSub(t, "_fp", "_ny", "_neg_y", P384_P);
         cComposePoint(t, "_nx", "_neg_y", "_result", 48, REV48);
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     public static void emitP384OnCurve(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt"), emit);
+        emitP384OnCurve(emit, null);
+    }
+
+    public static void emitP384OnCurve(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt"), emit, opts, null);
+        t.poolConstant(Ec.POOL_FIELD_P, P384_P);
         cDecomposePoint(t, "_pt", "_x", "_y", 48, REV48);
         cEmitCanonicityGuard(t, "_x", "_y", P384_P);
 
@@ -1557,6 +1906,7 @@ public final class P256P384 {
         t.toTop("_curve_eq");
         t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.releaseConstant(Ec.POOL_FIELD_P);
     }
 
     public static void emitP384EncodeCompressed(Consumer<StackOp> emit) {
@@ -1579,9 +1929,13 @@ public final class P256P384 {
     }
 
     public static void emitVerifyECDSA_P384(Consumer<StackOp> emit) {
+        emitVerifyECDSA_P384(emit, null);
+    }
+
+    public static void emitVerifyECDSA_P384(Consumer<StackOp> emit, Ec.EcCodegenOptions opts) {
         cEmitVerifyECDSA(emit, 48, REV48,
             P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2,
-            P384_B, P384_SQRT_EXP, P384_GX, P384_GY);
+            P384_B, P384_SQRT_EXP, P384_GX, P384_GY, Comb.P384_COMB_CURVE, opts);
     }
 
     // ===================================================================
@@ -1608,21 +1962,28 @@ public final class P256P384 {
     }
 
     public static void dispatch(String funcName, Consumer<StackOp> emit) {
+        dispatch(funcName, emit, null);
+    }
+
+    public static void dispatch(String funcName, Consumer<StackOp> emit,
+                                Ec.EcCodegenOptions opts) {
         switch (funcName) {
-            case "p256Add" -> emitP256Add(emit);
-            case "p256Mul" -> emitP256Mul(emit);
-            case "p256MulGen" -> emitP256MulGen(emit);
-            case "p256Negate" -> emitP256Negate(emit);
-            case "p256OnCurve" -> emitP256OnCurve(emit);
+            case "p256Add" -> emitP256Add(emit, opts);
+            case "p256Mul" -> emitP256Mul(emit, opts);
+            case "p256MulGen" -> emitP256MulGen(emit, opts);
+            case "p256Negate" -> emitP256Negate(emit, opts);
+            case "p256OnCurve" -> emitP256OnCurve(emit, opts);
+            // Pure byte shuffling with no field arithmetic: the flags cannot
+            // reach it, so it deliberately takes no options.
             case "p256EncodeCompressed" -> emitP256EncodeCompressed(emit);
-            case "p384Add" -> emitP384Add(emit);
-            case "p384Mul" -> emitP384Mul(emit);
-            case "p384MulGen" -> emitP384MulGen(emit);
-            case "p384Negate" -> emitP384Negate(emit);
-            case "p384OnCurve" -> emitP384OnCurve(emit);
+            case "p384Add" -> emitP384Add(emit, opts);
+            case "p384Mul" -> emitP384Mul(emit, opts);
+            case "p384MulGen" -> emitP384MulGen(emit, opts);
+            case "p384Negate" -> emitP384Negate(emit, opts);
+            case "p384OnCurve" -> emitP384OnCurve(emit, opts);
             case "p384EncodeCompressed" -> emitP384EncodeCompressed(emit);
-            case "verifyECDSA_P256" -> emitVerifyECDSA_P256(emit);
-            case "verifyECDSA_P384" -> emitVerifyECDSA_P384(emit);
+            case "verifyECDSA_P256" -> emitVerifyECDSA_P256(emit, opts);
+            case "verifyECDSA_P384" -> emitVerifyECDSA_P384(emit, opts);
             default -> throw new RuntimeException("unknown NIST EC builtin: " + funcName);
         }
     }

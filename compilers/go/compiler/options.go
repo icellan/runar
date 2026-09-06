@@ -16,6 +16,29 @@ type CompileOptions struct {
 	// Default (false) enables constant folding.
 	DisableConstantFolding bool
 
+	// EcConstantPool, EcReductionSinking and EcFixedBaseComb are the
+	// EXPERIMENTAL EC script-size optimizations. All three default off, and
+	// with all three off every EC emitter is byte-identical to the shipping
+	// output — no golden, size baseline, or cross-tier hex comparison moves.
+	//
+	// Cross-tier byte parity for the flags THEMSELVES is gated by
+	// conformance/ec-flag-parity/expected.json, replayed here in
+	// codegen/ec_flag_parity_test.go. See
+	// docs/experiments/script-size-optimizer-results.md.
+	EcConstantPool bool
+
+	// EcReductionSinking needs EcConstantPool: the cheap subtraction shape
+	// references the field prime twice, so without a pooled slot it is a
+	// regression. The emitters compare the two costs and never take the cheap
+	// shape when it does not pay, so enabling it alone is safe — just useless.
+	EcReductionSinking bool
+
+	// EcFixedBaseComb applies only where the base point is a compile-time
+	// constant (ecMulGen, p256MulGen, p384MulGen, and the u1*G half of ECDSA
+	// verification). Runtime-base multiplies keep the binary ladder: the comb's
+	// interval soundness argument does not cover an attacker-chosen base.
+	EcFixedBaseComb bool
+
 	// ParseOnly stops compilation after the parse pass (pass 1).
 	ParseOnly bool
 
@@ -75,18 +98,18 @@ type CompileOptions struct {
 // a named preset. The presets cover:
 //
 //   - "minimal-guest"   — PoC tuple, matches
-//                         tests/vectors/sp1/fri/minimal-guest/proof.postcard
-//                         (degreeBits=3, num_queries=2, log_blowup=2,
-//                         log_final_poly_len=2, commit/query_pow_bits=1).
+//     tests/vectors/sp1/fri/minimal-guest/proof.postcard
+//     (degreeBits=3, num_queries=2, log_blowup=2,
+//     log_final_poly_len=2, commit/query_pow_bits=1).
 //   - "evm-guest"       — production-scale tuple, matches
-//                         tests/vectors/sp1/fri/evm-guest/proof.postcard
-//                         (degreeBits=10, num_queries=100, log_blowup=1,
-//                         log_final_poly_len=0, commit/query_pow_bits=16).
+//     tests/vectors/sp1/fri/evm-guest/proof.postcard
+//     (degreeBits=10, num_queries=100, log_blowup=1,
+//     log_final_poly_len=0, commit/query_pow_bits=16).
 //   - "production-100"  — alias for "evm-guest".
 //   - "production-64"   — production-scale w/ num_queries=64 fallback
-//                         (per docs/sp1-fri-verifier.md §5).
+//     (per docs/sp1-fri-verifier.md §5).
 //   - "production-16"   — production-scale w/ num_queries=16 fallback
-//                         (per docs/sp1-fri-verifier.md §5).
+//     (per docs/sp1-fri-verifier.md §5).
 //
 // Returns an error when the preset name is unrecognised.
 func SP1FriPreset(name string) (codegen.SP1FriVerifierParams, error) {
@@ -289,5 +312,21 @@ func collectLoadPropRefs(bindings []ir.ANFBinding, out map[string]bool) {
 		case "loop":
 			collectLoadPropRefs(v.Body, out)
 		}
+	}
+}
+
+// ecCodegenOptions builds the options handed to the EC / NIST codegen modules.
+//
+// Returns nil — not an all-false struct — when nothing is enabled, so those
+// emitters take their untouched default path and the emitted bytes are provably
+// identical to the shipping ones.
+func (o *CompileOptions) ecCodegenOptions() *codegen.EcCodegenOptions {
+	if !o.EcConstantPool && !o.EcReductionSinking && !o.EcFixedBaseComb {
+		return nil
+	}
+	return &codegen.EcCodegenOptions{
+		ConstantPool:     o.EcConstantPool,
+		ReductionSinking: o.EcReductionSinking,
+		FixedBaseComb:    o.EcFixedBaseComb,
 	}
 }

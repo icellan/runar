@@ -221,10 +221,32 @@ def _eliminate_dead_code(program: ANFProgram) -> ANFProgram:
     return eliminate_dead_code(program)
 
 
-def _lower_to_stack(program: ANFProgram) -> list[Any]:
+def _lower_to_stack(program: ANFProgram, ec_codegen=None) -> list[Any]:
     """Stack lowering: ANF -> Stack IR."""
     from runar_compiler.codegen.stack import lower_to_stack
-    return lower_to_stack(program)
+    return lower_to_stack(program, ec_codegen)
+
+
+def _ec_codegen_options(ec_constant_pool: bool, ec_reduction_sinking: bool,
+                        ec_fixed_base_comb: bool):
+    """Options handed to the EC / NIST codegen modules.
+
+    Returns None -- not an all-false instance -- when nothing is enabled, so
+    those emitters take their untouched default path and the emitted bytes are
+    provably identical to the shipping ones.
+
+    Cross-tier byte parity for the flags THEMSELVES is gated by
+    conformance/ec-flag-parity/expected.json, replayed in
+    tests/test_ec_flag_parity.py.
+    """
+    if not (ec_constant_pool or ec_reduction_sinking or ec_fixed_base_comb):
+        return None
+    from runar_compiler.codegen.ec import EcCodegenOptions
+    return EcCodegenOptions(
+        constant_pool=ec_constant_pool,
+        reduction_sinking=ec_reduction_sinking,
+        fixed_base_comb=ec_fixed_base_comb,
+    )
 
 
 def _optimize_stack_ops(ops: list[Any]) -> list[Any]:
@@ -426,19 +448,56 @@ def _warn_dropped_readonly_fields(result: Any, Diagnostic: Any, Severity: Any) -
 # wasteful push+drop sequences — diverging from both the fold-OFF goldens and
 # the Zig tier, whose compileFromIR never folds IR input. So the IR entry points
 # force folding off regardless of the flag; the peephole optimizer still folds.
-def compile_from_ir(ir_path: str, disable_constant_folding: bool = False) -> Artifact:
-    """Read an ANF IR JSON file and compile it to a Runar artifact."""
+def compile_from_ir(
+    ir_path: str,
+    disable_constant_folding: bool = False,
+    ec_constant_pool: bool = False,
+    ec_reduction_sinking: bool = False,
+    ec_fixed_base_comb: bool = False,
+) -> Artifact:
+    """Read an ANF IR JSON file and compile it to a Runar artifact.
+
+    ``disable_constant_folding`` is accepted for signature parity with
+    ``compile_from_source`` but is not honoured: the ANF fold is forced OFF for
+    pre-lowered IR input, matching Go's ``disableFoldForIRInput``. The EC size
+    flags ARE honoured -- they act in stack lowering, downstream of the IR, so
+    the ``--ir`` path can reach them exactly like the ``--source`` path.
+    """
     program = _load_ir(ir_path)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program,
+        disable_constant_folding=True,
+        ec_constant_pool=ec_constant_pool,
+        ec_reduction_sinking=ec_reduction_sinking,
+        ec_fixed_base_comb=ec_fixed_base_comb,
+    )
 
 
-def compile_from_ir_bytes(data: bytes, disable_constant_folding: bool = False) -> Artifact:
-    """Compile from raw ANF IR JSON bytes."""
+def compile_from_ir_bytes(
+    data: bytes,
+    disable_constant_folding: bool = False,
+    ec_constant_pool: bool = False,
+    ec_reduction_sinking: bool = False,
+    ec_fixed_base_comb: bool = False,
+) -> Artifact:
+    """Compile from raw ANF IR JSON bytes. See :func:`compile_from_ir`."""
     program = _load_ir_from_bytes(data)
-    return compile_from_program(program, disable_constant_folding=True)
+    return compile_from_program(
+        program,
+        disable_constant_folding=True,
+        ec_constant_pool=ec_constant_pool,
+        ec_reduction_sinking=ec_reduction_sinking,
+        ec_fixed_base_comb=ec_fixed_base_comb,
+    )
 
 
-def compile_from_program(program: ANFProgram, disable_constant_folding: bool = False) -> Artifact:
+def compile_from_program(
+    program: ANFProgram,
+    disable_constant_folding: bool = False,
+    ec_constant_pool: bool = False,
+    ec_reduction_sinking: bool = False,
+    ec_fixed_base_comb: bool = False,
+) -> Artifact:
     """Compile a parsed ANF program to a Runar artifact."""
     # Pass 4.25: Constant folding (on by default)
     if not disable_constant_folding:
@@ -449,7 +508,8 @@ def compile_from_program(program: ANFProgram, disable_constant_folding: bool = F
     program = _optimize_ec(program)
 
     # Pass 5: Stack lowering
-    stack_methods = _lower_to_stack(program)
+    stack_methods = _lower_to_stack(program, _ec_codegen_options(
+        ec_constant_pool, ec_reduction_sinking, ec_fixed_base_comb))
 
     # Peephole optimization -- runs on Stack IR before emission.
     for sm in stack_methods:
@@ -476,6 +536,9 @@ def compile_from_source(
     source_path: str,
     disable_constant_folding: bool = False,
     constructor_args: dict[str, object] | None = None,
+    ec_constant_pool: bool = False,
+    ec_reduction_sinking: bool = False,
+    ec_fixed_base_comb: bool = False,
 ) -> Artifact:
     """Compile a source file through all passes to a Runar artifact.
 
@@ -514,7 +577,13 @@ def compile_from_source(
     _apply_constructor_args(program, constructor_args)
 
     # Feed into existing compilation pipeline (passes 4.25-6)
-    return compile_from_program(program, disable_constant_folding=disable_constant_folding)
+    return compile_from_program(
+        program,
+        disable_constant_folding=disable_constant_folding,
+        ec_constant_pool=ec_constant_pool,
+        ec_reduction_sinking=ec_reduction_sinking,
+        ec_fixed_base_comb=ec_fixed_base_comb,
+    )
 
 
 def compile_source_to_ir(

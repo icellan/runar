@@ -23,6 +23,9 @@ import { UnknownANFKindError, MERGED_LOCAL_TEMP_PREFIX } from 'runar-ir-schema';
 import { emitVerifySLHDSA } from './slh-dsa-codegen.js';
 import { emitVerifyWOTS } from './wots-codegen.js';
 import { emitVerifyRabinSig } from './rabin-codegen.js';
+import type { EcCodegenOptions } from './ec-codegen.js';
+import { estimateScriptBytes } from '../metrics/cost-model.js';
+import { optimizeStackIR } from '../optimizer/peephole.js';
 import {
   emitEcAdd, emitEcMul, emitEcMulGen, emitEcNegate,
   emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
@@ -61,6 +64,129 @@ import {
 // ---------------------------------------------------------------------------
 
 const MAX_STACK_DEPTH = 800;
+
+/**
+ * Experimental lowering options.
+ *
+ * Every field defaults to the shipping behaviour, so `lowerToStack(anf)` with
+ * no options is byte-identical to what the seven tiers produce today. These
+ * exist so a size experiment can be measured against the default without
+ * moving a single golden. See `docs/experiments/`.
+ */
+export interface LoweringOptions {
+  /**
+   * Park each curve's field prime / group order in a stack slot inside the EC
+   * codegen modules instead of re-pushing the 33- or 49-byte literal at every
+   * modular reduction.
+   */
+  ecConstantPool?: boolean;
+
+  /**
+   * Drop the sign fix-up from EC modular reductions wherever a sign lattice
+   * proves the dividend non-negative. Only pays alongside `ecConstantPool`;
+   * the codegen compares emitted bytes before choosing the cheap subtraction.
+   */
+  ecReductionSinking?: boolean;
+
+  /**
+   * Use a fixed-base comb wherever the base point is a compile-time constant.
+   * The window width is chosen by the byte-cost model, not fixed.
+   */
+  ecFixedBaseComb?: boolean;
+
+  /**
+   * Operand scheduling strategy.
+   *
+   * `'current'` (default) is the shipping behaviour: results are pushed on top
+   * of the operands that produced them, so a chain that reads the same values
+   * repeatedly pays a deeper `OP_PICK` each time.
+   *
+   * `'liveness'` parks a result on the alt stack when the next binding does
+   * not consume it, keeping hot operands at depth 0/1, and restores the whole
+   * spill group before the first binding that needs any of it.
+   */
+  schedulerMode?: 'current' | 'liveness';
+}
+
+/**
+ * ANF value kinds the spill scheduler is allowed to reason about.
+ *
+ * Deliberately narrow: these compute a single value from operands already on
+ * the stack and have no control flow, no side effects, and no bespoke stack
+ * choreography. Everything else — `if`, `loop`, `assert`, state ops, calls,
+ * `raw_script` — forces the alt stack to be drained first, so none of the
+ * delicate branch/loop reconciliation in `lowerIf` / `lowerLoop` ever sees a
+ * non-empty alt stack.
+ */
+const SPILLABLE_KINDS = new Set<ANFValue['kind']>([
+  'bin_op', 'unary_op', 'load_const', 'load_param', 'load_prop',
+]);
+
+/** Bytes an OP_TOALTSTACK + OP_FROMALTSTACK round trip costs. */
+const SPILL_ROUND_TRIP_BYTES = 2;
+
+/**
+ * Binary operators whose two operands may be materialized in either order.
+ *
+ * The operator itself is unchanged — only which operand is brought to the top
+ * first. Excluded on purpose:
+ *  - `+` is `OP_CAT` when `result_type` is `"bytes"`, and concatenation is not
+ *    commutative, so the caller must check the result type too;
+ *  - `&&` / `||` short-circuit on chain (they lower through a branch, not
+ *    `OP_BOOLAND` / `OP_BOOLOR`), so their operands are not interchangeable
+ *    at this level;
+ *  - `-`, `/`, `%`, shifts and every ordered comparison are order-sensitive.
+ *
+ * `===` / `!==` are commutative under both `OP_NUMEQUAL` and `OP_EQUAL`.
+ */
+const COMMUTATIVE_BINOPS = new Set<string>(['+', '*', '===', '!==', '&', '|', '^']);
+
+/**
+ * The ops one `bringToTop` would emit, mirroring its cases exactly, applied to
+ * a throwaway stack model.
+ *
+ * Returns null when the value is not resident, which makes the caller fall
+ * back to source order rather than guess.
+ *
+ * Costing has to go through the real peephole rather than a byte formula,
+ * because the cheapest-looking local choice is often the one the peephole
+ * would have erased anyway: two consumed operands at depths 1 and 0 emit
+ * `OP_SWAP OP_SWAP`, which `swap-swap` deletes outright — free — while
+ * "cleverly" taking them in the other order emits one real `OP_SWAP` and
+ * costs a byte.
+ */
+function materializationOps(model: StackMap, name: string, consume: boolean): StackOp[] | null {
+  let depth: number;
+  try {
+    depth = model.findDepth(name);
+  } catch {
+    return null;
+  }
+
+  const ops: StackOp[] = [];
+  if (depth === 0) {
+    if (!consume) { ops.push({ op: 'dup' }); model.dup(); }
+    return ops;
+  }
+  if (depth === 1) {
+    if (consume) { ops.push({ op: 'swap' }); model.swap(); }
+    else { ops.push({ op: 'over' }); model.push(model.peekAtDepth(1)); }
+    return ops;
+  }
+  if (consume) {
+    if (depth === 2) {
+      ops.push({ op: 'rot' });
+    } else {
+      ops.push({ op: 'push', value: BigInt(depth) }, { op: 'roll', depth });
+    }
+    model.push(model.removeAtDepth(depth));
+  } else {
+    ops.push({ op: 'push', value: BigInt(depth) }, { op: 'pick', depth });
+    model.push(model.peekAtDepth(depth));
+  }
+  return ops;
+}
+
 
 /**
  * Local hex-to-Uint8Array helper. Avoids a runar-testing dependency
@@ -575,11 +701,25 @@ class LoweringContext {
    */
   private readonly renamedParams: Map<string, string> = new Map();
 
+  /** Experimental lowering options; all default to shipping behaviour. */
+  private readonly opts: LoweringOptions;
+
+  /**
+   * Values parked on the alt stack by the liveness scheduler, bottom -> top.
+   *
+   * Always empty in `'current'` mode, and always drained before any binding
+   * the scheduler does not model (see SPILLABLE_KINDS) and at the end of
+   * every `lowerBindings` scope.
+   */
+  private altSpills: string[] = [];
+
   constructor(
     params: string[],
     properties: ANFProperty[],
     privateMethods: Map<string, ANFMethod> = new Map(),
+    opts: LoweringOptions = {},
   ) {
+    this.opts = opts;
     // Parameters are pushed onto the stack by the Bitcoin VM in order.
     // The first parameter is at the bottom, last parameter at the top.
     this.stackMap = new StackMap(params);
@@ -1035,6 +1175,158 @@ class LoweringContext {
    * If `consume` is true, use ROLL (removes from original position).
    * If `consume` is false, use PICK (copies, leaving original in place).
    */
+  // -- liveness scheduler: alt-stack spilling --------------------------------
+  //
+  // ANF pushes every result on top of the operands that made it, so a chain
+  // reading the same two values repeatedly buries them one slot deeper per
+  // binding and pays a `push d; OP_PICK` pair instead of a 1-byte `OP_2DUP`.
+  // Parking the result on the alt stack keeps the operands hot.
+  //
+  // Restores are done as a GROUP, not one at a time. Popping the whole alt
+  // stack puts the values back on the main stack in production order (first
+  // spilled ends up on top), which is the order an ANF accumulation chain
+  // reads them in — so the group restore usually lands operands exactly where
+  // the next bindings want them, and `bringToTop` fixes up any that differ.
+
+  /** True when the liveness scheduler is active for this context. */
+  private get schedulingByLiveness(): boolean {
+    // Never inside a branch arm: `lowerIf` reconciles arms by MAIN-stack depth
+    // alone (the Layer B/C invariants), so an arm must neither begin nor end
+    // with a non-empty alt stack.
+    return this.opts.schedulerMode === 'liveness' && !this._insideBranch;
+  }
+
+  /** Move the top-of-stack value to the alt stack. */
+  private spillToAlt(name: string): void {
+    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    this.stackMap.pop();
+    this.altSpills.push(name);
+  }
+
+  /** Pop every spilled value back. First-spilled ends up on top. */
+  private restoreSpills(): void {
+    while (this.altSpills.length > 0) {
+      const name = this.altSpills.pop()!;
+      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+      this.stackMap.push(name);
+      this.trackDepth();
+    }
+  }
+
+  /**
+   * Decide whether the just-computed `name` (now on top) should be parked.
+   *
+   * Spilling pays only if the value would otherwise sit above operands that
+   * get read before it is needed. The estimate counts those intervening reads:
+   * each one would cross this slot, and crossing it costs at least a byte once
+   * the access stops being a depth-0/1 `OP_DUP`/`OP_OVER`. Break-even is the
+   * 2-byte round trip, so 2 intervening reads are required.
+   */
+  private maybeSpill(
+    binding: ANFBinding,
+    bindingIndex: number,
+    bindings: ANFBinding[],
+    lastUses: Map<string, number>,
+  ): void {
+    if (!this.schedulingByLiveness) return;
+    if (!SPILLABLE_KINDS.has(binding.value.kind)) return;
+    // Only a value we actually left on top, under its own name.
+    if (this.stackMap.depth === 0) return;
+    if (this.stackMap.peekAtDepth(0) !== binding.name) return;
+
+    const nextUse = this.nextUseAfter(binding.name, bindingIndex, bindings);
+    if (nextUse === null) return;            // dead or used past this scope
+    if (nextUse === bindingIndex + 1) return; // consumed immediately: no burial
+    if (lastUses.get(binding.name) !== undefined
+      && lastUses.get(binding.name)! >= bindings.length) return; // pinned for an outer scope
+
+    // No control flow may follow the spill anywhere in this scope.
+    //
+    // Restoring immediately before an `if` leaves the parent stack in a shape
+    // `lowerIf` was not written for: its arm reconciliation, declared-result
+    // trim and Layer B/C depth invariants all reason about a main stack the
+    // scheduler has not been rearranging underneath them. That combination
+    // MISCOMPILED `if-without-else-multi-temp` — the script kept running and
+    // started ACCEPTING a witness the shipping compiler rejects, which the
+    // conformance witness corpus caught (see
+    // `packages/runar-testing/src/__tests__/liveness-scheduler-equivalence.test.ts`).
+    // Rather than try to make the two agree, spilling stays out of any scope
+    // that still has control flow ahead of it. `assert` is allowed: it consumes
+    // a value and emits OP_VERIFY without reshaping anything.
+    for (let j = bindingIndex + 1; j < bindings.length; j++) {
+      const kind = bindings[j]!.value.kind;
+      if (!SPILLABLE_KINDS.has(kind) && kind !== 'assert') return;
+    }
+
+    // Everything between here and the use must itself be schedulable, or the
+    // restore would land in the middle of a construct we do not model.
+    let interveningReads = 0;
+    for (let j = bindingIndex + 1; j < nextUse; j++) {
+      const v = bindings[j]!.value;
+      if (!SPILLABLE_KINDS.has(v.kind)) return;
+      interveningReads += collectRefs(v).filter(r => r !== binding.name).length;
+    }
+    if (interveningReads < SPILL_ROUND_TRIP_BYTES) return;
+
+    // Do not spill a value the very next binding will restore anyway: the
+    // round trip would be emitted and immediately undone. This is the
+    // `OP_DIV OP_TOALTSTACK OP_FROMALTSTACK` shape — 2 bytes for nothing.
+    const next = bindings[bindingIndex + 1];
+    if (next !== undefined) {
+      const nextRefs = collectRefs(next.value);
+      if (!SPILLABLE_KINDS.has(next.value.kind)
+        || nextRefs.some(r => this.altSpills.includes(r))) return;
+    }
+
+    this.spillToAlt(binding.name);
+  }
+
+  /** Index of the first binding at or after `from + 1` that references `name`. */
+  private nextUseAfter(name: string, from: number, bindings: ANFBinding[]): number | null {
+    for (let j = from + 1; j < bindings.length; j++) {
+      if (collectRefs(bindings[j]!.value).includes(name)) return j;
+    }
+    return null;
+  }
+
+  /**
+   * The options an `if`/`else` arm context inherits.
+   *
+   * The EC size flags have to cross into the arm: `if (usePQ) { ... } else {
+   * verifyECDSA_P256(...) }` is the shape a contract that needs the bytes back
+   * actually has, and dropping them here made the flags a no-op for it. Java
+   * (`StackLower.java`) and Zig already copied them, so omitting them was also
+   * a cross-tier divergence — the same source and flags produced locking
+   * scripts tens of kilobytes apart, i.e. different funding addresses.
+   *
+   * `schedulerMode` is forced back to `'current'`. `lowerIf` reconciles the two
+   * arms by MAIN-stack depth alone, so an arm must neither begin nor end with a
+   * non-empty alt stack. `schedulingByLiveness` already refuses inside a branch
+   * via `_insideBranch`, but `shouldSwapOperands` checks only the mode — so
+   * inheriting it verbatim would newly reorder commutative operands inside arms.
+   * Pin it here instead of relying on each call site to re-derive the rule.
+   */
+  private armOptions(): LoweringOptions {
+    return { ...this.opts, schedulerMode: 'current' };
+  }
+
+  /**
+   * Options handed to the EC / NIST codegen modules.
+   *
+   * Returns `undefined` — not `{}` — when nothing is enabled, so the emitters
+   * take their untouched default path and the emitted bytes are provably
+   * identical to the shipping ones.
+   */
+  private ecCodegenOptions(): EcCodegenOptions | undefined {
+    if (!this.opts.ecConstantPool && !this.opts.ecReductionSinking
+      && !this.opts.ecFixedBaseComb) return undefined;
+    return {
+      constantPool: this.opts.ecConstantPool === true,
+      reductionSinking: this.opts.ecReductionSinking === true,
+      fixedBaseComb: this.opts.ecFixedBaseComb === true,
+    };
+  }
+
   bringToTop(name: string, consume: boolean): void {
     const depth = this.stackMap.findDepth(name);
 
@@ -1178,6 +1470,16 @@ class LoweringContext {
 
     for (let i = 0; i < bindings.length; i++) {
       const binding = bindings[i]!;
+      // Drain the alt stack before anything the scheduler does not model, and
+      // before the first binding that reads a parked value.
+      if (this.altSpills.length > 0) {
+        const refs = collectRefs(binding.value);
+        if (!SPILLABLE_KINDS.has(binding.value.kind)
+          || refs.some(r => this.altSpills.includes(r))
+          || i === lastAssertIdx || i === terminalIfIdx) {
+          this.restoreSpills();
+        }
+      }
       // Propagate source location from ANF binding to StackOps
       this.currentSourceLoc = binding.sourceLoc;
       if (binding.value.kind === 'assert' && i === lastAssertIdx) {
@@ -1188,10 +1490,13 @@ class LoweringContext {
         this.lowerIf(binding.name, binding.value.cond, binding.value.then, binding.value.else, binding.value.results ?? [], i, lastUses, true);
       } else {
         this.lowerBinding(binding, i, lastUses);
+        this.maybeSpill(binding, i, bindings, lastUses);
       }
       this.currentSourceLoc = undefined;
     }
 
+    // Nothing may outlive the scope on the alt stack.
+    this.restoreSpills();
   }
 
   private lowerBinding(
@@ -1494,6 +1799,45 @@ class LoweringContext {
     }
   }
 
+  /**
+   * Would materializing a commutative operator's operands right-then-left cost
+   * fewer bytes than left-then-right?
+   *
+   * Scored with the exact emit-time cost of each `bringToTop`, on a throwaway
+   * copy of the stack map so the real one is untouched. Ties keep source
+   * order, which is what makes `'current'` and `'liveness'` identical wherever
+   * this cannot help.
+   */
+  private shouldSwapOperands(
+    op: string,
+    left: string,
+    right: string,
+    leftConsume: boolean,
+    rightConsume: boolean,
+    resultType?: string,
+  ): boolean {
+    if (this.opts.schedulerMode !== 'liveness') return false;
+    if (!COMMUTATIVE_BINOPS.has(op)) return false;
+    // `+` on ByteString operands is OP_CAT, which is not commutative.
+    if (resultType === 'bytes' && op === '+') return false;
+    if (left === right) return false;
+
+    const cost = (first: string, firstConsume: boolean, second: string, secondConsume: boolean): number => {
+      const model = this.stackMap.clone();
+      const ops: StackOp[] = [];
+      for (const [name, consume] of [[first, firstConsume], [second, secondConsume]] as const) {
+        const emitted = materializationOps(model, name, consume);
+        if (emitted === null) return Number.POSITIVE_INFINITY; // not resident
+        ops.push(...emitted);
+      }
+      // Score what the emitter would actually see, peephole included.
+      return estimateScriptBytes(optimizeStackIR(ops));
+    };
+
+    return cost(right, rightConsume, left, leftConsume)
+      < cost(left, leftConsume, right, rightConsume);
+  }
+
   private lowerBinOp(
     bindingName: string,
     op: string,
@@ -1503,13 +1847,20 @@ class LoweringContext {
     lastUses: Map<string, number>,
     resultType?: string,
   ): void {
-    // Get left operand to stack first
     const leftConsume = this.operandConsume(left, [left, right], bindingIndex, lastUses);
-    this.bringToTop(left, leftConsume);
-
-    // Get right operand to stack
     const rightConsume = this.operandConsume(right, [left, right], bindingIndex, lastUses);
-    this.bringToTop(right, rightConsume);
+
+    // Commutative operators may take their operands in either order, so pick
+    // the cheaper arrangement. The common win: the operand already on top is
+    // materialized SECOND for free, instead of being buried by the other one
+    // and then swapped back.
+    if (this.shouldSwapOperands(op, left, right, leftConsume, rightConsume, resultType)) {
+      this.bringToTop(right, rightConsume);
+      this.bringToTop(left, leftConsume);
+    } else {
+      this.bringToTop(left, leftConsume);
+      this.bringToTop(right, rightConsume);
+    }
 
     // Pop both operands (the opcode consumes them)
     this.stackMap.pop();
@@ -2232,7 +2583,10 @@ class LoweringContext {
     const preIfNames = this.stackMap.namedSlots();
 
     // Lower then-branch
-    const thenCtx = new LoweringContext([], this._properties, this.privateMethods);
+    // `armOptions()`, not `this.opts`: the EC size flags MUST reach the arm
+    // (an arm is where branch-guarded crypto lives), the liveness scheduler
+    // must NOT — see the comment on `armOptions`.
+    const thenCtx = new LoweringContext([], this._properties, this.privateMethods, this.armOptions());
     thenCtx.stackMap = this.stackMap.clone();
     thenCtx.outerProtectedRefs = protectedRefs;
     thenCtx._insideBranch = true;
@@ -2267,7 +2621,10 @@ class LoweringContext {
     }
 
     // Lower else-branch
-    const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
+    // `armOptions()`, not `this.opts`: the EC size flags MUST reach the arm
+    // (an arm is where branch-guarded crypto lives), the liveness scheduler
+    // must NOT — see the comment on `armOptions`.
+    const elseCtx = new LoweringContext([], this._properties, this.privateMethods, this.armOptions());
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx._insideBranch = true;
@@ -5012,13 +5369,14 @@ class LoweringContext {
     for (let i = 0; i < args.length; i++) this.stackMap.pop();
 
     const emitFn = (op: StackOp) => this.emitOp(op);
+    const ecOpts = this.ecCodegenOptions();
 
     switch (func) {
-      case 'ecAdd':              emitEcAdd(emitFn); break;
-      case 'ecMul':              emitEcMul(emitFn); break;
-      case 'ecMulGen':           emitEcMulGen(emitFn); break;
-      case 'ecNegate':           emitEcNegate(emitFn); break;
-      case 'ecOnCurve':          emitEcOnCurve(emitFn); break;
+      case 'ecAdd':              emitEcAdd(emitFn, ecOpts); break;
+      case 'ecMul':              emitEcMul(emitFn, ecOpts); break;
+      case 'ecMulGen':           emitEcMulGen(emitFn, ecOpts); break;
+      case 'ecNegate':           emitEcNegate(emitFn, ecOpts); break;
+      case 'ecOnCurve':          emitEcOnCurve(emitFn, ecOpts); break;
       case 'ecModReduce':        emitEcModReduce(emitFn); break;
       case 'ecEncodeCompressed': emitEcEncodeCompressed(emitFn); break;
       case 'ecMakePoint':        emitEcMakePoint(emitFn); break;
@@ -5049,19 +5407,20 @@ class LoweringContext {
     for (let i = 0; i < args.length; i++) this.stackMap.pop();
 
     const emitFn = (op: StackOp) => this.emitOp(op);
+    const ecOpts = this.ecCodegenOptions();
 
     switch (func) {
-      case 'p256Add':              emitP256Add(emitFn); break;
-      case 'p256Mul':              emitP256Mul(emitFn); break;
-      case 'p256MulGen':           emitP256MulGen(emitFn); break;
-      case 'p256Negate':           emitP256Negate(emitFn); break;
-      case 'p256OnCurve':          emitP256OnCurve(emitFn); break;
+      case 'p256Add':              emitP256Add(emitFn, ecOpts); break;
+      case 'p256Mul':              emitP256Mul(emitFn, ecOpts); break;
+      case 'p256MulGen':           emitP256MulGen(emitFn, ecOpts); break;
+      case 'p256Negate':           emitP256Negate(emitFn, ecOpts); break;
+      case 'p256OnCurve':          emitP256OnCurve(emitFn, ecOpts); break;
       case 'p256EncodeCompressed': emitP256EncodeCompressed(emitFn); break;
-      case 'p384Add':              emitP384Add(emitFn); break;
-      case 'p384Mul':              emitP384Mul(emitFn); break;
-      case 'p384MulGen':           emitP384MulGen(emitFn); break;
-      case 'p384Negate':           emitP384Negate(emitFn); break;
-      case 'p384OnCurve':          emitP384OnCurve(emitFn); break;
+      case 'p384Add':              emitP384Add(emitFn, ecOpts); break;
+      case 'p384Mul':              emitP384Mul(emitFn, ecOpts); break;
+      case 'p384MulGen':           emitP384MulGen(emitFn, ecOpts); break;
+      case 'p384Negate':           emitP384Negate(emitFn, ecOpts); break;
+      case 'p384OnCurve':          emitP384OnCurve(emitFn, ecOpts); break;
       case 'p384EncodeCompressed': emitP384EncodeCompressed(emitFn); break;
       default: throw new Error(`Unknown NIST EC builtin: ${func}`);
     }
@@ -5086,8 +5445,9 @@ class LoweringContext {
     this.stackMap.pop(); // sig
     this.stackMap.pop(); // msg
     const emitFn = (op: StackOp) => this.emitOp(op);
-    if (func === 'verifyECDSA_P256') emitVerifyECDSA_P256(emitFn);
-    else emitVerifyECDSA_P384(emitFn);
+    const ecOpts = this.ecCodegenOptions();
+    if (func === 'verifyECDSA_P256') emitVerifyECDSA_P256(emitFn, ecOpts);
+    else emitVerifyECDSA_P384(emitFn, ecOpts);
     this.stackMap.push(bindingName);
     this.trackDepth();
   }
@@ -5563,7 +5923,7 @@ function hexToBytes(hex: string): Uint8Array {
  * named temporaries via a stack map and emits PICK/ROLL to materialise
  * values as needed.
  */
-export function lowerToStack(program: ANFProgram): StackProgram {
+export function lowerToStack(program: ANFProgram, opts: LoweringOptions = {}): StackProgram {
   const methods: StackMethod[] = [];
   const privateMethods = new Map<string, ANFMethod>();
 
@@ -5577,7 +5937,7 @@ export function lowerToStack(program: ANFProgram): StackProgram {
     if (method.name !== 'constructor' && !method.isPublic) {
       continue;
     }
-    const stackMethod = lowerMethod(method, program.properties, privateMethods);
+    const stackMethod = lowerMethod(method, program.properties, privateMethods, opts);
     methods.push(stackMethod);
   }
 
@@ -5673,10 +6033,43 @@ function methodUsesCodePart(bindings: ANFBinding[]): boolean {
   return false;
 }
 
+/**
+ * Lower one method, and — under `schedulerMode: 'liveness'` — pick the
+ * cheaper of the two schedules by emitted bytes.
+ *
+ * The per-site spill heuristic in `maybeSpill` is greedy and approximate: it
+ * cannot know whether removing one slot actually moves an access across a
+ * cost boundary, because `OP_DUP`/`OP_SWAP`/`OP_OVER`/`OP_ROT` all cost one
+ * byte, so burying a value is free until the access reaches depth 3. Rather
+ * than model the whole stack evolution ahead of time, lower both ways and let
+ * the exact cost model decide. That makes "the scheduler never grows a method"
+ * a structural property rather than a hope.
+ *
+ * Sizes are compared AFTER the peephole pass, since that is what the emitter
+ * finally sees — spilling changes which peephole rules fire (an `OP_OVER
+ * OP_OVER` that fused into `OP_2DUP` may become a plain `OP_DUP`).
+ */
 function lowerMethod(
   method: ANFMethod,
   properties: ANFProperty[],
   privateMethods: Map<string, ANFMethod>,
+  opts: LoweringOptions = {},
+): StackMethod {
+  if (opts.schedulerMode === 'liveness') {
+    const scheduled = lowerMethodOnce(method, properties, privateMethods, opts);
+    const baseline = lowerMethodOnce(method, properties, privateMethods,
+      { ...opts, schedulerMode: 'current' });
+    const size = (m: StackMethod): number => estimateScriptBytes(optimizeStackIR(m.ops));
+    return size(scheduled) < size(baseline) ? scheduled : baseline;
+  }
+  return lowerMethodOnce(method, properties, privateMethods, opts);
+}
+
+function lowerMethodOnce(
+  method: ANFMethod,
+  properties: ANFProperty[],
+  privateMethods: Map<string, ANFMethod>,
+  opts: LoweringOptions = {},
 ): StackMethod {
   const paramNames = method.params.map(p => p.name);
 
@@ -5699,7 +6092,7 @@ function lowerMethod(
     paramNames.unshift('_codePart');
   }
 
-  const ctx = new LoweringContext(paramNames, properties, privateMethods);
+  const ctx = new LoweringContext(paramNames, properties, privateMethods, opts);
   // Pass terminalAssert=true for public methods so the last assert leaves
   // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
   ctx.lowerBindings(method.body, method.isPublic);

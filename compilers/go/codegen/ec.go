@@ -22,6 +22,9 @@ var ecFieldP *big.Int
 // p - 2, used for Fermat's little theorem modular inverse
 var ecFieldPMinus2 *big.Int
 
+// secp256k1 curve order
+var ecCurveN *big.Int
+
 // secp256k1 generator x-coordinate
 var ecGenX *big.Int
 
@@ -31,6 +34,7 @@ var ecGenY *big.Int
 func init() {
 	ecFieldP, _ = new(big.Int).SetString("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16)
 	ecFieldPMinus2 = new(big.Int).Sub(ecFieldP, big.NewInt(2))
+	ecCurveN, _ = new(big.Int).SetString("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)
 	ecGenX, _ = new(big.Int).SetString("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", 16)
 	ecGenY, _ = new(big.Int).SetString("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8", 16)
 }
@@ -49,17 +53,195 @@ func bigintToBytes32(n *big.Int) []byte {
 // ===========================================================================
 
 // ECTracker tracks named stack positions and emits StackOps for EC codegen.
+// EcCodegenOptions are the codegen options shared by every EC / NIST-curve
+// emitter.
+//
+// Off by default: with a nil pointer (or all-false struct) each emitter is
+// byte-identical to what the seven tiers ship today, so no golden, size
+// baseline, or cross-tier parity gate can move.
+type EcCodegenOptions struct {
+	// ConstantPool parks large repeated constants (the field prime, the group
+	// order) in a stack slot and copies them with OP_PICK instead of re-pushing
+	// the literal.
+	//
+	// ecFieldMod pushes the 256-bit prime at every modular reduction — 34 bytes
+	// a time, 20,025 times in p256-wallet (71 % of that fixture). A pick from a
+	// slot a dozen deep costs 2.
+	ConstantPool bool
+
+	// ReductionSinking emits `a mod p` without the sign fix-up wherever the
+	// dividend is provably non-negative, and the cheap `a - b + p` form for
+	// subtraction wherever the subtrahend is provably reduced.
+	//
+	// Which reductions qualify is decided by the sign lattice below — never
+	// assumed. Only sound alongside ConstantPool: the cheap subtraction
+	// references the prime twice, so without a pooled slot it is a regression.
+	ReductionSinking bool
+
+	// FixedBaseComb uses a Lim-Lee comb instead of the binary ladder wherever
+	// the base point is a compile-time constant (EcMulGen, P256MulGen,
+	// P384MulGen, and the u1*G half of ECDSA verification).
+	//
+	// The window width is not fixed: the emitter renders each candidate and
+	// keeps whichever the byte-cost model scores smallest.
+	FixedBaseComb bool
+}
+
+// ecDom is what is known about a tracked value's sign and range.
+//
+// domReduced implies domNonNegative; the ordering is what the transfer
+// functions meet over. domUnknown is the default for every slot the analysis
+// has not explicitly proved something about — including everything a rawBlock
+// or an OP_IF produces — so an un-analysed value can only ever fall back to the
+// shipping reduction.
+//
+// The distinction is not academic. OP_BIN2NUM of 32 unsigned coordinate bytes
+// gives domNonNegative but NOT domReduced: a coordinate may legitimately be up
+// to 2^256 - 1 while p is 2^32 + 977 smaller. Multiplication and addition need
+// only domNonNegative; subtraction's cheap form needs the subtrahend
+// domReduced, and conflating the two produces a script that passes 256 EC
+// oracle assertions and is still wrong on ecAdd((0,1), (2^256-1,1)).
+type ecDom int
+
+const (
+	// domUnknown means nothing is known; the value may be negative.
+	domUnknown ecDom = iota
+	// domNonNegative means the value is provably >= 0. It may be >= p.
+	domNonNegative
+	// domReduced means the value is provably in [0, p).
+	domReduced
+)
+
+// isNonNegative reports whether d proves the value is >= 0.
+func isNonNegative(d ecDom) bool { return d >= domNonNegative }
+
+// Stack slot names reserved for pooled constants.
+const (
+	ecPoolFieldP = "_pool$p"
+	ecPoolGroupN = "_pool$n"
+)
+
 type ECTracker struct {
 	nm []string // stack names ("" for anonymous)
-	e  func(StackOp)
+	// dm holds the sign-lattice fact per stack SLOT, kept parallel to nm.
+	//
+	// Slot-parallel rather than keyed by name on purpose: names are reused
+	// (_fmul_prod is written by every multiply) and the same name can be
+	// resident twice, so a name-keyed map would go stale in exactly the cases
+	// that matter. Every mutation of nm below mirrors into dm with the same
+	// splice, so the two cannot drift.
+	dm []ecDom
+	// altDm holds lattice facts for values parked on the alt stack, bottom to top.
+	altDm []ecDom
+	e     func(StackOp)
+	// pooling is true when this tracker may serve constants from a pooled slot.
+	pooling bool
+	// sinking is true when this tracker may emit sunk reductions.
+	sinking bool
+	// comb is true when a compile-time-known base may use a fixed-base comb.
+	comb bool
 }
 
 // NewECTracker creates a new tracker with initial named stack slots.
 func NewECTracker(init []string, emit func(StackOp)) *ECTracker {
+	return NewECTrackerOpts(init, emit, nil, nil)
+}
+
+// NewECTrackerOpts creates a tracker carrying codegen options and, optionally,
+// initial lattice facts for the pre-existing slots.
+func NewECTrackerOpts(init []string, emit func(StackOp), opts *EcCodegenOptions, initDomains []ecDom) *ECTracker {
 	nm := make([]string, len(init))
 	copy(nm, init)
-	return &ECTracker{nm: nm, e: emit}
+	dm := make([]ecDom, len(init))
+	if initDomains != nil {
+		copy(dm, initDomains)
+	}
+	t := &ECTracker{nm: nm, dm: dm, e: emit}
+	if opts != nil {
+		t.pooling = opts.ConstantPool
+		t.sinking = opts.ReductionSinking
+		t.comb = opts.FixedBaseComb
+	}
+	return t
 }
+
+// options returns the options this tracker was built with, for handing to a
+// nested tracker.
+func (t *ECTracker) options() *EcCodegenOptions {
+	return &EcCodegenOptions{ConstantPool: t.pooling, ReductionSinking: t.sinking, FixedBaseComb: t.comb}
+}
+
+// domainsCopy returns a copy of the lattice facts, for seeding a nested tracker.
+func (t *ECTracker) domainsCopy() []ecDom {
+	out := make([]ecDom, len(t.dm))
+	copy(out, t.dm)
+	return out
+}
+
+// namesCopy returns a copy of the stack names, for seeding a nested tracker.
+func (t *ECTracker) namesCopy() []string {
+	out := make([]string, len(t.nm))
+	copy(out, t.nm)
+	return out
+}
+
+// -- sign lattice ------------------------------------------------------------
+
+// domainOf reports what is known about the named value. domUnknown when the
+// name is absent.
+func (t *ECTracker) domainOf(name string) ecDom {
+	// A silent desync here would hand a transfer function a fact about the
+	// WRONG slot, which is the one failure mode that produces a smaller script
+	// that quietly computes something else. Fail loudly instead.
+	if len(t.dm) != len(t.nm) {
+		panic(fmt.Sprintf(
+			"ECTracker: lattice desynchronised (%d slots, %d facts). "+
+				"Every nm mutation must go through a tracker method or pushTracked/popTracked.",
+			len(t.nm), len(t.dm)))
+	}
+	for i := len(t.nm) - 1; i >= 0; i-- {
+		if t.nm[i] == name {
+			return t.dm[i]
+		}
+	}
+	return domUnknown
+}
+
+// setDomain records a fact about the named value's slot.
+func (t *ECTracker) setDomain(name string, d ecDom) {
+	for i := len(t.nm) - 1; i >= 0; i-- {
+		if t.nm[i] == name {
+			t.dm[i] = d
+			return
+		}
+	}
+}
+
+// pushTracked pushes a slot the caller tracks itself (used where raw opcodes
+// create items).
+func (t *ECTracker) pushTracked(name string, d ecDom) {
+	t.nm = append(t.nm, name)
+	t.dm = append(t.dm, d)
+}
+
+// popTracked pops a slot the caller tracks itself. Mirror of pushTracked.
+func (t *ECTracker) popTracked() string {
+	if len(t.nm) == 0 {
+		return ""
+	}
+	n := t.nm[len(t.nm)-1]
+	t.nm = t.nm[:len(t.nm)-1]
+	t.dm = t.dm[:len(t.dm)-1]
+	return n
+}
+
+// removeSlotAt removes the slot at an absolute (bottom-relative) index.
+func (t *ECTracker) removeSlotAt(index int) {
+	t.nm = append(t.nm[:index], t.nm[index+1:]...)
+	t.dm = append(t.dm[:index], t.dm[index+1:]...)
+}
+
+func (t *ECTracker) depth() int { return len(t.nm) }
 
 func (t *ECTracker) findDepth(name string) int {
 	for i := len(t.nm) - 1; i >= 0; i-- {
@@ -72,42 +254,57 @@ func (t *ECTracker) findDepth(name string) int {
 
 func (t *ECTracker) pushBytes(n string, v []byte) {
 	t.e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: v}})
-	t.nm = append(t.nm, n)
+	// A byte blob is not a number until BIN2NUM decides how to read it.
+	t.pushTracked(n, domUnknown)
 }
 
 func (t *ECTracker) pushBigInt(n string, v *big.Int) {
 	t.e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(v)}})
-	t.nm = append(t.nm, n)
+	d := domUnknown
+	if v.Sign() >= 0 {
+		d = domNonNegative
+	}
+	t.pushTracked(n, d)
 }
 
 func (t *ECTracker) pushInt(n string, v int64) {
 	t.e(StackOp{Op: "push", Value: bigIntPush(v)})
-	t.nm = append(t.nm, n)
+	d := domUnknown
+	if v >= 0 {
+		d = domNonNegative
+	}
+	t.pushTracked(n, d)
 }
 
 func (t *ECTracker) dup(n string) {
 	t.e(StackOp{Op: "dup"})
-	t.nm = append(t.nm, n)
+	d := domUnknown
+	if len(t.dm) > 0 {
+		d = t.dm[len(t.dm)-1]
+	}
+	t.pushTracked(n, d)
 }
 
 func (t *ECTracker) drop() {
 	t.e(StackOp{Op: "drop"})
-	if len(t.nm) > 0 {
-		t.nm = t.nm[:len(t.nm)-1]
-	}
+	t.popTracked()
 }
 
 func (t *ECTracker) nip() {
 	t.e(StackOp{Op: "nip"})
 	L := len(t.nm)
 	if L >= 2 {
-		t.nm = append(t.nm[:L-2], t.nm[L-1])
+		t.removeSlotAt(L - 2)
 	}
 }
 
 func (t *ECTracker) over(n string) {
 	t.e(StackOp{Op: "over"})
-	t.nm = append(t.nm, n)
+	d := domUnknown
+	if len(t.dm) >= 2 {
+		d = t.dm[len(t.dm)-2]
+	}
+	t.pushTracked(n, d)
 }
 
 func (t *ECTracker) swap() {
@@ -115,6 +312,7 @@ func (t *ECTracker) swap() {
 	L := len(t.nm)
 	if L >= 2 {
 		t.nm[L-1], t.nm[L-2] = t.nm[L-2], t.nm[L-1]
+		t.dm[L-1], t.dm[L-2] = t.dm[L-2], t.dm[L-1]
 	}
 }
 
@@ -122,9 +320,9 @@ func (t *ECTracker) rot() {
 	t.e(StackOp{Op: "rot"})
 	L := len(t.nm)
 	if L >= 3 {
-		r := t.nm[L-3]
-		t.nm = append(t.nm[:L-3], t.nm[L-2:]...)
-		t.nm = append(t.nm, r)
+		r, rd := t.nm[L-3], t.dm[L-3]
+		t.removeSlotAt(L - 3)
+		t.pushTracked(r, rd)
 	}
 }
 
@@ -145,13 +343,13 @@ func (t *ECTracker) roll(d int) {
 		return
 	}
 	t.e(StackOp{Op: "push", Value: bigIntPush(int64(d))})
-	t.nm = append(t.nm, "")
+	t.pushTracked("", domNonNegative)
 	t.e(StackOp{Op: "roll", Depth: d})
-	t.nm = t.nm[:len(t.nm)-1] // pop the push placeholder
+	t.popTracked() // the depth literal
 	idx := len(t.nm) - 1 - d
-	r := t.nm[idx]
-	t.nm = append(t.nm[:idx], t.nm[idx+1:]...)
-	t.nm = append(t.nm, r)
+	r, rd := t.nm[idx], t.dm[idx]
+	t.removeSlotAt(idx)
+	t.pushTracked(r, rd)
 }
 
 func (t *ECTracker) pick(d int, n string) {
@@ -164,10 +362,15 @@ func (t *ECTracker) pick(d int, n string) {
 		return
 	}
 	t.e(StackOp{Op: "push", Value: bigIntPush(int64(d))})
-	t.nm = append(t.nm, "")
+	t.pushTracked("", domNonNegative)
 	t.e(StackOp{Op: "pick", Depth: d})
-	t.nm = t.nm[:len(t.nm)-1] // pop the push placeholder
-	t.nm = append(t.nm, n)
+	t.popTracked() // the depth literal
+	// Once the depth literal is gone the copied slot sits at depth d.
+	src := domUnknown
+	if idx := len(t.dm) - 1 - d; idx >= 0 {
+		src = t.dm[idx]
+	}
+	t.pushTracked(n, src)
 }
 
 func (t *ECTracker) toTop(name string) {
@@ -178,16 +381,96 @@ func (t *ECTracker) copyToTop(name, n string) {
 	t.pick(t.findDepth(name), n)
 }
 
+// -- constant pool -----------------------------------------------------------
+//
+// A pooled constant is an ordinary tracked slot; nothing about the stack model
+// changes. pushConst just chooses, per call site and by emitted bytes, between
+// copying that slot and re-pushing the literal. Nested trackers built from
+// namesCopy() inherit the slot for free, so pooled constants work unchanged
+// inside an OP_IF arm.
+
+func (t *ECTracker) hasSlot(slot string) bool {
+	for _, n := range t.nm {
+		if n == slot {
+			return true
+		}
+	}
+	return false
+}
+
+// poolConstant parks value in slot for the lifetime of this emitter. No-op when
+// pooling is off.
+func (t *ECTracker) poolConstant(slot string, value *big.Int) {
+	if !t.pooling || t.hasSlot(slot) {
+		return
+	}
+	t.pushBigInt(slot, value)
+}
+
+// releaseConstant removes a pooled slot. No-op when pooling is off or the slot
+// is absent.
+func (t *ECTracker) releaseConstant(slot string) {
+	if !t.pooling || !t.hasSlot(slot) {
+		return
+	}
+	t.toTop(slot)
+	t.drop()
+}
+
+// constCost is the emitted byte cost a pushConst of this constant would incur
+// right now.
+//
+// The comparison is exact — SizeOfPushBigInt is the same encoder the emit pass
+// uses — so pooling can never make a call site bigger. A pick at depth d costs
+// SizeOfPushBigInt(d) + 1; depths 0 and 1 are OP_DUP / OP_OVER, 1 byte each.
+func (t *ECTracker) constCost(slot string, value *big.Int) int {
+	if t.pooling && t.hasSlot(slot) {
+		d := t.findDepth(slot)
+		pickCost := 1
+		if d > 1 {
+			pickCost = SizeOfPushBigInt(big.NewInt(int64(d))) + 1
+		}
+		if pickCost < SizeOfPushBigInt(value) {
+			return pickCost
+		}
+	}
+	return SizeOfPushBigInt(value)
+}
+
+// pushConst materializes value on top as name, from the pooled slot when that
+// is cheaper in emitted bytes than pushing the literal.
+func (t *ECTracker) pushConst(slot string, value *big.Int, name string) {
+	if t.pooling && t.hasSlot(slot) {
+		d := t.findDepth(slot)
+		pickCost := 1
+		if d > 1 {
+			pickCost = SizeOfPushBigInt(big.NewInt(int64(d))) + 1
+		}
+		if pickCost < SizeOfPushBigInt(value) {
+			t.pick(d, name)
+			return
+		}
+	}
+	t.pushBigInt(name, value)
+}
+
 func (t *ECTracker) toAlt() {
 	t.op("OP_TOALTSTACK")
 	if len(t.nm) > 0 {
-		t.nm = t.nm[:len(t.nm)-1]
+		d := t.dm[len(t.dm)-1]
+		t.popTracked()
+		t.altDm = append(t.altDm, d)
 	}
 }
 
 func (t *ECTracker) fromAlt(n string) {
 	t.op("OP_FROMALTSTACK")
-	t.nm = append(t.nm, n)
+	d := domUnknown
+	if len(t.altDm) > 0 {
+		d = t.altDm[len(t.altDm)-1]
+		t.altDm = t.altDm[:len(t.altDm)-1]
+	}
+	t.pushTracked(n, d)
 }
 
 func (t *ECTracker) rename(n string) {
@@ -200,13 +483,13 @@ func (t *ECTracker) rename(n string) {
 // produce="" means no output pushed.
 func (t *ECTracker) rawBlock(consume []string, produce string, fn func(emit func(StackOp))) {
 	for i := len(consume) - 1; i >= 0; i-- {
-		if len(t.nm) > 0 {
-			t.nm = t.nm[:len(t.nm)-1]
-		}
+		t.popTracked()
 	}
 	fn(t.e)
 	if produce != "" {
-		t.nm = append(t.nm, produce)
+		// Opaque opcodes: nothing is known about the result unless the caller
+		// proves it and records that with setDomain afterwards.
+		t.pushTracked(produce, domUnknown)
 	}
 }
 
@@ -214,17 +497,15 @@ func (t *ECTracker) rawBlock(consume []string, produce string, fn func(emit func
 // resultName="" means no result pushed.
 func (t *ECTracker) emitIf(condName string, thenFn func(func(StackOp)), elseFn func(func(StackOp)), resultName string) {
 	t.toTop(condName)
-	// condition consumed
-	if len(t.nm) > 0 {
-		t.nm = t.nm[:len(t.nm)-1]
-	}
+	t.popTracked() // condition consumed
 	var thenOps []StackOp
 	var elseOps []StackOp
 	thenFn(func(op StackOp) { thenOps = append(thenOps, op) })
 	elseFn(func(op StackOp) { elseOps = append(elseOps, op) })
 	t.e(StackOp{Op: "if", Then: thenOps, Else: elseOps})
 	if resultName != "" {
-		t.nm = append(t.nm, resultName)
+		// A join over two arms this tracker did not analyse: nothing is known.
+		t.pushTracked(resultName, domUnknown)
 	}
 }
 
@@ -234,11 +515,28 @@ func (t *ECTracker) emitIf(condName string, thenFn func(func(StackOp)), elseFn f
 
 // ecPushFieldP pushes the field prime p onto the stack as a script number.
 func ecPushFieldP(t *ECTracker, name string) {
-	t.pushBigInt(name, ecFieldP)
+	t.pushConst(ecPoolFieldP, ecFieldP, name)
+}
+
+// ecFieldModShort emits `a mod p` with no sign fix-up: 1 opcode instead of 7.
+//
+// Sound only when the dividend is provably >= 0, because OP_MOD takes the sign
+// of the dividend. The caller proves that; this function does not check.
+func ecFieldModShort(t *ECTracker, aName, resultName string) {
+	t.toTop(aName)
+	ecPushFieldP(t, "_fmods_p")
+	t.rawBlock([]string{aName, "_fmods_p"}, resultName, func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MOD"})
+	})
+	t.setDomain(resultName, domReduced)
 }
 
 // ecFieldMod reduces TOS mod p, ensuring non-negative result.
 func ecFieldMod(t *ECTracker, aName, resultName string) {
+	if t.sinking && isNonNegative(t.domainOf(aName)) {
+		ecFieldModShort(t, aName, resultName)
+		return
+	}
 	t.toTop(aName)
 	ecPushFieldP(t, "_fmod_p")
 	// (a % p + p) % p
@@ -252,40 +550,91 @@ func ecFieldMod(t *ECTracker, aName, resultName string) {
 		e(StackOp{Op: "swap"})                    // (a%p+p) p
 		e(StackOp{Op: "opcode", Code: "OP_MOD"})  // ((a%p+p)%p)
 	})
+	t.setDomain(resultName, domReduced)
 }
 
 // ecFieldAdd computes (a + b) mod p.
 func ecFieldAdd(t *ECTracker, aName, bName, resultName string) {
+	// Read the operand facts BEFORE rawBlock consumes their slots.
+	sumNonNeg := isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName))
 	t.toTop(aName)
 	t.toTop(bName)
 	t.rawBlock([]string{aName, bName}, "_fadd_sum", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
+	if sumNonNeg {
+		t.setDomain("_fadd_sum", domNonNegative)
+	}
 	ecFieldMod(t, "_fadd_sum", resultName)
+}
+
+// ecCheapSubPays reports whether the cheap subtraction shape pays here.
+//
+// `a - b + p` then one OP_MOD references the prime TWICE; the shipping shape
+// references it once and pays six more opcodes. So it only wins when the prime
+// is cheap to materialise — i.e. when it is pooled. Without a pool this rewrite
+// makes p256-wallet LARGER (958,792 -> 999,371 measured), which is why it is a
+// cost comparison and not a flag.
+func ecCheapSubPays(t *ECTracker) bool {
+	c := t.constCost(ecPoolFieldP, ecFieldP)
+	return 2*c+2 < c+8
 }
 
 // ecFieldSub computes (a - b) mod p (non-negative).
 func ecFieldSub(t *ECTracker, aName, bName, resultName string) {
 	t.toTop(aName)
 	t.toTop(bName)
+	// The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a single
+	// shifted reduction is exact. `b >= 0` alone is NOT enough — a coordinate
+	// decoded from 32 unsigned bytes can exceed p by up to 2^32 + 977, which is
+	// precisely the ecAdd((0,1), (2^256-1,1)) counterexample.
+	cheap := t.sinking &&
+		isNonNegative(t.domainOf(aName)) &&
+		t.domainOf(bName) == domReduced &&
+		ecCheapSubPays(t)
+
 	t.rawBlock([]string{aName, bName}, "_fsub_diff", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_SUB"})
 	})
+
+	if cheap {
+		ecPushFieldP(t, "_fsub_p")
+		t.rawBlock([]string{"_fsub_diff", "_fsub_p"}, "_fsub_shift", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_ADD"})
+		})
+		t.setDomain("_fsub_shift", domNonNegative)
+		ecFieldModShort(t, "_fsub_shift", resultName)
+		return
+	}
 	ecFieldMod(t, "_fsub_diff", resultName)
 }
 
 // ecFieldMul computes (a * b) mod p.
 func ecFieldMul(t *ECTracker, aName, bName, resultName string) {
+	ecFieldMulSigned(t, aName, bName, resultName, false)
+}
+
+// ecFieldMulSigned is ecFieldMul with an explicit assertion about the product's
+// sign, independent of the operands — ecFieldSqr uses it, since a*a >= 0 for any
+// a whatsoever.
+func ecFieldMulSigned(t *ECTracker, aName, bName, resultName string, productNonNegative bool) {
+	nonNeg := productNonNegative ||
+		(isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName)))
 	t.toTop(aName)
 	t.toTop(bName)
 	t.rawBlock([]string{aName, bName}, "_fmul_prod", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_MUL"})
 	})
+	if nonNeg {
+		t.setDomain("_fmul_prod", domNonNegative)
+	}
 	ecFieldMod(t, "_fmul_prod", resultName)
 }
 
 // ecFieldMulConst computes (a * c) mod p where c is a small constant.
 func ecFieldMulConst(t *ECTracker, aName string, c int64, resultName string) {
+	// Every call site passes a small positive c, so the product keeps a's sign.
+	nonNeg := c > 0 && isNonNegative(t.domainOf(aName))
 	t.toTop(aName)
 	t.rawBlock([]string{aName}, "_fmc_prod", func(e func(StackOp)) {
 		if c == 2 {
@@ -296,13 +645,16 @@ func ecFieldMulConst(t *ECTracker, aName string, c int64, resultName string) {
 			e(StackOp{Op: "opcode", Code: "OP_MUL"})
 		}
 	})
+	if nonNeg {
+		t.setDomain("_fmc_prod", domNonNegative)
+	}
 	ecFieldMod(t, "_fmc_prod", resultName)
 }
 
-// ecFieldSqr computes (a * a) mod p.
+// ecFieldSqr computes (a * a) mod p. A square is non-negative whatever a's sign is.
 func ecFieldSqr(t *ECTracker, aName, resultName string) {
 	t.copyToTop(aName, "_fsqr_copy")
-	ecFieldMul(t, aName, "_fsqr_copy", resultName)
+	ecFieldMulSigned(t, aName, "_fsqr_copy", resultName, true)
 }
 
 // ecFieldInv computes a^(p-2) mod p via square-and-multiply.
@@ -357,8 +709,8 @@ func ecDecomposePoint(t *ECTracker, pointName, xName, yName string) {
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
 	// Manually track the two new items
-	t.nm = append(t.nm, "_dp_xb")
-	t.nm = append(t.nm, "_dp_yb")
+	t.pushTracked("_dp_xb", domUnknown)
+	t.pushTracked("_dp_yb", domUnknown)
 
 	// Convert y_bytes (on top) to num
 	// Reverse from BE to LE, append 0x00 sign byte to ensure unsigned, then BIN2NUM
@@ -368,6 +720,10 @@ func ecDecomposePoint(t *ECTracker, pointName, xName, yName string) {
 		e(StackOp{Op: "opcode", Code: "OP_CAT"})
 		e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	})
+	// A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+	// UNSIGNED: >= 0, but it may be up to 2^256 - 1 and therefore >= p. That gap
+	// is exactly what the subtraction precondition turns on.
+	t.setDomain(yName, domNonNegative)
 
 	// Convert x_bytes to num
 	t.toTop("_dp_xb")
@@ -377,6 +733,7 @@ func ecDecomposePoint(t *ECTracker, pointName, xName, yName string) {
 		e(StackOp{Op: "opcode", Code: "OP_CAT"})
 		e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	})
+	t.setDomain(xName, domNonNegative)
 
 	// Stack: [yName, xName] -- swap to standard order [xName, yName]
 	t.swap()
@@ -671,10 +1028,10 @@ func ecJacobianToAffine(t *ECTracker, rxName, ryName string) {
 // Stack layout: [..., ax, ay, _k, jx, jy, jz]
 // After:        [..., ax, ay, _k, jx', jy', jz']
 func ecBuildJacobianAddAffineInline(e func(StackOp), t *ECTracker) {
-	// Create inner tracker with cloned stack state
-	initNm := make([]string, len(t.nm))
-	copy(initNm, t.nm)
-	ecJacobianAddAffineBody(NewECTracker(initNm, e), false)
+	// Create inner tracker with cloned stack state AND lattice facts: the
+	// operands' proved domains are what decide which reduction shape the body
+	// emits, so dropping them here would silently fall back everywhere.
+	ecJacobianAddAffineBody(NewECTrackerOpts(t.namesCopy(), e, t.options(), t.domainsCopy()), false)
 }
 
 // ecJacobianAddAffineBody is the mixed-add itself, emitting through a tracker
@@ -825,9 +1182,7 @@ func ecSelectCoord(t *ECTracker, addName, dblName, condName, resultName string) 
 //
 // Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
 func ecBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker) {
-	initNm := make([]string, len(t.nm))
-	copy(initNm, t.nm)
-	it := NewECTracker(initNm, e)
+	it := NewECTrackerOpts(t.namesCopy(), e, t.options(), t.domainsCopy())
 
 	// Keep the pre-add accumulator: it is what must be DOUBLED in the
 	// exceptional case, and the add below consumes jx/jy/jz.
@@ -894,12 +1249,14 @@ func ecBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker) {
 // EmitEcAdd adds two points.
 // Stack in: [point_a, point_b] (b on top)
 // Stack out: [result_point]
-func EmitEcAdd(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pa", "_pb"}, emit)
+func EmitEcAdd(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pa", "_pb"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, ecFieldP)
 	ecDecomposePoint(t, "_pa", "px", "py")
 	ecDecomposePoint(t, "_pb", "qx", "qy")
 	ecAffineAdd(t)
 	ecComposePoint(t, "rx", "ry", "_result")
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // ecEmitScalarReduce reduces a scalar to [0, n-1]: ((k mod n) + n) mod n.
@@ -915,7 +1272,7 @@ func EmitEcAdd(emit func(StackOp)) {
 // (42 bytes) against a ~429 KB script, and makes k >= n, k < 0 and k = 0 all
 // well defined.
 func ecEmitScalarReduce(t *ECTracker, kName, resultName string, n *big.Int) {
-	t.pushBigInt("_n_red", n)
+	t.pushConst(ecPoolGroupN, n, "_n_red")
 	t.rawBlock([]string{kName, "_n_red"}, resultName, func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_2DUP"})
 		e(StackOp{Op: "opcode", Code: "OP_MOD"})
@@ -933,8 +1290,10 @@ func ecEmitScalarReduce(t *ECTracker, kName, resultName string, n *big.Int) {
 // Stack out: [result_point]
 //
 // Uses 256-iteration double-and-add with Jacobian coordinates.
-func EmitEcMul(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt", "_k"}, emit)
+func EmitEcMul(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt", "_k"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, ecFieldP)
+	t.poolConstant(ecPoolGroupN, ecCurveN)
 	// Decompose to affine base point
 	ecDecomposePoint(t, "_pt", "ax", "ay")
 
@@ -944,18 +1303,17 @@ func EmitEcMul(emit func(StackOp)) {
 	//
 	// "k ∈ [1, n-1]" is a PRECONDITION the caller cannot enforce — the scalar is
 	// usually an unlock argument — so reduce it first. See ecEmitScalarReduce.
-	curveN, _ := new(big.Int).SetString("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)
 	t.toTop("_k")
-	ecEmitScalarReduce(t, "_k", "_kr", curveN)
-	t.pushBigInt("_n", curveN)
+	ecEmitScalarReduce(t, "_k", "_kr", ecCurveN)
+	t.pushConst(ecPoolGroupN, ecCurveN, "_n")
 	t.rawBlock([]string{"_kr", "_n"}, "_kn", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
-	t.pushBigInt("_n2", curveN)
+	t.pushConst(ecPoolGroupN, ecCurveN, "_n2")
 	t.rawBlock([]string{"_kn", "_n2"}, "_kn2", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
-	t.pushBigInt("_n3", curveN)
+	t.pushConst(ecPoolGroupN, ecCurveN, "_n3")
 	t.rawBlock([]string{"_kn2", "_n3"}, "_kn3", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
@@ -995,7 +1353,7 @@ func EmitEcMul(emit func(StackOp)) {
 		// Move _bit to TOS and remove from tracker BEFORE generating add ops,
 		// because OP_IF consumes _bit and the add ops run with _bit already gone.
 		t.toTop("_bit")
-		t.nm = t.nm[:len(t.nm)-1] // _bit consumed by IF
+		t.popTracked() // _bit consumed by IF
 		var addOps []StackOp
 		addEmit := func(op StackOp) { addOps = append(addOps, op) }
 		// Only the final step can be handed two equal operands — see
@@ -1021,37 +1379,316 @@ func EmitEcMul(emit func(StackOp)) {
 
 	// Compose result
 	ecComposePoint(t, "_rx", "_ry", "_result")
+	t.releaseConstant(ecPoolGroupN)
+	t.releaseConstant(ecPoolFieldP)
+}
+
+// ===========================================================================
+// Fixed-base comb (secp256k1)
+// ===========================================================================
+
+// ecEmitCombMulGen emits k*G by a Lim-Lee fixed-base comb instead of the
+// 257-round binary ladder, returning false when no geometry exists for w.
+//
+// The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+// the scalar into w blocks of d bits and reads one bit from each block per
+// round, so it performs one doubling and one conditional add per COLUMN: the
+// round count falls from w*d to d at the price of a 2^w - 1 entry table. G is a
+// compile-time constant here, so the table costs nothing to build — it is
+// 2*(2^w - 1) literal pushes, resident for the whole emitter, read by every
+// round with a 2-3 byte OP_PICK.
+//
+// This is the secp256k1 twin of cEmitCombMulGen in p256_p384.go. The curve
+// arithmetic is NOT shared: secp256k1 has a = 0, so ecJacobianDouble computes
+// D = 3X^2 where the NIST version computes 3(X-Z^2)(X+Z^2). Only comb.go — the
+// compile-time table and the interval checker — is common, and it takes a from
+// the curve record rather than assuming it.
+//
+// SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+// accumulator equal to the addend, its negation, or the point at infinity.
+// ecBuildJacobianAddOrDoubleInline's comment justifies using it everywhere but
+// the ladder's LAST step by an interval argument over c_i mod n, and insists
+// that argument be re-derived by anything changing the offset or the iteration
+// count. A comb changes both, so it is re-derived: CombSafeRounds evaluates the
+// same argument as executable interval arithmetic over the comb's own geometry,
+// and any round it cannot prove gets the complete add-or-double form instead.
+// Nothing is assumed safe.
+//
+// The other half of that argument is that the accumulator never starts at
+// infinity, which needs the first digit non-zero. CombGeometry searches for the
+// scalar offset that guarantees it rather than reusing the ladder's hardcoded
+// +3n — which happens to be right for secp256k1 at w=3 and is wrong for P-384.
+//
+// Stack in: [_k]. Stack out: [_result].
+func ecEmitCombMulGen(emit func(StackOp), w int, opts *EcCodegenOptions) bool {
+	curve := Secp256k1CombCurve
+	params := CombGeometry(w, curve)
+	if params == nil {
+		return false
+	}
+	d := params.D
+	table := CombTable(w, d, curve)
+	safe := CombSafeRounds(params, curve)
+	entries := (1 << w) - 1
+
+	t := NewECTrackerOpts([]string{"_k"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, ecFieldP)
+	t.poolConstant(ecPoolGroupN, ecCurveN)
+
+	// k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+	// what makes the interval argument apply at all; see ecEmitScalarReduce.
+	t.toTop("_k")
+	ecEmitScalarReduce(t, "_k", "_kr", ecCurveN)
+	t.rename("_k")
+	for i := int64(0); i < params.OffsetMultiple.Int64(); i++ {
+		off := fmt.Sprintf("_off%d", i)
+		t.pushConst(ecPoolGroupN, ecCurveN, off)
+		t.rawBlock([]string{"_k", off}, "_k", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_ADD"})
+		})
+	}
+	t.setDomain("_k", domNonNegative)
+
+	// Table, resident for the whole comb: picking an entry costs 2-3 bytes
+	// against a 34-byte literal push, and every round reads all of them.
+	for j := 1; j <= entries; j++ {
+		t.pushBigInt(fmt.Sprintf("_Tx%d", j), table[j].X)
+		t.pushBigInt(fmt.Sprintf("_Ty%d", j), table[j].Y)
+		t.setDomain(fmt.Sprintf("_Tx%d", j), domReduced)
+		t.setDomain(fmt.Sprintf("_Ty%d", j), domReduced)
+	}
+
+	// emitSelect materializes round i's digit and the selected table entry as
+	// ax/ay/_flag.
+	//
+	// Exactly one equality holds, so sum(eq_j * T_j) is that entry's coordinate
+	// and every term is non-negative and below p — no reduction is needed, and
+	// the result is domReduced by construction. When the digit is zero every
+	// term vanishes and _flag is 0, so no add runs.
+	emitSelect := func(i int) {
+		for b := 0; b < w; b++ {
+			shift := i + b*d
+			kc := fmt.Sprintf("_kc%d", b)
+			sh := fmt.Sprintf("_sh%d", b)
+			t.copyToTop("_k", kc)
+			if shift == 0 {
+				t.rename(sh)
+			} else if shift == 1 {
+				t.rawBlock([]string{kc}, sh, func(e func(StackOp)) {
+					e(StackOp{Op: "opcode", Code: "OP_2DIV"})
+				})
+			} else {
+				sd := fmt.Sprintf("_sd%d", b)
+				t.pushInt(sd, int64(shift))
+				t.rawBlock([]string{kc, sd}, sh, func(e func(StackOp)) {
+					e(StackOp{Op: "opcode", Code: "OP_RSHIFTNUM"})
+				})
+			}
+			two := fmt.Sprintf("_two%d", b)
+			bit := fmt.Sprintf("_b%d", b)
+			t.pushInt(two, 2)
+			t.rawBlock([]string{sh, two}, bit, func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_MOD"})
+			})
+			t.setDomain(bit, domReduced)
+		}
+
+		t.toTop("_b0")
+		t.rename("_idx")
+		for b := 1; b < w; b++ {
+			bit := fmt.Sprintf("_b%d", b)
+			wt := fmt.Sprintf("_wt%d", b)
+			bw := fmt.Sprintf("_bw%d", b)
+			t.toTop(bit)
+			t.pushInt(wt, int64(1<<b))
+			t.rawBlock([]string{bit, wt}, bw, func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_MUL"})
+			})
+			t.toTop("_idx")
+			t.rawBlock([]string{bw, "_idx"}, "_idx", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_ADD"})
+			})
+		}
+		t.setDomain("_idx", domReduced)
+
+		for j := 1; j <= entries; j++ {
+			ic := fmt.Sprintf("_ic%d", j)
+			jv := fmt.Sprintf("_jv%d", j)
+			eq := fmt.Sprintf("_eq%d", j)
+			t.copyToTop("_idx", ic)
+			t.pushInt(jv, int64(j))
+			t.rawBlock([]string{ic, jv}, eq, func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+			})
+			t.setDomain(eq, domReduced)
+		}
+
+		for _, coord := range []string{"x", "y"} {
+			acc := "ax"
+			if coord == "y" {
+				acc = "ay"
+			}
+			for j := 1; j <= entries; j++ {
+				ec := fmt.Sprintf("_e%s%d", coord, j)
+				tc := fmt.Sprintf("_t%s%d", coord, j)
+				pr := fmt.Sprintf("_pr%s%d", coord, j)
+				t.copyToTop(fmt.Sprintf("_eq%d", j), ec)
+				t.copyToTop(fmt.Sprintf("_T%s%d", coord, j), tc)
+				t.rawBlock([]string{ec, tc}, pr, func(e func(StackOp)) {
+					e(StackOp{Op: "opcode", Code: "OP_MUL"})
+				})
+				if j == 1 {
+					t.rename(acc)
+				} else {
+					t.toTop(acc)
+					t.rawBlock([]string{pr, acc}, acc, func(e func(StackOp)) {
+						e(StackOp{Op: "opcode", Code: "OP_ADD"})
+					})
+				}
+			}
+			t.setDomain(acc, domReduced)
+		}
+
+		for j := entries; j >= 1; j-- {
+			t.toTop(fmt.Sprintf("_eq%d", j))
+			t.drop()
+		}
+
+		t.toTop("_idx")
+		t.rawBlock([]string{"_idx"}, "_flag", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
+		})
+	}
+
+	// Round d-1 initialises the accumulator. The first digit is non-zero by
+	// construction (CombGeometry), so this is a real point and never infinity.
+	emitSelect(d - 1)
+	t.toTop("_flag")
+	t.drop()
+	t.toTop("ax")
+	t.rename("jx")
+	t.toTop("ay")
+	t.rename("jy")
+	t.pushInt("jz", 1)
+	t.setDomain("jz", domReduced)
+
+	for i := d - 2; i >= 0; i-- {
+		ecJacobianDouble(t)
+		emitSelect(i)
+
+		// ecJacobianAddAffineBody documents its layout as [..., ax, ay, jx, jy,
+		// jz] and replaces the accumulator IN PLACE at the top. The selection
+		// leaves ax/ay above jz, so restore the contract before the branch —
+		// otherwise the add arm would reorder the stack and the empty else arm
+		// would not, leaving the two arms with different layouts at OP_ENDIF.
+		t.toTop("_flag")
+		t.toAlt()
+		t.toTop("jx")
+		t.toTop("jy")
+		t.toTop("jz")
+		t.fromAlt("_flag")
+
+		t.popTracked() // consumed by OP_IF
+		var addOps []StackOp
+		addEmit := func(op StackOp) { addOps = append(addOps, op) }
+		if safe[i] {
+			ecBuildJacobianAddAffineInline(addEmit, t)
+		} else {
+			ecBuildJacobianAddOrDoubleInline(addEmit, t)
+		}
+		emit(StackOp{Op: "if", Then: addOps, Else: []StackOp{}})
+
+		// The addend was selected fresh for this round; the add only copied it.
+		t.toTop("ay")
+		t.drop()
+		t.toTop("ax")
+		t.drop()
+	}
+
+	ecJacobianToAffine(t, "_rx", "_ry")
+
+	for j := entries; j >= 1; j-- {
+		t.toTop(fmt.Sprintf("_Ty%d", j))
+		t.drop()
+		t.toTop(fmt.Sprintf("_Tx%d", j))
+		t.drop()
+	}
+	t.toTop("_k")
+	t.drop()
+
+	ecComposePoint(t, "_rx", "_ry", "_result")
+	t.releaseConstant(ecPoolGroupN)
+	t.releaseConstant(ecPoolFieldP)
+	return true
+}
+
+// ecEmitCombBest emits the cheapest comb over the candidate window widths.
+//
+// Each candidate is rendered in full and scored with the same byte-cost model
+// the emitter is measured by, and the smallest wins — the window width is not
+// hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the 2^w
+// selection logic outgrows the saving.
+//
+// Returns nil when no candidate could be built, so the caller falls back to the
+// ladder rather than emitting nothing.
+func ecEmitCombBest(opts *EcCodegenOptions) []StackOp {
+	var best []StackOp
+	for _, w := range []int{2, 3, 4} {
+		var ops []StackOp
+		if !ecEmitCombMulGen(func(op StackOp) { ops = append(ops, op) }, w, opts) {
+			continue
+		}
+		if best == nil || EstimateScriptBytes(ops) < EstimateScriptBytes(best) {
+			best = ops
+		}
+	}
+	return best
 }
 
 // EmitEcMulGen performs scalar multiplication G * k.
 // Stack in: [scalar]
 // Stack out: [result_point]
-func EmitEcMulGen(emit func(StackOp)) {
+func EmitEcMulGen(emit func(StackOp), opts *EcCodegenOptions) {
+	// G is a compile-time constant, so this is the one secp256k1 call site where
+	// a fixed-base comb applies. EmitEcMul cannot use it: its base arrives at
+	// run time.
+	if opts != nil && opts.FixedBaseComb {
+		if ops := ecEmitCombBest(opts); ops != nil {
+			for _, op := range ops {
+				emit(op)
+			}
+			return
+		}
+	}
+
 	// Push generator point as 64-byte blob, then delegate to ecMul
 	gPoint := make([]byte, 64)
 	copy(gPoint[0:32], bigintToBytes32(ecGenX))
 	copy(gPoint[32:64], bigintToBytes32(ecGenY))
 	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: gPoint}})
 	emit(StackOp{Op: "swap"}) // [point, scalar]
-	EmitEcMul(emit)
+	EmitEcMul(emit, opts)
 }
 
 // EmitEcNegate negates a point (x, p - y).
 // Stack in: [point]
 // Stack out: [negated_point]
-func EmitEcNegate(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt"}, emit)
+func EmitEcNegate(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, ecFieldP)
 	ecDecomposePoint(t, "_pt", "_nx", "_ny")
 	ecPushFieldP(t, "_fp")
 	ecFieldSub(t, "_fp", "_ny", "_neg_y")
 	ecComposePoint(t, "_nx", "_neg_y", "_result")
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitEcOnCurve checks if point is on secp256k1 (y^2 = x^3 + 7 mod p).
 // Stack in: [point]
 // Stack out: [boolean]
-func EmitEcOnCurve(emit func(StackOp)) {
-	t := NewECTracker([]string{"_pt"}, emit)
+func EmitEcOnCurve(emit func(StackOp), opts *EcCodegenOptions) {
+	t := NewECTrackerOpts([]string{"_pt"}, emit, opts, nil)
+	t.poolConstant(ecPoolFieldP, ecFieldP)
 	ecDecomposePoint(t, "_pt", "_x", "_y")
 
 	// GAP-301: coordinate canonicity. ecDecomposePoint BIN2NUMs each coordinate
@@ -1099,6 +1736,7 @@ func EmitEcOnCurve(emit func(StackOp)) {
 	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
+	t.releaseConstant(ecPoolFieldP)
 }
 
 // EmitEcModReduce computes ((value % mod) + mod) % mod.

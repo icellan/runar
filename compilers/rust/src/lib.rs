@@ -32,6 +32,23 @@ pub struct CompileOptions {
     /// Bake property values into the locking script (replaces OP_0 placeholders).
     /// Keys are property names; values are JSON values (string, number, bool).
     pub constructor_args: std::collections::HashMap<String, serde_json::Value>,
+    /// EXPERIMENTAL EC script-size optimizations. All default off, and with all
+    /// off every EC emitter is byte-identical to the shipping output — no
+    /// golden, size baseline, or cross-tier hex comparison moves.
+    ///
+    /// Cross-tier byte parity for the flags THEMSELVES is gated by
+    /// `conformance/ec-flag-parity/expected.json`, replayed in
+    /// `tests/ec_flag_parity_tests.rs`.
+    pub ec_constant_pool: bool,
+    /// Needs `ec_constant_pool`: the cheap subtraction shape references the
+    /// field prime twice, so without a pooled slot it does not pay. The
+    /// emitters compare the two costs, so enabling it alone is safe — just
+    /// useless.
+    pub ec_reduction_sinking: bool,
+    /// Applies only where the base point is a compile-time constant. Runtime-base
+    /// multiplies keep the binary ladder: the comb's interval soundness argument
+    /// does not cover an attacker-chosen base.
+    pub ec_fixed_base_comb: bool,
 }
 
 impl Default for CompileOptions {
@@ -42,7 +59,28 @@ impl Default for CompileOptions {
             validate_only: false,
             typecheck_only: false,
             constructor_args: std::collections::HashMap::new(),
+            ec_constant_pool: false,
+            ec_reduction_sinking: false,
+            ec_fixed_base_comb: false,
         }
+    }
+}
+
+impl CompileOptions {
+    /// Options handed to the EC / NIST codegen modules.
+    ///
+    /// `None` — not an all-false struct — when nothing is enabled, so those
+    /// emitters take their untouched default path and the emitted bytes are
+    /// provably identical to the shipping ones.
+    fn ec_codegen(&self) -> Option<codegen::ec::EcCodegenOptions> {
+        if !self.ec_constant_pool && !self.ec_reduction_sinking && !self.ec_fixed_base_comb {
+            return None;
+        }
+        Some(codegen::ec::EcCodegenOptions {
+            constant_pool: self.ec_constant_pool,
+            reduction_sinking: self.ec_reduction_sinking,
+            fixed_base_comb: self.ec_fixed_base_comb,
+        })
     }
 }
 
@@ -340,7 +378,13 @@ pub fn compile_from_source_str_with_options(
 
     // Passes 5-6: Backend (stack lowering + emit)
     // Constant folding already ran above; skip it in compile_from_program.
-    let backend_opts = CompileOptions { disable_constant_folding: true, ..Default::default() };
+    //
+    // `..opts.clone()`, NOT `..Default::default()`: the backend options must
+    // carry every field the caller set. With Default here, `--ec-constant-pool`
+    // (and any future backend flag) reached the frontend and was silently
+    // dropped before stack lowering — the compile succeeded and produced the
+    // unoptimized script.
+    let backend_opts = CompileOptions { disable_constant_folding: true, ..opts.clone() };
     compile_from_program_with_options(&anf_program, &backend_opts)
 }
 
@@ -468,7 +512,8 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     let optimized = frontend::anf_optimize::optimize_ec(program);
 
     // Pass 5: Stack lowering
-    let mut stack_methods = lower_to_stack(&optimized)?;
+    let mut stack_methods =
+        codegen::stack::lower_to_stack_with_ec(&optimized, opts.ec_codegen())?;
 
     // Peephole optimization — runs on Stack IR before emission. Uses the
     // source-loc-preserving variant so the artifact's sourceMap survives
@@ -637,8 +682,9 @@ pub fn compile_from_source_str_with_result(
     }
 
     // Pass 5: Stack lowering (catch panics)
+    let ec_codegen = opts.ec_codegen();
     let stack_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lower_to_stack(&anf_program)
+        codegen::stack::lower_to_stack_with_ec(&anf_program, ec_codegen)
     }));
 
     let mut stack_methods = match stack_result {
