@@ -20,14 +20,33 @@ Matching policy mirrors the user-facing audit doc:
 The lint surface intentionally mirrors `scripts/lint-no-silent-skips.sh`
 so a reviewer running either tool sees the same cohort.
 
+On top of skip/row reconciliation the audit also checks that the
+inventory DOCUMENT is internally consistent, because a table and a
+prose footer that disagree let a reader take the footer at face value
+and conclude the opposite of the truth:
+
+  * Every physical table row must be parseable — its `File:line` cell
+    must yield at least one `path:line`. A row with no parseable
+    location is invisible to the reconciliation above, so it can claim
+    to document a skip while documenting nothing.
+  * Every row's Category must come from the closed set
+    {Environmental, Gap, Stale}; an unrecognised category would escape
+    the per-category counts below.
+  * The `### Gap skips` / `### Stale skips` footers must state a count
+    that agrees with the number of rows carrying that category.
+  * Every `Gap` row must reference a tracker issue (`#<number>`), so a
+    deferred defect cannot be parked in the table anonymously.
+
 Run:
     python3 scripts/audit-test-skips.py
 
-Exit codes:
-    0  every skip is documented; every doc row points to a live skip.
+Exit codes (bitwise OR):
+    0  every skip is documented; every row is live; the doc agrees with itself.
     1  one or more orphan skips.
     2  one or more stale rows.
-    3  both orphans and stales.
+    4  the inventory document contradicts itself (unparseable row,
+       unknown category, footer/table count mismatch, Gap row with no
+       issue reference).
 """
 
 from __future__ import annotations
@@ -73,11 +92,16 @@ SKIP_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ".rs",
         re.compile(r"#\[ignore(?:\s*=\s*\"[^\"]*\")?\]|#\[cfg\(ignore\)\]"),
     ),
-    # Java (JUnit 5)
+    # Java (JUnit 5). `@EnabledIf\w*` / `@DisabledIf\w*` deliberately cover the
+    # GENERIC `@EnabledIf("method")` / `@DisabledIf("method")` forms as well as
+    # the `...EnvironmentVariable` / `...SystemProperty` specialisations. Only
+    # the two specialisations were listed before, so a test disabled with the
+    # generic form was invisible to this audit and to the CI lint that wraps it
+    # — `FixtureConformanceTest.java:62` sat in exactly that hole.
     (
         ".java",
         re.compile(
-            r"\bAssumptions\.assume(?:True|False)\b|@Disabled\b|@EnabledIfEnvironmentVariable\b|@EnabledIfSystemProperty\b"
+            r"\bAssumptions\.assume(?:True|False)\b|@Disabled\b|@EnabledIf\w*|@DisabledIf\w*"
         ),
     ),
     # Ruby (RSpec / Minitest). Matches both `skip(...)` and the bare
@@ -275,6 +299,7 @@ class InventoryRow(NamedTuple):
     line_in_md: int
     test_cell: str  # Markdown: pre-`File:line` column (often test names)
     file_line_cell: str  # raw cell content (may carry multiple paths)
+    category_cell: str  # Environmental | Gap | Stale
     rationale_cell: str
     sites: tuple[tuple[str, int], ...]  # extracted (path, line) pairs
 
@@ -283,8 +308,28 @@ _FILELINE_RE = re.compile(
     r"`?(?P<path>[\w./\-]+\.[A-Za-z0-9]+):(?P<lines>[\d,\s]+)`?"
 )
 
+# Closed category vocabulary, mirroring the "## Categories" prose in the doc.
+CATEGORIES = ("Environmental", "Gap", "Stale")
+
+# Categories whose footer section is MANDATORY. Gap and Stale are the two the
+# doc promises stay at zero (or stay tracked), so their count is a claim a
+# reader acts on — the claim must exist and must be checkable. Environmental is
+# the bulk default and carries no summary section; a per-PR count there would
+# be churn with nothing to contradict.
+FOOTER_REQUIRED = ("Gap", "Stale")
+
+# A Gap row must name the tracker item that owns the missing piece.
+_ISSUE_RE = re.compile(r"#\d+")
+
 
 def parse_inventory(md_path: Path) -> list[InventoryRow]:
+    """Every PHYSICAL table row in the inventory, parseable or not.
+
+    Rows with an unparseable `File:line` cell are returned with empty
+    `sites` rather than dropped: silently dropping them is what let a row
+    claim to document a skip while the reconciliation never saw it.
+    `check_inventory_integrity` turns such a row into a hard failure.
+    """
     if not md_path.exists():
         return []
     rows: list[InventoryRow] = []
@@ -301,9 +346,12 @@ def parse_inventory(md_path: Path) -> list[InventoryRow]:
             continue
         if "File:line" in cells[1]:
             continue
-        test_cell, file_line_cell, _category, rationale_cell = cells[0], cells[1], cells[2], cells[3]
-        if not file_line_cell:
-            continue
+        test_cell, file_line_cell, category_cell, rationale_cell = (
+            cells[0],
+            cells[1],
+            cells[2],
+            cells[3],
+        )
         # Extract every `path.ext:N[,M,...]` chunk in the cell.
         sites: list[tuple[str, int]] = []
         for m in _FILELINE_RE.finditer(file_line_cell):
@@ -311,9 +359,110 @@ def parse_inventory(md_path: Path) -> list[InventoryRow]:
             for s in re.split(r"[,\s]+", m.group("lines")):
                 if s.isdigit():
                     sites.append((path, int(s)))
-        if sites:
-            rows.append(InventoryRow(line_no, test_cell, file_line_cell, rationale_cell, tuple(sites)))
+        rows.append(
+            InventoryRow(
+                line_no,
+                test_cell,
+                file_line_cell,
+                category_cell,
+                rationale_cell,
+                tuple(sites),
+            )
+        )
     return rows
+
+
+def parse_footer_counts(md_path: Path) -> dict[str, tuple[int | None, int]]:
+    """Stated counts from the `### <Category> skips` footer sections.
+
+    Returns {category: (stated_count_or_None, line_in_md)}. A section body
+    opening with "None" states 0; otherwise the body must open with an
+    integer. `None` for the count means "present but unparseable", which is
+    itself a failure — a footer a reader cannot check is a footer that can
+    quietly contradict the table.
+    """
+    out: dict[str, tuple[int | None, int]] = {}
+    if not md_path.exists():
+        return out
+    lines = md_path.read_text(encoding="utf-8").splitlines()
+    for i, raw in enumerate(lines):
+        m = re.match(r"^###\s+(\w+) skips\s*$", raw.strip())
+        if not m or m.group(1) not in CATEGORIES:
+            continue
+        category = m.group(1)
+        body: list[str] = []
+        for follow in lines[i + 1 :]:
+            if follow.startswith("#"):
+                break
+            body.append(follow)
+        text = " ".join(body).strip()
+        stated: int | None = None
+        if re.match(r"^\**None\b", text, re.IGNORECASE):
+            stated = 0
+        else:
+            num = re.match(r"^\**(\d+)\b", text)
+            if num:
+                stated = int(num.group(1))
+        out[category] = (stated, i + 1)
+    return out
+
+
+def check_inventory_integrity(
+    rows: list[InventoryRow], footers: dict[str, tuple[int | None, int]]
+) -> list[str]:
+    """Fail on a doc that contradicts itself.
+
+    The audit's reconciliation only ever sees rows it could parse, so a row
+    with no `path:line` is a hole in the gate, and a prose footer stating a
+    count the table does not support is a claim nothing checks. #149 was an
+    open S0 while the Gap footer read "the audit found no gap skips".
+    """
+    problems: list[str] = []
+
+    for row in rows:
+        where = f"docs/test-skips.md:{row.line_in_md}"
+        if not row.sites:
+            problems.append(
+                f"{where}: File:line cell {row.file_line_cell!r} yields no parseable "
+                f"`path:line` — an unlocatable row documents nothing and is invisible "
+                f"to orphan/stale reconciliation"
+            )
+        if row.category_cell not in CATEGORIES:
+            problems.append(
+                f"{where}: category {row.category_cell!r} is not one of "
+                f"{'/'.join(CATEGORIES)}"
+            )
+        if row.category_cell == "Gap" and not _ISSUE_RE.search(
+            row.test_cell + " " + row.rationale_cell
+        ):
+            problems.append(
+                f"{where}: Gap row references no tracker issue (`#<number>`) — a "
+                f"deferred defect must name the item that owns it"
+            )
+
+    for category in CATEGORIES:
+        actual = sum(1 for r in rows if r.category_cell == category)
+        if category not in footers:
+            if category in FOOTER_REQUIRED:
+                problems.append(
+                    f"docs/test-skips.md: no `### {category} skips` section — that "
+                    f"section is mandatory and must state a count ({actual} row(s) "
+                    f"in the table)"
+                )
+            continue
+        stated, md_line = footers[category]
+        if stated is None:
+            problems.append(
+                f"docs/test-skips.md:{md_line}: `### {category} skips` section states "
+                f"no checkable count — open it with `None` or with a number"
+            )
+        elif stated != actual:
+            problems.append(
+                f"docs/test-skips.md:{md_line}: `### {category} skips` states {stated}, "
+                f"but the table carries {actual} {category} row(s)"
+            )
+
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +504,12 @@ def enclosing_test_name(path: str, skip_line: int) -> str | None:
 def main() -> int:
     sites = discover_skip_sites()
     rows = parse_inventory(INVENTORY_PATH)
+    integrity = check_inventory_integrity(rows, parse_footer_counts(INVENTORY_PATH))
+
+    # Reconciliation can only speak about rows that carry a location. Counting
+    # the parseable subset separately is what makes the "physical rows ==
+    # parsed rows" claim above checkable rather than assumed.
+    located_rows = [r for r in rows if r.sites]
 
     # Match live skips to documented sites WITHOUT depending on exact line
     # numbers. A skip that merely MOVED (line drift) must not read as both an
@@ -368,7 +523,7 @@ def main() -> int:
     for s in sites:
         live_by_file.setdefault(s.path, []).append(s)
     doc_by_file: dict[str, list[tuple[InventoryRow, int]]] = {}
-    for row in rows:
+    for row in located_rows:
         for path, line in row.sites:
             doc_by_file.setdefault(path, []).append((row, line))
 
@@ -428,10 +583,112 @@ def main() -> int:
             )
         rc |= 2
 
+    if integrity:
+        print("INVENTORY document contradicts itself:", file=sys.stderr)
+        for p in integrity:
+            print(f"  {p}", file=sys.stderr)
+        rc |= 4
+
     if rc == 0:
-        print(f"OK — {len(sites)} skip sites; {len(rows)} inventory rows; every site documented, every row live.")
+        print(
+            f"OK — {len(sites)} skip sites; {len(rows)} inventory rows "
+            f"({len(located_rows)} located); every site documented, every row live, "
+            f"table and footers agree."
+        )
     return rc
 
 
+# ---------------------------------------------------------------------------
+# Self-test — RED proofs for the integrity gates
+#
+# A gate nobody has watched fail is indistinguishable from no gate. Each case
+# below is a lie this script previously waved through; the assertion is that
+# it now produces a problem. Run via `--self-test` (wired into
+# scripts/lint-no-silent-skips.sh so CI exercises it on every push).
+# ---------------------------------------------------------------------------
+
+
+def _row(**kw) -> InventoryRow:
+    base = dict(
+        line_in_md=1,
+        test_cell="`someTest`",
+        file_line_cell="`a/b_test.go:10`",
+        category_cell="Environmental",
+        rationale_cell="reason",
+        sites=(("a/b_test.go", 10),),
+    )
+    base.update(kw)
+    return InventoryRow(**base)  # type: ignore[arg-type]
+
+
+def self_test() -> int:
+    ok_footers = {"Gap": (0, 100), "Stale": (0, 90)}
+    cases: list[tuple[str, list[InventoryRow], dict, str]] = [
+        (
+            "row with no parseable file:line",
+            [_row(file_line_cell="`a/b_test.go`", sites=())],
+            ok_footers,
+            "no parseable",
+        ),
+        (
+            "category outside the closed set",
+            [_row(category_cell="Deferred")],
+            ok_footers,
+            "not one of",
+        ),
+        (
+            "Gap footer says None while the table carries a Gap row",
+            [_row(category_cell="Gap", rationale_cell="blocked on #149")],
+            ok_footers,
+            "states 0, but the table carries 1",
+        ),
+        (
+            "Gap row with no tracker issue",
+            [_row(category_cell="Gap", rationale_cell="not implemented yet")],
+            {"Gap": (1, 100), "Stale": (0, 90)},
+            "references no tracker issue",
+        ),
+        (
+            "mandatory Gap section missing entirely",
+            [_row()],
+            {"Stale": (0, 90)},
+            "section is mandatory",
+        ),
+        (
+            "Gap footer states an uncheckable count",
+            [_row()],
+            {"Gap": (None, 100), "Stale": (0, 90)},
+            "no checkable count",
+        ),
+    ]
+
+    failures: list[str] = []
+    for name, rows, footers, expect in cases:
+        problems = check_inventory_integrity(rows, footers)
+        if not any(expect in p for p in problems):
+            failures.append(f"{name}: expected a problem containing {expect!r}, got {problems}")
+
+    # A clean document must stay silent, or every gate above is just noise.
+    clean = check_inventory_integrity([_row()], ok_footers)
+    if clean:
+        failures.append(f"clean inventory reported problems: {clean}")
+
+    # The generic JUnit annotation must be discoverable; only the
+    # ...EnvironmentVariable / ...SystemProperty specialisations were before.
+    java_pat = next(p for label, p in SKIP_PATTERNS if ".java" in label.split())
+    for probe in ('@EnabledIf("repoLayoutAvailable")', "@DisabledIf(\"x\")"):
+        if not java_pat.search(probe):
+            failures.append(f"Java skip pattern does not match {probe!r}")
+
+    for f in failures:
+        print(f"SELF-TEST FAILED: {f}", file=sys.stderr)
+    if failures:
+        return 1
+    print(f"OK — self-test: {len(cases)} integrity gates fire, clean input stays silent.")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(self_test())
     sys.exit(main())

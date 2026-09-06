@@ -82,6 +82,18 @@ interface FuzzerCLIOptions {
    */
   canonical: boolean;
   /**
+   * `--canonical` only. Tiers whose shim MUST be runnable; a missing one is a
+   * FAILURE, not a smaller run.
+   *
+   * Undefined (the default) means "every tier in `--compilers`", which for a
+   * bare invocation is all 7. `--require-tiers none` opts out for an
+   * exploratory local run. Without this the harness degraded silently: a tier
+   * whose shim binary was absent was marked `skip`, dropped from the compare,
+   * and the run still printed "Mismatches: 0" and exited 0 — a seven-tier
+   * wire-parity gate reporting success on six tiers.
+   */
+  requireTiers?: CompilerName[];
+  /**
    * TS-GAP-001 (randomized) / TS-GAP-005 — source-vs-script EXECUTION oracle.
    * Generates stateless, non-crypto contracts, renders each to TS, and runs
    * every generated spend through the ANF interpreter AND the compiled fold-ON
@@ -223,6 +235,19 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
       case '--canonical':
         opts.canonical = true;
         break;
+      case '--require-tiers': {
+        const raw = (argv[++i] ?? '').trim();
+        // `none` is the explicit opt-out. An EMPTY value is not: silently
+        // requiring nothing is the exact failure this flag exists to stop.
+        if (raw === 'none') {
+          opts.requireTiers = [];
+        } else if (raw === '' || raw === 'all') {
+          opts.requireTiers = ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'];
+        } else {
+          opts.requireTiers = raw.split(',').map((s) => s.trim()).filter(Boolean) as CompilerName[];
+        }
+        break;
+      }
       case '--execute':
         opts.execute = true;
         break;
@@ -305,6 +330,11 @@ Options:
                          byte-identical output OR an identical typed rejection.
                          Each non-TS tier is driven via its --canonicalise CLI
                          shim. Use --num for case count and --seed to reproduce.
+  --require-tiers <list> --canonical only. Tiers whose shim MUST be runnable; a
+                         missing one FAILS the run instead of quietly shrinking
+                         it. Default: every tier in --compilers (all 7 for a
+                         bare run). 'all' = all 7; 'none' = opt out (local
+                         exploration only — never in CI).
   --execute              TS-GAP-001 (randomized) / TS-GAP-005 — source-vs-script
                          EXECUTION oracle. Generates stateless, non-crypto
                          contracts, renders each to TS, and runs every generated
@@ -594,10 +624,16 @@ async function main(): Promise<void> {
     const tiers = (opts.compilers as readonly string[]).filter((c): c is CanonCompilerName =>
       (CANON_ALL_TIERS as readonly string[]).includes(c),
     );
+    // A tier that is not required is still not proven. Default the requirement
+    // to everything the caller asked to compare.
+    const requireTiers = (opts.requireTiers ?? tiers).filter((c): c is CanonCompilerName =>
+      (CANON_ALL_TIERS as readonly string[]).includes(c),
+    );
     const report = await runCanonicalDifferential({
       numCases: opts.num,
       seed: opts.seed,
       tiers,
+      requireTiers,
       verbose: opts.verbose,
       findingsDir: opts.findingsDir,
     });
@@ -606,9 +642,24 @@ async function main(): Promise<void> {
     console.log(`  Cases run:   ${report.casesRun}/${report.totalCases}`);
     console.log(`  Mismatches:  ${report.mismatchCount}`);
     console.log(`  Duration:    ${report.durationMs}ms`);
-    console.log(`  Tiers:       ${Object.entries(report.perTierAvailable)
-      .map(([t, ok]) => `${t}=${ok ? 'ok' : 'skip'}`)
+    // Three distinct states, previously collapsed into two: a tier that ran, a
+    // tier that was asked for and could NOT run (the silent-degradation case),
+    // and a tier this invocation never asked for.
+    console.log(`  Tiers:       ${CANON_ALL_TIERS
+      .map((t) => {
+        if (!(tiers as readonly string[]).includes(t)) return `${t}=not-requested`;
+        return `${t}=${report.perTierAvailable[t] ? 'ok' : 'SKIP'}`;
+      })
       .join(' ')}`);
+    console.log(`  Required:    ${report.requiredTiers.length > 0 ? report.requiredTiers.join(',') : '(none)'}`);
+    // Loud either way. A skipped tier was never compared, so "Mismatches: 0"
+    // says nothing about it — that must be visible even when it is tolerated.
+    if (report.skippedTiers.length > 0) {
+      console.warn(
+        `  WARNING:     ${report.skippedTiers.length} tier(s) SKIPPED and NOT compared: ` +
+          `${report.skippedTiers.join(', ')}. "Mismatches: 0" says nothing about them.`,
+      );
+    }
     if (report.findings.length > 0) {
       console.log(`  Findings:    ${report.findings.length} (e.g. ${report.findings[0]})`);
     }
@@ -620,6 +671,24 @@ async function main(): Promise<void> {
         ...report,
       });
       console.log(`\nResults written to: ${opts.output}`);
+    }
+    if (report.missingRequiredTiers.length > 0) {
+      console.error('');
+      console.error(
+        `INCOMPLETE RUN: required tier(s) ${report.missingRequiredTiers.join(', ')} were NOT ` +
+          `compared (shim missing, or not in --compilers), so this gate established parity ` +
+          `across ${report.requiredTiers.length - report.missingRequiredTiers.length} of ` +
+          `${report.requiredTiers.length} required tiers, not all of them.`,
+      );
+      console.error(
+        'canonicalJson is a WIRE primitive: one divergent byte breaks every cross-tier ' +
+          'signature, so an unchecked tier must never read as an agreeing tier.',
+      );
+      console.error(
+        'Build the missing shim (Zig needs `cd packages/runar-zig && zig build canonicalise`) ' +
+          'or narrow the requirement deliberately with --require-tiers.',
+      );
+      process.exit(1);
     }
     if (report.mismatchCount > 0) process.exit(1);
     return;

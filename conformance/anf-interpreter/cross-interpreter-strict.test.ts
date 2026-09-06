@@ -127,6 +127,12 @@ const inputFiles = readdirSync(INPUTS_DIR)
 // ---------------------------------------------------------------------------
 
 describe('ANF strict parity (TS SDK)', () => {
+  // Non-vacuity sentinel: an empty or fully-filtered corpus generates zero
+  // cases, and every describe in this file would still report green.
+  it('discovers the strict input corpus', () => {
+    expect(inputFiles.length).toBeGreaterThan(0);
+  });
+
   for (const inputFile of inputFiles) {
     const baseName = inputFile.replace(/\.json$/, '');
     it(`${baseName} matches pinned strict golden`, () => {

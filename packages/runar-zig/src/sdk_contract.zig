@@ -2756,8 +2756,15 @@ pub const RunarContract = struct {
         defer arena.deinit();
         const work = arena.allocator();
 
-        // Parse the ANF IR from JSON
-        const anf_program = anf_interp.parseANFFromJson(work, anf_json) catch return empty;
+        // Parse the ANF IR from JSON.
+        //
+        // FAIL CLOSED, same reasoning as the interpreter call below (NEW-006)
+        // and by a shorter route: swallowing a parse failure returns before the
+        // state-application loop, so `self.state` keeps its PRE-CALL value, the
+        // method's data / raw outputs vanish, and the caller is handed a txid
+        // for a continuation the covenant's `hashOutputs` binding rejects. No
+        // peer tier swallows this.
+        const anf_program = try anf_interp.parseANFFromJson(work, anf_json);
 
         // Build current state map: property name -> ANFValue
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
@@ -2875,7 +2882,11 @@ pub const RunarContract = struct {
         defer arena.deinit();
         const work = arena.allocator();
 
-        const anf_program = anf_interp.parseANFFromJson(work, anf_json) catch return empty;
+        // FAIL CLOSED — see the matching note in autoComputeState. The caller's
+        // explicit `new_state` wins here, but the method's data / raw outputs
+        // still have to materialise or the broadcast tx layout mismatches the
+        // compile-time `hashOutputs` check.
+        const anf_program = try anf_interp.parseANFFromJson(work, anf_json);
 
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
         for (self.artifact.state_fields, 0..) |field, i| {

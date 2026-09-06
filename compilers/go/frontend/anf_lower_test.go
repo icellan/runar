@@ -1442,39 +1442,32 @@ class BadLoop extends SmartContract {
 
 	contract := result.Contract
 
-	// This should be caught by validation or ANF lowering
+	// A non-constant loop bound is not representable in Script, so something
+	// MUST reject it. LowerToANF has no error channel, which leaves validation
+	// as the only gate — both arms below used to be t.Logf, so this test could
+	// not fail no matter what the compiler did with the program.
 	valResult := Validate(contract)
-	if len(valResult.Errors) > 0 {
-		// Validation caught it
-		found := false
-		for _, e := range valResult.Errors {
-			if strings.Contains(e.Message, "constant") || strings.Contains(e.Message, "bound") {
-				found = true
-				break
+	if len(valResult.Errors) == 0 {
+		program := LowerToANF(contract)
+		for _, m := range program.Methods {
+			for _, b := range m.Body {
+				if b.Value.Kind == "loop" && b.Value.Count > 0 {
+					t.Errorf("non-constant loop bound lowered to a loop with count=%d", b.Value.Count)
+				}
 			}
 		}
-		if !found {
-			t.Logf("validation errors: %v", valResult.Errors)
-		}
-		// Test passes — validation rejected non-constant loop bound
-		return
+		t.Fatalf("validation accepted a non-constant loop bound; nothing rejects it")
 	}
 
-	// If validation didn't catch it, try ANF lower and see if it errors
-	// (in practice, this should be caught by validation)
-	program := LowerToANF(contract)
-	// Verify that the loop count was NOT set to a runtime value
-	// (it should be 0 or there should be some error-handling)
 	found := false
-	for _, m := range program.Methods {
-		for _, b := range m.Body {
-			if b.Value.Kind == "loop" && b.Value.Count > 0 {
-				found = true
-			}
+	for _, e := range valResult.Errors {
+		if strings.Contains(e.Message, "constant") || strings.Contains(e.Message, "bound") {
+			found = true
+			break
 		}
 	}
-	if found {
-		t.Logf("Note: non-constant loop bound produced a loop with count > 0 (may be a bug)")
+	if !found {
+		t.Errorf("contract was rejected, but not for the non-constant loop bound: %v", valResult.Errors)
 	}
 }
 

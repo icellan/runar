@@ -2,19 +2,70 @@
  * Rust parser: verify all example contracts and conformance tests parse correctly.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { validate } from '../passes/02-validate.js';
 import { typecheck } from '../passes/03-typecheck.js';
 import { parseRustSource } from '../passes/01-parse-rust.js';
 import { readFileSync, existsSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { basename, join, resolve } from 'path';
+
+// ---------------------------------------------------------------------------
+// Vacuity guard
+// ---------------------------------------------------------------------------
+
+// Every test in this file must assert. The two conformance suites below used
+// to `return` early when a fixture path was missing, so all 18 of their cases
+// reported PASSED while executing zero `expect()` calls — an early `return` is
+// invisible to `scripts/lint-no-silent-skips.sh` because it is not a skip.
+// `expect.hasAssertions()` makes a re-introduction of that pattern fail loudly.
+beforeEach(() => {
+  expect.hasAssertions();
+});
 
 // ---------------------------------------------------------------------------
 // Conformance tests
 // ---------------------------------------------------------------------------
 
 const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', 'tests');
+
+interface SourceConfig {
+  sources?: Record<string, string>;
+}
+
+/**
+ * Resolve a conformance fixture's source for `ext` through its `source.json`,
+ * the same indirection `conformance/runner/` and `multi-format.test.ts` use.
+ * Contract sources live under `examples/<lang>/<dir>/<Contract>.runar.<ext>`;
+ * only the fixture metadata lives in `conformance/tests/<dir>/`.
+ *
+ * Throws on a missing `source.json`, an undeclared extension, or a declared
+ * path that is absent on disk. None of those are legitimate skips — they mean
+ * the fixture wiring is broken and the test must not silently pass.
+ */
+function readFixtureSource(testName: string, ext: string): { content: string; fileName: string } {
+  const configFile = join(CONFORMANCE_DIR, testName, 'source.json');
+  if (!existsSync(configFile)) {
+    throw new Error(`source.json not found for conformance fixture '${testName}': ${configFile}`);
+  }
+  const config = JSON.parse(readFileSync(configFile, 'utf-8')) as SourceConfig;
+  const rel = config.sources?.[ext];
+  if (rel === undefined) {
+    throw new Error(`source.json for '${testName}' does not declare a ${ext} source`);
+  }
+  const absPath = resolve(CONFORMANCE_DIR, testName, rel);
+  if (!existsSync(absPath)) {
+    throw new Error(
+      `source.json for '${testName}' declares ${ext} -> ${rel}, but resolved path does not exist: ${absPath}`,
+    );
+  }
+  return { content: readFileSync(absPath, 'utf-8'), fileName: basename(absPath) };
+}
+
+/** Format a parse result's errors for an assertion message. */
+function errorText(errors: { message: string; loc?: { line: number } }[]): string {
+  return errors.map(e => `  line ${e.loc?.line ?? '?'}: ${e.message}`).join('\n');
+}
 
 const CONFORMANCE_TESTS = [
   { dir: 'arithmetic', contract: 'Arithmetic', parent: 'SmartContract' },
@@ -30,13 +81,11 @@ const CONFORMANCE_TESTS = [
 
 describe('Rust parser: conformance test parsing', () => {
   for (const { dir, contract: contractName, parent } of CONFORMANCE_TESTS) {
-    it(`parses ${dir}.runar.rs conformance test`, () => {
-      const path = join(CONFORMANCE_DIR, dir, `${dir}.runar.rs`);
-      if (!existsSync(path)) return;
-      const source = readFileSync(path, 'utf-8');
-      const result = parse(source, `${dir}.runar.rs`);
+    it(`parses the ${dir} .runar.rs conformance source`, () => {
+      const { content, fileName } = readFixtureSource(dir, '.runar.rs');
+      const result = parse(content, fileName);
       const errors = result.errors.filter(e => e.severity === 'error');
-      expect(errors).toEqual([]);
+      expect(errors, `parse errors in ${fileName}:\n${errorText(errors)}`).toEqual([]);
       expect(result.contract).not.toBeNull();
       expect(result.contract!.name).toBe(contractName);
       expect(result.contract!.parentClass).toBe(parent);
@@ -53,37 +102,47 @@ describe('Rust parser: conformance test parsing', () => {
 describe('Rust parser: cross-format structural consistency', () => {
   for (const { dir } of CONFORMANCE_TESTS) {
     it(`${dir}: Rust and TS formats produce matching contract structure`, () => {
-      const rsPath = join(CONFORMANCE_DIR, dir, `${dir}.runar.rs`);
-      const tsPath = join(CONFORMANCE_DIR, dir, `${dir}.runar.ts`);
-      if (!existsSync(rsPath) || !existsSync(tsPath)) return;
+      const rs = readFixtureSource(dir, '.runar.rs');
+      const ts = readFixtureSource(dir, '.runar.ts');
 
-      const rsResult = parse(readFileSync(rsPath, 'utf-8'), `${dir}.runar.rs`);
-      const tsResult = parse(readFileSync(tsPath, 'utf-8'), `${dir}.runar.ts`);
+      const rsResult = parse(rs.content, rs.fileName);
+      const tsResult = parse(ts.content, ts.fileName);
 
-      if (!rsResult.contract || !tsResult.contract) return;
-      if (rsResult.errors.some(e => e.severity === 'error')) return;
-      if (tsResult.errors.some(e => e.severity === 'error')) return;
+      // A parse failure on either side is a real defect, not a reason to skip
+      // the comparison: returning early here would make the whole suite green
+      // the moment one parser regressed.
+      const rsErrors = rsResult.errors.filter(e => e.severity === 'error');
+      const tsErrors = tsResult.errors.filter(e => e.severity === 'error');
+      expect(rsErrors, `parse errors in ${rs.fileName}:\n${errorText(rsErrors)}`).toEqual([]);
+      expect(tsErrors, `parse errors in ${ts.fileName}:\n${errorText(tsErrors)}`).toEqual([]);
+      expect(rsResult.contract).not.toBeNull();
+      expect(tsResult.contract).not.toBeNull();
+      const rsContract = rsResult.contract!;
+      const tsContract = tsResult.contract!;
 
       // Contract name
-      expect(rsResult.contract.name).toBe(tsResult.contract.name);
+      expect(rsContract.name).toBe(tsContract.name);
+
+      // Same base class
+      expect(rsContract.parentClass).toBe(tsContract.parentClass);
 
       // Same number of properties
-      expect(rsResult.contract.properties.length).toBe(tsResult.contract.properties.length);
+      expect(rsContract.properties.length).toBe(tsContract.properties.length);
 
       // Property names and readonly flags
-      for (let j = 0; j < tsResult.contract.properties.length; j++) {
-        expect(rsResult.contract.properties[j]!.name).toBe(tsResult.contract.properties[j]!.name);
-        expect(rsResult.contract.properties[j]!.readonly).toBe(tsResult.contract.properties[j]!.readonly);
+      for (let j = 0; j < tsContract.properties.length; j++) {
+        expect(rsContract.properties[j]!.name).toBe(tsContract.properties[j]!.name);
+        expect(rsContract.properties[j]!.readonly).toBe(tsContract.properties[j]!.readonly);
       }
 
       // Same number of methods
-      expect(rsResult.contract.methods.length).toBe(tsResult.contract.methods.length);
+      expect(rsContract.methods.length).toBe(tsContract.methods.length);
 
       // Method names, visibility, and param counts
-      for (let j = 0; j < tsResult.contract.methods.length; j++) {
-        expect(rsResult.contract.methods[j]!.name).toBe(tsResult.contract.methods[j]!.name);
-        expect(rsResult.contract.methods[j]!.visibility).toBe(tsResult.contract.methods[j]!.visibility);
-        expect(rsResult.contract.methods[j]!.params.length).toBe(tsResult.contract.methods[j]!.params.length);
+      for (let j = 0; j < tsContract.methods.length; j++) {
+        expect(rsContract.methods[j]!.name).toBe(tsContract.methods[j]!.name);
+        expect(rsContract.methods[j]!.visibility).toBe(tsContract.methods[j]!.visibility);
+        expect(rsContract.methods[j]!.params.length).toBe(tsContract.methods[j]!.params.length);
       }
     });
   }
@@ -117,6 +176,14 @@ function findRustExamples(): { name: string; path: string }[] {
 const RUST_EXAMPLES = findRustExamples();
 
 describe('Rust parser: example contracts', () => {
+  // Non-vacuity sentinel: an empty discovery would generate zero `it()` cases
+  // and the describe would still report green. Assert the corpus is non-empty
+  // so a broken EXAMPLES_DIR fails instead of silently covering nothing.
+  it('discovers the examples/rust corpus', () => {
+    expect(existsSync(EXAMPLES_DIR), `examples dir missing: ${EXAMPLES_DIR}`).toBe(true);
+    expect(RUST_EXAMPLES.length).toBeGreaterThan(0);
+  });
+
   for (const { name, path } of RUST_EXAMPLES) {
     it(`parses ${name} without errors`, () => {
       const source = readFileSync(path, 'utf-8');

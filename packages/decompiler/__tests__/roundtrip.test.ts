@@ -103,6 +103,12 @@ describe('Tier 1: examples coverage matrix', () => {
   const baseline = loadBaseline();
   const files = listExamples();
 
+  // Non-vacuity sentinel: `listExamples()` returns [] when EXAMPLES_DIR is
+  // missing, which generates zero cases and still reports green.
+  it('discovers the examples corpus', () => {
+    expect(files.length).toBeGreaterThan(0);
+  });
+
   for (const f of files) {
     const id = relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, '');
     const expected = baseline.get(id);
@@ -136,7 +142,9 @@ describe('Tier 2: conformance fixtures', () => {
     const id = `fixture/${stem}`;
     it(`${id}: round-trip${HARD_GATES.has(stem) ? ' (byte-match required)' : ' recorded'}`, () => {
       const raw = JSON.parse(readFileSync(resolve(FIXTURES_DIR, f), 'utf8')) as { script: string };
-      if (raw.script.length === 0) return; // empty fixture — vacuously holds
+      // An empty fixture used to `return` as "vacuously holds"; a fixture with
+      // no script is a broken fixture, not a satisfied round-trip.
+      expect(raw.script.length, `fixture ${id} has an empty script`).toBeGreaterThan(0);
       const result = decompile(hexToBytes(raw.script));
       expect(result).toBeDefined();
       if (HARD_GATES.has(stem)) {

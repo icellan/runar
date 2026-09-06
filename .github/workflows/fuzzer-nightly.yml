@@ -540,6 +540,17 @@ jobs:
   # TS reference, so a Java canonicalJson divergence STILL fails the PR gate.
   # Schedule / push / workflow_dispatch additionally run the RANDOMIZED fuzz over
   # all 7 tiers (Java included) with a run_id-seeded corpus for rotating coverage.
+  #
+  # `--require-tiers` is NOT optional here. Every tier is discovered by probing
+  # for its toolchain / shim binary, and until it existed a tier that was not
+  # found was marked `skip`, dropped from the comparison, and neither warned
+  # about nor counted — so if the "Build Zig canonicalise shim" step below ever
+  # stops producing `packages/runar-zig/zig-out/bin/runar-canonicalise`, this job
+  # would keep printing "Mismatches: 0" and exiting 0 while proving nothing about
+  # Zig. canonicalJson is a WIRE primitive: one divergent byte breaks every
+  # cross-tier signature, so a tier that was never checked must never read as a
+  # tier that agrees. The flag lists exactly the tiers each step must cover, and
+  # a missing one fails the job before any case runs.
   # ---------------------------------------------------------------------------
   fuzz-canonical:
     name: canonicalJson differential (7 SDK tiers x N random JSON values)
@@ -611,6 +622,7 @@ jobs:
             --num 64 \
             --seed 20020602 \
             --compilers ts,go,rust,python,zig,ruby \
+            --require-tiers ts,go,rust,python,zig,ruby \
             --output /tmp/canonical-fuzz-pr.json
 
       # ----- PR gate (Java): deterministic, one-JVM batch. The randomized fuzz
@@ -663,6 +675,7 @@ jobs:
             --num "$NUM" \
             --seed "$SEED" \
             --compilers ts,go,rust,python,zig,ruby,java \
+            --require-tiers ts,go,rust,python,zig,ruby,java \
             --output /tmp/canonical-fuzz-report.json
 
       - name: Upload canonical fuzz findings
