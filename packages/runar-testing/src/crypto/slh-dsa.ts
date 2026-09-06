@@ -9,7 +9,7 @@
  * Only the SHA2 instantiation (not SHAKE) is implemented.
  */
 
-import { createHash } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 
 // ---------------------------------------------------------------------------
 // Parameter sets (FIPS 205 Table 1, SHA2 variants only)
@@ -177,25 +177,37 @@ function PRF(pkSeed: Uint8Array, skSeed: Uint8Array, adrs: Uint8Array, n: number
   return T(pkSeed, adrs, skSeed, n);
 }
 
-/** PRFmsg: for randomized message hashing */
+/**
+ * PRFmsg: for randomized message hashing.
+ *
+ * FIPS 205 Section 11.2.1: PRF_msg(SK.prf, opt_rand, M) =
+ *   Trunc_n(HMAC-SHA-256(SK.prf, opt_rand || M))
+ * This is an HMAC keyed by SK.prf — NOT a plain padded SHA-256 over the
+ * concatenation. See issue #137.
+ */
 function PRFmsg(skPrf: Uint8Array, optRand: Uint8Array, msg: Uint8Array, n: number): Uint8Array {
-  // HMAC-SHA256 based: SHA-256(toByte(0, 64-n) || skPrf || optRand || msg)
-  const pad = new Uint8Array(64 - n);
-  const input = concat(pad, skPrf, optRand, msg);
-  return trunc(sha256(input), n);
+  const mac = createHmac('sha256', Buffer.from(skPrf));
+  mac.update(Buffer.from(optRand));
+  mac.update(Buffer.from(msg));
+  return trunc(new Uint8Array(mac.digest()), n);
 }
 
-/** Hmsg: hash message to get FORS + tree indices */
+/**
+ * Hmsg: hash message to get FORS + tree indices (MGF1-SHA-256).
+ *
+ * FIPS 205 Section 11.2.1: H_msg(R, PK.seed, PK.root, M) =
+ *   MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+ * The `R || PK.seed` prefix on the MGF1 seed is mandatory — it mitigates
+ * multi-target long-message second-preimage attacks. See issue #137.
+ */
 function Hmsg(R: Uint8Array, pkSeed: Uint8Array, pkRoot: Uint8Array, msg: Uint8Array, outLen: number): Uint8Array {
-  // SHA-256 based MGF1 construction
-  const seed = concat(R, pkSeed, pkRoot, msg);
-  const hash = sha256(seed);
-  // For simplicity, use iterative hashing to extend output
+  const inner = sha256(concat(R, pkSeed, pkRoot, msg));
+  const seed = concat(R, pkSeed, inner);
   const result = new Uint8Array(outLen);
   let offset = 0;
   let counter = 0;
   while (offset < outLen) {
-    const block = sha256(concat(hash, toByte(counter, 4)));
+    const block = sha256(concat(seed, toByte(counter, 4)));
     const copyLen = Math.min(32, outLen - offset);
     result.set(block.subarray(0, copyLen), offset);
     offset += copyLen;
@@ -268,8 +280,11 @@ function wotsPkFromSig(sig: Uint8Array, msg: Uint8Array, pkSeed: Uint8Array,
   }
 
   // Compress: T_len(PK.seed, ADRS_pk, pk_0 || pk_1 || ... || pk_{len-1})
+  // FIPS 205 Algorithm 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes bytes
+  // 20-31, so the key pair address MUST be restored afterwards. See #137.
   const pkAdrs = new Uint8Array(adrs);
   setType(pkAdrs, ADRS_WOTS_PK);
+  setKeyPairAddress(pkAdrs, getKeyPairAddress(adrs));
   return T(pkSeed, pkAdrs, concat(...parts), n);
 }
 
@@ -354,8 +369,11 @@ function wotsPk(skSeed: Uint8Array, pkSeed: Uint8Array,
     parts.push(wotsChain(sk, 0, w - 1, pkSeed, chainAdrs, n));
   }
 
+  // FIPS 205 Algorithm 6 lines 9-11: setTypeAndClear(WOTS_PK) zeroes bytes
+  // 20-31, so the key pair address MUST be restored afterwards. See #137.
   const pkAdrs = new Uint8Array(adrs);
   setType(pkAdrs, ADRS_WOTS_PK);
+  setKeyPairAddress(pkAdrs, getKeyPairAddress(adrs));
   return T(pkSeed, pkAdrs, concat(...parts), n);
 }
 

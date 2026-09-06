@@ -5,7 +5,7 @@
  *   - Parameter set: SLH_SHA2_128s (n=16)
  *   - Seed: 0x42 || 0x00*47  (48 bytes = 3*n)
  *   - Message: "slh-dsa test vector" (UTF-8)
- *   - Expected public key: 00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf
+ *   - Expected public key: 00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0
  *   - Expected signature size: 7856 bytes
  *
  * Usage: node generate-slhdsa-sig.mjs
@@ -30,7 +30,7 @@ const { sk, pk } = slhKeygen(params, seed);
 const pkHex = Buffer.from(pk).toString('hex');
 console.log(`Public key (${pk.length} bytes): ${pkHex}`);
 
-const expectedPK = '00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf';
+const expectedPK = '00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0';
 if (pkHex !== expectedPK) {
   console.error(`ERROR: Public key mismatch!`);
   console.error(`  Expected: ${expectedPK}`);

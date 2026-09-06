@@ -98,6 +98,7 @@ A skip not in this file is a bug. If you must skip a test:
 | `PostQuantumSLHDSANaiveInsecure` | `examples/ts/post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure.test.ts:19` | Environmental | `describe.skipIf(!runSlowTests)` — same slow SLH-DSA cost. `runSlowTests = IS_CI \|\| RUN_SLOW_TESTS === '1'`; runs in CI, locally set `RUN_SLOW_TESTS=1`. |
 | `SPHINCSWallet (Hybrid ECDSA + SLH-DSA-SHA2-128s)` | `examples/ts/sphincs-wallet/SPHINCSWallet.test.ts:40` | Environmental | `describe.skipIf(!runSlowTests)` — same slow SLH-DSA cost. `runSlowTests = IS_CI \|\| RUN_SLOW_TESTS === '1'`; runs in CI, locally set `RUN_SLOW_TESTS=1`. |
 | `SLH-DSA-SHA2-128s dual-oracle` | `packages/runar-testing/src/__tests__/post-quantum-slh-dual-oracle.test.ts:36` | Environmental | `describe.skipIf(!runSlowTests)` — cross-checks the SLH-DSA reference impl against the script oracle, genuinely expensive. `runSlowTests = IS_CI \|\| RUN_SLOW_TESTS === '1'` (see `packages/runar-testing/src/test-env.ts`); runs in CI, locally set `RUN_SLOW_TESTS=1`. |
+| `SLH-DSA-SHA2-128s NIST ACVP vector (on-chain)` — the two `compiled script …` cases | `packages/runar-testing/src/__tests__/post-quantum-slh-acvp-onchain.test.ts:93,106` | Environmental | `it.skipIf(!runSlowTests)` — compiling and executing the ~184 KB SLH-DSA-128s script on `@bsv/sdk`'s `Spend` takes tens of seconds per case. `runSlowTests = IS_CI \|\| RUN_SLOW_TESTS === '1'` (see `packages/runar-testing/src/test-env.ts`), so both run in CI; locally set `RUN_SLOW_TESTS=1`. The two **interpreter** cases in the same file are NOT skipped and always replay the NIST ACVP vector (tgId 31 / tcId 422) against the reference impl, so #137 conformance is gated unconditionally even in a default local run. |
 | `SLH-DSA reference implementation` | `packages/runar-testing/src/crypto/__tests__/slh-dsa.test.ts:9` | Environmental | `describe.skipIf(!runSlowTests)` — exercises the SLH-DSA reference keygen/sign/verify (slow). `runSlowTests = IS_CI \|\| RUN_SLOW_TESTS === '1'` (see `packages/runar-testing/src/test-env.ts`); runs in CI, locally set `RUN_SLOW_TESTS=1`. |
 | `Runar.compile_check accepts a path to a valid .runar.rb contract` | `packages/runar-rb/spec/sdk/compile_check_spec.rb:22` | Environmental | RSpec `skip "...not found"` guard — fires only when `examples/ruby/p2pkh/P2PKH.runar.rb` is absent (e.g. the gem is consumed without the examples tree). When the repo is checked out normally the fixture exists and the spec runs the real frontend. |
 | `TestEmitVerifyRabinSig_RejectsMalleatedSignature/FlipHighBitOfSig` | `compilers/go/codegen/rabin_adversarial_test.go:381` | Environmental | `t.Skip` defensive guard for `sig.BitLen() - 2 < 1` — only fires if the generated Rabin signature is pathologically tiny (< 3 bits), in which case there is no high bit to flip. Real Rabin signatures under the test key are hundreds of bits, so the skip never fires in practice; the other three mutation subtests still run unconditionally. |
@@ -149,10 +150,13 @@ opt-outs at the conformance-runner level, not test-level skips. See
   Ruby/Zig/Java ports); the five affected `expected-script.hex` goldens were
   regenerated fold-OFF and re-verified byte-identical across all tiers, and the
   five accept tests now assert the script ACCEPTS a valid signature (verified on
-  the go-sdk interpreter). Scope: this fixes INTERNAL consistency (runar signer
-  ↔ on-chain verifier). True FIPS-205 conformance for 192/256 additionally needs
-  MGF1-SHA-512, which Bitcoin Script cannot express (no `OP_SHA512`) — that
-  remains the separate #137 gap; the runar SLH-DSA is a SHA-256-only variant.
+  the go-sdk interpreter). Scope: this fixed INTERNAL consistency (runar signer
+  ↔ on-chain verifier). #137 has since fixed EXTERNAL conformance too, for the
+  128-bit sets: the native verifier and the emitted script both accept the NIST
+  ACVP `SLH-DSA-SHA2-128s` vector (tgId 31 / tcId 422). True FIPS-205
+  conformance for 192/256 additionally needs SHA-512 (FIPS 205 §11.2.2/11.2.3),
+  which Bitcoin Script cannot express (no `OP_SHA512`), so those four parameter
+  sets remain SHA-256-only and self-consistent rather than standard-conformant.
 
 - `examples/sol/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.sol` —
   Sol parser rejected the capitalised `Int` type alias used in the cross-format

@@ -53,12 +53,20 @@ SUPPORTED_KEYS = [
     # 128s), and (2) the FORS index extraction now reads a 3-byte window when an
     # a-bit field straddles it (a=14 sets 192s/256s), adding ops there. New
     # counts match byte-for-byte against the regenerated goldens.
-    ("SHA2_128s", 179246),
-    ("SHA2_128f", 514147),
-    ("SHA2_192s", 256935),
-    ("SHA2_192f", 741024),
-    ("SHA2_256s", 350397),
-    ("SHA2_256f", 699553),
+    #
+    # #137 (FIPS-205 conformance) then added, per parameter set, exactly 6 + d:
+    #   +6 once, in Hmsg -- the MGF1 seed must be prefixed with R || PK.seed
+    #     (FIPS 205 Sec 11.2.1): 2 extra copy_to_top (2 ops each) + 2 OP_CAT.
+    #   +1 per hypertree layer (d layers) -- wots_pkFromSig must restore the key
+    #     pair address after set_type(WOTS_PK) (FIPS 205 Alg. 8 lines 8-11),
+    #     turning a 1-op 4-zero-byte push into a 2-op push-depth + PICK.
+    # d = 7, 22, 7, 22, 8, 17 for 128s, 128f, 192s, 192f, 256s, 256f.
+    ("SHA2_128s", 179259),
+    ("SHA2_128f", 514175),
+    ("SHA2_192s", 256948),
+    ("SHA2_192f", 741052),
+    ("SHA2_256s", 350411),
+    ("SHA2_256f", 699576),
 ])
 def test_op_count(key, expected):
     ops: list[StackOp] = []

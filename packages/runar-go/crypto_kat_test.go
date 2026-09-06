@@ -265,34 +265,25 @@ func TestOfficialKAT_SLHDSA_ACVP(t *testing.T) {
 				t.Fatalf("bad signature hex: %v", err)
 			}
 
-			// The NIST-published signature is EXPECTED TO FAIL verification
-			// today — this is a self-clearing xfail pinned to issue #137, NOT
-			// a skip. CONFIRMED CONFORMANCE BUG (BUG-101 class): the native
-			// SLH-DSA round-trips its OWN signatures (see
-			// TestSLHDSA_SelfConsistency) but is NOT FIPS-205 conformant, so
-			// it currently rejects this authoritative NIST ACVP signature.
-			// The vector is copied verbatim from NIST (see
-			// slh-dsa-acvp-kat.json _source) — the impl is at fault, NOT the
-			// vector. At least one deviation is confirmed: slhHmsg's MGF1
-			// seed omits the R||PK.seed prefix that FIPS-205 §11.2 mandates
-			// (added to mitigate multi-target long-message 2nd-preimage
-			// attacks); a patch experiment shows further verify-path
-			// deviations remain beyond it, so a full FIPS-205 audit is
-			// required (tracked in #137).
-			//
-			// When #137 is fixed and SLHVerify starts ACCEPTING the standard
-			// vector, THIS ASSERTION FLIPS TO A FAILURE — that is the point:
-			// it forces whoever fixes #137 to replace the block below with
-			// `if !SLHVerify(...) { t.Fatalf(...) }` and delete this xfail
-			// comment, instead of the bug rotting silently behind a skip.
-			if SLHVerify(params, msg, sig, pk) {
-				t.Fatalf("SLHVerify ACCEPTED the official NIST ACVP %s signature — issue #137 appears FIXED. Flip this xfail to require acceptance and delete the xfail comment.", v.ParamSet)
+			// The native SLH-DSA MUST accept this authoritative NIST ACVP
+			// signature. Issue #137 (fixed) was the BUG-101-class case where
+			// the impl round-tripped its OWN signatures (see
+			// TestSLHDSA_SelfConsistency) while deviating from FIPS 205, so
+			// it rejected the standard vector. Two verify-path deviations
+			// were responsible, and NEITHER alone was sufficient:
+			//   1. FIPS 205 §11.2.1 — H_msg's MGF1 seed must be
+			//      R || PK.seed || SHA-256(R || PK.seed || PK.root || M);
+			//      the R || PK.seed prefix was omitted.
+			//   2. FIPS 205 Alg. 8 (lines 8-11) — wots_pkFromSig must
+			//      restore the key pair address after setTypeAndClear(
+			//      WOTS_PK) zeroes ADRS bytes 20-31; it was left at 0.
+			// This is a real KAT now, not an xfail: it fails if either
+			// deviation is reintroduced.
+			if !SLHVerify(params, msg, sig, pk) {
+				t.Fatalf("SLHVerify REJECTED the official NIST ACVP %s signature — the impl is not FIPS-205 conformant (regression of #137)", v.ParamSet)
 			}
 
-			// A genuinely tampered signature MUST be rejected regardless of
-			// #137 — that property holds whether or not the impl is
-			// FIPS-205 conformant, so it runs unconditionally (it used to be
-			// dead code behind the t.Skipf this xfail replaces).
+			// A genuinely tampered signature MUST be rejected.
 			tampered := make([]byte, len(sig))
 			copy(tampered, sig)
 			tampered[len(tampered)-1] ^= 0x01

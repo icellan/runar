@@ -705,8 +705,11 @@ public final class SlhDsa {
         emit.accept(new SwapOp());
         emit.accept(new DropOp());
 
-        // Compress -> wotsPk
-        emitBuildAdrs(emit, layer, SLH_WOTS_PK, 0, 2, -1, HashMode.ZERO);
+        // Compress -> wotsPk. ta8 at depth 2, kp4 PICKed from depth 1.
+        // FIPS 205 Alg. 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes ADRS
+        // bytes 20-31, but the key pair address MUST then be restored.
+        // Emitting a zero key-pair address here was half of issue #137.
+        emitBuildAdrs(emit, layer, SLH_WOTS_PK, 0, 2, 1, HashMode.ZERO);
         emit.accept(new SwapOp());
         emitSlhTRaw(emit, n, 4);
     }
@@ -957,14 +960,27 @@ public final class SlhDsa {
     /**
      * Emit message digest computation.
      *
-     * <p>Input:  {@code R(3) pkSeed(2) pkRoot(1) msg(0)}.
+     * <p>FIPS 205 &sect;11.2.1:
+     * {@code H_msg(R, PK.seed, PK.root, M) =
+     *   MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)}.
+     * The {@code R || PK.seed} prefix on the MGF1 seed is mandatory — it
+     * mitigates multi-target long-message second-preimage attacks. Omitting it
+     * was half of issue #137 (the other half was the WOTS_PK key-pair address).
+     *
+     * <p>Input:  {@code R(5) pkSeed(4) R(3) pkSeed(2) pkRoot(1) msg(0)} — R and
+     * pkSeed are supplied twice: once for the inner SHA-256 and once for the
+     * MGF1 seed prefix.
      * Output: {@code digest(outLen bytes)}.
      */
     private static void emitSlhHmsg(Consumer<StackOp> emit, int n, int outLen) {
+        // CAT: R || pkSeed || pkRoot || msg, then SHA-256 -> inner(32B)
         emit.accept(new OpcodeOp("OP_CAT"));
         emit.accept(new OpcodeOp("OP_CAT"));
         emit.accept(new OpcodeOp("OP_CAT"));
         emit.accept(new OpcodeOp("OP_SHA256"));
+        // Prepend the mandatory R || PK.seed prefix -> seed(2n+32 B)
+        emit.accept(new OpcodeOp("OP_CAT"));
+        emit.accept(new OpcodeOp("OP_CAT"));
 
         int blocks = (outLen + 31) / 32;
         if (blocks == 1) {
@@ -1074,13 +1090,17 @@ public final class SlhDsa {
         t.split("R", "sigRest");
 
         // ---- 3. Compute Hmsg(R, pkSeed, pkRoot, msg) ----
+        // FIPS 205 §11.2.1 needs R and PK.seed TWICE: once inside the inner
+        // SHA-256, once as the MGF1 seed prefix. See #137.
+        t.copyToTop("R", "_R2");
+        t.copyToTop("pkSeed", "_pks2");
         t.copyToTop("R", "_R");
         t.copyToTop("pkSeed", "_pks");
         t.copyToTop("pkRoot", "_pkr");
         t.copyToTop("msg", "_msg");
         final int digestLenF = digestLen;
         final int nF = n;
-        t.rawBlock(List.of("_R", "_pks", "_pkr", "_msg"), "digest",
+        t.rawBlock(List.of("_R2", "_pks2", "_R", "_pks", "_pkr", "_msg"), "digest",
             e -> emitSlhHmsg(e, nF, digestLenF));
 
         // ---- 4. Extract md, treeIdx, leafIdx ----

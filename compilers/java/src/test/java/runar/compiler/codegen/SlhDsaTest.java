@@ -140,23 +140,30 @@ class SlhDsaTest {
     // three-OP_TOALTSTACK preamble (`007b7b7b`). Lengths match the original
     // prefix lengths so the assertEquals substring contract is preserved.
     //
+    // #137 (FIPS-205 conformance): the Hmsg MGF1 seed must be prefixed with
+    // R || PK.seed (FIPS 205 Sec 11.2.1), which inserts two extra OP_PICKs
+    // (`53795779`) and two extra OP_CATs (`7e7e`) into the Hmsg preamble --
+    // inside the 100-hex-char window for every parameter set, so all six
+    // prefixes below were re-captured from the fixed pipeline. All 7 tiers
+    // emit byte-identical hex (conformance 72/72 in both fold modes).
+    //
     // SLH-DSA MGF1 byte-order fix: the Hmsg last-block `swap` removal deletes an
     // OP_SWAP (`7c`) from the MGF1 tail, which falls inside the 100-byte prefix
     // window for 192s/192f/256s/256f (their shorter pkSeedPad padding puts the
     // MGF1 loop earlier than 128f's, whose window ends before it). Prefixes for
     // those four sets re-captured from the fixed pipeline.
     private static final String EXPECTED_PREFIX_128S =
-        "007b7b7b7c8202b01e887c607f78300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a607f785579557958797e7e7ea804000000007ea8011e7f7501157f577f7c517f517f";
+        "007b7b7b7c8202b01e887c607f78300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a607f7855795379577957795a797e7e7ea87e7e04000000007ea8011e7f7501157f57";
     private static final String EXPECTED_PREFIX_128F =
-        "007b7b7b7c8202c042887c607f78300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a607f785579557958797e7e7ea8007c7604000000007ea87b7c7e7c04000000017ea8";
+        "007b7b7b7c8202c042887c607f78300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a607f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04";
     private static final String EXPECTED_PREFIX_192S =
-        "007b7b7b7c8202603f887c01187f7828000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a01187f785579557958797e7e7ea8007c7604000000007ea87b7c7e7c04000000017ea8577f757e011e";
+        "007b7b7b7c8202603f887c01187f7828000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a01187f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017ea8";
     private static final String EXPECTED_PREFIX_192F =
-        "007b7b7b7c8203508b00887c01187f7828000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a01187f785579557958797e7e7ea8007c7604000000007ea87b7c7e7c04000000017ea85a7f757e01";
+        "007b7b7b7c8203508b00887c01187f7828000000000000000000000000000000000000000000000000000000000000000000000000000000007e537a01187f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017e";
     private static final String EXPECTED_PREFIX_256S =
-        "007b7b7b7c82026074887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f785579557958797e7e7ea8007c7604000000007ea87b7c7e7c04000000017ea85f7f757e01277f577f7c517f517f";
+        "007b7b7b7c82026074887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017ea85f7f757e01277f57";
     private static final String EXPECTED_PREFIX_256F =
-        "007b7b7b7c820360be00887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f785579557958797e7e7ea8007c7604000000007ea87b7c7e7c04000000017ea85c7f757e01237f587f7c517f51";
+        "007b7b7b7c820360be00887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017ea85c7f757e01237f";
 
     // BUG-011: each verifySLHDSA_* prologue now emits an OP_SIZE exact-length
     // guard (+5 Stack-IR ops per parameter set, +14 or +16 hex chars depending
@@ -170,12 +177,21 @@ class SlhDsaTest {
     // 14-bit-field span from 2 to 3 bytes for 192s/256s (a=14), adding ops. New
     // lengths re-captured from the fixed pipeline; all 5 conformance goldens
     // (expected-script.hex) match the same codegen byte-for-byte.
-    private static final int EXPECTED_HEX_LEN_128S = 377194;
-    private static final int EXPECTED_HEX_LEN_128F = 1067822;
-    private static final int EXPECTED_HEX_LEN_192S = 553166;
-    private static final int EXPECTED_HEX_LEN_192F = 1576078;
-    private static final int EXPECTED_HEX_LEN_256S = 738346;
-    private static final int EXPECTED_HEX_LEN_256F = 1458726;
+    //
+    // #137 (FIPS-205 conformance) shrank every parameter set slightly. Two
+    // deviations were fixed in the shared emitter: (1) FIPS 205 Sec 11.2.1 --
+    // Hmsg's MGF1 seed must be prefixed with R || PK.seed, and (2) FIPS 205
+    // Alg. 8 lines 8-11 -- wots_pkFromSig must restore the key pair address
+    // after setTypeAndClear(WOTS_PK). Net bytes fall because the PICKed 4-byte
+    // key-pair address is cheaper to encode than the 4-zero-byte push it
+    // replaces, once per hypertree layer. The prefix constants above are
+    // unchanged: the drift lands past the 100-hex-char window.
+    private static final int EXPECTED_HEX_LEN_128S = 377164;
+    private static final int EXPECTED_HEX_LEN_128F = 1067702;
+    private static final int EXPECTED_HEX_LEN_192S = 553136;
+    private static final int EXPECTED_HEX_LEN_192F = 1575958;
+    private static final int EXPECTED_HEX_LEN_256S = 738310;
+    private static final int EXPECTED_HEX_LEN_256F = 1458636;
 
     @Test
     void compilesSlhDsa128sToCanonicalHex() throws Exception {

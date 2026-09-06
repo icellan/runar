@@ -686,8 +686,11 @@ function emitSLHWotsAll(
   // psp(3) ta8(2) kp4(1) endptAcc(0)
 
   // Compress -> wotsPk via T(pkSeed, ADRS_WOTS_PK, endptAcc)
-  // Build ADRS: ta8 at depth 2, keypair=0 (setType clears it, not restored per FIPS 205)
-  emitBuildADRS(emit, layer, SLH_WOTS_PK, 0, 2, 'zero', 'zero');
+  // Build ADRS: ta8 at depth 2, keypair PICKed from kp4 at depth 1.
+  // FIPS 205 Alg. 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes ADRS bytes
+  // 20-31, but the key pair address MUST then be restored. Emitting a zero
+  // key-pair address here was half of issue #137.
+  emitBuildADRS(emit, layer, SLH_WOTS_PK, 0, 2, 1, 'zero');
   // psp(4) ta8(3) kp4(2) endptAcc(1) adrs22(0)
   emit({ op: 'swap' });
   // psp(4) ta8(3) kp4(2) adrs22(1) endptAcc(0)
@@ -1038,20 +1041,32 @@ function emitSLHFors(
 }
 
 // ===========================================================================
-// 8. Hmsg — Message Digest (SHA-256 MGF1)
+// 8. Hmsg — Message Digest (MGF1-SHA-256)
 // ===========================================================================
-// Input:  R(3) pkSeed(2) pkRoot(1) msg(0)
+// FIPS 205 §11.2.1:
+//   H_msg(R, PK.seed, PK.root, M) =
+//     MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+// The `R || PK.seed` prefix on the MGF1 seed is mandatory — it mitigates
+// multi-target long-message second-preimage attacks. Omitting it was half of
+// issue #137 (the other half was the WOTS_PK key-pair address).
+//
+// Input:  R(5) pkSeed(4) R(3) pkSeed(2) pkRoot(1) msg(0)
+//         (R and pkSeed are supplied twice: once for the inner SHA-256 and
+//          once for the MGF1 seed prefix)
 // Output: digest(outLen bytes)
 
 function emitSLHHmsg(
   emit: (op: StackOp) => void,
   _n: number, outLen: number,
 ): void {
-  // CAT: R || pkSeed || pkRoot || msg
+  // CAT: R || pkSeed || pkRoot || msg, then SHA-256 -> inner(32B)
   emit({ op: 'opcode', code: 'OP_CAT' });
   emit({ op: 'opcode', code: 'OP_CAT' });
   emit({ op: 'opcode', code: 'OP_CAT' });
-  emit({ op: 'opcode', code: 'OP_SHA256' });          // seed(32B)
+  emit({ op: 'opcode', code: 'OP_SHA256' });          // R pkSeed inner
+  // Prepend the mandatory R || PK.seed prefix -> seed(2n+32 B)
+  emit({ op: 'opcode', code: 'OP_CAT' });             // R (pkSeed||inner)
+  emit({ op: 'opcode', code: 'OP_CAT' });             // seed
 
   const blocks = Math.ceil(outLen / 32);
   if (blocks === 1) {
@@ -1165,11 +1180,15 @@ function emitVerifySLHDSA(
   t.split('R', 'sigRest');
 
   // ---- 3. Compute Hmsg(R, pkSeed, pkRoot, msg) ----
+  // FIPS 205 §11.2.1 needs R and PK.seed TWICE: once inside the inner
+  // SHA-256, once as the MGF1 seed prefix. See #137.
+  t.copyToTop('R', '_R2');
+  t.copyToTop('pkSeed', '_pks2');
   t.copyToTop('R', '_R');
   t.copyToTop('pkSeed', '_pks');
   t.copyToTop('pkRoot', '_pkr');
   t.copyToTop('msg', '_msg');
-  t.rawBlock(['_R', '_pks', '_pkr', '_msg'], 'digest', (e) => {
+  t.rawBlock(['_R2', '_pks2', '_R', '_pks', '_pkr', '_msg'], 'digest', (e) => {
     emitSLHHmsg(e, n, digestLen);
   });
 

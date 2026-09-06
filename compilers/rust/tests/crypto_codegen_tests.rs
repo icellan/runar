@@ -238,13 +238,22 @@ fn test_emit_verify_slh_dsa_op_counts_match_go_reference() {
     // the FORS index window to ceil((bit_offset+a)/8) instead of capping at 2
     // bytes, so the a=14 sets (192s/256s) emit a 3-byte window on unlucky
     // alignments (+48 for 192s, +66 for 256s). Numbers match the Go/TS peers.
+    //
+    // #137 (FIPS-205 conformance) then added, per parameter set, exactly 6 + d:
+    //   +6 once, in emit_slh_hmsg -- the MGF1 seed must be prefixed with
+    //     R || PK.seed (FIPS 205 Sec 11.2.1): 2 extra copy_to_top (2 ops each)
+    //     + 2 OP_CAT.
+    //   +1 per hypertree layer (d layers) -- wots_pk_from_sig must restore the
+    //     key pair address after set_type(WOTS_PK) (FIPS 205 Alg. 8 lines 8-11),
+    //     turning a 1-op 4-zero-byte push into a 2-op push-depth + PICK.
+    // d = 7, 22, 7, 22, 8, 17 for 128s, 128f, 192s, 192f, 256s, 256f.
     let expected = [
-        ("SHA2_128s", 29564usize),
-        ("SHA2_128f", 85765),
-        ("SHA2_192s", 41951),
-        ("SHA2_192f", 121712),
-        ("SHA2_256s", 61193),
-        ("SHA2_256f", 122997),
+        ("SHA2_128s", 29577usize),
+        ("SHA2_128f", 85793),
+        ("SHA2_192s", 41964),
+        ("SHA2_192f", 121740),
+        ("SHA2_256s", 61207),
+        ("SHA2_256f", 123020),
     ];
     for (key, want) in expected {
         let ops = collect(|s| emit_verify_slh_dsa(s, key));

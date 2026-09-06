@@ -55,7 +55,7 @@ function hash160hex(data: Buffer | Uint8Array): string {
 
 // Deterministic SLH-DSA test public key (32 bytes hex: PK.seed[16] || PK.root[16])
 // Generated from seed [0, 1, 2, ..., 47] with SLH-DSA-SHA2-128s (n=16).
-const SLHDSA_TEST_PK = '00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf';
+const SLHDSA_TEST_PK = '00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0';
 const SLHDSA_TEST_PK_HASH = hash160hex(Buffer.from(SLHDSA_TEST_PK, 'hex'));
 
 describe('SPHINCSWallet (Hybrid ECDSA + SLH-DSA-SHA2-128s)', () => {

@@ -1919,7 +1919,7 @@ func TestStatefulWOTSGate_ScriptExecution_TamperedSig(t *testing.T) {
 // SLH-DSA test vector generated from the TypeScript reference implementation
 // using: slhKeygen(SLH_SHA2_128s, seed=0x42||0x00*47), slhSign(msg, sk)
 // Verified: slhVerify(msg, sig, pk) === true
-const slhdsaTestPK = "00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf"
+const slhdsaTestPK = "00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0"
 const slhdsaTestMsg = "736c682d647361207465737420766563746f72" // "slh-dsa test vector"
 const slhdsaTestSigFile = "testdata/slhdsa-test-sig.hex"
 
