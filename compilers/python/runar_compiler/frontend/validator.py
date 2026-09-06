@@ -250,6 +250,138 @@ class _ValidationContext:
         for stmt in ctor.body:
             self._validate_statement(stmt)
 
+        self._validate_constructor_slot_bijection()
+
+    def _validate_constructor_slot_bijection(self) -> None:
+        """Enforce the NEW-002 invariant.
+
+        Every constructor parameter initialises exactly one property that needs
+        a deploy-time value, and the i-th parameter initialises the i-th such
+        property.
+
+        A property's deploy-time value comes from a constructor ARGUMENT, and
+        the artifact addresses those arguments POSITIONALLY: the ABI
+        constructor params come from the constructor SIGNATURE while a
+        constructor slot's ``paramIndex`` is an index into the properties with
+        no ``initial_value``, and the SDK splices
+        ``constructorArgs[slot.paramIndex]`` into the slot's bytes. Two
+        independently built lists, assumed to line up. Where they disagree a
+        deploy argument lands in ANOTHER property's slot, silently -- a
+        deployed contract authorising a value the developer never passed for
+        that property.
+
+        "Needs a deploy-time value" mirrors
+        ``_constructor_assigned_properties`` in ``anf_lower.py`` exactly: a
+        property carries a compile-time ``initial_value`` iff it has an
+        initializer the constructor does NOT override by assigning it a bare
+        parameter.
+        """
+        ctor = self.contract.constructor
+        param_index = {p.name: i for i, p in enumerate(ctor.params)}
+
+        # property -> distinct bare parameters assigned to it; a property with
+        # any non-parameter assignment is recorded with an EMPTY set.
+        prop_to_params: dict[str, set[str]] = {}
+        param_to_props: dict[str, set[str]] = {}
+        for stmt in ctor.body:
+            if not isinstance(stmt, AssignmentStmt):
+                continue
+            if not isinstance(stmt.target, PropertyAccessExpr):
+                continue
+            prop = stmt.target.property
+            if not isinstance(stmt.value, Identifier) or stmt.value.name not in param_index:
+                prop_to_params.setdefault(prop, set())
+                continue
+            param = stmt.value.name
+            prop_to_params.setdefault(prop, set()).add(param)
+            param_to_props.setdefault(param, set()).add(prop)
+
+        before = len(self.errors)
+
+        # (a) One parameter feeding several properties: only one of them could
+        # own the argument, so the rest keep a default or deploy undefined.
+        for param in ctor.params:
+            props = param_to_props.get(param.name, set())
+            if len(props) > 1:
+                self._add_error(
+                    f"constructor parameter '{param.name}' initialises more than one "
+                    f"property ({', '.join(sorted(props))}). Each constructor parameter "
+                    "is spliced into exactly one property's deploy-time slot, so only "
+                    "the first would receive the argument. Declare one parameter per "
+                    "property.",
+                    loc=ctor.source_location,
+                )
+
+        # (b) One property fed by several parameters -- no single argument owns it.
+        for prop_node in self.contract.properties:
+            params = prop_to_params.get(prop_node.name, set())
+            if len(params) > 1:
+                self._add_error(
+                    f"property '{prop_node.name}' is assigned more than one constructor "
+                    f"parameter ({', '.join(sorted(params))}). Each property that needs "
+                    "a deploy-time value corresponds to exactly one constructor parameter.",
+                    loc=ctor.source_location,
+                )
+
+        # (c) A property that needs a deploy-time value but whose constructor
+        # assignment is not a parameter. A property assigned NOTHING is already
+        # reported above, so it is skipped here rather than double-reported.
+        for prop_node in self.contract.properties:
+            if prop_node.initializer is not None:
+                continue
+            params = prop_to_params.get(prop_node.name)
+            if params is None or len(params) >= 1:
+                continue
+            self._add_error(
+                f"property '{prop_node.name}' has no initializer and is not assigned a "
+                "constructor parameter, so it has no deploy-time value. The constructor "
+                "body is not compiled into the locking script — give the property a "
+                "literal initializer or assign it a constructor parameter "
+                f"(this.{prop_node.name} = {prop_node.name}).",
+                loc=ctor.source_location,
+            )
+
+        # (d) A parameter that initialises nothing: its argument is dropped
+        # and, because slots are positional, every later argument lands in the
+        # wrong slot.
+        for param in ctor.params:
+            if param.name in param_to_props:
+                continue
+            self._add_error(
+                f"constructor parameter '{param.name}' does not initialise any property. "
+                "Constructor arguments are spliced into property slots positionally, so "
+                "an unused parameter drops its own argument and shifts every later one "
+                f"into the wrong property's slot. Assign it (this.{param.name} = "
+                f"{param.name}) or remove the parameter.",
+                loc=ctor.source_location,
+            )
+
+        # (e) Order. Only meaningful once (a)-(d) hold, otherwise the positions
+        # being compared are themselves the thing that is broken.
+        if len(self.errors) != before:
+            return
+        slot = 0
+        for prop_node in self.contract.properties:
+            params = prop_to_params.get(prop_node.name, set())
+            single = next(iter(params)) if len(params) == 1 else None
+            if prop_node.initializer is not None and single is None:
+                continue  # initializer survives: not a deploy-time property
+            if single is not None:
+                declared = param_index[single]
+                if declared != slot:
+                    abi_name = ctor.params[slot].name if slot < len(ctor.params) else "?"
+                    self._add_error(
+                        f"property '{prop_node.name}' occupies deploy-time slot {slot}, "
+                        f"but the constructor parameter that initialises it ('{single}') "
+                        f"is declared at position {declared}. Constructor arguments are "
+                        "spliced positionally, so the deployed script would carry "
+                        f"argument {slot} — advertised by the ABI as parameter "
+                        f"'{abi_name}' — in this property's slot. Declare the parameters "
+                        "in the same order as the properties they initialise.",
+                        loc=ctor.source_location,
+                    )
+            slot += 1
+
     # -------------------------------------------------------------------
     # Method validation
     # -------------------------------------------------------------------
@@ -276,6 +408,10 @@ class _ValidationContext:
                     "Arrays are only allowed as contract properties.",
                     loc=method.source_location,
                 )
+
+        # `return` is a PRIVATE-helper construct only (NEW-012).
+        if method.visibility == "public":
+            self._reject_return_in_public_method(method)
 
         # Public methods must end with an assert() call (unless
         # StatefulSmartContract, where the compiler auto-injects the final
@@ -397,6 +533,47 @@ class _ValidationContext:
     # -------------------------------------------------------------------
     # asm() intrinsic validation
     # -------------------------------------------------------------------
+
+
+    def _reject_return_in_public_method(self, method) -> None:
+        """Enforce ``spec/grammar.md:161`` and ``:162``.
+
+        161: "Public methods MUST return ``void``."
+        162: "Public methods MUST end with an ``assert(...)`` call as their
+             final statement."
+
+        ``spec/semantics.md`` gives ``return`` no early-exit meaning at all:
+        §4.6 defines it ONLY as "the value of this method is v" (the
+        private-helper inlining semantics), while §4.7 sequences statements
+        UNCONDITIONALLY -- there is no rule under which the statements after a
+        ``return`` are skipped.
+
+        Lowering it as if it were the tail of an inlined helper produced two
+        different broken scripts (NEW-012):
+
+        * ``return;`` -- the enclosing branch had no result to contribute, so
+          its arm yielded OP_0 and the whole script evaluated FALSE, an
+          unspendable UTXO from source that compiled clean. In this tier it
+          surfaced as an internal "stack lowering: list index out of range"
+          instead.
+        * ``return expr;`` -- the returned value became the branch result and
+          hence the script's final truthiness, so any truthy expr spent the
+          contract WITHOUT reaching the guarding assert. Fail-OPEN.
+
+        The Java tier has always rejected the valued form; this brings the rule
+        to every tier and covers the bare form too.
+        """
+        for ret in _find_return_statements(method.body):
+            self._add_error(
+                f"public method '{method.name}' must not use `return`: public "
+                "methods are spending entry points, they return void "
+                "(spec/grammar.md:161) and must end with an assert() that "
+                "encodes the spending condition (spec/grammar.md:162). "
+                "R\u00fanar has no early exit \u2014 restructure the guard as an "
+                "if/else, or move the logic into a private helper, where "
+                "`return` is allowed.",
+                loc=ret.source_location,
+            )
 
     def _validate_asm_usage(self, method) -> None:
         """Walk a method body and validate every asm({...}) call.
@@ -615,6 +792,24 @@ def _is_super_call(stmt: Statement) -> bool:
         return isinstance(callee.object, Identifier) and callee.object.name == "super"
     return False
 
+
+
+def _find_return_statements(body: list[Statement]) -> list[ReturnStmt]:
+    """Every ``return`` in ``body``, at any nesting depth (arms, loop bodies)."""
+    found: list[ReturnStmt] = []
+
+    def walk(stmts: list[Statement]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ReturnStmt):
+                found.append(stmt)
+            elif isinstance(stmt, IfStmt):
+                walk(stmt.then)
+                walk(stmt.else_ or [])
+            elif isinstance(stmt, ForStmt):
+                walk(stmt.body)
+
+    walk(body)
+    return found
 
 def _ends_with_assert(body: list[Statement]) -> bool:
     if len(body) == 0:

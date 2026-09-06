@@ -279,6 +279,62 @@ fn checkStateBigintMagnitude(
     return LowerError.UnrepresentableStateBigint;
 }
 
+fn isConstructorParam(contract: ContractNode, name: []const u8) bool {
+    for (contract.constructor.params) |p| {
+        if (std.mem.eql(u8, p.name, name)) return true;
+    }
+    return false;
+}
+
+/// True when the constructor gives `prop_name` its value from exactly one
+/// constructor PARAMETER, and that parameter feeds no other property.
+///
+/// Such a property gets its value from the deploy-time argument, so any
+/// initializer on it is a default the argument overrides — baking the default
+/// into the artifact would silently discard the argument (NEW-001). The
+/// property must instead stay in the constructor slot list so the SDK writes
+/// the argument.
+///
+/// Deliberately narrow in three ways.
+///
+///  1. Only a BARE parameter reference counts. `.a = 5` assigns a literal, not
+///     an argument, and keeps its initializer.
+///  2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+///     is positional, so a parameter feeding two properties has no
+///     representation — that shape is already undeployable today when written
+///     without initializers, and belongs to NEW-002.
+///  3. A property assigned more than once in the constructor is skipped, for
+///     the same reason.
+fn constructorAssignsUniquely(contract: ContractNode, prop_name: []const u8) bool {
+    var param: ?[]const u8 = null;
+    var assign_count: usize = 0;
+
+    for (contract.constructor.assignments) |a| {
+        if (!std.mem.eql(u8, a.target, prop_name)) continue;
+        assign_count += 1;
+        switch (a.value) {
+            .identifier => |name| {
+                if (!isConstructorParam(contract, name)) return false;
+                param = name;
+            },
+            else => return false,
+        }
+    }
+    if (assign_count != 1) return false;
+    const p = param orelse return false;
+
+    var feeds: usize = 0;
+    for (contract.constructor.assignments) |a| {
+        switch (a.value) {
+            .identifier => |name| {
+                if (std.mem.eql(u8, name, p)) feeds += 1;
+            },
+            else => {},
+        }
+    }
+    return feeds == 1;
+}
+
 fn lowerPropertiesWithDiagnostic(
     allocator: Allocator,
     contract: ContractNode,
@@ -295,14 +351,11 @@ fn lowerPropertiesWithDiagnostic(
             .readonly = prop.readonly,
             .synthetic_array_chain = prop.synthetic_array_chain,
         };
-        // Only emit initialValue for properties that have defaults AND are NOT
-        // constructor params. This matches the TS compiler: properties with
-        // initializers are excluded from auto-generated constructors.
+        // Only emit initialValue for properties that have defaults AND do NOT
+        // take their value from a constructor argument. See
+        // `constructorAssignsUniquely`.
         if (prop.initializer) |init_expr| {
-            const is_ctor_param = for (contract.constructor.params) |p| {
-                if (std.mem.eql(u8, p.name, prop.name)) break true;
-            } else false;
-            if (!is_ctor_param) {
+            if (!constructorAssignsUniquely(contract, prop.name)) {
                 anf_prop.initial_value = extractLiteralValue(init_expr);
             }
         }

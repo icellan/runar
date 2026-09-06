@@ -73,18 +73,92 @@ pub fn try_lower_to_anf(contract: &ContractNode) -> Result<ANFProgram, String> {
 // Properties
 // ---------------------------------------------------------------------------
 
+/// Properties the constructor assigns a constructor PARAMETER to.
+///
+/// These get their value from the deploy-time argument, so any initializer on
+/// them is a default the argument overrides — carrying it into `initial_value`
+/// would bake the default into the artifact and silently discard the argument
+/// (NEW-001). The property must instead stay in the constructor slot list
+/// (`initial_value == None`) so the SDK writes the argument.
+///
+/// Deliberately narrow in three ways.
+///
+/// 1. Only a BARE parameter reference counts. `this.a = 5n` assigns a literal,
+///    not an argument, and keeps its initializer.
+/// 2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+///    is positional, so a parameter feeding two properties has no
+///    representation — that shape is already undeployable today when written
+///    without initializers, and belongs to NEW-002.
+/// 3. A property assigned more than once in the constructor is skipped, for the
+///    same reason.
+fn constructor_assigned_properties(contract: &ContractNode) -> HashSet<String> {
+    let params: HashSet<&str> = contract
+        .constructor
+        .params
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut prop_to_params: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut param_to_props: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for stmt in &contract.constructor.body {
+        let Statement::Assignment { target, value, .. } = stmt else {
+            continue;
+        };
+        let Expression::PropertyAccess { property } = target else {
+            continue;
+        };
+        match value {
+            Expression::Identifier { name } if params.contains(name.as_str()) => {
+                prop_to_params
+                    .entry(property.clone())
+                    .or_default()
+                    .insert(name.clone());
+                param_to_props
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(property.clone());
+            }
+            _ => {
+                // Not a constructor argument: never strip this property.
+                prop_to_params.entry(property.clone()).or_default();
+            }
+        }
+    }
+
+    let mut out = HashSet::new();
+    for (prop, ps) in &prop_to_params {
+        if ps.len() != 1 {
+            continue;
+        }
+        let param = ps.iter().next().expect("len checked");
+        if param_to_props.get(param).map(HashSet::len) == Some(1) {
+            out.insert(prop.clone());
+        }
+    }
+    out
+}
+
 fn lower_properties(contract: &ContractNode) -> Vec<ANFProperty> {
+    let ctor_assigned = constructor_assigned_properties(contract);
     contract
         .properties
         .iter()
         .map(|prop| {
             let prop_type = type_node_to_string(&prop.prop_type);
-            check_state_bigint_magnitude(prop, &prop_type);
+            let baked = !ctor_assigned.contains(&prop.name);
+            if baked {
+                check_state_bigint_magnitude(prop, &prop_type);
+            }
             ANFProperty {
                 name: prop.name.clone(),
                 prop_type,
                 readonly: prop.readonly,
-                initial_value: prop.initializer.as_ref().and_then(extract_literal_value),
+                initial_value: if baked {
+                    prop.initializer.as_ref().and_then(extract_literal_value)
+                } else {
+                    None
+                },
                 synthetic_array_chain: prop.synthetic_array_chain.as_ref().map(|chain| {
                     chain
                         .iter()

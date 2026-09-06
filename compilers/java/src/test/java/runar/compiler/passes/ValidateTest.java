@@ -199,9 +199,19 @@ class ValidateTest {
     // ------------------------------------------------------------------
 
     @Test
-    void rejectsReturnValueFromPublicMethod() {
-        // Public methods compile as spending entry points; returning a value
-        // has no meaning and is not allowed by the Rúnar subset.
+    void rejectsReturnInPublicMethod() {
+        // Public methods compile as spending entry points. `return` is a
+        // PRIVATE-helper construct: spec/grammar.md:161 makes them void,
+        // :162 makes the trailing assert their spending condition, and
+        // spec/semantics.md §4.7 sequences statements unconditionally, so
+        // there is no early exit to lower.
+        //
+        // This test used to assert the OPPOSITE for the bare form — "uses
+        // only `return;` (no value) so it should be OK" — and that hole is
+        // NEW-012: the arm carrying the bare `return;` contributed no result,
+        // yielded OP_0, and the whole script evaluated FALSE. Source compiled
+        // clean, `Spend` rejected the spend, the UTXO was unspendable. Both
+        // spellings are errors now.
         String src = """
             class Bad extends SmartContract {
                 @Readonly Bigint x;
@@ -220,11 +230,18 @@ class ValidateTest {
                 }
             }
             """;
-        // The method above uses only `return;` (no value) so it should be OK.
-        ContractNode ok = JavaParser.parse(src, "OkReturn.runar.java");
-        assertDoesNotThrow(() -> Validate.run(ok));
+        // Bare `return;` — rejected (NEW-012).
+        ContractNode bareReturn = JavaParser.parse(src, "BareReturn.runar.java");
+        Validate.ValidationException bareErr = assertThrows(
+            Validate.ValidationException.class,
+            () -> Validate.run(bareReturn)
+        );
+        assertTrue(
+            bareErr.errors().stream().anyMatch(m -> m.contains("must not use `return`")),
+            "expected bare-return error, got " + bareErr.errors()
+        );
 
-        // Now a `return expr;` in a public method must be rejected.
+        // `return expr;` — rejected too, as it always has been here.
         String badSrc = """
             class Bad extends SmartContract {
                 @Readonly Bigint x;
@@ -249,9 +266,37 @@ class ValidateTest {
             () -> Validate.run(bad)
         );
         assertTrue(
-            e.errors().stream().anyMatch(m -> m.contains("must not return a value")),
-            "expected return-value error, got " + e.errors()
+            e.errors().stream().anyMatch(m -> m.contains("must not use `return`")),
+            "expected return error, got " + e.errors()
         );
+    }
+
+    @Test
+    void allowsReturnInPrivateHelper() {
+        // spec/grammar.md:168 — "Private methods may return a value." The
+        // rejection above must not spill onto the inlined-helper form, which
+        // is how ~340 in-repo contracts legitimately use `return`.
+        String src = """
+            class Ok extends SmartContract {
+                @Readonly Bigint x;
+
+                Ok(Bigint x) {
+                    super(x);
+                    this.x = x;
+                }
+
+                Bigint doubled(Bigint v) {
+                    return v.add(v);
+                }
+
+                @Public
+                void check(Bigint y) {
+                    assertThat(this.doubled(y) == this.x);
+                }
+            }
+            """;
+        ContractNode ok = JavaParser.parse(src, "Ok.runar.java");
+        assertDoesNotThrow(() -> Validate.run(ok));
     }
 
     // ------------------------------------------------------------------

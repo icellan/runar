@@ -406,20 +406,16 @@ class ZigParser extends ParserCore<ZigToken> {
     this.expect('}');
     if (this.current().type === ';') this.advance();
 
-    // Strip property initializers for properties that are also explicit
-    // constructor params: the constructor argument overrides any default,
-    // and the Zig compiler reference implementation omits `initialValue`
-    // in this case so every compiler must do the same to keep IR identical.
-    // Cast is needed: TS 5.9 flow analysis keeps `this.constructorNode`
-    // narrowed to `null` from the reset on line 361 and collapses the
-    // optional-chain's non-null branch to `never`.
-    const ctor = this.constructorNode as MethodNode | null;
-    const ctorParamNames = new Set<string>(
-      ctor ? ctor.params.map((p) => p.name) : [],
-    );
+    // The initializer of a property the constructor assigns is no longer
+    // stripped here. `04-anf-lower.ts` now applies that rule to EVERY surface
+    // (see `constructorAssignedProperties`), keyed on the constructor
+    // assignment rather than on a name match, so the Zig surface no longer
+    // needs — and must not keep — a private copy that only fired when the
+    // struct field and the `init` parameter happened to share a name.
+    // `readonly` inference still reads the ORIGINAL initializer, exactly as it
+    // did when the strip ran in the same expression.
     this.properties = this.properties.map((property) => ({
       ...property,
-      initializer: ctorParamNames.has(property.name) ? undefined : property.initializer,
       readonly: this.parentClass === 'SmartContract' || this.parentClass === 'UnsafeSmartContract' || property.readonly || (this.parentClass === 'StatefulSmartContract' && !property.readonly && property.initializer === undefined && !this.methodsMutateProperty(property.name)),
     }));
 

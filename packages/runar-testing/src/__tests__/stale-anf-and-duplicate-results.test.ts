@@ -55,7 +55,7 @@ const MERGE_SOURCE = `import { StatefulSmartContract } from 'runar-lang';
 export class Merge extends StatefulSmartContract {
   a: bigint = 0n;
   b: bigint = 0n;
-  constructor(seed: bigint) { super(seed); this.a = seed; this.b = seed; }
+  constructor(a: bigint, b: bigint) { super(a, b); this.a = a; this.b = b; }
 
   public go(x: bigint, flag: bigint) {
     let na: bigint = 1n;

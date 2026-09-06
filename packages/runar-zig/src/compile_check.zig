@@ -193,8 +193,15 @@ test "compileCheckSource reports Zig constructor assignment failures" {
 
     try std.testing.expect(!result.ok());
     try std.testing.expectEqual(CompileCheckStage.validate, result.stage.?);
-    try std.testing.expectEqual(@as(usize, 1), result.messages.len);
+    // TWO distinct diagnostics, both correct and both load-bearing: `amount` is
+    // never assigned (so the property has no source), AND it is a dead
+    // constructor parameter (so every later constructor argument would be
+    // spliced into the wrong property slot). The bijection check is the
+    // all-7-tier one added in 02-validate.ts / validator.{go,rs,py,rb} /
+    // validate.zig; this expectation predated it and asserted a count of 1.
+    try std.testing.expectEqual(@as(usize, 2), result.messages.len);
     try std.testing.expectEqualStrings("property must be assigned in the constructor", result.messages[0]);
+    try std.testing.expect(std.mem.startsWith(u8, result.messages[1], "constructor parameter 'amount' does not initialise any property."));
 }
 
 test "compileCheckFile reads and checks a file" {

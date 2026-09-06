@@ -134,10 +134,69 @@ public final class AnfLower {
     // Properties
     // ------------------------------------------------------------------
 
+    /**
+     * Properties the constructor assigns a constructor PARAMETER to.
+     *
+     * <p>These get their value from the deploy-time argument, so any
+     * initializer on them is a default the argument overrides — carrying it
+     * into {@code initialValue} would bake the default into the artifact and
+     * silently discard the argument (NEW-001). The property must instead stay
+     * in the constructor slot list ({@code initialValue == null}) so the SDK
+     * writes the argument.
+     *
+     * <p>Deliberately narrow in three ways.
+     *
+     * <ol>
+     *   <li>Only a BARE parameter reference counts. {@code this.a = 5n}
+     *       assigns a literal, not an argument, and keeps its initializer.
+     *   <li>The property&lt;-&gt;parameter mapping must be ONE-TO-ONE. The
+     *       artifact model is positional, so a parameter feeding two properties
+     *       has no representation — that shape is already undeployable today
+     *       when written without initializers, and belongs to NEW-002.
+     *   <li>A property assigned more than once in the constructor is skipped,
+     *       for the same reason.
+     * </ol>
+     */
+    private static Set<String> constructorAssignedProperties(ContractNode contract) {
+        MethodNode ctor = contract.constructor();
+        if (ctor == null) return Set.of();
+
+        Set<String> params = new HashSet<>();
+        for (ParamNode p : ctor.params()) params.add(p.name());
+
+        Map<String, Set<String>> propToParams = new LinkedHashMap<>();
+        Map<String, Set<String>> paramToProps = new HashMap<>();
+
+        for (Statement stmt : ctor.body()) {
+            if (!(stmt instanceof AssignmentStatement assign)) continue;
+            if (!(assign.target() instanceof PropertyAccessExpr target)) continue;
+            String prop = target.property();
+            if (!(assign.value() instanceof Identifier id) || !params.contains(id.name())) {
+                // Not a constructor argument: never strip this property.
+                propToParams.computeIfAbsent(prop, k -> new HashSet<>());
+                continue;
+            }
+            propToParams.computeIfAbsent(prop, k -> new HashSet<>()).add(id.name());
+            paramToProps.computeIfAbsent(id.name(), k -> new HashSet<>()).add(prop);
+        }
+
+        Set<String> out = new HashSet<>();
+        for (Map.Entry<String, Set<String>> e : propToParams.entrySet()) {
+            if (e.getValue().size() != 1) continue;
+            String param = e.getValue().iterator().next();
+            if (paramToProps.get(param).size() != 1) continue;
+            out.add(e.getKey());
+        }
+        return out;
+    }
+
     private static List<AnfProperty> lowerProperties(ContractNode contract) {
+        Set<String> ctorAssigned = constructorAssignedProperties(contract);
         List<AnfProperty> out = new ArrayList<>(contract.properties().size());
         for (PropertyNode p : contract.properties()) {
-            ConstValue init = p.initializer() != null ? extractLiteralValue(p.initializer()) : null;
+            ConstValue init = p.initializer() != null && !ctorAssigned.contains(p.name())
+                ? extractLiteralValue(p.initializer())
+                : null;
             AnfProperty prop = new AnfProperty(p.name(), typeToString(p.type()), p.readonly(), init);
             if (init != null) checkStateBigintMagnitude(prop);
             out.add(prop);

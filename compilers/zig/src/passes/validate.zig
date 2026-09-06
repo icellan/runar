@@ -97,6 +97,10 @@ fn validateWithMode(
 
 /// Free a ValidationResult previously returned by validate().
 pub fn freeResult(allocator: Allocator, result: ValidationResult) void {
+    // Diagnostics whose message was allocPrint'd carry `owned_message`; static
+    // literals leave it false and must not be freed.
+    for (result.errors) |d| if (d.owned_message) allocator.free(d.message);
+    for (result.warnings) |d| if (d.owned_message) allocator.free(d.message);
     allocator.free(result.errors);
     allocator.free(result.warnings);
 }
@@ -290,6 +294,212 @@ fn validateConstructor(
             });
         }
     }
+
+    try validateConstructorSlotBijection(allocator, contract, errors);
+}
+
+/// Distinct bare constructor parameters the constructor assigns to one
+/// property, mirroring the TS `propToParams` map entry for that property: a
+/// non-parameter assignment (an assigned literal is not a deploy-time
+/// argument) RESETS the set.
+const PropAssignment = struct {
+    /// The constructor assigns the property at least once.
+    present: bool,
+    /// Number of DISTINCT parameters currently assigned (capped at 2).
+    count: usize,
+    /// The single parameter, when `count == 1`.
+    param: ?[]const u8,
+};
+
+fn propAssignedParams(contract: ContractNode, prop_name: []const u8) PropAssignment {
+    var out = PropAssignment{ .present = false, .count = 0, .param = null };
+    for (contract.constructor.assignments) |a| {
+        if (!std.mem.eql(u8, a.target, prop_name)) continue;
+        out.present = true;
+        switch (a.value) {
+            .identifier => |name| {
+                if (!isCtorParam(contract, name)) {
+                    out.count = 0;
+                    out.param = null;
+                    continue;
+                }
+                if (out.param) |p| {
+                    if (!std.mem.eql(u8, p, name)) out.count = 2;
+                } else {
+                    out.param = name;
+                    out.count = 1;
+                }
+            },
+            else => {
+                out.count = 0;
+                out.param = null;
+            },
+        }
+    }
+    return out;
+}
+
+fn isCtorParam(contract: ContractNode, name: []const u8) bool {
+    for (contract.constructor.params) |p| {
+        if (std.mem.eql(u8, p.name, name)) return true;
+    }
+    return false;
+}
+
+fn ctorParamIndex(contract: ContractNode, name: []const u8) ?usize {
+    for (contract.constructor.params, 0..) |p, i| {
+        if (std.mem.eql(u8, p.name, name)) return i;
+    }
+    return null;
+}
+
+/// Distinct properties a constructor parameter is assigned to, appended to
+/// `out` in constructor-body order.
+fn paramFedProps(
+    allocator: Allocator,
+    contract: ContractNode,
+    param_name: []const u8,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    for (contract.constructor.assignments) |a| {
+        switch (a.value) {
+            .identifier => |name| {
+                if (!std.mem.eql(u8, name, param_name)) continue;
+                var seen = false;
+                for (out.items) |existing| {
+                    if (std.mem.eql(u8, existing, a.target)) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) try out.append(allocator, a.target);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Enforce the NEW-002 invariant: every constructor parameter initialises
+/// exactly one property that needs a deploy-time value, and the i-th parameter
+/// initialises the i-th such property.
+///
+/// A property's deploy-time value comes from a constructor ARGUMENT, and the
+/// artifact addresses those arguments POSITIONALLY: the ABI constructor params
+/// come from the constructor SIGNATURE while a constructor slot's `paramIndex`
+/// is an index into the properties with no `initialValue`, and the SDK splices
+/// `constructorArgs[slot.paramIndex]` into the slot's bytes. Two independently
+/// built lists, assumed to line up. Where they disagree a deploy argument lands
+/// in ANOTHER property's slot, silently — a deployed contract authorising a
+/// value the developer never passed for that property.
+///
+/// "Needs a deploy-time value" mirrors `constructorAssignsUniquely` in
+/// `anf_lower.zig` exactly: a property carries a compile-time `initial_value`
+/// iff it has an initializer the constructor does NOT override by assigning it
+/// a bare parameter.
+fn validateConstructorSlotBijection(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    const ctor = contract.constructor;
+    const before = errors.items.len;
+
+    // (a) One parameter feeding several properties: only one of them could own
+    // the argument, so the rest keep a default or deploy undefined.
+    for (ctor.params) |param| {
+        var fed: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer fed.deinit(allocator);
+        try paramFedProps(allocator, contract, param.name, &fed);
+        if (fed.items.len <= 1) continue;
+        const joined = try std.mem.join(allocator, ", ", fed.items);
+        defer allocator.free(joined);
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "constructor parameter '{s}' initialises more than one property ({s}). Each constructor parameter is spliced into exactly one property's deploy-time slot, so only the first would receive the argument. Declare one parameter per property.",
+                .{ param.name, joined },
+            ),
+            .owned_message = true,
+            .severity = .@"error",
+        });
+    }
+
+    // (b) One property fed by several parameters — no single argument owns it.
+    for (contract.properties) |prop| {
+        const info = propAssignedParams(contract, prop.name);
+        if (info.count <= 1) continue;
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "property '{s}' is assigned more than one constructor parameter. Each property that needs a deploy-time value corresponds to exactly one constructor parameter.",
+                .{prop.name},
+            ),
+            .owned_message = true,
+            .severity = .@"error",
+        });
+    }
+
+    // (c) A property that needs a deploy-time value but whose constructor
+    // assignment is not a parameter. A property assigned NOTHING is already
+    // reported above, so it is skipped here rather than double-reported.
+    for (contract.properties) |prop| {
+        if (prop.initializer != null) continue;
+        const info = propAssignedParams(contract, prop.name);
+        if (!info.present or info.count >= 1) continue;
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "property '{s}' has no initializer and is not assigned a constructor parameter, so it has no deploy-time value. The constructor body is not compiled into the locking script — give the property a literal initializer or assign it a constructor parameter (this.{s} = {s}).",
+                .{ prop.name, prop.name, prop.name },
+            ),
+            .owned_message = true,
+            .severity = .@"error",
+        });
+    }
+
+    // (d) A parameter that initialises nothing: its argument is dropped and,
+    // because slots are positional, every later argument lands in the wrong slot.
+    for (ctor.params) |param| {
+        var fed: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer fed.deinit(allocator);
+        try paramFedProps(allocator, contract, param.name, &fed);
+        if (fed.items.len > 0) continue;
+        try errors.append(allocator, .{
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "constructor parameter '{s}' does not initialise any property. Constructor arguments are spliced into property slots positionally, so an unused parameter drops its own argument and shifts every later one into the wrong property's slot. Assign it (this.{s} = {s}) or remove the parameter.",
+                .{ param.name, param.name, param.name },
+            ),
+            .owned_message = true,
+            .severity = .@"error",
+        });
+    }
+
+    // (e) Order. Only meaningful once (a)-(d) hold, otherwise the positions
+    // being compared are themselves the thing that is broken.
+    if (errors.items.len != before) return;
+    var slot: usize = 0;
+    for (contract.properties) |prop| {
+        const info = propAssignedParams(contract, prop.name);
+        const single: ?[]const u8 = if (info.count == 1) info.param else null;
+        if (prop.initializer != null and single == null) continue;
+        if (single) |param| {
+            const declared = ctorParamIndex(contract, param) orelse continue;
+            if (declared != slot) {
+                const abi_name = if (slot < ctor.params.len) ctor.params[slot].name else "?";
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "property '{s}' occupies deploy-time slot {d}, but the constructor parameter that initialises it ('{s}') is declared at position {d}. Constructor arguments are spliced positionally, so the deployed script would carry argument {d} — advertised by the ABI as parameter '{s}' — in this property's slot. Declare the parameters in the same order as the properties they initialise.",
+                        .{ prop.name, slot, param, declared, slot, abi_name },
+                    ),
+                    .owned_message = true,
+                    .severity = .@"error",
+                });
+            }
+        }
+        slot += 1;
+    }
 }
 
 fn isZigConstructor(ctor: ConstructorNode) bool {
@@ -332,6 +542,24 @@ fn validateMethods(
             if (p.type_info == .fixed_array) {
                 try errors.append(allocator, .{
                     .message = "FixedArray is not allowed as a method parameter",
+                    .severity = .@"error",
+                });
+            }
+        }
+
+        // `return` is a PRIVATE-helper construct only (NEW-012).
+        if (method.is_public) {
+            var returns: usize = 0;
+            countReturnStatements(method.body, &returns);
+            var i: usize = 0;
+            while (i < returns) : (i += 1) {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "public method '{s}' must not use `return`: public methods are spending entry points, they return void (spec/grammar.md:161) and must end with an assert() that encodes the spending condition (spec/grammar.md:162). R\u{00fa}nar has no early exit \u{2014} restructure the guard as an if/else, or move the logic into a private helper, where `return` is allowed.",
+                        .{method.name},
+                    ),
+                    .owned_message = true,
                     .severity = .@"error",
                 });
             }
@@ -761,6 +989,36 @@ fn checkAsmCall(
     }
 }
 
+/// Count every `return` in `body`, at any nesting depth (arms, loop bodies).
+///
+/// Enforces spec/grammar.md:161 ("Public methods MUST return `void`") and :162
+/// ("Public methods MUST end with an `assert(...)` call as their final
+/// statement"). spec/semantics.md gives `return` no early-exit meaning at all:
+/// 4.6 defines it ONLY as "the value of this method is v" (the private-helper
+/// inlining semantics), while 4.7 sequences statements UNCONDITIONALLY.
+///
+/// Lowering it as if it were the tail of an inlined helper produced two
+/// different broken scripts (NEW-012): `return;` left the enclosing branch with
+/// no result, so its arm yielded OP_0 and the whole script evaluated FALSE (an
+/// unspendable UTXO from source that compiled clean); `return expr;` made the
+/// returned value the branch result and hence the script's final truthiness, so
+/// any truthy expr spent the contract WITHOUT reaching the guarding assert
+/// (fail-OPEN). The Java tier has always rejected the valued form; this brings
+/// the rule to every tier and covers the bare form too.
+fn countReturnStatements(body: []const Statement, out: *usize) void {
+    for (body) |stmt| {
+        switch (stmt) {
+            .return_stmt => out.* += 1,
+            .if_stmt => |s| {
+                countReturnStatements(s.then_body, out);
+                if (s.else_body) |eb| countReturnStatements(eb, out);
+            },
+            .for_stmt => |s| countReturnStatements(s.body, out),
+            else => {},
+        }
+    }
+}
+
 /// Check if a method body ends with an assert statement (or all branches of a
 /// trailing if-statement end with assert).
 fn endsWithAssert(body: []const Statement) bool {
@@ -1095,6 +1353,7 @@ fn warnLocktimeWithoutSequenceGuard(
         );
         try warnings.append(allocator, .{
             .message = msg,
+            .owned_message = true,
             .severity = .warning,
         });
     }
@@ -1260,8 +1519,17 @@ fn makePropertyWithInit(name: []const u8, type_info: RunarType, readonly: bool) 
     return .{ .name = name, .type_info = type_info, .readonly = readonly, .initializer = .{ .literal_int = 0 } };
 }
 
+/// `this.<target> = <target>` — a property initialised from the constructor
+/// parameter of the same name, which is what every test contract below pairs
+/// with `makeParam(target)`.
+///
+/// This used to build `.value = .{ .literal_int = 0 }`, an AST no frontend
+/// parser produces: an assigned LITERAL is not a deploy-time argument, so the
+/// property it targets ends up with neither an initializer nor a constructor
+/// slot. The NEW-002 bijection check reads exactly this edge, so the fiction
+/// became visible as a diagnostic on contracts the tests call valid.
 fn makeAssignment(target: []const u8) types.AssignmentNode {
-    return .{ .target = target, .value = .{ .literal_int = 0 } };
+    return .{ .target = target, .value = .{ .identifier = target } };
 }
 
 fn makeParam(name: []const u8) types.ParamNode {
@@ -1298,6 +1566,111 @@ test "valid SmartContract passes validation" {
 
     try testing.expectEqual(@as(usize, 0), result.errors.len);
     try testing.expectEqual(@as(usize, 0), result.warnings.len);
+}
+
+// NEW-012 — `return` in a PUBLIC method.
+//
+// spec/grammar.md:161 makes public methods void, :162 makes their trailing
+// assert the spending condition, and spec/semantics.md gives `return` no
+// early-exit meaning at all (4.6 defines only "the value of this method is v";
+// 4.7 sequences statements unconditionally).
+//
+// Lowering it as if it were the tail of an inlined helper produced two broken
+// scripts: `return;` left the enclosing arm with no result, so it yielded OP_0
+// and the whole script evaluated FALSE — an unspendable UTXO from source that
+// compiled clean; `return expr;` made the returned value the branch result and
+// hence the script's final truthiness, so any truthy expr spent the contract
+// WITHOUT reaching the guarding assert (fail-OPEN).
+test "bare return in a public method is rejected" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("pk", .pub_key, true)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
+    var super_args = [_]Expression{.{ .identifier = "pk" }};
+    var params = [_]types.ParamNode{makeParam("pk")};
+    var then_body = [_]Statement{.{ .return_stmt = null }};
+    var body = [_]Statement{
+        .{ .if_stmt = .{ .condition = .{ .literal_bool = true }, .then_body = &then_body } },
+        .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const contract = ContractNode{
+        .name = "Guard",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var hits: usize = 0;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "must not use `return`") != null) hits += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), hits);
+}
+
+test "valued return in a public method is rejected" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("pk", .pub_key, true)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
+    var super_args = [_]Expression{.{ .identifier = "pk" }};
+    var params = [_]types.ParamNode{makeParam("pk")};
+    var then_body = [_]Statement{.{ .return_stmt = Expression{ .literal_bool = true } }};
+    var body = [_]Statement{
+        .{ .if_stmt = .{ .condition = .{ .literal_bool = true }, .then_body = &then_body } },
+        .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const contract = ContractNode{
+        .name = "Guard",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var hits: usize = 0;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "must not use `return`") != null) hits += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), hits);
+}
+
+// spec/grammar.md:168 — "Private methods may return a value." The rejection
+// must not spill onto the inlined-helper form, which is how ~340 in-repo
+// contracts legitimately use `return`.
+test "return in a private helper is allowed" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("pk", .pub_key, true)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("pk")};
+    var super_args = [_]Expression{.{ .identifier = "pk" }};
+    var params = [_]types.ParamNode{makeParam("pk")};
+    var helper_body = [_]Statement{.{ .return_stmt = Expression{ .literal_bool = true } }};
+    var public_body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "helper", .is_public = false, .params = &.{}, .body = &helper_body },
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &public_body },
+    };
+    const contract = ContractNode{
+        .name = "Guard",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    for (result.errors) |e| {
+        try testing.expect(std.mem.indexOf(u8, e.message, "must not use `return`") == null);
+    }
 }
 
 test "void property type is rejected" {
@@ -2043,15 +2416,10 @@ fn hasLocktimeWarning(result: ValidationResult) bool {
     return locktimeWarning(result) != null;
 }
 
-/// freeResult only frees the diagnostic slices; the locktime warning's message
-/// is allocator-owned (allocPrint'd), so free those messages first to keep the
-/// leak-checking test allocator happy. Static-literal messages are left alone.
+/// Retained for readability at the locktime test call sites: `freeResult` now
+/// frees every allocator-owned message via `owned_message`, so the old
+/// free-by-substring pass would be a double free.
 fn freeLocktimeResult(allocator: Allocator, result: ValidationResult) void {
-    for (result.warnings) |w| {
-        if (std.mem.indexOf(u8, w.message, LOCKTIME_NEEDLE) != null) {
-            allocator.free(w.message);
-        }
-    }
     freeResult(allocator, result);
 }
 

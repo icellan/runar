@@ -3,6 +3,8 @@ package frontend
 import (
 	"fmt"
 	"math/big"
+	"sort"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -114,20 +116,20 @@ func (ctx *validationContext) addErrorWithLoc(msg string, loc *SourceLocation) {
 // ---------------------------------------------------------------------------
 
 var validPropTypes = map[string]bool{
-	"bigint":         true,
-	"boolean":        true,
-	"ByteString":     true,
-	"PubKey":         true,
-	"Sig":            true,
-	"Sha256":         true,
-	"Ripemd160":      true,
-	"Addr":           true,
+	"bigint":          true,
+	"boolean":         true,
+	"ByteString":      true,
+	"PubKey":          true,
+	"Sig":             true,
+	"Sha256":          true,
+	"Ripemd160":       true,
+	"Addr":            true,
 	"SigHashPreimage": true,
-	"RabinSig":       true,
-	"RabinPubKey":    true,
-	"Point":          true,
-	"P256Point":      true,
-	"P384Point":      true,
+	"RabinSig":        true,
+	"RabinPubKey":     true,
+	"Point":           true,
+	"P256Point":       true,
+	"P384Point":       true,
 }
 
 func (ctx *validationContext) validateProperties() {
@@ -298,6 +300,168 @@ func (ctx *validationContext) validateConstructor() {
 	for _, stmt := range ctor.Body {
 		ctx.validateStatement(stmt)
 	}
+
+	ctx.validateConstructorSlotBijection()
+}
+
+// validateConstructorSlotBijection enforces the NEW-002 invariant: every
+// constructor parameter initialises exactly one property that needs a
+// deploy-time value, and the i-th parameter initialises the i-th such property.
+//
+// A property's deploy-time value comes from a constructor ARGUMENT, and the
+// artifact addresses those arguments POSITIONALLY: the ABI constructor params
+// come from the constructor SIGNATURE while a constructor slot's ParamIndex is
+// an index into the properties with no InitialValue, and the SDK splices
+// constructorArgs[slot.ParamIndex] into the slot's bytes. Two independently
+// built lists, assumed to line up. Where they disagree a deploy argument lands
+// in ANOTHER property's slot, silently — a deployed contract authorising a
+// value the developer never passed for that property.
+//
+// "Needs a deploy-time value" mirrors constructorAssignedProperties in
+// anf_lower.go exactly: a property carries a compile-time InitialValue iff it
+// has an initializer the constructor does NOT override by assigning it a bare
+// parameter.
+func (ctx *validationContext) validateConstructorSlotBijection() {
+	ctor := ctx.contract.Constructor
+	paramIndex := map[string]int{}
+	for i, p := range ctor.Params {
+		paramIndex[p.Name] = i
+	}
+
+	// property -> distinct bare parameters assigned to it; a property with any
+	// non-parameter assignment is recorded with an EMPTY set.
+	propToParams := map[string]map[string]bool{}
+	paramToProps := map[string]map[string]bool{}
+	for _, stmt := range ctor.Body {
+		assign, ok := stmt.(AssignmentStmt)
+		if !ok {
+			continue
+		}
+		target, ok := assign.Target.(PropertyAccessExpr)
+		if !ok {
+			continue
+		}
+		ident, identOK := assign.Value.(Identifier)
+		_, isParam := paramIndex[ident.Name]
+		if !identOK || !isParam {
+			propToParams[target.Property] = map[string]bool{}
+			continue
+		}
+		if propToParams[target.Property] == nil {
+			propToParams[target.Property] = map[string]bool{}
+		}
+		propToParams[target.Property][ident.Name] = true
+		if paramToProps[ident.Name] == nil {
+			paramToProps[ident.Name] = map[string]bool{}
+		}
+		paramToProps[ident.Name][target.Property] = true
+	}
+
+	before := len(ctx.errors)
+
+	// (a) One parameter feeding several properties: only one of them could own
+	// the argument, so the rest keep a default or deploy undefined.
+	for _, param := range ctor.Params {
+		props := paramToProps[param.Name]
+		if len(props) > 1 {
+			ctx.addErrorWithLoc(fmt.Sprintf(
+				"constructor parameter '%s' initialises more than one property (%s). "+
+					"Each constructor parameter is spliced into exactly one property's "+
+					"deploy-time slot, so only the first would receive the argument. "+
+					"Declare one parameter per property.",
+				param.Name, strings.Join(sortedKeys(props), ", ")), &ctor.SourceLocation)
+		}
+	}
+
+	// (b) One property fed by several parameters — no single argument owns it.
+	for _, prop := range ctx.contract.Properties {
+		params := propToParams[prop.Name]
+		if len(params) > 1 {
+			ctx.addErrorWithLoc(fmt.Sprintf(
+				"property '%s' is assigned more than one constructor parameter (%s). "+
+					"Each property that needs a deploy-time value corresponds to exactly "+
+					"one constructor parameter.",
+				prop.Name, strings.Join(sortedKeys(params), ", ")), &ctor.SourceLocation)
+		}
+	}
+
+	// (c) A property that needs a deploy-time value but whose constructor
+	// assignment is not a parameter. A property assigned NOTHING is already
+	// reported above, so it is skipped here rather than double-reported.
+	for _, prop := range ctx.contract.Properties {
+		if prop.Initializer != nil {
+			continue
+		}
+		params, assigned := propToParams[prop.Name]
+		if !assigned || len(params) >= 1 {
+			continue
+		}
+		ctx.addErrorWithLoc(fmt.Sprintf(
+			"property '%s' has no initializer and is not assigned a constructor "+
+				"parameter, so it has no deploy-time value. The constructor body is not "+
+				"compiled into the locking script — give the property a literal "+
+				"initializer or assign it a constructor parameter (this.%s = %s).",
+			prop.Name, prop.Name, prop.Name), &ctor.SourceLocation)
+	}
+
+	// (d) A parameter that initialises nothing: its argument is dropped and,
+	// because slots are positional, every later argument lands in the wrong slot.
+	for _, param := range ctor.Params {
+		if _, ok := paramToProps[param.Name]; ok {
+			continue
+		}
+		ctx.addErrorWithLoc(fmt.Sprintf(
+			"constructor parameter '%s' does not initialise any property. Constructor "+
+				"arguments are spliced into property slots positionally, so an unused "+
+				"parameter drops its own argument and shifts every later one into the "+
+				"wrong property's slot. Assign it (this.%s = %s) or remove the parameter.",
+			param.Name, param.Name, param.Name), &ctor.SourceLocation)
+	}
+
+	// (e) Order. Only meaningful once (a)-(d) hold, otherwise the positions
+	// being compared are themselves the thing that is broken.
+	if len(ctx.errors) != before {
+		return
+	}
+	slot := 0
+	for _, prop := range ctx.contract.Properties {
+		params := propToParams[prop.Name]
+		if prop.Initializer != nil && len(params) != 1 {
+			continue // initializer survives: not a deploy-time property
+		}
+		if len(params) == 1 {
+			var param string
+			for p := range params {
+				param = p
+			}
+			if declared := paramIndex[param]; declared != slot {
+				abiName := "?"
+				if slot < len(ctor.Params) {
+					abiName = ctor.Params[slot].Name
+				}
+				ctx.addErrorWithLoc(fmt.Sprintf(
+					"property '%s' occupies deploy-time slot %d, but the constructor "+
+						"parameter that initialises it ('%s') is declared at position %d. "+
+						"Constructor arguments are spliced positionally, so the deployed "+
+						"script would carry argument %d — advertised by the ABI as parameter "+
+						"'%s' — in this property's slot. Declare the parameters in the same "+
+						"order as the properties they initialise.",
+					prop.Name, slot, param, declared, slot, abiName), &ctor.SourceLocation)
+			}
+		}
+		slot++
+	}
+}
+
+// sortedKeys returns a set's keys in a deterministic order so diagnostics do
+// not depend on Go's randomised map iteration.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func isSuperCall(stmt Statement) bool {
@@ -350,6 +514,11 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 				&method.SourceLocation,
 			)
 		}
+	}
+
+	// `return` is a PRIVATE-helper construct only (NEW-012).
+	if method.Visibility == "public" {
+		ctx.rejectReturnInPublicMethod(method)
 	}
 
 	// Public methods must end with an assert() call (unless
@@ -602,6 +771,68 @@ func (ctx *validationContext) validateAsmUsage(method MethodNode) {
 			ctx.addError(fmt.Sprintf("Expression-form asm<%s>() must have out_arity 1 (got %s); only a single stack value can be bound to the result variable.", call.AsmReturnType, outArity.Value.String()))
 		}
 	})
+}
+
+// rejectReturnInPublicMethod enforces spec/grammar.md:161 ("Public methods MUST
+// return `void`") and :162 ("Public methods MUST end with an `assert(...)` call
+// as their final statement").
+//
+// spec/semantics.md gives `return` no early-exit meaning at all: §4.6 defines it
+// ONLY as "the value of this method is v" (the private-helper inlining
+// semantics), while §4.7 sequences statements UNCONDITIONALLY — there is no
+// rule under which the statements after a `return` are skipped.
+//
+// Lowering it as if it were the tail of an inlined helper produced two
+// different broken scripts (NEW-012):
+//
+//   - `return;`      the enclosing branch had no result to contribute, so its
+//     arm yielded OP_0 and the whole script evaluated FALSE —
+//     an unspendable UTXO from source that compiled clean. In
+//     this tier it surfaced as an internal stack-lowering panic
+//     ("index out of range [-1]") instead.
+//   - `return expr;` the returned value became the branch result and hence the
+//     script's final truthiness, so any truthy expr spent the
+//     contract WITHOUT reaching the guarding assert. Fail-OPEN.
+//
+// The Java tier has always rejected the valued form; this brings the rule to
+// every tier and covers the bare form too.
+func (ctx *validationContext) rejectReturnInPublicMethod(method MethodNode) {
+	for _, ret := range findReturnStatements(method.Body) {
+		loc := ret.SourceLocation
+		ctx.addErrorWithLoc(
+			fmt.Sprintf(
+				"public method '%s' must not use `return`: public methods are spending "+
+					"entry points, they return void (spec/grammar.md:161) and must end with "+
+					"an assert() that encodes the spending condition (spec/grammar.md:162). "+
+					"Rúnar has no early exit — restructure the guard as an if/else, or move "+
+					"the logic into a private helper, where `return` is allowed.",
+				method.Name,
+			),
+			&loc,
+		)
+	}
+}
+
+// findReturnStatements collects every return in body, at any nesting depth
+// (if/else arms, loop bodies).
+func findReturnStatements(body []Statement) []ReturnStmt {
+	var found []ReturnStmt
+	var walk func(stmts []Statement)
+	walk = func(stmts []Statement) {
+		for _, stmt := range stmts {
+			switch s := stmt.(type) {
+			case ReturnStmt:
+				found = append(found, s)
+			case IfStmt:
+				walk(s.Then)
+				walk(s.Else)
+			case ForStmt:
+				walk(s.Body)
+			}
+		}
+	}
+	walk(body)
+	return found
 }
 
 func endsWithAssert(body []Statement) bool {

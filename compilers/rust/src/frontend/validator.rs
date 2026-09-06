@@ -3,7 +3,7 @@
 //! Validates the Rúnar AST against the language subset constraints.
 //! This pass does NOT modify the AST; it only reports errors and warnings.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::ast::*;
 use super::diagnostic::Diagnostic;
@@ -263,6 +263,182 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     for stmt in &ctor.body {
         validate_statement(stmt, errors);
     }
+
+    validate_constructor_slot_bijection(contract, errors);
+}
+
+/// Enforce the NEW-002 invariant: every constructor parameter initialises
+/// exactly one property that needs a deploy-time value, and the i-th parameter
+/// initialises the i-th such property.
+///
+/// A property's deploy-time value comes from a constructor ARGUMENT, and the
+/// artifact addresses those arguments POSITIONALLY: the ABI constructor params
+/// come from the constructor SIGNATURE while a constructor slot's `paramIndex`
+/// is an index into the properties with no `initial_value`, and the SDK splices
+/// `constructorArgs[slot.paramIndex]` into the slot's bytes. Two independently
+/// built lists, assumed to line up. Where they disagree a deploy argument lands
+/// in ANOTHER property's slot, silently — a deployed contract authorising a
+/// value the developer never passed for that property.
+///
+/// "Needs a deploy-time value" mirrors `constructor_assigned_properties` in
+/// `anf_lower.rs` exactly: a property carries a compile-time `initial_value`
+/// iff it has an initializer the constructor does NOT override by assigning it
+/// a bare parameter.
+fn validate_constructor_slot_bijection(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    let ctor = &contract.constructor;
+    let param_index: HashMap<&str, usize> = ctor
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.name.as_str(), i))
+        .collect();
+
+    // property -> distinct bare parameters assigned to it; a property with any
+    // non-parameter assignment is recorded with an EMPTY set.
+    let mut prop_to_params: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut param_to_props: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for stmt in &ctor.body {
+        let Statement::Assignment { target, value, .. } = stmt else {
+            continue;
+        };
+        let Expression::PropertyAccess { property } = target else {
+            continue;
+        };
+        match value {
+            Expression::Identifier { name } if param_index.contains_key(name.as_str()) => {
+                prop_to_params
+                    .entry(property.clone())
+                    .or_default()
+                    .insert(name.clone());
+                param_to_props
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(property.clone());
+            }
+            _ => {
+                prop_to_params.entry(property.clone()).or_default();
+            }
+        }
+    }
+
+    let before = errors.len();
+
+    // (a) One parameter feeding several properties: only one of them could own
+    // the argument, so the rest keep a default or deploy undefined.
+    for param in &ctor.params {
+        let props = param_to_props.get(&param.name);
+        if props.map(BTreeSet::len).unwrap_or(0) > 1 {
+            let names: Vec<&str> = props.unwrap().iter().map(String::as_str).collect();
+            errors.push(Diagnostic::error(
+                format!(
+                    "Constructor parameter '{}' initialises more than one property ({}). \
+                     Each constructor parameter is spliced into exactly one property's \
+                     deploy-time slot, so only the first would receive the argument. \
+                     Declare one parameter per property.",
+                    param.name,
+                    names.join(", ")
+                ),
+                Some(ctor.source_location.clone()),
+            ));
+        }
+    }
+
+    // (b) One property fed by several parameters — no single argument owns it.
+    for prop in &contract.properties {
+        let params = prop_to_params.get(&prop.name);
+        if params.map(BTreeSet::len).unwrap_or(0) > 1 {
+            let names: Vec<&str> = params.unwrap().iter().map(String::as_str).collect();
+            errors.push(Diagnostic::error(
+                format!(
+                    "Property '{}' is assigned more than one constructor parameter ({}). \
+                     Each property that needs a deploy-time value corresponds to exactly \
+                     one constructor parameter.",
+                    prop.name,
+                    names.join(", ")
+                ),
+                Some(ctor.source_location.clone()),
+            ));
+        }
+    }
+
+    // (c) A property that needs a deploy-time value but whose constructor
+    // assignment is not a parameter. A property assigned NOTHING is already
+    // reported above, so it is skipped here rather than double-reported.
+    for prop in &contract.properties {
+        if prop.initializer.is_some() {
+            continue;
+        }
+        match prop_to_params.get(&prop.name) {
+            Some(params) if params.is_empty() => {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "Property '{}' has no initializer and is not assigned a constructor \
+                         parameter, so it has no deploy-time value. The constructor body is \
+                         not compiled into the locking script — give the property a literal \
+                         initializer or assign it a constructor parameter (this.{} = {}).",
+                        prop.name, prop.name, prop.name
+                    ),
+                    Some(ctor.source_location.clone()),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // (d) A parameter that initialises nothing: its argument is dropped and,
+    // because slots are positional, every later argument lands in the wrong slot.
+    for param in &ctor.params {
+        if param_to_props.contains_key(&param.name) {
+            continue;
+        }
+        errors.push(Diagnostic::error(
+            format!(
+                "Constructor parameter '{}' does not initialise any property. Constructor \
+                 arguments are spliced into property slots positionally, so an unused \
+                 parameter drops its own argument and shifts every later one into the wrong \
+                 property's slot. Assign it (this.{} = {}) or remove the parameter.",
+                param.name, param.name, param.name
+            ),
+            Some(ctor.source_location.clone()),
+        ));
+    }
+
+    // (e) Order. Only meaningful once (a)-(d) hold, otherwise the positions
+    // being compared are themselves the thing that is broken.
+    if errors.len() != before {
+        return;
+    }
+    let mut slot = 0usize;
+    for prop in &contract.properties {
+        let params = prop_to_params.get(&prop.name);
+        let single = params.filter(|p| p.len() == 1).map(|p| p.iter().next().unwrap());
+        if prop.initializer.is_some() && single.is_none() {
+            continue; // initializer survives: not a deploy-time property
+        }
+        if let Some(param) = single {
+            let declared = param_index[param.as_str()];
+            if declared != slot {
+                let abi_name = ctor
+                    .params
+                    .get(slot)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("?");
+                errors.push(Diagnostic::error(
+                    format!(
+                        "Property '{}' occupies deploy-time slot {}, but the constructor \
+                         parameter that initialises it ('{}') is declared at position {}. \
+                         Constructor arguments are spliced positionally, so the deployed \
+                         script would carry argument {} — advertised by the ABI as parameter \
+                         '{}' — in this property's slot. Declare the parameters in the same \
+                         order as the properties they initialise.",
+                        prop.name, slot, param, declared, slot, abi_name
+                    ),
+                    Some(ctor.source_location.clone()),
+                ));
+            }
+        }
+        slot += 1;
+    }
 }
 
 fn is_super_call(stmt: &Statement) -> bool {
@@ -331,6 +507,11 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
                 Some(method.source_location.clone()),
             ));
         }
+    }
+
+    // `return` is a PRIVATE-helper construct only (NEW-012).
+    if method.visibility == Visibility::Public {
+        reject_return_in_public_method(method, errors);
     }
 
     // Public methods must end with an assert() call (unless StatefulSmartContract,
@@ -506,6 +687,66 @@ fn check_readonly_writes(
             ),
             Some(loc),
         ));
+    }
+}
+
+
+/// Enforces `spec/grammar.md:161` ("Public methods MUST return `void`") and
+/// `:162` ("Public methods MUST end with an `assert(...)` call as their final
+/// statement").
+///
+/// `spec/semantics.md` gives `return` no early-exit meaning at all: §4.6 defines
+/// it ONLY as "the value of this method is v" (the private-helper inlining
+/// semantics), while §4.7 sequences statements UNCONDITIONALLY — there is no
+/// rule under which the statements after a `return` are skipped.
+///
+/// Lowering it as if it were the tail of an inlined helper produced two
+/// different broken scripts (NEW-012):
+///
+///   - `return;`      the enclosing branch had no result to contribute, so its
+///                    arm yielded OP_0 and the whole script evaluated FALSE —
+///                    an unspendable UTXO from source that compiled clean.
+///   - `return expr;` the returned value became the branch result and hence the
+///                    script's final truthiness, so any truthy expr spent the
+///                    contract WITHOUT reaching the guarding assert. Fail-OPEN.
+///
+/// The Java tier has always rejected the valued form; this brings the rule to
+/// every tier and covers the bare form too.
+fn reject_return_in_public_method(method: &MethodNode, errors: &mut Vec<Diagnostic>) {
+    let mut found: Vec<SourceLocation> = Vec::new();
+    collect_return_statements(&method.body, &mut found);
+    for loc in found {
+        errors.push(Diagnostic::error(
+            format!(
+                "public method '{}' must not use `return`: public methods are spending \
+                 entry points, they return void (spec/grammar.md:161) and must end with \
+                 an assert() that encodes the spending condition (spec/grammar.md:162). \
+                 Rúnar has no early exit — restructure the guard as an if/else, or move \
+                 the logic into a private helper, where `return` is allowed.",
+                method.name
+            ),
+            Some(loc),
+        ));
+    }
+}
+
+/// Collects every `return` in `body`, at any nesting depth (if/else arms, loop
+/// bodies).
+fn collect_return_statements(body: &[Statement], out: &mut Vec<SourceLocation>) {
+    for stmt in body {
+        match stmt {
+            Statement::ReturnStatement { source_location, .. } => {
+                out.push(source_location.clone());
+            }
+            Statement::IfStatement { then_branch, else_branch, .. } => {
+                collect_return_statements(then_branch, out);
+                if let Some(else_body) = else_branch {
+                    collect_return_statements(else_body, out);
+                }
+            }
+            Statement::ForStatement { body, .. } => collect_return_statements(body, out),
+            _ => {}
+        }
     }
 }
 

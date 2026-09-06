@@ -117,16 +117,73 @@ module RunarCompiler
     # Properties
     # -------------------------------------------------------------------
 
+    # Properties the constructor assigns a constructor PARAMETER to.
+    #
+    # These get their value from the deploy-time argument, so any initializer
+    # on them is a default the argument overrides -- carrying it into
+    # +initial_value+ would bake the default into the artifact and silently
+    # discard the argument (NEW-001). The property must instead stay in the
+    # constructor slot list so the SDK writes the argument.
+    #
+    # Deliberately narrow in three ways.
+    #
+    # 1. Only a BARE parameter reference counts. +this.a = 5n+ assigns a
+    #    literal, not an argument, and keeps its initializer.
+    # 2. The property<->parameter mapping must be ONE-TO-ONE. The artifact
+    #    model is positional, so a parameter feeding two properties has no
+    #    representation -- that shape is already undeployable today when
+    #    written without initializers, and belongs to NEW-002.
+    # 3. A property assigned more than once in the constructor is skipped, for
+    #    the same reason.
+    #
+    # @param contract [ContractNode]
+    # @return [Hash{String=>true}]
+    def self._constructor_assigned_properties(contract)
+      ctor = contract.constructor
+      return {} if ctor.nil?
+
+      params = ctor.params.map(&:name)
+      prop_to_params = {}
+      param_to_props = {}
+
+      ctor.body.each do |stmt|
+        next unless stmt.is_a?(AssignmentStmt)
+        next unless stmt.target.is_a?(PropertyAccessExpr)
+
+        prop = stmt.target.property
+        value = stmt.value
+        unless value.is_a?(Identifier) && params.include?(value.name)
+          # Not a constructor argument: never strip this property.
+          prop_to_params[prop] ||= []
+          next
+        end
+        (prop_to_params[prop] ||= []) << value.name
+        (param_to_props[value.name] ||= []) << prop
+      end
+
+      out = {}
+      prop_to_params.each do |prop, ps|
+        uniq = ps.uniq
+        next unless uniq.length == 1
+        next unless param_to_props[uniq.first].uniq.length == 1
+
+        out[prop] = true
+      end
+      out
+    end
+    private_class_method :_constructor_assigned_properties
+
     # @param contract [ContractNode]
     # @return [Array<IR::ANFProperty>]
     def self._lower_properties(contract)
+      ctor_assigned = _constructor_assigned_properties(contract)
       contract.properties.map do |prop|
         anf_prop = IR::ANFProperty.new(
           name: prop.name,
           type: _type_node_to_string(prop.type),
           readonly: prop.readonly
         )
-        unless prop.initializer.nil?
+        if !prop.initializer.nil? && !ctor_assigned[prop.name]
           anf_prop.initial_value = _extract_literal_value(prop.initializer)
           _check_state_bigint_magnitude(anf_prop)
         end

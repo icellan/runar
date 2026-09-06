@@ -286,6 +286,167 @@ function validateConstructor(ctx: ValidationContext): void {
   for (const stmt of ctor.body) {
     validateStatement(stmt, ctx);
   }
+
+  validateConstructorSlotBijection(ctx);
+}
+
+// ---------------------------------------------------------------------------
+// Constructor parameter <-> deploy-time property bijection (NEW-002)
+// ---------------------------------------------------------------------------
+
+/**
+ * A property's deploy-time value comes from a constructor ARGUMENT, and the
+ * artifact addresses those arguments POSITIONALLY:
+ *
+ *   - `abi.constructor.params` is built from the constructor SIGNATURE
+ *     (`artifact/assembler.ts#extractABI`);
+ *   - a constructor slot's `paramIndex` is an index into
+ *     `properties.filter(p => p.initialValue === undefined)`
+ *     (`05-stack-lower.ts#lowerLoadProp`);
+ *   - the SDK splices `constructorArgs[slot.paramIndex]` into the slot's bytes.
+ *
+ * Two independently-built lists, assumed to line up. Nothing checked that they
+ * do, so any program where they disagree deployed an argument into ANOTHER
+ * property's slot — silently, with no diagnostic. That is a fund-safety defect:
+ * the deployed contract authorises a value the developer never passed for that
+ * property.
+ *
+ * INVARIANT ENFORCED HERE. Every constructor parameter initialises exactly one
+ * property that needs a deploy-time value, and the i-th parameter initialises
+ * the i-th such property. A program that cannot satisfy it has no
+ * representation in the positional artifact model and is rejected rather than
+ * mis-wired.
+ *
+ * "Needs a deploy-time value" mirrors `04-anf-lower.ts#lowerProperties` exactly:
+ * a property carries a compile-time `initialValue` iff it has an initializer
+ * the constructor does NOT override by assigning it a bare parameter. So a
+ * property is deploy-time iff it has no initializer, or it has one that a
+ * constructor parameter overrides (NEW-001).
+ *
+ * Only a BARE parameter reference counts as initialising a property, for the
+ * same reason as in ANF lowering: the constructor body is never lowered to
+ * script, so a computed form (`this.p = seed + 1n`) has no deploy-time value
+ * any tier could honour. A property with any non-parameter assignment is
+ * therefore treated as uninitialised, which is what makes `this.count = 0n`
+ * inside the constructor an error pointing at the property-initializer form.
+ */
+function validateConstructorSlotBijection(ctx: ValidationContext): void {
+  const ctor = ctx.contract.constructor;
+  const paramIndex = new Map<string, number>();
+  ctor.params.forEach((p, i) => paramIndex.set(p.name, i));
+
+  // property -> the distinct bare parameters assigned to it; a property with
+  // any non-parameter assignment is recorded with an EMPTY set, matching
+  // `constructorAssignedProperties` in 04-anf-lower.ts.
+  const propToParams = new Map<string, Set<string>>();
+  const paramToProps = new Map<string, Set<string>>();
+  for (const stmt of ctor.body) {
+    if (stmt.kind !== 'assignment') continue;
+    if (stmt.target.kind !== 'property_access') continue;
+    const prop = stmt.target.property;
+    if (stmt.value.kind !== 'identifier' || !paramIndex.has(stmt.value.name)) {
+      propToParams.set(prop, new Set());
+      continue;
+    }
+    const param = stmt.value.name;
+    if (!propToParams.has(prop)) propToParams.set(prop, new Set());
+    propToParams.get(prop)!.add(param);
+    if (!paramToProps.has(param)) paramToProps.set(param, new Set());
+    paramToProps.get(param)!.add(prop);
+  }
+
+  const loc = ctor.sourceLocation;
+  const before = ctx.errors.length;
+
+  // (a) One parameter feeding several properties. Only one of them could own
+  //     the argument, so the rest would silently keep a default or deploy
+  //     undefined. Reported per parameter so the message names both properties.
+  for (const [param, props] of paramToProps) {
+    if (props.size > 1) {
+      ctx.errors.push(makeDiagnostic(
+        `Constructor parameter '${param}' initialises more than one property ` +
+          `(${[...props].join(', ')}). Each constructor parameter is spliced into ` +
+          `exactly one property's deploy-time slot, so only the first would receive ` +
+          `the argument. Declare one parameter per property.`,
+        'error',
+        loc,
+      ));
+    }
+  }
+
+  // (b) One property fed by several parameters — no single argument owns it.
+  for (const [prop, params] of propToParams) {
+    if (params.size > 1) {
+      ctx.errors.push(makeDiagnostic(
+        `Property '${prop}' is assigned more than one constructor parameter ` +
+          `(${[...params].join(', ')}). Each property that needs a deploy-time value ` +
+          `corresponds to exactly one constructor parameter.`,
+        'error',
+        loc,
+      ));
+    }
+  }
+
+  // (c) A property that needs a deploy-time value but whose constructor
+  //     assignment is not a parameter (`this.count = 0n`). A property assigned
+  //     NOTHING is already reported above ("must be assigned in the
+  //     constructor"), so it is skipped here rather than double-reported.
+  for (const prop of ctx.contract.properties) {
+    if (prop.initializer !== undefined) continue;
+    const assigned = propToParams.get(prop.name);
+    if (assigned === undefined) continue; // reported by the assignment check
+    if (assigned.size >= 1) continue; // 1 = fine, >1 reported by (b)
+    ctx.errors.push(makeDiagnostic(
+      `Property '${prop.name}' has no initializer and is not assigned a constructor ` +
+        `parameter, so it has no deploy-time value. The constructor body is not ` +
+        `compiled into the locking script — give the property a literal initializer ` +
+        `(e.g. '${prop.name}: bigint = 0n') or assign it a constructor parameter ` +
+        `(e.g. 'this.${prop.name} = ${prop.name}').`,
+      'error',
+      prop.sourceLocation ?? loc,
+    ));
+  }
+
+  // (d) A parameter that initialises nothing. Its argument would be dropped and
+  //     — because slots are positional — every later argument would land in the
+  //     wrong property's slot.
+  for (const param of ctor.params) {
+    if (paramToProps.has(param.name)) continue;
+    ctx.errors.push(makeDiagnostic(
+      `Constructor parameter '${param.name}' does not initialise any property. ` +
+        `Constructor arguments are spliced into property slots positionally, so an ` +
+        `unused parameter drops its own argument and shifts every later one into ` +
+        `the wrong property's slot. Assign it ('this.${param.name} = ${param.name}') ` +
+        `or remove the parameter.`,
+      'error',
+      loc,
+    ));
+  }
+
+  // (e) Order. Only meaningful once (a)-(d) hold, otherwise the positions being
+  //     compared are themselves the thing that is broken.
+  if (ctx.errors.length !== before) return;
+
+  const deployProps = ctx.contract.properties.filter(
+    p => p.initializer === undefined || (propToParams.get(p.name)?.size ?? 0) === 1,
+  );
+  for (let i = 0; i < deployProps.length; i++) {
+    const prop = deployProps[i]!;
+    const param = [...(propToParams.get(prop.name) ?? [])][0];
+    if (param === undefined) continue; // unreachable once (c) holds
+    const declared = paramIndex.get(param)!;
+    if (declared === i) continue;
+    ctx.errors.push(makeDiagnostic(
+      `Property '${prop.name}' occupies deploy-time slot ${i}, but the constructor ` +
+        `parameter that initialises it ('${param}') is declared at position ${declared}. ` +
+        `Constructor arguments are spliced positionally, so the deployed script would ` +
+        `carry argument ${i} — advertised by the ABI as parameter ` +
+        `'${ctor.params[i]?.name ?? '?'}' — in this property's slot. Declare the ` +
+        `parameters in the same order as the properties they initialise.`,
+      'error',
+      loc,
+    ));
+  }
 }
 
 function isSuperCall(stmt: Statement): boolean {
@@ -368,6 +529,11 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
     }
   }
 
+  // `return` is a PRIVATE-helper construct only (NEW-012).
+  if (method.visibility === 'public') {
+    rejectReturnInPublicMethod(method, ctx);
+  }
+
   // Warn on manual preimage boilerplate in StatefulSmartContract
   if (ctx.contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
     warnManualPreimageUsage(method, ctx);
@@ -391,6 +557,73 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
   for (const stmt of method.body) {
     validateStatement(stmt, ctx);
   }
+}
+
+/**
+ * `spec/grammar.md:161` — "Public methods MUST return `void`."
+ * `spec/grammar.md:168` — "Private methods may return a value."
+ *
+ * And `spec/semantics.md` gives `return` no early-exit meaning at all: §4.6
+ * defines it ONLY as "the value of this method is v" (the private-helper
+ * inlining semantics), while §4.7 sequences statements UNCONDITIONALLY —
+ * there is no rule under which the statements after a `return` are skipped.
+ *
+ * The compiler used to accept both spellings in a public method and lower them
+ * as if they were the tail of an inlined helper, which produced two different
+ * broken scripts (NEW-012):
+ *
+ *   - `return;`      the enclosing branch had no result to contribute, so its
+ *                    arm yielded OP_0 and the whole script evaluated FALSE.
+ *                    `Spend`: "The top stack element must be truthy after
+ *                    script evaluation." An unspendable UTXO from source that
+ *                    compiled clean.
+ *   - `return expr;` the returned value became the branch result and hence the
+ *                    script's final truthiness, so any truthy `expr` spent the
+ *                    contract WITHOUT reaching the guarding assert. Fail-OPEN,
+ *                    and invisible to every differential oracle because the
+ *                    interpreter, the ScriptVM and `Spend` all agreed.
+ *
+ * Rejecting here is the same rule the Java tier has always enforced for the
+ * valued form ("public method '<name>' must not return a value"); this brings
+ * the remaining tiers in line and covers the bare form too.
+ */
+function rejectReturnInPublicMethod(method: MethodNode, ctx: ValidationContext): void {
+  for (const stmt of findReturnStatements(method.body)) {
+    ctx.errors.push(makeDiagnostic(
+      `Public method '${method.name}' must not use \`return\`: public methods are ` +
+      `spending entry points, they return void (spec/grammar.md:161) and must end ` +
+      `with an assert() that encodes the spending condition (spec/grammar.md:162). ` +
+      `Rúnar has no early exit — restructure the guard as an if/else, or move the ` +
+      `logic into a private helper, where \`return\` is allowed.`,
+      'error',
+      stmt.sourceLocation ?? method.sourceLocation,
+    ));
+  }
+}
+
+/** Every `return` in `body`, at any nesting depth (if/else arms, loop bodies). */
+function findReturnStatements(body: Statement[]): Extract<Statement, { kind: 'return_statement' }>[] {
+  const found: Extract<Statement, { kind: 'return_statement' }>[] = [];
+  const walk = (stmts: Statement[]): void => {
+    for (const stmt of stmts) {
+      switch (stmt.kind) {
+        case 'return_statement':
+          found.push(stmt);
+          break;
+        case 'if_statement':
+          walk(stmt.then);
+          if (stmt.else) walk(stmt.else);
+          break;
+        case 'for_statement':
+          walk(stmt.body);
+          break;
+        default:
+          break;
+      }
+    }
+  };
+  walk(body);
+  return found;
 }
 
 function endsWithAssert(body: Statement[]): boolean {

@@ -301,6 +301,13 @@ The loop variable `i` is substituted with the concrete iteration value in each u
     <return e, env, sigma>  ==>  (v, sigma)
 ```
 
+This is the **only** rule for `return`, and it says exactly one thing: the value
+of the enclosing (private, inlined) method is `v`. There is deliberately **no
+rule for a bare `return;`** and **no rule that terminates a statement sequence
+early** — see §4.7, whose premises are unconditional. `return` is therefore a
+private-helper construct: a `return` in a public method is a compile error
+(`spec/grammar.md` §6).
+
 ### 4.7 Statement Sequences
 
 ```
@@ -309,6 +316,9 @@ The loop variable `i` is substituted with the concrete iteration value in each u
     ──────────────────────────────────────────
     <S1; S2, env, sigma>  ==>  <env'', sigma''>
 ```
+
+`S2` is evaluated unconditionally: nothing in `S1` can skip it. Rúnar has no
+early exit, no `break` and no `continue` (`spec/grammar.md` §9).
 
 ---
 

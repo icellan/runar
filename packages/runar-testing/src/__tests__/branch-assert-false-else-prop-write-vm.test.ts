@@ -56,13 +56,21 @@ import { PrivateKey } from '@bsv/sdk';
 const PRIV = PrivateKey.fromString('b1'.repeat(32), 16);
 const PKH = PRIV.toPublicKey().toHash('hex') as string;
 
-/** Compile -> deploy -> call, with @bsv/sdk's real `Spend` behind broadcast. */
+/**
+ * Compile -> deploy -> call, with @bsv/sdk's real `Spend` behind broadcast.
+ *
+ * `ctorArgs` is one zero per declared constructor parameter — every contract
+ * here deploys from all-zero state, and the count differs only because a
+ * contract declares one parameter per property (NEW-002: a parameter shared
+ * between two properties has no slot of its own and is a compile error).
+ */
 async function run(
   source: string,
   fileName: string,
   disableConstantFolding: boolean,
   method: string,
   args: bigint[],
+  ctorArgs: bigint[] = [0n],
 ): Promise<Record<string, unknown>> {
   const r = compile(source, { fileName, disableConstantFolding });
   if (!r.success || !r.artifact) {
@@ -77,7 +85,7 @@ async function run(
     satoshis: 1_000_000,
     script: '76a914' + PKH + '88ac',
   });
-  const c = new RunarContract(r.artifact as never, [0n]);
+  const c = new RunarContract(r.artifact as never, ctorArgs);
   c.connect(provider, signer);
   await c.deploy({ satoshis: 1000 });
   await c.call(method, args, { satoshis: 1000 });
@@ -119,7 +127,7 @@ const GUARD2 = `import { StatefulSmartContract } from 'runar-lang';
 export class Guard2 extends StatefulSmartContract {
   a: bigint = 0n;
   b: bigint = 0n;
-  constructor(seed: bigint) { super(seed); this.a = seed; this.b = seed; }
+  constructor(a: bigint, b: bigint) { super(a, b); this.a = a; this.b = b; }
 
   public bump(n: bigint) {
     if (n > 0n) { this.a = n; this.b = n + 1n; }
@@ -140,7 +148,7 @@ const GUARD3 = `import { StatefulSmartContract } from 'runar-lang';
 export class Guard3 extends StatefulSmartContract {
   a: bigint = 0n;
   b: bigint = 0n;
-  constructor(seed: bigint) { super(seed); this.a = seed; this.b = seed; }
+  constructor(a: bigint, b: bigint) { super(a, b); this.a = a; this.b = b; }
 
   public bump(n: bigint) {
     let k: bigint = 0n;
@@ -165,7 +173,7 @@ const NESTED = `import { StatefulSmartContract } from 'runar-lang';
 export class Nested extends StatefulSmartContract {
   a: bigint = 0n;
   b: bigint = 0n;
-  constructor(seed: bigint) { super(seed); this.a = seed; this.b = seed; }
+  constructor(a: bigint, b: bigint) { super(a, b); this.a = a; this.b = b; }
 
   public dispatch(sel: bigint, v: bigint) {
     for (let i = 0n; i < 2n; i++) {
@@ -192,7 +200,7 @@ const NESTED_IF = `import { StatefulSmartContract } from 'runar-lang';
 export class NestedIf extends StatefulSmartContract {
   a: bigint = 0n;
   b: bigint = 0n;
-  constructor(seed: bigint) { super(seed); this.a = seed; this.b = seed; }
+  constructor(a: bigint, b: bigint) { super(a, b); this.a = a; this.b = b; }
 
   public dispatch(sel: bigint, v: bigint) {
     if (v > 0n) {
@@ -216,13 +224,13 @@ for (const fold of [true, false]) {
     });
 
     it('P0-1: two properties in the guarded arm', async () => {
-      const state = await run(GUARD2, 'Guard2.runar.ts', fold, 'bump', [5n]);
+      const state = await run(GUARD2, 'Guard2.runar.ts', fold, 'bump', [5n], [0n, 0n]);
       expect(state.a).toBe(5n);
       expect(state.b).toBe(6n);
     });
 
     it('P0-1: a local beside the property in the guarded arm', async () => {
-      const state = await run(GUARD3, 'Guard3.runar.ts', fold, 'bump', [5n]);
+      const state = await run(GUARD3, 'Guard3.runar.ts', fold, 'bump', [5n], [0n, 0n]);
       expect(state.a).toBe(5n);
       expect(state.b).toBe(6n);
     });
@@ -234,20 +242,20 @@ for (const fold of [true, false]) {
 
   describe(`dispatch chain out of liftBranchUpdateProps' reach (${mode})`, () => {
     it('P0-2: chain inside a loop body', async () => {
-      const state = await run(NESTED, 'Nested.runar.ts', fold, 'dispatch', [0n, 7n]);
+      const state = await run(NESTED, 'Nested.runar.ts', fold, 'dispatch', [0n, 7n], [0n, 0n]);
       expect(state.a).toBe(7n);
       expect(state.b).toBe(0n);
     });
 
     it('P0-2: chain inside another if arm', async () => {
-      const state = await run(NESTED_IF, 'NestedIf.runar.ts', fold, 'dispatch', [1n, 9n]);
+      const state = await run(NESTED_IF, 'NestedIf.runar.ts', fold, 'dispatch', [1n, 9n], [0n, 0n]);
       expect(state.a).toBe(0n);
       expect(state.b).toBe(9n);
     });
 
     it('P0-2: the nested chain still rejects an unmatched selector', async () => {
       await expect(
-        run(NESTED_IF, 'NestedIf.runar.ts', fold, 'dispatch', [5n, 9n]),
+        run(NESTED_IF, 'NestedIf.runar.ts', fold, 'dispatch', [5n, 9n], [0n, 0n]),
       ).rejects.toThrow();
     });
   });

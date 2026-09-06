@@ -2,8 +2,11 @@ package runar.compiler.passes;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import runar.compiler.builtins.BuiltinRegistry;
 import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
@@ -317,6 +320,149 @@ public final class Validate {
             for (Statement s : ctor.body()) {
                 validateStatement(s);
             }
+
+            validateConstructorSlotBijection(ctor);
+        }
+
+        /**
+         * Enforce the NEW-002 invariant: every constructor parameter
+         * initialises exactly one property that needs a deploy-time value, and
+         * the i-th parameter initialises the i-th such property.
+         *
+         * <p>A property's deploy-time value comes from a constructor ARGUMENT,
+         * and the artifact addresses those arguments POSITIONALLY: the ABI
+         * constructor params come from the constructor SIGNATURE while a
+         * constructor slot's {@code paramIndex} is an index into the properties
+         * with no {@code initialValue}, and the SDK splices
+         * {@code constructorArgs[slot.paramIndex]} into the slot's bytes. Two
+         * independently built lists, assumed to line up. Where they disagree a
+         * deploy argument lands in ANOTHER property's slot, silently — a
+         * deployed contract authorising a value the developer never passed for
+         * that property.
+         *
+         * <p>"Needs a deploy-time value" mirrors
+         * {@code constructorAssignedProperties} in {@code AnfLower} exactly: a
+         * property carries a compile-time {@code initialValue} iff it has an
+         * initializer the constructor does NOT override by assigning it a bare
+         * parameter.
+         */
+        void validateConstructorSlotBijection(MethodNode ctor) {
+            Map<String, Integer> paramIndex = new LinkedHashMap<>();
+            for (int i = 0; i < ctor.params().size(); i++) {
+                paramIndex.put(ctor.params().get(i).name(), i);
+            }
+
+            // property -> distinct bare parameters assigned to it; a property
+            // with any non-parameter assignment is recorded with an EMPTY set.
+            Map<String, Set<String>> propToParams = new LinkedHashMap<>();
+            Map<String, Set<String>> paramToProps = new LinkedHashMap<>();
+            for (Statement stmt : ctor.body()) {
+                if (!(stmt instanceof AssignmentStatement assign)) continue;
+                if (!(assign.target() instanceof PropertyAccessExpr target)) continue;
+                String prop = target.property();
+                if (!(assign.value() instanceof Identifier id) || !paramIndex.containsKey(id.name())) {
+                    propToParams.put(prop, new TreeSet<>());
+                    continue;
+                }
+                propToParams.computeIfAbsent(prop, k -> new TreeSet<>()).add(id.name());
+                paramToProps.computeIfAbsent(id.name(), k -> new TreeSet<>()).add(prop);
+            }
+
+            int before = errors.size();
+
+            // (a) One parameter feeding several properties: only one of them
+            // could own the argument, so the rest keep a default or deploy
+            // undefined.
+            for (ParamNode param : ctor.params()) {
+                Set<String> props = paramToProps.get(param.name());
+                if (props != null && props.size() > 1) {
+                    error(
+                        "constructor parameter '" + param.name() + "' initialises more than one "
+                            + "property (" + String.join(", ", props) + "). Each constructor "
+                            + "parameter is spliced into exactly one property's deploy-time slot, "
+                            + "so only the first would receive the argument. Declare one parameter "
+                            + "per property.",
+                        ctor.sourceLocation()
+                    );
+                }
+            }
+
+            // (b) One property fed by several parameters — no single argument owns it.
+            for (PropertyNode p : contract.properties()) {
+                Set<String> params = propToParams.get(p.name());
+                if (params != null && params.size() > 1) {
+                    error(
+                        "property '" + p.name() + "' is assigned more than one constructor "
+                            + "parameter (" + String.join(", ", params) + "). Each property that "
+                            + "needs a deploy-time value corresponds to exactly one constructor "
+                            + "parameter.",
+                        ctor.sourceLocation()
+                    );
+                }
+            }
+
+            // (c) A property that needs a deploy-time value but whose
+            // constructor assignment is not a parameter. A property assigned
+            // NOTHING is already reported above, so it is skipped here rather
+            // than double-reported.
+            for (PropertyNode p : contract.properties()) {
+                if (p.initializer() != null) continue;
+                Set<String> params = propToParams.get(p.name());
+                if (params == null || !params.isEmpty()) continue;
+                error(
+                    "property '" + p.name() + "' has no initializer and is not assigned a "
+                        + "constructor parameter, so it has no deploy-time value. The constructor "
+                        + "body is not compiled into the locking script — give the property a "
+                        + "literal initializer or assign it a constructor parameter (this."
+                        + p.name() + " = " + p.name() + ").",
+                    ctor.sourceLocation()
+                );
+            }
+
+            // (d) A parameter that initialises nothing: its argument is dropped
+            // and, because slots are positional, every later argument lands in
+            // the wrong slot.
+            for (ParamNode param : ctor.params()) {
+                if (paramToProps.containsKey(param.name())) continue;
+                error(
+                    "constructor parameter '" + param.name() + "' does not initialise any "
+                        + "property. Constructor arguments are spliced into property slots "
+                        + "positionally, so an unused parameter drops its own argument and shifts "
+                        + "every later one into the wrong property's slot. Assign it (this."
+                        + param.name() + " = " + param.name() + ") or remove the parameter.",
+                    ctor.sourceLocation()
+                );
+            }
+
+            // (e) Order. Only meaningful once (a)-(d) hold, otherwise the
+            // positions being compared are themselves the thing that is broken.
+            if (errors.size() != before) return;
+            int slot = 0;
+            for (PropertyNode p : contract.properties()) {
+                Set<String> params = propToParams.get(p.name());
+                String single = params != null && params.size() == 1 ? params.iterator().next() : null;
+                if (p.initializer() != null && single == null) continue;
+                if (single != null) {
+                    int declared = paramIndex.get(single);
+                    if (declared != slot) {
+                        String abiName = slot < ctor.params().size()
+                            ? ctor.params().get(slot).name()
+                            : "?";
+                        error(
+                            "property '" + p.name() + "' occupies deploy-time slot " + slot
+                                + ", but the constructor parameter that initialises it ('" + single
+                                + "') is declared at position " + declared + ". Constructor "
+                                + "arguments are spliced positionally, so the deployed script "
+                                + "would carry argument " + slot + " — advertised by the ABI as "
+                                + "parameter '" + abiName + "' — in this property's slot. Declare "
+                                + "the parameters in the same order as the properties they "
+                                + "initialise.",
+                            ctor.sourceLocation()
+                        );
+                    }
+                }
+                slot++;
+            }
         }
 
         // --------------------------------------------------------------
@@ -360,17 +506,39 @@ public final class Validate {
                 }
             }
 
-            // Public methods must not return a value. Private methods may.
+            // `return` is a PRIVATE-helper construct only (NEW-012).
+            //
+            // spec/grammar.md:161 ("Public methods MUST return `void`") is why
+            // this tier already rejected `return expr;` — alone among the seven,
+            // which is how the other six shipped a FAIL-OPEN miscompile: the
+            // returned value became the enclosing branch's result and therefore
+            // the script's final truthiness, so any truthy expr spent the
+            // contract WITHOUT reaching the guarding assert.
+            //
+            // The bare `return;` was the hole THIS tier had. spec/grammar.md:162
+            // requires a public method to end with the assert that encodes its
+            // spending condition, and spec/semantics.md gives `return` no
+            // early-exit meaning at all: §4.6 defines it ONLY as "the value of
+            // this method is v" (the inlining semantics), while §4.7 sequences
+            // statements UNCONDITIONALLY. Elsewhere a bare `return;` left the
+            // enclosing branch with no result, its arm yielded OP_0, and the
+            // whole script evaluated FALSE — an unspendable UTXO from source
+            // that compiled clean.
+            //
+            // So: reject BOTH spellings, everywhere in a public body.
             if (m.visibility() == Visibility.PUBLIC) {
-                walkReturnsInBody(m.body(), returnStmt -> {
-                    if (returnStmt.value() != null) {
-                        error(
-                            "public method '" + m.name()
-                                + "' must not return a value (returned from a spending entry point)",
-                            returnStmt.sourceLocation()
-                        );
-                    }
-                });
+                walkReturnsInBody(m.body(), returnStmt ->
+                    error(
+                        "public method '" + m.name()
+                            + "' must not use `return`: public methods are spending entry"
+                            + " points, they return void (spec/grammar.md:161) and must end"
+                            + " with an assert() that encodes the spending condition"
+                            + " (spec/grammar.md:162). Rúnar has no early exit — restructure"
+                            + " the guard as an if/else, or move the logic into a private"
+                            + " helper, where `return` is allowed.",
+                        returnStmt.sourceLocation()
+                    )
+                );
             }
 
             // Public methods must end with an assert() call (unless

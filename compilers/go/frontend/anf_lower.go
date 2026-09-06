@@ -142,7 +142,73 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 // Properties
 // ---------------------------------------------------------------------------
 
+// constructorAssignedProperties returns the properties the constructor assigns
+// a constructor PARAMETER to.
+//
+// These get their value from the deploy-time argument, so any initializer on
+// them is a default the argument overrides — carrying it into InitialValue
+// would bake the default into the artifact and silently discard the argument
+// (NEW-001). The property must instead stay in the constructor slot list
+// (InitialValue == nil) so the SDK writes the argument.
+//
+// Deliberately narrow in three ways.
+//
+//  1. Only a BARE parameter reference counts. `this.a = 5n` assigns a literal,
+//     not an argument, and keeps its initializer.
+//  2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+//     is positional, so a parameter feeding two properties has no
+//     representation — that shape is already undeployable today when written
+//     without initializers, and belongs to NEW-002.
+//  3. A property assigned more than once in the constructor is skipped, for
+//     the same reason.
+func constructorAssignedProperties(contract *ContractNode) map[string]bool {
+	params := map[string]bool{}
+	for _, p := range contract.Constructor.Params {
+		params[p.Name] = true
+	}
+	propToParams := map[string]map[string]bool{}
+	paramToProps := map[string]map[string]bool{}
+
+	for _, stmt := range contract.Constructor.Body {
+		assign, ok := stmt.(AssignmentStmt)
+		if !ok {
+			continue
+		}
+		target, ok := assign.Target.(PropertyAccessExpr)
+		if !ok {
+			continue
+		}
+		ident, identOK := assign.Value.(Identifier)
+		if !identOK || !params[ident.Name] {
+			propToParams[target.Property] = map[string]bool{}
+			continue
+		}
+		if propToParams[target.Property] == nil {
+			propToParams[target.Property] = map[string]bool{}
+		}
+		propToParams[target.Property][ident.Name] = true
+		if paramToProps[ident.Name] == nil {
+			paramToProps[ident.Name] = map[string]bool{}
+		}
+		paramToProps[ident.Name][target.Property] = true
+	}
+
+	out := map[string]bool{}
+	for prop, ps := range propToParams {
+		if len(ps) != 1 {
+			continue
+		}
+		for param := range ps {
+			if len(paramToProps[param]) == 1 {
+				out[prop] = true
+			}
+		}
+	}
+	return out
+}
+
 func lowerProperties(contract *ContractNode) []ir.ANFProperty {
+	ctorAssigned := constructorAssignedProperties(contract)
 	props := make([]ir.ANFProperty, len(contract.Properties))
 	for i, prop := range contract.Properties {
 		props[i] = ir.ANFProperty{
@@ -150,7 +216,7 @@ func lowerProperties(contract *ContractNode) []ir.ANFProperty {
 			Type:     typeNodeToString(prop.Type),
 			Readonly: prop.Readonly,
 		}
-		if prop.Initializer != nil {
+		if prop.Initializer != nil && !ctorAssigned[prop.Name] {
 			props[i].InitialValue = extractLiteralValue(prop.Initializer)
 			checkStateBigintMagnitude(&props[i])
 		}

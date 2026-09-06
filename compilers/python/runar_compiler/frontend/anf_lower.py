@@ -196,7 +196,60 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
 # Properties
 # ---------------------------------------------------------------------------
 
+def _constructor_assigned_properties(contract: ContractNode) -> set[str]:
+    """Properties the constructor assigns a constructor PARAMETER to.
+
+    These get their value from the deploy-time argument, so any initializer on
+    them is a default the argument overrides -- carrying it into
+    ``initial_value`` would bake the default into the artifact and silently
+    discard the argument (NEW-001). The property must instead stay in the
+    constructor slot list (``initial_value is None``) so the SDK writes the
+    argument.
+
+    Deliberately narrow in three ways.
+
+    1. Only a BARE parameter reference counts. ``this.a = 5n`` assigns a
+       literal, not an argument, and keeps its initializer.
+    2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+       is positional, so a parameter feeding two properties has no
+       representation -- that shape is already undeployable today when written
+       without initializers, and belongs to NEW-002.
+    3. A property assigned more than once in the constructor is skipped, for
+       the same reason.
+    """
+    ctor = contract.constructor
+    if ctor is None:
+        return set()
+    params = {p.name for p in ctor.params}
+    prop_to_params: dict[str, set[str]] = {}
+    param_to_props: dict[str, set[str]] = {}
+
+    for stmt in ctor.body:
+        if not isinstance(stmt, AssignmentStmt):
+            continue
+        if not isinstance(stmt.target, PropertyAccessExpr):
+            continue
+        prop = stmt.target.property
+        if not isinstance(stmt.value, Identifier) or stmt.value.name not in params:
+            # Not a constructor argument: never strip this property.
+            prop_to_params.setdefault(prop, set())
+            continue
+        param = stmt.value.name
+        prop_to_params.setdefault(prop, set()).add(param)
+        param_to_props.setdefault(param, set()).add(prop)
+
+    out: set[str] = set()
+    for prop, ps in prop_to_params.items():
+        if len(ps) != 1:
+            continue
+        (param,) = ps
+        if len(param_to_props[param]) == 1:
+            out.add(prop)
+    return out
+
+
 def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
+    ctor_assigned = _constructor_assigned_properties(contract)
     result = []
     for prop in contract.properties:
         anf_prop = ANFProperty(
@@ -204,7 +257,7 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
             type=_type_node_to_string(prop.type),
             readonly=prop.readonly,
         )
-        if prop.initializer is not None:
+        if prop.initializer is not None and prop.name not in ctor_assigned:
             anf_prop.initial_value = _extract_literal_value(prop.initializer)
             _check_state_bigint_magnitude(anf_prop)
         # Propagate synthetic FixedArray chain (set by expand_fixed_arrays)

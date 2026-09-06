@@ -68,6 +68,8 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
 // ---------------------------------------------------------------------------
 
 function lowerProperties(contract: ContractNode): ANFProperty[] {
+  const ctorAssigned = constructorAssignedProperties(contract);
+
   return contract.properties.map(prop => {
     const anfProp: ANFProperty = {
       name: prop.name,
@@ -75,14 +77,89 @@ function lowerProperties(contract: ContractNode): ANFProperty[] {
       readonly: prop.readonly,
     };
 
-    // Extract literal value from property initializer
-    if (prop.initializer) {
+    // Extract literal value from property initializer. A property the
+    // constructor assigns a PARAMETER to carries no compile-time value: the
+    // constructor argument wins and the initializer degrades to a default.
+    if (prop.initializer && !ctorAssigned.has(prop.name)) {
       anfProp.initialValue = extractLiteralValue(prop.initializer);
       checkStateBigintMagnitude(anfProp);
     }
 
     return anfProp;
   });
+}
+
+/**
+ * Properties the constructor assigns a constructor PARAMETER to.
+ *
+ * These get their value from the deploy-time argument, so any initializer on
+ * them is a default that the argument overrides — carrying it into
+ * `initialValue` would bake the default into the artifact and silently discard
+ * the argument (NEW-001). The property must instead stay in the constructor
+ * slot list (`initialValue === undefined`) so the SDK writes the argument.
+ *
+ * This is the shared form of a rule the Zig surface has always applied in its
+ * own parser, where `count: i64 = 0` beside `init(count: i64)` is the idiomatic
+ * struct declaration and five conformance fixtures depend on the strip. Keying
+ * on the ASSIGNMENT rather than on a name match generalises it to the shape
+ * that actually occurs in-repo, `constructor(seed) { this.p = seed; }`.
+ *
+ * Deliberately narrow in three ways.
+ *
+ * 1. Only a BARE parameter reference counts. `this.a = 5n` assigns a literal,
+ *    not an argument, and keeps its initializer; a computed form like
+ *    `this.p = seed + 1n` is left alone because the constructor body is never
+ *    lowered to script, so no tier could honour the arithmetic anyway.
+ *
+ * 2. The property↔parameter mapping must be ONE-TO-ONE. The artifact model is
+ *    positional — the properties with no `initialValue` correspond in order to
+ *    `abi.constructor.params` — so a parameter feeding two properties
+ *    (`constructor(seed) { this.a = seed; this.b = seed; }`) has no
+ *    representation: two state fields would face one argument and the SDK
+ *    would leave the second undefined. That shape is ALREADY undeployable
+ *    today when written without initializers (`deploy()` throws "Cannot
+ *    convert undefined to a BigInt"), so stripping there would convert a
+ *    wrong-state bug into a crash rather than fixing anything. It is left at
+ *    today's behaviour and belongs to NEW-002, which is about making that
+ *    correspondence explicit instead of positional.
+ *
+ * 3. A property assigned more than once in the constructor is skipped for the
+ *    same reason — there is no single argument it corresponds to.
+ */
+function constructorAssignedProperties(contract: ContractNode): Set<string> {
+  const out = new Set<string>();
+  const ctor = contract.constructor;
+  if (!ctor) return out;
+
+  const params = new Set(ctor.params.map(p => p.name));
+  // property -> the parameters assigned to it; parameter -> properties it feeds
+  const propToParams = new Map<string, Set<string>>();
+  const paramToProps = new Map<string, Set<string>>();
+
+  for (const stmt of ctor.body) {
+    if (stmt.kind !== 'assignment') continue;
+    if (stmt.target.kind !== 'property_access') continue;
+    const prop = stmt.target.property;
+    if (stmt.value.kind !== 'identifier' || !params.has(stmt.value.name)) {
+      // Assigned something that is not a constructor argument: the property
+      // does not correspond to a slot, so never strip it.
+      propToParams.set(prop, new Set());
+      continue;
+    }
+    const param = stmt.value.name;
+    if (!propToParams.has(prop)) propToParams.set(prop, new Set());
+    propToParams.get(prop)!.add(param);
+    if (!paramToProps.has(param)) paramToProps.set(param, new Set());
+    paramToProps.get(param)!.add(prop);
+  }
+
+  for (const [prop, ps] of propToParams) {
+    if (ps.size !== 1) continue;
+    const param = [...ps][0]!;
+    if (paramToProps.get(param)!.size !== 1) continue;
+    out.add(prop);
+  }
+  return out;
 }
 
 /**
