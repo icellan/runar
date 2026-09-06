@@ -2614,6 +2614,38 @@ fn lower_call_expr(
     })
 }
 
+/// Lower one arm of a ternary, guaranteeing the arm ENDS with the binding that
+/// holds its result.
+///
+/// NEW-016: `lower_expr_to_ref` returns an existing ref without emitting
+/// anything when the arm is a bare identifier — `g ? f : c === 0n` produced
+/// `then: []`, an `if` arm with no bindings at all. Stack lowering reads an
+/// arm's result off its stack effect, so a +0 arm has no result to adopt and
+/// the depth reconcile padded the shortfall with an EMPTY push. The contract
+/// compiled clean, the AST interpreter accepted it, and the real engine
+/// rejected the spend with "OP_VERIFY requires the top stack value to be
+/// truthy" over a stack of `[01, ]` — the arm's `true` replaced by an empty
+/// (false) value. An ordinary contract deployed to a permanently unspendable
+/// UTXO.
+///
+/// Aliasing through `load_const "@ref:"` — the same idiom `let x = y` and the
+/// increment/decrement lowerings already use — makes the arm's stack effect +1
+/// and copies the parent slot instead of trying to move it. The alias is only
+/// emitted when the result was NOT produced inside the arm, so every arm that
+/// already ended on its own result keeps its exact bytes.
+fn lower_ternary_arm(expr: &Expression, arm_ctx: &mut LoweringContext) {
+    let ref_name = lower_expr_to_ref(expr, arm_ctx);
+    let ends_on_result = arm_ctx
+        .bindings
+        .last()
+        .is_some_and(|last| last.name == ref_name);
+    if !ends_on_result {
+        arm_ctx.emit(ANFValue::LoadConst {
+            value: serde_json::Value::String(format!("@ref:{}", ref_name)),
+        });
+    }
+}
+
 fn lower_ternary_expr(
     condition: &Expression,
     consequent: &Expression,
@@ -2623,11 +2655,11 @@ fn lower_ternary_expr(
     let cond_ref = lower_expr_to_ref(condition, ctx);
 
     let mut then_ctx = ctx.sub_context();
-    lower_expr_to_ref(consequent, &mut then_ctx);
+    lower_ternary_arm(consequent, &mut then_ctx);
     ctx.sync_counter(&then_ctx);
 
     let mut else_ctx = ctx.sub_context();
-    lower_expr_to_ref(alternate, &mut else_ctx);
+    lower_ternary_arm(alternate, &mut else_ctx);
     ctx.sync_counter(&else_ctx);
 
     ctx.emit(ANFValue::If {

@@ -3,6 +3,8 @@ package runar.compiler.passes;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -316,6 +318,49 @@ public final class StackLower {
             Set<String> out = new LinkedHashSet<>();
             for (String s : slots) if (s != null && !s.isEmpty()) out.add(s);
             return out;
+        }
+
+        /**
+         * How many slots carry each name.
+         *
+         * <p>The model resolves a name to its SHALLOWEST slot, so a name held
+         * more than once has one live slot and the rest are dead residue — but
+         * they are all still "the name" to a set-membership test, which is what
+         * NEW-018 turned on. See {@code lowerIf}. Insertion-ordered so callers
+         * that iterate it stay deterministic.
+         */
+        Map<String, Integer> nameCounts() {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            for (String s : slots) {
+                if (s != null && !s.isEmpty()) counts.merge(s, 1, Integer::sum);
+            }
+            return counts;
+        }
+
+        /**
+         * The depths to drop for a MULTISET of names, deepest-first.
+         *
+         * <p>Takes the SHALLOWEST occurrences of a name listed more than once —
+         * the shallowest slot is the live one, and it is the one the sibling arm
+         * consumed. Deepest-first so removing a deeper slot does not shift a
+         * shallower one. For a name listed once this is exactly
+         * {@code findDepth}, which also resolves to the shallowest slot.
+         */
+        List<Integer> dropDepthsFor(List<String> names) {
+            Map<String, Integer> need = new HashMap<>();
+            for (String n : names) need.merge(n, 1, Integer::sum);
+            List<Integer> depths = new ArrayList<>();
+            for (int d = 0; d < depth(); d++) {
+                String name = peekAtDepth(d);
+                if (name == null || name.isEmpty()) continue;
+                int want = need.getOrDefault(name, 0);
+                if (want > 0) {
+                    depths.add(d);
+                    need.put(name, want - 1);
+                }
+            }
+            depths.sort((a, b) -> Integer.compare(b, a));
+            return depths;
         }
 
         /** Debug string of the slot names (bottom -> top) for error messages. */
@@ -2282,7 +2327,37 @@ public final class StackLower {
                     + bindingName + "'.");
             }
 
-            bringToTop(cond, isLastUse(cond, idx, lastUses));
+            // NEW-015: does an ARM read the condition again?
+            //
+            // lastUses is keyed by the index of the ENCLOSING binding, and
+            // collectRefs deliberately recurses into thenBranch / elseBranch so
+            // an arm-only ref is not dropped early. Both facts together mean an
+            // arm's read of the condition lands on THIS binding's index —
+            // indistinguishable from a ref used only as the condition.
+            // isLastUse then said "yes, consume it", bringToTop ROLLed the slot
+            // away, and the arm looked for a value that was no longer there:
+            //
+            //     let f: boolean = c > 0n;
+            //     assert(f ? c > 10n : !f);
+            //     //  Value 'f' not found on stack (stack has 1 items: [c])
+            //
+            // Legal source, accepted by validate and typecheck, rejected here —
+            // so there was no diagnostic a developer could act on. It only ever
+            // bit when the condition local was DEAD after the `if`; one that
+            // stayed live was already covered by the `> idx` rule below, which
+            // is why the shape looked like it worked. && / || desugar to this
+            // node, so `f || !f` routes through the same path.
+            boolean condReadInArms = false;
+            for (AnfBinding b : thenB) {
+                if (collectRefs(b.value()).contains(cond)) { condReadInArms = true; break; }
+            }
+            if (!condReadInArms) {
+                for (AnfBinding b : elseB) {
+                    if (collectRefs(b.value()).contains(cond)) { condReadInArms = true; break; }
+                }
+            }
+
+            bringToTop(cond, !condReadInArms && isLastUse(cond, idx, lastUses));
             sm.pop();
 
             Set<String> protectedRefs = new LinkedHashSet<>();
@@ -2291,6 +2366,13 @@ public final class StackLower {
                     protectedRefs.add(e.getKey());
                 }
             }
+
+            // A condition the arms re-read was PICKed just above, so the slot
+            // survived OP_IF. Protect it for the same reason the merged-local
+            // block below is protected: only ONE arm may hold the read, so
+            // letting that arm consume the slot would leave the two arms at
+            // different depths over a name the parent still models.
+            if (condReadInArms && sm.has(cond)) protectedRefs.add(cond);
 
             // The K>=2 merged-local block reads every merged local in BOTH
             // arms, and that read is RECONCILIATION, not a use: it is what
@@ -2363,28 +2445,69 @@ public final class StackLower {
             }
 
             // Phase 1: consumed-name analysis.
-            Set<String> postThenNames = thenCtx.sm.namedSlots();
+            //
+            // NEW-018: counted by MULTIPLICITY, not by name-set membership.
+            //
+            // A parent stack legitimately holds the same name in more than one
+            // slot — a loop rebinding a local leaves one slot per unrolled
+            // iteration, all named `acc`, of which only the shallowest is ever
+            // read (the model resolves a name to its shallowest slot). When an
+            // arm ROLLs that live slot away, the name is STILL in the arm's name
+            // SET because the dead residue slot beneath it carries the same name
+            // — so the set-difference this phase used to compute saw nothing
+            // consumed, emitted no matching drop in the sibling, and left the
+            // two arms one slot apart.
+            //
+            // Phase 3 then "fixed" the depth with an anonymous pad. A pad
+            // restores the COUNT but not the POSITION: the arm that lost a slot
+            // from the middle of the region gets a placeholder next to its
+            // result, while the sibling still holds the real value in the
+            // original slot. The two arms leave positionally different stacks,
+            // the parent adopts one of them, and every slot the other arm holds
+            // below the result is off by one:
+            //
+            //     let acc = p; let wacc = 0n;
+            //     for (…) for (…) { acc = acc + p; wacc = wacc + acc; }
+            //     let br0 = 0n; const sib0 = p;
+            //     if (p === 0n) { br0 = p; }
+            //     assert((p >= 0n ? acc >= 0n : false) ? (br0 < sib0) : false);
+            //
+            // The inner conditional is the CONDITION of the outer one. Its
+            // then-arm consumes the live `acc`; the parent holds `acc` twice, so
+            // phase 1 missed it and the arms came back as `[t · br0 sib0 …]`
+            // against `[t br0 sib0 acc …]`. With p = 1 the source ACCEPTS and
+            // the AST interpreter accepts; the script engines reject the spend
+            // with "The top stack element must be truthy after script
+            // evaluation" — an ordinary contract deployed to a permanently
+            // unspendable UTXO. It needs no `&&`: a plain nested ternary reaches
+            // it, and `a && b && c` is left-associative, so it is also what
+            // blocked the short-circuit desugar.
+            //
+            // Counting occurrences instead makes the sibling drop its matching
+            // slot, both arms end at the same depth with the same layout, and no
+            // pad is needed at all. Byte-neutral for every parent stack with no
+            // duplicated name: for a name held once, "parent has 1, arm has 0"
+            // is exactly the old `!postThenNames.contains(n)`, and the drop
+            // depths are the same list.
+            Map<String, Integer> preIfCounts = sm.nameCounts();
+            Map<String, Integer> thenCounts = thenCtx.sm.nameCounts();
+            Map<String, Integer> elseCounts = elseCtx.sm.nameCounts();
             List<String> consumedNames = new ArrayList<>();
-            for (String n : preIfNames) {
-                if (!postThenNames.contains(n) && elseCtx.sm.has(n)) consumedNames.add(n);
-            }
-            Set<String> postElseNames = elseCtx.sm.namedSlots();
             List<String> elseConsumedNames = new ArrayList<>();
-            for (String n : preIfNames) {
-                if (!postElseNames.contains(n) && thenCtx.sm.has(n)) elseConsumedNames.add(n);
+            for (Map.Entry<String, Integer> e : preIfCounts.entrySet()) {
+                String n = e.getKey();
+                int held = e.getValue();
+                int thenLost = Math.max(0, held - thenCounts.getOrDefault(n, 0));
+                int elseLost = Math.max(0, held - elseCounts.getOrDefault(n, 0));
+                for (int i = 0; i < thenLost - elseLost; i++) consumedNames.add(n);
+                for (int i = 0; i < elseLost - thenLost; i++) elseConsumedNames.add(n);
             }
 
             if (!consumedNames.isEmpty()) {
-                List<Integer> depths = new ArrayList<>();
-                for (String n : consumedNames) depths.add(elseCtx.sm.findDepth(n));
-                depths.sort((a, b) -> Integer.compare(b, a));
-                for (int d : depths) dropAtDepth(elseCtx, d);
+                for (int d : elseCtx.sm.dropDepthsFor(consumedNames)) dropAtDepth(elseCtx, d);
             }
             if (!elseConsumedNames.isEmpty()) {
-                List<Integer> depths = new ArrayList<>();
-                for (String n : elseConsumedNames) depths.add(thenCtx.sm.findDepth(n));
-                depths.sort((a, b) -> Integer.compare(b, a));
-                for (int d : depths) dropAtDepth(thenCtx, d);
+                for (int d : thenCtx.sm.dropDepthsFor(elseConsumedNames)) dropAtDepth(thenCtx, d);
             }
 
             // Branch-merged locals: trim each arm down to exactly its K
@@ -2402,12 +2525,20 @@ public final class StackLower {
             //
             // Runs AFTER the phase-2 consumption drops, so both arms have given
             // up the same parent slots and share one base depth.
+            //
+            // NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is.
+            // Phase 1 now makes both arms give up the same slot of a name the
+            // parent holds twice, so the base depth has to count that slot as
+            // given up too — otherwise targetDepth is one too high, the trim
+            // below does nothing, and the layout assertion fires on a program
+            // that is actually well-formed.
             int nDeclared = results.size();
             if (nDeclared >= 1) {
-                Set<String> stillHeld = thenCtx.sm.namedSlots();
+                Map<String, Integer> stillHeldCounts = thenCtx.sm.nameCounts();
                 int consumedFromParent = 0;
-                for (String n : preIfNames) {
-                    if (!stillHeld.contains(n) && sm.has(n)) consumedFromParent++;
+                for (Map.Entry<String, Integer> e : preIfCounts.entrySet()) {
+                    consumedFromParent +=
+                        Math.max(0, e.getValue() - stillHeldCounts.getOrDefault(e.getKey(), 0));
                 }
                 int targetDepth = sm.depth() - consumedFromParent + nDeclared;
                 for (LoweringContext armCtx : List.of(thenCtx, elseCtx)) {
@@ -2504,6 +2635,10 @@ public final class StackLower {
                     + "(see GitHub issue #99). binding='" + bindingName + "'.");
             }
 
+            // NEW-018 needs the arms' post-branch name MULTISET. Snapshotted here
+            // because the arms' op lists are consumed immediately after this point.
+            Map<String, Integer> postBranchCounts = thenCtx.sm.nameCounts();
+
             IfOp ifOp;
             if (!elseCtx.ops.isEmpty()) {
                 ifOp = new IfOp(thenCtx.ops, elseCtx.ops);
@@ -2521,14 +2656,20 @@ public final class StackLower {
             int postEndifDrops = 0;
 
             // Reconcile parent stackMap with consumed names in both branches.
-            Set<String> postBranchNames = thenCtx.sm.namedSlots();
-            List<String> toRemove = new ArrayList<>();
-            for (String n : preIfNames) {
-                if (!postBranchNames.contains(n) && sm.has(n)) toRemove.add(n);
-            }
-            for (String n : toRemove) {
-                int d = sm.findDepth(n);
-                sm.removeAtDepth(d);
+            //
+            // NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is.
+            // When the arms consume the live slot of a name the parent holds
+            // twice, the parent must give up one slot too — the set test kept
+            // both, so the parent modelled one more slot than the arms
+            // physically left and the adopt below saw armDepth == parentDepth
+            // and pushed nothing at all.
+            for (Map.Entry<String, Integer> e : preIfCounts.entrySet()) {
+                String n = e.getKey();
+                int excess = e.getValue() - postBranchCounts.getOrDefault(n, 0);
+                while (excess > 0 && sm.has(n)) {
+                    sm.removeAtDepth(sm.findDepth(n));
+                    excess--;
+                }
             }
 
             // C27: the N>=2 result reconcile below also applies when the else-

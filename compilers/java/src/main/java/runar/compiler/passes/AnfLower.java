@@ -1804,15 +1804,45 @@ public final class AnfLower {
             return out;
         }
 
+        /**
+         * Lower one arm of a ternary, guaranteeing the arm ENDS with the
+         * binding that holds its result.
+         *
+         * <p>NEW-016: {@code lowerExprToRef} returns an existing ref without
+         * emitting anything when the arm is a bare identifier —
+         * {@code g ? f : c === 0n} produced {@code then: []}, an {@code if} arm
+         * with no bindings at all. Stack lowering reads an arm's result off its
+         * stack effect, so a +0 arm has no result to adopt and the depth
+         * reconcile padded the shortfall with an EMPTY push. The contract
+         * compiled clean, the AST interpreter accepted it, and the real engine
+         * rejected the spend with "OP_VERIFY requires the top stack value to be
+         * truthy" over a stack of {@code [01, ]} — the arm's {@code true}
+         * replaced by an empty (false) value. An ordinary contract deployed to
+         * a permanently unspendable UTXO.
+         *
+         * <p>Aliasing through {@code load_const "@ref:"} — the same idiom
+         * {@code let x = y} and the increment/decrement lowerings already use —
+         * makes the arm's stack effect +1 and copies the parent slot instead of
+         * trying to move it. The alias is only emitted when the result was NOT
+         * produced inside the arm, so every arm that already ended on its own
+         * result keeps its exact bytes.
+         */
+        private void lowerTernaryArm(Expression e) {
+            String ref = lowerExprToRef(e);
+            if (bindings.isEmpty() || !bindings.get(bindings.size() - 1).name().equals(ref)) {
+                emit(makeLoadConstString("@ref:" + ref));
+            }
+        }
+
         private String lowerTernaryExpr(TernaryExpr e) {
             String condRef = lowerExprToRef(e.condition());
 
             LowerCtx thenCtx = subContext();
-            thenCtx.lowerExprToRef(e.consequent());
+            thenCtx.lowerTernaryArm(e.consequent());
             syncCounter(thenCtx);
 
             LowerCtx elseCtx = subContext();
-            elseCtx.lowerExprToRef(e.alternate());
+            elseCtx.lowerTernaryArm(e.alternate());
             syncCounter(elseCtx);
 
             return emit(new If(condRef, thenCtx.bindings, elseCtx.bindings));

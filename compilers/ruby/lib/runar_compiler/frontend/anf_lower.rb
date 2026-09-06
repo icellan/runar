@@ -1747,15 +1747,47 @@ module RunarCompiler
 
       # @param e [TernaryExpr]
       # @return [String]
+      # Lower one arm of a ternary so the arm ENDS with its result binding.
+      #
+      # NEW-016: +lower_expr_to_ref+ returns an existing ref without emitting
+      # anything when the arm is a bare identifier -- <tt>g ? f : c === 0n</tt>
+      # produced <tt>then: []</tt>, an +if+ arm with no bindings at all. Stack
+      # lowering reads an arm's result off its stack effect, so a +0 arm has no
+      # result to adopt and the depth reconcile padded the shortfall with an
+      # EMPTY push. The contract compiled clean, the AST interpreter accepted
+      # it, and the real engine rejected the spend with "OP_VERIFY requires the
+      # top stack value to be truthy" over a stack of <tt>[01, ]</tt> -- the
+      # arm's +true+ replaced by an empty (false) value. An ordinary contract
+      # deployed to a permanently unspendable UTXO.
+      #
+      # Aliasing through <tt>load_const "@ref:"</tt> -- the same idiom
+      # <tt>let x = y</tt> and the increment/decrement lowerings already use --
+      # makes the arm's stack effect +1 and copies the parent slot instead of
+      # trying to move it. The alias is only emitted when the result was NOT
+      # produced inside the arm, so every arm that already ended on its own
+      # result keeps its exact bytes.
+      #
+      # @param e [Expression]
+      # @return [void]
+      def _lower_ternary_arm(e)
+        ref = lower_expr_to_ref(e)
+        return if !bindings.empty? && bindings.last.name == ref
+
+        emit(Frontend._make_load_const_string("@ref:#{ref}"))
+      end
+      # Called on the ARM's sub-context from `_lower_ternary_expr`, so it has to
+      # cross an object boundary the way `lower_expr_to_ref` does.
+      public :_lower_ternary_arm
+
       def _lower_ternary_expr(e)
         cond_ref = lower_expr_to_ref(e.condition)
 
         then_ctx = sub_context
-        then_ctx.lower_expr_to_ref(e.consequent)
+        then_ctx._lower_ternary_arm(e.consequent)
         sync_counter(then_ctx)
 
         else_ctx = sub_context
-        else_ctx.lower_expr_to_ref(e.alternate)
+        else_ctx._lower_ternary_arm(e.alternate)
         sync_counter(else_ctx)
 
         emit(IR::ANFValue.new(kind: "if").tap do |v|

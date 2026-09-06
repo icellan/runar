@@ -1690,15 +1690,40 @@ class _LowerCtx:
             return self.bindings[end_index - 1].name
         return self.emit(_make_load_const_string("@void"))
 
+    def _lower_ternary_arm(self, e: Expression) -> None:
+        """Lower one arm of a ternary so the arm ENDS with its result binding.
+
+        NEW-016: ``lower_expr_to_ref`` returns an existing ref without emitting
+        anything when the arm is a bare identifier -- ``g ? f : c === 0n``
+        produced ``then: []``, an ``if`` arm with no bindings at all. Stack
+        lowering reads an arm's result off its stack effect, so a +0 arm has no
+        result to adopt and the depth reconcile padded the shortfall with an
+        EMPTY push. The contract compiled clean, the AST interpreter accepted
+        it, and the real engine rejected the spend with "OP_VERIFY requires the
+        top stack value to be truthy" over a stack of ``[01, ]`` -- the arm's
+        ``true`` replaced by an empty (false) value. An ordinary contract
+        deployed to a permanently unspendable UTXO.
+
+        Aliasing through ``load_const "@ref:"`` -- the same idiom ``let x = y``
+        and the increment/decrement lowerings already use -- makes the arm's
+        stack effect +1 and copies the parent slot instead of trying to move
+        it. The alias is only emitted when the result was NOT produced inside
+        the arm, so every arm that already ended on its own result keeps its
+        exact bytes.
+        """
+        ref = self.lower_expr_to_ref(e)
+        if not self.bindings or self.bindings[-1].name != ref:
+            self.emit(_make_load_const_string("@ref:" + ref))
+
     def _lower_ternary_expr(self, e: TernaryExpr) -> str:
         cond_ref = self.lower_expr_to_ref(e.condition)
 
         then_ctx = self.sub_context()
-        then_ctx.lower_expr_to_ref(e.consequent)
+        then_ctx._lower_ternary_arm(e.consequent)
         self.sync_counter(then_ctx)
 
         else_ctx = self.sub_context()
-        else_ctx.lower_expr_to_ref(e.alternate)
+        else_ctx._lower_ternary_arm(e.alternate)
         self.sync_counter(else_ctx)
 
         return self.emit(ANFValue(

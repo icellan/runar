@@ -324,6 +324,42 @@ class StackMap:
         """Return the set of all non-empty slot names."""
         return {s for s in self.slots if s}
 
+    def name_counts(self) -> dict[str, int]:
+        """How many slots carry each name.
+
+        The model resolves a name to its SHALLOWEST slot, so a name held more
+        than once has one live slot and the rest are dead residue -- but they
+        are all still "the name" to a set-membership test, which is what
+        NEW-018 turned on. See ``_lower_if``.
+        """
+        counts: dict[str, int] = {}
+        for s in self.slots:
+            if s:
+                counts[s] = counts.get(s, 0) + 1
+        return counts
+
+    def drop_depths_for(self, names: list[str]) -> list[int]:
+        """The depths to drop for a MULTISET of names, deepest-first.
+
+        Takes the SHALLOWEST occurrences of a name listed more than once -- the
+        shallowest slot is the live one, and it is the one the sibling arm
+        consumed. Returned deepest-first so removing a deeper slot does not
+        shift a shallower one. For a name listed once this is exactly
+        ``find_depth``, which also resolves to the shallowest slot.
+        """
+        need: dict[str, int] = {}
+        for n in names:
+            need[n] = need.get(n, 0) + 1
+        depths: list[int] = []
+        for d in range(self.depth()):
+            name = self.peek_at_depth(d)
+            if not name:
+                continue
+            if need.get(name, 0) > 0:
+                depths.append(d)
+                need[name] -= 1
+        return sorted(depths, reverse=True)
+
     def debug_slots(self) -> str:
         """Debug string of the slot names (bottom -> top) for error messages."""
         return ", ".join(self.slots)
@@ -1733,7 +1769,32 @@ class _LoweringContext:
                 f"would silently replace the other. binding='{binding_name}'."
             )
 
-        is_last = self._is_last_use(cond, binding_index, last_uses)
+        # NEW-015: does an ARM read the condition again?
+        #
+        # ``last_uses`` is keyed by the index of the ENCLOSING binding, and
+        # ``collect_refs`` deliberately recurses into ``then`` / ``else`` so an
+        # arm-only ref is not dropped early. Both facts together mean an arm's
+        # read of the condition lands on THIS binding's index --
+        # indistinguishable from a ref used only as the condition.
+        # ``_is_last_use`` then said "yes, consume it", ``bring_to_top`` ROLLed
+        # the slot away, and the arm looked for a value that was no longer
+        # there:
+        #
+        #     let f: boolean = c > 0n;
+        #     assert(f ? c > 10n : !f);
+        #     #  Value 'f' not found on stack (stack has 1 items: [c])
+        #
+        # Legal source, accepted by validate and typecheck, rejected here -- so
+        # there was no diagnostic a developer could act on. It only ever bit
+        # when the condition local was DEAD after the ``if``; one that stayed
+        # live was already covered by the ``last_idx > binding_index`` rule
+        # below, which is why the shape looked like it worked. ``&&`` / ``||``
+        # desugar to this node, so ``f || !f`` routes through the same path.
+        cond_read_in_arms = any(
+            cond in collect_refs(b.value) for b in list(then_bindings) + list(else_bindings)
+        )
+
+        is_last = not cond_read_in_arms and self._is_last_use(cond, binding_index, last_uses)
         self.bring_to_top(cond, is_last)
         self.sm.pop()  # OP_IF consumes the condition
 
@@ -1742,6 +1803,14 @@ class _LoweringContext:
         for ref, last_idx in last_uses.items():
             if last_idx > binding_index and self.sm.has(ref):
                 protected_refs.add(ref)
+
+        # A condition the arms re-read was PICKed just above, so the slot
+        # survived OP_IF. Protect it for the same reason the merged-local block
+        # below is protected: only ONE arm may hold the read, so letting that
+        # arm consume the slot would leave the two arms at different depths over
+        # a name the parent still models.
+        if cond_read_in_arms and self.sm.has(cond):
+            protected_refs.add(cond)
 
         # The K>=2 merged-local block reads every merged local in BOTH arms, and
         # that read is RECONCILIATION, not a use: it is what makes each arm
@@ -1824,17 +1893,63 @@ class _LoweringContext:
         # to remove those same items, then push empty bytes as placeholder.
         # OP_CAT with empty bytes is identity (no-op for output hashing).
         # Phase 1: collect consumed names from both directions.
-        post_then_names = then_ctx.sm.named_slots()
-        consumed_names = [n for n in pre_if_names
-                          if n not in post_then_names and else_ctx.sm.has(n)]
-        post_else_names = else_ctx.sm.named_slots()
-        else_consumed_names = [n for n in pre_if_names
-                               if n not in post_else_names and then_ctx.sm.has(n)]
+        #
+        # NEW-018: counted by MULTIPLICITY, not by name-set membership.
+        #
+        # A parent stack legitimately holds the same name in more than one slot
+        # -- a loop rebinding a local leaves one slot per unrolled iteration,
+        # all named ``acc``, of which only the shallowest is ever read (the
+        # model resolves a name to its shallowest slot). When an arm ROLLs that
+        # live slot away, the name is STILL in the arm's name SET because the
+        # dead residue slot beneath it carries the same name -- so the
+        # set-difference this phase used to compute saw nothing consumed,
+        # emitted no matching drop in the sibling, and left the two arms one
+        # slot apart.
+        #
+        # Phase 3 then "fixed" the depth with an anonymous pad. A pad restores
+        # the COUNT but not the POSITION: the arm that lost a slot from the
+        # middle of the region gets a placeholder next to its result, while the
+        # sibling still holds the real value in the original slot. The two arms
+        # leave positionally different stacks, the parent adopts one of them,
+        # and every slot the other arm holds below the result is off by one::
+        #
+        #     let acc = p; let wacc = 0n;
+        #     for (...) for (...) { acc = acc + p; wacc = wacc + acc; }
+        #     let br0 = 0n; const sib0 = p;
+        #     if (p === 0n) { br0 = p; }
+        #     assert((p >= 0n ? acc >= 0n : false) ? (br0 < sib0) : false);
+        #
+        # The inner conditional is the CONDITION of the outer one. Its then-arm
+        # consumes the live ``acc``; the parent holds ``acc`` twice, so phase 1
+        # missed it and the arms came back as ``[t . br0 sib0 ...]`` against
+        # ``[t br0 sib0 acc ...]``. With p = 1 the source ACCEPTS and the AST
+        # interpreter accepts; the script engines reject the spend with "The top
+        # stack element must be truthy after script evaluation" -- an ordinary
+        # contract deployed to a permanently unspendable UTXO. It needs no
+        # ``&&``: a plain nested ternary reaches it, and ``a && b && c`` is
+        # left-associative, so it is also what blocked the short-circuit desugar.
+        #
+        # Counting occurrences instead makes the sibling drop its matching slot,
+        # both arms end at the same depth with the same layout, and no pad is
+        # needed at all. Byte-neutral for every parent stack with no duplicated
+        # name: for a name held once, "parent has 1, arm has 0" is exactly the
+        # old ``n not in post_then_names``, and the drop depths are the same
+        # list.
+        pre_if_counts = self.sm.name_counts()
+        then_counts = then_ctx.sm.name_counts()
+        else_counts = else_ctx.sm.name_counts()
+        consumed_names: list[str] = []
+        else_consumed_names: list[str] = []
+        for name, held in pre_if_counts.items():
+            then_lost = max(0, held - then_counts.get(name, 0))
+            else_lost = max(0, held - else_counts.get(name, 0))
+            consumed_names.extend([name] * max(0, then_lost - else_lost))
+            else_consumed_names.extend([name] * max(0, else_lost - then_lost))
 
         # Phase 2: perform ALL drops before any placeholder pushes.
         # This prevents double-placeholder when bilateral drops balance each other.
         if consumed_names:
-            depths = sorted([else_ctx.sm.find_depth(n) for n in consumed_names], reverse=True)
+            depths = else_ctx.sm.drop_depths_for(consumed_names)
             for depth in depths:
                 if depth == 0:
                     else_ctx.emit_op(StackOp(op="drop"))
@@ -1852,7 +1967,7 @@ class _LoweringContext:
                     else_ctx.emit_op(StackOp(op="drop"))
                     else_ctx.sm.pop()
         if else_consumed_names:
-            depths = sorted([then_ctx.sm.find_depth(n) for n in else_consumed_names], reverse=True)
+            depths = then_ctx.sm.drop_depths_for(else_consumed_names)
             for depth in depths:
                 if depth == 0:
                     then_ctx.emit_op(StackOp(op="drop"))
@@ -1884,12 +1999,18 @@ class _LoweringContext:
         #
         # Runs AFTER the phase-2 consumption drops, so both arms have given up
         # the same parent slots and share one base depth.
+        #
+        # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is.
+        # Phase 1 now makes both arms give up the same slot of a name the parent
+        # holds twice, so the base depth has to count that slot as given up too
+        # -- otherwise ``target_depth`` is one too high, the trim below does
+        # nothing, and the layout assertion fires on a well-formed program.
         n_declared = len(results)
         if n_declared >= 1:
-            still_held = then_ctx.sm.named_slots()
+            still_held_counts = then_ctx.sm.name_counts()
             consumed_from_parent = sum(
-                1 for name in pre_if_names
-                if name not in still_held and self.sm.has(name)
+                max(0, held - still_held_counts.get(name, 0))
+                for name, held in pre_if_counts.items()
             )
             target_depth = self.sm.depth() - consumed_from_parent + n_declared
             for arm_ctx in (then_ctx, else_ctx):
@@ -1967,6 +2088,10 @@ class _LoweringContext:
                 f"(see GitHub issue #99); binding={binding_name!r}"
             )
 
+        # NEW-018 needs the arms' post-branch name MULTISET. Snapshotted here
+        # because the arms' op lists are consumed immediately after this point.
+        post_branch_counts = then_ctx.sm.name_counts()
+
         then_ops = then_ctx.ops
         else_ops = else_ctx.ops
 
@@ -1984,11 +2109,17 @@ class _LoweringContext:
         post_endif_drops = 0
 
         # Reconcile parent stackMap: remove items consumed by the branches.
-        post_branch_names = then_ctx.sm.named_slots()
-        for name in pre_if_names:
-            if name not in post_branch_names and self.sm.has(name):
-                depth = self.sm.find_depth(name)
-                self.sm.remove_at_depth(depth)
+        #
+        # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. When
+        # the arms consume the live slot of a name the parent holds twice, the
+        # parent must give up one slot too -- the set test kept both, so the
+        # parent modelled one more slot than the arms physically left and the
+        # adopt below saw ``arm_depth == parent_depth`` and pushed nothing.
+        for name, held in pre_if_counts.items():
+            excess = held - post_branch_counts.get(name, 0)
+            while excess > 0 and self.sm.has(name):
+                self.sm.remove_at_depth(self.sm.find_depth(name))
+                excess -= 1
 
         # C27: the N>=2 result reconcile below also applies when the else-branch
         # is PRESENT and BOTH arms wrote the same N mutable fields (e.g. each

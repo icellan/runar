@@ -2176,15 +2176,42 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     return try ctx.emit(makeLoadConstString(ctx.allocator, "@void"));
 }
 
+/// Lower one arm of a ternary, guaranteeing the arm ENDS with the binding that
+/// holds its result.
+///
+/// NEW-016: `lowerExprToRef` returns an existing ref without emitting anything
+/// when the arm is a bare identifier — `g ? f : c === 0n` produced `then: []`,
+/// an `if` arm with no bindings at all. Stack lowering reads an arm's result
+/// off its stack effect, so a +0 arm has no result to adopt and the depth
+/// reconcile padded the shortfall with an EMPTY push. The contract compiled
+/// clean, the AST interpreter accepted it, and the real engine rejected the
+/// spend with "OP_VERIFY requires the top stack value to be truthy" over a
+/// stack of `[01, ]` — the arm's `true` replaced by an empty (false) value. An
+/// ordinary contract deployed to a permanently unspendable UTXO.
+///
+/// Aliasing through `load_const "@ref:"` — the same idiom `let x = y` and the
+/// increment/decrement lowerings already use — makes the arm's stack effect +1
+/// and copies the parent slot instead of trying to move it. The alias is only
+/// emitted when the result was NOT produced inside the arm, so every arm that
+/// already ended on its own result keeps its exact bytes.
+fn lowerTernaryArm(ctx: *LowerCtx, e: Expression) LowerError!void {
+    const ref = try lowerExprToRef(ctx, e);
+    const ends_on_result = ctx.bindings.items.len > 0 and
+        std.mem.eql(u8, ctx.bindings.items[ctx.bindings.items.len - 1].name, ref);
+    if (!ends_on_result) {
+        _ = try ctx.emit(makeLoadConstString(ctx.allocator, try refString(ctx.allocator, ref)));
+    }
+}
+
 fn lowerTernaryExpr(ctx: *LowerCtx, t: *const types.Ternary) LowerError![]const u8 {
     const cond_ref = try lowerExprToRef(ctx, t.condition);
 
     var then_ctx = ctx.subContext();
-    _ = try lowerExprToRef(&then_ctx, t.then_expr);
+    try lowerTernaryArm(&then_ctx, t.then_expr);
     ctx.syncCounter(&then_ctx);
 
     var else_ctx = ctx.subContext();
-    _ = try lowerExprToRef(&else_ctx, t.else_expr);
+    try lowerTernaryArm(&else_ctx, t.else_expr);
     ctx.syncCounter(&else_ctx);
 
     const if_val = try ctx.allocator.create(types.ANFIf);

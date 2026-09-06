@@ -130,6 +130,55 @@ pub const StackMap = struct {
         return set;
     }
 
+    /// How many slots carry each name. The model resolves a name to its
+    /// SHALLOWEST slot, so a name held more than once has one live slot and the
+    /// rest are dead residue — but they are all still "the name" to a
+    /// set-membership test, which is what NEW-018 turned on. See `lowerIf`.
+    pub fn nameCounts(self: *const StackMap, allocator: Allocator) !std.StringHashMapUnmanaged(usize) {
+        var counts: std.StringHashMapUnmanaged(usize) = .empty;
+        for (self.slots.items) |slot| {
+            if (slot) |s| {
+                const gop = try counts.getOrPut(allocator, s);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+            }
+        }
+        return counts;
+    }
+
+    /// The depths to drop for a MULTISET of names, deepest-first. Takes the
+    /// SHALLOWEST occurrences of a name listed more than once — the shallowest
+    /// slot is the live one, and it is the one the sibling arm consumed.
+    /// Deepest-first so removing a deeper slot does not shift a shallower one.
+    /// For a name listed once this is exactly `findDepth`, which also resolves
+    /// to the shallowest slot.
+    pub fn dropDepthsFor(
+        self: *const StackMap,
+        allocator: Allocator,
+        names: []const []const u8,
+    ) !std.ArrayListUnmanaged(usize) {
+        var need: std.StringHashMapUnmanaged(usize) = .empty;
+        defer need.deinit(allocator);
+        for (names) |n| {
+            const gop = try need.getOrPut(allocator, n);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* += 1;
+        }
+        var depths: std.ArrayListUnmanaged(usize) = .empty;
+        var d: usize = 0;
+        while (d < self.depth()) : (d += 1) {
+            const slot = self.peekAtDepth(d) orelse continue;
+            if (need.getPtr(slot)) |want| {
+                if (want.* > 0) {
+                    try depths.append(allocator, d);
+                    want.* -= 1;
+                }
+            }
+        }
+        std.mem.sort(usize, depths.items, {}, comptime std.sort.desc(usize));
+        return depths;
+    }
+
     /// Debug string of the slot names (bottom -> top) for error messages.
     /// Mirrors the TS reference compiler's `StackMap.debugSlots`.
     pub fn debugSlots(self: *const StackMap, allocator: Allocator) ![]u8 {
@@ -4058,7 +4107,35 @@ const LowerCtx = struct {
             }
         }
 
-        try self.bringToTopAuto(ie.condition);
+        // NEW-015: does an ARM read the condition again?
+        //
+        // `last_uses` is keyed by the index of the ENCLOSING binding, and
+        // `collectValueRefs` deliberately recurses into `then` / `else` so an
+        // arm-only ref is not dropped early. Both facts together mean an arm's
+        // read of the condition lands on THIS binding's index —
+        // indistinguishable from a ref used only as the condition. `isLastUse`
+        // then said "yes, consume it", `bringToTop` ROLLed the slot away, and
+        // the arm looked for a value that was no longer there:
+        //
+        //     let f: boolean = c > 0n;
+        //     assert(f ? c > 10n : !f);
+        //     //  Value 'f' not found on stack (stack has 1 items: [c])
+        //
+        // Legal source, accepted by validate and typecheck, rejected here — so
+        // there was no diagnostic a developer could act on. It only ever bit
+        // when the condition local was DEAD after the `if`; one that stayed
+        // live was already covered by the `> current_idx` rule below, which is
+        // why the shape looked like it worked. `&&` / `||` desugar to this
+        // node, so `f || !f` routes through the same path.
+        var arm_refs: std.StringHashMapUnmanaged(void) = .empty;
+        defer arm_refs.deinit(self.allocator);
+        for (ie.then_bindings) |b| try collectValueRefs(self.allocator, b.value, &arm_refs);
+        if (ie.else_bindings) |eb| {
+            for (eb) |b| try collectValueRefs(self.allocator, b.value, &arm_refs);
+        }
+        const cond_read_in_arms = arm_refs.contains(ie.condition);
+
+        try self.bringToTop(ie.condition, !cond_read_in_arms and self.isLastUse(ie.condition));
         _ = self.stack.pop();
         var base_stack = try self.stack.clone(self.allocator);
         defer base_stack.deinit(self.allocator);
@@ -4072,6 +4149,15 @@ const LowerCtx = struct {
             if (entry.value_ptr.* > self.current_idx and self.stack.findDepth(entry.key_ptr.*) != null) {
                 try protected_refs.put(self.allocator, entry.key_ptr.*, {});
             }
+        }
+
+        // A condition the arms re-read was PICKed just above, so the slot
+        // survived OP_IF. Protect it for the same reason the merged-local block
+        // below is protected: only ONE arm may hold the read, so letting that
+        // arm consume the slot would leave the two arms at different depths
+        // over a name the parent still models.
+        if (cond_read_in_arms and self.stack.findDepth(ie.condition) != null) {
+            try protected_refs.put(self.allocator, ie.condition, {});
         }
 
         // The K>=2 merged-local block reads every merged local in BOTH arms,
@@ -4154,38 +4240,94 @@ const LowerCtx = struct {
             }
         }
 
-        var post_then_names = try then_ctx.stack.namedSlots(self.allocator);
-        defer post_then_names.deinit(self.allocator);
-        var post_else_names = try else_ctx.stack.namedSlots(self.allocator);
-        defer post_else_names.deinit(self.allocator);
+        // Phase 1: collect consumed names from both directions.
+        //
+        // NEW-018: counted by MULTIPLICITY, not by name-set membership.
+        //
+        // A parent stack legitimately holds the same name in more than one slot
+        // — a loop rebinding a local leaves one slot per unrolled iteration, all
+        // named `acc`, of which only the shallowest is ever read (the model
+        // resolves a name to its shallowest slot). When an arm ROLLs that live
+        // slot away, the name is STILL in the arm's name SET because the dead
+        // residue slot beneath it carries the same name — so the set-difference
+        // this phase used to compute saw nothing consumed, emitted no matching
+        // drop in the sibling, and left the two arms one slot apart.
+        //
+        // Phase 3 then "fixed" the depth with an anonymous pad. A pad restores
+        // the COUNT but not the POSITION: the arm that lost a slot from the
+        // middle of the region gets a placeholder next to its result, while the
+        // sibling still holds the real value in the original slot. The two arms
+        // leave positionally different stacks, the parent adopts one of them,
+        // and every slot the other arm holds below the result is off by one:
+        //
+        //     let acc = p; let wacc = 0n;
+        //     for (…) for (…) { acc = acc + p; wacc = wacc + acc; }
+        //     let br0 = 0n; const sib0 = p;
+        //     if (p === 0n) { br0 = p; }
+        //     assert((p >= 0n ? acc >= 0n : false) ? (br0 < sib0) : false);
+        //
+        // The inner conditional is the CONDITION of the outer one. Its then-arm
+        // consumes the live `acc`; the parent holds `acc` twice, so phase 1
+        // missed it and the arms came back as `[t · br0 sib0 …]` against
+        // `[t br0 sib0 acc …]`. With p = 1 the source ACCEPTS and the AST
+        // interpreter accepts; the script engines reject the spend with "The top
+        // stack element must be truthy after script evaluation" — an ordinary
+        // contract deployed to a permanently unspendable UTXO. It needs no `&&`:
+        // a plain nested ternary reaches it, and `a && b && c` is
+        // left-associative, so it is also what blocked the short-circuit desugar.
+        //
+        // Counting occurrences instead makes the sibling drop its matching slot,
+        // both arms end at the same depth with the same layout, and no pad is
+        // needed at all. Byte-neutral for every parent stack with no duplicated
+        // name: for a name held once, "parent has 1, arm has 0" is exactly the
+        // old `post_then_names.get(name) == null`, and the drop depths are the
+        // same list.
+        var pre_if_counts = try self.stack.nameCounts(self.allocator);
+        defer pre_if_counts.deinit(self.allocator);
+        var then_counts = try then_ctx.stack.nameCounts(self.allocator);
+        defer then_counts.deinit(self.allocator);
+        var else_counts = try else_ctx.stack.nameCounts(self.allocator);
+        defer else_counts.deinit(self.allocator);
 
-        var consumed_depths = std.ArrayListUnmanaged(usize).empty;
+        var consumed_names = std.ArrayListUnmanaged([]const u8).empty;
+        defer consumed_names.deinit(self.allocator);
+        var else_consumed_names = std.ArrayListUnmanaged([]const u8).empty;
+        defer else_consumed_names.deinit(self.allocator);
+        // Iterate the parent's slots, not the count map, so the result order is
+        // deterministic — hash-map iteration order is not.
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(self.allocator);
+        var pi: usize = 0;
+        while (pi < self.stack.depth()) : (pi += 1) {
+            const name = self.stack.peekAtDepth(pi) orelse continue;
+            if (seen.get(name) != null) continue;
+            try seen.put(self.allocator, name, {});
+            const held = pre_if_counts.get(name) orelse 0;
+            const then_held = then_counts.get(name) orelse 0;
+            const else_held = else_counts.get(name) orelse 0;
+            const then_lost = if (held > then_held) held - then_held else 0;
+            const else_lost = if (held > else_held) held - else_held else 0;
+            if (then_lost > else_lost) {
+                var j: usize = 0;
+                while (j < then_lost - else_lost) : (j += 1) {
+                    try consumed_names.append(self.allocator, name);
+                }
+            } else if (else_lost > then_lost) {
+                var j: usize = 0;
+                while (j < else_lost - then_lost) : (j += 1) {
+                    try else_consumed_names.append(self.allocator, name);
+                }
+            }
+        }
+
+        var consumed_depths = try else_ctx.stack.dropDepthsFor(self.allocator, consumed_names.items);
         defer consumed_depths.deinit(self.allocator);
-        var pre_it = pre_if_names.iterator();
-        while (pre_it.next()) |entry| {
-            if (post_then_names.get(entry.key_ptr.*) == null) {
-                if (else_ctx.stack.findDepth(entry.key_ptr.*)) |depth| {
-                    try consumed_depths.append(self.allocator, depth);
-                }
-            }
-        }
-
-        var else_consumed_depths = std.ArrayListUnmanaged(usize).empty;
+        var else_consumed_depths = try then_ctx.stack.dropDepthsFor(self.allocator, else_consumed_names.items);
         defer else_consumed_depths.deinit(self.allocator);
-        pre_it = pre_if_names.iterator();
-        while (pre_it.next()) |entry| {
-            if (post_else_names.get(entry.key_ptr.*) == null) {
-                if (then_ctx.stack.findDepth(entry.key_ptr.*)) |depth| {
-                    try else_consumed_depths.append(self.allocator, depth);
-                }
-            }
-        }
 
-        std.mem.sort(usize, consumed_depths.items, {}, comptime std.sort.desc(usize));
         for (consumed_depths.items) |depth| {
             try removeBranchValueAtDepth(&else_ctx, depth);
         }
-        std.mem.sort(usize, else_consumed_depths.items, {}, comptime std.sort.desc(usize));
         for (else_consumed_depths.items) |depth| {
             try removeBranchValueAtDepth(&then_ctx, depth);
         }
@@ -4204,16 +4346,22 @@ const LowerCtx = struct {
         //
         // Runs AFTER the phase-2 consumption drops, so both arms have given up
         // the same parent slots and share one base depth.
+        //
+        // NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is.
+        // Phase 1 now makes both arms give up the same slot of a name the parent
+        // holds twice, so the base depth has to count that slot as given up too
+        // — otherwise target_depth is one too high, the trim below does nothing,
+        // and the layout assertion fires on a well-formed program.
         const n_declared = ie.results.len;
         if (n_declared >= 1) {
-            var still_held = try then_ctx.stack.namedSlots(self.allocator);
-            defer still_held.deinit(self.allocator);
+            var still_held_counts = try then_ctx.stack.nameCounts(self.allocator);
+            defer still_held_counts.deinit(self.allocator);
             var consumed_from_parent: usize = 0;
-            var merge_it = pre_if_names.iterator();
+            var merge_it = pre_if_counts.iterator();
             while (merge_it.next()) |entry| {
-                if (!still_held.contains(entry.key_ptr.*) and self.stack.findDepth(entry.key_ptr.*) != null) {
-                    consumed_from_parent += 1;
-                }
+                const held = entry.value_ptr.*;
+                const kept = still_held_counts.get(entry.key_ptr.*) orelse 0;
+                if (held > kept) consumed_from_parent += held - kept;
             }
             const target_depth = self.stack.depth() - consumed_from_parent + n_declared;
             for ([_]*LowerCtx{ &then_ctx, &else_ctx }) |arm_ctx| {
@@ -4316,14 +4464,21 @@ const LowerCtx = struct {
         // before comparing.
         var post_endif_drops: usize = 0;
 
-        var post_branch_names = try then_ctx.stack.namedSlots(self.allocator);
-        defer post_branch_names.deinit(self.allocator);
-        pre_it = pre_if_names.iterator();
-        while (pre_it.next()) |entry| {
-            if (post_branch_names.get(entry.key_ptr.*) == null) {
-                if (self.stack.findDepth(entry.key_ptr.*)) |depth| {
-                    try self.stack.removeAtDepth(self.allocator, depth);
-                }
+        // NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. When
+        // the arms consume the live slot of a name the parent holds twice, the
+        // parent must give up one slot too — the set test kept both, so the
+        // parent modelled one more slot than the arms physically left and the
+        // adopt below saw arm_depth == parent_depth and pushed nothing at all.
+        var post_branch_counts = try then_ctx.stack.nameCounts(self.allocator);
+        defer post_branch_counts.deinit(self.allocator);
+        var reconcile_it = pre_if_counts.iterator();
+        while (reconcile_it.next()) |entry| {
+            const held = entry.value_ptr.*;
+            const kept = post_branch_counts.get(entry.key_ptr.*) orelse 0;
+            var excess: usize = if (held > kept) held - kept else 0;
+            while (excess > 0) : (excess -= 1) {
+                const d = self.stack.findDepth(entry.key_ptr.*) orelse break;
+                try self.stack.removeAtDepth(self.allocator, d);
             }
         }
 

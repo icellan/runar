@@ -2202,15 +2202,40 @@ func (ctx *lowerCtx) lowerArgs(args []Expression) []string {
 	return refs
 }
 
+// lowerTernaryArm lowers one arm of a ternary, guaranteeing the arm ENDS with
+// the binding that holds its result.
+//
+// NEW-016: lowerExprToRef returns an existing ref without emitting anything
+// when the arm is a bare identifier — `g ? f : c === 0n` produced `then: []`,
+// an if arm with no bindings at all. Stack lowering reads an arm's result off
+// its stack effect, so a +0 arm has no result to adopt and the depth reconcile
+// padded the shortfall with an EMPTY push. The contract compiled clean, the
+// AST interpreter accepted it, and the real engine rejected the spend with
+// "OP_VERIFY requires the top stack value to be truthy" over a stack of
+// [01, ] — the arm's true replaced by an empty (false) value. An ordinary
+// contract deployed to a permanently unspendable UTXO.
+//
+// Aliasing through load_const "@ref:" — the same idiom `let x = y` and the
+// increment/decrement lowerings already use — makes the arm's stack effect +1
+// and copies the parent slot instead of trying to move it. The alias is only
+// emitted when the result was NOT produced inside the arm, so every arm that
+// already ended on its own result keeps its exact bytes.
+func (ctx *lowerCtx) lowerTernaryArm(e Expression) {
+	ref := ctx.lowerExprToRef(e)
+	if len(ctx.bindings) == 0 || ctx.bindings[len(ctx.bindings)-1].Name != ref {
+		ctx.emit(makeLoadConstString("@ref:" + ref))
+	}
+}
+
 func (ctx *lowerCtx) lowerTernaryExpr(e TernaryExpr) string {
 	condRef := ctx.lowerExprToRef(e.Condition)
 
 	thenCtx := ctx.subContext()
-	thenCtx.lowerExprToRef(e.Consequent)
+	thenCtx.lowerTernaryArm(e.Consequent)
 	ctx.syncCounter(thenCtx)
 
 	elseCtx := ctx.subContext()
-	elseCtx.lowerExprToRef(e.Alternate)
+	elseCtx.lowerTernaryArm(e.Alternate)
 	ctx.syncCounter(elseCtx)
 
 	elseBindings2 := elseCtx.bindings
