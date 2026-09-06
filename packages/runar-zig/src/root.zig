@@ -248,6 +248,7 @@ test {
     _ = @import("sdk_state_range_guard_test.zig");
     _ = @import("sdk_anf_interpreter.zig");
     _ = @import("sdk_anf_interpreter_intent_test.zig");
+    _ = @import("sdk_anf_parse_failclosed_test.zig");
     _ = @import("sdk_g1_raw_outputs_test.zig");
     _ = @import("sdk_null_bytestring_arg_test.zig");
     _ = @import("sdk_satcounter_continuation_test.zig");

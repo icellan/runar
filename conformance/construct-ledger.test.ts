@@ -120,6 +120,7 @@ const REQUIRED_CONSTRUCTS = [
   'merge-locals-k2-both-arms',
   'merge-locals-k3',
   'merge-locals-nested-if',
+  'merge-locals-nested-declared-results-inherited-slot',
   'loop-carried-locals-k2',
   'merge-locals-with-prop-updates',
   'cond-write-multi-property',
@@ -157,7 +158,7 @@ const REQUIRED_CONSTRUCTS = [
  * is locked in; LOWERING it is the deliberate, reviewable act it should be.
  * Same spirit as the repo's `lint-no-silent-skips` job.
  */
-const MIN_REQUIRED_CONSTRUCTS = 19;
+const MIN_REQUIRED_CONSTRUCTS = 20;
 
 /**
  * Files that ONLY prove an implementation is its own inverse. Verified by

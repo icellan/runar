@@ -970,9 +970,26 @@ fn test_source_compile_boolean_logic() {
         .expect("source compilation should succeed");
 
     assert_eq!(artifact.contract_name, "BooleanLogic");
+    // NEW-014: source-level `&&` / `||` SHORT-CIRCUIT, so they lower to real
+    // OP_IF / OP_ELSE control flow rather than OP_BOOLAND / OP_BOOLOR. Asserting
+    // the branch triple is present AND the eager opcodes are gone pins the rule
+    // in both directions — the old assertion would still pass on a compiler that
+    // emitted a branch and an OP_BOOLAND.
+    //
+    // This does NOT mean OP_BOOLAND is dead: the compiler still synthesises
+    // bin_op &&/|| when folding if/else-chain guard conditions, whose operands
+    // are already-bound comparison results that cannot abort. Only the
+    // SOURCE-level operators changed. Do not "fix" those back.
+    for op in ["OP_IF", "OP_ELSE", "OP_ENDIF"] {
+        assert!(
+            artifact.asm.contains(op),
+            "expected {op} in ASM — `&&` / `||` must lower to branches"
+        );
+    }
     assert!(
-        artifact.asm.contains("OP_BOOLAND"),
-        "expected OP_BOOLAND in ASM"
+        !artifact.asm.contains("OP_BOOLAND") && !artifact.asm.contains("OP_BOOLOR"),
+        "source-level `&&` / `||` must not emit OP_BOOLAND / OP_BOOLOR: {}",
+        artifact.asm
     );
 }
 

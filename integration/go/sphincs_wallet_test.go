@@ -17,7 +17,7 @@ import (
 
 // Deterministic SLH-DSA test public key (32 bytes hex: PK.seed[16] || PK.root[16]).
 // Generated from seed [0, 1, 2, ..., 47] with SLH-DSA-SHA2-128s (n=16).
-const sphincsTestPK = "00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf"
+const sphincsTestPK = "00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0"
 
 func sphincsTestPKHash() string {
 	pkBytes, _ := hex.DecodeString(sphincsTestPK)

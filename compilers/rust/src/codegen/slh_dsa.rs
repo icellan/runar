@@ -842,8 +842,11 @@ fn emit_slh_wots_all(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer:
     // psp(3) ta8(2) kp4(1) endptAcc(0)
 
     // Compress -> wotsPk via T(pkSeed, ADRS_WOTS_PK, endptAcc)
-    // Build ADRS: ta8 at depth 2, kp4 at depth 1 (from endptAcc which is TOS)
-    emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, None, HashMode::Zero);
+    // Build ADRS: ta8 at depth 2, kp4 PICKed from depth 1.
+    // FIPS 205 Alg. 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes ADRS bytes
+    // 20-31, but the key pair address MUST then be restored. Emitting a zero
+    // key-pair address here was half of issue #137.
+    emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, Some(1), HashMode::Zero);
     // psp(4) ta8(3) kp4(2) endptAcc(1) adrs22(0)
     emit(StackOp::Swap);
     // psp(4) ta8(3) kp4(2) adrs22(1) endptAcc(0)
@@ -1199,19 +1202,31 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
 }
 
 // ===========================================================================
-// 8. Hmsg -- Message Digest (SHA-256 MGF1)
+// 8. Hmsg -- Message Digest (MGF1-SHA-256)
 // ===========================================================================
-// Input:  R(3) pkSeed(2) pkRoot(1) msg(0)
+// FIPS 205 Section 11.2.1:
+//   H_msg(R, PK.seed, PK.root, M) =
+//     MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+// The `R || PK.seed` prefix on the MGF1 seed is mandatory -- it mitigates
+// multi-target long-message second-preimage attacks. Omitting it was half of
+// issue #137 (the other half was the WOTS_PK key-pair address).
+//
+// Input:  R(5) pkSeed(4) R(3) pkSeed(2) pkRoot(1) msg(0)
+//         (R and pkSeed are supplied twice: once for the inner SHA-256 and
+//          once for the MGF1 seed prefix)
 // Output: digest(out_len bytes)
 
 fn emit_slh_hmsg(emit: &mut dyn FnMut(StackOp), n: usize, out_len: usize) {
     let _ = n; // n unused in Hmsg but kept for API consistency
 
-    // CAT: R || pkSeed || pkRoot || msg
+    // CAT: R || pkSeed || pkRoot || msg, then SHA-256 -> inner(32B)
     emit(StackOp::Opcode("OP_CAT".into()));
     emit(StackOp::Opcode("OP_CAT".into()));
     emit(StackOp::Opcode("OP_CAT".into()));
-    emit(StackOp::Opcode("OP_SHA256".into())); // seed(32B)
+    emit(StackOp::Opcode("OP_SHA256".into())); // R pkSeed inner
+    // Prepend the mandatory R || PK.seed prefix -> seed(2n+32 B)
+    emit(StackOp::Opcode("OP_CAT".into())); // R (pkSeed||inner)
+    emit(StackOp::Opcode("OP_CAT".into())); // seed
 
     let blocks = (out_len + 31) / 32;
     if blocks == 1 {
@@ -1325,11 +1340,15 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     t.split("R", "sigRest");
 
     // ---- 3. Compute Hmsg(R, pkSeed, pkRoot, msg) ----
+    // FIPS 205 Section 11.2.1 needs R and PK.seed TWICE: once inside the
+    // inner SHA-256, once as the MGF1 seed prefix. See #137.
+    t.copy_to_top("R", "_R2");
+    t.copy_to_top("pkSeed", "_pks2");
     t.copy_to_top("R", "_R");
     t.copy_to_top("pkSeed", "_pks");
     t.copy_to_top("pkRoot", "_pkr");
     t.copy_to_top("msg", "_msg");
-    t.raw_block(&["_R", "_pks", "_pkr", "_msg"], "digest", |e| {
+    t.raw_block(&["_R2", "_pks2", "_R", "_pks", "_pkr", "_msg"], "digest", |e| {
         emit_slh_hmsg(e, n, digest_len);
     });
 

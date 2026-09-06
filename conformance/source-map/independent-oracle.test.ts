@@ -205,6 +205,20 @@ describe('independent anchor oracle vs anchor-known-issues.json — regression g
     .map((d) => d.name);
   const TIERS = ['ts', 'go', 'rs', 'py', 'zig', 'rb', 'java'];
 
+  // A missing golden used to `continue`, which emits no `it()` at all — so
+  // deleting a golden deleted its own test and nothing went red. Every
+  // (fixture, tier) pair must ship one.
+  const missingGoldens = FIXTURES.flatMap((fixture) =>
+    TIERS.filter(
+      (tier) => !existsSync(join(SOURCE_MAP_DIR, fixture, tier, 'expected-source-map.json')),
+    ).map((tier) => `${fixture}/${tier}`),
+  );
+
+  it('every fixture ships a source-map golden for all 7 tiers', () => {
+    expect(FIXTURES.length).toBeGreaterThan(0);
+    expect(missingGoldens, `missing source-map goldens: ${missingGoldens.join(', ')}`).toEqual([]);
+  });
+
   for (const fixture of FIXTURES) {
     for (const tier of TIERS) {
       const goldenPath = join(SOURCE_MAP_DIR, fixture, tier, 'expected-source-map.json');

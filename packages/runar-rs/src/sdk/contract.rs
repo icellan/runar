@@ -88,13 +88,33 @@ pub const AUTO_PREVOUTS_PARAM_NAME: &str = "allPrevouts";
 /// ByteString param is a caller error, not a stub request.
 /// True for OR-CHECKSIG; false when script looks like OP_CHECKMULTISIG (0xae/af).
 fn is_likely_or_checksig(artifact: &RunarArtifact) -> bool {
+    // Prefer ASM: it is opcode-accurate, where a hex substring test is not.
+    if let Some(asm) = artifact.asm.as_deref() {
+        let asm = asm.to_ascii_uppercase();
+        if asm.contains("OP_CHECKMULTISIG") {
+            return false;
+        }
+        if asm.contains("OP_BOOLOR") && asm.contains("OP_CHECKSIG") {
+            return true;
+        }
+        // NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+        // OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES
+        // that change: when the FIRST branch fails, its OP_CHECKSIG has already
+        // run with a non-empty signature, which is exactly what BIP146 rejects.
+        // Short-circuiting removes the hazard only when the first branch
+        // succeeds, so the warning must still fire for the branch-shaped form.
+        return asm.contains("OP_IF") && asm.contains("OP_CHECKSIG");
+    }
+    // No ASM (older artifact): fall back to the coarse hex probe. It cannot see
+    // the branch-shaped form — OP_IF is 0x63, which matches far too much push
+    // data to test for — so this path stays as it was rather than becoming a
+    // spam generator.
     let script = artifact.script.to_ascii_lowercase();
     // OP_CHECKMULTISIG = 0xae, OP_CHECKMULTISIGVERIFY = 0xaf
     if script.contains("ae") || script.contains("af") {
         return false;
     }
-    // OP_BOOLOR = 0x9b (not 0x9a which is OP_BOOLAND). Coarse hex probe only —
-    // may false-positive inside push data; prefer ASM when available.
+    // OP_BOOLOR = 0x9b (not 0x9a which is OP_BOOLAND).
     script.contains("9b")
 }
 
@@ -813,17 +833,35 @@ impl RunarContract {
         if is_stateful {
             if let Some(ref anf) = self.artifact.anf {
                 let named_args = build_named_args(&user_params, &resolved_args);
-                if let Ok((state, data_outs, _raw_outs, ordered_outs)) = anf_interpreter::compute_new_state_and_data_outputs(
-                    anf, method_name, &self.state, &named_args,
-                    &self.constructor_args,
-                ) {
-                    auto_computed_state = Some(state);
-                    anf_ordered_outputs = ordered_outs;
-                    resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
-                        script: d.script,
-                        satoshis: d.satoshis,
-                    }).collect();
-                }
+                // FAIL CLOSED (NEW-006). The legacy behaviour was to swallow
+                // this and build the continuation from the CURRENT state, which
+                // the covenant's hashOutputs binding then rejects — a silent
+                // "your call cannot be broadcast", plus silent loss of the
+                // method's data / raw outputs. The interpreter is the only
+                // thing that knows this method's post-state and its
+                // addDataOutput/addRawOutput payloads, so there is nothing to
+                // fall back TO: an explicit `new_state` covers only the state
+                // field and still leaves the outputs missing.
+                let (state, data_outs, _raw_outs, ordered_outs) =
+                    anf_interpreter::compute_new_state_and_data_outputs(
+                        anf, method_name, &self.state, &named_args,
+                        &self.constructor_args,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "RunarContract.call('{}'): the ANF interpreter could not evaluate \
+                             the method body, so the state continuation and data outputs this \
+                             call would commit cannot be derived. Refusing to broadcast a \
+                             transaction built from the pre-call state. Cause: {}",
+                            method_name, e
+                        )
+                    })?;
+                auto_computed_state = Some(state);
+                anf_ordered_outputs = ordered_outs;
+                resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
+                    script: d.script,
+                    satoshis: d.satoshis,
+                }).collect();
             }
         }
         if let Some(explicit) = options.and_then(|o| o.data_outputs.as_ref()) {
@@ -2705,6 +2743,7 @@ mod tests {
             parent_class: None,
             abi,
             script: script.to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2712,6 +2751,37 @@ mod tests {
             code_separator_indices: None,
             anf: None,
         }
+    }
+
+    /// The issue #106 OR-CHECKSIG gate must recognise BOTH lowerings of `||`.
+    ///
+    /// It went blind once already: the gate tested for OP_BOOLOR, and NEW-014
+    /// stopped the compiler emitting that opcode, so the NULLFAIL warning
+    /// silently never fired. The `OP_CHECKMULTISIG` row is the counterweight: a
+    /// gate that warns on everything is as useless as one that warns on nothing.
+    #[test]
+    fn or_checksig_gate_sees_both_lowerings() {
+        let cases: &[(&str, bool)] = &[
+            ("OP_DUP OP_BOOLOR OP_CHECKSIG", true),
+            ("OP_IF OP_CHECKSIG OP_ELSE OP_CHECKSIG OP_ENDIF", true),
+            ("OP_IF OP_CHECKSIG OP_CHECKMULTISIG", false),
+            ("OP_IF OP_DUP OP_ELSE OP_DROP OP_ENDIF", false),
+            ("OP_DUP OP_HASH160 OP_CHECKSIG", false),
+            ("op_if op_checksig op_endif", true),
+        ];
+        for (asm, want) in cases {
+            let mut artifact = make_artifact("5100", simple_abi());
+            artifact.asm = Some((*asm).to_string());
+            assert_eq!(
+                super::is_likely_or_checksig(&artifact),
+                *want,
+                "asm = {asm:?}"
+            );
+        }
+        // No ASM: falls back to the coarse hex probe, which cannot see the
+        // branch-shaped form. Documented limit, pinned so it stays deliberate.
+        let artifact = make_artifact("5100", simple_abi());
+        assert!(!super::is_likely_or_checksig(&artifact));
     }
 
     fn simple_abi() -> Abi {
@@ -2765,6 +2835,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2801,6 +2872,7 @@ mod tests {
                 }],
             },
             script: "76a90088ac".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot {
                 param_index: 0,
@@ -2840,6 +2912,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "unlock".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "007c00ac".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![
                 ConstructorSlot { param_index: 0, byte_offset: 0 },
@@ -2878,6 +2951,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "unlock".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "76a90088ac".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2914,6 +2988,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "check".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "009c69".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
@@ -2942,6 +3017,7 @@ mod tests {
                 methods: vec![AbiMethod { name: "check".to_string(), params: vec![], is_public: true, is_terminal: None, uses_code_part: None,  sig_hash_type: None,}],
             },
             script: "00930088".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2 }]),
             code_sep_index_slots: None,
@@ -3202,6 +3278,83 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// NEW-006 (b): an ANF interpreter failure must FAIL CLOSED.
+    ///
+    /// The legacy behaviour swallowed the error and built the stateful
+    /// continuation from the CURRENT (pre-call) state, which the covenant's
+    /// hashOutputs binding then rejects — a silent "your call cannot be
+    /// broadcast", plus silent loss of the method's data / raw outputs. There
+    /// is nothing to fall back TO: the interpreter is the only thing that
+    /// knows the post-state and the output payloads.
+    ///
+    /// The artifact here advertises `spend` in its ABI but omits it from the
+    /// ANF, so the interpreter provably cannot evaluate the body.
+    #[test]
+    fn call_fails_closed_when_anf_interpreter_cannot_evaluate() {
+        let mut artifact = make_artifact(
+            "51",
+            abi_with_methods(vec![AbiMethod {
+                name: "spend".to_string(),
+                params: vec![],
+                is_public: true, is_terminal: None, uses_code_part: None,
+                sig_hash_type: None,
+            }]),
+        );
+        artifact.state_fields = Some(vec![StateField {
+            name: "count".to_string(),
+            field_type: "bigint".to_string(),
+            index: 0,
+            initial_value: None,
+            fixed_array: None,
+        }]);
+        artifact.anf = Some(anf_interpreter::ANFProgram {
+            contract_name: "Test".to_string(),
+            properties: vec![anf_interpreter::ANFProperty {
+                name: "count".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: false,
+                initial_value: None,
+            }],
+            // The ABI advertises `spend`; the ANF does not describe it.
+            methods: vec![],
+        });
+
+        let mut contract = RunarContract::new(artifact, vec![]);
+
+        let signer = MockSigner::new();
+        let mut provider = MockProvider::always_ack("testnet");
+        let address = signer.get_address().unwrap();
+        provider.add_utxo(&address, Utxo {
+            txid: "aa".repeat(32),
+            output_index: 0,
+            satoshis: 100_000,
+            script: format!("76a914{}88ac", "00".repeat(20)),
+        });
+
+        contract.deploy(&mut provider, &signer, &DeployOptions {
+            satoshis: 50_000,
+            change_address: None,
+            funding_signer: None,
+        }).unwrap();
+
+        let broadcast_count_after_deploy = provider.get_broadcasted_txs().len();
+
+        let err = contract
+            .call("spend", &[], &mut provider, &signer, None)
+            .expect_err(
+                "call() returned Ok having built the continuation from the PRE-CALL state \
+                 (the interpreter could not evaluate the body)",
+            );
+        assert!(
+            err.contains("ANF interpreter could not evaluate"),
+            "expected a fail-closed diagnostic naming the interpreter, got: {}",
+            err
+        );
+        assert!(err.contains("spend"), "error must name the method: {}", err);
+        // Nothing beyond the deploy may reach the network.
+        assert_eq!(provider.get_broadcasted_txs().len(), broadcast_count_after_deploy);
+    }
+
     #[test]
     fn deploy_fails_no_utxos() {
         let artifact = make_artifact("51", simple_abi());
@@ -3387,6 +3540,7 @@ mod tests {
                 methods: vec![],
             },
             script: code_hex.to_string(),
+            asm: None,
             state_fields: Some(state_fields),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -3465,6 +3619,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None, fixed_array: None }]),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -3504,6 +3659,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![
                 StateField { name: "genesisOutpoint".to_string(), field_type: "ByteString".to_string(), index: 0, initial_value: None, fixed_array: None },
                 StateField { name: "rollingHash".to_string(), field_type: "ByteString".to_string(), index: 1, initial_value: None, fixed_array: None },
@@ -3729,6 +3885,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
@@ -3757,6 +3914,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "amount".to_string(),
                 field_type: "bigint".to_string(),
@@ -3785,6 +3943,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "offset".to_string(),
                 field_type: "bigint".to_string(),
@@ -3813,6 +3972,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
@@ -3868,6 +4028,7 @@ mod tests {
                 }],
             },
             script: script.to_string(),
+            asm: None,
             state_fields: Some(vec![StateField {
                 name: "count".to_string(), field_type: "bigint".to_string(), index: 0,
                 initial_value: None, fixed_array: None,
@@ -4000,6 +4161,7 @@ mod tests {
                 methods: vec![],
             },
             script: "0093".to_string(), // template: OP_0 placeholder + OP_ADD
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
@@ -4199,6 +4361,7 @@ mod tests {
             // offsets 1 and 3. A constructor slot at offset 0 would shift these
             // under adjust_code_sep_offset, but the byte-walk ignores args.
             script: "51ab52ab".to_string(),
+            asm: None,
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,

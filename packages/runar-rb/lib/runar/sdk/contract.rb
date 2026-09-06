@@ -51,7 +51,8 @@ module Runar
   module SDK
     # Producer-side marker (issue #106) for the deliberately-empty branch of an
     # OR-CHECKSIG method — checkSig(sigA, pkA) || checkSig(sigB, pkB), where the
-    # `||` lowers to the non-lazy OP_BOOLOR so BOTH OP_CHECKSIGs run. Only the
+    # `||` short-circuits (NEW-014): the second OP_CHECKSIG runs only when the
+    # first branch FAILS, and the first then ran with a non-empty signature. Only the
     # matching branch supplies a real signature; the failing branch MUST push an
     # empty signature (OP_0) or BIP146 NULLFAIL rejects the whole spend.
     #
@@ -415,6 +416,19 @@ module Runar
         estimated_inputs  = 1 + extra_input_count + 1
         resolved_args, sig_indices, preimage_index, prevouts_indices =
           resolve_method_args(args, user_params, signer, estimated_inputs: estimated_inputs)
+
+        # Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not
+        # genuine multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG
+        # method means every branch gets a real signature, and the branch that
+        # fails then carries a non-empty invalid one -- which BIP146 NULLFAIL
+        # rejects, taking the whole spend with it. Pass EMPTY_SIG for the
+        # non-matching branch instead.
+        if sig_indices.length >= 2 && likely_or_checksig?
+          warn("runar-sdk: warning: #{@artifact.contract_name}.call('#{method_name}') " \
+               "has #{sig_indices.length} auto-signed Sig slots. If this is an " \
+               "OR-CHECKSIG method, pass EMPTY_SIG for the non-matching " \
+               "branch(es) to satisfy BIP146 NULLFAIL (issue #106).")
+        end
 
         needs_op_push_tx    = preimage_index >= 0 || is_stateful
         method_selector_hex = compute_method_selector(method_name, is_stateful)
@@ -1320,6 +1334,29 @@ module Runar
 
         [resolved_args, sig_indices, preimage_index, prevouts_indices]
       end
+
+      # Does the locking script look like OR-CHECKSIG rather than genuine
+      # multi-sig? Scopes the issue #106 soft warning.
+      #
+      # ASM, not a hex substring test: `script.include?('9b')` matches any byte
+      # pair anywhere, push data included, and even straddles two adjacent
+      # opcodes' nibbles.
+      #
+      # NEW-014: `||` no longer lowers to OP_BOOLOR -- it lowers to real
+      # OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES
+      # that change: when the FIRST branch fails, its OP_CHECKSIG has already
+      # run with a non-empty signature, which is exactly what BIP146 rejects.
+      # Short-circuiting removes the hazard only when the first branch
+      # succeeds, so both the legacy and the branch-shaped forms must warn.
+      def likely_or_checksig?
+        asm = @artifact.asm.to_s.upcase
+        return false if asm.empty?
+        return false if asm.include?('OP_CHECKMULTISIG')
+        return false unless asm.include?('OP_CHECKSIG')
+
+        asm.include?('OP_BOOLOR') || asm.include?('OP_IF')
+      end
+
       # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength
 
       # The well-known ByteString parameter the SDK fills in with the

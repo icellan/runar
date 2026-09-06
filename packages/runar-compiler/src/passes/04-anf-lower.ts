@@ -68,6 +68,8 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
 // ---------------------------------------------------------------------------
 
 function lowerProperties(contract: ContractNode): ANFProperty[] {
+  const ctorAssigned = constructorAssignedProperties(contract);
+
   return contract.properties.map(prop => {
     const anfProp: ANFProperty = {
       name: prop.name,
@@ -75,14 +77,89 @@ function lowerProperties(contract: ContractNode): ANFProperty[] {
       readonly: prop.readonly,
     };
 
-    // Extract literal value from property initializer
-    if (prop.initializer) {
+    // Extract literal value from property initializer. A property the
+    // constructor assigns a PARAMETER to carries no compile-time value: the
+    // constructor argument wins and the initializer degrades to a default.
+    if (prop.initializer && !ctorAssigned.has(prop.name)) {
       anfProp.initialValue = extractLiteralValue(prop.initializer);
       checkStateBigintMagnitude(anfProp);
     }
 
     return anfProp;
   });
+}
+
+/**
+ * Properties the constructor assigns a constructor PARAMETER to.
+ *
+ * These get their value from the deploy-time argument, so any initializer on
+ * them is a default that the argument overrides — carrying it into
+ * `initialValue` would bake the default into the artifact and silently discard
+ * the argument (NEW-001). The property must instead stay in the constructor
+ * slot list (`initialValue === undefined`) so the SDK writes the argument.
+ *
+ * This is the shared form of a rule the Zig surface has always applied in its
+ * own parser, where `count: i64 = 0` beside `init(count: i64)` is the idiomatic
+ * struct declaration and five conformance fixtures depend on the strip. Keying
+ * on the ASSIGNMENT rather than on a name match generalises it to the shape
+ * that actually occurs in-repo, `constructor(seed) { this.p = seed; }`.
+ *
+ * Deliberately narrow in three ways.
+ *
+ * 1. Only a BARE parameter reference counts. `this.a = 5n` assigns a literal,
+ *    not an argument, and keeps its initializer; a computed form like
+ *    `this.p = seed + 1n` is left alone because the constructor body is never
+ *    lowered to script, so no tier could honour the arithmetic anyway.
+ *
+ * 2. The property↔parameter mapping must be ONE-TO-ONE. The artifact model is
+ *    positional — the properties with no `initialValue` correspond in order to
+ *    `abi.constructor.params` — so a parameter feeding two properties
+ *    (`constructor(seed) { this.a = seed; this.b = seed; }`) has no
+ *    representation: two state fields would face one argument and the SDK
+ *    would leave the second undefined. That shape is ALREADY undeployable
+ *    today when written without initializers (`deploy()` throws "Cannot
+ *    convert undefined to a BigInt"), so stripping there would convert a
+ *    wrong-state bug into a crash rather than fixing anything. It is left at
+ *    today's behaviour and belongs to NEW-002, which is about making that
+ *    correspondence explicit instead of positional.
+ *
+ * 3. A property assigned more than once in the constructor is skipped for the
+ *    same reason — there is no single argument it corresponds to.
+ */
+function constructorAssignedProperties(contract: ContractNode): Set<string> {
+  const out = new Set<string>();
+  const ctor = contract.constructor;
+  if (!ctor) return out;
+
+  const params = new Set(ctor.params.map(p => p.name));
+  // property -> the parameters assigned to it; parameter -> properties it feeds
+  const propToParams = new Map<string, Set<string>>();
+  const paramToProps = new Map<string, Set<string>>();
+
+  for (const stmt of ctor.body) {
+    if (stmt.kind !== 'assignment') continue;
+    if (stmt.target.kind !== 'property_access') continue;
+    const prop = stmt.target.property;
+    if (stmt.value.kind !== 'identifier' || !params.has(stmt.value.name)) {
+      // Assigned something that is not a constructor argument: the property
+      // does not correspond to a slot, so never strip it.
+      propToParams.set(prop, new Set());
+      continue;
+    }
+    const param = stmt.value.name;
+    if (!propToParams.has(prop)) propToParams.set(prop, new Set());
+    propToParams.get(prop)!.add(param);
+    if (!paramToProps.has(param)) paramToProps.set(param, new Set());
+    paramToProps.get(param)!.add(prop);
+  }
+
+  for (const [prop, ps] of propToParams) {
+    if (ps.size !== 1) continue;
+    const param = [...ps][0]!;
+    if (paramToProps.get(param)!.size !== 1) continue;
+    out.add(prop);
+  }
+  return out;
 }
 
 /**
@@ -1782,6 +1859,47 @@ function lowerBinaryExpr(
   expr: Extract<Expression, { kind: 'binary_expr' }>,
   ctx: LoweringContext,
 ): string {
+  // NEW-014: `&&` and `||` SHORT-CIRCUIT. They desugar to the ternary, which
+  // 05-stack-lower already emits as real OP_IF / OP_ELSE control flow:
+  //
+  //     a && b   ==>   a ? b : false
+  //     a || b   ==>   a ? true : b
+  //
+  // They used to lower to `bin_op`, i.e. OP_BOOLAND / OP_BOOLOR — binary stack
+  // ops, so BOTH operands were pushed and therefore both evaluated.
+  // `spec/semantics.md` §3.7 licensed that with "This is safe in Rúnar because
+  // all expressions are pure (no side effects beyond `assert`)". Purity is not
+  // TOTALITY: the same document's §10 and §11.3 list division by zero as a
+  // runtime failure, and OP_SPLIT / OP_NUM2BIN abort out of range. Evaluating
+  // the operand the source skipped therefore aborted the script, and the
+  // ordinary defensive guard —
+  //
+  //     assert(d === 0n || (100n / d) > 1n);
+  //
+  // — compiled to a locking script the chain rejects for exactly the input the
+  // guard exists to protect, while `TestContract` (which short-circuits, like
+  // every surface syntax the frontends accept) reported success. §3.9 already
+  // specifies the ternary's untaken arm as unevaluated, so laziness was
+  // already in the language; `&&` / `||` were the sole eager outlier.
+  //
+  // Only SOURCE-level `&&` / `||` desugar here. The compiler still synthesises
+  // `bin_op` `&&` / `||` internally to fold if/else-chain guard conditions
+  // (see `lowerIfStatement`); those operands are already-bound refs to plain
+  // comparison results, so they cannot abort and stay on the cheap opcodes.
+  if (expr.op === '&&' || expr.op === '||') {
+    const constant: Expression = { kind: 'bool_literal', value: expr.op === '||' };
+    return lowerTernaryExpr(
+      {
+        kind: 'ternary_expr',
+        condition: expr.left,
+        consequent: expr.op === '||' ? constant : expr.right,
+        alternate: expr.op === '||' ? expr.right : constant,
+        ...(expr.sourceLocation !== undefined ? { sourceLocation: expr.sourceLocation } : {}),
+      },
+      ctx,
+    );
+  }
+
   const leftRef = lowerExprToRef(expr.left, ctx);
   const rightRef = lowerExprToRef(expr.right, ctx);
 
@@ -2251,6 +2369,34 @@ function lowerAsmCall(
   });
 }
 
+/**
+ * Lower one arm of a ternary, guaranteeing the arm ENDS with the binding that
+ * holds its result.
+ *
+ * NEW-016: `lowerExprToRef` returns an existing ref without emitting anything
+ * when the arm is a bare identifier — `g ? f : c === 0n` produced
+ * `then: []`, an `if` arm with no bindings at all. 05-stack-lower reads an
+ * arm's result off its stack effect, so a +0 arm has no result to adopt and
+ * the depth reconcile padded the shortfall with an EMPTY push. The contract
+ * compiled clean, `TestContract` accepted it, and the real engine rejected the
+ * spend with "OP_VERIFY requires the top stack value to be truthy" over a
+ * stack of `[01, ]` — the arm's `true` replaced by an empty (false) value.
+ * An ordinary contract deployed to a permanently unspendable UTXO.
+ *
+ * Aliasing through `load_const @ref:` — the same idiom `let x = y` and the
+ * increment/decrement lowerings already use — makes the arm's stack effect +1
+ * and copies the parent slot instead of trying to move it. The alias is only
+ * emitted when the result was NOT produced inside the arm, so every arm that
+ * already ended on its own result keeps its exact bytes.
+ */
+function lowerTernaryArm(expr: Expression, armCtx: LoweringContext): void {
+  const ref = lowerExprToRef(expr, armCtx);
+  const last = armCtx.bindings[armCtx.bindings.length - 1];
+  if (last === undefined || last.name !== ref) {
+    armCtx.emit({ kind: 'load_const', value: `@ref:${ref}` });
+  }
+}
+
 function lowerTernaryExpr(
   expr: Extract<Expression, { kind: 'ternary_expr' }>,
   ctx: LoweringContext,
@@ -2258,11 +2404,11 @@ function lowerTernaryExpr(
   const condRef = lowerExprToRef(expr.condition, ctx);
 
   const thenCtx = ctx.subContext();
-  lowerExprToRef(expr.consequent, thenCtx);
+  lowerTernaryArm(expr.consequent, thenCtx);
   ctx.syncCounter(thenCtx);
 
   const elseCtx = ctx.subContext();
-  lowerExprToRef(expr.alternate, elseCtx);
+  lowerTernaryArm(expr.alternate, elseCtx);
   ctx.syncCounter(elseCtx);
 
   return ctx.emit({

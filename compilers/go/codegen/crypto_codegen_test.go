@@ -92,8 +92,17 @@ func TestSlhdsaEmitOpCountGoldens(t *testing.T) {
 		// window to ceil((bitOffset+a)/8) instead of capping at 2 bytes, so a=14
 		// sets (192s/256s) emit a 3-byte window on unlucky alignments. Must match
 		// the TS peer goldens in slh-dsa-codegen.test.ts.
-		{"SHA2_128f", 514147},
-		{"SHA2_192s", 256935},
+		//
+		// #137 (FIPS-205 conformance) then added, per parameter set, exactly
+		// 6 + d ops:
+		//   +6 once, in Hmsg — the MGF1 seed must be prefixed with R || PK.seed
+		//     (FIPS 205 §11.2.1), costing 2 extra copyToTop (2 ops each) + 2 OP_CAT.
+		//   +1 per hypertree layer (d layers) — wots_pkFromSig must restore the key
+		//     pair address after setTypeAndClear(WOTS_PK) (FIPS 205 Alg. 8 lines
+		//     8-11), so a 1-op 4-zero-byte push becomes a 2-op push-depth + PICK.
+		// 128f: d=22 -> 514147 + 6 + 22 = 514175.  192s: d=7 -> 256935 + 6 + 7 = 256948.
+		{"SHA2_128f", 514175},
+		{"SHA2_192s", 256948},
 	}
 	for _, tc := range cases {
 		t.Run(tc.param, func(t *testing.T) {

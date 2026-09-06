@@ -33,6 +33,11 @@ pub const CompilerDiagnostic = struct {
     message: []const u8,
     location: ?SourceLocation = null,
     severity: DiagnosticSeverity = .@"error",
+    /// True when `message` was allocPrint'd and the diagnostic list owns it, so
+    /// a `freeResult`-style teardown must free it. Static string literals leave
+    /// this false and are never freed. Defaults to false, so every existing
+    /// literal-message construction site is unaffected.
+    owned_message: bool = false,
 };
 
 // ============================================================================

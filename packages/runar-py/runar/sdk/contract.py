@@ -69,6 +69,14 @@ def _is_likely_or_checksig(artifact) -> bool:
         return False
     if 'OP_BOOLOR' in asm and 'OP_CHECKSIG' in asm:
         return True
+    # NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+    # OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES
+    # that change: when the FIRST branch fails, its OP_CHECKSIG has already
+    # run with a non-empty signature, which is exactly what BIP146 rejects.
+    # Short-circuiting only removes the hazard when the first branch succeeds,
+    # so this warning must still fire for the branch-shaped form.
+    if 'OP_IF' in asm and 'OP_CHECKSIG' in asm:
+        return True
     script = (getattr(artifact, 'script', None) or getattr(artifact, 'script_hex', None) or '').lower()
     if not asm and ('ae' in script or 'af' in script):
         return False
@@ -740,8 +748,23 @@ class RunarContract:
                     flat_ctor_args, ordered_outputs=ordered,
                 )
                 anf_ordered_outputs = ordered
-            except Exception:
-                computed, data_outs = None, []
+            except Exception as err:
+                # FAIL CLOSED (NEW-006). The legacy behaviour was to swallow
+                # this and build the continuation from the CURRENT (pre-call)
+                # state, which the covenant's hashOutputs binding then rejects
+                # -- a silent "your call cannot be broadcast", plus silent loss
+                # of the method's data / raw outputs. The interpreter is the
+                # only thing that knows this method's post-state and its
+                # addDataOutput/addRawOutput payloads, so there is nothing to
+                # fall back TO: an explicit `new_state` covers only the state
+                # field and still leaves the outputs missing.
+                raise RuntimeError(
+                    f"RunarContract.call('{method_name}'): the ANF interpreter "
+                    f"could not evaluate the method body, so the state "
+                    f"continuation and data outputs this call would commit "
+                    f"cannot be derived. Refusing to broadcast a transaction "
+                    f"built from the pre-call state. Cause: {err}"
+                ) from err
             if computed is not None:
                 merged = {**flat_state, **computed}
                 anf_computed_state = _regroup_fixed_array_state(

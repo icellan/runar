@@ -154,19 +154,23 @@ The ANF IR is the **conformance boundary** for the multi-compiler strategy. All 
 - Temporaries are numbered sequentially per method (`t0`, `t1`, ...).
 - Sub-expressions are flattened left-to-right.
 - Constants are always wrapped in `load_const` (never inlined).
-- Logical operators (`&&`, `||`) use eager evaluation -- both operands are always evaluated and combined with a single opcode.
+- Logical operators (`&&`, `||`) SHORT-CIRCUIT -- they desugar to the conditional, so the right operand is evaluated only when the left does not already decide the result.
 
 ### Logical Operator Lowering Example
 
-`a && b` becomes:
+`a && b` desugars to `a ? b : false` and becomes:
 
 ```
 t0 = <evaluate a>
-t1 = <evaluate b>
-t2 = bin_op("&&", t0, t1)
+t1 = if t0 then { t2 = <evaluate b>; -> t2 }
+        else { t3 = load_const(false); -> t3 }
 ```
 
-Both operands are always evaluated. At the Stack IR level, `bin_op("&&")` emits `OP_BOOLAND` and `bin_op("||")` emits `OP_BOOLOR`. There is no short-circuit lowering -- Bitcoin Script has no conditional branching at the expression level that would skip operand evaluation, so both sides are computed eagerly.
+At the Stack IR level that is real `OP_IF` / `OP_ELSE` / `OP_ENDIF` control flow, so `b`'s opcodes are not executed when `a` is false. `a || b` desugars to `a ? true : b` the same way.
+
+It would be cheaper to emit `OP_BOOLAND` / `OP_BOOLOR` -- one byte instead of a branch -- but those are binary stack ops, so both operands must already be on the stack and are therefore both evaluated. That is only sound if the skipped operand is TOTAL, and Rúnar's are not: division by zero, an out-of-range `OP_SPLIT` and an undersized `OP_NUM2BIN` all abort the script. Under the old eager lowering, `assert(d === 0n || (100n / d) > 1n)` compiled to a script consensus rejects at `d = 0` -- the exact input the guard exists to protect. Purity is not totality; see `spec/semantics.md` §3.7.
+
+`bin_op("&&")` / `bin_op("||")` still exist and still emit `OP_BOOLAND` / `OP_BOOLOR`: `lowerIfStatement` synthesises them when folding if/else-chain guard conditions, where both operands are already-bound refs to plain comparison results and cannot abort.
 
 ---
 

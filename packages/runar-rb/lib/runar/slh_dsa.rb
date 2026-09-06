@@ -21,6 +21,7 @@
 # Runar::Builtins interface.
 
 require 'digest'
+require 'openssl'
 
 module Runar
   module SLHDSA
@@ -168,21 +169,29 @@ module Runar
     end
 
     # PRFmsg: randomized message hashing.
+    #
+    # FIPS 205 Section 11.2.1: PRF_msg(SK.prf, opt_rand, M) =
+    #   Trunc_n(HMAC-SHA-256(SK.prf, opt_rand || M))
+    # This is an HMAC keyed by SK.prf — NOT a plain padded SHA-256 over the
+    # concatenation. See issue #137.
     def self.prf_msg(sk_prf, opt_rand, msg, n)
-      pad = "\x00".b * (64 - n)
-      input = pad + sk_prf + opt_rand + msg
-      Digest::SHA256.digest(input)[0, n]
+      OpenSSL::HMAC.digest('SHA256', sk_prf, opt_rand + msg)[0, n]
     end
 
-    # Hmsg: hash message to get FORS + tree indices (SHA-256 + MGF1-style extension).
+    # Hmsg: hash message to get FORS + tree indices (MGF1-SHA-256).
+    #
+    # FIPS 205 Section 11.2.1: H_msg(R, PK.seed, PK.root, M) =
+    #   MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+    # The `R || PK.seed` prefix on the MGF1 seed is mandatory — it mitigates
+    # multi-target long-message second-preimage attacks. See issue #137.
     def self.hmsg(r, pk_seed, pk_root, msg, out_len)
-      seed = r + pk_seed + pk_root + msg
-      hash = Digest::SHA256.digest(seed)
+      inner = Digest::SHA256.digest(r + pk_seed + pk_root + msg)
+      seed  = r + pk_seed + inner
 
       result = String.new(capacity: out_len).b
       counter = 0
       while result.bytesize < out_len
-        block = Digest::SHA256.digest(hash + [counter].pack('N'))
+        block = Digest::SHA256.digest(seed + [counter].pack('N'))
         copy_len = [32, out_len - result.bytesize].min
         result << block.byteslice(0, copy_len)
         counter += 1
@@ -275,8 +284,11 @@ module Runar
         parts << wots_chain(sig_i, all_digits[i], (w - 1) - all_digits[i], pk_seed, tmp_adrs, n)
       end
 
+      # FIPS 205 Algorithm 8 lines 8-11: set_type(WOTS_PK) zeroes bytes 20-31,
+      # so the key pair address MUST be restored afterwards. See issue #137.
       pk_adrs = adrs.dup
       set_type(pk_adrs, ADRS_WOTS_PK)
+      set_key_pair_address(pk_adrs, get_key_pair_address(adrs))
       t_hash(pk_seed, pk_adrs, parts, n)
     end
 
@@ -342,8 +354,11 @@ module Runar
         parts << wots_chain(sk, 0, w - 1, pk_seed, chain_adrs, n)
       end
 
+      # FIPS 205 Algorithm 6 lines 9-11: set_type(WOTS_PK) zeroes bytes 20-31,
+      # so the key pair address MUST be restored afterwards. See issue #137.
       pk_adrs = adrs.dup
       set_type(pk_adrs, ADRS_WOTS_PK)
+      set_key_pair_address(pk_adrs, kp_addr)
       t_hash(pk_seed, pk_adrs, parts, n)
     end
 

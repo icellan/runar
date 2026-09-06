@@ -246,18 +246,50 @@ fn slh_prf(pk_seed: &[u8], sk_seed: &[u8], adrs: &Adrs, n: usize) -> Vec<u8> {
     slh_t(pk_seed, adrs, sk_seed, n)
 }
 
-/// PRFmsg: randomized message hashing
-fn slh_prf_msg(sk_prf: &[u8], opt_rand: &[u8], msg: &[u8], n: usize) -> Vec<u8> {
-    let pad_len = 64 - n;
-    let mut input = Vec::with_capacity(pad_len + n + n + msg.len());
-    input.extend(std::iter::repeat(0u8).take(pad_len));
-    input.extend_from_slice(sk_prf);
-    input.extend_from_slice(opt_rand);
-    input.extend_from_slice(msg);
-    trunc(&sha256_hash(&input), n)
+/// HMAC-SHA-256 (RFC 2104), block size 64 bytes.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&sha256_hash(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Vec::with_capacity(BLOCK + data.len());
+    inner.extend_from_slice(&ipad);
+    inner.extend_from_slice(data);
+    let inner_hash = sha256_hash(&inner);
+    let mut outer = Vec::with_capacity(BLOCK + 32);
+    outer.extend_from_slice(&opad);
+    outer.extend_from_slice(&inner_hash);
+    sha256_hash(&outer)
 }
 
-/// Hmsg: hash message to get FORS + tree indices (SHA-256 based MGF1)
+/// PRFmsg: randomized message hashing.
+///
+/// FIPS 205 Section 11.2.1: PRF_msg(SK.prf, opt_rand, M) =
+///   Trunc_n(HMAC-SHA-256(SK.prf, opt_rand || M))
+/// This is an HMAC keyed by SK.prf — NOT a plain padded SHA-256 over the
+/// concatenation. See issue #137.
+fn slh_prf_msg(sk_prf: &[u8], opt_rand: &[u8], msg: &[u8], n: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(opt_rand.len() + msg.len());
+    data.extend_from_slice(opt_rand);
+    data.extend_from_slice(msg);
+    trunc(&hmac_sha256(sk_prf, &data), n)
+}
+
+/// Hmsg: hash message to get FORS + tree indices (MGF1-SHA-256).
+///
+/// FIPS 205 Section 11.2.1: H_msg(R, PK.seed, PK.root, M) =
+///   MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+/// The `R || PK.seed` prefix on the MGF1 seed is mandatory — it mitigates
+/// multi-target long-message second-preimage attacks. See issue #137.
 fn slh_hmsg(
     r: &[u8],
     pk_seed: &[u8],
@@ -265,19 +297,24 @@ fn slh_hmsg(
     msg: &[u8],
     out_len: usize,
 ) -> Vec<u8> {
-    let mut seed = Vec::with_capacity(r.len() + pk_seed.len() + pk_root.len() + msg.len());
+    let mut inner_input = Vec::with_capacity(r.len() + pk_seed.len() + pk_root.len() + msg.len());
+    inner_input.extend_from_slice(r);
+    inner_input.extend_from_slice(pk_seed);
+    inner_input.extend_from_slice(pk_root);
+    inner_input.extend_from_slice(msg);
+    let inner = sha256_hash(&inner_input);
+
+    let mut seed = Vec::with_capacity(r.len() + pk_seed.len() + 32);
     seed.extend_from_slice(r);
     seed.extend_from_slice(pk_seed);
-    seed.extend_from_slice(pk_root);
-    seed.extend_from_slice(msg);
-    let hash = sha256_hash(&seed);
+    seed.extend_from_slice(&inner);
 
     let mut result = vec![0u8; out_len];
     let mut offset = 0;
     let mut counter: u32 = 0;
     while offset < out_len {
-        let mut block_input = Vec::with_capacity(32 + 4);
-        block_input.extend_from_slice(&hash);
+        let mut block_input = Vec::with_capacity(seed.len() + 4);
+        block_input.extend_from_slice(&seed);
         block_input.extend_from_slice(&to_byte(counter, 4));
         let block = sha256_hash(&block_input);
         let copy_len = std::cmp::min(32, out_len - offset);
@@ -383,8 +420,11 @@ fn slh_wots_pk_from_sig(
     }
 
     // Compress: T_len(PK.seed, ADRS_pk, pk_0 || ... || pk_{len-1})
+    // FIPS 205 Algorithm 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes bytes
+    // 20-31, so the key pair address MUST be restored afterwards. See #137.
     let mut pk_adrs = *adrs;
     set_type(&mut pk_adrs, ADRS_WOTS_PK);
+    set_key_pair_address(&mut pk_adrs, get_key_pair_address(adrs));
     slh_t(pk_seed, &pk_adrs, &parts, n)
 }
 
@@ -462,8 +502,11 @@ fn slh_wots_pk(
         parts.extend_from_slice(&chain_result);
     }
 
+    // FIPS 205 Algorithm 6 lines 9-11: setTypeAndClear(WOTS_PK) zeroes bytes
+    // 20-31, so the key pair address MUST be restored afterwards. See #137.
     let mut pk_adrs = *adrs;
     set_type(&mut pk_adrs, ADRS_WOTS_PK);
+    set_key_pair_address(&mut pk_adrs, get_key_pair_address(adrs));
     slh_t(pk_seed, &pk_adrs, &parts, n)
 }
 

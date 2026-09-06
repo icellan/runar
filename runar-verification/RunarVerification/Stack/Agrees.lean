@@ -24269,23 +24269,15 @@ consumability smoke test: a concrete two-binding-branch `.ifVal` whose
 
 /-- `ifValDrops smBranch refSm otherSm` mirrors the in-arm `parentInBoth`
 helper of `lowerValueP`'s `.ifVal` arm (`Stack/Lower.lean:3468-3475`):
-the parent-scope refs (folded over `smBranch`) that are present in `refSm`
-but absent from `otherSm`. When both `ifValDrops smBranch smEls smThn` and
+the parent-scope refs (folded over `smBranch`) that `otherSm` gave up MORE
+often than `refSm` did — counted by multiplicity since NEW-018, not by set
+membership, so a name the parent holds twice is seen as consumed when the LIVE
+slot goes even though the dead residue keeps the name present. When both `ifValDrops smBranch smEls smThn` and
 `ifValDrops smBranch smThn smEls` are empty, neither branch consumed a
 parent slot the other kept, so the asymmetric-consumption cleanup path
 (ROLL+DROP injection) does not fire. -/
 def ifValDrops (smBranch refSm otherSm : StackMap) : List String :=
-  List.foldl
-    (fun acc slot =>
-      match slot with
-      | none => acc
-      | some n =>
-      if Stack.Lower.listContains acc n = true then acc
-      else
-        match refSm.depth? n, otherSm.depth? n with
-        | some _, none => acc ++ [n]
-        | _, _ => acc)
-    [] smBranch
+  Stack.Lower.consumedNamesMulti smBranch refSm otherSm
 
 /-- `removeConsumedAtDepths sm []` is the identity (no names ⇒ no ops). -/
 theorem removeConsumedAtDepths_nil (sm : StackMap) :

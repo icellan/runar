@@ -54,8 +54,16 @@ describe('SLH-DSA codegen — op-count goldens (T-006)', () => {
     // bytes — so a=14 sets (192s/256s) emit a 3-byte window (an extra reverse
     // pair + the previously-skipped right-shift) on unlucky alignments. 128f
     // (a=6) sees only the Hmsg -1; 192s sees -1 + 48.
-    ['SHA2_128f', 514147],
-    ['SHA2_192s', 256935],
+    //
+    // #137 (FIPS-205 conformance) then added, per parameter set, exactly 6 + d:
+    //   +6 once, in Hmsg — the MGF1 seed must be prefixed with R || PK.seed
+    //     (FIPS 205 §11.2.1): 2 extra copyToTop (2 ops each) + 2 OP_CAT.
+    //   +1 per hypertree layer (d layers) — wots_pkFromSig must restore the key
+    //     pair address after setTypeAndClear(WOTS_PK) (FIPS 205 Alg. 8 lines
+    //     8-11), turning a 1-op 4-zero-byte push into a 2-op push-depth + PICK.
+    // 128f: d=22 -> 514147 + 28 = 514175.  192s: d=7 -> 256935 + 13 = 256948.
+    ['SHA2_128f', 514175],
+    ['SHA2_192s', 256948],
   ];
 
   for (const [paramKey, expected] of goldens) {

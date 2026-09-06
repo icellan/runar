@@ -28,7 +28,17 @@ const DRIVERS_DIR = join(__dirname, 'drivers');
 const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
 interface CaseInput {
-  case: string;
+  /**
+   * Conformance fixture name → `conformance/tests/<case>/expected-ir.json`.
+   * Mutually exclusive with `anfPath`.
+   */
+  case?: string;
+  /**
+   * Repo-root-relative ANF IR path, for a case whose program is not a
+   * conformance fixture (`drivers/PROTOCOL.md`). Every per-language driver
+   * already prefers this field over `case`; the TS reference resolves it here.
+   */
+  anfPath?: string;
   methodName: string;
   currentState: Record<string, unknown>;
   args: Record<string, unknown>;
@@ -88,9 +98,16 @@ function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: 
   };
 }
 
-function loadAnf(caseName: string): ANFProgram {
-  const path = join(CONFORMANCE_TESTS_DIR, caseName, 'expected-ir.json');
+function loadAnf(input: Pick<CaseInput, 'case' | 'anfPath'>): ANFProgram {
+  const path = input.anfPath
+    ? join(REPO_ROOT, input.anfPath)
+    : join(CONFORMANCE_TESTS_DIR, requireCase(input), 'expected-ir.json');
   return JSON.parse(readFileSync(path, 'utf8')) as ANFProgram;
+}
+
+function requireCase(input: Pick<CaseInput, 'case'>): string {
+  if (!input.case) throw new Error("input JSON carries neither 'anfPath' nor 'case'");
+  return input.case;
 }
 
 // Strict parity exercises every input file EXCEPT those that carry a
@@ -110,12 +127,18 @@ const inputFiles = readdirSync(INPUTS_DIR)
 // ---------------------------------------------------------------------------
 
 describe('ANF strict parity (TS SDK)', () => {
+  // Non-vacuity sentinel: an empty or fully-filtered corpus generates zero
+  // cases, and every describe in this file would still report green.
+  it('discovers the strict input corpus', () => {
+    expect(inputFiles.length).toBeGreaterThan(0);
+  });
+
   for (const inputFile of inputFiles) {
     const baseName = inputFile.replace(/\.json$/, '');
     it(`${baseName} matches pinned strict golden`, () => {
       const inputRaw = JSON.parse(readFileSync(join(INPUTS_DIR, inputFile), 'utf8')) as CaseInput;
       const input = decodeBigints(inputRaw) as CaseInput;
-      const anf = loadAnf(input.case);
+      const anf = loadAnf(input);
 
       let actual: CaseOutput;
       try {

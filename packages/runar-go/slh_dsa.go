@@ -12,6 +12,7 @@
 package runar
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"math"
@@ -204,21 +205,32 @@ func slhPRF(pkSeed, skSeed, adrs []byte, n int) []byte {
 }
 
 // slhPRFmsg computes the randomized message hash PRF.
+//
+// FIPS 205 Section 11.2.1: PRF_msg(SK.prf, opt_rand, M) =
+//   Trunc_n(HMAC-SHA-256(SK.prf, opt_rand || M))
+// This is an HMAC keyed by SK.prf — NOT a plain padded SHA-256 over the
+// concatenation. See issue #137.
 func slhPRFmsg(skPrf, optRand, msg []byte, n int) []byte {
-	pad := make([]byte, 64-n)
-	input := slhConcat(pad, skPrf, optRand, msg)
-	return slhTrunc(slhSha256(input), n)
+	mac := hmac.New(sha256.New, skPrf)
+	mac.Write(optRand)
+	mac.Write(msg)
+	return slhTrunc(mac.Sum(nil), n)
 }
 
 // slhHmsg hashes a message to get FORS + tree indices using MGF1-SHA-256.
+//
+// FIPS 205 Section 11.2.1: H_msg(R, PK.seed, PK.root, M) =
+//   MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+// The `R || PK.seed` prefix on the MGF1 seed is mandatory — it mitigates
+// multi-target long-message second-preimage attacks. See issue #137.
 func slhHmsg(R, pkSeed, pkRoot, msg []byte, outLen int) []byte {
-	seed := slhConcat(R, pkSeed, pkRoot, msg)
-	hash := slhSha256(seed)
+	inner := slhSha256(slhConcat(R, pkSeed, pkRoot, msg))
+	seed := slhConcat(R, pkSeed, inner)
 	result := make([]byte, outLen)
 	offset := 0
 	counter := 0
 	for offset < outLen {
-		block := slhSha256(slhConcat(hash, slhToByte(counter, 4)))
+		block := slhSha256(slhConcat(seed, slhToByte(counter, 4)))
 		copyLen := 32
 		if outLen-offset < copyLen {
 			copyLen = outLen - offset
@@ -308,9 +320,12 @@ func slhWotsPkFromSig(sig, msg, pkSeed, adrs []byte, params SLHParams) []byte {
 	}
 
 	// Compress: T_len(PK.seed, ADRS_pk, pk_0 || pk_1 || ... || pk_{len-1})
+	// FIPS 205 Algorithm 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes bytes
+	// 20-31, so the key pair address MUST be restored afterwards. See #137.
 	pkAdrs := make([]byte, slhADRSSize)
 	copy(pkAdrs, adrs)
 	slhSetType(pkAdrs, slhADRS_WOTS_PK)
+	slhSetKeyPairAddress(pkAdrs, kpAddr)
 	return slhT(pkSeed, pkAdrs, slhConcat(parts...), n)
 }
 
@@ -382,9 +397,12 @@ func slhWotsPk(skSeed, pkSeed, adrs []byte, params SLHParams) []byte {
 		parts[i] = slhWotsChain(sk, 0, w-1, pkSeed, chainAdrs, n)
 	}
 
+	// FIPS 205 Algorithm 6 lines 9-11: setTypeAndClear(WOTS_PK) zeroes bytes
+	// 20-31, so the key pair address MUST be restored afterwards. See #137.
 	pkAdrs := make([]byte, slhADRSSize)
 	copy(pkAdrs, adrs)
 	slhSetType(pkAdrs, slhADRS_WOTS_PK)
+	slhSetKeyPairAddress(pkAdrs, slhGetKeyPairAddress(adrs))
 	return slhT(pkSeed, pkAdrs, slhConcat(parts...), n)
 }
 

@@ -59,7 +59,7 @@ RSpec.describe 'verifySLHDSA_SHA2_128s' do # rubocop:disable RSpec/DescribeClass
 
   it 'deploys an SLH-DSA-locked UTXO on regtest' do
     # Deterministic SLH-DSA test public key (32 bytes hex: PK.seed[16] || PK.root[16]).
-    test_pk = '00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf'
+    test_pk = '00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0'
 
     artifact = compile_source_slhdsa(SLHDSA_INLINE_SOURCE, 'SlhDsaVerify.runar.ts')
 

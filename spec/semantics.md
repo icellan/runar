@@ -135,19 +135,76 @@ Note: `==` and `===` have identical semantics in Rúnar (no type coercion). The 
 
 ### 3.7 Logical Operators
 
-Eager evaluation (both operands are always evaluated):
+**Short-circuit evaluation**, as in TypeScript: the right operand is evaluated
+only when the left does not already determine the result.
 
 ```
-    <e1, env, sigma> -->* VBool(b1)    <e2, env, sigma> -->* VBool(b2)
-    ────────────────────────────────────────────────────────────────────
-    <e1 && e2, env, sigma>  -->  VBool(b1 ∧ b2)
+    <e1, env, sigma> -->* VBool(false)
+    ──────────────────────────────────────────────
+    <e1 && e2, env, sigma>  -->  VBool(false)
 
-    <e1, env, sigma> -->* VBool(b1)    <e2, env, sigma> -->* VBool(b2)
-    ────────────────────────────────────────────────────────────────────
-    <e1 || e2, env, sigma>  -->  VBool(b1 ∨ b2)
+    <e1, env, sigma> -->* VBool(true)    <e2, env, sigma> -->* VBool(b2)
+    ─────────────────────────────────────────────────────────────────────
+    <e1 && e2, env, sigma>  -->  VBool(b2)
+
+    <e1, env, sigma> -->* VBool(true)
+    ──────────────────────────────────────────────
+    <e1 || e2, env, sigma>  -->  VBool(true)
+
+    <e1, env, sigma> -->* VBool(false)    <e2, env, sigma> -->* VBool(b2)
+    ─────────────────────────────────────────────────────────────────────
+    <e1 || e2, env, sigma>  -->  VBool(b2)
 ```
 
-`&&` compiles to `OP_BOOLAND` and `||` compiles to `OP_BOOLOR`. Unlike TypeScript's short-circuit semantics, both operands are evaluated unconditionally. This is safe in Rúnar because all expressions are pure (no side effects beyond `assert`).
+Note the shape of these rules: in the short-circuiting case `e2` does not appear
+in the premises at all, so nothing about `e2` — including whether it *has* a
+value — can affect the result. That is the whole content of the rule, and §3.9's
+ternary is written the same way.
+
+`&&` and `||` are defined by desugaring to the conditional of §3.9, which the
+compiler emits as real `OP_IF` / `OP_ELSE` control flow:
+
+```
+    e1 && e2   ≡   e1 ? e2 : false
+    e1 || e2   ≡   e1 ? true : e2
+```
+
+#### Why this rule changed
+
+An earlier revision of this section specified **eager** evaluation — `&&` to
+`OP_BOOLAND`, `||` to `OP_BOOLOR`, both operands always evaluated — and
+justified it with: *"This is safe in Rúnar because all expressions are pure (no
+side effects beyond `assert`)."*
+
+That justification does not hold, and the counterexample is two sections further
+down in this same document. **Purity is not totality.** A pure expression is one
+with no side effects; a *total* expression is one that has a value for every
+input. Eager evaluation is only sound when the skipped operand is total, and
+§10 (Runtime Failure) lists division by zero as a failure that aborts the
+script. `OP_SPLIT` and `OP_NUM2BIN` abort out of range for the same reason. So
+Rúnar has pure expressions that are **partial**, and evaluating one the source
+intended to skip does not produce a harmless extra value — it kills the script.
+
+The practical consequence was that the ordinary defensive guard idiom was
+unwritable:
+
+```typescript
+    assert(d === 0n || (100n / d) > 1n);   // "guard the division"
+```
+
+Under the eager rule this accepted at the source level and in the AST
+interpreter, while the compiled locking script was **rejected by consensus**
+with `OP_DIV cannot divide by zero!` — for exactly the input the guard exists to
+protect. A contract written this way deployed to a permanently unspendable UTXO.
+
+Laziness was already in the language: §3.9 has always specified the untaken arm
+of a conditional as unevaluated, and every frontend's surface syntax
+(`&&`/`||`, Python's `and`/`or`) reads as short-circuiting to anyone writing it.
+`&&` and `||` were the sole eager outlier, so they were brought into line with
+the ternary rather than the reverse.
+
+Scripts using these operators get larger — a branch costs more than a single
+`OP_BOOLAND` — which is the price of the operands being genuinely conditional.
 
 ### 3.8 Unary Operators
 
@@ -301,6 +358,13 @@ The loop variable `i` is substituted with the concrete iteration value in each u
     <return e, env, sigma>  ==>  (v, sigma)
 ```
 
+This is the **only** rule for `return`, and it says exactly one thing: the value
+of the enclosing (private, inlined) method is `v`. There is deliberately **no
+rule for a bare `return;`** and **no rule that terminates a statement sequence
+early** — see §4.7, whose premises are unconditional. `return` is therefore a
+private-helper construct: a `return` in a public method is a compile error
+(`spec/grammar.md` §6).
+
 ### 4.7 Statement Sequences
 
 ```
@@ -309,6 +373,9 @@ The loop variable `i` is substituted with the concrete iteration value in each u
     ──────────────────────────────────────────
     <S1; S2, env, sigma>  ==>  <env'', sigma''>
 ```
+
+`S2` is evaluated unconditionally: nothing in `S1` can skip it. Rúnar has no
+early exit, no `break` and no `continue` (`spec/grammar.md` §9).
 
 ---
 

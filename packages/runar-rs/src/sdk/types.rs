@@ -205,6 +205,18 @@ pub struct RunarArtifact {
     pub parent_class: Option<String>,
     pub abi: Abi,
     pub script: String,
+    /// Human-readable disassembly of `script`, as the compiler emits it.
+    ///
+    /// Carried so opcode-level questions can be asked WITHOUT substring-probing
+    /// the hex: `script.contains("9b")` matches any byte pair anywhere, push
+    /// data included, and even straddles two adjacent opcodes' nibbles. The
+    /// issue #106 OR-CHECKSIG gate needs a real answer (see
+    /// `is_likely_or_checksig`), and after NEW-014 that question is "does this
+    /// script branch around an OP_CHECKSIG", which no coarse hex probe can
+    /// answer. Optional: older artifacts, and any producer that omits it, still
+    /// deserialize.
+    #[serde(default)]
+    pub asm: Option<String>,
     #[serde(default)]
     pub state_fields: Option<Vec<StateField>>,
     #[serde(default)]

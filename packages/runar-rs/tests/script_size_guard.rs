@@ -29,6 +29,7 @@ fn make_artifact(script: &str, contract_name: &str, methods: Vec<AbiMethod>) -> 
             methods,
         },
         script: script.to_string(),
+        asm: None,
         state_fields: None,
         constructor_slots: None,
         code_sep_index_slots: None,

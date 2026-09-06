@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { Spend, LockingScript, type Transaction } from '@bsv/sdk';
+import { detachUnlockingScript } from '../spend-safety.js';
 import type { Provider } from './provider.js';
 import { txToTransactionData } from './provider.js';
 import type { TransactionData, UTXO } from '../types.js';
@@ -89,7 +90,10 @@ function validateBroadcastTx(
         otherInputs,
         outputs: tx.outputs,
         inputIndex: i,
-        unlockingScript: input.unlockingScript!,
+        // NEW-005: `Spend` mutates the script it executes in place. `tx` is the
+        // CALLER's live transaction object, so validating it must not leave it
+        // unevaluable — hand `Spend` a private copy. See spend-safety.ts.
+        unlockingScript: detachUnlockingScript(input.unlockingScript!),
         inputSequence: input.sequence ?? 0xffffffff,
         lockTime: tx.lockTime,
       });

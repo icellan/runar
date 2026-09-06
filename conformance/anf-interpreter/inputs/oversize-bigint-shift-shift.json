@@ -1,0 +1,12 @@
+{
+  "case": "oversize-bigint-shift",
+  "methodName": "shift",
+  "currentState": { "out": "0n" },
+  "args": {},
+  "constructorArgs": ["0n"],
+  "scriptOracle": {
+    "source": "conformance/tests/oversize-bigint-shift/OversizeBigintShift.runar.ts",
+    "constructorArgs": ["0n"],
+    "methodArgs": []
+  }
+}

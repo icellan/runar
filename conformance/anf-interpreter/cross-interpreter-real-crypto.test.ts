@@ -125,6 +125,13 @@ const inputFiles = readdirSync(INPUTS_DIR)
 // ---------------------------------------------------------------------------
 
 describe('ANF real-crypto parity (TS SDK)', () => {
+  // Non-vacuity sentinel: an empty or fully-filtered corpus generates zero
+  // cases, and every describe in this file would still report green. This is
+  // the thinnest of the three corpora, so it is the likeliest to reach zero.
+  it('discovers the real-crypto input corpus', () => {
+    expect(inputFiles.length).toBeGreaterThan(0);
+  });
+
   for (const inputFile of inputFiles) {
     const baseName = inputFile.replace(/\.json$/, '');
     it(`${baseName} matches pinned real-crypto golden`, () => {

@@ -160,6 +160,7 @@ MethodBody
 - Public methods are **entry points** -- they correspond to spending paths in the locking script.
 - Public methods MUST return `void`.
 - Public methods MUST end with an `assert(...)` call as their final statement. This assert encodes the spending condition: if it fails, the transaction is invalid.
+- Public methods MUST NOT contain a `return` statement, in either spelling. This is a consequence of the two rules above and of the fact that `return` has no early-exit semantics (see §9, Statement Restrictions): `return e;` would return a value from a `void` method, and `return;` would let the method terminate without reaching the `assert` that encodes its spending condition. Restructure the guard as an `if`/`else`, or move the logic into a private helper, where `return` is allowed.
 - Parameters of public methods form part of the **unlocking script** (scriptSig).
 
 ### Private Methods
@@ -414,6 +415,7 @@ ReturnStatement
 - **Labeled statements, break, continue**: **disallowed**.
 - **Throw statements**: **disallowed** (use `assert(false)`).
 - **Try/catch/finally**: **disallowed**.
+- **Return statements**: legal only in a **private** method, where `return e;` supplies the value the call site is inlined with (`spec/semantics.md` §4.6). There is **no early exit** in Rúnar: statement sequencing (`spec/semantics.md` §4.7) is unconditional, so a `return` never skips the statements that follow it. A `return` in a **public** method is an **error** (see §6, Public Methods).
 
 ---
 

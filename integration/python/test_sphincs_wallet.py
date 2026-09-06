@@ -50,7 +50,7 @@ from runar.sdk import RunarContract, DeployOptions
 
 # Deterministic SLH-DSA test public key (32 bytes hex: PK.seed[16] || PK.root[16])
 # Generated from seed [0, 1, 2, ..., 47] with SLH-DSA-SHA2-128s (n=16).
-SLHDSA_TEST_PK = "00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf"
+SLHDSA_TEST_PK = "00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0"
 SLHDSA_TEST_PK_HASH = _hash160(bytes.fromhex(SLHDSA_TEST_PK))
 
 

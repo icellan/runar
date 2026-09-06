@@ -8,7 +8,22 @@ from TS/Go/Rust on contracts with position-dispatch patterns (nested
 All 6 Rúnar compilers must produce byte-identical Bitcoin Script for the
 same canonical TypeScript source. For the canonical TicTacToe contracts
 (both v1 hand-rolled and v2 FixedArray), the expected locking script size
-is **9494 bytes** (18988 hex chars). The count grew a further 18 bytes to 9494
+is **9616 bytes** (19232 hex chars). The count grew 122 bytes from 9494 with
+NEW-014 (``&&`` / ``||`` now SHORT-CIRCUIT on-chain). ``checkWinAfterMove``
+is eight ``v_a == player && v_b == player && v_c == player`` chains, and
+``&&`` is left-associative, so each one stops being a pair of OP_BOOLANDs and
+becomes nested OP_IF / OP_ELSE branching. That growth is the FIX, not a
+regression: OP_BOOLAND is a binary stack op, so both operands had to be
+evaluated, and an operand the source meant to skip can abort the script
+(``OP_DIV`` by zero, out-of-range ``OP_SPLIT``, undersized ``OP_NUM2BIN``).
+The new bytes were EXECUTED before this number was changed, not merely agreed
+on by seven tiers — see
+``audits/v1-review/claude/repro/NEW-014-tictactoe-spends-at-9616.mts``, which
+deploys and plays a full game on the real @bsv/sdk ``Spend`` engine: a winning
+line pays out, and ``moveAndWin`` on a board with no line is REJECTED with
+"OP_VERIFY requires the top stack value to be truthy" (the authorization case
+— had the chains miscompiled to always-true, either player could steal the
+pot). Before that it was 9494; the count grew 18 bytes to 9494
 with the C17 fix (peephole ``not-not-elim`` guard): the rule was an unguarded
 2-op window that composed with ``PUSH 0; OP_NUMEQUAL -> OP_NOT`` to delete
 ``x !== 0n`` outright, so TicTacToe's 9 × ``if (this.cN != 0n)`` comparisons
@@ -42,7 +57,7 @@ TS_V1 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.runar.ts"
 TS_V2 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.v2.runar.ts"
 PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py"
 
-EXPECTED_BYTES = 9494
+EXPECTED_BYTES = 9616
 
 
 def _byte_len(hex_str: str) -> int:
@@ -50,7 +65,7 @@ def _byte_len(hex_str: str) -> int:
 
 
 class TestTicTacToeCrossCompilerBytes:
-    def test_canonical_ts_v1_locks_to_9494_bytes(self):
+    def test_canonical_ts_v1_locks_to_9616_bytes(self):
         assert TS_V1.exists(), f"missing canonical source: {TS_V1}"
         artifact = must_compile_source(str(TS_V1))
         assert _byte_len(artifact.script) == EXPECTED_BYTES, (
@@ -58,7 +73,7 @@ class TestTicTacToeCrossCompilerBytes:
             f"to match the TS/Go/Rust reference; got {_byte_len(artifact.script)}."
         )
 
-    def test_canonical_ts_v2_locks_to_9494_bytes(self):
+    def test_canonical_ts_v2_locks_to_9616_bytes(self):
         assert TS_V2.exists(), f"missing canonical source: {TS_V2}"
         artifact = must_compile_source(str(TS_V2))
         assert _byte_len(artifact.script) == EXPECTED_BYTES, (
@@ -76,7 +91,7 @@ class TestTicTacToeCrossCompilerBytes:
             "Bitcoin Script."
         )
 
-    def test_python_dsl_source_locks_to_9494_bytes(self):
+    def test_python_dsl_source_locks_to_9616_bytes(self):
         # The Python DSL TicTacToe is a snake_case port of the TS source.
         # It was reported as 4684 bytes before the liftBranchUpdateProps
         # port, confirming the same bug affected Python-DSL parsing as well.

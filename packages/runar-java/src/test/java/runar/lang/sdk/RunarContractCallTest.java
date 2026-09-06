@@ -273,6 +273,57 @@ class RunarContractCallTest {
             "continuation script must reflect the interpreter-computed count=6");
     }
 
+    /**
+     * NEW-006 (b): {@code call()} must FAIL CLOSED when the ANF interpreter
+     * cannot evaluate the method body.
+     *
+     * <p>The old {@code catch (RuntimeException ignore)} swallowed the failure
+     * and then built the stateful continuation from the CURRENT (pre-call)
+     * state and broadcast it. The covenant's hashOutputs binding rejects that
+     * spend, and the method's data / raw outputs are silently dropped — so the
+     * only symptom was a network rejection with no diagnostic. There is nothing
+     * to fall back TO: the interpreter is the only thing that knows both the
+     * post-state and the addDataOutput/addRawOutput payloads.
+     *
+     * <p>The body is made unevaluable by rewriting the counter's
+     * {@code extractOutputHash} call to {@code poseidon2Hash} — an
+     * intentionally Go-only proof-system primitive the Java simulator throws
+     * on (see {@code AnfInterpreterTest#unsupportedProofSystemPrimitiveThrows}).
+     */
+    @Test
+    void callRefusesToBroadcastWhenTheAnfInterpreterCannotEvaluateTheBody() throws Exception {
+        String json = readArtifactJson("artifacts/stateful-counter.runar.json")
+            .replace("\"func\": \"extractOutputHash\"", "\"func\": \"poseidon2Hash\"");
+        RunarArtifact artifact = RunarArtifact.fromJson(json);
+        LocalSigner signer = new LocalSigner(PRIV);
+        MockProvider provider = new MockProvider();
+        provider.addUtxo(signer.address(),
+            new UTXO("ab".repeat(32), 1, 200_000L,
+                ScriptUtils.buildP2PKHScript(signer.address())));
+
+        RunarContract contract = new RunarContract(artifact, List.of(BigInteger.valueOf(5)));
+        UTXO contractUtxo = new UTXO("ba".repeat(32), 0, 6_000L, contract.lockingScript());
+        contract.setCurrentUtxo(contractUtxo);
+        provider.addKnownOutpoint(contractUtxo);
+
+        // Non-vacuity: the mutation really does break the interpreter.
+        assertThrows(RuntimeException.class, () -> AnfInterpreter.computeNewStateAndDataOutputs(
+            artifact.anf(), "increment", Map.of("count", BigInteger.valueOf(5)),
+            Map.of(), List.of(BigInteger.valueOf(5))));
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+            () -> contract.call("increment", List.of(), null, provider, signer));
+        assertTrue(ex.getMessage().contains("increment"),
+            "the failure must name the method: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("Refusing to broadcast"),
+            "the failure must say it refused to broadcast: " + ex.getMessage());
+        assertNotNull(ex.getCause(), "the underlying interpreter failure must be attached");
+        assertEquals(0, provider.getBroadcastedTxs().size(),
+            "nothing may reach the network when the post-state cannot be derived");
+        assertSame(contractUtxo, contract.currentUtxo(),
+            "the contract UTXO must be untouched after a refused call");
+    }
+
     @Test
     void callWithOptionsTerminalOutputsBuildsExactOutputsAndClearsUtxo() throws Exception {
         // Branch 4: callWithOptions(... terminalOutputs ...) → callTerminal().
@@ -349,14 +400,18 @@ class RunarContractCallTest {
     // ------------------------------------------------------------------
 
     private static RunarArtifact loadArtifact(String classpathRel) throws Exception {
+        return RunarArtifact.fromJson(readArtifactJson(classpathRel));
+    }
+
+    private static String readArtifactJson(String classpathRel) throws Exception {
         Path resource = Path.of("src/test/resources/" + classpathRel);
         if (!Files.exists(resource)) {
             try (var in = RunarContractCallTest.class.getClassLoader().getResourceAsStream(classpathRel)) {
                 if (in == null) throw new IllegalStateException("missing fixture " + classpathRel);
-                return RunarArtifact.fromJson(new String(in.readAllBytes()));
+                return new String(in.readAllBytes());
             }
         }
-        return RunarArtifact.fromJson(Files.readString(resource));
+        return Files.readString(resource);
     }
 
     /** ECDSA verify helper: returns {@code true} if {@code der} verifies under {@code pubKey} against {@code msg}. */

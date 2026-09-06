@@ -52,7 +52,7 @@ fn test_slhdsa_naive_deploy() {
     // Constructor: 32-byte SLH-DSA public key (PK.seed[16] || PK.root[16]).
     // Use a deterministic test key. Full sign+verify spend tests are gated
     // on raw transaction construction (see Go's TestSLHDSA_ValidSpend).
-    let pk = "00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf";
+    let pk = "00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0";
     let mut contract = RunarContract::new(
         artifact,
         vec![SdkValue::Bytes(pk.to_string())],

@@ -279,6 +279,62 @@ fn checkStateBigintMagnitude(
     return LowerError.UnrepresentableStateBigint;
 }
 
+fn isConstructorParam(contract: ContractNode, name: []const u8) bool {
+    for (contract.constructor.params) |p| {
+        if (std.mem.eql(u8, p.name, name)) return true;
+    }
+    return false;
+}
+
+/// True when the constructor gives `prop_name` its value from exactly one
+/// constructor PARAMETER, and that parameter feeds no other property.
+///
+/// Such a property gets its value from the deploy-time argument, so any
+/// initializer on it is a default the argument overrides — baking the default
+/// into the artifact would silently discard the argument (NEW-001). The
+/// property must instead stay in the constructor slot list so the SDK writes
+/// the argument.
+///
+/// Deliberately narrow in three ways.
+///
+///  1. Only a BARE parameter reference counts. `.a = 5` assigns a literal, not
+///     an argument, and keeps its initializer.
+///  2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+///     is positional, so a parameter feeding two properties has no
+///     representation — that shape is already undeployable today when written
+///     without initializers, and belongs to NEW-002.
+///  3. A property assigned more than once in the constructor is skipped, for
+///     the same reason.
+fn constructorAssignsUniquely(contract: ContractNode, prop_name: []const u8) bool {
+    var param: ?[]const u8 = null;
+    var assign_count: usize = 0;
+
+    for (contract.constructor.assignments) |a| {
+        if (!std.mem.eql(u8, a.target, prop_name)) continue;
+        assign_count += 1;
+        switch (a.value) {
+            .identifier => |name| {
+                if (!isConstructorParam(contract, name)) return false;
+                param = name;
+            },
+            else => return false,
+        }
+    }
+    if (assign_count != 1) return false;
+    const p = param orelse return false;
+
+    var feeds: usize = 0;
+    for (contract.constructor.assignments) |a| {
+        switch (a.value) {
+            .identifier => |name| {
+                if (std.mem.eql(u8, name, p)) feeds += 1;
+            },
+            else => {},
+        }
+    }
+    return feeds == 1;
+}
+
 fn lowerPropertiesWithDiagnostic(
     allocator: Allocator,
     contract: ContractNode,
@@ -295,14 +351,11 @@ fn lowerPropertiesWithDiagnostic(
             .readonly = prop.readonly,
             .synthetic_array_chain = prop.synthetic_array_chain,
         };
-        // Only emit initialValue for properties that have defaults AND are NOT
-        // constructor params. This matches the TS compiler: properties with
-        // initializers are excluded from auto-generated constructors.
+        // Only emit initialValue for properties that have defaults AND do NOT
+        // take their value from a constructor argument. See
+        // `constructorAssignsUniquely`.
         if (prop.initializer) |init_expr| {
-            const is_ctor_param = for (contract.constructor.params) |p| {
-                if (std.mem.eql(u8, p.name, prop.name)) break true;
-            } else false;
-            if (!is_ctor_param) {
+            if (!constructorAssignsUniquely(contract, prop.name)) {
                 anf_prop.initial_value = extractLiteralValue(init_expr);
             }
         }
@@ -1662,6 +1715,49 @@ fn lowerExprToRef(ctx: *LowerCtx, expr: Expression) LowerError![]const u8 {
             return try ctx.emit(.{ .load_prop = .{ .name = pa.property } });
         },
         .binary_op => |bop| {
+            // NEW-014: `&&` and `||` SHORT-CIRCUIT. They desugar to the
+            // ternary, which stack lowering already emits as real OP_IF /
+            // OP_ELSE control flow:
+            //
+            //     a && b   ==>   a ? b : false
+            //     a || b   ==>   a ? true : b
+            //
+            // They used to lower to `bin_op`, i.e. OP_BOOLAND / OP_BOOLOR —
+            // binary stack ops, so BOTH operands were pushed and therefore
+            // both evaluated. `spec/semantics.md` §3.7 licensed that with
+            // "This is safe in Rúnar because all expressions are pure (no side
+            // effects beyond `assert`)". Purity is not TOTALITY: the same
+            // document's §10 and §11.3 list division by zero as a runtime
+            // failure, and OP_SPLIT / OP_NUM2BIN abort out of range.
+            // Evaluating the operand the source skipped therefore aborted the
+            // script, and the ordinary defensive guard —
+            //
+            //     assert(d === 0n || (100n / d) > 1n);
+            //
+            // — compiled to a locking script the chain rejects for exactly the
+            // input the guard exists to protect, while the AST interpreter
+            // (which short-circuits, like every surface syntax the frontends
+            // accept) reported success. §3.9 already specifies the ternary's
+            // untaken arm as unevaluated, so laziness was already in the
+            // language; `&&` / `||` were the sole eager outlier.
+            //
+            // Only SOURCE-level `&&` / `||` desugar here. The compiler still
+            // synthesises `bin_op` `&&` / `||` internally to fold if/else-chain
+            // guard conditions; those operands are already-bound refs to plain
+            // comparison results, so they cannot abort and stay on the cheap
+            // opcodes.
+            if (bop.op == .and_op or bop.op == .or_op) {
+                const is_or = bop.op == .or_op;
+                const constant: Expression = .{ .literal_bool = is_or };
+                const t = try ctx.allocator.create(types.Ternary);
+                t.* = .{
+                    .condition = bop.left,
+                    .then_expr = if (is_or) constant else bop.right,
+                    .else_expr = if (is_or) bop.right else constant,
+                };
+                return try lowerTernaryExpr(ctx, t);
+            }
+
             const left_ref = try lowerExprToRef(ctx, bop.left);
             const right_ref = try lowerExprToRef(ctx, bop.right);
 
@@ -2176,15 +2272,42 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     return try ctx.emit(makeLoadConstString(ctx.allocator, "@void"));
 }
 
+/// Lower one arm of a ternary, guaranteeing the arm ENDS with the binding that
+/// holds its result.
+///
+/// NEW-016: `lowerExprToRef` returns an existing ref without emitting anything
+/// when the arm is a bare identifier — `g ? f : c === 0n` produced `then: []`,
+/// an `if` arm with no bindings at all. Stack lowering reads an arm's result
+/// off its stack effect, so a +0 arm has no result to adopt and the depth
+/// reconcile padded the shortfall with an EMPTY push. The contract compiled
+/// clean, the AST interpreter accepted it, and the real engine rejected the
+/// spend with "OP_VERIFY requires the top stack value to be truthy" over a
+/// stack of `[01, ]` — the arm's `true` replaced by an empty (false) value. An
+/// ordinary contract deployed to a permanently unspendable UTXO.
+///
+/// Aliasing through `load_const "@ref:"` — the same idiom `let x = y` and the
+/// increment/decrement lowerings already use — makes the arm's stack effect +1
+/// and copies the parent slot instead of trying to move it. The alias is only
+/// emitted when the result was NOT produced inside the arm, so every arm that
+/// already ended on its own result keeps its exact bytes.
+fn lowerTernaryArm(ctx: *LowerCtx, e: Expression) LowerError!void {
+    const ref = try lowerExprToRef(ctx, e);
+    const ends_on_result = ctx.bindings.items.len > 0 and
+        std.mem.eql(u8, ctx.bindings.items[ctx.bindings.items.len - 1].name, ref);
+    if (!ends_on_result) {
+        _ = try ctx.emit(makeLoadConstString(ctx.allocator, try refString(ctx.allocator, ref)));
+    }
+}
+
 fn lowerTernaryExpr(ctx: *LowerCtx, t: *const types.Ternary) LowerError![]const u8 {
     const cond_ref = try lowerExprToRef(ctx, t.condition);
 
     var then_ctx = ctx.subContext();
-    _ = try lowerExprToRef(&then_ctx, t.then_expr);
+    try lowerTernaryArm(&then_ctx, t.then_expr);
     ctx.syncCounter(&then_ctx);
 
     var else_ctx = ctx.subContext();
-    _ = try lowerExprToRef(&else_ctx, t.else_expr);
+    try lowerTernaryArm(&else_ctx, t.else_expr);
     ctx.syncCounter(&else_ctx);
 
     const if_val = try ctx.allocator.create(types.ANFIf);

@@ -51,6 +51,28 @@ function findExampleContracts(): ExampleContract[] {
 
 const examples = findExampleContracts();
 
+/**
+ * Assert a full frontend compile and hand back the narrowed pieces.
+ *
+ * The four per-example tests below used to open with
+ * `if (!r.success || !r.anf || !r.contract) return;`. Every shipped example
+ * compiles today, so the bail never fired — but a single compiler regression
+ * would have turned 4 x N tests green-and-empty in one shot, and the
+ * `compiles through the TS compiler` sibling deliberately TOLERATES failure
+ * (it only asserts that a failed compile carries diagnostics), so nothing
+ * else in this file would have gone red either.
+ */
+function requireCompiled(result: ReturnType<typeof compile>, fileName: string) {
+  const errors = result.diagnostics
+    .filter(d => d.severity === 'error')
+    .map(d => d.message)
+    .join('; ');
+  expect(result.success, `compile failed for ${fileName}: ${errors}`).toBe(true);
+  expect(result.anf, `no ANF produced for ${fileName}`).toBeTruthy();
+  expect(result.contract, `no contract produced for ${fileName}`).toBeTruthy();
+  return { anf: result.anf!, contract: result.contract! };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -86,25 +108,21 @@ describe('Example contracts: end-to-end compilation', () => {
         }
       });
 
-      it('produces a valid artifact structure (if backend passes succeed)', () => {
+      it('produces a valid artifact structure', () => {
         const compileResult = compile(example.source, { fileName: example.fileName });
+        const { anf, contract } = requireCompiled(compileResult, example.fileName);
 
-        // Skip if frontend compilation failed
-        if (!compileResult.success || !compileResult.anf || !compileResult.contract) {
-          return;
-        }
-
-        const stackProgram = lowerToStack(compileResult.anf);
+        const stackProgram = lowerToStack(anf);
         expect(stackProgram).toBeDefined();
-        expect(stackProgram.contractName).toBe(compileResult.anf.contractName);
+        expect(stackProgram.contractName).toBe(anf.contractName);
 
         const emitResult = emit(stackProgram);
         expect(emitResult).toBeDefined();
 
         // Assemble artifact
         const artifact = assembleArtifact(
-          compileResult.contract,
-          compileResult.anf,
+          contract,
+          anf,
           stackProgram,
           emitResult.scriptHex,
           emitResult.scriptAsm,
@@ -150,14 +168,11 @@ describe('Example contracts: end-to-end compilation', () => {
         }
       });
 
-      it('produces a non-empty locking script (if backend passes succeed)', () => {
+      it('produces a non-empty locking script', () => {
         const compileResult = compile(example.source, { fileName: example.fileName });
+        const { anf } = requireCompiled(compileResult, example.fileName);
 
-        if (!compileResult.success || !compileResult.anf || !compileResult.contract) {
-          return;
-        }
-
-        const stackProgram = lowerToStack(compileResult.anf);
+        const stackProgram = lowerToStack(anf);
         const emitResult = emit(stackProgram);
 
         // The script should not be empty (a valid contract should produce code)
@@ -167,12 +182,9 @@ describe('Example contracts: end-to-end compilation', () => {
 
       it('has at least one public method in the ABI', () => {
         const compileResult = compile(example.source, { fileName: example.fileName });
+        const { contract } = requireCompiled(compileResult, example.fileName);
 
-        if (!compileResult.success || !compileResult.contract) {
-          return;
-        }
-
-        const publicMethods = compileResult.contract.methods.filter(
+        const publicMethods = contract.methods.filter(
           m => m.visibility === 'public',
         );
         expect(publicMethods.length).toBeGreaterThan(0);
@@ -189,12 +201,7 @@ describe('Example contracts: ANF IR structure', () => {
   for (const example of examples) {
     it(`${example.name} ANF IR has expected shape`, () => {
       const result = compile(example.source, { fileName: example.fileName });
-
-      if (!result.success || !result.anf) {
-        return;
-      }
-
-      const anf = result.anf;
+      const { anf } = requireCompiled(result, example.fileName);
 
       // Must have a contract name (may differ from file name)
       expect(anf.contractName).toBeDefined();

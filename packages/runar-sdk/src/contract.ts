@@ -20,6 +20,7 @@ import type { OrderedOutputEntry } from './anf-interpreter.js';
 import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript, Spend } from '@bsv/sdk';
 import { WalletProvider } from './providers/wallet-provider.js';
+import { detachUnlockingScript } from './spend-safety.js';
 
 /**
  * Deep-review finding C8: opt-out for `finalizeCall`'s pre-broadcast local
@@ -77,7 +78,9 @@ declare module './types.js' {
 /**
  * Producer-side marker (issue #106) for the deliberately-empty branch of an
  * OR-CHECKSIG method — `checkSig(sigA, pkA) || checkSig(sigB, pkB)`, where
- * `||` lowers to the non-lazy `OP_BOOLOR` so BOTH `OP_CHECKSIG`s run. Only the
+ * `||` short-circuits (NEW-014), so the second `OP_CHECKSIG` runs only when the
+ * first branch FAILS — and when it does, the first ran with a non-empty
+ * signature. Only the
  * matching branch supplies a real signature; the failing branch MUST push an
  * empty signature (OP_0) or BIP146 NULLFAIL rejects the whole spend.
  *
@@ -132,6 +135,15 @@ export function isLikelyOrCheckSigMethod(artifact: {
     return false;
   }
   if (asm.includes('OP_BOOLOR') && asm.includes('OP_CHECKSIG')) {
+    return true;
+  }
+  // NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+  // OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES that
+  // change: when the FIRST branch fails, its OP_CHECKSIG has already run with a
+  // non-empty signature, which is exactly what BIP146 rejects. Short-circuiting
+  // only removes the hazard when the first branch succeeds, so this warning
+  // must still fire for the branch-shaped form.
+  if (asm.includes('OP_IF') && asm.includes('OP_CHECKSIG')) {
     return true;
   }
   // Fall back to hex when ASM is missing: OP_CHECKMULTISIG=0xae, OP_BOOLOR=0x9a
@@ -227,7 +239,12 @@ function dryRunContractInput(
       otherInputs: otherInputs as unknown as ConstructorParameters<typeof Spend>[0]['otherInputs'],
       outputs: tx.outputs,
       inputIndex,
-      unlockingScript: input.unlockingScript!,
+      // NEW-005: `Spend` mutates the script it executes in place, so it must
+      // never be handed the live in-flight input's own object — the dry-run
+      // would corrupt every evaluation that follows it (including
+      // `MockProvider.validateBroadcastTx`, one line later in `finalizeCall`).
+      // See spend-safety.ts.
+      unlockingScript: detachUnlockingScript(input.unlockingScript!),
       inputSequence: input.sequence ?? 0xffffffff,
       lockTime: tx.lockTime,
     });
@@ -1206,8 +1223,22 @@ export class RunarContract {
             satoshis: Number(d.satoshis),
           }));
         }
-      } catch {
-        // ANF interp failures fall through to the legacy newState-only path.
+      } catch (err) {
+        // FAIL CLOSED (NEW-006). The legacy behaviour was to swallow this and
+        // build the continuation from the CURRENT state, which the covenant's
+        // hashOutputs binding then rejects — a silent "your call cannot be
+        // broadcast", plus silent loss of the method's data / raw outputs.
+        // The interpreter is the only thing that knows this method's post-state
+        // and its addDataOutput/addRawOutput payloads, so there is nothing to
+        // fall back TO: an explicit `newState` covers only the state field and
+        // still leaves the outputs missing.
+        throw new Error(
+          `RunarContract.call('${methodName}'): the ANF interpreter could not evaluate ` +
+            `the method body, so the state continuation and data outputs this call would ` +
+            `commit cannot be derived. Refusing to broadcast a transaction built from the ` +
+            `pre-call state. Cause: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
       }
     }
 

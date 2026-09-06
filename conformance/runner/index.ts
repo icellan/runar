@@ -19,7 +19,7 @@ import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, readdirSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
-import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats } from './runner.js';
+import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults } from './runner.js';
 import {
   generateReport,
   formatReportAsJSON,
@@ -158,6 +158,10 @@ Environment:
   RUNAR_CONFORMANCE_CONCURRENCY  Cap on parallel test execution (default: cpus/4, capped at 8)
   RUNAR_JAVA_DAEMON=0            Disable the Java compile daemon (default: on)
   RUNAR_CONFORMANCE_SPAWN_STATS=1  Print the child-process tally at the end of the run
+  RUNAR_CONFORMANCE_COMPILE_TIMEOUT_MS  Per-invocation hang detector for native
+                        compilers (default: 180000). This is not a performance
+                        budget: killing a slow-but-healthy child destroys its
+                        output mid-pipe, which is why the budget is generous.
   RUNAR_PREBUILD=1               Same as --prebuild
 
   --help, -h            Show this help message
@@ -170,7 +174,12 @@ Test Directory Structure:
       expected-script.hex       Expected script hex golden file (optional)
 
 Exit Code:
-  0 if all tests pass, 1 if any test fails.
+  0  all tests passed and every compiler subprocess produced usable output
+  1  CONFORMANCE failure — the compilers disagreed, or a golden did not match
+  2  HARNESS failure — a compiler subprocess timed out, was killed by a signal,
+     blew the output-capture cap, or failed to spawn. The run produced NO
+     trustworthy parity verdict (in either direction) and must be re-run; it
+     is deliberately not reported as a cross-tier divergence.
 `.trim());
 }
 
@@ -193,6 +202,42 @@ function maybePrintSpawnStats(): void {
     console.log(`  ${cmd.padEnd(24)} ${n}`);
   }
   console.log('');
+}
+
+/**
+ * Exit status for a HARNESS failure — the runner or the host failed to obtain
+ * a compiler's output (timeout, signal kill, over-cap capture, failed spawn).
+ *
+ * Deliberately distinct from the conformance-failure status (1). A harness
+ * fault says NOTHING about whether the tiers agree, and must never be read as
+ * a cross-tier divergence — nor may a run that suffered one be read as
+ * agreement, which is why it fails even when every fixture passed.
+ */
+const EXIT_HARNESS_FAILURE = 2;
+
+/**
+ * Print any recorded harness faults and report whether the run is tainted.
+ * Called on every exit path so no mode can drop them silently.
+ */
+function reportHarnessFaults(): boolean {
+  const faults = getHarnessFaults();
+  if (faults.length === 0) return false;
+  const RED = '\x1b[31m';
+  const BOLD = '\x1b[1m';
+  const RESET = '\x1b[0m';
+  console.error('');
+  console.error(`${BOLD}${RED}HARNESS FAILURE${RESET} — ${faults.length} compiler subprocess(es) did not`);
+  console.error('produce usable output. These are NOT conformance results: the runner could');
+  console.error('not obtain a verdict from the tier(s) below, so this run proves nothing about');
+  console.error('cross-tier parity either way. Re-run on a less loaded host, or raise');
+  console.error('RUNAR_CONFORMANCE_COMPILE_TIMEOUT_MS / lower RUNAR_CONFORMANCE_CONCURRENCY.');
+  console.error('');
+  for (const f of faults) {
+    console.error(`  ${RED}[${f.kind}]${RESET} ${f.detail}`);
+    console.error(`::error::conformance harness: ${f.detail}`);
+  }
+  console.error('');
+  return true;
 }
 
 async function main(): Promise<void> {
@@ -223,6 +268,10 @@ async function main(): Promise<void> {
     printParserCoverageReport(report);
     maybePrintSpawnStats();
     await shutdownJavaDaemon();
+    const tainted = reportHarnessFaults();
+    if (tainted) {
+      process.exit(EXIT_HARNESS_FAILURE);
+    }
     if (!report.allOk) {
       process.exit(1);
     }
@@ -246,6 +295,10 @@ async function main(): Promise<void> {
     printIrParityReport(report);
     maybePrintSpawnStats();
     await shutdownJavaDaemon();
+    const tainted = reportHarnessFaults();
+    if (tainted) {
+      process.exit(EXIT_HARNESS_FAILURE);
+    }
     if (!report.allOk) {
       for (const f of report.failures) {
         console.error(`::error::conformance: ${f.fixture} — ${f.error.split('\n')[0]}`);
@@ -331,6 +384,19 @@ async function main(): Promise<void> {
   // the JVM gets a clean shutdown rather than a SIGKILL on parent exit.
   await shutdownJavaDaemon();
 
+  // A harness fault is reported SEPARATELY from a conformance failure, and
+  // closes the misreporting hole in both directions:
+  //   * it cannot be filed as a divergence — the banner and exit 2 say the
+  //     runner never got an answer, so nobody goes hunting a codegen bug;
+  //   * it cannot be laundered into a green run — a fault fails the run even
+  //     with a clean 71/71 board.
+  // The full report (including any genuine divergence) is printed above
+  // regardless; only the exit status is claimed by the harness verdict, on
+  // the grounds that a run whose subprocesses died did not measure parity.
+  const tainted = reportHarnessFaults();
+  if (tainted) {
+    process.exit(EXIT_HARNESS_FAILURE);
+  }
   // Exit with failure code if any tests failed
   if (report.failed > 0) {
     process.exit(1);

@@ -64,6 +64,53 @@ func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) 
 	return source, resolved
 }
 
+// conformanceSourcePathExt resolves a conformance fixture's source path for one
+// format. It is the extension-taking peer of `conformanceSourcePath` (which is
+// hard-wired to `.runar.ts`), and it resolves through the `source.json`
+// manifest the fixtures have used since the migration moved the sources out to
+// `examples/<format>/`.
+//
+// It FAILS rather than skips when a format cannot be resolved. Every fixture
+// carries all nine formats by the frontend-parity invariant (CLAUDE.md), so a
+// missing entry is a broken fixture, not a reason to report a pass. Looking for
+// the pre-migration `<dir>/<dir><ext>` layout WITHOUT this fallback is what
+// silently skipped all twelve subtests of the two conformance-compile tests
+// below: the file has not existed at that path for any fixture since the
+// migration, so both tests were unconditionally, permanently green-and-empty.
+func conformanceSourcePathExt(t *testing.T, testName, ext string) string {
+	t.Helper()
+
+	// Pre-migration in-tree layout, still used by a few fixtures.
+	direct := filepath.Join(conformanceDir(), testName, testName+ext)
+	if _, err := os.Stat(direct); err == nil {
+		return direct
+	}
+
+	sourceJSON := filepath.Join(conformanceDir(), testName, "source.json")
+	data, err := os.ReadFile(sourceJSON)
+	if err != nil {
+		t.Fatalf("%s: no %s and no readable source.json (%v) — the fixture cannot be resolved",
+			testName, direct, err)
+	}
+	var manifest struct {
+		Sources map[string]string `json:"sources"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("%s: source.json is unparseable: %v", testName, err)
+	}
+	ref, ok := manifest.Sources[ext]
+	if !ok {
+		t.Fatalf("%s: source.json declares no %s source; every fixture must carry all "+
+			"nine formats (frontend-parity invariant)", testName, ext)
+	}
+	resolved := filepath.Join(conformanceDir(), testName, ref)
+	if _, err := os.Stat(resolved); err != nil {
+		t.Fatalf("%s: source.json points %s at %s, which does not exist (%v)",
+			testName, ext, resolved, err)
+	}
+	return resolved
+}
+
 // ---------------------------------------------------------------------------
 // Test: ParseSource dispatch routes to the correct parser by extension
 // ---------------------------------------------------------------------------
@@ -357,10 +404,7 @@ func TestGoContract_CompileConformance(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source := filepath.Join(conformanceDir(), dir, dir+".runar.go")
-			if _, err := os.Stat(source); os.IsNotExist(err) {
-				t.Skipf("source not found: %s", source)
-			}
+			source := conformanceSourcePathExt(t, dir, ".runar.go")
 
 			artifact, err := CompileFromSource(source)
 			if err != nil {
@@ -371,12 +415,15 @@ func TestGoContract_CompileConformance(t *testing.T) {
 				t.Error("expected non-empty script hex")
 			}
 
-			// Compare against golden expected-script.hex
+			// Compare against golden expected-script.hex. A missing golden is a
+			// hard failure, not a pass: every conformance fixture ships one, so
+			// its absence means the fixture is broken — and treating it as "OK"
+			// would let this test go green while comparing against nothing.
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 			goldenHex, err := os.ReadFile(goldenPath)
 			if err != nil {
-				t.Logf("%s: no golden file, script hex=%d bytes", dir, len(artifact.Script)/2)
-				return
+				t.Fatalf("%s: golden %s is unreadable (%v); compiled script hex=%d bytes "+
+					"was compared against nothing", dir, goldenPath, err, len(artifact.Script)/2)
 			}
 
 			expected := strings.TrimSpace(string(goldenHex))
@@ -401,10 +448,7 @@ func TestRubyContract_CompileConformance(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source := filepath.Join(conformanceDir(), dir, dir+".runar.rb")
-			if _, err := os.Stat(source); os.IsNotExist(err) {
-				t.Skipf("source not found: %s", source)
-			}
+			source := conformanceSourcePathExt(t, dir, ".runar.rb")
 
 			artifact, err := CompileFromSource(source)
 			if err != nil {
@@ -415,13 +459,15 @@ func TestRubyContract_CompileConformance(t *testing.T) {
 				t.Error("expected non-empty script hex")
 			}
 
-			// Compare against golden expected-script.hex
+			// Compare against golden expected-script.hex. A missing golden is a
+			// hard failure, not a pass: every conformance fixture ships one, so
+			// its absence means the fixture is broken — and treating it as "OK"
+			// would let this test go green while comparing against nothing.
 			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
 			goldenHex, err := os.ReadFile(goldenPath)
 			if err != nil {
-				// No golden file — just verify non-empty output
-				t.Logf("%s: no golden file, script hex=%d bytes", dir, len(artifact.Script)/2)
-				return
+				t.Fatalf("%s: golden %s is unreadable (%v); compiled script hex=%d bytes "+
+					"was compared against nothing", dir, goldenPath, err, len(artifact.Script)/2)
 			}
 
 			expected := strings.TrimSpace(string(goldenHex))

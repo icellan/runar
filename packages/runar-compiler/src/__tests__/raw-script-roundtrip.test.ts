@@ -76,18 +76,28 @@ describe('raw_script round-trip: Rúnar-compiled examples', () => {
   walk(EXAMPLES_DIR, files);
   files.sort();
 
+  // Non-vacuity sentinel: an empty walk generates zero cases and the describe
+  // still reports green.
+  it('discovers the examples corpus', () => {
+    expect(files.length).toBeGreaterThan(0);
+  });
+
   for (const f of files) {
     const id = relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, '');
     it(`${id}: original hex == raw_script-wrapped re-emit`, () => {
       const source = readFileSync(f, 'utf8');
       const r = compile(source, { fileName: basename(f) });
-      if (!r.success || !r.scriptHex) {
-        // Skip examples that don't compile cleanly under current options.
-        return;
-      }
-      if (r.scriptHex.length === 0) return;
+      // A compile failure or an empty script used to `return` here, which made
+      // the round-trip claim vacuous for that example instead of red.
+      const errors = r.diagnostics
+        .filter(d => d.severity === 'error')
+        .map(d => d.message)
+        .join('; ');
+      expect(r.success, `compile failed for ${id}: ${errors}`).toBe(true);
+      expect(r.scriptHex, `no script emitted for ${id}`).toBeTruthy();
+      expect(r.scriptHex!.length, `empty script for ${id}`).toBeGreaterThan(0);
 
-      const wrapped = wrapRawScript(r.scriptHex);
+      const wrapped = wrapRawScript(r.scriptHex!);
       const stack = lowerToStack(wrapped);
       const emitted = emit(stack);
       expect(emitted.scriptHex).toBe(r.scriptHex);

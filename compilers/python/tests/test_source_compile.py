@@ -53,8 +53,20 @@ class TestSourceCompile:
         assert "OP_ADD" in artifact.asm
 
     def test_source_compile_boolean_logic(self):
+        # NEW-014: source-level ``&&`` / ``||`` SHORT-CIRCUIT, so they lower to
+        # real OP_IF / OP_ELSE control flow rather than OP_BOOLAND / OP_BOOLOR.
+        # Both directions are pinned: the old assertion would still pass on a
+        # compiler that emitted a branch AND an OP_BOOLAND.
+        #
+        # OP_BOOLAND is not dead — the compiler still synthesises bin_op &&/||
+        # when folding if/else-chain guard conditions, whose operands are
+        # already-bound comparison results that cannot abort. Only the
+        # SOURCE-level operators changed. Do not "fix" those back.
         artifact = must_compile_source(_source_path("boolean-logic"))
-        assert "OP_BOOLAND" in artifact.asm
+        for op in ("OP_IF", "OP_ELSE", "OP_ENDIF"):
+            assert op in artifact.asm, f"expected {op} — `&&` / `||` must branch"
+        assert "OP_BOOLAND" not in artifact.asm
+        assert "OP_BOOLOR" not in artifact.asm
 
     def test_source_compile_if_else(self):
         artifact = must_compile_source(_source_path("if-else"))

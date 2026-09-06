@@ -184,20 +184,39 @@ public final class SlhDsa {
         return T(pkSeed, adrs, skSeed, n);
     }
 
+    /**
+     * PRF_msg. FIPS 205 &sect;11.2.1:
+     *   PRF_msg(SK.prf, opt_rand, M) = Trunc_n(HMAC-SHA-256(SK.prf, opt_rand || M))
+     * This is an HMAC keyed by SK.prf — NOT a plain padded SHA-256 over the
+     * concatenation. See issue #137.
+     */
     private static byte[] PRFmsg(byte[] skPrf, byte[] optRand, byte[] msg, int n) {
-        byte[] pad = new byte[64 - n];
-        return trunc(sha256(concat(pad, skPrf, optRand, msg)), n);
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(skPrf, "HmacSHA256"));
+            mac.update(optRand);
+            mac.update(msg);
+            return trunc(mac.doFinal(), n);
+        } catch (java.security.GeneralSecurityException e) {
+            throw new IllegalStateException("HmacSHA256 unavailable", e);
+        }
     }
 
-    /** Hmsg via MGF1-SHA-256. */
+    /**
+     * Hmsg via MGF1-SHA-256. FIPS 205 &sect;11.2.1:
+     *   H_msg(R, PK.seed, PK.root, M) =
+     *     MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+     * The {@code R || PK.seed} prefix on the MGF1 seed is mandatory — it
+     * mitigates multi-target long-message second-preimage attacks. See #137.
+     */
     private static byte[] Hmsg(byte[] R, byte[] pkSeed, byte[] pkRoot, byte[] msg, int outLen) {
-        byte[] seed = concat(R, pkSeed, pkRoot, msg);
-        byte[] hash = sha256(seed);
+        byte[] inner = sha256(concat(R, pkSeed, pkRoot, msg));
+        byte[] seed = concat(R, pkSeed, inner);
         byte[] result = new byte[outLen];
         int offset = 0;
         int counter = 0;
         while (offset < outLen) {
-            byte[] block = sha256(concat(hash, toByte(counter, 4)));
+            byte[] block = sha256(concat(seed, toByte(counter, 4)));
             int copyLen = Math.min(32, outLen - offset);
             System.arraycopy(block, 0, result, offset, copyLen);
             offset += copyLen;

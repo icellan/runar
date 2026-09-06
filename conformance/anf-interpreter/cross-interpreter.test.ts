@@ -16,11 +16,37 @@ const DRIVERS_DIR = join(__dirname, 'drivers');
 const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
 interface CaseInput {
-  case: string;
+  /**
+   * Conformance fixture name → `conformance/tests/<case>/expected-ir.json`.
+   * Mutually exclusive with `anfPath`.
+   */
+  case?: string;
+  /**
+   * Repo-root-relative ANF IR path, for a case whose program is not a
+   * conformance fixture (`drivers/PROTOCOL.md`). Every per-language driver
+   * already prefers this field over `case`; the TS reference resolves it here.
+   */
+  anfPath?: string;
   methodName: string;
   currentState: Record<string, unknown>;
   args: Record<string, unknown>;
   constructorArgs: unknown[];
+  scriptOracle?: ScriptOracleSpec;
+}
+
+/**
+ * Drives the script-semantics oracle for a case (see the oracle describe block
+ * at the bottom of this file). Every field is explicit — nothing is inferred
+ * from `CaseInput`, because a wrong inference would silently weaken the only
+ * non-tier-vs-tier check in this suite.
+ */
+interface ScriptOracleSpec {
+  /** Repo-relative `.runar.ts` source the deployed script is compiled from. */
+  source: string;
+  /** Deploy-time constructor args (the state the call tx spends FROM). */
+  constructorArgs: string[];
+  /** POSITIONAL method args, in declaration order. */
+  methodArgs: unknown[];
 }
 
 interface CaseOutput {
@@ -69,9 +95,16 @@ function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: 
   };
 }
 
-function loadAnf(caseName: string): ANFProgram {
-  const path = join(CONFORMANCE_TESTS_DIR, caseName, 'expected-ir.json');
+function loadAnf(input: Pick<CaseInput, 'case' | 'anfPath'>): ANFProgram {
+  const path = input.anfPath
+    ? join(REPO_ROOT, input.anfPath)
+    : join(CONFORMANCE_TESTS_DIR, requireCase(input), 'expected-ir.json');
   return JSON.parse(readFileSync(path, 'utf8')) as ANFProgram;
+}
+
+function requireCase(input: Pick<CaseInput, 'case'>): string {
+  if (!input.case) throw new Error("input JSON carries neither 'anfPath' nor 'case'");
+  return input.case;
 }
 
 // Lenient parity exercises every input file EXCEPT those that carry a
@@ -92,12 +125,18 @@ const inputFiles = readdirSync(INPUTS_DIR)
 // ---------------------------------------------------------------------------
 
 describe('ANF interpreter parity (TS SDK)', () => {
+  // Non-vacuity sentinel: an empty or fully-filtered corpus generates zero
+  // cases, and every describe in this file would still report green.
+  it('discovers the lenient input corpus', () => {
+    expect(inputFiles.length).toBeGreaterThan(0);
+  });
+
   for (const inputFile of inputFiles) {
     const baseName = inputFile.replace(/\.json$/, '');
     it(`${baseName} matches pinned golden`, () => {
       const inputRaw = JSON.parse(readFileSync(join(INPUTS_DIR, inputFile), 'utf8')) as CaseInput;
       const input = decodeBigints(inputRaw) as CaseInput;
-      const anf = loadAnf(input.case);
+      const anf = loadAnf(input);
       const result = computeNewStateAndDataOutputs(
         anf,
         input.methodName,
@@ -262,4 +301,103 @@ for (const cfg of driverConfigs) {
       });
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Script-semantics oracle.
+//
+// Everything above this line is tier-vs-tier: every driver reads the SAME
+// `expected-ir.json` with the same bare JSON parse and is compared against a
+// golden pinned from one of those same readers. That is definitionally blind
+// to a SHARED misreading of the IR — which is exactly how NEW-008 survived:
+// four of seven SDKs took the ByteString branch for a `"<decimal>n"` const
+// operand, agreed with each other and with the pinned golden, and still built
+// a continuation the deployed script rejects.
+//
+// This block closes that hole by checking the golden against an INDEPENDENT
+// authority: the compiled locking script, executed on the real `@bsv/sdk`
+// Spend engine with real secp256k1, with the continuation output's state
+// decoded straight off the broadcast call tx (byte layout only — it is NOT
+// re-derived by re-running the transition). If the interpreter and the script
+// ever disagree about a state value, this fails even when all seven
+// interpreters agree with each other.
+//
+// Coverage is opt-in per case via the `scriptOracle` block in the input file:
+// the oracle deploys and spends for real, so it needs the source, the deploy
+// constructor args, and POSITIONAL method args, none of which can be inferred
+// safely from the interpreter's name-keyed `args` map. Cases driven by
+// compiler-implicit introspection params (`_serialisedOutputs`,
+// `_prevOutScript_0`, block-height binding) carry no block: their unlocking
+// witness is not expressible through `runStatefulSpend`'s positional API.
+// ---------------------------------------------------------------------------
+
+const scriptOracleCases = inputFiles
+  .map(f => ({ file: f, input: JSON.parse(readFileSync(join(INPUTS_DIR, f), 'utf8')) as CaseInput }))
+  .filter((e): e is { file: string; input: CaseInput & { scriptOracle: ScriptOracleSpec } } =>
+    e.input.scriptOracle !== undefined);
+
+describe('ANF interpreter vs SCRIPT semantics (independent oracle)', () => {
+  // Non-vacuity sentinels. An empty oracle set — or one that lost the byte-op
+  // case — would leave every assertion below unexecuted while the file still
+  // reported green, which is the failure mode this whole block exists to end.
+  it('drives the oracle for at least one case', () => {
+    expect(scriptOracleCases.length).toBeGreaterThan(0);
+  });
+
+  it('covers a length-sensitive byte op with an oversize bigint const', () => {
+    // `~(9007199254740993n << 8n)`: the const is past Number.MAX_SAFE_INTEGER,
+    // so it survives the conformance runner's golden narrowing and the
+    // checked-in IR really does carry the on-disk `"<decimal>n"` STRING form
+    // that four SDKs used to mis-route (NEW-008).
+    expect(scriptOracleCases.map(c => c.file)).toContain('oversize-bigint-shift-shift.json');
+  });
+
+  for (const { file, input } of scriptOracleCases) {
+    const baseName = file.replace(/\.json$/, '');
+    it(`${baseName}: pinned golden state matches the deployed script`, async () => {
+      const spec = input.scriptOracle;
+      const sourcePath = join(REPO_ROOT, spec.source);
+      const { runStatefulSpend } = await import('../../packages/runar-testing/src/oracle/real-crypto-execution.js');
+      const result = await runStatefulSpend({
+        source: readFileSync(sourcePath, 'utf8'),
+        fileName: sourcePath.split('/').pop()!,
+        method: input.methodName,
+        // `"<n>n"` is the bigint convention for this ENTIRE file (see
+        // `decodeBigints`), and `methodArgs` was the one field that never got
+        // decoded — a bigint method arg arrived as the literal string
+        // `"-1000n"` and the SDK read it as a ByteString ("Some elements in
+        // this string are not hex encoded"). No existing oracle case had a
+        // bigint method arg, so nothing noticed.
+        args: decodeBigints(spec.methodArgs) as unknown[],
+        constructorArgs: decodeBigints(spec.constructorArgs) as (bigint | boolean | string)[],
+        signerKey: 'alice',
+      });
+
+      // A rejected spend or a failed state decode must never read as "the
+      // oracle had no opinion" — both mean this case checked nothing.
+      expect(result.vmError ?? '', 'deployed script must verify on the real Spend engine').toBe('');
+      expect(result.vmAccepted).toBe(true);
+      expect(result.stateDecodeError ?? '').toBe('');
+      expect(result.continuationState, 'oracle produced no on-chain state to compare').toBeTruthy();
+
+      const onChain = normalizeStateForOracle(result.continuationState as Record<string, unknown>);
+      const golden = JSON.parse(readFileSync(join(EXPECTED_DIR, file), 'utf8')) as CaseOutput;
+      // Only the state fields the oracle can decode are compared; the golden
+      // may also pin dataOutputs/rawOutputs, which the continuation script
+      // does not carry.
+      for (const [key, value] of Object.entries(onChain)) {
+        expect(golden.state[key], `state.${key} disagrees with the deployed script`).toEqual(value);
+      }
+      expect(Object.keys(onChain).length).toBeGreaterThan(0);
+    }, 120_000);
+  }
+});
+
+/** `bigint` → `"42n"`, matching the golden encoding used above. */
+function normalizeStateForOracle(state: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(state)) {
+    out[k] = typeof v === 'bigint' ? `${v}n` : v;
+  }
+  return out;
 }

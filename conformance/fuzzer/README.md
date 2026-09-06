@@ -23,6 +23,43 @@ design principle P8).
 | `--spend-oracle` | real `@bsv/sdk` `Spend` over a real deploy→call, **plus an independent state model** | absolute, **full tx context + state VALUE** | The spend is really spendable **and** commits the right state |
 | `--replay` | checked-in reproducers | regression | A divergence already found cannot come back |
 
+## A skipped tier is a failure, not a smaller run (`--canonical`)
+
+Every non-TS tier in `--canonical` is discovered by probing for its toolchain or
+shim binary. A tier that is not found used to be marked `skip`, dropped from the
+comparison, and neither warned about nor counted — so a run that never touched
+Zig still printed `Mismatches: 0` and exited **0**:
+
+```
+Tiers: ts=ok go=ok rust=ok python=ok zig=skip ruby=ok java=ok     # exit 0
+```
+
+A gate meant to establish SEVEN-tier parity reporting success having established
+six. `canonicalJson` is a **wire** primitive — one divergent byte breaks every
+cross-tier signature — so "we did not check that tier" must never read as "that
+tier agrees".
+
+`--require-tiers` closes it. It defaults to **every tier in `--compilers`** (all
+7 for a bare run), and a required tier that was not compared — shim missing, or
+not requested — fails the run before any case executes:
+
+```
+Tiers:    ts=ok go=ok rust=ok python=ok zig=SKIP ruby=ok java=ok
+Required: ts,go,rust,python,zig,ruby,java
+INCOMPLETE RUN: required tier(s) zig were NOT compared …          # exit 1
+```
+
+The Zig shim is the one that needs an explicit build; the other five are built
+lazily on first invocation:
+
+```bash
+cd packages/runar-zig && zig build canonicalise
+```
+
+`--require-tiers none` opts out for local exploration. Never use it in CI: both
+`--canonical` steps in `.github/workflows/fuzzer-nightly.yml` name their tiers
+explicitly, so narrowing the set is a visible diff rather than a silent skip.
+
 ## Horizontal parity fuzz is NOT fund-safety-complete on its own
 
 `anf-differential.ts`, `ir-differential.ts`, `canonical-json-differential.ts`

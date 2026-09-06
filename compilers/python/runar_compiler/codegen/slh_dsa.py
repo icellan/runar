@@ -682,8 +682,11 @@ def _emit_slh_wots_all(emit: Callable, p: SLHCodegenParams, layer: int) -> None:
     emit(_make_stack_op(op="swap"))
     emit(_make_stack_op(op="drop"))
 
-    # Compress -> wotsPk
-    _emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, -1, "zero")
+    # Compress -> wotsPk. ta8 at depth 2, kp4 PICKed from depth 1.
+    # FIPS 205 Alg. 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes ADRS bytes
+    # 20-31, but the key pair address MUST then be restored. Emitting a zero
+    # key-pair address here was half of issue #137.
+    _emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, 1, "zero")
     emit(_make_stack_op(op="swap"))
     _emit_slh_t_raw(emit, n, 4)
 
@@ -904,19 +907,32 @@ def _emit_slh_fors(emit: Callable, p: SLHCodegenParams) -> None:
 
 
 # ===========================================================================
-# 8. Hmsg -- Message Digest (SHA-256 MGF1)
+# 8. Hmsg -- Message Digest (MGF1-SHA-256)
 # ===========================================================================
 
 def _emit_slh_hmsg(emit: Callable, n: int, out_len: int) -> None:
     """Emit message digest computation.
 
-    Input:  R(3) pkSeed(2) pkRoot(1) msg(0)
+    FIPS 205 Section 11.2.1:
+        H_msg(R, PK.seed, PK.root, M) =
+          MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+    The ``R || PK.seed`` prefix on the MGF1 seed is mandatory -- it mitigates
+    multi-target long-message second-preimage attacks. Omitting it was half of
+    issue #137 (the other half was the WOTS_PK key-pair address).
+
+    Input:  R(5) pkSeed(4) R(3) pkSeed(2) pkRoot(1) msg(0)
+            (R and pkSeed are supplied twice: once for the inner SHA-256 and
+             once for the MGF1 seed prefix)
     Output: digest(out_len bytes)
     """
+    # CAT: R || pkSeed || pkRoot || msg, then SHA-256 -> inner(32B)
     emit(_make_stack_op(op="opcode", code="OP_CAT"))
     emit(_make_stack_op(op="opcode", code="OP_CAT"))
     emit(_make_stack_op(op="opcode", code="OP_CAT"))
     emit(_make_stack_op(op="opcode", code="OP_SHA256"))
+    # Prepend the mandatory R || PK.seed prefix -> seed(2n+32 B)
+    emit(_make_stack_op(op="opcode", code="OP_CAT"))
+    emit(_make_stack_op(op="opcode", code="OP_CAT"))
 
     blocks = (out_len + 31) // 32
     if blocks == 1:
@@ -1027,11 +1043,15 @@ def emit_verify_slh_dsa(emit: Callable, param_key: str) -> None:
     t.split("R", "sigRest")
 
     # ---- 3. Compute Hmsg(R, pkSeed, pkRoot, msg) ----
+    # FIPS 205 Section 11.2.1 needs R and PK.seed TWICE: once inside the
+    # inner SHA-256, once as the MGF1 seed prefix. See #137.
+    t.copy_to_top("R", "_R2")
+    t.copy_to_top("pkSeed", "_pks2")
     t.copy_to_top("R", "_R")
     t.copy_to_top("pkSeed", "_pks")
     t.copy_to_top("pkRoot", "_pkr")
     t.copy_to_top("msg", "_msg")
-    t.raw_block(["_R", "_pks", "_pkr", "_msg"], "digest",
+    t.raw_block(["_R2", "_pks2", "_R", "_pks", "_pkr", "_msg"], "digest",
                 lambda e: _emit_slh_hmsg(e, n, digest_len))
 
     # ---- 4. Extract md, treeIdx, leafIdx ----

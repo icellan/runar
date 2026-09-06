@@ -712,7 +712,11 @@ fn emitSLHWotsAll(
 
     try builder.emitOp("OP_SWAP");
     try builder.emitOp("OP_DROP");
-    try appendBuildADRSToBuilder(builder, layer, SLH_WOTS_PK, 0, 2, null, false);
+    // Compress -> wotsPk. ta8 at depth 2, kp4 PICKed from depth 1.
+    // FIPS 205 Alg. 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes ADRS bytes
+    // 20-31, but the key pair address MUST then be restored. Emitting a zero
+    // key-pair address here was half of issue #137.
+    try appendBuildADRSToBuilder(builder, layer, SLH_WOTS_PK, 0, 2, 1, false);
     try builder.emitOp("OP_SWAP");
     try emitSLHTRaw(builder, n, 4);
 }
@@ -926,11 +930,24 @@ fn emitSLHFors(builder: *Builder, p: SLHCodegenParams) PqEmitterError!void {
     try emitSLHTRaw(builder, n, 4);
 }
 
+// FIPS 205 Section 11.2.1:
+//   H_msg(R, PK.seed, PK.root, M) =
+//     MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+// The `R || PK.seed` prefix on the MGF1 seed is mandatory -- it mitigates
+// multi-target long-message second-preimage attacks. Omitting it was half of
+// issue #137 (the other half was the WOTS_PK key-pair address).
+//
+// Input:  R(5) pkSeed(4) R(3) pkSeed(2) pkRoot(1) msg(0)
+// Output: digest(out_len bytes)
 fn emitSLHHmsg(builder: *Builder, out_len: usize) PqEmitterError!void {
+    // CAT: R || pkSeed || pkRoot || msg, then SHA-256 -> inner(32B)
     try builder.emitOp("OP_CAT");
     try builder.emitOp("OP_CAT");
     try builder.emitOp("OP_CAT");
     try builder.emitOp("OP_SHA256");
+    // Prepend the mandatory R || PK.seed prefix -> seed(2n+32 B)
+    try builder.emitOp("OP_CAT");
+    try builder.emitOp("OP_CAT");
 
     const blocks = (out_len + 31) / 32;
     if (blocks == 1) {
@@ -1218,12 +1235,16 @@ pub fn appendVerifySLHDSA(
     try tracker.pushInt(null, @intCast(n));
     try tracker.split("R", "sigRest");
 
+    // FIPS 205 Section 11.2.1 needs R and PK.seed TWICE: once inside the inner
+    // SHA-256, once as the MGF1 seed prefix. See #137.
+    try tracker.copyToTop("R", "_R2");
+    try tracker.copyToTop("pkSeed", "_pks2");
     try tracker.copyToTop("R", "_R");
     try tracker.copyToTop("pkSeed", "_pks");
     try tracker.copyToTop("pkRoot", "_pkr");
     try tracker.copyToTop("msg", "_msg");
     try emitSLHHmsg(&builder, digest_len);
-    try tracker.consumeProduce(4, "digest");
+    try tracker.consumeProduce(6, "digest");
 
     try tracker.toTop("digest");
     try tracker.pushInt(null, @intCast(md_len));

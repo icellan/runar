@@ -72,6 +72,7 @@ fn or_checksig_artifact(pk_a_hex: &str, pk_b_hex: &str) -> RunarArtifact {
             }],
         },
         script: or_checksig_script(pk_a_hex, pk_b_hex),
+        asm: None,
         state_fields: None,
         constructor_slots: None,
         code_sep_index_slots: None,

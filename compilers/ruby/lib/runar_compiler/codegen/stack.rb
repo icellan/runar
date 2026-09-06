@@ -218,6 +218,40 @@ module RunarCompiler::Codegen
       @slots.each { |s| result.add(s) if s && !s.empty? }
       result
     end
+
+    # How many slots carry each name.
+    #
+    # The model resolves a name to its SHALLOWEST slot, so a name held more than
+    # once has one live slot and the rest are dead residue -- but they are all
+    # still "the name" to a set-membership test, which is what NEW-018 turned
+    # on. See +lower_if+.
+    def name_counts
+      counts = Hash.new(0)
+      @slots.each { |s| counts[s] += 1 if s && !s.empty? }
+      counts
+    end
+
+    # The depths to drop for a MULTISET of names, deepest-first.
+    #
+    # Takes the SHALLOWEST occurrences of a name listed more than once -- the
+    # shallowest slot is the live one, and it is the one the sibling arm
+    # consumed. Deepest-first so removing a deeper slot does not shift a
+    # shallower one. For a name listed once this is exactly +find_depth+, which
+    # also resolves to the shallowest slot.
+    def drop_depths_for(names)
+      need = Hash.new(0)
+      names.each { |n| need[n] += 1 }
+      depths = []
+      (0...depth).each do |d|
+        name = peek_at_depth(d)
+        next if name.nil? || name.empty?
+        next unless need[name] > 0
+
+        depths << d
+        need[name] -= 1
+      end
+      depths.sort.reverse
+    end
   end
 
   # -----------------------------------------------------------------------
@@ -2061,7 +2095,31 @@ module RunarCompiler::Codegen
               "replace the other. binding='#{binding_name}'."
       end
 
-      is_last = _is_last_use(cond, binding_index, last_uses)
+      # NEW-015: does an ARM read the condition again?
+      #
+      # +last_uses+ is keyed by the index of the ENCLOSING binding, and
+      # +collect_refs+ deliberately recurses into +then+ / +else+ so an arm-only
+      # ref is not dropped early. Both facts together mean an arm's read of the
+      # condition lands on THIS binding's index -- indistinguishable from a ref
+      # used only as the condition. +_is_last_use+ then said "yes, consume it",
+      # +bring_to_top+ ROLLed the slot away, and the arm looked for a value that
+      # was no longer there:
+      #
+      #     let f: boolean = c > 0n;
+      #     assert(f ? c > 10n : !f);
+      #     #  Value 'f' not found on stack (stack has 1 items: [c])
+      #
+      # Legal source, accepted by validate and typecheck, rejected here -- so
+      # there was no diagnostic a developer could act on. It only ever bit when
+      # the condition local was DEAD after the +if+; one that stayed live was
+      # already covered by the <tt>last_idx > binding_index</tt> rule below,
+      # which is why the shape looked like it worked. <tt>&&</tt> / <tt>||</tt>
+      # desugar to this node, so <tt>f || !f</tt> routes through the same path.
+      cond_read_in_arms = (then_bindings + else_bindings).any? do |b|
+        RunarCompiler::Codegen.collect_refs(b.value).include?(cond)
+      end
+
+      is_last = !cond_read_in_arms && _is_last_use(cond, binding_index, last_uses)
       bring_to_top(cond, is_last)
       @sm.pop # OP_IF consumes the condition
 
@@ -2070,6 +2128,13 @@ module RunarCompiler::Codegen
       last_uses.each do |ref, last_idx|
         protected_refs.add(ref) if last_idx > binding_index && @sm.has?(ref)
       end
+
+      # A condition the arms re-read was PICKed just above, so the slot survived
+      # OP_IF. Protect it for the same reason the merged-local block below is
+      # protected: only ONE arm may hold the read, so letting that arm consume
+      # the slot would leave the two arms at different depths over a name the
+      # parent still models.
+      protected_refs.add(cond) if cond_read_in_arms && @sm.has?(cond)
 
       # The K>=2 merged-local block reads every merged local in BOTH arms, and
       # that read is RECONCILIATION, not a use: it is what makes each arm leave
@@ -2147,14 +2212,61 @@ module RunarCompiler::Codegen
       end
 
       # Balance stack between branches
-      post_then_names = then_ctx.sm.named_slots
-      consumed_names = pre_if_names.select { |n| !post_then_names.include?(n) && else_ctx.sm.has?(n) }.to_a
-      post_else_names = else_ctx.sm.named_slots
-      else_consumed_names = pre_if_names.select { |n| !post_else_names.include?(n) && then_ctx.sm.has?(n) }.to_a
+      #
+      # NEW-018: counted by MULTIPLICITY, not by name-set membership.
+      #
+      # A parent stack legitimately holds the same name in more than one slot --
+      # a loop rebinding a local leaves one slot per unrolled iteration, all
+      # named +acc+, of which only the shallowest is ever read (the model
+      # resolves a name to its shallowest slot). When an arm ROLLs that live slot
+      # away, the name is STILL in the arm's name SET because the dead residue
+      # slot beneath it carries the same name -- so the set-difference this phase
+      # used to compute saw nothing consumed, emitted no matching drop in the
+      # sibling, and left the two arms one slot apart.
+      #
+      # Phase 3 then "fixed" the depth with an anonymous pad. A pad restores the
+      # COUNT but not the POSITION: the arm that lost a slot from the middle of
+      # the region gets a placeholder next to its result, while the sibling still
+      # holds the real value in the original slot. The two arms leave
+      # positionally different stacks, the parent adopts one of them, and every
+      # slot the other arm holds below the result is off by one:
+      #
+      #     let acc = p; let wacc = 0n;
+      #     for (...) for (...) { acc = acc + p; wacc = wacc + acc; }
+      #     let br0 = 0n; const sib0 = p;
+      #     if (p === 0n) { br0 = p; }
+      #     assert((p >= 0n ? acc >= 0n : false) ? (br0 < sib0) : false);
+      #
+      # The inner conditional is the CONDITION of the outer one. Its then-arm
+      # consumes the live +acc+; the parent holds +acc+ twice, so phase 1 missed
+      # it and the arms came back as <tt>[t . br0 sib0 ...]</tt> against
+      # <tt>[t br0 sib0 acc ...]</tt>. With p = 1 the source ACCEPTS and the AST
+      # interpreter accepts; the script engines reject the spend with "The top
+      # stack element must be truthy after script evaluation" -- an ordinary
+      # contract deployed to a permanently unspendable UTXO. It needs no
+      # <tt>&&</tt>: a plain nested ternary reaches it, and <tt>a && b && c</tt>
+      # is left-associative, so it is also what blocked the short-circuit
+      # desugar.
+      #
+      # Counting occurrences instead makes the sibling drop its matching slot,
+      # both arms end at the same depth with the same layout, and no pad is
+      # needed at all. Byte-neutral for every parent stack with no duplicated
+      # name.
+      pre_if_counts = @sm.name_counts
+      then_counts = then_ctx.sm.name_counts
+      else_counts = else_ctx.sm.name_counts
+      consumed_names = []
+      else_consumed_names = []
+      pre_if_counts.each do |name, held|
+        then_lost = [0, held - then_counts[name]].max
+        else_lost = [0, held - else_counts[name]].max
+        (then_lost - else_lost).times { consumed_names << name } if then_lost > else_lost
+        (else_lost - then_lost).times { else_consumed_names << name } if else_lost > then_lost
+      end
 
       # Phase 2: perform ALL drops before any placeholder pushes.
       if consumed_names.any?
-        depths = consumed_names.map { |n| else_ctx.sm.find_depth(n) }.sort.reverse
+        depths = else_ctx.sm.drop_depths_for(consumed_names)
         depths.each do |d|
           if d == 0
             else_ctx.emit_op({ op: "drop" })
@@ -2175,7 +2287,7 @@ module RunarCompiler::Codegen
         end
       end
       if else_consumed_names.any?
-        depths = else_consumed_names.map { |n| then_ctx.sm.find_depth(n) }.sort.reverse
+        depths = then_ctx.sm.drop_depths_for(else_consumed_names)
         depths.each do |d|
           if d == 0
             then_ctx.emit_op({ op: "drop" })
@@ -2210,10 +2322,16 @@ module RunarCompiler::Codegen
       #
       # Runs AFTER the phase-2 consumption drops, so both arms have given up the
       # same parent slots and share one base depth.
+      #
+      # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. Phase 1
+      # now makes both arms give up the same slot of a name the parent holds
+      # twice, so the base depth has to count that slot as given up too --
+      # otherwise +target_depth+ is one too high, the trim below does nothing,
+      # and the layout assertion fires on a well-formed program.
       n_declared = results.length
       if n_declared >= 1
-        still_held = then_ctx.sm.named_slots
-        consumed_from_parent = pre_if_names.count { |n| !still_held.include?(n) && @sm.has?(n) }
+        still_held_counts = then_ctx.sm.name_counts
+        consumed_from_parent = pre_if_counts.sum { |name, held| [0, held - still_held_counts[name]].max }
         target_depth = @sm.depth - consumed_from_parent + n_declared
         [then_ctx, else_ctx].each do |arm_ctx|
           arm_ctx.drop_slot_at_depth(n_declared) while arm_ctx.sm.depth > target_depth
@@ -2289,6 +2407,10 @@ module RunarCompiler::Codegen
               "(see GitHub issue #99); binding=#{binding_name.inspect}"
       end
 
+      # NEW-018 needs the arms' post-branch name MULTISET. Snapshotted here
+      # because the arms' op lists are consumed immediately after this point.
+      post_branch_counts = then_ctx.sm.name_counts
+
       then_ops = then_ctx.ops
       else_ops = else_ctx.ops
 
@@ -2304,11 +2426,17 @@ module RunarCompiler::Codegen
       post_endif_drops = 0
 
       # Reconcile parent stackMap
-      post_branch_names = then_ctx.sm.named_slots
-      pre_if_names.each do |n|
-        if !post_branch_names.include?(n) && @sm.has?(n)
-          depth = @sm.find_depth(n)
-          @sm.remove_at_depth(depth)
+      #
+      # NEW-018: counted by MULTIPLICITY, for the same reason phase 1 is. When
+      # the arms consume the live slot of a name the parent holds twice, the
+      # parent must give up one slot too -- the set test kept both, so the parent
+      # modelled one more slot than the arms physically left and the adopt below
+      # saw arm_depth == parent_depth and pushed nothing at all.
+      pre_if_counts.each do |name, held|
+        excess = held - post_branch_counts[name]
+        while excess > 0 && @sm.has?(name)
+          @sm.remove_at_depth(@sm.find_depth(name))
+          excess -= 1
         end
       end
 

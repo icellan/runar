@@ -1,7 +1,16 @@
 {
   "case": "stateful-counter",
   "methodName": "decrement",
-  "currentState": { "count": "5n" },
+  "currentState": {
+    "count": "5n"
+  },
   "args": {},
-  "constructorArgs": []
+  "constructorArgs": [],
+  "scriptOracle": {
+    "source": "examples/ts/stateful-counter/Counter.runar.ts",
+    "constructorArgs": [
+      "5n"
+    ],
+    "methodArgs": []
+  }
 }

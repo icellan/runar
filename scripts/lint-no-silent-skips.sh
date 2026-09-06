@@ -88,6 +88,10 @@ fi
 # logic lives in scripts/audit-test-skips.py — it also reports stale
 # inventory rows that point to lines no longer carrying a skip.
 # ---------------------------------------------------------------------------
+if ! python3 scripts/audit-test-skips.py --self-test; then
+  echo "::error::audit-test-skips.py self-test failed — an integrity gate no longer fires."
+  fail=1
+fi
 if ! python3 scripts/audit-test-skips.py; then
   echo "::error::test-skip inventory drift — see scripts/audit-test-skips.py output above."
   fail=1

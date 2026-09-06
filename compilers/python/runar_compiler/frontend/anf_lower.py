@@ -196,7 +196,60 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
 # Properties
 # ---------------------------------------------------------------------------
 
+def _constructor_assigned_properties(contract: ContractNode) -> set[str]:
+    """Properties the constructor assigns a constructor PARAMETER to.
+
+    These get their value from the deploy-time argument, so any initializer on
+    them is a default the argument overrides -- carrying it into
+    ``initial_value`` would bake the default into the artifact and silently
+    discard the argument (NEW-001). The property must instead stay in the
+    constructor slot list (``initial_value is None``) so the SDK writes the
+    argument.
+
+    Deliberately narrow in three ways.
+
+    1. Only a BARE parameter reference counts. ``this.a = 5n`` assigns a
+       literal, not an argument, and keeps its initializer.
+    2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+       is positional, so a parameter feeding two properties has no
+       representation -- that shape is already undeployable today when written
+       without initializers, and belongs to NEW-002.
+    3. A property assigned more than once in the constructor is skipped, for
+       the same reason.
+    """
+    ctor = contract.constructor
+    if ctor is None:
+        return set()
+    params = {p.name for p in ctor.params}
+    prop_to_params: dict[str, set[str]] = {}
+    param_to_props: dict[str, set[str]] = {}
+
+    for stmt in ctor.body:
+        if not isinstance(stmt, AssignmentStmt):
+            continue
+        if not isinstance(stmt.target, PropertyAccessExpr):
+            continue
+        prop = stmt.target.property
+        if not isinstance(stmt.value, Identifier) or stmt.value.name not in params:
+            # Not a constructor argument: never strip this property.
+            prop_to_params.setdefault(prop, set())
+            continue
+        param = stmt.value.name
+        prop_to_params.setdefault(prop, set()).add(param)
+        param_to_props.setdefault(param, set()).add(prop)
+
+    out: set[str] = set()
+    for prop, ps in prop_to_params.items():
+        if len(ps) != 1:
+            continue
+        (param,) = ps
+        if len(param_to_props[param]) == 1:
+            out.add(prop)
+    return out
+
+
 def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
+    ctor_assigned = _constructor_assigned_properties(contract)
     result = []
     for prop in contract.properties:
         anf_prop = ANFProperty(
@@ -204,7 +257,7 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
             type=_type_node_to_string(prop.type),
             readonly=prop.readonly,
         )
-        if prop.initializer is not None:
+        if prop.initializer is not None and prop.name not in ctor_assigned:
             anf_prop.initial_value = _extract_literal_value(prop.initializer)
             _check_state_bigint_magnitude(anf_prop)
         # Propagate synthetic FixedArray chain (set by expand_fixed_arrays)
@@ -1210,6 +1263,46 @@ class _LowerCtx:
             return self._lower_member_expr(expr)
 
         if isinstance(expr, BinaryExpr):
+            # NEW-014: ``and`` / ``or`` (``&&`` / ``||``) SHORT-CIRCUIT. They
+            # desugar to the ternary, which stack lowering already emits as
+            # real OP_IF / OP_ELSE control flow:
+            #
+            #     a && b   ==>   a ? b : false
+            #     a || b   ==>   a ? true : b
+            #
+            # They used to lower to ``bin_op``, i.e. OP_BOOLAND / OP_BOOLOR --
+            # binary stack ops, so BOTH operands were pushed and therefore both
+            # evaluated. ``spec/semantics.md`` §3.7 licensed that with "This is
+            # safe in Rúnar because all expressions are pure (no side effects
+            # beyond ``assert``)". Purity is not TOTALITY: the same document's
+            # §10 and §11.3 list division by zero as a runtime failure, and
+            # OP_SPLIT / OP_NUM2BIN abort out of range. Evaluating the operand
+            # the source skipped therefore aborted the script, and the ordinary
+            # defensive guard --
+            #
+            #     assert(d === 0n || (100n / d) > 1n);
+            #
+            # -- compiled to a locking script the chain rejects for exactly the
+            # input the guard exists to protect, while the AST interpreter
+            # (which short-circuits, like every surface syntax the frontends
+            # accept) reported success. §3.9 already specifies the ternary's
+            # untaken arm as unevaluated, so laziness was already in the
+            # language; ``&&`` / ``||`` were the sole eager outlier.
+            #
+            # Only SOURCE-level ``&&`` / ``||`` desugar here. The compiler still
+            # synthesises ``bin_op`` ``&&`` / ``||`` internally to fold
+            # if/else-chain guard conditions; those operands are already-bound
+            # refs to plain comparison results, so they cannot abort and stay on
+            # the cheap opcodes.
+            if expr.op in ("&&", "||"):
+                is_or = expr.op == "||"
+                constant = BoolLiteral(value=is_or)
+                return self._lower_ternary_expr(TernaryExpr(
+                    condition=expr.left,
+                    consequent=constant if is_or else expr.right,
+                    alternate=expr.right if is_or else constant,
+                ))
+
             left_ref = self.lower_expr_to_ref(expr.left)
             right_ref = self.lower_expr_to_ref(expr.right)
 
@@ -1690,15 +1783,40 @@ class _LowerCtx:
             return self.bindings[end_index - 1].name
         return self.emit(_make_load_const_string("@void"))
 
+    def _lower_ternary_arm(self, e: Expression) -> None:
+        """Lower one arm of a ternary so the arm ENDS with its result binding.
+
+        NEW-016: ``lower_expr_to_ref`` returns an existing ref without emitting
+        anything when the arm is a bare identifier -- ``g ? f : c === 0n``
+        produced ``then: []``, an ``if`` arm with no bindings at all. Stack
+        lowering reads an arm's result off its stack effect, so a +0 arm has no
+        result to adopt and the depth reconcile padded the shortfall with an
+        EMPTY push. The contract compiled clean, the AST interpreter accepted
+        it, and the real engine rejected the spend with "OP_VERIFY requires the
+        top stack value to be truthy" over a stack of ``[01, ]`` -- the arm's
+        ``true`` replaced by an empty (false) value. An ordinary contract
+        deployed to a permanently unspendable UTXO.
+
+        Aliasing through ``load_const "@ref:"`` -- the same idiom ``let x = y``
+        and the increment/decrement lowerings already use -- makes the arm's
+        stack effect +1 and copies the parent slot instead of trying to move
+        it. The alias is only emitted when the result was NOT produced inside
+        the arm, so every arm that already ended on its own result keeps its
+        exact bytes.
+        """
+        ref = self.lower_expr_to_ref(e)
+        if not self.bindings or self.bindings[-1].name != ref:
+            self.emit(_make_load_const_string("@ref:" + ref))
+
     def _lower_ternary_expr(self, e: TernaryExpr) -> str:
         cond_ref = self.lower_expr_to_ref(e.condition)
 
         then_ctx = self.sub_context()
-        then_ctx.lower_expr_to_ref(e.consequent)
+        then_ctx._lower_ternary_arm(e.consequent)
         self.sync_counter(then_ctx)
 
         else_ctx = self.sub_context()
-        else_ctx.lower_expr_to_ref(e.alternate)
+        else_ctx._lower_ternary_arm(e.alternate)
         self.sync_counter(else_ctx)
 
         return self.emit(ANFValue(

@@ -73,18 +73,92 @@ pub fn try_lower_to_anf(contract: &ContractNode) -> Result<ANFProgram, String> {
 // Properties
 // ---------------------------------------------------------------------------
 
+/// Properties the constructor assigns a constructor PARAMETER to.
+///
+/// These get their value from the deploy-time argument, so any initializer on
+/// them is a default the argument overrides — carrying it into `initial_value`
+/// would bake the default into the artifact and silently discard the argument
+/// (NEW-001). The property must instead stay in the constructor slot list
+/// (`initial_value == None`) so the SDK writes the argument.
+///
+/// Deliberately narrow in three ways.
+///
+/// 1. Only a BARE parameter reference counts. `this.a = 5n` assigns a literal,
+///    not an argument, and keeps its initializer.
+/// 2. The property<->parameter mapping must be ONE-TO-ONE. The artifact model
+///    is positional, so a parameter feeding two properties has no
+///    representation — that shape is already undeployable today when written
+///    without initializers, and belongs to NEW-002.
+/// 3. A property assigned more than once in the constructor is skipped, for the
+///    same reason.
+fn constructor_assigned_properties(contract: &ContractNode) -> HashSet<String> {
+    let params: HashSet<&str> = contract
+        .constructor
+        .params
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut prop_to_params: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut param_to_props: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for stmt in &contract.constructor.body {
+        let Statement::Assignment { target, value, .. } = stmt else {
+            continue;
+        };
+        let Expression::PropertyAccess { property } = target else {
+            continue;
+        };
+        match value {
+            Expression::Identifier { name } if params.contains(name.as_str()) => {
+                prop_to_params
+                    .entry(property.clone())
+                    .or_default()
+                    .insert(name.clone());
+                param_to_props
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(property.clone());
+            }
+            _ => {
+                // Not a constructor argument: never strip this property.
+                prop_to_params.entry(property.clone()).or_default();
+            }
+        }
+    }
+
+    let mut out = HashSet::new();
+    for (prop, ps) in &prop_to_params {
+        if ps.len() != 1 {
+            continue;
+        }
+        let param = ps.iter().next().expect("len checked");
+        if param_to_props.get(param).map(HashSet::len) == Some(1) {
+            out.insert(prop.clone());
+        }
+    }
+    out
+}
+
 fn lower_properties(contract: &ContractNode) -> Vec<ANFProperty> {
+    let ctor_assigned = constructor_assigned_properties(contract);
     contract
         .properties
         .iter()
         .map(|prop| {
             let prop_type = type_node_to_string(&prop.prop_type);
-            check_state_bigint_magnitude(prop, &prop_type);
+            let baked = !ctor_assigned.contains(&prop.name);
+            if baked {
+                check_state_bigint_magnitude(prop, &prop_type);
+            }
             ANFProperty {
                 name: prop.name.clone(),
                 prop_type,
                 readonly: prop.readonly,
-                initial_value: prop.initializer.as_ref().and_then(extract_literal_value),
+                initial_value: if baked {
+                    prop.initializer.as_ref().and_then(extract_literal_value)
+                } else {
+                    None
+                },
                 synthetic_array_chain: prop.synthetic_array_chain.as_ref().map(|chain| {
                     chain
                         .iter()
@@ -2072,6 +2146,45 @@ fn lower_binary_expr(
     right: &Expression,
     ctx: &mut LoweringContext,
 ) -> String {
+    // NEW-014: `&&` and `||` SHORT-CIRCUIT. They desugar to the ternary, which
+    // stack lowering already emits as real OP_IF / OP_ELSE control flow:
+    //
+    //     a && b   ==>   a ? b : false
+    //     a || b   ==>   a ? true : b
+    //
+    // They used to lower to `bin_op`, i.e. OP_BOOLAND / OP_BOOLOR — binary
+    // stack ops, so BOTH operands were pushed and therefore both evaluated.
+    // `spec/semantics.md` §3.7 licensed that with "This is safe in Rúnar
+    // because all expressions are pure (no side effects beyond `assert`)".
+    // Purity is not TOTALITY: the same document's §10 and §11.3 list division
+    // by zero as a runtime failure, and OP_SPLIT / OP_NUM2BIN abort out of
+    // range. Evaluating the operand the source skipped therefore aborted the
+    // script, and the ordinary defensive guard —
+    //
+    //     assert(d === 0n || (100n / d) > 1n);
+    //
+    // — compiled to a locking script the chain rejects for exactly the input
+    // the guard exists to protect, while the AST interpreter (which
+    // short-circuits, like every surface syntax the frontends accept) reported
+    // success. §3.9 already specifies the ternary's untaken arm as
+    // unevaluated, so laziness was already in the language; `&&` / `||` were
+    // the sole eager outlier.
+    //
+    // Only SOURCE-level `&&` / `||` desugar here. The compiler still
+    // synthesises `bin_op` `&&` / `||` internally to fold if/else-chain guard
+    // conditions; those operands are already-bound refs to plain comparison
+    // results, so they cannot abort and stay on the cheap opcodes.
+    if op.as_str() == "&&" || op.as_str() == "||" {
+        let is_or = op.as_str() == "||";
+        let constant = Expression::BoolLiteral { value: is_or };
+        let (consequent, alternate) = if is_or {
+            (constant, right.clone())
+        } else {
+            (right.clone(), constant)
+        };
+        return lower_ternary_expr(left, &consequent, &alternate, ctx);
+    }
+
     let left_ref = lower_expr_to_ref(left, ctx);
     let right_ref = lower_expr_to_ref(right, ctx);
 
@@ -2614,6 +2727,38 @@ fn lower_call_expr(
     })
 }
 
+/// Lower one arm of a ternary, guaranteeing the arm ENDS with the binding that
+/// holds its result.
+///
+/// NEW-016: `lower_expr_to_ref` returns an existing ref without emitting
+/// anything when the arm is a bare identifier — `g ? f : c === 0n` produced
+/// `then: []`, an `if` arm with no bindings at all. Stack lowering reads an
+/// arm's result off its stack effect, so a +0 arm has no result to adopt and
+/// the depth reconcile padded the shortfall with an EMPTY push. The contract
+/// compiled clean, the AST interpreter accepted it, and the real engine
+/// rejected the spend with "OP_VERIFY requires the top stack value to be
+/// truthy" over a stack of `[01, ]` — the arm's `true` replaced by an empty
+/// (false) value. An ordinary contract deployed to a permanently unspendable
+/// UTXO.
+///
+/// Aliasing through `load_const "@ref:"` — the same idiom `let x = y` and the
+/// increment/decrement lowerings already use — makes the arm's stack effect +1
+/// and copies the parent slot instead of trying to move it. The alias is only
+/// emitted when the result was NOT produced inside the arm, so every arm that
+/// already ended on its own result keeps its exact bytes.
+fn lower_ternary_arm(expr: &Expression, arm_ctx: &mut LoweringContext) {
+    let ref_name = lower_expr_to_ref(expr, arm_ctx);
+    let ends_on_result = arm_ctx
+        .bindings
+        .last()
+        .is_some_and(|last| last.name == ref_name);
+    if !ends_on_result {
+        arm_ctx.emit(ANFValue::LoadConst {
+            value: serde_json::Value::String(format!("@ref:{}", ref_name)),
+        });
+    }
+}
+
 fn lower_ternary_expr(
     condition: &Expression,
     consequent: &Expression,
@@ -2623,11 +2768,11 @@ fn lower_ternary_expr(
     let cond_ref = lower_expr_to_ref(condition, ctx);
 
     let mut then_ctx = ctx.sub_context();
-    lower_expr_to_ref(consequent, &mut then_ctx);
+    lower_ternary_arm(consequent, &mut then_ctx);
     ctx.sync_counter(&then_ctx);
 
     let mut else_ctx = ctx.sub_context();
-    lower_expr_to_ref(alternate, &mut else_ctx);
+    lower_ternary_arm(alternate, &mut else_ctx);
     ctx.sync_counter(&else_ctx);
 
     ctx.emit(ANFValue::If {

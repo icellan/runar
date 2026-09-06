@@ -120,6 +120,7 @@ fn ctor_bytestring_artifact() -> RunarArtifact {
         // Template: OP_CODESEPARATOR-ish filler byte, the ctor-slot OP_0
         // placeholder, then OP_SWAP. Only the slot at byte offset 1 matters.
         script: "ab007c".to_string(),
+        asm: None,
         state_fields: None,
         constructor_slots: Some(vec![ConstructorSlot {
             param_index: 0,

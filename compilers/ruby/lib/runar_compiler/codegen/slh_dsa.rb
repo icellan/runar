@@ -649,8 +649,11 @@ module RunarCompiler
         emit.call(_make_stack_op(op: "swap"))
         emit.call(_make_stack_op(op: "drop"))
 
-        # Compress -> wotsPk
-        _emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, -1, "zero")
+        # Compress -> wotsPk. ta8 at depth 2, kp4 PICKed from depth 1.
+        # FIPS 205 Alg. 8 lines 8-11: setTypeAndClear(WOTS_PK) zeroes ADRS
+        # bytes 20-31, but the key pair address MUST then be restored.
+        # Emitting a zero key-pair address here was half of issue #137.
+        _emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, 1, "zero")
         emit.call(_make_stack_op(op: "swap"))
         _emit_slh_t_raw(emit, n, 4)
       end
@@ -875,14 +878,27 @@ module RunarCompiler
       private_class_method :_emit_slh_fors
 
       # =================================================================
-      # 8. Hmsg -- Message Digest (SHA-256 MGF1)
+      # 8. Hmsg -- Message Digest (MGF1-SHA-256)
       # =================================================================
+      # FIPS 205 Section 11.2.1:
+      #   H_msg(R, PK.seed, PK.root, M) =
+      #     MGF1-SHA-256(R || PK.seed || SHA-256(R || PK.seed || PK.root || M), m)
+      # The `R || PK.seed` prefix on the MGF1 seed is mandatory -- it mitigates
+      # multi-target long-message second-preimage attacks. Omitting it was half
+      # of issue #137 (the other half was the WOTS_PK key-pair address).
+      #
+      # Input:  R(5) pkSeed(4) R(3) pkSeed(2) pkRoot(1) msg(0)
+      # Output: digest(out_len bytes)
 
       def self._emit_slh_hmsg(emit, n, out_len)
+        # CAT: R || pkSeed || pkRoot || msg, then SHA-256 -> inner(32B)
         emit.call(_make_stack_op(op: "opcode", code: "OP_CAT"))
         emit.call(_make_stack_op(op: "opcode", code: "OP_CAT"))
         emit.call(_make_stack_op(op: "opcode", code: "OP_CAT"))
         emit.call(_make_stack_op(op: "opcode", code: "OP_SHA256"))
+        # Prepend the mandatory R || PK.seed prefix -> seed(2n+32 B)
+        emit.call(_make_stack_op(op: "opcode", code: "OP_CAT"))
+        emit.call(_make_stack_op(op: "opcode", code: "OP_CAT"))
 
         blocks = (out_len + 31) / 32
         if blocks == 1
@@ -1001,11 +1017,15 @@ module RunarCompiler
         t.split_op("R", "sigRest")
 
         # ---- 3. Compute Hmsg(R, pkSeed, pkRoot, msg) ----
+        # FIPS 205 Section 11.2.1 needs R and PK.seed TWICE: once inside the
+        # inner SHA-256, once as the MGF1 seed prefix. See #137.
+        t.copy_to_top("R", "_R2")
+        t.copy_to_top("pkSeed", "_pks2")
         t.copy_to_top("R", "_R")
         t.copy_to_top("pkSeed", "_pks")
         t.copy_to_top("pkRoot", "_pkr")
         t.copy_to_top("msg", "_msg")
-        t.raw_block(["_R", "_pks", "_pkr", "_msg"], "digest") do |e|
+        t.raw_block(["_R2", "_pks2", "_R", "_pks", "_pkr", "_msg"], "digest") do |e|
           _emit_slh_hmsg(e, n, digest_len)
         end
 

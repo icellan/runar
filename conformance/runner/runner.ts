@@ -33,8 +33,26 @@ const REPO_ROOT = resolve(__dirname, '../..');
 interface RunResult {
   stdout: string;
   stderr: string;
+  /**
+   * The child's exit status. `-1` means the child never exited normally —
+   * it died from a signal, or the spawn itself failed. NEVER coalesce that
+   * to 0: a killed child's captured stdout is truncated (often empty), and
+   * reading it as a successful compile turns a dead subprocess into a fake
+   * cross-tier divergence. See `abnormal` below.
+   */
   code: number;
   timedOut: boolean;
+  /** Signal that killed the child, or null if it exited on its own. */
+  signal: NodeJS.Signals | null;
+  /** True when output exceeded the capture cap and the child was killed. */
+  truncated: boolean;
+  /**
+   * Human description of an ABNORMAL termination (timeout / signal / capture
+   * overflow / spawn failure), or undefined when the child exited on its own
+   * — whatever its status. Callers MUST treat a set value as a harness fault,
+   * not as compiler output: the captured stdout is not a compile result.
+   */
+  abnormal?: string;
   error?: Error;
 }
 
@@ -43,6 +61,56 @@ interface RunOptions {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   maxBuffer?: number;
+  /** Context (usually the fixture / source file) named in harness faults. */
+  label?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Harness faults
+// ---------------------------------------------------------------------------
+//
+// A HARNESS fault is the runner (or the host) failing to obtain a compiler's
+// output — a timeout, a signal kill, an over-cap capture, a failed spawn. It
+// is categorically NOT a conformance result: it says nothing about whether the
+// tiers agree. Recording every one centrally means a resource problem can
+// never be laundered into a cross-tier verdict, in either direction:
+//
+//   * it cannot masquerade as a DIVERGENCE — the fault is reported as a
+//     harness error and exits with a dedicated status (see runner/index.ts);
+//   * it cannot masquerade as AGREEMENT — a fixture whose tier died still
+//     fails, because the fault list is non-empty even if every surviving
+//     tier happened to match.
+//
+// Historically `runCmd` did `code: code ?? 0`, which mapped a SIGKILLed child
+// (Node reports `code === null`, `signal === 'SIGKILL'`) onto exit status 0.
+// The native driver then took the child's partially-drained stdout as the
+// script hex and returned `success: true`. An empty pipe surfaced as
+// "reported success but produced empty hex: [zig, ruby]" and a partly-drained
+// one as "majority [6 tiers] vs [x] identical up to length" — both reported
+// as cross-tier divergences of the compilers, which were in fact innocent.
+
+export interface HarnessFault {
+  /** Command basename, e.g. `ruby` / `runar-zig`. */
+  cmd: string;
+  kind: 'timeout' | 'signal' | 'output-truncated' | 'spawn-error';
+  /** Human description, including the source file when known. */
+  detail: string;
+  durationMs: number;
+}
+
+const harnessFaults: HarnessFault[] = [];
+
+/** Every abnormal subprocess termination recorded since `resetHarnessFaults()`. */
+export function getHarnessFaults(): HarnessFault[] {
+  return harnessFaults.slice();
+}
+
+export function resetHarnessFaults(): void {
+  harnessFaults.length = 0;
+}
+
+function recordHarnessFault(f: HarnessFault): void {
+  harnessFaults.push(f);
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +146,8 @@ function runCmd(cmd: string, args: string[], opts: RunOptions = {}): Promise<Run
   spawnTotal++;
   const key = basename(cmd);
   spawnByCommand.set(key, (spawnByCommand.get(key) ?? 0) + 1);
+  const t0 = performance.now();
+  const label = opts.label;
   return new Promise((resolvePromise) => {
     const proc = spawn(cmd, args, {
       cwd: opts.cwd,
@@ -125,27 +195,107 @@ function runCmd(cmd: string, args: string[], opts: RunOptions = {}): Promise<Run
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      const abnormal = `failed to spawn ${basename(cmd)}: ${err.message}`;
+      recordHarnessFault({
+        cmd: basename(cmd),
+        kind: 'spawn-error',
+        detail: `${abnormal}${label ? ` (${label})` : ''}`,
+        durationMs: Math.round(performance.now() - t0),
+      });
       resolvePromise({
         stdout: Buffer.concat(outChunks).toString('utf-8'),
         stderr: Buffer.concat(errChunks).toString('utf-8'),
         code: -1,
         timedOut,
+        signal: null,
+        truncated: false,
+        abnormal,
         error: err,
       });
     });
 
-    proc.on('close', (code) => {
+    proc.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      const durationMs = Math.round(performance.now() - t0);
+      const truncated = outLen > cap || errLen > cap;
+
+      // Classify an abnormal death. Order matters: the capture-overflow and
+      // timeout kills are OUR SIGKILLs, so they must be named before the
+      // generic "killed by <signal>" fallback (which covers an OS memory-
+      // pressure kill, a crashed compiler, or an operator's ^C).
+      let abnormal: string | undefined;
+      let kind: HarnessFault['kind'] | undefined;
+      if (truncated) {
+        abnormal =
+          `output exceeded the ${cap}-byte capture cap after ${durationMs}ms ` +
+          `(killed; stdout ${outLen}B, stderr ${errLen}B — captured output is TRUNCATED)`;
+        kind = 'output-truncated';
+      } else if (timedOut) {
+        abnormal =
+          `timed out after ${opts.timeoutMs}ms and was SIGKILLed ` +
+          `(captured stdout ${outLen}B is TRUNCATED, not a compile result)`;
+        kind = 'timeout';
+      } else if (code === null) {
+        abnormal =
+          `killed by ${signal ?? 'an unknown signal'} after ${durationMs}ms ` +
+          `(captured stdout ${outLen}B is TRUNCATED, not a compile result)`;
+        kind = 'signal';
+      }
+      if (abnormal && kind) {
+        recordHarnessFault({
+          cmd: basename(cmd),
+          kind,
+          detail: `${basename(cmd)} ${abnormal}${label ? ` (${label})` : ''}`,
+          durationMs,
+        });
+      }
+
       resolvePromise({
         stdout: Buffer.concat(outChunks).toString('utf-8'),
         stderr: Buffer.concat(errChunks).toString('utf-8'),
-        code: code ?? 0,
+        // `code ?? -1`, NOT `code ?? 0`: a signal death has a null status and
+        // must never be readable as a clean exit.
+        code: code ?? -1,
         timedOut,
+        signal: signal ?? null,
+        truncated,
+        abnormal,
       });
     });
   });
+}
+
+/**
+ * One-line description of how a child process ended, for error messages.
+ * Prefers the abnormal-termination reason over the bare status, so a message
+ * can never read "exit -1" when what actually happened was "SIGKILLed after
+ * the 180s timeout".
+ */
+function describeExit(res: RunResult): string {
+  return res.abnormal ?? `exit ${res.code}`;
+}
+
+/**
+ * Per-invocation wall-clock budget for a native compiler.
+ *
+ * This is a HANG detector, not a performance budget, and it must not fire on
+ * a merely-slow host: a timeout kill destroys the child's output mid-pipe.
+ * Before the harness-fault work below, that truncation was silently read as a
+ * compile result and surfaced as a fake cross-tier divergence. The budget is
+ * now generous (matching `JavaDaemon`'s 180s per-request deadline, which was
+ * raised for the same reason) so that saturating the host produces slow runs
+ * rather than dead children. Worst observed single invocation on an 8-core
+ * host: 5.6s at the default concurrency, 33s at 10x oversubscription.
+ */
+function compileTimeoutMs(): number {
+  const env = process.env.RUNAR_CONFORMANCE_COMPILE_TIMEOUT_MS;
+  if (env) {
+    const n = parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 1000) return n;
+  }
+  return 180_000;
 }
 
 /**
@@ -481,11 +631,11 @@ async function runTsCompiler(source: string, sourceFile: string): Promise<Compil
       // 180_000ms: tsx pays a cold-start cost per invocation; the prior 30s
       // budget tripped on arithmetic / blake3 / convergence-proof on slower
       // hosts.
-      { timeoutMs: 180_000, cwd: REPO_ROOT },
+      { timeoutMs: 180_000, cwd: REPO_ROOT, label: `ts on ${basename(sourceFile)}` },
     );
     if (result.code !== 0) {
       throw new Error(
-        `TS compiler exited with code ${result.code}${result.timedOut ? ' (timeout)' : ''}: ${result.stderr || result.stdout}`,
+        `TS compiler ${describeExit(result)}: ${result.stderr || result.stdout}`,
       );
     }
 
@@ -518,6 +668,13 @@ async function runTsCompiler(source: string, sourceFile: string): Promise<Compil
     const irOutput = artifact.ir?.anf ? JSON.stringify(artifact.ir.anf) : '';
     const scriptHex = artifact.script ?? '';
     const scriptAsm = artifact.asm ?? '';
+    // Same contract as the native tiers' `requireHex`: no fixture compiles to
+    // the empty script, so an artifact without one is a broken emit or a torn
+    // write — fail the TS tier by name rather than feeding `''` into the
+    // parity comparison as if it were this tier's opinion.
+    if (scriptHex.trim() === '') {
+      throw new Error(`TS artifact ${artifactPath} carries no script hex`);
+    }
 
     const durationMs = performance.now() - start;
     return {
@@ -583,12 +740,12 @@ interface NativeCompilerSpec {
 }
 
 const NATIVE_COMPILERS: Record<Exclude<CompilerId, 'ts'>, NativeCompilerSpec> = {
-  go: { id: 'go', find: findGoBinary, cwd: GO_COMPILER_DIR, combined: true, timeoutMs: 30_000 },
-  rust: { id: 'rust', find: findRustBinary, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv, combined: true, timeoutMs: 30_000 },
-  python: { id: 'python', find: () => findPythonCompiler(), cwd: PYTHON_COMPILER_DIR, combined: true, timeoutMs: 30_000 },
-  zig: { id: 'zig', find: findZigBinary, cwd: ZIG_COMPILER_DIR, combined: true, timeoutMs: 30_000 },
-  ruby: { id: 'ruby', find: findRubyBinary, cwd: RUBY_COMPILER_DIR, combined: true, timeoutMs: 30_000 },
-  java: { id: 'java', find: findJavaBinary, cwd: JAVA_COMPILER_DIR, combined: true, timeoutMs: 30_000, tolerateHexFailure: true },
+  go: { id: 'go', find: findGoBinary, cwd: GO_COMPILER_DIR, combined: true, timeoutMs: compileTimeoutMs() },
+  rust: { id: 'rust', find: findRustBinary, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv, combined: true, timeoutMs: compileTimeoutMs() },
+  python: { id: 'python', find: () => findPythonCompiler(), cwd: PYTHON_COMPILER_DIR, combined: true, timeoutMs: compileTimeoutMs() },
+  zig: { id: 'zig', find: findZigBinary, cwd: ZIG_COMPILER_DIR, combined: true, timeoutMs: compileTimeoutMs() },
+  ruby: { id: 'ruby', find: findRubyBinary, cwd: RUBY_COMPILER_DIR, combined: true, timeoutMs: compileTimeoutMs() },
+  java: { id: 'java', find: findJavaBinary, cwd: JAVA_COMPILER_DIR, combined: true, timeoutMs: compileTimeoutMs(), tolerateHexFailure: true },
 };
 
 /**
@@ -604,6 +761,42 @@ const UNKNOWN_FLAG_RE =
 const combinedModeUnsupported = new Set<CompilerId>();
 
 /**
+ * Reject any result whose child did not exit under its own control.
+ *
+ * Every caller below branches on `res.code`, and several are deliberately
+ * lenient about a non-zero status (`tolerateHexFailure`, the stale-binary
+ * probe). That leniency is only ever sound for a compiler that RAN and
+ * decided to fail. A SIGKILLed child has no verdict at all — it has a
+ * half-drained pipe — so it must be rejected before any of that logic runs.
+ */
+function requireCleanExit(spec: NativeCompilerSpec, res: RunResult, phase: string): void {
+  if (!res.abnormal) return;
+  // The `HARNESS:` prefix carries the classification into the per-fixture
+  // error line, so the board never shows a dead subprocess as if the tier had
+  // an opinion about the script.
+  throw new Error(`HARNESS: ${spec.id} ${phase}: ${res.abnormal}`);
+}
+
+/**
+ * `--hex` is contracted to print the locking script on stdout. A zero exit
+ * with nothing on stdout is therefore never a legitimate "this contract
+ * compiles to the empty script" — it is a broken tier or a lost pipe. Fail
+ * the tier by name (with its stderr) instead of handing `''` to the parity
+ * comparison, where it would surface as a cross-tier divergence and put the
+ * blame on the six honest tiers.
+ */
+function requireHex(spec: NativeCompilerSpec, res: RunResult, phase: string): string {
+  const hex = res.stdout.trim();
+  if (hex === '') {
+    throw new Error(
+      `${spec.id} ${phase} exited 0 but wrote NOTHING to stdout ` +
+      `(stderr: ${res.stderr.trim() || '<empty>'})`,
+    );
+  }
+  return hex;
+}
+
+/**
  * Compile `source` with a native tier and return both its ANF IR and its
  * script hex. Returns undefined when the tier's binary is not on disk.
  */
@@ -616,7 +809,12 @@ async function runNativeCompiler(
   if (!binary) return undefined;
   const { cmd, args: binArgs } = splitCmd(binary);
   const env = spec.env?.();
-  const runOpts: RunOptions = { timeoutMs: spec.timeoutMs, cwd: spec.cwd, env };
+  const runOpts: RunOptions = {
+    timeoutMs: spec.timeoutMs,
+    cwd: spec.cwd,
+    env,
+    label: `${spec.id} on ${basename(sourceFile)}`,
+  };
 
   const start = performance.now();
   const tmpDir = join(__dirname, '..', '.tmp');
@@ -638,18 +836,23 @@ async function runNativeCompiler(
         [...binArgs, '--source', tmpFile, '--hex', '--emit-ir-to', irFile, ...foldFlag()],
         runOpts,
       );
+      // An abnormal death (timeout / signal / over-cap capture) short-circuits
+      // EVERY branch below, `tolerateHexFailure` included. Whatever landed in
+      // stdout or in the IR file is a torn half-write, not compiler output, and
+      // must never reach the parity comparison as this tier's script.
+      requireCleanExit(spec, res, '--hex --emit-ir-to');
       if (existsSync(irFile)) {
         // The CLI writes the IR file BEFORE emitting hex, so an IR file plus a
         // non-zero exit means the hex stage failed — a real compile error.
         if (res.code === 0) {
           irOutput = readFileSync(irFile, 'utf-8').trim();
-          scriptHexOutput = res.stdout.trim();
+          scriptHexOutput = requireHex(spec, res, '--hex --emit-ir-to');
         } else if (spec.tolerateHexFailure) {
           irOutput = readFileSync(irFile, 'utf-8').trim();
           scriptHexOutput = '';
         } else {
           throw new Error(
-            `${spec.id} --hex --emit-ir-to exit ${res.code}: ${res.stderr || res.stdout}`,
+            `${spec.id} --hex --emit-ir-to ${describeExit(res)}: ${res.stderr || res.stdout}`,
           );
         }
       } else if (res.code !== 0 && UNKNOWN_FLAG_RE.test(res.stderr)) {
@@ -662,7 +865,7 @@ async function runNativeCompiler(
         combinedModeUnsupported.add(spec.id);
       } else {
         throw new Error(
-          `${spec.id} --hex --emit-ir-to exit ${res.code}: ${res.stderr || res.stdout}`,
+          `${spec.id} --hex --emit-ir-to ${describeExit(res)}: ${res.stderr || res.stdout}`,
         );
       }
     }
@@ -674,8 +877,9 @@ async function runNativeCompiler(
         [...binArgs, '--source', tmpFile, '--emit-ir', ...foldFlag()],
         runOpts,
       );
+      requireCleanExit(spec, irRes, '--emit-ir');
       if (irRes.code !== 0) {
-        throw new Error(`${spec.id} --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+        throw new Error(`${spec.id} --emit-ir ${describeExit(irRes)}: ${irRes.stderr || irRes.stdout}`);
       }
       irOutput = irRes.stdout.trim();
 
@@ -684,12 +888,13 @@ async function runNativeCompiler(
         [...binArgs, '--source', tmpFile, '--hex', ...foldFlag()],
         runOpts,
       );
+      requireCleanExit(spec, hexRes, '--hex');
       if (hexRes.code === 0) {
-        scriptHexOutput = hexRes.stdout.trim();
+        scriptHexOutput = requireHex(spec, hexRes, '--hex');
       } else if (spec.tolerateHexFailure) {
         scriptHexOutput = '';
       } else {
-        throw new Error(`${spec.id} --hex exit ${hexRes.code}: ${hexRes.stderr || hexRes.stdout}`);
+        throw new Error(`${spec.id} --hex ${describeExit(hexRes)}: ${hexRes.stderr || hexRes.stdout}`);
       }
     }
 
@@ -939,6 +1144,15 @@ function javaEmptyOutputError(irOutput: string, scriptHex: string): string | nul
 }
 
 /**
+ * Java daemon errors that mean "the JVM never answered" rather than "the Java
+ * compiler rejected this program". Kept in sync with the messages thrown in
+ * `java-daemon.ts`. The daemon does not go through `runCmd`, so its
+ * infrastructure failures have to be classified by hand.
+ */
+const JAVA_DAEMON_HARNESS_RE =
+  /daemon timeout after|daemon exited unexpectedly|daemon banner timeout|daemon already stopped/i;
+
+/**
  * Assemble the one-shot Java `CompilerOutput` from the raw `--emit-ir` and
  * `--hex` process results. This is exactly what `runJavaCompiler` returns in
  * one-shot mode (`RUNAR_JAVA_DAEMON=0`); it is exported so the failure ladder
@@ -1039,12 +1253,26 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
       };
     } catch (err) {
       const durationMs = performance.now() - start;
+      const message = err instanceof Error ? err.message : String(err);
+      // The daemon does not go through `runCmd`, so its infrastructure
+      // failures need the same classification by hand — otherwise a JVM that
+      // died of resource exhaustion is filed as a Java conformance failure
+      // and the operator goes looking for a codegen bug that isn't there.
+      const harness = JAVA_DAEMON_HARNESS_RE.test(message);
+      if (harness) {
+        recordHarnessFault({
+          cmd: 'java-daemon',
+          kind: /timeout/i.test(message) ? 'timeout' : 'signal',
+          detail: `java daemon ${message} (java on ${basename(sourceFile)})`,
+          durationMs: Math.round(durationMs),
+        });
+      }
       return {
         irJson: '',
         scriptHex: '',
         scriptAsm: '',
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: harness ? `HARNESS: ${message}` : message,
         durationMs,
       };
     } finally {
@@ -1114,7 +1342,7 @@ async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
     const result = await runCmd(
       'node',
       ['--import', tsxLoader, driverFile],
-      { timeoutMs: 90_000, cwd: REPO_ROOT },
+      { timeoutMs: 90_000, cwd: REPO_ROOT, label: `ts --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (result.code !== 0) {
@@ -1153,7 +1381,7 @@ async function runGoParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<Pa
     const res = await runCmd(
       cmd,
       [...bin_args, '--source', tmpFile, '--parse-only'],
-      { timeoutMs: 30_000, cwd: GO_COMPILER_DIR },
+      { timeoutMs: compileTimeoutMs(), cwd: GO_COMPILER_DIR, label: `go --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (res.code !== 0) {
@@ -1181,7 +1409,7 @@ async function runRustParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
     const res = await runCmd(
       cmd,
       [...bin_args, '--source', tmpFile, '--parse-only'],
-      { timeoutMs: 60_000, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv() },
+      { timeoutMs: compileTimeoutMs(), cwd: RUST_COMPILER_DIR, env: cargoAwareEnv(), label: `rust --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (res.code !== 0) {
@@ -1209,7 +1437,7 @@ async function runPythonParseOnly({ source, sourceFile }: ParseOnlyDeps): Promis
     const res = await runCmd(
       cmd,
       [...bin_args, '--source', tmpFile, '--parse-only'],
-      { timeoutMs: 30_000, cwd: PYTHON_COMPILER_DIR },
+      { timeoutMs: compileTimeoutMs(), cwd: PYTHON_COMPILER_DIR, label: `python --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (res.code !== 0) {
@@ -1237,7 +1465,7 @@ async function runZigParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<P
     const res = await runCmd(
       cmd,
       [...bin_args, '--source', tmpFile, '--parse-only'],
-      { timeoutMs: 30_000, cwd: ZIG_COMPILER_DIR },
+      { timeoutMs: compileTimeoutMs(), cwd: ZIG_COMPILER_DIR, label: `zig --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (res.code !== 0) {
@@ -1265,7 +1493,7 @@ async function runRubyParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
     const res = await runCmd(
       cmd,
       [...bin_args, '--source', tmpFile, '--parse-only'],
-      { timeoutMs: 30_000, cwd: RUBY_COMPILER_DIR },
+      { timeoutMs: compileTimeoutMs(), cwd: RUBY_COMPILER_DIR, label: `ruby --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (res.code !== 0) {
@@ -1314,7 +1542,7 @@ async function runJavaParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
     const res = await runCmd(
       cmd,
       [...bin_args, '--source', tmpFile, '--parse-only'],
-      { timeoutMs: 60_000, cwd: JAVA_COMPILER_DIR },
+      { timeoutMs: compileTimeoutMs(), cwd: JAVA_COMPILER_DIR, label: `java --parse-only on ${basename(sourceFile)}` },
     );
     const durationMs = performance.now() - start;
     if (res.code !== 0) {
@@ -1588,11 +1816,18 @@ async function runIrToHex(
     timeoutMs: spec.timeoutMs,
     cwd: spec.cwd,
     env: spec.env?.(),
+    label: `${id} --ir on ${basename(dirname(irPath))}`,
   });
   // Zig interleaves allocator diagnostics with its output; keep only the
   // first line, exactly as the ci.yml loop's `head -1` did.
   const raw = id === 'zig' ? (res.stdout.split('\n')[0] ?? '') : res.stdout;
-  return { code: res.code, hex: raw.replace(/\s/g, '').toLowerCase(), stderr: res.stderr };
+  return {
+    code: res.code,
+    hex: raw.replace(/\s/g, '').toLowerCase(),
+    // Lead with the abnormal-termination reason: a SIGKILLed child's stderr is
+    // usually empty, and `exit -1` alone reads like a compiler error.
+    stderr: res.abnormal ? `${res.abnormal}\n${res.stderr}` : res.stderr,
+  };
 }
 
 /**
@@ -2841,5 +3076,9 @@ export async function runAllMultiFormatConformanceTests(
   return results;
 }
 
-// Re-export for tools that previously imported these helpers.
+// Re-export for tools that previously imported these helpers. `runCmd` is also
+// a test seam: `runner/__tests__/subprocess-integrity.test.ts` pins the
+// "a killed child is never a successful compile" invariant directly on this
+// primitive, because every tier's output flows through it.
 export { runCmd };
+export type { RunResult, RunOptions };

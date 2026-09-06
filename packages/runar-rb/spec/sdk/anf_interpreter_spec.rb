@@ -1477,4 +1477,84 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
       expect(new_state['result']).to eq(5)
     end
   end
+  # ---------------------------------------------------------------------------
+  # NEW-013 -- `num2bin` sign-bit placement
+  # ---------------------------------------------------------------------------
+  #
+  # The ANF interpreter models what the DEPLOYED SCRIPT computes. For negative
+  # values it used to set the sign bit on the last MAGNITUDE byte and pad zeros
+  # AFTER it, so num2bin(-1, 2) came out 8100 where OP_NUM2BIN yields 0180.
+  # Those bytes go into the call transaction, so a legal method built a
+  # continuation the script rejects.
+  #
+  # Every expectation below is the output of OP_NUM2BIN on the real @bsv/sdk
+  # Spend interpreter, derived by
+  # conformance/anf-interpreter/num2bin-engine-parity.test.ts, which re-runs the
+  # engine live rather than trusting a table. Do NOT re-stamp these from this
+  # implementation's own output -- that is precisely how six of seven SDKs
+  # agreed on the wrong answer.
+  describe 'num2bin_hex' do
+    # [value, width, expected, why]
+    vectors = [
+      # Negative, padded -- the NEW-013 corner. The sign bit belongs on the
+      # byte that is most significant AFTER padding, not before it.
+      [-1, 2, '0180', 'negative padded'],
+      [-1, 4, '01000080', 'negative padded'],
+      [-1, 8, '0100000000000080', 'negative padded'],
+      [-5, 4, '05000080', 'negative padded'],
+      [-1000, 4, 'e8030080', 'negative padded'],
+      [-1000, 8, 'e803000000000080', 'negative padded'],
+      [-255, 3, 'ff0080', 'negative padded'],
+      [-256, 3, '000180', 'negative padded'],
+      # Negative, exact width -- the minimal encoding already fills the field,
+      # so it is pushed unchanged and the sign bit does not move.
+      [-1, 1, '81', 'negative exact width'],
+      [-127, 1, 'ff', 'negative exact width'],
+      [-1000, 2, 'e883', 'negative exact width'],
+      [-256, 2, '0081', 'negative exact width'],
+      # Negative, sign-bit carry -- the top magnitude byte already uses bit 7,
+      # so the minimal encoding grows a byte before any padding happens.
+      [-128, 2, '8080', 'negative carry, exact width'],
+      [-128, 3, '800080', 'negative carry, padded'],
+      [-128, 8, '8000000000000080', 'negative carry, padded'],
+      [-32_768, 3, '008080', 'negative carry, exact width'],
+      [-32_768, 4, '00800080', 'negative carry, padded'],
+      # Positive at the same widths -- must be untouched by the fix.
+      [1, 1, '01', 'positive exact width'],
+      [1, 2, '0100', 'positive padded'],
+      [1, 8, '0100000000000000', 'positive padded'],
+      [1000, 2, 'e803', 'positive exact width'],
+      [1000, 4, 'e8030000', 'positive padded'],
+      [1000, 8, 'e803000000000000', 'positive padded'],
+      [127, 1, '7f', 'positive exact width'],
+      [128, 2, '8000', 'positive carry, exact width'],
+      [128, 3, '800000', 'positive carry, padded'],
+      [255, 2, 'ff00', 'positive carry, exact width'],
+      # Zero -- an all-zero field, no sign bit anywhere.
+      [0, 1, '00', 'zero'],
+      [0, 4, '00000000', 'zero'],
+      [0, 8, '0000000000000000', 'zero']
+    ]
+
+    vectors.each do |n, width, expected, why|
+      it "encodes num2bin(#{n}, #{width}) as OP_NUM2BIN does (#{why})" do
+        expect(mod.num2bin_hex(n, width)).to eq(expected)
+      end
+    end
+
+    # Non-vacuity: this table only earns its keep if it can see the pre-fix
+    # answer. '8100' is exactly what this method used to return.
+    it 'does not answer with the pre-fix sign-bit placement' do
+      expect(mod.num2bin_hex(-1, 2)).not_to eq('8100')
+    end
+
+    # bin2num is this interpreter's own inverse, so a round trip proves only
+    # self-consistency -- it held throughout the bug. Kept as a smoke test; the
+    # vector table above is the evidence.
+    it 'round-trips through bin2num (smoke test only, NOT the evidence)' do
+      [-1000, -128, -1, 0, 1, 128, 1000].each do |n|
+        expect(mod.bin2num_int(mod.num2bin_hex(n, 8))).to eq(n)
+      end
+    end
+  end
 end

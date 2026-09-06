@@ -782,15 +782,22 @@ def _eval_value(
         # Handle @ref: aliases
         if isinstance(v, str) and v.startswith('@ref:'):
             target = v[5:]
-            # An alias is a pure rename -- the lowering emits one for every
-            # named local (``const left = a << 3n`` becomes ``t2 = a << 3n``
-            # plus ``left = @ref:t2``). It occupies the SAME stack bytes as its
-            # target, so the side-map entry must travel with it or both the
-            # non-minimal numeric check and the chained byte-op threading go
-            # blind on real compiler output.
-            if target in script_bytes:
-                script_bytes[binding_name] = script_bytes[target]
+            _alias_script_bytes(script_bytes, target, binding_name)
             return env.get(target)
+        # On-disk ANF spells every bigint as a ``"<decimal>n"`` STRING (see
+        # ``jsonWithBigInt`` in runar-cli's compile command) -- that is the
+        # artifact every SDK loads with a bare ``json.load``. Decode it here so
+        # a const operand is an ``int``, not a ``str``: the byte-op paths below
+        # gate on ``not isinstance(_, str)``, so leaving it a string silently
+        # routes ``<< >> & | ^ ~`` down the ByteString branch and the SDK builds
+        # a continuation the deployed script disagrees with (NEW-008). Go /
+        # Rust / Zig already decode this shape; this makes all seven agree with
+        # the script.
+        #
+        # Unambiguous: ANF ByteString literals are hex and ``n`` is not a hex
+        # digit, so ``^-?\d+n$`` cannot be a bytestring.
+        if isinstance(v, str) and _BIGINT_RE.match(v):
+            return int(v[:-1])
         return v
 
     if kind == 'bin_op':
@@ -917,7 +924,9 @@ def _eval_value(
         )
         env.update(child_env)
         if branch:
-            return child_env.get(branch[-1]['name'])
+            last_name = branch[-1]['name']
+            _alias_script_bytes(script_bytes, last_name, binding_name)
+            return child_env.get(last_name)
         return None
 
     if kind == 'loop':
@@ -941,7 +950,9 @@ def _eval_value(
             )
             env.update(loop_env)
             if body:
-                last_val = loop_env.get(body[-1]['name'])
+                last_name = body[-1]['name']
+                _alias_script_bytes(script_bytes, last_name, binding_name)
+                last_val = loop_env.get(last_name)
         return last_val
 
     if kind == 'assert':
@@ -1439,9 +1450,21 @@ def _is_truthy(v: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 def _num2bin_hex(n: int, byte_len: int) -> str:
-    if n == 0:
-        return '00' * byte_len
+    """``num2bin(n, byte_len)`` -- exactly what OP_NUM2BIN computes (NEW-013).
 
+    The order of the two steps below is load-bearing. This used to set the sign
+    bit on the last MAGNITUDE byte and pad zeros AFTER it, so ``num2bin(-1, 2)``
+    produced ``8100`` while the script produces ``0180``. The result is the
+    bytes the SDK puts in the call transaction, so the wrong order built
+    continuations the deployed script rejects -- and six of the seven SDKs
+    shared the mistake, which is why tier-vs-tier parity never caught it.
+
+    The engine pads FIRST and then puts the sign bit on the new most-significant
+    byte.
+    """
+    # 1. Minimal BSV script-number encoding: little-endian magnitude with the
+    #    sign in bit 7 of the top byte, growing one byte when magnitude data
+    #    already occupies that bit.
     negative = n < 0
     abs_n = -n if negative else n
 
@@ -1449,22 +1472,29 @@ def _num2bin_hex(n: int, byte_len: int) -> str:
     while abs_n > 0:
         result_bytes.append(abs_n & 0xff)
         abs_n >>= 8
-
-    # Sign bit handling
     if result_bytes:
-        if negative:
-            if (result_bytes[-1] & 0x80) == 0:
-                result_bytes[-1] |= 0x80
-            else:
-                result_bytes.append(0x80)
-        else:
-            if (result_bytes[-1] & 0x80) != 0:
-                result_bytes.append(0x00)
+        if (result_bytes[-1] & 0x80) != 0:
+            result_bytes.append(0x80 if negative else 0x00)
+        elif negative:
+            result_bytes[-1] |= 0x80
 
-    # Pad or truncate to requested length
+    # 2a. Field too narrow for the value: OP_NUM2BIN rejects this outright
+    #     ("impossible encoding"). The interpreter keeps its historical
+    #     truncation rather than growing a new failure mode here; an
+    #     equal-length encoding is already final and needs no sign-bit move.
+    if len(result_bytes) >= byte_len:
+        return ''.join(f'{b:02x}' for b in result_bytes[:byte_len])
+
+    # 2b. Padded: lift the sign bit off the magnitude, zero-extend, and
+    #     re-apply it to the byte that is now most significant.
+    sign_bit = 0
+    if result_bytes:
+        sign_bit = result_bytes[-1] & 0x80
+        result_bytes[-1] &= 0x7f
     while len(result_bytes) < byte_len:
         result_bytes.append(0x00)
-    result_bytes = result_bytes[:byte_len]
+    if sign_bit != 0:
+        result_bytes[byte_len - 1] |= 0x80
 
     return ''.join(f'{b:02x}' for b in result_bytes)
 
@@ -1595,6 +1625,32 @@ def _assert_minimal_numeric_operand(
 # sources (literals, arithmetic) are minimal on-chain. Deriving the minimal
 # encoding of the numeric value per-op instead would abort where the chain spends
 # (and spend where the chain aborts) -- a funds-relevant divergence.
+
+def _alias_script_bytes(script_bytes: Dict[str, bytes], frm: str, to: str) -> None:
+    """Carry a binding's raw stack bytes across an ALIAS -- a binding whose
+    value IS another binding's slot: the ``load_const "@ref:<name>"`` every
+    local rebind lowers to, an ``if`` adopting its taken arm's last value, a
+    ``loop`` adopting its body's.
+
+    Without this, a chained length-sensitive op re-minimises the aliased value
+    and disagrees with the deployed script (NEW-006: ``2 << 8`` is a 1-byte
+    ``0x00`` on the stack but ``b''`` when re-minimised from ``0``).
+
+    Mirrors ``compilers/python/runar_compiler/codegen/stack.py`` (and the TS
+    ``05-stack-lower.ts``), which carries its raw-slot marker across the same
+    constructs.
+
+    CLEARS when the source has no entry: the alias target is then a freshly
+    pushed, minimal value, so a stale entry left by an earlier binding of the
+    SAME name (``let m0 = 4 ^ 4; m0 = 300;``) would otherwise be read as this
+    slot's width -- a wrong value rather than an abort, the worse failure.
+    """
+    bs = script_bytes.get(frm)
+    if bs is not None:
+        script_bytes[to] = bs
+    else:
+        script_bytes.pop(to, None)
+
 
 def _script_number_bitwise_bytes(op: str, av: bytes, bv: bytes) -> bytes:
     """OP_AND/OP_OR/OP_XOR on raw stack bytes. Raises ValueError (execution

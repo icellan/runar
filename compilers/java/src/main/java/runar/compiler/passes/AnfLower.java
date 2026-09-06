@@ -134,10 +134,69 @@ public final class AnfLower {
     // Properties
     // ------------------------------------------------------------------
 
+    /**
+     * Properties the constructor assigns a constructor PARAMETER to.
+     *
+     * <p>These get their value from the deploy-time argument, so any
+     * initializer on them is a default the argument overrides — carrying it
+     * into {@code initialValue} would bake the default into the artifact and
+     * silently discard the argument (NEW-001). The property must instead stay
+     * in the constructor slot list ({@code initialValue == null}) so the SDK
+     * writes the argument.
+     *
+     * <p>Deliberately narrow in three ways.
+     *
+     * <ol>
+     *   <li>Only a BARE parameter reference counts. {@code this.a = 5n}
+     *       assigns a literal, not an argument, and keeps its initializer.
+     *   <li>The property&lt;-&gt;parameter mapping must be ONE-TO-ONE. The
+     *       artifact model is positional, so a parameter feeding two properties
+     *       has no representation — that shape is already undeployable today
+     *       when written without initializers, and belongs to NEW-002.
+     *   <li>A property assigned more than once in the constructor is skipped,
+     *       for the same reason.
+     * </ol>
+     */
+    private static Set<String> constructorAssignedProperties(ContractNode contract) {
+        MethodNode ctor = contract.constructor();
+        if (ctor == null) return Set.of();
+
+        Set<String> params = new HashSet<>();
+        for (ParamNode p : ctor.params()) params.add(p.name());
+
+        Map<String, Set<String>> propToParams = new LinkedHashMap<>();
+        Map<String, Set<String>> paramToProps = new HashMap<>();
+
+        for (Statement stmt : ctor.body()) {
+            if (!(stmt instanceof AssignmentStatement assign)) continue;
+            if (!(assign.target() instanceof PropertyAccessExpr target)) continue;
+            String prop = target.property();
+            if (!(assign.value() instanceof Identifier id) || !params.contains(id.name())) {
+                // Not a constructor argument: never strip this property.
+                propToParams.computeIfAbsent(prop, k -> new HashSet<>());
+                continue;
+            }
+            propToParams.computeIfAbsent(prop, k -> new HashSet<>()).add(id.name());
+            paramToProps.computeIfAbsent(id.name(), k -> new HashSet<>()).add(prop);
+        }
+
+        Set<String> out = new HashSet<>();
+        for (Map.Entry<String, Set<String>> e : propToParams.entrySet()) {
+            if (e.getValue().size() != 1) continue;
+            String param = e.getValue().iterator().next();
+            if (paramToProps.get(param).size() != 1) continue;
+            out.add(e.getKey());
+        }
+        return out;
+    }
+
     private static List<AnfProperty> lowerProperties(ContractNode contract) {
+        Set<String> ctorAssigned = constructorAssignedProperties(contract);
         List<AnfProperty> out = new ArrayList<>(contract.properties().size());
         for (PropertyNode p : contract.properties()) {
-            ConstValue init = p.initializer() != null ? extractLiteralValue(p.initializer()) : null;
+            ConstValue init = p.initializer() != null && !ctorAssigned.contains(p.name())
+                ? extractLiteralValue(p.initializer())
+                : null;
             AnfProperty prop = new AnfProperty(p.name(), typeToString(p.type()), p.readonly(), init);
             if (init != null) checkStateBigintMagnitude(prop);
             out.add(prop);
@@ -1389,6 +1448,48 @@ public final class AnfLower {
                 return lowerMemberExpr(me);
             }
             if (expr instanceof BinaryExpr be) {
+                // NEW-014: && and || SHORT-CIRCUIT. They desugar to the
+                // ternary, which stack lowering already emits as real OP_IF /
+                // OP_ELSE control flow:
+                //
+                //     a && b   ==>   a ? b : false
+                //     a || b   ==>   a ? true : b
+                //
+                // They used to lower to bin_op, i.e. OP_BOOLAND / OP_BOOLOR —
+                // binary stack ops, so BOTH operands were pushed and therefore
+                // both evaluated. spec/semantics.md §3.7 licensed that with
+                // "This is safe in Rúnar because all expressions are pure (no
+                // side effects beyond assert)". Purity is not TOTALITY: the
+                // same document's §10 and §11.3 list division by zero as a
+                // runtime failure, and OP_SPLIT / OP_NUM2BIN abort out of
+                // range. Evaluating the operand the source skipped therefore
+                // aborted the script, and the ordinary defensive guard —
+                //
+                //     assert(d === 0n || (100n / d) > 1n);
+                //
+                // — compiled to a locking script the chain rejects for exactly
+                // the input the guard exists to protect, while the AST
+                // interpreter (which short-circuits, like every surface syntax
+                // the frontends accept) reported success. §3.9 already
+                // specifies the ternary's untaken arm as unevaluated, so
+                // laziness was already in the language; && / || were the sole
+                // eager outlier.
+                //
+                // Only SOURCE-level && / || desugar here. The compiler still
+                // synthesises bin_op && / || internally to fold if/else-chain
+                // guard conditions; those operands are already-bound refs to
+                // plain comparison results, so they cannot abort and stay on
+                // the cheap opcodes.
+                String shortCircuitOp = be.op().canonical();
+                if (shortCircuitOp.equals("&&") || shortCircuitOp.equals("||")) {
+                    boolean isOr = shortCircuitOp.equals("||");
+                    Expression constant = new BoolLiteral(isOr);
+                    return lowerTernaryExpr(new TernaryExpr(
+                        be.left(),
+                        isOr ? constant : be.right(),
+                        isOr ? be.right() : constant));
+                }
+
                 String leftRef = lowerExprToRef(be.left());
                 String rightRef = lowerExprToRef(be.right());
                 String resultType = null;
@@ -1804,15 +1905,45 @@ public final class AnfLower {
             return out;
         }
 
+        /**
+         * Lower one arm of a ternary, guaranteeing the arm ENDS with the
+         * binding that holds its result.
+         *
+         * <p>NEW-016: {@code lowerExprToRef} returns an existing ref without
+         * emitting anything when the arm is a bare identifier —
+         * {@code g ? f : c === 0n} produced {@code then: []}, an {@code if} arm
+         * with no bindings at all. Stack lowering reads an arm's result off its
+         * stack effect, so a +0 arm has no result to adopt and the depth
+         * reconcile padded the shortfall with an EMPTY push. The contract
+         * compiled clean, the AST interpreter accepted it, and the real engine
+         * rejected the spend with "OP_VERIFY requires the top stack value to be
+         * truthy" over a stack of {@code [01, ]} — the arm's {@code true}
+         * replaced by an empty (false) value. An ordinary contract deployed to
+         * a permanently unspendable UTXO.
+         *
+         * <p>Aliasing through {@code load_const "@ref:"} — the same idiom
+         * {@code let x = y} and the increment/decrement lowerings already use —
+         * makes the arm's stack effect +1 and copies the parent slot instead of
+         * trying to move it. The alias is only emitted when the result was NOT
+         * produced inside the arm, so every arm that already ended on its own
+         * result keeps its exact bytes.
+         */
+        private void lowerTernaryArm(Expression e) {
+            String ref = lowerExprToRef(e);
+            if (bindings.isEmpty() || !bindings.get(bindings.size() - 1).name().equals(ref)) {
+                emit(makeLoadConstString("@ref:" + ref));
+            }
+        }
+
         private String lowerTernaryExpr(TernaryExpr e) {
             String condRef = lowerExprToRef(e.condition());
 
             LowerCtx thenCtx = subContext();
-            thenCtx.lowerExprToRef(e.consequent());
+            thenCtx.lowerTernaryArm(e.consequent());
             syncCounter(thenCtx);
 
             LowerCtx elseCtx = subContext();
-            elseCtx.lowerExprToRef(e.alternate());
+            elseCtx.lowerTernaryArm(e.alternate());
             syncCounter(elseCtx);
 
             return emit(new If(condRef, thenCtx.bindings, elseCtx.bindings));

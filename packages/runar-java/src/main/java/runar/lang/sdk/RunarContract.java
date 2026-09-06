@@ -461,9 +461,25 @@ public final class RunarContract {
                         );
                     }
                     orderedOutputs = new ArrayList<>(execResult.outputs);
-                } catch (RuntimeException ignore) {
-                    // Best-effort — caller can pre-supply stateUpdates if
-                    // the body uses primitives the interpreter can't run.
+                } catch (RuntimeException err) {
+                    // FAIL CLOSED (NEW-006). The legacy behaviour was to
+                    // swallow this and build the continuation from the CURRENT
+                    // (pre-call) state, which the covenant's hashOutputs
+                    // binding then rejects — a silent "your call cannot be
+                    // broadcast", plus silent loss of the method's data / raw
+                    // outputs. The interpreter is the only thing that knows
+                    // this method's post-state AND its addDataOutput /
+                    // addRawOutput payloads, so there is nothing to fall back
+                    // TO: an explicit `newState` covers only the state field
+                    // and still leaves the outputs missing.
+                    throw new IllegalStateException(
+                        "RunarContract.call('" + methodName + "'): the ANF interpreter could not"
+                            + " evaluate the method body, so the state continuation and data"
+                            + " outputs this call would commit cannot be derived. Refusing to"
+                            + " broadcast a transaction built from the pre-call state. Cause: "
+                            + err.getMessage(),
+                        err
+                    );
                 }
             }
             // Explicit state always applies, including when there is no ANF to
@@ -498,6 +514,20 @@ public final class RunarContract {
                 rejectUnresolvableNullArg(
                     "RunarContract.call", userParams.get(i), i, resolved.get(i));
             }
+        }
+
+        // Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not
+        // genuine multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG
+        // method means every branch gets a real signature, and the branch that
+        // fails then carries a non-empty invalid one -- which BIP146 NULLFAIL
+        // rejects, taking the whole spend with it. Pass EMPTY_SIG for the
+        // non-matching branch instead.
+        if (sigIndices.size() >= 2 && isLikelyOrChecksig(artifact)) {
+            System.err.printf(
+                "runar-sdk: warning: %s.call(\"%s\") has %d auto-signed Sig slots. "
+                    + "If this is an OR-CHECKSIG method, pass EMPTY_SIG for the "
+                    + "non-matching branch(es) to satisfy BIP146 NULLFAIL (issue #106).%n",
+                artifact.contractName(), methodName, sigIndices.size());
         }
 
         // Detect injected param shapes: stateful contracts may carry
@@ -1633,6 +1663,29 @@ public final class RunarContract {
      * and the TS {@code AUTO_PREVOUTS_PARAM_NAME} convention.
      */
     static final String AUTO_PREVOUTS_PARAM_NAME = "allPrevouts";
+
+    /**
+     * Does the locking script look like OR-CHECKSIG rather than genuine
+     * multi-sig? Scopes the issue #106 soft warning.
+     *
+     * <p>ASM, not a hex substring test: {@code script.contains("9b")} matches any
+     * byte pair anywhere, push data included, and even straddles two adjacent
+     * opcodes' nibbles.
+     *
+     * <p>NEW-014: {@code ||} no longer lowers to OP_BOOLOR — it lowers to real
+     * OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES that
+     * change: when the FIRST branch fails, its OP_CHECKSIG has already run with a
+     * non-empty signature, which is exactly what BIP146 rejects. Short-circuiting
+     * removes the hazard only when the first branch succeeds, so both the legacy
+     * and the branch-shaped forms must warn.
+     */
+    private static boolean isLikelyOrChecksig(RunarArtifact artifact) {
+        String asm = artifact.asm() == null ? "" : artifact.asm().toUpperCase(java.util.Locale.ROOT);
+        if (asm.isEmpty() || asm.contains("OP_CHECKMULTISIG") || !asm.contains("OP_CHECKSIG")) {
+            return false;
+        }
+        return asm.contains("OP_BOOLOR") || asm.contains("OP_IF");
+    }
 
     private static boolean isAutoPrevoutsParam(RunarArtifact.ABIParam param, Object value) {
         return value == null

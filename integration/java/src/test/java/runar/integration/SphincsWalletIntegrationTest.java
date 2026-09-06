@@ -43,7 +43,7 @@ class SphincsWalletIntegrationTest extends IntegrationBase {
 
     // Same deterministic 32-byte SLH-DSA test PK used by the Python suite.
     private static final String SLHDSA_TEST_PK_HEX =
-        "00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf";
+        "00000000000000000000000000000000b253ffb61412a32b56e07eb091eef8c0";
 
     private static String hash160Hex(byte[] data) {
         try {
