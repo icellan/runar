@@ -20,7 +20,8 @@ type emptySigMarker struct{}
 
 // EmptySig is the producer-side marker (issue #106) for the deliberately-empty
 // branch of an OR-CHECKSIG method — checkSig(sigA, pkA) || checkSig(sigB, pkB),
-// where || lowers to the non-lazy OP_BOOLOR so BOTH OP_CHECKSIGs run. Only the
+// where || short-circuits (NEW-014): the second OP_CHECKSIG runs only when the
+// first branch FAILS, and the first then ran with a non-empty signature. Only the
 // matching branch supplies a real signature; the failing branch MUST push an
 // empty signature (OP_0) or BIP146 NULLFAIL rejects the whole spend.
 //

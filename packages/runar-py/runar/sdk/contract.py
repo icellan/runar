@@ -69,6 +69,14 @@ def _is_likely_or_checksig(artifact) -> bool:
         return False
     if 'OP_BOOLOR' in asm and 'OP_CHECKSIG' in asm:
         return True
+    # NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+    # OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES
+    # that change: when the FIRST branch fails, its OP_CHECKSIG has already
+    # run with a non-empty signature, which is exactly what BIP146 rejects.
+    # Short-circuiting only removes the hazard when the first branch succeeds,
+    # so this warning must still fire for the branch-shaped form.
+    if 'OP_IF' in asm and 'OP_CHECKSIG' in asm:
+        return True
     script = (getattr(artifact, 'script', None) or getattr(artifact, 'script_hex', None) or '').lower()
     if not asm and ('ae' in script or 'af' in script):
         return False

@@ -78,7 +78,9 @@ declare module './types.js' {
 /**
  * Producer-side marker (issue #106) for the deliberately-empty branch of an
  * OR-CHECKSIG method — `checkSig(sigA, pkA) || checkSig(sigB, pkB)`, where
- * `||` lowers to the non-lazy `OP_BOOLOR` so BOTH `OP_CHECKSIG`s run. Only the
+ * `||` short-circuits (NEW-014), so the second `OP_CHECKSIG` runs only when the
+ * first branch FAILS — and when it does, the first ran with a non-empty
+ * signature. Only the
  * matching branch supplies a real signature; the failing branch MUST push an
  * empty signature (OP_0) or BIP146 NULLFAIL rejects the whole spend.
  *
@@ -133,6 +135,15 @@ export function isLikelyOrCheckSigMethod(artifact: {
     return false;
   }
   if (asm.includes('OP_BOOLOR') && asm.includes('OP_CHECKSIG')) {
+    return true;
+  }
+  // NEW-014: `||` no longer lowers to OP_BOOLOR — it lowers to real
+  // OP_IF / OP_ELSE / OP_ENDIF control flow. The NULLFAIL hazard SURVIVES that
+  // change: when the FIRST branch fails, its OP_CHECKSIG has already run with a
+  // non-empty signature, which is exactly what BIP146 rejects. Short-circuiting
+  // only removes the hazard when the first branch succeeds, so this warning
+  // must still fire for the branch-shaped form.
+  if (asm.includes('OP_IF') && asm.includes('OP_CHECKSIG')) {
     return true;
   }
   // Fall back to hex when ASM is missing: OP_CHECKMULTISIG=0xae, OP_BOOLOR=0x9a
