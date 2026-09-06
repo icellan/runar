@@ -953,8 +953,23 @@ func TestSourceCompile_BooleanLogic(t *testing.T) {
 	if artifact.ContractName != "BooleanLogic" {
 		t.Errorf("expected BooleanLogic, got %s", artifact.ContractName)
 	}
-	if !strings.Contains(artifact.ASM, "OP_BOOLAND") {
-		t.Errorf("expected OP_BOOLAND in ASM")
+	// NEW-014: source-level `&&` / `||` SHORT-CIRCUIT, so they lower to real
+	// OP_IF / OP_ELSE control flow rather than OP_BOOLAND / OP_BOOLOR. Asserting
+	// the branch triple is present AND the eager opcodes are gone pins the rule
+	// in both directions — the old assertion would still pass on a compiler that
+	// emitted a branch and an OP_BOOLAND.
+	//
+	// This does NOT mean OP_BOOLAND is dead: the compiler still synthesises
+	// bin_op &&/|| when folding if/else-chain guard conditions, whose operands
+	// are already-bound comparison results that cannot abort. Only the
+	// SOURCE-level operators changed. Do not "fix" those back.
+	for _, op := range []string{"OP_IF", "OP_ELSE", "OP_ENDIF"} {
+		if !strings.Contains(artifact.ASM, op) {
+			t.Errorf("expected %s in ASM — `&&` / `||` must lower to branches", op)
+		}
+	}
+	if strings.Contains(artifact.ASM, "OP_BOOLAND") || strings.Contains(artifact.ASM, "OP_BOOLOR") {
+		t.Errorf("source-level `&&` / `||` must not emit OP_BOOLAND / OP_BOOLOR: %s", artifact.ASM)
 	}
 }
 

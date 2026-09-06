@@ -20,7 +20,7 @@ func TestTicTacToeV2_Compile(t *testing.T) {
 // FixedArray feature in the Go compiler. It compiles both the
 // hand-rolled v1 contract and the v2 FixedArray rewrite through the full
 // Go compiler pipeline and asserts that the resulting locking scripts
-// are byte-identical and have length 9494. (BUG-100: each of the three public
+// are byte-identical and have length 9616. (BUG-100: each of the three public
 // methods now carries the fixed on-chain OP_PUSH_TX preimage-binding blob, so
 // the script grew from the pre-fix 5087 bytes. #116: the numeric `!=` migration
 // to [OP_NUMEQUAL, OP_NOT] added one byte per numeric inequality, growing the
@@ -31,7 +31,17 @@ func TestTicTacToeV2_Compile(t *testing.T) {
 // composed with `PUSH 0; OP_NUMEQUAL -> OP_NOT` to delete `x !== 0n` outright;
 // the guarded 3-op rule lets the 9 × `if (this.cN != 0n)` comparisons regain
 // their OP_NOT OP_NOT pair, growing the script from 9476 to 9494 — verified
-// byte-identical against the fixed TS reference.)
+// byte-identical against the fixed TS reference. NEW-014: `&&` / `||` now
+// SHORT-CIRCUIT on-chain — checkWinAfterMove is eight
+// `v_a == player && v_b == player && v_c == player` chains and `&&` is
+// left-associative, so each stops being a pair of OP_BOOLANDs and becomes
+// nested OP_IF / OP_ELSE branching, growing the script from 9494 to 9616. The
+// growth IS the fix: OP_BOOLAND is a binary stack op, so both operands had to
+// be evaluated, and an operand the source meant to skip can abort the script.
+// These bytes were EXECUTED before this number moved, not merely agreed on by
+// seven tiers — audits/v1-review/claude/repro/NEW-014-tictactoe-spends-at-9616.mts
+// plays a full game on the real @bsv/sdk Spend engine and proves that
+// moveAndWin on a board with NO line is still REJECTED.)
 //
 // The v2 contract uses `Board [9]runar.Bigint`. The expand-fixed-arrays
 // pass runs between typecheck and ANF lowering, expanding the array
@@ -57,7 +67,7 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	v1Bytes := len(v1.Script) / 2
 	v2Bytes := len(v2.Script) / 2
 
-	const expectedBytes = 9494
+	const expectedBytes = 9616
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}

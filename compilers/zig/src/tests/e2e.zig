@@ -667,7 +667,7 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
 
     try std.testing.expectEqualStrings(v1_hex, v2_hex);
 
-    // Byte-count lock-in: the canonical TS compiler produces 9494 bytes for
+    // Byte-count lock-in: the canonical TS compiler produces 9616 bytes for
     // both TicTacToe variants. Any divergence from this length indicates a
     // regression in Zig's stack lowering or branch-reconciliation logic.
     // (BUG-100 fix: checkPreimage now emits the 760-byte on-chain OP_PUSH_TX
@@ -681,7 +681,18 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // a provably-canonical boolean producer, so the 9 × `if (this.cN != 0n)`
     // sites each regain their `OP_NOT OP_NOT` pair — +18 bytes from 9476.
     // Behaviour is unchanged; the booleans only feed OP_IF.)
-    const expected_bytes: usize = 9494;
+    // (NEW-014: `&&` / `||` now SHORT-CIRCUIT on-chain. checkWinAfterMove is
+    // eight `v_a == player && v_b == player && v_c == player` chains, and `&&`
+    // is left-associative, so each stops being a pair of OP_BOOLANDs and
+    // becomes nested OP_IF / OP_ELSE branching — +122 bytes from 9494. The
+    // growth IS the fix: OP_BOOLAND is a binary stack op, so both operands had
+    // to be evaluated, and an operand the source meant to skip can abort the
+    // script. These bytes were EXECUTED before this number moved, not merely
+    // agreed on by seven tiers — see
+    // audits/v1-review/claude/repro/NEW-014-tictactoe-spends-at-9616.mts, which
+    // plays a full game on the real @bsv/sdk Spend engine and proves that
+    // moveAndWin on a board with NO line is still REJECTED.)
+    const expected_bytes: usize = 9616;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

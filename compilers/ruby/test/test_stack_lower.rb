@@ -410,10 +410,29 @@ class TestStackLower < Minitest::Test
       }
     TS
 
+    # NEW-014: source-level `&&` SHORT-CIRCUITS. It desugars to `a ? b : false`
+    # and lowers to real OP_IF / OP_ELSE control flow, so the right operand's
+    # opcodes sit INSIDE the then-branch and are not executed when the left is
+    # false. `a > 0n && b > 0n` becomes
+    #   OP_SWAP OP_0 OP_GREATERTHAN OP_IF OP_0 OP_GREATERTHAN
+    #                               OP_ELSE OP_FALSE OP_NIP OP_ENDIF
+    # Both directions are pinned: asserting only the branch would still pass on
+    # a compiler that emitted a branch AND an OP_BOOLAND.
+    #
+    # OP_BOOLAND is NOT dead — the compiler still synthesises bin_op &&/|| when
+    # folding if/else-chain guard conditions, whose operands are already-bound
+    # comparison results that cannot abort. Only the SOURCE-level operator
+    # changed; do not "fix" those call sites back.
+    # This is Stack IR, not ASM: OP_IF / OP_ELSE / OP_ENDIF are the STRUCTURE of
+    # an `if` op, not `opcode` entries, and `collect_opcodes` deliberately
+    # recurses through them. So the branch is asserted as an `if` NODE, and the
+    # eager opcode's absence over the flattened leaves.
     methods = stack_lower_source(source)
     check_method = methods.find { |m| m[:name] == "check" }
-    opcodes = collect_opcodes(check_method[:ops])
-    assert_includes opcodes, "OP_BOOLAND"
+    assert_includes collect_op_types(check_method[:ops]), "if",
+                    "`&&` must lower to a branch, not OP_BOOLAND"
+    refute_includes collect_opcodes(check_method[:ops]), "OP_BOOLAND",
+                    "source-level `&&` must not be eager"
   end
 
   # ---------------------------------------------------------------------------

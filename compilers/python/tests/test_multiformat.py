@@ -277,9 +277,23 @@ class TestFormatSpecificParsing:
         assert verify.is_public is True
         assert len(verify.params) == 3
 
+        # NEW-014: Ruby's ``&&`` / ``||`` (like every other frontend's)
+        # SHORT-CIRCUIT, so ANF lowering desugars them to the conditional --
+        # ``a && b`` to ``a ? b : false``, ``a || b`` to ``a ? true : b``. They
+        # therefore appear as ``if`` nodes, never as ``bin_op``. Asserting the
+        # absence too keeps this a real pin on the desugar rather than a test
+        # that would pass either way.
+        #
+        # The Ruby PARSER is what this test is about, and it still produces the
+        # operators; what changed is how ANF lowers them. A ``bin_op`` carrying
+        # ``&&`` / ``||`` is still legal in the IR -- the compiler synthesises
+        # one when folding if/else-chain guard conditions -- so this asserts only
+        # that no SOURCE-level operator produced one here.
+        kinds = [b.value.kind for b in verify.body]
+        assert "if" in kinds, "`&&` / `||` must desugar to conditionals"
         bin_ops = [b.value.op for b in verify.body if b.value.kind == "bin_op"]
-        assert "&&" in bin_ops
-        assert "||" in bin_ops
+        assert "&&" not in bin_ops
+        assert "||" not in bin_ops
 
     def test_parse_ruby_if_else(self):
         program = _parse_and_lower("if-else", ".runar.rb")

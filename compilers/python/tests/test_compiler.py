@@ -71,11 +71,22 @@ class TestCompileFromIR:
         assert "OP_ENDIF" in artifact.asm
 
     def test_compile_boolean_logic(self):
+        # NEW-014: source-level ``&&`` / ``||`` SHORT-CIRCUIT, so the checked-in
+        # golden IR for this fixture now carries ``if`` nodes where it used to
+        # carry ``bin_op`` ``&&`` / ``||``, and the emitted script branches
+        # instead of using OP_BOOLAND / OP_BOOLOR. Both directions are pinned.
+        #
+        # OP_BOOLAND is not dead — the compiler still synthesises bin_op &&/||
+        # when folding if/else-chain guard conditions, whose operands are
+        # already-bound comparison results that cannot abort. Only the
+        # SOURCE-level operators changed. Do not "fix" those back.
         ir_json = load_conformance_ir("boolean-logic")
         artifact = must_compile_ir(ir_json)
 
-        assert "OP_BOOLAND" in artifact.asm
-        assert "OP_BOOLOR" in artifact.asm
+        for op in ("OP_IF", "OP_ELSE", "OP_ENDIF"):
+            assert op in artifact.asm, f"expected {op} — `&&` / `||` must branch"
+        assert "OP_BOOLAND" not in artifact.asm
+        assert "OP_BOOLOR" not in artifact.asm
         assert "OP_NOT" in artifact.asm
 
 

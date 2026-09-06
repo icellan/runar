@@ -36,7 +36,8 @@ import { SmartContract, assert } from 'runar-lang';
 import type { ByteString } from 'runar-lang';
 
 export class Encoder extends SmartContract {
-  constructor(readonly n: bigint) { super(n); }
+  readonly n: bigint;
+  constructor(n: bigint) { super(n); this.n = n; }
   public unlock(): void {
     const out: ByteString = int2str(this.n, 4n);
     assert(len(out) === 4n);

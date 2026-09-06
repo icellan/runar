@@ -276,8 +276,18 @@ class TestStackOpcodes < Minitest::Test
       }
     TS
 
+    # NEW-014: source-level `&&` SHORT-CIRCUITS. `a && b` desugars to
+    # `a ? b : false`, so the ASM is the branch below and NOT OP_BOOLAND — that
+    # opcode is a binary stack op, which would force the right operand to be
+    # evaluated even when the left already decided the answer.
+    #
+    # OP_BOOLAND is NOT dead: the compiler still synthesises bin_op &&/|| when
+    # folding if/else-chain guard conditions, whose operands are already-bound
+    # comparison results that cannot abort. Only the SOURCE-level operator
+    # changed; do not "fix" those call sites back.
     artifact = compile_ts_source(source, 'B.runar.ts')
-    assert_includes artifact.asm, 'OP_BOOLAND'
+    assert_equal 'OP_SWAP OP_IF OP_ELSE OP_FALSE OP_NIP OP_ENDIF', artifact.asm
+    refute_includes artifact.asm, 'OP_BOOLAND', 'source-level `&&` must not be eager'
   end
 
   def test_boolean_or_emits_op_boolor
@@ -293,8 +303,18 @@ class TestStackOpcodes < Minitest::Test
       }
     TS
 
+    # NEW-014: source-level `||` SHORT-CIRCUITS. `a || b` desugars to
+    # `a ? true : b`, so the ASM is the branch below and NOT OP_BOOLOR. Note
+    # there is no OP_ELSE here: the else-arm is the bare local `b`, which the
+    # branch already left on the stack, so the arm emits nothing.
+    #
+    # OP_BOOLOR is NOT dead: the compiler still synthesises bin_op &&/|| when
+    # folding if/else-chain guard conditions, whose operands are already-bound
+    # comparison results that cannot abort. Only the SOURCE-level operator
+    # changed; do not "fix" those call sites back.
     artifact = compile_ts_source(source, 'B.runar.ts')
-    assert_includes artifact.asm, 'OP_BOOLOR'
+    assert_equal 'OP_SWAP OP_IF OP_TRUE OP_NIP OP_ENDIF', artifact.asm
+    refute_includes artifact.asm, 'OP_BOOLOR', 'source-level `||` must not be eager'
   end
 
   # ---------------------------------------------------------------------------
