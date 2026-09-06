@@ -466,6 +466,54 @@ def consumedNames (before : StackMap) (after : StackMap) :
         else if listContains after.names n then acc
         else acc ++ [n]
 
+/-- Occurrences of `name` in `sm`. Mirrors TS `lowerIf`'s local `countNames`
+(`05-stack-lower.ts:2576-2583`), which skips anonymous slots. -/
+def StackMap.countName (sm : StackMap) (name : String) : Nat :=
+  sm.foldl (init := 0) fun acc slot => if slot == some name then acc + 1 else acc
+
+/-- Parent-scope slots one arm gave up MORE often than the other, as a
+multiset. Mirrors TS `lowerIf` phase 1 after NEW-018
+(`05-stack-lower.ts:2584-2593`).
+
+`refSm` keeps what `otherSm` consumed: the result is the names `refSm` must
+drop so both arms end at the same depth AND the same layout. Counting matters
+because a parent stack legitimately holds one name in several slots — a loop
+rebinding a local leaves one per unrolled iteration — and the set test this
+replaces saw "still present" when only the DEAD residue was still present.
+
+Nat subtraction is already clamped at zero, which is the reference's
+`Math.max(0, …)`. -/
+def consumedNamesMulti (parent refSm otherSm : StackMap) : List String :=
+  parent.foldl (init := ([] : List String)) fun acc slot =>
+    match slot with
+    | none   => acc
+    | some n =>
+        if listContains acc n then acc
+        else
+          let refLost   := parent.countName n - refSm.countName n
+          let otherLost := parent.countName n - otherSm.countName n
+          acc ++ List.replicate (otherLost - refLost) n
+
+/-- The parent slots an arm gave up, as a MULTISET: one copy per occurrence
+lost, so `removeNames` removes that many shallowest slots. Mirrors TS
+`lowerIf`'s post-`OP_ENDIF` parent reconcile after NEW-018
+(`05-stack-lower.ts:2934-2941`), which decrements a per-name `excess` count
+instead of removing a single slot per distinct name. -/
+def lostNamesMulti (parent arm : StackMap) : List String :=
+  parent.foldl (init := ([] : List String)) fun acc slot =>
+    match slot with
+    | none   => acc
+    | some n =>
+        if listContains acc n then acc
+        else acc ++ List.replicate (parent.countName n - arm.countName n) n
+
+/-- How many parent slots an arm gave up, counted by MULTIPLICITY. Mirrors TS
+`lowerIf`'s declared-results base depth after NEW-018
+(`05-stack-lower.ts:2686-2690`), where `consumedFromParent` sums
+`max(0, held - stillHeld)` instead of counting distinct lost names. -/
+def consumedCount (parent arm : StackMap) : Nat :=
+  (lostNamesMulti parent arm).length
+
 /-- Insertion-sort descending on `Nat`. -/
 def sortDesc : List Nat → List Nat
   | []      => []
@@ -474,6 +522,41 @@ def sortDesc : List Nat → List Nat
         | []      => [y]
         | a :: as => if y ≥ a then y :: a :: as else a :: insert y as
       insert x (sortDesc xs)
+
+/-- Depths to drop for a MULTISET of names, mirroring TS `lowerIf`'s local
+`dropDepthsFor`.
+
+For a name listed more than once, take the SHALLOWEST occurrences: the model
+resolves a name to its shallowest slot, so that is the live one, and it is the
+one the sibling arm consumed. Returned deepest-first so removing a deeper slot
+does not shift a shallower one.
+
+For a name listed ONCE this is exactly `depth?`, which also resolves to the
+shallowest slot — so every duplicate-free call site keeps its old answer, and
+`removeConsumedAtDepths` below stays byte-identical on the inputs it used to
+receive. -/
+def dropDepthsFor (sm : StackMap) (names : List String) : List Nat :=
+  -- Short-circuit the empty case so `dropDepthsFor sm [] = []` holds by `rfl`
+  -- for an OPAQUE `sm`. Without it the walk below recurses on `sm`'s spine and
+  -- `removeConsumedAtDepths sm [] = ([], sm)` — which `Agrees.lean` proves by
+  -- `rfl` and rewrites with twice — is no longer definitional.
+  match names with
+  | [] => []
+  | _ =>
+  let need : List (String × Nat) :=
+    names.foldl (init := ([] : List (String × Nat))) fun acc n =>
+      lastUsesUpdate acc n ((lastUsesLookup acc n).getD 0 + 1)
+  let rec go (d : Nat) (slots : StackMap) (nd : List (String × Nat)) : List Nat :=
+    match slots with
+    | []             => []
+    | none :: rest   => go (d + 1) rest nd
+    | some n :: rest =>
+        match lastUsesLookup nd n with
+        | some w =>
+            if w > 0 then d :: go (d + 1) rest (lastUsesUpdate nd n (w - 1))
+            else go (d + 1) rest nd
+        | none   => go (d + 1) rest nd
+  sortDesc (go 0 sm need)
 
 /-- Emit ROLL+DROP cleanup for `names` from a stackmap's perspective.
 Mirrors TS `lowerIf`'s asymmetric-consumption fix
@@ -493,12 +576,11 @@ list and the updated stackmap. -/
 def removeConsumedAtDepths (sm : StackMap) (names : List String) :
     (List StackOp × StackMap) :=
   -- Collect depths for names that exist in sm.
-  let depths : List Nat :=
-    names.foldl (init := ([] : List Nat)) fun acc n =>
-      match sm.depth? n with
-      | some d => acc ++ [d]
-      | none   => acc
-  let sorted := sortDesc depths
+  -- NEW-018: resolved through `dropDepthsFor` so a name listed TWICE resolves
+  -- to two DIFFERENT slots. The old per-name `depth?` fold returned the same
+  -- shallowest depth for both copies, which then removed one slot and dropped
+  -- the wrong one twice.
+  let sorted := dropDepthsFor sm names
   -- Walk sorted depths; for each emit cleanup and remove from sm.
   let rec go (sm : StackMap) : List Nat → (List StackOp × StackMap)
     | []      => ([], sm)
@@ -549,11 +631,6 @@ def trimArmToDepth (k target : Nat) : Nat → StackMap → (List StackOp × Stac
         (ops ++ rest, smF)
       else
         ([], sm)
-
-/-- Occurrences of `name` in `sm`. Mirrors TS `lowerIf`'s local `countNames`
-(`05-stack-lower.ts:2576-2583`), which skips anonymous slots. -/
-def StackMap.countName (sm : StackMap) (name : String) : Nat :=
-  sm.foldl (init := 0) fun acc slot => if slot == some name then acc + 1 else acc
 
 /-- Worker for `inheritedModel`. `skipped` records, per name, how many
 occurrences have already been dropped — the reference decrements a shared
@@ -4583,7 +4660,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             | some d =>
                 -- Only treat as shadow-rebind if NO parent items were
                 -- consumed by THEN (else asymmetric path applies).
-                let consumedByThen := consumedNames smBranch (smThn.tail)
+                let consumedByThen := lostNamesMulti smBranch (smThn.tail)
                 if consumedByThen.isEmpty then some (smBranch, d, topName)
                 else none
             | none => none
@@ -4592,7 +4669,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             if isEmptyBytesRebind b topName then
               match smBranch.depth? topName with
               | some d =>
-                  let consumedByThen := consumedNames smBranch (smThn.tail)
+                  let consumedByThen := lostNamesMulti smBranch (smThn.tail)
                   if consumedByThen.isEmpty then some (smBranch, d, topName)
                   else none
               | none => none
@@ -4663,19 +4740,17 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
           --              ⇒ THEN consumed them; ELSE must drop them too.
           -- `dropsForThn` = parent items missing from smEls but still in smThn
           --              ⇒ ELSE consumed them; THEN must drop them too.
-          let parentInBoth (refSm : StackMap) (otherSm : StackMap) :
-              List String :=
-            smBranch.foldl (init := ([] : List String)) fun acc slot =>
-              match slot with
-              | none   => acc   -- anonymous: no name for either arm to drop
-              | some n =>
-              if listContains acc n then acc
-              else
-                match refSm.depth? n, otherSm.depth? n with
-                | some _, none => acc ++ [n]   -- present in refSm, missing from otherSm
-                | _, _         => acc
-          let dropsForEls := parentInBoth smEls smThn
-          let dropsForThn := parentInBoth smThn smEls
+          -- NEW-018: counted by MULTIPLICITY, not by set membership. A parent
+          -- stack legitimately holds one name in several slots (a loop
+          -- rebinding a local leaves one per unrolled iteration), and only the
+          -- shallowest is live. The set test this replaces asked "is the name
+          -- still present in the other arm?" — and the answer was YES even when
+          -- the arm had rolled the LIVE slot away, because the dead residue
+          -- beneath it carries the same name. No matching drop was emitted, the
+          -- depth-balance pad restored the COUNT but not the POSITION, and the
+          -- two arms left positionally different stacks.
+          let dropsForEls := consumedNamesMulti smBranch smEls smThn
+          let dropsForThn := consumedNamesMulti smBranch smThn smEls
           let (elsCleanupOps, smElsAfter) :=
             removeConsumedAtDepths smEls dropsForEls
           let (thnCleanupOps, smThnAfter) :=
@@ -4738,7 +4813,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
           -- `bitwise-ops`, `boolean-logic` and `shift-ops` stopped
           -- compiling in the model. The declared-results path below already
           -- reconciles against its post-cleanup map (`smThnTrim`).
-          let parentConsumed := consumedNames smBranch smThnPad
+          let parentConsumed := lostNamesMulti smBranch smThnPad
           let smParentReconciled : StackMap := removeNames smBranch parentConsumed
           -- Issue #149 / #150 step 3: re-sort each arm's inherited region back
           -- into the parent's slot order. The reference runs this on BOTH arms
@@ -4889,7 +4964,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
               -- recomputed from the TRIMMED arms, matching the TS ordering
               -- (trim at 2620, balance at 2710, reconcile at 2771).
               let nDeclared := results.length
-              let consumedFromParent := (consumedNames smBranch smThnAfter).length
+              let consumedFromParent := consumedCount smBranch smThnAfter
               let targetDepth := smBranch.length - consumedFromParent + nDeclared
               let (thnTrimOps, smThnTrim) :=
                 trimArmToDepth nDeclared targetDepth smThnAfter.length smThnAfter
@@ -4908,7 +4983,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                 padArm false true (smElsTrim.length - smThnTrim.length) smThnTrim
               let elsResultOps := elsOps ++ elsCleanupOps ++ elsTrimOps ++ extraEls'
               let thnResultOps := thnOps ++ thnCleanupOps ++ thnTrimOps ++ extraThn'
-              let parentConsumedTrim := consumedNames smBranch smThnTrimPad
+              let parentConsumedTrim := lostNamesMulti smBranch smThnTrimPad
               let smParentTrimmed : StackMap := removeNames smBranch parentConsumedTrim
               -- Issue #149 / #150 step 3, declared-results peer. Same call, same
               -- ordering: after the parent reconcile, before the adopt.
