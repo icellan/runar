@@ -1,0 +1,835 @@
+{
+  "variants": {
+    "off": {},
+    "pool": {
+      "constantPool": true
+    },
+    "sink": {
+      "constantPool": true,
+      "reductionSinking": true
+    },
+    "comb": {
+      "constantPool": true,
+      "reductionSinking": true,
+      "fixedBaseComb": true
+    }
+  },
+  "emitters": {
+    "EcAdd": {
+      "off": {
+        "bytes": 25426,
+        "sha256": "3a6a3250b87bc980734f059d0691a7618301842b2da5d6c9811bdd378d6d2ee1",
+        "postPeephole": {
+          "bytes": 24398,
+          "sha256": "f957169ddbee238e716e293209b277e887688d0adaff088a06c192c80a72bb62"
+        }
+      },
+      "pool": {
+        "bytes": 8791,
+        "sha256": "273c9c2648bee5175f1b83f54ac3d1996428a728334e00f6e1b3be1357b8740b",
+        "postPeephole": {
+          "bytes": 7763,
+          "sha256": "7b41cd07e70aa0e3ec21fa82758183ddac89a7b3f05b3a6b352127171c443193"
+        }
+      },
+      "sink": {
+        "bytes": 5202,
+        "sha256": "5e2c39c383a0da549291d17a80daec4a74d148b360faf8b09a2fd921ff71a6ec",
+        "postPeephole": {
+          "bytes": 4174,
+          "sha256": "eb3cb8886c8ad61dd2efe96ea8e59790cd8283b9eb8463d87533556e8df2a37f"
+        }
+      },
+      "comb": {
+        "bytes": 5202,
+        "sha256": "5e2c39c383a0da549291d17a80daec4a74d148b360faf8b09a2fd921ff71a6ec",
+        "postPeephole": {
+          "bytes": 4174,
+          "sha256": "eb3cb8886c8ad61dd2efe96ea8e59790cd8283b9eb8463d87533556e8df2a37f"
+        }
+      }
+    },
+    "EcMul": {
+      "off": {
+        "bytes": 428676,
+        "sha256": "8097e08786504e28c896317c0ee46b18e9280395625017eb74a7fca7286d18cb",
+        "postPeephole": {
+          "bytes": 424501,
+          "sha256": "ea17ad4c4c08bd598b64ff8008cfd80aa1b3c1ea8cfd03f120f056798c3b1e89"
+        }
+      },
+      "pool": {
+        "bytes": 140242,
+        "sha256": "3f4dfaee63080e019a16743f6aeb8f03f6479eecdfaf091993667a008920c11e",
+        "postPeephole": {
+          "bytes": 136137,
+          "sha256": "e05ae80a1b0d5b683dab6ba0da72f6a9a7eb73e2fd2dda42194e7a78a3782be4"
+        }
+      },
+      "sink": {
+        "bytes": 84137,
+        "sha256": "219719829cbefd9ca336f9f78231021d38769aca243890a03333b156525fb64a",
+        "postPeephole": {
+          "bytes": 80032,
+          "sha256": "164cbf3cfc0e17dc4c2a3d45cb9b53302fa3c0919cbd86b0d89f42062213af2d"
+        }
+      },
+      "comb": {
+        "bytes": 84137,
+        "sha256": "219719829cbefd9ca336f9f78231021d38769aca243890a03333b156525fb64a",
+        "postPeephole": {
+          "bytes": 80032,
+          "sha256": "164cbf3cfc0e17dc4c2a3d45cb9b53302fa3c0919cbd86b0d89f42062213af2d"
+        }
+      }
+    },
+    "EcMulGen": {
+      "off": {
+        "bytes": 428742,
+        "sha256": "214f3136c4713c0f9bc8e366b81ac235c09dfdfe52d00a3ac04942b5ae8b47cc",
+        "postPeephole": {
+          "bytes": 424565,
+          "sha256": "4e53228ab5469c0d0e96db04c73f5c2129658b5dd8450cb8a11dfe94169c8f64"
+        }
+      },
+      "pool": {
+        "bytes": 140308,
+        "sha256": "997261a65d5c4b5da4d06f1f3a6d9ebc13a07b5a8545bb19634b33afd66f3a91",
+        "postPeephole": {
+          "bytes": 136203,
+          "sha256": "94cd1778fc2309e5efae2f3c36e13a38a0a53f8513450c289b164529f213294c"
+        }
+      },
+      "sink": {
+        "bytes": 84203,
+        "sha256": "192e66df05ba81d5fbc11b1019e08ff2f7b7c70a9970e3f27410922e757fee90",
+        "postPeephole": {
+          "bytes": 80098,
+          "sha256": "48f7dc497c4a877ba730b161c4dcfcd368df0259a2e5d7c568a754258d96c506"
+        }
+      },
+      "comb": {
+        "bytes": 52237,
+        "sha256": "17fcf22f1ebb6cf752de3be937cd183202aedf271937ec6919e14686a029d18d",
+        "postPeephole": {
+          "bytes": 50155,
+          "sha256": "ca9bcb58ece58025dde6f727c603d6e6d9ede172c6c57d4148098e1ec9a2bccb"
+        }
+      }
+    },
+    "EcNegate": {
+      "off": {
+        "bytes": 1018,
+        "sha256": "18e405c44216a1f1b927f16f6aac869e11b8fd65ef15265496071b37bf07f9d9",
+        "postPeephole": {
+          "bytes": 1016,
+          "sha256": "fcf10cefc7558c5e7ab1ff5882ca8c128c72f5fe3411c24518b69cbab92ba6b8"
+        }
+      },
+      "pool": {
+        "bytes": 991,
+        "sha256": "0c88dbabadba86e3a46195845c65c6a998647bfa708529457b8caaa6fece49b6",
+        "postPeephole": {
+          "bytes": 989,
+          "sha256": "2a5a653594760bd00f44940a0d3fec3a4b59d110376c169435f1ab0897eb0ed8"
+        }
+      },
+      "sink": {
+        "bytes": 991,
+        "sha256": "0c88dbabadba86e3a46195845c65c6a998647bfa708529457b8caaa6fece49b6",
+        "postPeephole": {
+          "bytes": 989,
+          "sha256": "2a5a653594760bd00f44940a0d3fec3a4b59d110376c169435f1ab0897eb0ed8"
+        }
+      },
+      "comb": {
+        "bytes": 991,
+        "sha256": "0c88dbabadba86e3a46195845c65c6a998647bfa708529457b8caaa6fece49b6",
+        "postPeephole": {
+          "bytes": 989,
+          "sha256": "2a5a653594760bd00f44940a0d3fec3a4b59d110376c169435f1ab0897eb0ed8"
+        }
+      }
+    },
+    "EcOnCurve": {
+      "off": {
+        "bytes": 734,
+        "sha256": "5adf6468d3637a6eb9e04f3d53c1e0d4068db875328370b0922111eb12afaa46",
+        "postPeephole": {
+          "bytes": 726,
+          "sha256": "26d924858e905789a289855370fd445b96ed1d9e5cb20affeca5f75eb4a7397f"
+        }
+      },
+      "pool": {
+        "bytes": 579,
+        "sha256": "9102df0d39cd6ef42af732ced445c0b9258df6fb531c7db6dbd7de32b23cf28a",
+        "postPeephole": {
+          "bytes": 571,
+          "sha256": "99c3d6f30e254e158dfc25465c0383d3a567a04b01c3ab634659496931755e24"
+        }
+      },
+      "sink": {
+        "bytes": 551,
+        "sha256": "60d2cb607c2e5544538855ffc78eb0b5efa3f7069f64013d3e12dc8684c13e5b",
+        "postPeephole": {
+          "bytes": 543,
+          "sha256": "1acb61a23eb1070dbea86dad7a0d1d7db29470e8a2a0462d048fcdcff3e5e84c"
+        }
+      },
+      "comb": {
+        "bytes": 551,
+        "sha256": "60d2cb607c2e5544538855ffc78eb0b5efa3f7069f64013d3e12dc8684c13e5b",
+        "postPeephole": {
+          "bytes": 543,
+          "sha256": "1acb61a23eb1070dbea86dad7a0d1d7db29470e8a2a0462d048fcdcff3e5e84c"
+        }
+      }
+    },
+    "EcModReduce": {
+      "off": {
+        "bytes": 8,
+        "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939",
+        "postPeephole": {
+          "bytes": 8,
+          "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939"
+        }
+      },
+      "pool": {
+        "bytes": 8,
+        "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939",
+        "postPeephole": {
+          "bytes": 8,
+          "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939"
+        }
+      },
+      "sink": {
+        "bytes": 8,
+        "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939",
+        "postPeephole": {
+          "bytes": 8,
+          "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939"
+        }
+      },
+      "comb": {
+        "bytes": 8,
+        "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939",
+        "postPeephole": {
+          "bytes": 8,
+          "sha256": "67859e92455ce4ed0de89a585ca093710793638b47de173ae6697037f9873939"
+        }
+      }
+    },
+    "EcEncodeCompressed": {
+      "off": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      },
+      "pool": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      },
+      "sink": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      },
+      "comb": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      }
+    },
+    "EcMakePoint": {
+      "off": {
+        "bytes": 471,
+        "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7",
+        "postPeephole": {
+          "bytes": 471,
+          "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7"
+        }
+      },
+      "pool": {
+        "bytes": 471,
+        "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7",
+        "postPeephole": {
+          "bytes": 471,
+          "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7"
+        }
+      },
+      "sink": {
+        "bytes": 471,
+        "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7",
+        "postPeephole": {
+          "bytes": 471,
+          "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7"
+        }
+      },
+      "comb": {
+        "bytes": 471,
+        "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7",
+        "postPeephole": {
+          "bytes": 471,
+          "sha256": "2386c6124c0ae7aeec1d1c583f867595a76e9f226b91a9d046c1bf2584d85ef7"
+        }
+      }
+    },
+    "EcPointX": {
+      "off": {
+        "bytes": 235,
+        "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8",
+        "postPeephole": {
+          "bytes": 235,
+          "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8"
+        }
+      },
+      "pool": {
+        "bytes": 235,
+        "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8",
+        "postPeephole": {
+          "bytes": 235,
+          "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8"
+        }
+      },
+      "sink": {
+        "bytes": 235,
+        "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8",
+        "postPeephole": {
+          "bytes": 235,
+          "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8"
+        }
+      },
+      "comb": {
+        "bytes": 235,
+        "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8",
+        "postPeephole": {
+          "bytes": 235,
+          "sha256": "565258cd99b1f3f0e742aa11d2febbb7dba0696498c6e2241e183a7984d7deb8"
+        }
+      }
+    },
+    "EcPointY": {
+      "off": {
+        "bytes": 236,
+        "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b",
+        "postPeephole": {
+          "bytes": 236,
+          "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b"
+        }
+      },
+      "pool": {
+        "bytes": 236,
+        "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b",
+        "postPeephole": {
+          "bytes": 236,
+          "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b"
+        }
+      },
+      "sink": {
+        "bytes": 236,
+        "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b",
+        "postPeephole": {
+          "bytes": 236,
+          "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b"
+        }
+      },
+      "comb": {
+        "bytes": 236,
+        "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b",
+        "postPeephole": {
+          "bytes": 236,
+          "sha256": "a19c838dd948d1a2d277623103620e99905f64664a1ed9fe1d7a0f0466a42f2b"
+        }
+      }
+    },
+    "P256Add": {
+      "off": {
+        "bytes": 19906,
+        "sha256": "c3881056b85af5158aa022db9f35354157ba979b817d9e02af4181cb43d5cb94",
+        "postPeephole": {
+          "bytes": 19118,
+          "sha256": "3dafe2b8eb9a7bf49b1a050d471ce095acfed15db6a1470b62732e919d76b8b0"
+        }
+      },
+      "pool": {
+        "bytes": 7111,
+        "sha256": "8d8f2fe65d2ba240bf93292a918d2727f5e77390f7dec307c274b203586af9eb",
+        "postPeephole": {
+          "bytes": 6323,
+          "sha256": "3993f69c93cf6f3b979e00148324b3a9ff19b240b7f3e8055a9f89f9ac2e5910"
+        }
+      },
+      "sink": {
+        "bytes": 4369,
+        "sha256": "3c8f63ad72a56db6b6ec228c940a117b54fdcc1dafd84d9f3fb4348c39fd81a8",
+        "postPeephole": {
+          "bytes": 3581,
+          "sha256": "59c479fe3765a390eeb7d8b230fda234be5b47182174d038060626bf4fe520da"
+        }
+      },
+      "comb": {
+        "bytes": 4369,
+        "sha256": "3c8f63ad72a56db6b6ec228c940a117b54fdcc1dafd84d9f3fb4348c39fd81a8",
+        "postPeephole": {
+          "bytes": 3581,
+          "sha256": "59c479fe3765a390eeb7d8b230fda234be5b47182174d038060626bf4fe520da"
+        }
+      }
+    },
+    "P256Mul": {
+      "off": {
+        "bytes": 459746,
+        "sha256": "7012a0e15c57537d5927390586365267d94e77a5756e823c86b873bf144a4e0b",
+        "postPeephole": {
+          "bytes": 453233,
+          "sha256": "745067c1d414cca13079e97cc7eebbe1af4beffc88ab9aeb6bfd9d2415033529"
+        }
+      },
+      "pool": {
+        "bytes": 150416,
+        "sha256": "97d7e6d8aefa8bc66b8f020777124a17bb166f2f2a3d2029ca70643d93da8a29",
+        "postPeephole": {
+          "bytes": 143973,
+          "sha256": "f3a16eadfc77d0b0134eeb42ccd1956cfe09f410ddf1d24790992337355729a1"
+        }
+      },
+      "sink": {
+        "bytes": 90514,
+        "sha256": "1eec2107d410362b50c7b77f5fbc107a3732bc1a109640d5561f057baae5e18d",
+        "postPeephole": {
+          "bytes": 84071,
+          "sha256": "30e36be9cb6930d85063855ca182eeb86ba35c9903caf05487cd69ffe64628db"
+        }
+      },
+      "comb": {
+        "bytes": 90514,
+        "sha256": "1eec2107d410362b50c7b77f5fbc107a3732bc1a109640d5561f057baae5e18d",
+        "postPeephole": {
+          "bytes": 84071,
+          "sha256": "30e36be9cb6930d85063855ca182eeb86ba35c9903caf05487cd69ffe64628db"
+        }
+      }
+    },
+    "P256MulGen": {
+      "off": {
+        "bytes": 459812,
+        "sha256": "76602b6b20bbd1a206ca196e279d8912264d7d86f1608d0c4a1cb4170727f55c",
+        "postPeephole": {
+          "bytes": 453297,
+          "sha256": "2d6cd0d21543d1fa343ad1f3598c9fb1869006eca5f485898dc6e6135cd66a78"
+        }
+      },
+      "pool": {
+        "bytes": 150482,
+        "sha256": "f9bde1be13b8ba33cf0c0fd7251d54e70cfc82c24aa508d862b2937861fb6dc1",
+        "postPeephole": {
+          "bytes": 144039,
+          "sha256": "2749eb5d77a9f97b44beff60cfcbbe93c6e80d0f536de42a829c909585c3aa5b"
+        }
+      },
+      "sink": {
+        "bytes": 90580,
+        "sha256": "920b173ae1ef85969f45cd456c4a77945de54d5b37addce8c6a5281d524a8d6b",
+        "postPeephole": {
+          "bytes": 84137,
+          "sha256": "b2cd5b2bc85422726b8d4d4d3680dcf0789bfb5b9b1a30d0be8e54def34ef492"
+        }
+      },
+      "comb": {
+        "bytes": 54117,
+        "sha256": "a79b973d11f57989ff14ebccf0debbf86ef1f240c799a30870b15620ef97ef51",
+        "postPeephole": {
+          "bytes": 51387,
+          "sha256": "bea2287f75117891b45186b7e1daee5a28afa7049c59cb3969cda4b41f43bacd"
+        }
+      }
+    },
+    "P256Negate": {
+      "off": {
+        "bytes": 1018,
+        "sha256": "db96eb906a201fbdc80386afe0c924b4f014031bc248d358c3b8f7e4d1130242",
+        "postPeephole": {
+          "bytes": 1016,
+          "sha256": "eff7114a137869dc9c55b69112979158171ccb2882cb833365c0894f67301773"
+        }
+      },
+      "pool": {
+        "bytes": 991,
+        "sha256": "857cba64c1113cab98b2501e21568d7863f4a35c80d7092db58105738a8c8ff4",
+        "postPeephole": {
+          "bytes": 989,
+          "sha256": "e7e02e493fe9d5942543d9594ccf3d11cf42a40b8f1ed920508157da9f0a2d87"
+        }
+      },
+      "sink": {
+        "bytes": 991,
+        "sha256": "857cba64c1113cab98b2501e21568d7863f4a35c80d7092db58105738a8c8ff4",
+        "postPeephole": {
+          "bytes": 989,
+          "sha256": "e7e02e493fe9d5942543d9594ccf3d11cf42a40b8f1ed920508157da9f0a2d87"
+        }
+      },
+      "comb": {
+        "bytes": 991,
+        "sha256": "857cba64c1113cab98b2501e21568d7863f4a35c80d7092db58105738a8c8ff4",
+        "postPeephole": {
+          "bytes": 989,
+          "sha256": "e7e02e493fe9d5942543d9594ccf3d11cf42a40b8f1ed920508157da9f0a2d87"
+        }
+      }
+    },
+    "P256OnCurve": {
+      "off": {
+        "bytes": 858,
+        "sha256": "7514bbabd200f50c56282fd92b881b0d2ee83aa6948e525b04ae39a21f849018",
+        "postPeephole": {
+          "bytes": 848,
+          "sha256": "cf4765c6015aaef99e0a69c016c4032d5f8cba0185dbefc29afc50e5b90fbc9b"
+        }
+      },
+      "pool": {
+        "bytes": 639,
+        "sha256": "ab722c360154cd00e97cf2b6c5fdd259f2cf718a4d6d4487cc475b3defe58f64",
+        "postPeephole": {
+          "bytes": 629,
+          "sha256": "b804f0289352ecaf6834ff51f7c41960096856ba215cbd17bda7e6ab77130f36"
+        }
+      },
+      "sink": {
+        "bytes": 600,
+        "sha256": "e1995c440d40a680c632693485d7f9285769112a71256c76d0ce1012850f1637",
+        "postPeephole": {
+          "bytes": 590,
+          "sha256": "3fc2ec5339a852c520b8d514937b2474143ae7e8544b0accd13ddb45cf5eb4f4"
+        }
+      },
+      "comb": {
+        "bytes": 600,
+        "sha256": "e1995c440d40a680c632693485d7f9285769112a71256c76d0ce1012850f1637",
+        "postPeephole": {
+          "bytes": 590,
+          "sha256": "3fc2ec5339a852c520b8d514937b2474143ae7e8544b0accd13ddb45cf5eb4f4"
+        }
+      }
+    },
+    "P256EncodeCompressed": {
+      "off": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      },
+      "pool": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      },
+      "sink": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      },
+      "comb": {
+        "bytes": 19,
+        "sha256": "aa8fd739d3c76679bb7e93c22c1d4fcc7946b9fb3c86b92b9c06d67c9df48f72",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "f1a86d1b3b82c245a69a39f8cd5b7684c17db4aef6e4e06430aa18ed862c3634"
+        }
+      }
+    },
+    "VerifyECDSA_P256": {
+      "off": {
+        "bytes": 974024,
+        "sha256": "68d0eaa9e637956cbd43d16f06534c93735a8d2ac9942467a11489fbe845c4be",
+        "postPeephole": {
+          "bytes": 958776,
+          "sha256": "cbd64aa2d1606103d46afe99464bcf457290314168625f7e8c2ad198c8fb817a"
+        }
+      },
+      "pool": {
+        "bytes": 319501,
+        "sha256": "66e515a71d49e9149c72edbdf232e9222c8f69534f771e65c1d502803388de1b",
+        "postPeephole": {
+          "bytes": 304395,
+          "sha256": "5b6409f302925d794d1d88cbf4080cee4082fa8e174d8653e25f9c0ba9cedcd5"
+        }
+      },
+      "sink": {
+        "bytes": 194928,
+        "sha256": "f86b2c3410346b70c6aa2d64d635f4a048c130fe2d252f5979af3aceaf609b37",
+        "postPeephole": {
+          "bytes": 179822,
+          "sha256": "7715fa15da172bbf821df18c40752bc6cdb206c5cf6b91500987c2a58ff61422"
+        }
+      },
+      "comb": {
+        "bytes": 158464,
+        "sha256": "e9ba2bcaa57ffbdccc815a632c772842d97c1af263e124bacfd6b9463cc00c32",
+        "postPeephole": {
+          "bytes": 147071,
+          "sha256": "81193a8481375bb79554bffde2215e6fbebf3c9e15bf311a9023e6f9f707ea3f"
+        }
+      }
+    },
+    "P384Add": {
+      "off": {
+        "bytes": 46710,
+        "sha256": "cd5bc4214e96e61595e25a7b61d8b0d4d2102e6296f85ca541a2fdd2faba1750",
+        "postPeephole": {
+          "bytes": 45286,
+          "sha256": "9d19718a22a99d72fa300c78bce60026b0420b7c86fafba5e38327f0697cd343"
+        }
+      },
+      "pool": {
+        "bytes": 12251,
+        "sha256": "36b56dfd7f812b9a27d43fb0bad385f73985453dda11de70f0771fc0c3b02bc6",
+        "postPeephole": {
+          "bytes": 10827,
+          "sha256": "1ae8420703b3e2eda885e0e74442692093af33494203067f060c92575fdd9aa5"
+        }
+      },
+      "sink": {
+        "bytes": 7283,
+        "sha256": "6c94c7a8ec1bfbd79496b61a2ea7eaeda311b402b3d3f4d38243912cb83892c5",
+        "postPeephole": {
+          "bytes": 5859,
+          "sha256": "501b97c3f2bf56242dc22b6f75b7f0da04ace3e5cb7fe0ae264e7216f1cc1ed0"
+        }
+      },
+      "comb": {
+        "bytes": 7283,
+        "sha256": "6c94c7a8ec1bfbd79496b61a2ea7eaeda311b402b3d3f4d38243912cb83892c5",
+        "postPeephole": {
+          "bytes": 5859,
+          "sha256": "501b97c3f2bf56242dc22b6f75b7f0da04ace3e5cb7fe0ae264e7216f1cc1ed0"
+        }
+      }
+    },
+    "P384Mul": {
+      "off": {
+        "bytes": 927350,
+        "sha256": "c87ca9575963a3aa9b34a295179a7d49f4e198d972d8684408f04a3d497c0323",
+        "postPeephole": {
+          "bytes": 917353,
+          "sha256": "634637109530d90e3d0ddacd99303767004b8fe72a0ff6da144dcb92ca8687ba"
+        }
+      },
+      "pool": {
+        "bytes": 226900,
+        "sha256": "b398052ceb7d77745d3a91c75e7153fcc6a4fef802ba97c994eadff14a104199",
+        "postPeephole": {
+          "bytes": 217005,
+          "sha256": "df3a84bd95d293734c1f64a766546bc72975a7e7f33e7a8dd6201a344957d02f"
+        }
+      },
+      "sink": {
+        "bytes": 136356,
+        "sha256": "996346065dfc29a390af856473e1a9877d037ac135628d7bbf78c0bcae697a8b",
+        "postPeephole": {
+          "bytes": 126461,
+          "sha256": "fe65cb637e253b3ad2868c90ff58c55560baef3456c5ab302d93817c5d134e53"
+        }
+      },
+      "comb": {
+        "bytes": 136356,
+        "sha256": "996346065dfc29a390af856473e1a9877d037ac135628d7bbf78c0bcae697a8b",
+        "postPeephole": {
+          "bytes": 126461,
+          "sha256": "fe65cb637e253b3ad2868c90ff58c55560baef3456c5ab302d93817c5d134e53"
+        }
+      }
+    },
+    "P384MulGen": {
+      "off": {
+        "bytes": 927449,
+        "sha256": "706e1c6fdf1d5845f50129e6274970012617cff8bc8d2b6bac88328b60ffdc17",
+        "postPeephole": {
+          "bytes": 917450,
+          "sha256": "ca1bd9d37005216e25dbb20290da124a76be1ffa54ff7b14d6a54134cc4a4ba4"
+        }
+      },
+      "pool": {
+        "bytes": 226999,
+        "sha256": "0397c02c400570458f72800bea6387114d85bb43f91c4411c9174e1142793360",
+        "postPeephole": {
+          "bytes": 217104,
+          "sha256": "0f8047582997e426b9575a8ee8e1326703f988935d4b6ed438aacb280dff1f38"
+        }
+      },
+      "sink": {
+        "bytes": 136455,
+        "sha256": "10d60eb67b0d2359a0d99b2edb64d5739ed01a0f4a949fa658d4df344c400cae",
+        "postPeephole": {
+          "bytes": 126560,
+          "sha256": "4a98ddc44ec1ab94a53bbde568e54b36f616dc5d3100f983d67989a82485f724"
+        }
+      },
+      "comb": {
+        "bytes": 81418,
+        "sha256": "f456395d4368a0f7456896922d3f76f9a0bfa072c2e05b7c1e347cd4128f7ad6",
+        "postPeephole": {
+          "bytes": 77129,
+          "sha256": "8b92701526aa33fa446f7f9929d10b2a97ddbb575b717a120a1d738cfe6e8d23"
+        }
+      }
+    },
+    "P384Negate": {
+      "off": {
+        "bytes": 1498,
+        "sha256": "8ba083da26607f67e606a45006db0875b8c02722e7ec96e63a262c779a628dc8",
+        "postPeephole": {
+          "bytes": 1496,
+          "sha256": "79da63572850aa692f3ba045504d0dc2cf20c92d98f8da433168a0494844bfa1"
+        }
+      },
+      "pool": {
+        "bytes": 1455,
+        "sha256": "afadda301ddef4de732d20099366ce8b23a1420dc3f963bddb9bf6caf4534f1c",
+        "postPeephole": {
+          "bytes": 1453,
+          "sha256": "65e9d72d0000978b875e9ad96cd078c2e15becb45d06e63d9d45f1885eed4e99"
+        }
+      },
+      "sink": {
+        "bytes": 1455,
+        "sha256": "afadda301ddef4de732d20099366ce8b23a1420dc3f963bddb9bf6caf4534f1c",
+        "postPeephole": {
+          "bytes": 1453,
+          "sha256": "65e9d72d0000978b875e9ad96cd078c2e15becb45d06e63d9d45f1885eed4e99"
+        }
+      },
+      "comb": {
+        "bytes": 1455,
+        "sha256": "afadda301ddef4de732d20099366ce8b23a1420dc3f963bddb9bf6caf4534f1c",
+        "postPeephole": {
+          "bytes": 1453,
+          "sha256": "65e9d72d0000978b875e9ad96cd078c2e15becb45d06e63d9d45f1885eed4e99"
+        }
+      }
+    },
+    "P384OnCurve": {
+      "off": {
+        "bytes": 1227,
+        "sha256": "2d274e9e22ec20d8d49ebf0dd55f90d0a9d27476a69eb45fc4e097dd26920be1",
+        "postPeephole": {
+          "bytes": 1217,
+          "sha256": "f379b94a85ff3b4107b57e0fbbadd2a3da6aabf47d63b97a517fd7ac9814eef2"
+        }
+      },
+      "pool": {
+        "bytes": 896,
+        "sha256": "43c8c11c162a87796f189403239a8e960520096df9e397034cff21595f201794",
+        "postPeephole": {
+          "bytes": 886,
+          "sha256": "d4ab34d1d72a77246b58da779759c9c5626156be60cf23cc022a5a0bce6d7be9"
+        }
+      },
+      "sink": {
+        "bytes": 857,
+        "sha256": "d1eb673d321f4a43709679783f31ce107e1686c0c8385dc9e26477d19b7eb769",
+        "postPeephole": {
+          "bytes": 847,
+          "sha256": "cd6c67a1a11a34c51e2a6e9c9f8eb6a8a468fe14db1b9ce4cf0ada90a140ee4f"
+        }
+      },
+      "comb": {
+        "bytes": 857,
+        "sha256": "d1eb673d321f4a43709679783f31ce107e1686c0c8385dc9e26477d19b7eb769",
+        "postPeephole": {
+          "bytes": 847,
+          "sha256": "cd6c67a1a11a34c51e2a6e9c9f8eb6a8a468fe14db1b9ce4cf0ada90a140ee4f"
+        }
+      }
+    },
+    "P384EncodeCompressed": {
+      "off": {
+        "bytes": 19,
+        "sha256": "59052424dd77c722550109df93d63de9ffe3b8fbd5769313eaa2941cfbabf06e",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "6725743ec2d0a66ec361dd9350805a78485aac0a0378b604a6dc516ad456b07e"
+        }
+      },
+      "pool": {
+        "bytes": 19,
+        "sha256": "59052424dd77c722550109df93d63de9ffe3b8fbd5769313eaa2941cfbabf06e",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "6725743ec2d0a66ec361dd9350805a78485aac0a0378b604a6dc516ad456b07e"
+        }
+      },
+      "sink": {
+        "bytes": 19,
+        "sha256": "59052424dd77c722550109df93d63de9ffe3b8fbd5769313eaa2941cfbabf06e",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "6725743ec2d0a66ec361dd9350805a78485aac0a0378b604a6dc516ad456b07e"
+        }
+      },
+      "comb": {
+        "bytes": 19,
+        "sha256": "59052424dd77c722550109df93d63de9ffe3b8fbd5769313eaa2941cfbabf06e",
+        "postPeephole": {
+          "bytes": 18,
+          "sha256": "6725743ec2d0a66ec361dd9350805a78485aac0a0378b604a6dc516ad456b07e"
+        }
+      }
+    },
+    "VerifyECDSA_P384": {
+      "off": {
+        "bytes": 1987394,
+        "sha256": "cfbc39f382a08f8a8e42a141656d70ad12b8d8748501dc2316fd05ebd6625eb5",
+        "postPeephole": {
+          "bytes": 1963284,
+          "sha256": "397df153d19a0f942abc21bc387377a3779f5d9b5db2649ff3ae6611fb8e6e8f"
+        }
+      },
+      "pool": {
+        "bytes": 487239,
+        "sha256": "8c97eff2569dd507e85e3caa26bfbc328635d86c37876bc17cb1c72f3e0d6975",
+        "postPeephole": {
+          "bytes": 463335,
+          "sha256": "089d3c546b4386acf9441a32fd604ef5b43845662102a7292519539b2fc7cd3d"
+        }
+      },
+      "sink": {
+        "bytes": 296482,
+        "sha256": "1603092cf28f554992c37d3c9b310dbe66071ac82c82d9e7c003399a04b28786",
+        "postPeephole": {
+          "bytes": 272578,
+          "sha256": "918bab110fdedde53c498dd9cec1c6ba37ceecda2497ae431e239e0d465d5175"
+        }
+      },
+      "comb": {
+        "bytes": 241444,
+        "sha256": "3a72e126eecc6ec8ef00a99334c4be504482d6b2f445d5bb1b8b87738e3eca6d",
+        "postPeephole": {
+          "bytes": 223146,
+          "sha256": "e048520fdf0195662dff50697ae005549707db070c22f6c6b3417dc1b7d1be2b"
+        }
+      }
+    }
+  }
+}

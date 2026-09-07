@@ -43,6 +43,12 @@ program
   .option('--ir', 'include IR in artifact')
   .option('--asm', 'print ASM to stdout')
   .option('--disable-constant-folding', 'disable ANF constant folding pass')
+  .option('--ec-constant-pool', 'EXPERIMENTAL: pool repeated EC curve constants (changes emitted bytes)')
+  .option('--ec-reduction-sinking', 'EXPERIMENTAL: drop provably-dead sign fix-ups from EC modular reductions')
+  .option('--ec-fixed-base-comb', 'EXPERIMENTAL: comb multiplication where the base point is a compile-time constant')
+  .option('--stack-scheduler <mode>', 'EXPERIMENTAL: operand scheduling — current|liveness', 'current')
+  .option('--acknowledge-single-tier-schedule',
+    'Required with --stack-scheduler liveness: that mode exists only in the TypeScript compiler')
   .option('--from-ir <path>', 'compile from an ANF IR JSON file (skips parse/validate/typecheck/anf-lower)')
   .option('--hex', 'print only the script hex to stdout (no artifact JSON)')
   .option('--parse-only', 'stop after parse + validate; print "parser ok" on success (requires source input)')

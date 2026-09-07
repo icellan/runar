@@ -152,165 +152,49 @@ fn collect_ops(f: impl FnOnce(&mut dyn FnMut(StackOp))) -> Vec<StackOp> {
     ops
 }
 
-// ===========================================================================
-// ECTracker (same as in ec.rs — duplicated since it's private there)
-// ===========================================================================
-
-struct ECTracker<'a> {
-    nm: Vec<String>,
-    e: &'a mut dyn FnMut(StackOp),
-}
-
-#[allow(dead_code)]
-impl<'a> ECTracker<'a> {
-    fn new(init: &[&str], emit: &'a mut dyn FnMut(StackOp)) -> Self {
-        ECTracker {
-            nm: init.iter().map(|s| s.to_string()).collect(),
-            e: emit,
-        }
-    }
-
-    fn depth(&self) -> usize { self.nm.len() }
-
-    fn find_depth(&self, name: &str) -> usize {
-        for i in (0..self.nm.len()).rev() {
-            if self.nm[i] == name {
-                return self.nm.len() - 1 - i;
-            }
-        }
-        panic!("ECTracker: '{}' not on stack {:?}", name, self.nm);
-    }
-
-    fn push_bytes(&mut self, n: &str, v: Vec<u8>) {
-        (self.e)(StackOp::Push(PushValue::Bytes(v)));
-        self.nm.push(n.to_string());
-    }
-
-    fn push_int(&mut self, n: &str, v: i128) {
-        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(v))));
-        self.nm.push(n.to_string());
-    }
-
-    fn push_big_int(&mut self, n: &str, v: &BigInt) {
-        let script_num = bigint_to_script_num(v);
-        (self.e)(StackOp::Push(PushValue::Bytes(script_num)));
-        self.nm.push(n.to_string());
-    }
-
-    fn dup(&mut self, n: &str) {
-        (self.e)(StackOp::Dup);
-        self.nm.push(n.to_string());
-    }
-
-    fn drop(&mut self) {
-        (self.e)(StackOp::Drop);
-        if !self.nm.is_empty() { self.nm.pop(); }
-    }
-
-    fn nip(&mut self) {
-        (self.e)(StackOp::Nip);
-        let len = self.nm.len();
-        if len >= 2 { self.nm.remove(len - 2); }
-    }
-
-    fn over(&mut self, n: &str) {
-        (self.e)(StackOp::Over);
-        self.nm.push(n.to_string());
-    }
-
-    fn swap(&mut self) {
-        (self.e)(StackOp::Swap);
-        let len = self.nm.len();
-        if len >= 2 { self.nm.swap(len - 1, len - 2); }
-    }
-
-    fn rot(&mut self) {
-        (self.e)(StackOp::Rot);
-        let len = self.nm.len();
-        if len >= 3 {
-            let r = self.nm.remove(len - 3);
-            self.nm.push(r);
-        }
-    }
-
-    fn op(&mut self, code: &str) {
-        (self.e)(StackOp::Opcode(code.into()));
-    }
-
-    fn roll(&mut self, d: usize) {
-        if d == 0 { return; }
-        if d == 1 { self.swap(); return; }
-        if d == 2 { self.rot(); return; }
-        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
-        self.nm.push(String::new());
-        (self.e)(StackOp::Opcode("OP_ROLL".into()));
-        self.nm.pop();
-        let idx = self.nm.len() - 1 - d;
-        let r = self.nm.remove(idx);
-        self.nm.push(r);
-    }
-
-    fn pick(&mut self, d: usize, n: &str) {
-        if d == 0 { self.dup(n); return; }
-        if d == 1 { self.over(n); return; }
-        (self.e)(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
-        self.nm.push(String::new());
-        (self.e)(StackOp::Opcode("OP_PICK".into()));
-        self.nm.pop();
-        self.nm.push(n.to_string());
-    }
-
-    fn to_top(&mut self, name: &str) {
-        let d = self.find_depth(name);
-        self.roll(d);
-    }
-
-    fn copy_to_top(&mut self, name: &str, n: &str) {
-        let d = self.find_depth(name);
-        self.pick(d, n);
-    }
-
-    fn to_alt(&mut self) {
-        self.op("OP_TOALTSTACK");
-        if !self.nm.is_empty() { self.nm.pop(); }
-    }
-
-    fn from_alt(&mut self, n: &str) {
-        self.op("OP_FROMALTSTACK");
-        self.nm.push(n.to_string());
-    }
-
-    fn rename(&mut self, n: &str) {
-        if let Some(last) = self.nm.last_mut() {
-            *last = n.to_string();
-        }
-    }
-
-    fn raw_block(
-        &mut self,
-        consume: &[&str],
-        produce: Option<&str>,
-        f: impl FnOnce(&mut dyn FnMut(StackOp)),
-    ) {
-        for _ in consume {
-            if !self.nm.is_empty() { self.nm.pop(); }
-        }
-        f(self.e);
-        if let Some(p) = produce {
-            self.nm.push(p.to_string());
-        }
-    }
-}
+// The tracker is SHARED with ec.rs, not copied.
+//
+// It used to be duplicated here "since it's private there". That was tolerable
+// while it was 200 lines of pure stack bookkeeping; it stopped being tolerable
+// once it carried a sign lattice whose transfer functions decide which reduction
+// shape gets emitted. Two independently-maintained copies of that is two chances
+// to prove `Reduced` where only `NonNegative` holds — and the resulting script
+// is smaller, passes every local test, and is wrong.
+use super::ec::{comb_emit_select, Dom, ECTracker, EcCodegenOptions, POOL_FIELD_P, POOL_GROUP_N};
+use super::comb::{comb_geometry, comb_safe_rounds, comb_table, CombCurve, P256_COMB_CURVE, P384_COMB_CURVE};
+use super::cost_model::estimate_script_bytes;
+use num_traits::ToPrimitive;
 
 // ===========================================================================
 // Generic curve field arithmetic (parameterized by prime)
 // ===========================================================================
 
 fn c_push_field_p(t: &mut ECTracker, name: &str, c: &NistCurveParams) {
-    t.push_big_int(name, &*c.field_p);
+    t.push_const(POOL_FIELD_P, &c.field_p, name);
+}
+
+/// `a mod p` with no sign fix-up: 1 opcode instead of 7. Sound only when the
+/// dividend is provably >= 0 — the caller proves that, this does not check.
+fn c_field_mod_short(t: &mut ECTracker, a_name: &str, result_name: &str, c: &NistCurveParams) {
+    t.to_top(a_name);
+    c_push_field_p(t, "_fmods_p", c);
+    t.raw_block(&[a_name, "_fmods_p"], Some(result_name), |e| {
+        e(StackOp::Opcode("OP_MOD".into()));
+    });
+    t.set_domain(result_name, Dom::Reduced);
+}
+
+/// Does the cheap `a - b + p` subtraction pay? Only when p is pooled.
+fn c_cheap_sub_pays(t: &ECTracker, c: &NistCurveParams) -> bool {
+    let cost = t.const_cost(POOL_FIELD_P, &c.field_p);
+    2 * cost + 2 < cost + 8
 }
 
 fn c_field_mod(t: &mut ECTracker, a_name: &str, result_name: &str, c: &NistCurveParams) {
+    if t.sinking && t.domain_of(a_name).is_non_negative() {
+        c_field_mod_short(t, a_name, result_name, c);
+        return;
+    }
     t.to_top(a_name);
     c_push_field_p(t, "_fmod_p", c);
     t.raw_block(&[a_name, "_fmod_p"], Some(result_name), |e| {
@@ -323,36 +207,77 @@ fn c_field_mod(t: &mut ECTracker, a_name: &str, result_name: &str, c: &NistCurve
         e(StackOp::Swap);
         e(StackOp::Opcode("OP_MOD".into()));
     });
+    t.set_domain(result_name, Dom::Reduced);
 }
 
 fn c_field_add(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str, c: &NistCurveParams) {
+    // Read the operand facts before raw_block consumes their slots.
+    let sum_non_neg =
+        t.domain_of(a_name).is_non_negative() && t.domain_of(b_name).is_non_negative();
     t.to_top(a_name);
     t.to_top(b_name);
     t.raw_block(&[a_name, b_name], Some("_fadd_sum"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
+    if sum_non_neg {
+        t.set_domain("_fadd_sum", Dom::NonNegative);
+    }
     c_field_mod(t, "_fadd_sum", result_name, c);
 }
 
 fn c_field_sub(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str, c: &NistCurveParams) {
     t.to_top(a_name);
     t.to_top(b_name);
+    // Needs a >= 0 AND b in [0, p): then a - b > -p and one shifted reduction is
+    // exact. `b >= 0` alone is not enough — a coordinate decoded from 32 unsigned
+    // bytes may exceed p by up to 2^32 + 977.
+    let cheap = t.sinking
+        && t.domain_of(a_name).is_non_negative()
+        && t.domain_of(b_name) == Dom::Reduced
+        && c_cheap_sub_pays(t, c);
+
     t.raw_block(&[a_name, b_name], Some("_fsub_diff"), |e| {
         e(StackOp::Opcode("OP_SUB".into()));
     });
+
+    if cheap {
+        c_push_field_p(t, "_fsub_p", c);
+        t.raw_block(&["_fsub_diff", "_fsub_p"], Some("_fsub_shift"), |e| {
+            e(StackOp::Opcode("OP_ADD".into()));
+        });
+        t.set_domain("_fsub_shift", Dom::NonNegative);
+        c_field_mod_short(t, "_fsub_shift", result_name, c);
+        return;
+    }
     c_field_mod(t, "_fsub_diff", result_name, c);
 }
 
 fn c_field_mul(t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str, c: &NistCurveParams) {
+    c_field_mul_signed(t, a_name, b_name, result_name, c, false);
+}
+
+/// `c_field_mul` with an explicit assertion about the product's sign,
+/// independent of the operands: a*a >= 0 for any a whatsoever.
+fn c_field_mul_signed(
+    t: &mut ECTracker, a_name: &str, b_name: &str, result_name: &str, c: &NistCurveParams,
+    product_non_negative: bool,
+) {
+    let non_neg = product_non_negative
+        || (t.domain_of(a_name).is_non_negative() && t.domain_of(b_name).is_non_negative());
     t.to_top(a_name);
     t.to_top(b_name);
     t.raw_block(&[a_name, b_name], Some("_fmul_prod"), |e| {
         e(StackOp::Opcode("OP_MUL".into()));
     });
+    if non_neg {
+        t.set_domain("_fmul_prod", Dom::NonNegative);
+    }
     c_field_mod(t, "_fmul_prod", result_name, c);
 }
 
 fn c_field_mul_const(t: &mut ECTracker, a_name: &str, cv: i128, result_name: &str, c: &NistCurveParams) {
+    // Every call site passes a small positive cv, so the product keeps a's sign.
+    let non_neg = cv > 0 && t.domain_of(a_name).is_non_negative();
     t.to_top(a_name);
     t.raw_block(&[a_name], Some("_fmc_prod"), |e| {
         if cv == 2 {
@@ -362,12 +287,15 @@ fn c_field_mul_const(t: &mut ECTracker, a_name: &str, cv: i128, result_name: &st
             e(StackOp::Opcode("OP_MUL".into()));
         }
     });
+    if non_neg {
+        t.set_domain("_fmc_prod", Dom::NonNegative);
+    }
     c_field_mod(t, "_fmc_prod", result_name, c);
 }
 
 fn c_field_sqr(t: &mut ECTracker, a_name: &str, result_name: &str, c: &NistCurveParams) {
     t.copy_to_top(a_name, "_fsqr_copy");
-    c_field_mul(t, a_name, "_fsqr_copy", result_name, c);
+    c_field_mul_signed(t, a_name, "_fsqr_copy", result_name, c, true);
 }
 
 /// c_field_inv computes a^(p-2) mod p via generic square-and-multiply.
@@ -399,7 +327,7 @@ fn c_field_inv(t: &mut ECTracker, a_name: &str, result_name: &str, c: &NistCurve
 // ===========================================================================
 
 fn c_push_group_n(t: &mut ECTracker, name: &str, g: &NistGroupParams) {
-    t.push_big_int(name, &*g.n);
+    t.push_const(POOL_GROUP_N, &g.n, name);
 }
 
 fn c_group_mod(t: &mut ECTracker, a_name: &str, result_name: &str, g: &NistGroupParams) {
@@ -488,8 +416,8 @@ fn c_decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: 
         e(StackOp::Push(PushValue::Int(BigInt::from(c.coord_bytes as i128))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
-    t.nm.push("_dp_xb".to_string());
-    t.nm.push("_dp_yb".to_string());
+    t.push_tracked("_dp_xb", Dom::Unknown);
+    t.push_tracked("_dp_yb", Dom::Unknown);
 
     // Convert y_bytes (on top) to num
     t.raw_block(&["_dp_yb"], Some(y_name), |e| {
@@ -498,6 +426,10 @@ fn c_decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: 
         e(StackOp::Opcode("OP_CAT".into()));
         e(StackOp::Opcode("OP_BIN2NUM".into()));
     });
+    // A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+    // UNSIGNED: >= 0, but it may be up to 2^(8*coord_bytes) - 1 and therefore
+    // >= p. That gap is exactly what the subtraction precondition turns on.
+    t.set_domain(y_name, Dom::NonNegative);
 
     // Convert x_bytes to num
     t.to_top("_dp_xb");
@@ -507,6 +439,7 @@ fn c_decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: 
         e(StackOp::Opcode("OP_CAT".into()));
         e(StackOp::Opcode("OP_BIN2NUM".into()));
     });
+    t.set_domain(x_name, Dom::NonNegative);
 
     // Swap to standard order [xName, yName]
     t.swap();
@@ -795,7 +728,8 @@ fn c_jacobian_to_affine(t: &mut ECTracker, rx_name: &str, ry_name: &str, c: &Nis
 fn c_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &ECTracker, c: &NistCurveParams) {
     let cloned_nm: Vec<String> = t.nm.clone();
     let init_strs: Vec<&str> = cloned_nm.iter().map(|s| s.as_str()).collect();
-    let mut it = ECTracker::new(&init_strs, e);
+    let opts = t.options();
+    let mut it = ECTracker::with_opts(&init_strs, e, Some(&opts), Some(&t.dm));
     c_jacobian_add_affine_body(&mut it, false, c);
 }
 
@@ -944,7 +878,8 @@ fn c_build_jacobian_add_or_double_inline(
 ) {
     let cloned_nm: Vec<String> = t.nm.clone();
     let init_strs: Vec<&str> = cloned_nm.iter().map(|s| s.as_str()).collect();
-    let mut it = ECTracker::new(&init_strs, e);
+    let opts = t.options();
+    let mut it = ECTracker::with_opts(&init_strs, e, Some(&opts), Some(&t.dm));
     let it = &mut it;
 
     // Keep the pre-add accumulator: it is what must be DOUBLED in the
@@ -999,19 +934,46 @@ fn c_build_jacobian_add_or_double_inline(
 // Scalar multiplication (generic for both P-256 and P-384)
 // ===========================================================================
 
-fn c_emit_mul(emit: &mut dyn FnMut(StackOp), c: &NistCurveParams, g: &NistGroupParams) {
-    let mut t = ECTracker::new(&["_pt", "_k"], emit);
+fn c_emit_mul(
+    emit: &mut dyn FnMut(StackOp),
+    c: &NistCurveParams,
+    g: &NistGroupParams,
+    opts: Option<&EcCodegenOptions>,
+) {
+    let mut t = ECTracker::with_opts(&["_pt", "_k"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &c.field_p);
+    t.pool_constant(POOL_GROUP_N, &g.n);
     c_decompose_point(&mut t, "_pt", "ax", "ay", c);
 
-    // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
+    // k' = k + 3n, as THREE separate `+n` steps.
+    //
+    // This tier used to push a pre-folded `3n` "to match Go peephole optimizer
+    // output". Emitting the three steps is what the reference does, and the
+    // peephole's fold-chain-add collapses them back to the same `push 3n, ADD`
+    // — so the shipped bytes are unchanged while the pre-peephole form now
+    // matches the reference exactly, which is what the cross-tier flag-parity
+    // fixture compares.
     //
     // The "k ∈ [1, n-1]" precondition is one the caller cannot enforce — the
     // scalar is usually an unlock argument — so reduce it first.
     t.to_top("_k");
     c_emit_scalar_reduce(&mut t, "_k", "_kr", g);
-    let three_n = &**g.n * 3;
-    t.push_big_int("_3n", &three_n);
-    t.raw_block(&["_kr", "_3n"], Some("_kn3"), |e| {
+    // These three route through the POOL, matching the secp256k1 twin.
+    // They used to be raw literal pushes, which made the poolConstant of the
+    // group order above a strict LOSS: the slot was redeemed exactly once, by
+    // cEmitScalarReduce, so under --ec-constant-pool P-256 paid park 34 +
+    // pick 2 + release 2-3 = 38-39 bytes where a bare literal costs 34.
+    // Break-even is two redemptions; this is now four.
+    t.push_const(POOL_GROUP_N, &g.n, "_n");
+    t.raw_block(&["_kr", "_n"], Some("_kn"), |e| {
+        e(StackOp::Opcode("OP_ADD".into()));
+    });
+    t.push_const(POOL_GROUP_N, &g.n, "_n2");
+    t.raw_block(&["_kn", "_n2"], Some("_kn2"), |e| {
+        e(StackOp::Opcode("OP_ADD".into()));
+    });
+    t.push_const(POOL_GROUP_N, &g.n, "_n3");
+    t.raw_block(&["_kn2", "_n3"], Some("_kn3"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
     t.rename("_k");
@@ -1051,7 +1013,7 @@ fn c_emit_mul(emit: &mut dyn FnMut(StackOp), c: &NistCurveParams, g: &NistGroupP
 
         // Conditional add
         t.to_top("_bit");
-        t.nm.pop(); // _bit consumed by IF
+        t.pop_tracked(); // _bit consumed by IF
         // Only the final step can be handed two equal operands — see
         // c_build_jacobian_add_or_double_inline for why, and for what it costs
         // not to.
@@ -1076,6 +1038,180 @@ fn c_emit_mul(emit: &mut dyn FnMut(StackOp), c: &NistCurveParams, g: &NistGroupP
     t.to_top("_k"); t.drop();
 
     c_compose_point(&mut t, "_rx", "_ry", "_result", c);
+    t.release_constant(POOL_GROUP_N);
+    t.release_constant(POOL_FIELD_P);
+}
+
+
+// ===========================================================================
+// Fixed-base comb (the base is a compile-time constant)
+// ===========================================================================
+
+/// `k·G` by a Lim-Lee comb, for a base known at compile time.
+///
+/// The binary ladder runs one doubling and one conditional add per scalar BIT. A
+/// comb splits the scalar into `w` blocks of `d` bits and runs one doubling and
+/// one conditional add per COLUMN, so the round count falls from `w*d` to `d` at
+/// the price of a `2^w - 1` entry table — which costs nothing to build here,
+/// because `G` is a constant. Measured optimum is w=3: the selection logic grows
+/// as `2^w` and overtakes the saving by w=5.
+///
+/// SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+/// accumulator equal to the addend, its negation, or the point at infinity.
+/// `c_build_jacobian_add_or_double_inline`'s comment justifies using it
+/// everywhere but the last step of the BINARY ladder by an interval argument
+/// over `c_i mod n`, and insists that argument be re-derived by anything
+/// changing the offset or the iteration count. A comb changes both, so it is
+/// re-derived — as executable interval arithmetic in `comb_safe_rounds`,
+/// evaluated here. Rounds it cannot prove get the complete add-or-double form
+/// instead; nothing is assumed. For P-256 at w=3 it proves 81 of 86 rounds.
+///
+/// The other half of that argument is that the accumulator never starts at
+/// infinity, which needs the first digit non-zero. `comb_geometry` searches for
+/// the scalar offset that guarantees it rather than reusing the ladder's
+/// hardcoded `+3n` — which happens to be right for P-256 at w=3 and WRONG for
+/// P-384.
+///
+/// Stack in: [_k]. Stack out: [_result]. Returns false when no geometry exists.
+fn c_emit_comb_mul_gen(
+    emit: &mut dyn FnMut(StackOp),
+    c: &NistCurveParams,
+    g: &NistGroupParams,
+    curve: &CombCurve,
+    w: usize,
+    opts: Option<&EcCodegenOptions>,
+) -> bool {
+    let params = match comb_geometry(w, curve) {
+        Some(p) => p,
+        None => return false,
+    };
+    let d = params.d;
+    let table = comb_table(w, d, curve);
+    let safe = comb_safe_rounds(&params, curve);
+    let entries = (1usize << w) - 1;
+
+    let mut t = ECTracker::with_opts(&["_k"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &c.field_p);
+    t.pool_constant(POOL_GROUP_N, &g.n);
+
+    // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+    // what makes the interval argument apply at all; see `c_emit_scalar_reduce`.
+    t.to_top("_k");
+    c_emit_scalar_reduce(&mut t, "_k", "_kr", g);
+    t.rename("_k");
+    let offset = params.offset_multiple.to_u32().expect("comb offset fits u32");
+    for i in 0..offset {
+        let off = format!("_off{}", i);
+        t.push_const(POOL_GROUP_N, &g.n, &off);
+        t.raw_block(&["_k", &off], Some("_k"), |e| {
+            e(StackOp::Opcode("OP_ADD".into()));
+        });
+    }
+    t.set_domain("_k", Dom::NonNegative);
+
+    // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+    // against a 34-byte literal push, and every round reads all of them.
+    for j in 1..=entries {
+        let pt = table[j].as_ref().expect("comb table entry is never infinity");
+        t.push_big(&format!("_Tx{}", j), &pt.x);
+        t.push_big(&format!("_Ty{}", j), &pt.y);
+        t.set_domain(&format!("_Tx{}", j), Dom::Reduced);
+        t.set_domain(&format!("_Ty{}", j), Dom::Reduced);
+    }
+
+    // Round d-1 initialises the accumulator. The first digit is non-zero by
+    // construction (`comb_geometry`), so this is a real point, never infinity.
+    comb_emit_select(&mut t, d - 1, w, d);
+    t.to_top("_flag");
+    t.drop();
+    t.to_top("ax");
+    t.rename("jx");
+    t.to_top("ay");
+    t.rename("jy");
+    t.push_int("jz", 1);
+    t.set_domain("jz", Dom::Reduced);
+
+    for i in (0..=(d - 2)).rev() {
+        c_jacobian_double(&mut t, c);
+        comb_emit_select(&mut t, i, w, d);
+
+        // `c_jacobian_add_affine_body` documents its layout as
+        // [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at the
+        // top. The selection leaves ax/ay above jz, so restore the contract
+        // before the branch — otherwise the add arm would reorder the stack and
+        // the empty else arm would not, leaving the two arms with different
+        // layouts at OP_ENDIF.
+        t.to_top("_flag");
+        t.to_alt();
+        t.to_top("jx");
+        t.to_top("jy");
+        t.to_top("jz");
+        t.from_alt("_flag");
+
+        t.pop_tracked(); // consumed by OP_IF
+        let safe_i = safe[i];
+        let add_ops = collect_ops(|add_emit| {
+            if safe_i {
+                c_build_jacobian_add_affine_inline(add_emit, &t, c);
+            } else {
+                c_build_jacobian_add_or_double_inline(add_emit, &t, c);
+            }
+        });
+        (t.e)(StackOp::If { then_ops: add_ops, else_ops: vec![] });
+
+        // The addend was selected fresh for this round; the add only copied it.
+        t.to_top("ay");
+        t.drop();
+        t.to_top("ax");
+        t.drop();
+    }
+
+    c_jacobian_to_affine(&mut t, "_rx", "_ry", c);
+
+    for j in (1..=entries).rev() {
+        t.to_top(&format!("_Ty{}", j));
+        t.drop();
+        t.to_top(&format!("_Tx{}", j));
+        t.drop();
+    }
+    t.to_top("_k");
+    t.drop();
+
+    c_compose_point(&mut t, "_rx", "_ry", "_result", c);
+    t.release_constant(POOL_GROUP_N);
+    t.release_constant(POOL_FIELD_P);
+    true
+}
+
+/// Emit the cheapest comb over the candidate window widths.
+///
+/// Each candidate is rendered in full and scored with the same byte-cost model
+/// the emitter is measured by, and the smallest wins.
+fn c_emit_comb_best(
+    c: &NistCurveParams,
+    g: &NistGroupParams,
+    curve: &CombCurve,
+    opts: Option<&EcCodegenOptions>,
+) -> Option<Vec<StackOp>> {
+    let mut best: Option<Vec<StackOp>> = None;
+    for w in [2usize, 3, 4] {
+        let mut ops: Vec<StackOp> = Vec::new();
+        let built = {
+            let mut sink = |op: StackOp| ops.push(op);
+            c_emit_comb_mul_gen(&mut sink, c, g, curve, w, opts)
+        };
+        if !built {
+            continue;
+        }
+        let better = match &best {
+            None => true,
+            Some(b) => estimate_script_bytes(&ops) < estimate_script_bytes(b),
+        };
+        if better {
+            best = Some(ops);
+        }
+    }
+    best
 }
 
 // ===========================================================================
@@ -1151,8 +1287,8 @@ fn c_decompress_pub_key(
         e(StackOp::Push(PushValue::Int(BigInt::from(1))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
-    t.nm.push("_dk_prefix".to_string());
-    t.nm.push("_dk_xbytes".to_string());
+    t.push_tracked("_dk_prefix", Dom::Unknown);
+    t.push_tracked("_dk_xbytes", Dom::Unknown);
 
     // SEC1 §2.3.4 requires the prefix to be exactly 0x02 or 0x03. The parity
     // reduction below is `BIN2NUM, 2 MOD`, which accepts far more than that:
@@ -1203,7 +1339,7 @@ fn c_decompress_pub_key(
     t.copy_to_top("_dk_x_save", "_dk_x_for_3");
     c_field_mul_const(t, "_dk_x_for_3", 3, "_dk_3x", c);
     c_field_sub(t, "_dk_x3", "_dk_3x", "_dk_x3m3x", c);
-    t.push_big_int("_dk_b", curve_b);
+    t.push_big("_dk_b", curve_b);
     c_field_add(t, "_dk_x3m3x", "_dk_b", "_dk_y2", c);
 
     // y = (y^2)^sqrtExp mod p. c_field_pow CONSUMES its base, so keep a copy of
@@ -1240,7 +1376,7 @@ fn c_decompress_pub_key(
 
     // Use OP_IF to select: if match, use y_cand (drop neg_y), else use neg_y (drop y_cand)
     t.to_top("_dk_match");
-    t.nm.pop(); // condition consumed by IF
+    t.pop_tracked(); // condition consumed by IF
 
     let then_ops = vec![StackOp::Drop]; // remove neg_y, leaving y_cand
     let else_ops = vec![StackOp::Nip];  // remove y_cand, leaving neg_y
@@ -1248,10 +1384,19 @@ fn c_decompress_pub_key(
 
     // Remove one from tracker and rename the surviving item
     if let Some(neg_idx) = t.nm.iter().rposition(|n| n == "_dk_neg_y") {
-        t.nm.remove(neg_idx);
+        t.remove_slot_at(neg_idx);
     }
     if let Some(yc_idx) = t.nm.iter().rposition(|n| n == "_dk_y_cand") {
         t.nm[yc_idx] = qy_name.to_string();
+        // FORGET what was known about the slot: `_dk_y_cand` carries Reduced from
+// cFieldPow, but that fact describes only the THEN path. The else arm leaves
+// `p - y_cand` (bare OP_SUB, Unknown, range (0, p]) in this same slot, and
+// p - 0 = p is not < p. This is the join ECTracker.emitIf refuses to make, and
+// the raw `if` here bypasses that rule, so the reset must be explicit. Sound
+// today only via an unwritten argument (y_cand = 0 needs an order-2 point,
+// impossible on a prime-order curve) and unexploited only because nothing uses
+// qy as a fieldSub subtrahend yet.
+        t.set_domain(qy_name, Dom::Unknown);
     }
     if let Some(xs_idx) = t.nm.iter().rposition(|n| n == "_dk_x_save") {
         t.nm[xs_idx] = qx_name.to_string();
@@ -1322,8 +1467,8 @@ fn c_emit_length_gate(t: &mut ECTracker, name: &str, want: usize, flag_name: &st
         e(StackOp::Opcode("OP_SPLIT".into()));
         e(StackOp::Drop);
     });
-    t.nm.push(flag_name.to_string());
-    t.nm.push(name.to_string());
+    t.push_tracked(flag_name, Dom::Unknown);
+    t.push_tracked(name, Dom::Unknown);
 }
 
 /// SEC1 §4.1.4 step 1 / FIPS 186-5 §6.4.2: verify 1 <= r <= n-1 and
@@ -1398,8 +1543,17 @@ fn c_emit_verify_ecdsa(
     sqrt_exp: &BigInt,
     gx: &BigInt,
     gy: &BigInt,
+    comb_curve: &CombCurve,
+    opts: Option<&EcCodegenOptions>,
 ) {
-    let mut t = ECTracker::new(&["_msg", "_sig", "_pk"], emit);
+    let mut t = ECTracker::with_opts(&["_msg", "_sig", "_pk"], emit, opts, None);
+    // The verifier does hundreds of reductions OUTSIDE the two ladders —
+    // decompression's sqrt ladder, `c_group_inv`, `c_affine_add`, the final
+    // `c_group_mod`. Each ladder pools separately: `c_emit_mul` runs on its own
+    // tracker that deliberately cannot see this stack, so it cannot reach this
+    // slot.
+    t.pool_constant(POOL_FIELD_P, &c.field_p);
+    t.pool_constant(POOL_GROUP_N, &g.n);
 
     // Step 0: length gate. `_sig` and `_pk` are bare ByteString in the builtin
     // table and the type checker imposes no width, so both arrive attacker-sized.
@@ -1432,8 +1586,8 @@ fn c_emit_verify_ecdsa(
         e(StackOp::Push(PushValue::Int(BigInt::from(cb))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
-    t.nm.push("_r_bytes".to_string());
-    t.nm.push("_s_bytes".to_string());
+    t.push_tracked("_r_bytes", Dom::Unknown);
+    t.push_tracked("_s_bytes", Dom::Unknown);
 
     // Convert r_bytes to integer
     let rev_fn = c.reverse_bytes;
@@ -1494,7 +1648,18 @@ fn c_emit_verify_ecdsa(
     g_point_data[..c.coord_bytes].copy_from_slice(&gx_bytes);
     g_point_data[c.coord_bytes..].copy_from_slice(&gy_bytes);
 
-    t.push_bytes("_G", g_point_data);
+    // u1*G. G is a compile-time constant, so this half can use a fixed-base
+    // comb — one doubling and one add per COLUMN instead of per bit. u2*Q below
+    // cannot: Q arrives in the witness.
+    let comb_ops = if opts.map(|o| o.fixed_base_comb).unwrap_or(false) {
+        c_emit_comb_best(c, g, comb_curve, opts)
+    } else {
+        None
+    };
+
+    if comb_ops.is_none() {
+        t.push_bytes("_G", g_point_data);
+    }
     t.to_top("_u1");
 
     // Stash items on altstack.
@@ -1510,14 +1675,24 @@ fn c_emit_verify_ecdsa(
     t.to_top("_qx");
     t.to_alt();
 
-    // Remove _G and _u1 from tracker before c_emit_mul
-    t.nm.pop(); // _u1
-    t.nm.pop(); // _G
+    // The multiply creates its own ECTracker and cannot see items below its
+    // operands. Remove them from ours.
+    t.pop_tracked(); // _u1
+    if comb_ops.is_none() {
+        t.pop_tracked(); // _G
+    }
 
-    c_emit_mul(t.e, c, g);
+    match &comb_ops {
+        Some(ops) => {
+            for op in ops {
+                (t.e)(op.clone());
+            }
+        }
+        None => c_emit_mul(t.e, c, g, opts),
+    }
 
     // After mul, one result point is on the stack
-    t.nm.push("_R1_point".to_string());
+    t.push_tracked("_R1_point", Dom::Unknown);
 
     // Pop qx/qy/u2 from altstack (LIFO order)
     t.from_alt("_qx");
@@ -1534,10 +1709,10 @@ fn c_emit_verify_ecdsa(
     t.to_top("_u2");
 
     // Remove from tracker, emit mul, push result
-    t.nm.pop(); // _u2
-    t.nm.pop(); // _Q_point
-    c_emit_mul(t.e, c, g);
-    t.nm.push("_R2_point".to_string());
+    t.pop_tracked(); // _u2
+    t.pop_tracked(); // _Q_point
+    c_emit_mul(t.e, c, g, opts);
+    t.push_tracked("_R2_point", Dom::Unknown);
 
     // Restore R1 point
     t.from_alt("_R1_point");
@@ -1582,6 +1757,8 @@ fn c_emit_verify_ecdsa(
     t.raw_block(&["_input_ok", "_sig_ok"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
+    t.release_constant(POOL_GROUP_N);
+    t.release_constant(POOL_FIELD_P);
 }
 
 // ===========================================================================
@@ -1589,41 +1766,54 @@ fn c_emit_verify_ecdsa(
 // ===========================================================================
 
 /// p256Add: add two P-256 points.
-pub fn emit_p256_add(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pa", "_pb"], emit);
+pub fn emit_p256_add(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pa", "_pb"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &P256_CURVE.field_p);
     c_decompose_point(&mut t, "_pa", "px", "py", &P256_CURVE);
     c_decompose_point(&mut t, "_pb", "qx", "qy", &P256_CURVE);
     c_affine_add(&mut t, &P256_CURVE);
     c_compose_point(&mut t, "rx", "ry", "_result", &P256_CURVE);
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// p256Mul: P-256 scalar multiplication.
-pub fn emit_p256_mul(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_mul(emit, &P256_CURVE, &P256_GROUP);
+pub fn emit_p256_mul(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    c_emit_mul(emit, &P256_CURVE, &P256_GROUP, opts);
 }
 
 /// p256MulGen: P-256 generator multiplication.
-pub fn emit_p256_mul_gen(emit: &mut dyn FnMut(StackOp)) {
+pub fn emit_p256_mul_gen(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    if opts.map(|o| o.fixed_base_comb).unwrap_or(false) {
+        if let Some(ops) = c_emit_comb_best(&P256_CURVE, &P256_GROUP, &P256_COMB_CURVE, opts) {
+            for op in ops {
+                emit(op);
+            }
+            return;
+        }
+    }
     let mut g_point = Vec::with_capacity(64);
     g_point.extend_from_slice(&bigint_to_n_bytes(&P256_GX, 32));
     g_point.extend_from_slice(&bigint_to_n_bytes(&P256_GY, 32));
     emit(StackOp::Push(PushValue::Bytes(g_point)));
     emit(StackOp::Swap); // [point, scalar]
-    emit_p256_mul(emit);
+    emit_p256_mul(emit, opts);
 }
 
 /// p256Negate: negate a P-256 point.
-pub fn emit_p256_negate(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt"], emit);
+pub fn emit_p256_negate(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &P256_CURVE.field_p);
     c_decompose_point(&mut t, "_pt", "_nx", "_ny", &P256_CURVE);
     c_push_field_p(&mut t, "_fp", &P256_CURVE);
     c_field_sub(&mut t, "_fp", "_ny", "_neg_y", &P256_CURVE);
     c_compose_point(&mut t, "_nx", "_neg_y", "_result", &P256_CURVE);
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// p256OnCurve: check if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p).
-pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt"], emit);
+pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &P256_CURVE.field_p);
     c_decompose_point(&mut t, "_pt", "_x", "_y", &P256_CURVE);
     c_emit_canonicity_guard(&mut t, "_x", "_y", &P256_CURVE);
 
@@ -1637,7 +1827,7 @@ pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
     c_field_mul(&mut t, "_x2", "_x_copy", "_x3", &P256_CURVE);
     c_field_mul_const(&mut t, "_x_copy2", 3, "_3x", &P256_CURVE);
     c_field_sub(&mut t, "_x3", "_3x", "_x3m3x", &P256_CURVE);
-    t.push_big_int("_b", &P256_B);
+    t.push_big("_b", &P256_B);
     c_field_add(&mut t, "_x3m3x", "_b", "_rhs", &P256_CURVE);
 
     // Compare
@@ -1653,6 +1843,7 @@ pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
     t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// p256EncodeCompressed: encode a P-256 point as 33-byte compressed pubkey.
@@ -1683,8 +1874,8 @@ pub fn emit_p256_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
 }
 
 /// verifyECDSA_P256: verify an ECDSA signature on P-256.
-pub fn emit_verify_ecdsa_p256(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_verify_ecdsa(emit, &P256_CURVE, &P256_GROUP, &P256_B, &P256_SQRT_EXP, &P256_GX, &P256_GY);
+pub fn emit_verify_ecdsa_p256(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    c_emit_verify_ecdsa(emit, &P256_CURVE, &P256_GROUP, &P256_B, &P256_SQRT_EXP, &P256_GX, &P256_GY, &P256_COMB_CURVE, opts);
 }
 
 // ===========================================================================
@@ -1692,41 +1883,54 @@ pub fn emit_verify_ecdsa_p256(emit: &mut dyn FnMut(StackOp)) {
 // ===========================================================================
 
 /// p384Add: add two P-384 points.
-pub fn emit_p384_add(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pa", "_pb"], emit);
+pub fn emit_p384_add(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pa", "_pb"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &P384_CURVE.field_p);
     c_decompose_point(&mut t, "_pa", "px", "py", &P384_CURVE);
     c_decompose_point(&mut t, "_pb", "qx", "qy", &P384_CURVE);
     c_affine_add(&mut t, &P384_CURVE);
     c_compose_point(&mut t, "rx", "ry", "_result", &P384_CURVE);
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// p384Mul: P-384 scalar multiplication.
-pub fn emit_p384_mul(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_mul(emit, &P384_CURVE, &P384_GROUP);
+pub fn emit_p384_mul(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    c_emit_mul(emit, &P384_CURVE, &P384_GROUP, opts);
 }
 
 /// p384MulGen: P-384 generator multiplication.
-pub fn emit_p384_mul_gen(emit: &mut dyn FnMut(StackOp)) {
+pub fn emit_p384_mul_gen(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    if opts.map(|o| o.fixed_base_comb).unwrap_or(false) {
+        if let Some(ops) = c_emit_comb_best(&P384_CURVE, &P384_GROUP, &P384_COMB_CURVE, opts) {
+            for op in ops {
+                emit(op);
+            }
+            return;
+        }
+    }
     let mut g_point = Vec::with_capacity(96);
     g_point.extend_from_slice(&bigint_to_n_bytes(&P384_GX, 48));
     g_point.extend_from_slice(&bigint_to_n_bytes(&P384_GY, 48));
     emit(StackOp::Push(PushValue::Bytes(g_point)));
     emit(StackOp::Swap); // [point, scalar]
-    emit_p384_mul(emit);
+    emit_p384_mul(emit, opts);
 }
 
 /// p384Negate: negate a P-384 point.
-pub fn emit_p384_negate(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt"], emit);
+pub fn emit_p384_negate(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &P384_CURVE.field_p);
     c_decompose_point(&mut t, "_pt", "_nx", "_ny", &P384_CURVE);
     c_push_field_p(&mut t, "_fp", &P384_CURVE);
     c_field_sub(&mut t, "_fp", "_ny", "_neg_y", &P384_CURVE);
     c_compose_point(&mut t, "_nx", "_neg_y", "_result", &P384_CURVE);
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// p384OnCurve: check if a P-384 point is on the curve.
-pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
-    let mut t = ECTracker::new(&["_pt"], emit);
+pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    let mut t = ECTracker::with_opts(&["_pt"], emit, opts, None);
+    t.pool_constant(POOL_FIELD_P, &P384_CURVE.field_p);
     c_decompose_point(&mut t, "_pt", "_x", "_y", &P384_CURVE);
     c_emit_canonicity_guard(&mut t, "_x", "_y", &P384_CURVE);
 
@@ -1740,7 +1944,7 @@ pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
     c_field_mul(&mut t, "_x2", "_x_copy", "_x3", &P384_CURVE);
     c_field_mul_const(&mut t, "_x_copy2", 3, "_3x", &P384_CURVE);
     c_field_sub(&mut t, "_x3", "_3x", "_x3m3x", &P384_CURVE);
-    t.push_big_int("_b", &P384_B);
+    t.push_big("_b", &P384_B);
     c_field_add(&mut t, "_x3m3x", "_b", "_rhs", &P384_CURVE);
 
     // Compare
@@ -1756,6 +1960,7 @@ pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
     t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
+    t.release_constant(POOL_FIELD_P);
 }
 
 /// p384EncodeCompressed: encode a P-384 point as 49-byte compressed pubkey.
@@ -1786,6 +1991,6 @@ pub fn emit_p384_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
 }
 
 /// verifyECDSA_P384: verify an ECDSA signature on P-384.
-pub fn emit_verify_ecdsa_p384(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_verify_ecdsa(emit, &P384_CURVE, &P384_GROUP, &P384_B, &P384_SQRT_EXP, &P384_GX, &P384_GY);
+pub fn emit_verify_ecdsa_p384(emit: &mut dyn FnMut(StackOp), opts: Option<&EcCodegenOptions>) {
+    c_emit_verify_ecdsa(emit, &P384_CURVE, &P384_GROUP, &P384_B, &P384_SQRT_EXP, &P384_GX, &P384_GY, &P384_COMB_CURVE, opts);
 }

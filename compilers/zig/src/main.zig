@@ -17,6 +17,7 @@ const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
 const stack_lower = @import("passes/stack_lower.zig");
+const ec_emitters = @import("passes/helpers/ec_emitters.zig");
 const peephole = @import("passes/peephole.zig");
 const emit = @import("codegen/emit.zig");
 const input_limits = @import("frontend/input_limits.zig");
@@ -26,6 +27,21 @@ const CompileOptions = struct {
     emit_ir: bool = false,
     hex_only: bool = false,
     disable_constant_folding: bool = false,
+    /// EXPERIMENTAL EC script-size optimizations. All default off, and with all
+    /// off every EC emitter is byte-identical to the shipping output — no
+    /// golden, size baseline, or cross-tier hex comparison moves.
+    ///
+    /// Cross-tier byte parity for the flags THEMSELVES is gated by
+    /// conformance/ec-flag-parity/expected.json.
+    ec_constant_pool: bool = false,
+    /// Needs `ec_constant_pool`: the cheap subtraction shape references the
+    /// field prime twice, so without a pooled slot it does not pay. The emitters
+    /// compare the two costs, so enabling it alone is safe — just useless.
+    ec_reduction_sinking: bool = false,
+    /// Applies only where the base point is a compile-time constant. Runtime-base
+    /// multiplies keep the binary ladder: the comb's interval soundness argument
+    /// does not cover an attacker-chosen base.
+    ec_fixed_base_comb: bool = false,
     parse_only: bool = false,
     emit_source_map_path: ?[]const u8 = null,
     /// `--emit-ir-to <path>`: write the SAME bytes `--emit-ir` would print to
@@ -35,6 +51,18 @@ const CompileOptions = struct {
     /// same source (audit finding #17).
     emit_ir_to_path: ?[]const u8 = null,
 };
+
+/// Options handed to the EC / NIST codegen modules.
+///
+/// All-false — the default — makes those emitters take their untouched path, so
+/// the emitted bytes are provably identical to the shipping ones.
+fn ecCodegenOptions(opts: CompileOptions) ec_emitters.EcCodegenOptions {
+    return .{
+        .constant_pool = opts.ec_constant_pool,
+        .reduction_sinking = opts.ec_reduction_sinking,
+        .fixed_base_comb = opts.ec_fixed_base_comb,
+    };
+}
 
 const ParseOptionsError = error{
     UnknownFlag,
@@ -58,6 +86,18 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
         if (std.mem.eql(u8, arg, "--disable-constant-folding")) {
             if (!allow_disable_constant_folding) return error.UnsupportedFlag;
             opts.disable_constant_folding = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--ec-constant-pool")) {
+            opts.ec_constant_pool = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--ec-reduction-sinking")) {
+            opts.ec_reduction_sinking = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--ec-fixed-base-comb")) {
+            opts.ec_fixed_base_comb = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--parse-only")) {
@@ -221,6 +261,9 @@ fn printUsage() void {
         \\  --emit-ir                 Output canonical ANF IR JSON (stop after pass 4)
         \\  --hex                     Output script hex only (no artifact JSON)
         \\  --disable-constant-folding  Skip constant folding pass
+        \\  --ec-constant-pool          EXPERIMENTAL: pool repeated EC curve constants
+        \\  --ec-reduction-sinking      EXPERIMENTAL: drop provably-dead EC sign fix-ups
+        \\  --ec-fixed-base-comb        EXPERIMENTAL: comb mul for compile-time base points
         \\
         \\Formats: .runar.zig, .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.java, .json
         \\
@@ -257,7 +300,7 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
         return;
     }
 
-    const stack_program = try stack_lower.lower(allocator, program);
+    const stack_program = try stack_lower.lowerOpts(allocator, program, ecCodegenOptions(opts));
     defer stack_program.deinit(allocator);
     const optimized_methods = try peephole.optimize(allocator, stack_program.methods);
     const optimized_stack_program = types.StackProgram{
@@ -475,7 +518,7 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     }
 
     // Pass 5: Stack Lower
-    const stack_program = try stack_lower.lower(work_allocator, program);
+    const stack_program = try stack_lower.lowerOpts(work_allocator, program, ecCodegenOptions(opts));
     defer stack_program.deinit(work_allocator);
     const optimized_methods = try peephole.optimize(work_allocator, stack_program.methods);
     const optimized_stack_program = types.StackProgram{

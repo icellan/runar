@@ -12,6 +12,12 @@ interface CompileOptions {
   ir?: boolean;
   asm?: boolean;
   disableConstantFolding?: boolean;
+  ecConstantPool?: boolean;
+  ecReductionSinking?: boolean;
+  ecFixedBaseComb?: boolean;
+  stackScheduler?: string;
+  /** Required alongside `stackScheduler: 'liveness'`. See `schedulerMode`. */
+  acknowledgeSingleTierSchedule?: boolean;
   fromIr?: string;
   hex?: boolean;
   parseOnly?: boolean;
@@ -72,6 +78,50 @@ function repoRelativeFileName(absSourcePath: string): string {
  * 3. Write the resulting artifact JSON to the output directory.
  * 4. Optionally print the ASM to stdout.
  */
+/**
+ * Validate `--stack-scheduler`. An unrecognised mode is an error rather than a
+ * silent fall back to the default: a benchmark run that quietly measured the
+ * shipping compiler while reporting an experiment would be worse than a crash.
+ */
+function schedulerMode(
+  options: { stackScheduler?: string; acknowledgeSingleTierSchedule?: boolean },
+): 'current' | 'liveness' {
+  const mode = options.stackScheduler ?? 'current';
+  if (mode !== 'current' && mode !== 'liveness') {
+    throw new Error(`--stack-scheduler: unknown mode '${mode}' (expected current|liveness)`);
+  }
+  // `liveness` exists in the TypeScript compiler ONLY. Grepping
+  // scheduler/schedulerMode/liveness across the other six returns nothing, and
+  // `altSpills`/`maybeSpill`/`restoreSpills` live in 05-stack-lower.ts alone.
+  //
+  // That makes it categorically different from the three `--ec-*` flags, which
+  // every tier implements with identical spelling and which
+  // `conformance/ec-flag-parity/expected.json` pins across all seven. Nothing
+  // pins the scheduler dimension, because there is nothing to pin it against.
+  //
+  // The output is not merely unusual, it is undeployable-by-consensus: the mode
+  // moves emitted bytes, which shifts the `constructorSlots` offsets and
+  // `codeSeparatorIndex` the SDKs read back out of the artifact. A contract
+  // compiled this way has a locking script — and therefore a funding address —
+  // that no other tier can reproduce, so a redeploy from any other tier lands
+  // somewhere else.
+  //
+  // So it is gated the way this repo gates its other "this compiles but you
+  // should not ship it" path (`@acknowledgeUnsoundSP1FriVerifier`): a hard
+  // error unless the caller says the words. Benchmarks pass the flag; a user
+  // reaching for a size win cannot do it by accident.
+  if (mode === 'liveness' && options.acknowledgeSingleTierSchedule !== true) {
+    throw new Error(
+      '--stack-scheduler liveness is implemented in the TypeScript compiler ONLY.\n'
+      + 'The emitted script differs from every other tier, and the shifted\n'
+      + 'constructorSlots / codeSeparatorIndex mean the deployed contract has a\n'
+      + 'funding address no other tier reproduces.\n'
+      + 'Pass --acknowledge-single-tier-schedule if that is what you want.',
+    );
+  }
+  return mode;
+}
+
 export async function compileCommand(
   files: string[],
   options: CompileOptions,
@@ -81,10 +131,10 @@ export async function compileCommand(
 
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
-  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; parseOnly?: boolean }) => unknown;
+  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; ecConstantPool?: boolean; ecReductionSinking?: boolean; ecFixedBaseComb?: boolean; schedulerMode?: 'current' | 'liveness'; parseOnly?: boolean }) => unknown;
   type CompileFromANFFn = (
     program: unknown,
-    options?: { disableConstantFolding?: boolean },
+    options?: { disableConstantFolding?: boolean; ecConstantPool?: boolean; ecReductionSinking?: boolean; ecFixedBaseComb?: boolean; schedulerMode?: 'current' | 'liveness' },
   ) => { scriptHex: string; scriptAsm: string };
   type LoadANFFn = (json: string) => unknown;
 
@@ -174,7 +224,13 @@ export async function compileCommand(
 
     let result: { scriptHex: string; scriptAsm: string };
     try {
-      result = compileFromANF(program, { disableConstantFolding: options.disableConstantFolding });
+      result = compileFromANF(program, {
+      disableConstantFolding: options.disableConstantFolding,
+      ecConstantPool: options.ecConstantPool,
+      ecReductionSinking: options.ecReductionSinking,
+      ecFixedBaseComb: options.ecFixedBaseComb,
+      schedulerMode: schedulerMode(options),
+    });
     } catch (err) {
       console.error(`  Compilation error: ${(err as Error).message}`);
       process.exitCode = 1;
@@ -250,6 +306,10 @@ export async function compileCommand(
       compileResult = compile(source, {
         fileName: resolvedPath,
         disableConstantFolding: options.disableConstantFolding,
+        ecConstantPool: options.ecConstantPool,
+        ecReductionSinking: options.ecReductionSinking,
+        ecFixedBaseComb: options.ecFixedBaseComb,
+        schedulerMode: schedulerMode(options),
         parseOnly: options.parseOnly,
       }) as CompileResultLike;
     } catch (err) {

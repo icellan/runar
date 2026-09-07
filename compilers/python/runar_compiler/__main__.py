@@ -116,6 +116,21 @@ def main() -> None:
         help="Disable the ANF constant folding pass",
     )
     parser.add_argument(
+        "--ec-constant-pool",
+        action="store_true",
+        help="EXPERIMENTAL: pool repeated EC curve constants (changes emitted bytes)",
+    )
+    parser.add_argument(
+        "--ec-reduction-sinking",
+        action="store_true",
+        help="EXPERIMENTAL: drop provably-dead sign fix-ups from EC modular reductions",
+    )
+    parser.add_argument(
+        "--ec-fixed-base-comb",
+        action="store_true",
+        help="EXPERIMENTAL: comb multiplication where the base point is a compile-time constant",
+    )
+    parser.add_argument(
         "--emit-source-map",
         dest="emit_source_map",
         metavar="PATH",
@@ -222,11 +237,17 @@ def main() -> None:
             artifact = compile_from_source(
                 args.source,
                 disable_constant_folding=args.disable_constant_folding,
+                ec_constant_pool=args.ec_constant_pool,
+                ec_reduction_sinking=args.ec_reduction_sinking,
+                ec_fixed_base_comb=args.ec_fixed_base_comb,
             )
         else:
             artifact = compile_from_ir(
                 args.ir,
                 disable_constant_folding=args.disable_constant_folding,
+                ec_constant_pool=args.ec_constant_pool,
+                ec_reduction_sinking=args.ec_reduction_sinking,
+                ec_fixed_base_comb=args.ec_fixed_base_comb,
             )
     except CompilationError as e:
         print(f"Compilation error: {e}", file=sys.stderr)

@@ -80,7 +80,12 @@ public final class Emit {
     // Opcode table
     // ------------------------------------------------------------------
 
-    static final Map<String, Integer> OPCODES = new HashMap<>();
+    /**
+     * The opcode table. Public so {@code codegen.CostModel} can reject an
+     * unknown mnemonic loudly rather than costing it zero — a typo in a codegen
+     * module must not become a size report that is quietly wrong.
+     */
+    public static final Map<String, Integer> OPCODES = new HashMap<>();
     static {
         OPCODES.put("OP_0", 0x00);
         OPCODES.put("OP_FALSE", 0x00);

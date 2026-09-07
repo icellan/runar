@@ -80,6 +80,18 @@ struct Args {
     #[arg(long)]
     disable_constant_folding: bool,
 
+    /// EXPERIMENTAL: pool repeated EC curve constants (changes emitted bytes)
+    #[arg(long)]
+    ec_constant_pool: bool,
+
+    /// EXPERIMENTAL: drop provably-dead sign fix-ups from EC modular reductions
+    #[arg(long)]
+    ec_reduction_sinking: bool,
+
+    /// EXPERIMENTAL: comb multiplication where the base point is a compile-time constant
+    #[arg(long)]
+    ec_fixed_base_comb: bool,
+
     /// After a successful compile, write artifact.sourceMap JSON to this path.
     #[arg(long)]
     emit_source_map: Option<PathBuf>,
@@ -107,6 +119,9 @@ fn main() {
 
     let opts = runar_compiler_rust::CompileOptions {
         disable_constant_folding: args.disable_constant_folding,
+        ec_constant_pool: args.ec_constant_pool,
+        ec_reduction_sinking: args.ec_reduction_sinking,
+        ec_fixed_base_comb: args.ec_fixed_base_comb,
         ..Default::default()
     };
 

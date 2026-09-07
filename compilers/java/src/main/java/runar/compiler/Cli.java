@@ -177,7 +177,7 @@ public final class Cli {
         // Runs INDEPENDENTLY of --emit-ir / --hex so a single invocation
         // can produce both artefacts (e.g. `--hex --emit-source-map=...`).
         if (parsed.emitSourceMap != null) {
-            int rc = writeSourceMap(anf, parsed.emitSourceMap);
+            int rc = writeSourceMap(anf, parsed.emitSourceMap, parsed.ecCodegen());
             if (rc != 0) return rc;
         }
 
@@ -196,7 +196,7 @@ public final class Cli {
         }
 
         if (parsed.hex) {
-            return emitHex(anf);
+            return emitHex(anf, parsed.ecCodegen());
         }
 
         // No output flag specified; default to IR emission for parity with
@@ -251,8 +251,13 @@ public final class Cli {
     }
 
     private int writeSourceMap(AnfProgram anf, String path) {
+        return writeSourceMap(anf, path, null);
+    }
+
+    private int writeSourceMap(
+        AnfProgram anf, String path, runar.compiler.codegen.Ec.EcCodegenOptions ecCodegen) {
         try {
-            StackProgram stack = StackLower.run(anf);
+            StackProgram stack = StackLower.run(anf, ecCodegen);
             StackProgram optimised = Peephole.run(stack);
             Emit.EmitResultWithSourceMap result = Emit.runResultWithSourceMap(optimised);
             StringBuilder b = new StringBuilder(64 + 80 * result.sourceMap().size());
@@ -319,7 +324,7 @@ public final class Cli {
 
         // GAP-002: --emit-source-map also runs on the IR path.
         if (parsed.emitSourceMap != null) {
-            int rc = writeSourceMap(anf, parsed.emitSourceMap);
+            int rc = writeSourceMap(anf, parsed.emitSourceMap, parsed.ecCodegen());
             if (rc != 0) return rc;
         }
 
@@ -329,7 +334,7 @@ public final class Cli {
         }
 
         if (parsed.hex) {
-            return emitHex(anf);
+            return emitHex(anf, parsed.ecCodegen());
         }
 
         out.println(Jcs.stringify(anf));
@@ -355,8 +360,12 @@ public final class Cli {
     }
 
     private int emitHex(AnfProgram anf) {
+        return emitHex(anf, null);
+    }
+
+    private int emitHex(AnfProgram anf, runar.compiler.codegen.Ec.EcCodegenOptions ecCodegen) {
         try {
-            StackProgram stack = StackLower.run(anf);
+            StackProgram stack = StackLower.run(anf, ecCodegen);
             StackProgram optimised = Peephole.run(stack);
             String hex = Emit.run(optimised);
             out.println(hex);
@@ -625,6 +634,29 @@ public final class Cli {
         boolean hex;
         boolean parseOnly;
         boolean disableConstantFolding;
+        /**
+         * EXPERIMENTAL EC script-size optimizations. All three default off, and
+         * with all three off every EC emitter is byte-identical to the shipping
+         * output — no golden, size baseline, or cross-tier hex comparison moves.
+         *
+         * <p>Cross-tier byte parity for the flags THEMSELVES is gated by
+         * conformance/ec-flag-parity/expected.json, replayed in
+         * codegen/EcFlagParityTest.
+         */
+        boolean ecConstantPool;
+        /**
+         * Needs {@code ecConstantPool}: the cheap subtraction shape references the
+         * field prime twice, so without a pooled slot it does not pay. The
+         * emitters compare the two costs, so enabling it alone is safe — just
+         * useless.
+         */
+        boolean ecReductionSinking;
+        /**
+         * Applies only where the base point is a compile-time constant. Runtime-base
+         * multiplies keep the binary ladder: the comb's interval soundness argument
+         * does not cover an attacker-chosen base.
+         */
+        boolean ecFixedBaseComb;
         boolean version;
         boolean help;
         boolean daemon;
@@ -658,6 +690,9 @@ public final class Cli {
                     case "--hex" -> out.hex = true;
                     case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
+                    case "--ec-constant-pool" -> out.ecConstantPool = true;
+                    case "--ec-reduction-sinking" -> out.ecReductionSinking = true;
+                    case "--ec-fixed-base-comb" -> out.ecFixedBaseComb = true;
                     case "--emit-source-map" -> out.emitSourceMap = requireValue(list, "--emit-source-map");
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
@@ -666,6 +701,19 @@ public final class Cli {
                 }
             }
             return out;
+        }
+
+        /**
+         * Options handed to the EC / NIST codegen modules.
+         *
+         * <p>Returns {@code null} — not an all-false record — when nothing is
+         * enabled, so those emitters take their untouched default path and the
+         * emitted bytes are provably identical to the shipping ones.
+         */
+        runar.compiler.codegen.Ec.EcCodegenOptions ecCodegen() {
+            if (!ecConstantPool && !ecReductionSinking && !ecFixedBaseComb) return null;
+            return new runar.compiler.codegen.Ec.EcCodegenOptions(
+                ecConstantPool, ecReductionSinking, ecFixedBaseComb);
         }
 
         private static String requireValue(List<String> list, String flag) {

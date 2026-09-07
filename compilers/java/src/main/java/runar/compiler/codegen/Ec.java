@@ -82,13 +82,168 @@ public final class Ec {
     // ECTracker: named stack slot tracker (mirrors Python ECTracker)
     // ==================================================================
 
+    /**
+     * Codegen options shared by every EC / NIST-curve emitter.
+     *
+     * <p>Off by default: with {@code null} (or an all-false instance) each emitter is byte-identical
+     * to what the seven tiers ship today, so no golden, size baseline, or cross-tier parity gate can
+     * move.
+     *
+     * @param constantPool park large repeated constants (the field prime, the group order) in a
+     *     stack slot and copy them with {@code OP_PICK} instead of re-pushing the literal. {@code
+     *     fieldMod} pushes the 256-bit prime at every modular reduction — 34 bytes a time, 20,025
+     *     times in {@code p256-wallet} (71 % of that fixture). A pick from a slot a dozen deep costs
+     *     2.
+     * @param reductionSinking emit {@code a mod p} without the sign fix-up wherever the dividend is
+     *     provably non-negative, and the cheap {@code a - b + p} form for subtraction wherever the
+     *     subtrahend is provably reduced. Which reductions qualify is decided by the sign lattice
+     *     below — never assumed. Only useful alongside {@code constantPool}: the cheap subtraction
+     *     references the prime twice, so without a pooled slot it does not pay (and the emitters
+     *     compare the two costs, so it is never taken when it does not).
+     * @param fixedBaseComb use a fixed-base comb instead of the binary ladder wherever the base
+     *     point is a compile-time constant. The window width is not fixed here: the emitter renders
+     *     each candidate and keeps whichever the byte-cost model scores smallest.
+     */
+    public record EcCodegenOptions(
+            boolean constantPool, boolean reductionSinking, boolean fixedBaseComb) {
+
+        /** All flags off — byte-identical to the shipping output. */
+        public static EcCodegenOptions none() {
+            return new EcCodegenOptions(false, false, false);
+        }
+    }
+
+    /**
+     * What is known about a tracked value's sign and range.
+     *
+     * <p>{@code REDUCED} implies {@code NON_NEGATIVE}; the ordering is what the transfer functions
+     * meet over. {@code UNKNOWN} is the default for every slot the analysis has not explicitly proved
+     * something about — including everything a {@code rawBlock} or an {@code OP_IF} produces — so an
+     * un-analysed value can only ever fall back to the shipping reduction.
+     *
+     * <p>The distinction is not academic. {@code OP_BIN2NUM} of 32 unsigned coordinate bytes gives
+     * {@code NON_NEGATIVE} but NOT {@code REDUCED}: a coordinate may legitimately be up to {@code
+     * 2^256 - 1} while p is {@code 2^32 + 977} smaller. Multiplication and addition need only {@code
+     * NON_NEGATIVE}; subtraction's cheap form needs the subtrahend {@code REDUCED}, and conflating
+     * the two produces a script that passes 256 EC oracle assertions and is still wrong on {@code
+     * ecAdd((0,1), (2^256-1,1))}.
+     */
+    public enum Dom {
+        /** Nothing known. May be negative. */
+        UNKNOWN,
+        /** Provably &gt;= 0. May be &gt;= p. */
+        NON_NEGATIVE,
+        /** Provably in [0, p). */
+        REDUCED;
+
+        /** True when this proves the value is &gt;= 0. */
+        boolean isNonNegative() {
+            return this != UNKNOWN;
+        }
+    }
+
+    /** Stack slot names reserved for pooled constants. */
+    public static final String POOL_FIELD_P = "_pool$p";
+
+    public static final String POOL_GROUP_N = "_pool$n";
+
     static final class ECTracker {
         final List<String> nm;
+        /**
+         * Sign-lattice fact per stack SLOT, kept parallel to {@link #nm}.
+         *
+         * <p>Slot-parallel rather than keyed by name on purpose: names are reused ({@code
+         * _fmul_prod} is written by every multiply) and the same name can be resident twice, so a
+         * name-keyed map would go stale in exactly the cases that matter. Every mutation of {@code
+         * nm} below mirrors into {@code dm} with the same splice, so the two cannot drift.
+         */
+        final List<Dom> dm;
+
+        /** Lattice facts for values parked on the alt stack, bottom -&gt; top. */
+        private final List<Dom> altDm = new ArrayList<>();
+
         final Consumer<StackOp> e;
+        /** True when this tracker may serve constants from a pooled slot. */
+        final boolean pooling;
+        /** True when this tracker may emit sunk reductions. */
+        final boolean sinking;
+        /** True when a compile-time-known base may use a fixed-base comb. */
+        final boolean comb;
 
         ECTracker(List<String> init, Consumer<StackOp> emit) {
+            this(init, emit, null, null);
+        }
+
+        ECTracker(List<String> init, Consumer<StackOp> emit, EcCodegenOptions opts,
+                  List<Dom> initDomains) {
             this.nm = new ArrayList<>(init);
+            this.dm = new ArrayList<>();
+            if (initDomains != null) {
+                this.dm.addAll(initDomains);
+            } else {
+                for (int i = 0; i < this.nm.size(); i++) this.dm.add(Dom.UNKNOWN);
+            }
             this.e = emit;
+            this.pooling = opts != null && opts.constantPool();
+            this.sinking = opts != null && opts.reductionSinking();
+            this.comb = opts != null && opts.fixedBaseComb();
+        }
+
+        /** The options this tracker was built with, for handing to a nested tracker. */
+        EcCodegenOptions options() {
+            return new EcCodegenOptions(pooling, sinking, comb);
+        }
+
+        // -- sign lattice ------------------------------------------------
+
+        /** What is known about the named value. {@code UNKNOWN} when the name is absent. */
+        Dom domainOf(String name) {
+            // A silent desync here would hand a transfer function a fact about
+            // the WRONG slot, which is the one failure mode that produces a
+            // smaller script that quietly computes something else. Fail loudly.
+            if (dm.size() != nm.size()) {
+                throw new RuntimeException(
+                        "ECTracker: lattice desynchronised (" + nm.size() + " slots, " + dm.size()
+                                + " facts). Every nm mutation must go through a tracker method"
+                                + " or pushTracked/popTracked.");
+            }
+            for (int i = nm.size() - 1; i >= 0; i--) {
+                if (name.equals(nm.get(i))) return dm.get(i);
+            }
+            return Dom.UNKNOWN;
+        }
+
+        /** Record a fact about the named value's slot. */
+        void setDomain(String name, Dom d) {
+            for (int i = nm.size() - 1; i >= 0; i--) {
+                if (name.equals(nm.get(i))) {
+                    dm.set(i, d);
+                    return;
+                }
+            }
+        }
+
+        /** Push a slot the caller tracks itself (used where raw opcodes create items). */
+        void pushTracked(String name, Dom d) {
+            nm.add(name);
+            dm.add(d);
+        }
+
+        /** Pop a slot the caller tracks itself. Mirror of {@link #pushTracked}. */
+        String popTracked() {
+            if (nm.isEmpty()) return "";
+            dm.remove(dm.size() - 1);
+            return nm.remove(nm.size() - 1);
+        }
+
+        /** Remove the slot at an absolute (bottom-relative) index. */
+        void removeSlotAt(int index) {
+            nm.remove(index);
+            dm.remove(index);
+        }
+
+        int depth() {
+            return nm.size();
         }
 
         int findDepth(String name) {
@@ -100,43 +255,39 @@ public final class Ec {
 
         void pushBytes(String n, byte[] v) {
             e.accept(new PushOp(PushValue.ofHex(hexOf(v))));
-            nm.add(n);
+            // A byte blob is not a number until BIN2NUM decides how to read it.
+            pushTracked(n, Dom.UNKNOWN);
         }
 
         void pushBigInt(String n, BigInteger v) {
             e.accept(new PushOp(PushValue.of(v)));
-            nm.add(n);
+            pushTracked(n, v.signum() >= 0 ? Dom.NON_NEGATIVE : Dom.UNKNOWN);
         }
 
         void pushInt(String n, long v) {
             e.accept(new PushOp(PushValue.of(v)));
-            nm.add(n);
+            pushTracked(n, v >= 0 ? Dom.NON_NEGATIVE : Dom.UNKNOWN);
         }
 
         void dup(String n) {
             e.accept(new DupOp());
-            nm.add(n);
+            pushTracked(n, dm.isEmpty() ? Dom.UNKNOWN : dm.get(dm.size() - 1));
         }
 
         void drop() {
             e.accept(new DropOp());
-            if (!nm.isEmpty()) nm.remove(nm.size() - 1);
+            popTracked();
         }
 
         void nip() {
             e.accept(new NipOp());
             int L = nm.size();
-            if (L >= 2) {
-                String top = nm.get(L - 1);
-                nm.remove(L - 1);
-                nm.remove(L - 2);
-                nm.add(top);
-            }
+            if (L >= 2) removeSlotAt(L - 2);
         }
 
         void over(String n) {
             e.accept(new OverOp());
-            nm.add(n);
+            pushTracked(n, dm.size() >= 2 ? dm.get(dm.size() - 2) : Dom.UNKNOWN);
         }
 
         void swap() {
@@ -146,6 +297,9 @@ public final class Ec {
                 String t = nm.get(L - 1);
                 nm.set(L - 1, nm.get(L - 2));
                 nm.set(L - 2, t);
+                Dom d = dm.get(L - 1);
+                dm.set(L - 1, dm.get(L - 2));
+                dm.set(L - 2, d);
             }
         }
 
@@ -154,8 +308,9 @@ public final class Ec {
             int L = nm.size();
             if (L >= 3) {
                 String r = nm.get(L - 3);
-                nm.remove(L - 3);
-                nm.add(r);
+                Dom rd = dm.get(L - 3);
+                removeSlotAt(L - 3);
+                pushTracked(r, rd);
             }
         }
 
@@ -168,23 +323,26 @@ public final class Ec {
             if (d == 1) { swap(); return; }
             if (d == 2) { rot(); return; }
             e.accept(new PushOp(PushValue.of(d)));
-            nm.add("");
+            pushTracked("", Dom.NON_NEGATIVE);
             e.accept(new RollOp(d));
-            nm.remove(nm.size() - 1); // pop push placeholder
+            popTracked(); // the depth literal
             int idx = nm.size() - 1 - d;
             String r = nm.get(idx);
-            nm.remove(idx);
-            nm.add(r);
+            Dom rd = dm.get(idx);
+            removeSlotAt(idx);
+            pushTracked(r, rd);
         }
 
         void pick(int d, String n) {
             if (d == 0) { dup(n); return; }
             if (d == 1) { over(n); return; }
             e.accept(new PushOp(PushValue.of(d)));
-            nm.add("");
+            pushTracked("", Dom.NON_NEGATIVE);
             e.accept(new PickOp(d));
-            nm.remove(nm.size() - 1);
-            nm.add(n);
+            popTracked(); // the depth literal
+            // Once the depth literal is gone the copied slot sits at depth d.
+            Dom src = dm.size() > d ? dm.get(dm.size() - 1 - d) : Dom.UNKNOWN;
+            pushTracked(n, src);
         }
 
         void toTop(String name) {
@@ -195,14 +353,74 @@ public final class Ec {
             pick(findDepth(name), n);
         }
 
+        // -- constant pool -----------------------------------------------
+        //
+        // A pooled constant is an ordinary tracked slot; nothing about the
+        // stack model changes. pushConst just chooses, per call site and by
+        // emitted bytes, between copying that slot and re-pushing the literal.
+        // Nested trackers built from a copy of nm inherit the slot for free, so
+        // pooled constants work unchanged inside an OP_IF arm.
+
+        /** Park {@code value} in {@code slot} for this emitter. No-op when pooling is off. */
+        void poolConstant(String slot, BigInteger value) {
+            if (!pooling || nm.contains(slot)) return;
+            pushBigInt(slot, value);
+        }
+
+        /** Remove a pooled slot. No-op when pooling is off or the slot is absent. */
+        void releaseConstant(String slot) {
+            if (!pooling || !nm.contains(slot)) return;
+            toTop(slot);
+            drop();
+        }
+
+        /**
+         * Emitted bytes a {@code pushConst} of this constant would cost right now.
+         *
+         * <p>The comparison is exact — {@code CostModel.sizeOfPushInt} is the same encoder the emit
+         * pass uses — so pooling can never make a call site bigger. A pick at depth d costs {@code
+         * sizeOfPushInt(d) + 1}; depths 0 and 1 are OP_DUP / OP_OVER, 1 byte each.
+         */
+        int constCost(String slot, BigInteger value) {
+            if (pooling && nm.contains(slot)) {
+                int d = findDepth(slot);
+                int pickCost =
+                        d <= 1 ? 1 : CostModel.sizeOfPushInt(BigInteger.valueOf(d)) + 1;
+                if (pickCost < CostModel.sizeOfPushInt(value)) return pickCost;
+            }
+            return CostModel.sizeOfPushInt(value);
+        }
+
+        /**
+         * Materialize {@code value} on top as {@code name}, from the pooled slot when that is cheaper
+         * in emitted bytes than pushing the literal.
+         */
+        void pushConst(String slot, BigInteger value, String name) {
+            if (pooling && nm.contains(slot)) {
+                int d = findDepth(slot);
+                int pickCost =
+                        d <= 1 ? 1 : CostModel.sizeOfPushInt(BigInteger.valueOf(d)) + 1;
+                if (pickCost < CostModel.sizeOfPushInt(value)) {
+                    pick(d, name);
+                    return;
+                }
+            }
+            pushBigInt(name, value);
+        }
+
         void toAlt() {
             op("OP_TOALTSTACK");
-            if (!nm.isEmpty()) nm.remove(nm.size() - 1);
+            if (!nm.isEmpty()) {
+                Dom d = dm.get(dm.size() - 1);
+                popTracked();
+                altDm.add(d);
+            }
         }
 
         void fromAlt(String n) {
             op("OP_FROMALTSTACK");
-            nm.add(n);
+            Dom d = altDm.isEmpty() ? Dom.UNKNOWN : altDm.remove(altDm.size() - 1);
+            pushTracked(n, d);
         }
 
         void rename(String n) {
@@ -215,11 +433,13 @@ public final class Ec {
          */
         void rawBlock(List<String> consume, String produce, Consumer<Consumer<StackOp>> fn) {
             for (int i = 0; i < consume.size(); i++) {
-                if (!nm.isEmpty()) nm.remove(nm.size() - 1);
+                popTracked();
             }
             fn.accept(this.e);
             if (produce != null && !produce.isEmpty()) {
-                nm.add(produce);
+                // Opaque opcodes: nothing is known about the result unless the
+                // caller proves it and records that with setDomain afterwards.
+                pushTracked(produce, Dom.UNKNOWN);
             }
         }
 
@@ -229,15 +449,15 @@ public final class Ec {
                     Consumer<Consumer<StackOp>> elseFn,
                     String resultName) {
             toTop(condName);
-            // condition consumed
-            if (!nm.isEmpty()) nm.remove(nm.size() - 1);
+            popTracked(); // condition consumed
             List<StackOp> thenOps = new ArrayList<>();
             List<StackOp> elseOps = new ArrayList<>();
             thenFn.accept(thenOps::add);
             elseFn.accept(elseOps::add);
             this.e.accept(new IfOp(thenOps, elseOps));
             if (resultName != null && !resultName.isEmpty()) {
-                nm.add(resultName);
+                // A join over two arms this tracker did not analyse: nothing is known.
+                pushTracked(resultName, Dom.UNKNOWN);
             }
         }
     }
@@ -247,10 +467,41 @@ public final class Ec {
     // ==================================================================
 
     private static void pushFieldP(ECTracker t, String name) {
-        t.pushBigInt(name, EC_FIELD_P);
+        t.pushConst(POOL_FIELD_P, EC_FIELD_P, name);
+    }
+
+    /**
+     * {@code a mod p} with no sign fix-up: 1 opcode instead of 7.
+     *
+     * <p>Sound only when the dividend is provably &gt;= 0, because {@code OP_MOD} takes the sign of
+     * the dividend. The caller proves that; this function does not check.
+     */
+    private static void fieldModShort(ECTracker t, String aName, String resultName) {
+        t.toTop(aName);
+        pushFieldP(t, "_fmods_p");
+        t.rawBlock(List.of(aName, "_fmods_p"), resultName,
+                e -> e.accept(new OpcodeOp("OP_MOD")));
+        t.setDomain(resultName, Dom.REDUCED);
+    }
+
+    /**
+     * Does the cheap {@code a - b + p} subtraction shape pay here?
+     *
+     * <p>It references the prime TWICE where the shipping shape references it once and pays six more
+     * opcodes, so it only wins when the prime is cheap to materialise — i.e. when it is pooled.
+     * Without a pool this rewrite makes p256-wallet LARGER (958,792 -&gt; 999,371 measured), which is
+     * why it is a cost comparison and not a flag.
+     */
+    private static boolean cheapSubPays(ECTracker t) {
+        int c = t.constCost(POOL_FIELD_P, EC_FIELD_P);
+        return 2 * c + 2 < c + 8;
     }
 
     private static void fieldMod(ECTracker t, String aName, String resultName) {
+        if (t.sinking && t.domainOf(aName).isNonNegative()) {
+            fieldModShort(t, aName, resultName);
+            return;
+        }
         t.toTop(aName);
         pushFieldP(t, "_fmod_p");
         t.rawBlock(List.of(aName, "_fmod_p"), resultName, e -> {
@@ -263,30 +514,71 @@ public final class Ec {
             e.accept(new SwapOp());
             e.accept(new OpcodeOp("OP_MOD"));
         });
+        t.setDomain(resultName, Dom.REDUCED);
     }
 
     private static void fieldAdd(ECTracker t, String aName, String bName, String resultName) {
+        // Read the operand facts BEFORE rawBlock consumes their slots.
+        boolean sumNonNeg =
+                t.domainOf(aName).isNonNegative() && t.domainOf(bName).isNonNegative();
         t.toTop(aName);
         t.toTop(bName);
         t.rawBlock(List.of(aName, bName), "_fadd_sum", e -> e.accept(new OpcodeOp("OP_ADD")));
+        if (sumNonNeg) t.setDomain("_fadd_sum", Dom.NON_NEGATIVE);
         fieldMod(t, "_fadd_sum", resultName);
     }
 
     private static void fieldSub(ECTracker t, String aName, String bName, String resultName) {
         t.toTop(aName);
         t.toTop(bName);
+        // The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a
+        // single shifted reduction is exact. `b >= 0` alone is NOT enough — a
+        // coordinate decoded from 32 unsigned bytes can exceed p by up to
+        // 2^32 + 977, which is precisely the ecAdd((0,1), (2^256-1,1))
+        // counterexample.
+        boolean cheap =
+                t.sinking
+                        && t.domainOf(aName).isNonNegative()
+                        && t.domainOf(bName) == Dom.REDUCED
+                        && cheapSubPays(t);
+
         t.rawBlock(List.of(aName, bName), "_fsub_diff", e -> e.accept(new OpcodeOp("OP_SUB")));
+
+        if (cheap) {
+            pushFieldP(t, "_fsub_p");
+            t.rawBlock(List.of("_fsub_diff", "_fsub_p"), "_fsub_shift",
+                    e -> e.accept(new OpcodeOp("OP_ADD")));
+            t.setDomain("_fsub_shift", Dom.NON_NEGATIVE);
+            fieldModShort(t, "_fsub_shift", resultName);
+            return;
+        }
         fieldMod(t, "_fsub_diff", resultName);
     }
 
     private static void fieldMul(ECTracker t, String aName, String bName, String resultName) {
+        fieldMul(t, aName, bName, resultName, false);
+    }
+
+    /**
+     * {@code fieldMul} with an explicit assertion about the product's sign, independent of the
+     * operands — {@code fieldSqr} uses it, since a*a &gt;= 0 for any a whatsoever.
+     */
+    private static void fieldMul(ECTracker t, String aName, String bName, String resultName,
+                                 boolean productNonNegative) {
+        boolean nonNeg =
+                productNonNegative
+                        || (t.domainOf(aName).isNonNegative()
+                                && t.domainOf(bName).isNonNegative());
         t.toTop(aName);
         t.toTop(bName);
         t.rawBlock(List.of(aName, bName), "_fmul_prod", e -> e.accept(new OpcodeOp("OP_MUL")));
+        if (nonNeg) t.setDomain("_fmul_prod", Dom.NON_NEGATIVE);
         fieldMod(t, "_fmul_prod", resultName);
     }
 
     private static void fieldMulConst(ECTracker t, String aName, long c, String resultName) {
+        // Every call site passes a small positive c, so the product keeps a's sign.
+        boolean nonNeg = c > 0 && t.domainOf(aName).isNonNegative();
         t.toTop(aName);
         t.rawBlock(List.of(aName), "_fmc_prod", e -> {
             if (c == 2L) {
@@ -296,12 +588,14 @@ public final class Ec {
                 e.accept(new OpcodeOp("OP_MUL"));
             }
         });
+        if (nonNeg) t.setDomain("_fmc_prod", Dom.NON_NEGATIVE);
         fieldMod(t, "_fmc_prod", resultName);
     }
 
+    /** {@code (a * a) mod p}. A square is non-negative whatever a's sign is. */
     private static void fieldSqr(ECTracker t, String aName, String resultName) {
         t.copyToTop(aName, "_fsqr_copy");
-        fieldMul(t, aName, "_fsqr_copy", resultName);
+        fieldMul(t, aName, "_fsqr_copy", resultName, true);
     }
 
     /** Compute a^(p-2) mod p via square-and-multiply. Consumes {@code aName}. */
@@ -366,8 +660,8 @@ public final class Ec {
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
         // Manually track the two new items
-        t.nm.add("_dp_xb");
-        t.nm.add("_dp_yb");
+        t.pushTracked("_dp_xb", Dom.UNKNOWN);
+        t.pushTracked("_dp_yb", Dom.UNKNOWN);
 
         // Convert y_bytes (on top) to num
         t.rawBlock(List.of("_dp_yb"), yName, e -> {
@@ -376,6 +670,11 @@ public final class Ec {
             e.accept(new OpcodeOp("OP_CAT"));
             e.accept(new OpcodeOp("OP_BIN2NUM"));
         });
+        // A 0x00 sign byte is appended before BIN2NUM, so the coordinate
+        // decodes UNSIGNED: >= 0, but it may be up to 2^(8*coordBytes) - 1 and
+        // therefore >= p. That gap is exactly what the subtraction precondition
+        // turns on.
+        t.setDomain(yName, Dom.NON_NEGATIVE);
 
         // Convert x_bytes to num
         t.toTop("_dp_xb");
@@ -385,6 +684,7 @@ public final class Ec {
             e.accept(new OpcodeOp("OP_CAT"));
             e.accept(new OpcodeOp("OP_BIN2NUM"));
         });
+        t.setDomain(xName, Dom.NON_NEGATIVE);
 
         // Stack: [yName, xName] -> swap to [xName, yName]
         t.swap();
@@ -627,7 +927,10 @@ public final class Ec {
      * Stack: [..., ax, ay, _k, jx, jy, jz]
      */
     private static void buildJacobianAddAffineInline(Consumer<StackOp> e, ECTracker t) {
-        jacobianAddAffineBody(new ECTracker(t.nm, e), false);
+        // The inner tracker inherits the stack state AND the lattice facts: the
+        // operands' proved domains are what decide which reduction shape the
+        // body emits, so dropping them here would silently fall back everywhere.
+        jacobianAddAffineBody(new ECTracker(t.nm, e, t.options(), t.dm), false);
     }
 
     /**
@@ -779,7 +1082,7 @@ public final class Ec {
      * <p>Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
      */
     private static void buildJacobianAddOrDoubleInline(Consumer<StackOp> e, ECTracker t) {
-        ECTracker it = new ECTracker(t.nm, e);
+        ECTracker it = new ECTracker(t.nm, e, t.options(), t.dm);
 
         // Keep the pre-add accumulator: it is what must be DOUBLED in the
         // exceptional case, and the add below consumes jx/jy/jz.
@@ -831,11 +1134,17 @@ public final class Ec {
     // ==================================================================
 
     public static void emitEcAdd(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
+        emitEcAdd(emit, null);
+    }
+
+    public static void emitEcAdd(Consumer<StackOp> emit, EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit, opts, null);
+        t.poolConstant(POOL_FIELD_P, EC_FIELD_P);
         decomposePoint(t, "_pa", "px", "py");
         decomposePoint(t, "_pb", "qx", "qy");
         affineAdd(t);
         composePoint(t, "rx", "ry", "_result");
+        t.releaseConstant(POOL_FIELD_P);
     }
 
     /**
@@ -853,7 +1162,7 @@ public final class Ec {
      * ~429 KB script, and makes k &gt;= n, k &lt; 0 and k = 0 all well defined.
      */
     private static void emitScalarReduce(ECTracker t, String kName, String resultName) {
-        t.pushBigInt("_n_red", EC_CURVE_N);
+        t.pushConst(POOL_GROUP_N, EC_CURVE_N, "_n_red");
         t.rawBlock(List.of(kName, "_n_red"), resultName, e -> {
             e.accept(new OpcodeOp("OP_2DUP"));
             e.accept(new OpcodeOp("OP_MOD"));
@@ -867,7 +1176,13 @@ public final class Ec {
     }
 
     public static void emitEcMul(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt", "_k"), emit);
+        emitEcMul(emit, null);
+    }
+
+    public static void emitEcMul(Consumer<StackOp> emit, EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt", "_k"), emit, opts, null);
+        t.poolConstant(POOL_FIELD_P, EC_FIELD_P);
+        t.poolConstant(POOL_GROUP_N, EC_CURVE_N);
         decomposePoint(t, "_pt", "ax", "ay");
 
         // k' = k + 3n
@@ -876,11 +1191,11 @@ public final class Ec {
         // is usually an unlock argument — so reduce it first.
         t.toTop("_k");
         emitScalarReduce(t, "_k", "_kr");
-        t.pushBigInt("_n", EC_CURVE_N);
+        t.pushConst(POOL_GROUP_N, EC_CURVE_N, "_n");
         t.rawBlock(List.of("_kr", "_n"), "_kn", e -> e.accept(new OpcodeOp("OP_ADD")));
-        t.pushBigInt("_n2", EC_CURVE_N);
+        t.pushConst(POOL_GROUP_N, EC_CURVE_N, "_n2");
         t.rawBlock(List.of("_kn", "_n2"), "_kn2", e -> e.accept(new OpcodeOp("OP_ADD")));
-        t.pushBigInt("_n3", EC_CURVE_N);
+        t.pushConst(POOL_GROUP_N, EC_CURVE_N, "_n3");
         t.rawBlock(List.of("_kn2", "_n3"), "_kn3", e -> e.accept(new OpcodeOp("OP_ADD")));
         t.rename("_k");
 
@@ -912,7 +1227,7 @@ public final class Ec {
 
             // Move _bit to TOS and remove from tracker BEFORE generating add ops
             t.toTop("_bit");
-            t.nm.remove(t.nm.size() - 1); // _bit consumed by IF
+            t.popTracked(); // _bit consumed by IF
             List<StackOp> addOps = new ArrayList<>();
             // Only the final step can be handed two equal operands — see
             // buildJacobianAddOrDoubleInline for why, and for what it costs not to.
@@ -934,9 +1249,267 @@ public final class Ec {
 
         // Compose result
         composePoint(t, "_rx", "_ry", "_result");
+        t.releaseConstant(POOL_GROUP_N);
+        t.releaseConstant(POOL_FIELD_P);
+    }
+
+    // ==================================================================
+    // Fixed-base comb (secp256k1)
+    // ==================================================================
+
+    /**
+     * Round {@code i}'s digit and the selected table entry, as {@code ax}/{@code ay}/{@code _flag}.
+     *
+     * <p>Exactly one equality holds, so {@code sum(eq_j * T_j)} is that entry's coordinate and every
+     * term is non-negative and below p — no reduction is needed, and the result is {@code REDUCED} by
+     * construction. When the digit is zero every term vanishes and {@code _flag} is 0, so no add
+     * runs.
+     *
+     * <p>Shared by both comb emitters: the selection is pure scalar bit-twiddling and table indexing,
+     * with no curve arithmetic in it at all.
+     */
+    static void combEmitSelect(ECTracker t, int i, int w, int d) {
+        int entries = (1 << w) - 1;
+        for (int b = 0; b < w; b++) {
+            int shift = i + b * d;
+            String kc = "_kc" + b;
+            String sh = "_sh" + b;
+            t.copyToTop("_k", kc);
+            if (shift == 0) {
+                t.rename(sh);
+            } else if (shift == 1) {
+                t.rawBlock(List.of(kc), sh, e -> e.accept(new OpcodeOp("OP_2DIV")));
+            } else {
+                String sd = "_sd" + b;
+                t.pushInt(sd, shift);
+                t.rawBlock(List.of(kc, sd), sh, e -> e.accept(new OpcodeOp("OP_RSHIFTNUM")));
+            }
+            String two = "_two" + b;
+            String bit = "_b" + b;
+            t.pushInt(two, 2);
+            t.rawBlock(List.of(sh, two), bit, e -> e.accept(new OpcodeOp("OP_MOD")));
+            t.setDomain(bit, Dom.REDUCED);
+        }
+
+        t.toTop("_b0");
+        t.rename("_idx");
+        for (int b = 1; b < w; b++) {
+            String bit = "_b" + b;
+            String wt = "_wt" + b;
+            String bw = "_bw" + b;
+            t.toTop(bit);
+            t.pushInt(wt, 1L << b);
+            t.rawBlock(List.of(bit, wt), bw, e -> e.accept(new OpcodeOp("OP_MUL")));
+            t.toTop("_idx");
+            t.rawBlock(List.of(bw, "_idx"), "_idx", e -> e.accept(new OpcodeOp("OP_ADD")));
+        }
+        t.setDomain("_idx", Dom.REDUCED);
+
+        for (int j = 1; j <= entries; j++) {
+            String ic = "_ic" + j;
+            String jv = "_jv" + j;
+            String eq = "_eq" + j;
+            t.copyToTop("_idx", ic);
+            t.pushInt(jv, j);
+            t.rawBlock(List.of(ic, jv), eq, e -> e.accept(new OpcodeOp("OP_NUMEQUAL")));
+            t.setDomain(eq, Dom.REDUCED);
+        }
+
+        for (String coord : new String[] {"x", "y"}) {
+            String acc = coord.equals("x") ? "ax" : "ay";
+            for (int j = 1; j <= entries; j++) {
+                String ec = "_e" + coord + j;
+                String tc = "_t" + coord + j;
+                String pr = "_pr" + coord + j;
+                t.copyToTop("_eq" + j, ec);
+                t.copyToTop("_T" + coord + j, tc);
+                t.rawBlock(List.of(ec, tc), pr, e -> e.accept(new OpcodeOp("OP_MUL")));
+                if (j == 1) {
+                    t.rename(acc);
+                } else {
+                    t.toTop(acc);
+                    t.rawBlock(List.of(pr, acc), acc, e -> e.accept(new OpcodeOp("OP_ADD")));
+                }
+            }
+            t.setDomain(acc, Dom.REDUCED);
+        }
+
+        for (int j = entries; j >= 1; j--) {
+            t.toTop("_eq" + j);
+            t.drop();
+        }
+
+        t.toTop("_idx");
+        t.rawBlock(List.of("_idx"), "_flag", e -> e.accept(new OpcodeOp("OP_0NOTEQUAL")));
+    }
+
+    /**
+     * {@code k*G} by a Lim-Lee fixed-base comb instead of the 257-round binary ladder.
+     *
+     * <p>The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits the scalar into
+     * {@code w} blocks of {@code d} bits and reads one bit from each block per round, so it performs
+     * one doubling and one conditional add per COLUMN: the round count falls from {@code w*d} to
+     * {@code d} at the price of a {@code 2^w - 1} entry table. G is a compile-time constant here, so
+     * the table costs nothing to build.
+     *
+     * <p>This is the secp256k1 twin of {@code P256P384.cEmitCombMulGen}. The curve arithmetic is NOT
+     * shared: secp256k1 has {@code a = 0}, so {@code jacobianDouble} computes {@code D = 3X^2} where
+     * the NIST version computes {@code 3(X-Z^2)(X+Z^2)}. Only {@code Comb} — the compile-time table
+     * and the interval checker — is common, and it takes {@code a} from the curve record.
+     *
+     * <p>SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add accumulator equal to the
+     * addend, its negation, or the point at infinity. {@code buildJacobianAddOrDoubleInline}'s comment
+     * justifies using it everywhere but the ladder's LAST step by an interval argument over {@code c_i
+     * mod n}, and insists that argument be re-derived by anything changing the offset or the iteration
+     * count. A comb changes both, so it is re-derived: {@code Comb.combSafeRounds} evaluates the same
+     * argument as executable interval arithmetic over the comb's own geometry, and any round it cannot
+     * prove gets the complete add-or-double form instead. Nothing is assumed safe.
+     *
+     * <p>The other half of that argument is that the accumulator never starts at infinity, which needs
+     * the first digit non-zero. {@code Comb.combGeometry} searches for the scalar offset that
+     * guarantees it rather than reusing the ladder's hardcoded {@code +3n} — right for secp256k1 at
+     * w=3, wrong for P-384.
+     *
+     * <p>Stack in: [_k]. Stack out: [_result].
+     *
+     * @return false when no geometry exists for {@code w}
+     */
+    private static boolean emitCombMulGen(Consumer<StackOp> emit, int w, EcCodegenOptions opts) {
+        Comb.Curve curve = Comb.SECP256K1_COMB_CURVE;
+        Comb.Params params = Comb.combGeometry(w, curve);
+        if (params == null) return false;
+        int d = params.d();
+        List<Comb.Point> table = Comb.combTable(w, d, curve);
+        boolean[] safe = Comb.combSafeRounds(params, curve);
+        int entries = (1 << w) - 1;
+
+        ECTracker t = new ECTracker(List.of("_k"), emit, opts, null);
+        t.poolConstant(POOL_FIELD_P, EC_FIELD_P);
+        t.poolConstant(POOL_GROUP_N, EC_CURVE_N);
+
+        // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so
+        // what makes the interval argument apply at all; see emitScalarReduce.
+        t.toTop("_k");
+        emitScalarReduce(t, "_k", "_kr");
+        t.rename("_k");
+        for (int i = 0; i < params.offsetMultiple(); i++) {
+            String off = "_off" + i;
+            t.pushConst(POOL_GROUP_N, EC_CURVE_N, off);
+            t.rawBlock(List.of("_k", off), "_k", e -> e.accept(new OpcodeOp("OP_ADD")));
+        }
+        t.setDomain("_k", Dom.NON_NEGATIVE);
+
+        // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+        // against a 34-byte literal push, and every round reads all of them.
+        for (int j = 1; j <= entries; j++) {
+            Comb.Point pt = table.get(j);
+            t.pushBigInt("_Tx" + j, pt.x());
+            t.pushBigInt("_Ty" + j, pt.y());
+            t.setDomain("_Tx" + j, Dom.REDUCED);
+            t.setDomain("_Ty" + j, Dom.REDUCED);
+        }
+
+        // Round d-1 initialises the accumulator. The first digit is non-zero by
+        // construction (combGeometry), so this is a real point, never infinity.
+        combEmitSelect(t, d - 1, w, d);
+        t.toTop("_flag");
+        t.drop();
+        t.toTop("ax");
+        t.rename("jx");
+        t.toTop("ay");
+        t.rename("jy");
+        t.pushInt("jz", 1);
+        t.setDomain("jz", Dom.REDUCED);
+
+        for (int i = d - 2; i >= 0; i--) {
+            jacobianDouble(t);
+            combEmitSelect(t, i, w, d);
+
+            // jacobianAddAffineBody documents its layout as
+            // [..., ax, ay, jx, jy, jz] and replaces the accumulator IN PLACE at
+            // the top. The selection leaves ax/ay above jz, so restore the
+            // contract before the branch — otherwise the add arm would reorder
+            // the stack and the empty else arm would not, leaving the two arms
+            // with different layouts at OP_ENDIF.
+            t.toTop("_flag");
+            t.toAlt();
+            t.toTop("jx");
+            t.toTop("jy");
+            t.toTop("jz");
+            t.fromAlt("_flag");
+
+            t.popTracked(); // consumed by OP_IF
+            List<StackOp> addOps = new ArrayList<>();
+            if (safe[i]) {
+                buildJacobianAddAffineInline(addOps::add, t);
+            } else {
+                buildJacobianAddOrDoubleInline(addOps::add, t);
+            }
+            emit.accept(new IfOp(addOps, List.of()));
+
+            // The addend was selected fresh for this round; the add only copied it.
+            t.toTop("ay");
+            t.drop();
+            t.toTop("ax");
+            t.drop();
+        }
+
+        jacobianToAffine(t, "_rx", "_ry");
+
+        for (int j = entries; j >= 1; j--) {
+            t.toTop("_Ty" + j);
+            t.drop();
+            t.toTop("_Tx" + j);
+            t.drop();
+        }
+        t.toTop("_k");
+        t.drop();
+
+        composePoint(t, "_rx", "_ry", "_result");
+        t.releaseConstant(POOL_GROUP_N);
+        t.releaseConstant(POOL_FIELD_P);
+        return true;
+    }
+
+    /**
+     * Emit the cheapest comb over the candidate window widths.
+     *
+     * <p>Each candidate is rendered in full and scored with the same byte-cost model the emitter is
+     * measured by, and the smallest wins — the window width is not hardcoded. w=1 is the binary ladder
+     * and is excluded; beyond w=4 the {@code 2^w} selection logic outgrows the saving.
+     *
+     * @return {@code null} when no candidate could be built, so the caller falls back to the ladder
+     *     rather than emitting nothing
+     */
+    private static List<StackOp> emitCombBest(EcCodegenOptions opts) {
+        List<StackOp> best = null;
+        for (int w : new int[] {2, 3, 4}) {
+            List<StackOp> ops = new ArrayList<>();
+            if (!emitCombMulGen(ops::add, w, opts)) continue;
+            if (best == null
+                    || CostModel.estimateScriptBytes(ops) < CostModel.estimateScriptBytes(best)) {
+                best = ops;
+            }
+        }
+        return best;
     }
 
     public static void emitEcMulGen(Consumer<StackOp> emit) {
+        emitEcMulGen(emit, null);
+    }
+
+    public static void emitEcMulGen(Consumer<StackOp> emit, EcCodegenOptions opts) {
+        // G is a compile-time constant, so this is the one secp256k1 call site
+        // where a fixed-base comb applies. emitEcMul cannot use it: its base
+        // arrives at run time.
+        if (opts != null && opts.fixedBaseComb()) {
+            List<StackOp> ops = emitCombBest(opts);
+            if (ops != null) {
+                for (StackOp op : ops) emit.accept(op);
+                return;
+            }
+        }
+
         byte[] gPoint = new byte[64];
         byte[] gx = bigintToBytes32(EC_GEN_X);
         byte[] gy = bigintToBytes32(EC_GEN_Y);
@@ -944,19 +1517,30 @@ public final class Ec {
         System.arraycopy(gy, 0, gPoint, 32, 32);
         emit.accept(new PushOp(PushValue.ofHex(hexOf(gPoint))));
         emit.accept(new SwapOp());
-        emitEcMul(emit);
+        emitEcMul(emit, opts);
     }
 
     public static void emitEcNegate(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt"), emit);
+        emitEcNegate(emit, null);
+    }
+
+    public static void emitEcNegate(Consumer<StackOp> emit, EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt"), emit, opts, null);
+        t.poolConstant(POOL_FIELD_P, EC_FIELD_P);
         decomposePoint(t, "_pt", "_nx", "_ny");
         pushFieldP(t, "_fp");
         fieldSub(t, "_fp", "_ny", "_neg_y");
         composePoint(t, "_nx", "_neg_y", "_result");
+        t.releaseConstant(POOL_FIELD_P);
     }
 
     public static void emitEcOnCurve(Consumer<StackOp> emit) {
-        ECTracker t = new ECTracker(List.of("_pt"), emit);
+        emitEcOnCurve(emit, null);
+    }
+
+    public static void emitEcOnCurve(Consumer<StackOp> emit, EcCodegenOptions opts) {
+        ECTracker t = new ECTracker(List.of("_pt"), emit, opts, null);
+        t.poolConstant(POOL_FIELD_P, EC_FIELD_P);
         decomposePoint(t, "_pt", "_x", "_y");
 
         // GAP-301: coordinate canonicity. decomposePoint BIN2NUMs each coordinate
@@ -999,6 +1583,7 @@ public final class Ec {
         t.toTop("_curve_eq");
         t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.releaseConstant(POOL_FIELD_P);
     }
 
     public static void emitEcModReduce(Consumer<StackOp> emit) {
@@ -1096,12 +1681,16 @@ public final class Ec {
     }
 
     public static void dispatch(String funcName, Consumer<StackOp> emit) {
+        dispatch(funcName, emit, null);
+    }
+
+    public static void dispatch(String funcName, Consumer<StackOp> emit, EcCodegenOptions opts) {
         switch (funcName) {
-            case "ecAdd" -> emitEcAdd(emit);
-            case "ecMul" -> emitEcMul(emit);
-            case "ecMulGen" -> emitEcMulGen(emit);
-            case "ecNegate" -> emitEcNegate(emit);
-            case "ecOnCurve" -> emitEcOnCurve(emit);
+            case "ecAdd" -> emitEcAdd(emit, opts);
+            case "ecMul" -> emitEcMul(emit, opts);
+            case "ecMulGen" -> emitEcMulGen(emit, opts);
+            case "ecNegate" -> emitEcNegate(emit, opts);
+            case "ecOnCurve" -> emitEcOnCurve(emit, opts);
             case "ecModReduce" -> emitEcModReduce(emit);
             case "ecEncodeCompressed" -> emitEcEncodeCompressed(emit);
             case "ecMakePoint" -> emitEcMakePoint(emit);

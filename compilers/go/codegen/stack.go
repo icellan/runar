@@ -25,14 +25,14 @@ const maxStackDepth = 800
 
 // StackOp represents a single stack-machine operation.
 type StackOp struct {
-	Op         string    // "push", "dup", "swap", "roll", "pick", "drop", "opcode", "if", "nip", "over", "rot", "tuck", "placeholder", "raw_bytes"
-	Value      PushValue // for push ops
-	Depth      int       // for roll/pick (informational)
-	Code       string    // for opcode ops (e.g. "OP_ADD")
-	Then       []StackOp // for if ops
-	Else       []StackOp // for if ops
-	ParamIndex int       // for placeholder ops — index into constructor params
-	ParamName  string    // for placeholder ops — name of constructor param
+	Op         string             // "push", "dup", "swap", "roll", "pick", "drop", "opcode", "if", "nip", "over", "rot", "tuck", "placeholder", "raw_bytes"
+	Value      PushValue          // for push ops
+	Depth      int                // for roll/pick (informational)
+	Code       string             // for opcode ops (e.g. "OP_ADD")
+	Then       []StackOp          // for if ops
+	Else       []StackOp          // for if ops
+	ParamIndex int                // for placeholder ops — index into constructor params
+	ParamName  string             // for placeholder ops — name of constructor param
 	SourceLoc  *ir.SourceLocation // Debug: source location from ANF binding
 
 	// raw_bytes — opaque opcode-byte span emitted verbatim by a raw_script
@@ -46,10 +46,10 @@ type StackOp struct {
 
 // PushValue holds the typed value for a push operation.
 type PushValue struct {
-	Kind    string // "bigint", "bool", "bytes"
-	BigInt  *big.Int
-	Bool    bool
-	Bytes   []byte
+	Kind   string // "bigint", "bool", "bytes"
+	BigInt *big.Int
+	Bool   bool
+	Bytes  []byte
 }
 
 // StackMethod is the stack-lowered form of a single contract method.
@@ -98,25 +98,25 @@ func isVariableLengthStateType(t string) bool {
 // ---------------------------------------------------------------------------
 
 var builtinOpcodes = map[string][]string{
-	"sha256":       {"OP_SHA256"},
-	"ripemd160":    {"OP_RIPEMD160"},
-	"hash160":      {"OP_HASH160"},
-	"hash256":      {"OP_HASH256"},
-	"checkSig":     {"OP_CHECKSIG"},
+	"sha256":        {"OP_SHA256"},
+	"ripemd160":     {"OP_RIPEMD160"},
+	"hash160":       {"OP_HASH160"},
+	"hash256":       {"OP_HASH256"},
+	"checkSig":      {"OP_CHECKSIG"},
 	"checkMultiSig": {"OP_CHECKMULTISIG"},
-	"len":          {"OP_SIZE"},
-	"cat":          {"OP_CAT"},
-	"num2bin":      {"OP_NUM2BIN"},
-	"bin2num":      {"OP_BIN2NUM"},
-	"abs":          {"OP_ABS"},
-	"min":          {"OP_MIN"},
-	"max":          {"OP_MAX"},
-	"within":       {"OP_WITHIN"},
-	"split":        {"OP_SPLIT"},
-	"left":         {"OP_SPLIT", "OP_DROP"},
-	"int2str":      {"OP_NUM2BIN"},
-	"bool":         {"OP_0NOTEQUAL"},
-	"unpack":       {"OP_BIN2NUM"},
+	"len":           {"OP_SIZE"},
+	"cat":           {"OP_CAT"},
+	"num2bin":       {"OP_NUM2BIN"},
+	"bin2num":       {"OP_BIN2NUM"},
+	"abs":           {"OP_ABS"},
+	"min":           {"OP_MIN"},
+	"max":           {"OP_MAX"},
+	"within":        {"OP_WITHIN"},
+	"split":         {"OP_SPLIT"},
+	"left":          {"OP_SPLIT", "OP_DROP"},
+	"int2str":       {"OP_NUM2BIN"},
+	"bool":          {"OP_0NOTEQUAL"},
+	"unpack":        {"OP_BIN2NUM"},
 }
 
 // ---------------------------------------------------------------------------
@@ -618,18 +618,18 @@ func collectRefs(value *ir.ANFValue) []string {
 // ---------------------------------------------------------------------------
 
 type loweringContext struct {
-	sm             *stackMap
-	ops            []StackOp
-	maxDepth       int
-	properties     []ir.ANFProperty
-	privateMethods map[string]*ir.ANFMethod // private methods available for inlining
-	localBindings      map[string]bool // binding names in current lowerBindings scope; used by @ref: handler
-	outerProtectedRefs map[string]bool // parent-scope refs that must not be consumed (used after current if-branch)
-	insideBranch       bool            // true when executing inside an if-branch; update_prop skips old-value removal
-	currentSourceLoc   *ir.SourceLocation // Debug: source location to attach to next emitted StackOps
-	constValues        map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
-	arrayLengths       map[string]int      // element counts for array_literal bindings (used by checkMultiSig)
-	arrayElements      map[string][]string // element refs for array_literal bindings (used by checkMultiSig)
+	sm                 *stackMap
+	ops                []StackOp
+	maxDepth           int
+	properties         []ir.ANFProperty
+	privateMethods     map[string]*ir.ANFMethod // private methods available for inlining
+	localBindings      map[string]bool          // binding names in current lowerBindings scope; used by @ref: handler
+	outerProtectedRefs map[string]bool          // parent-scope refs that must not be consumed (used after current if-branch)
+	insideBranch       bool                     // true when executing inside an if-branch; update_prop skips old-value removal
+	currentSourceLoc   *ir.SourceLocation       // Debug: source location to attach to next emitted StackOps
+	constValues        map[string]*big.Int      // compile-time constant values tracked for extraction (e.g., Merkle depth)
+	arrayLengths       map[string]int           // element counts for array_literal bindings (used by checkMultiSig)
+	arrayElements      map[string][]string      // element refs for array_literal bindings (used by checkMultiSig)
 
 	// renamedParams maps a method param name whose name collides with a MUTABLE
 	// property to the reserved stack-slot name its witness value lives under
@@ -649,6 +649,13 @@ type loweringContext struct {
 	// validated PoC tuple). Set via LowerToStackOptions.SP1FriParams,
 	// which the compiler-level CompileOptions.SP1FriParams threads through.
 	sp1FriParams *SP1FriVerifierParams
+
+	// ecCodegen carries the EXPERIMENTAL EC size options (constant pool, sign
+	// lattice / reduction sinking, fixed-base comb) down to the EC and NIST
+	// curve emitters. nil — not an all-false struct — when nothing is enabled,
+	// so those emitters take their untouched default path and the emitted bytes
+	// are provably identical to the shipping ones.
+	ecCodegen *EcCodegenOptions
 }
 
 func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringContext {
@@ -712,11 +719,12 @@ func (ctx *loweringContext) emitOp(op StackOp) {
 // Leaves stack:  [..., script, varint_bytes]
 //
 // Bitcoin varint format:
-//   len < 0xfd:        1 byte (len itself)
-//   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
-//   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
-//   otherwise:         0xff + 8 bytes LE                (9 bytes — never used in
-//                                                        practice for BSV scripts)
+//
+//	len < 0xfd:        1 byte (len itself)
+//	len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+//	len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+//	otherwise:         0xff + 8 bytes LE                (9 bytes — never used in
+//	                                                     practice for BSV scripts)
 //
 // We must support all four shapes; emitting a 3-byte varint for a script whose
 // length exceeds 0xffff produces a truncated value that no longer matches what
@@ -769,7 +777,8 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
@@ -784,7 +793,8 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0x10000)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
@@ -800,7 +810,8 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0x100000000)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
@@ -839,7 +850,8 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -850,18 +862,22 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 	smEndTarget := ctx.sm.clone()
@@ -874,7 +890,8 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(256)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -885,25 +902,30 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4c}}})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
@@ -914,25 +936,30 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4d}}})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
@@ -950,8 +977,10 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
@@ -960,7 +989,8 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -969,8 +999,10 @@ func (ctx *loweringContext) emitPushDataDecode() {
 
 	// THEN: fb < 76 → direct length
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	smEndTarget := ctx.sm.clone()
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
@@ -981,7 +1013,8 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(77)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -994,14 +1027,18 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 	ctx.sm = smAfterInnerIf.clone()
@@ -1012,14 +1049,18 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
@@ -2096,6 +2137,10 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 
 	// Lower then-branch
 	thenCtx := newLoweringContext(nil, ctx.properties)
+	// Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives in
+	// the arms, so dropping them here made the flags a no-op for exactly the
+	// shape that needs them — and diverged from Java/Zig, which do inherit.
+	thenCtx.ecCodegen = ctx.ecCodegen
 	thenCtx.sm = ctx.sm.clone()
 	thenCtx.outerProtectedRefs = protectedRefs
 	thenCtx.insideBranch = true
@@ -2113,6 +2158,10 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 
 	// Lower else-branch
 	elseCtx := newLoweringContext(nil, ctx.properties)
+	// Inherit the EXPERIMENTAL EC size options: branch-guarded crypto lives in
+	// the arms, so dropping them here made the flags a no-op for exactly the
+	// shape that needs them — and diverged from Java/Zig, which do inherit.
+	elseCtx.ecCodegen = ctx.ecCodegen
 	elseCtx.sm = ctx.sm.clone()
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.insideBranch = true
@@ -2880,8 +2929,8 @@ func (ctx *loweringContext) lowerComputeStateOutputHash(bindingName string, args
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [prefix, amountAndTail]
 	ctx.sm.pop()
 	ctx.sm.pop()
-	ctx.sm.push("") // prefix
-	ctx.sm.push("") // amountAndTail
+	ctx.sm.push("")                // prefix
+	ctx.sm.push("")                // amountAndTail
 	ctx.emitOp(StackOp{Op: "nip"}) // drop prefix
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -2891,8 +2940,8 @@ func (ctx *loweringContext) lowerComputeStateOutputHash(bindingName string, args
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [amount(8), tail(44)]
 	ctx.sm.pop()
 	ctx.sm.pop()
-	ctx.sm.push("") // amount
-	ctx.sm.push("") // tail
+	ctx.sm.push("")                 // amount
+	ctx.sm.push("")                 // tail
 	ctx.emitOp(StackOp{Op: "drop"}) // drop tail
 	ctx.sm.pop()
 	// --- Stack: [..., stateBytes, amount(8LE)] ---
@@ -3265,7 +3314,8 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0}}})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
-		ctx.sm.pop(); ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.pop()
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 		// Stack: [..., rest, fb_num]
@@ -3293,7 +3343,8 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-		ctx.sm.pop(); ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.pop()
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 		ctx.sm.pop()
@@ -3309,7 +3360,8 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(254)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
-		ctx.sm.pop(); ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.pop()
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 		ctx.sm.pop()
@@ -3332,7 +3384,8 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(255)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
-		ctx.sm.pop(); ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.pop()
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 		ctx.sm.pop()
@@ -3449,15 +3502,18 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					// Variable-length byte-string: decode push-data
 					// prefix, extract data.
 					ctx.emitPushDataDecode() // [..., data, rest]
-					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.pop()
+					ctx.sm.pop()
 					ctx.sm.push(prop.Name)
 					ctx.sm.push("") // rest on top
 				} else {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(propSizes[i]))})
 					ctx.sm.push("")
 					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-					ctx.sm.pop(); ctx.sm.pop()
-					ctx.sm.push(""); ctx.sm.push("")
+					ctx.sm.pop()
+					ctx.sm.pop()
+					ctx.sm.push("")
+					ctx.sm.push("")
 					ctx.emitOp(StackOp{Op: "swap"})
 					ctx.sm.swap()
 					if isNumericStateType(prop.Type) {
@@ -3465,7 +3521,8 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					}
 					ctx.emitOp(StackOp{Op: "swap"})
 					ctx.sm.swap()
-					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.pop()
+					ctx.sm.pop()
 					ctx.sm.push(prop.Name)
 					ctx.sm.push("")
 				}
@@ -4161,8 +4218,8 @@ func (ctx *loweringContext) lowerArrayAccess(bindingName string, args []string, 
 	ctx.bringToTop(index, indexConsume)
 
 	// OP_SPLIT at index: stack = [..., left, right]
-	ctx.sm.pop()  // index consumed
-	ctx.sm.pop()  // data consumed
+	ctx.sm.pop() // index consumed
+	ctx.sm.pop() // data consumed
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.push("") // left part (discard)
 	ctx.sm.push("") // right part (keep)
@@ -4178,8 +4235,8 @@ func (ctx *loweringContext) lowerArrayAccess(bindingName string, args []string, 
 	ctx.sm.push("")
 
 	// OP_SPLIT: split off first byte: stack = [..., firstByte, rest]
-	ctx.sm.pop()  // 1 consumed
-	ctx.sm.pop()  // right consumed
+	ctx.sm.pop() // 1 consumed
+	ctx.sm.pop() // right consumed
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.push("") // first byte (keep)
 	ctx.sm.push("") // rest (discard)
@@ -4331,12 +4388,12 @@ func (ctx *loweringContext) lowerRight(bindingName string, args []string, bindin
 	ctx.sm.pop() // len
 	ctx.sm.pop() // data
 
-	ctx.emitOp(StackOp{Op: "swap"})                          // <len> <data>
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})       // <len> <data> <size>
-	ctx.emitOp(StackOp{Op: "rot"})                            // <data> <size> <len>
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})        // <data> <size-len>
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})      // <left> <right>
-	ctx.emitOp(StackOp{Op: "nip"})                            // <right>
+	ctx.emitOp(StackOp{Op: "swap"})                     // <len> <data>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})  // <len> <data> <size>
+	ctx.emitOp(StackOp{Op: "rot"})                      // <data> <size> <len>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})   // <data> <size-len>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // <left> <right>
+	ctx.emitOp(StackOp{Op: "nip"})                      // <right>
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
@@ -4363,11 +4420,11 @@ func (ctx *loweringContext) lowerSafeDivMod(bindingName, funcName string, args [
 
 	// Stack: ... a b
 	// DUP b, check non-zero, then divide/mod
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"}) // ... a b b
-	ctx.sm.push("")                                     // extra b copy
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})       // ... a b b
+	ctx.sm.push("")                                         // extra b copy
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"}) // ... a b (b!=0)
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})    // ... a b (aborts if zero)
-	ctx.sm.pop() // remove the check result
+	ctx.sm.pop()                                            // remove the check result
 
 	// Pop both operands, emit div or mod
 	ctx.sm.pop() // b
@@ -4438,21 +4495,21 @@ func (ctx *loweringContext) lowerPow(bindingName string, args []string, bindingI
 	ctx.sm.pop() // base
 
 	// Stack: base exp
-	ctx.emitOp(StackOp{Op: "swap"})                          // exp base
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})    // exp base 1(acc)
+	ctx.emitOp(StackOp{Op: "swap"})                       // exp base
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)}) // exp base 1(acc)
 
 	const maxPowIterations = 32
 	for i := 0; i < maxPowIterations; i++ {
 		// Stack: exp base acc
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_PICK"})              // exp base acc exp
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_PICK"}) // exp base acc exp
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(i))})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"})       // exp base acc (exp > i)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"}) // exp base acc (exp > i)
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
-				{Op: "over"},                            // exp base acc base
-				{Op: "opcode", Code: "OP_MUL"},          // exp base (acc*base)
+				{Op: "over"},                   // exp base acc base
+				{Op: "opcode", Code: "OP_MUL"}, // exp base (acc*base)
 			},
 		})
 	}
@@ -4598,14 +4655,14 @@ func (ctx *loweringContext) lowerGcd(bindingName string, args []string, bindingI
 	for i := 0; i < gcdIterations; i++ {
 		// Stack: a b
 		// if b != 0: a b -> b (a%b)
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})        // a b b
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})  // a b (b!=0)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})       // a b b
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"}) // a b (b!=0)
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
 				// a b -> b (a%b)
 				{Op: "opcode", Code: "OP_TUCK"}, // b a b
-				{Op: "opcode", Code: "OP_MOD"},   // b (a%b)
+				{Op: "opcode", Code: "OP_MOD"},  // b (a%b)
 			},
 		})
 	}
@@ -4677,18 +4734,18 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 	const log2Iterations = 64
 	for i := 0; i < log2Iterations; i++ {
 		// Stack: input counter
-		ctx.emitOp(StackOp{Op: "swap"})                                  // counter input
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})               // counter input input
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})            // counter input input 1
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"})        // counter input (input>1)
+		ctx.emitOp(StackOp{Op: "swap"})                           // counter input
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})         // counter input input
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})     // counter input input 1
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"}) // counter input (input>1)
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
-				{Op: "push", Value: bigIntPush(2)},       // counter input 2
-				{Op: "opcode", Code: "OP_DIV"},           // counter (input/2)
-				{Op: "swap"},                             // (input/2) counter
-				{Op: "opcode", Code: "OP_1ADD"},          // (input/2) (counter+1)
-				{Op: "swap"},                             // (counter+1) (input/2)
+				{Op: "push", Value: bigIntPush(2)}, // counter input 2
+				{Op: "opcode", Code: "OP_DIV"},     // counter (input/2)
+				{Op: "swap"},                       // (input/2) counter
+				{Op: "opcode", Code: "OP_1ADD"},    // (input/2) (counter+1)
+				{Op: "swap"},                       // (counter+1) (input/2)
 			},
 		})
 		// Stack: counter input (or input counter if swapped back)
@@ -4737,6 +4794,11 @@ type LowerToStackOptions struct {
 	// canonical `minimal-guest`, `evm-guest`, and `production-{100,64,16}`
 	// tuples; downstream consumers can supply arbitrary tuples directly.
 	SP1FriParams *SP1FriVerifierParams
+
+	// EcCodegen enables the EXPERIMENTAL EC script-size optimizations. nil
+	// keeps every EC emitter byte-identical to the shipping output; see
+	// EcCodegenOptions and docs/experiments/script-size-optimizer-results.md.
+	EcCodegen *EcCodegenOptions
 }
 
 // LowerToStack converts an ANF program to a slice of StackMethods.
@@ -5080,6 +5142,7 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	ctx := newLoweringContext(paramNames, properties)
 	ctx.privateMethods = privateMethods
 	ctx.sp1FriParams = opts.SP1FriParams
+	ctx.ecCodegen = opts.EcCodegen
 
 	// Mode 3: witness-assisted Groth16 verifier preamble. If the method
 	// body opens with a call to assertGroth16WitnessAssisted, emit the
@@ -5332,15 +5395,15 @@ func (ctx *loweringContext) lowerEcBuiltin(bindingName, funcName string, args []
 
 	switch funcName {
 	case "ecAdd":
-		EmitEcAdd(emitFn)
+		EmitEcAdd(emitFn, ctx.ecCodegen)
 	case "ecMul":
-		EmitEcMul(emitFn)
+		EmitEcMul(emitFn, ctx.ecCodegen)
 	case "ecMulGen":
-		EmitEcMulGen(emitFn)
+		EmitEcMulGen(emitFn, ctx.ecCodegen)
 	case "ecNegate":
-		EmitEcNegate(emitFn)
+		EmitEcNegate(emitFn, ctx.ecCodegen)
 	case "ecOnCurve":
-		EmitEcOnCurve(emitFn)
+		EmitEcOnCurve(emitFn, ctx.ecCodegen)
 	case "ecModReduce":
 		EmitEcModReduce(emitFn)
 	case "ecEncodeCompressed":
@@ -5388,27 +5451,27 @@ func (ctx *loweringContext) lowerNistEcBuiltin(bindingName, funcName string, arg
 
 	switch funcName {
 	case "p256Add":
-		EmitP256Add(emitFn)
+		EmitP256Add(emitFn, ctx.ecCodegen)
 	case "p256Mul":
-		EmitP256Mul(emitFn)
+		EmitP256Mul(emitFn, ctx.ecCodegen)
 	case "p256MulGen":
-		EmitP256MulGen(emitFn)
+		EmitP256MulGen(emitFn, ctx.ecCodegen)
 	case "p256Negate":
-		EmitP256Negate(emitFn)
+		EmitP256Negate(emitFn, ctx.ecCodegen)
 	case "p256OnCurve":
-		EmitP256OnCurve(emitFn)
+		EmitP256OnCurve(emitFn, ctx.ecCodegen)
 	case "p256EncodeCompressed":
 		EmitP256EncodeCompressed(emitFn)
 	case "p384Add":
-		EmitP384Add(emitFn)
+		EmitP384Add(emitFn, ctx.ecCodegen)
 	case "p384Mul":
-		EmitP384Mul(emitFn)
+		EmitP384Mul(emitFn, ctx.ecCodegen)
 	case "p384MulGen":
-		EmitP384MulGen(emitFn)
+		EmitP384MulGen(emitFn, ctx.ecCodegen)
 	case "p384Negate":
-		EmitP384Negate(emitFn)
+		EmitP384Negate(emitFn, ctx.ecCodegen)
 	case "p384OnCurve":
-		EmitP384OnCurve(emitFn)
+		EmitP384OnCurve(emitFn, ctx.ecCodegen)
 	case "p384EncodeCompressed":
 		EmitP384EncodeCompressed(emitFn)
 	default:
@@ -5435,9 +5498,9 @@ func (ctx *loweringContext) lowerVerifyECDSA(bindingName, funcName string, args 
 	emitFn := func(op StackOp) { ctx.emitOp(op) }
 
 	if funcName == "verifyECDSA_P256" {
-		EmitVerifyECDSA_P256(emitFn)
+		EmitVerifyECDSA_P256(emitFn, ctx.ecCodegen)
 	} else {
-		EmitVerifyECDSA_P384(emitFn)
+		EmitVerifyECDSA_P384(emitFn, ctx.ecCodegen)
 	}
 
 	ctx.sm.push(bindingName)
@@ -5576,9 +5639,9 @@ var bn254BuiltinNames = map[string]bool{
 	"bn254FieldAdd": true, "bn254FieldSub": true,
 	"bn254FieldMul": true, "bn254FieldInv": true,
 	"bn254FieldNeg": true,
-	"bn254G1Add": true, "bn254G1ScalarMul": true,
+	"bn254G1Add":    true, "bn254G1ScalarMul": true,
 	"bn254G1Negate": true, "bn254G1OnCurve": true,
-	"bn254Pairing":        true,
+	"bn254Pairing":       true,
 	"bn254MultiPairing4": true,
 	"bn254MultiPairing3": true,
 }

@@ -54,6 +54,16 @@ export interface DiffExecOptions {
   args: (WitnessArg | WitnessSignMarker)[]; // method arguments (interpreter + witness order)
   constructorArgs?: Record<string, unknown>;
   disableConstantFolding?: boolean; // default false → fold-ON deployed bytes
+  /**
+   * EXPERIMENTAL backend toggles. Present so a size experiment can be run
+   * through this same source-vs-script oracle: compile the SAME contract with
+   * a flag off and on, execute both on the SAME witness, and require identical
+   * acceptance. Both default to the shipping path.
+   */
+  schedulerMode?: 'current' | 'liveness';
+  ecConstantPool?: boolean;
+  ecReductionSinking?: boolean;
+  ecFixedBaseComb?: boolean;
 }
 
 export interface DiffExecResult {
@@ -141,6 +151,10 @@ export function runDifferentialExecution(opts: DiffExecOptions): DiffExecResult 
     fileName: opts.fileName,
     disableConstantFolding: opts.disableConstantFolding ?? false,
     constructorArgs: ctor,
+    schedulerMode: opts.schedulerMode,
+    ecConstantPool: opts.ecConstantPool,
+    ecReductionSinking: opts.ecReductionSinking,
+    ecFixedBaseComb: opts.ecFixedBaseComb,
   });
   if (!compiled.success || !compiled.artifact) {
     const errs = compiled.diagnostics

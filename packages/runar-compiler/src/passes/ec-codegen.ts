@@ -10,6 +10,8 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import { sizeOfPushValue, estimateScriptBytes } from '../metrics/cost-model.js';
+import { combParams, combTable, combSafeRounds, SECP256K1_COMB_CURVE } from './comb.js';
 
 // ===========================================================================
 // Constants
@@ -40,13 +42,171 @@ function bigintToBytes32(n: bigint): Uint8Array {
 // ECTracker — named stack state tracker (mirrors SLHTracker)
 // ===========================================================================
 
+/**
+ * Codegen options shared by every EC / NIST-curve emitter.
+ *
+ * Off by default: with no options (or `constantPool: false`) each emitter is
+ * byte-identical to what the seven tiers ship today, so no golden, size
+ * baseline, or cross-tier parity gate can move.
+ */
+export interface EcCodegenOptions {
+  /**
+   * Park large repeated constants (the field prime, the group order) in a
+   * stack slot and copy them with `OP_PICK` instead of re-pushing the literal.
+   *
+   * `fieldMod` pushes the 256-bit prime at every modular reduction — 34 bytes
+   * a time, 20,025 times in `p256-wallet` (71 % of that fixture). A pick from
+   * a slot a dozen deep costs 2. See
+   * `docs/experiments/script-size-optimization-baseline.md`.
+   */
+  constantPool?: boolean;
+
+  /**
+   * Emit `a mod p` without the sign fix-up wherever the dividend is provably
+   * non-negative, and the cheap `a - b + p` form for subtraction wherever the
+   * subtrahend is provably reduced.
+   *
+   * `fieldMod` costs 10 bytes and runs ~20,000 times in a P-256 verify; six of
+   * those bytes exist only because `OP_MOD` takes the sign of the dividend.
+   * Which reductions qualify is decided by the sign lattice below — never
+   * assumed. Worth ~124 kB on p256-wallet, but only alongside `constantPool`:
+   * the cheap subtraction references the prime twice, so without a pooled slot
+   * it is a regression.
+   */
+  reductionSinking?: boolean;
+
+  /**
+   * Use a fixed-base comb instead of the binary ladder wherever the base point
+   * is a compile-time constant (`p256MulGen`, `p384MulGen`, and the `u1·G` half
+   * of ECDSA verification).
+   *
+   * The window width is not fixed here: the emitter renders each candidate and
+   * keeps whichever the byte-cost model scores smallest.
+   */
+  fixedBaseComb?: boolean;
+}
+
+// ===========================================================================
+// Sign lattice
+// ===========================================================================
+
+/**
+ * What is known about a tracked value's sign and range.
+ *
+ * `Reduced` implies `NonNegative`; the ordering is what the transfer functions
+ * meet over. `Unknown` is the default for every slot the analysis has not
+ * explicitly proved something about — including everything a `rawBlock` or an
+ * `OP_IF` produces — so an un-analysed value can only ever fall back to the
+ * shipping reduction.
+ *
+ * The distinction is not academic. `OP_BIN2NUM` of 32 unsigned coordinate bytes
+ * gives `NonNegative` but NOT `Reduced`: a coordinate may legitimately be up to
+ * 2^256 - 1 while p is 2^32 + 977 smaller. Multiplication and addition need only
+ * `NonNegative`; subtraction's cheap form needs the subtrahend `Reduced`, and
+ * conflating the two produces a script that passes 256 EC oracle assertions and
+ * is still wrong on `ecAdd((0,1), (2^256-1,1))`. See
+ * docs/experiments/script-size-optimizer-results.md §3.8.
+ */
+export const enum Dom {
+  /** Nothing known. May be negative. */
+  Unknown = 0,
+  /** Provably >= 0. May be >= p. */
+  NonNegative = 1,
+  /** Provably in [0, p). */
+  Reduced = 2,
+}
+
+/** True when `d` proves the value is >= 0. */
+export function isNonNegative(d: Dom): boolean {
+  return d >= Dom.NonNegative;
+}
+
+/** Stack slot names reserved for pooled constants. */
+export const POOL_FIELD_P = '_pool$p';
+export const POOL_GROUP_N = '_pool$n';
+
 export class ECTracker {
   nm: (string | null)[];
+  /**
+   * Sign-lattice fact per stack SLOT, kept parallel to `nm`.
+   *
+   * Slot-parallel rather than keyed by name on purpose: names are reused
+   * (`_fmul_prod` is written by every multiply) and the same name can be
+   * resident twice, so a name-keyed map would go stale in exactly the cases
+   * that matter. Every mutation of `nm` below mirrors into `dm` with the same
+   * splice, so the two cannot drift.
+   */
+  dm: Dom[];
+  /** Lattice facts for values parked on the alt stack, bottom -> top. */
+  private altDm: Dom[] = [];
   _e: (op: StackOp) => void;
+  /** True when this tracker may serve constants from a pooled slot. */
+  readonly pooling: boolean;
+  /** True when this tracker may emit sunk reductions. */
+  readonly sinking: boolean;
+  /** True when a compile-time-known base may use a fixed-base comb. */
+  readonly comb: boolean;
 
-  constructor(init: (string | null)[], emit: (op: StackOp) => void) {
+  constructor(
+    init: (string | null)[],
+    emit: (op: StackOp) => void,
+    opts?: EcCodegenOptions,
+    initDomains?: Dom[],
+  ) {
     this.nm = [...init];
+    this.dm = init.map((_, i) => initDomains?.[i] ?? Dom.Unknown);
     this._e = emit;
+    this.pooling = opts?.constantPool === true;
+    this.sinking = opts?.reductionSinking === true;
+    this.comb = opts?.fixedBaseComb === true;
+  }
+
+  /** The options this tracker was built with, for handing to a nested tracker. */
+  get options(): EcCodegenOptions {
+    return { constantPool: this.pooling, reductionSinking: this.sinking, fixedBaseComb: this.comb };
+  }
+
+  // -- sign lattice ---------------------------------------------------------
+
+  /** What is known about the named value. Unknown when the name is absent. */
+  domainOf(name: string): Dom {
+    // A silent desync here would hand a transfer function a fact about the
+    // WRONG slot, which is the one failure mode that produces a smaller script
+    // that quietly computes something else. Fail loudly instead.
+    if (this.dm.length !== this.nm.length) {
+      throw new Error(
+        `ECTracker: lattice desynchronised (${this.nm.length} slots, ${this.dm.length} facts). `
+        + 'Every nm mutation must go through a tracker method or pushTracked/popTracked.',
+      );
+    }
+    for (let i = this.nm.length - 1; i >= 0; i--)
+      if (this.nm[i] === name) return this.dm[i] ?? Dom.Unknown;
+    return Dom.Unknown;
+  }
+
+  /** Record a fact about the named value's slot. */
+  setDomain(name: string, d: Dom): void {
+    for (let i = this.nm.length - 1; i >= 0; i--) {
+      if (this.nm[i] === name) { this.dm[i] = d; return; }
+    }
+  }
+
+  /** Push a slot the caller tracks itself (used where raw opcodes create items). */
+  pushTracked(name: string | null, d: Dom = Dom.Unknown): void {
+    this.nm.push(name);
+    this.dm.push(d);
+  }
+
+  /** Pop a slot the caller tracks itself. Mirror of `pushTracked`. */
+  popTracked(): string | null {
+    this.dm.pop();
+    return this.nm.pop() ?? null;
+  }
+
+  /** Remove the slot at an absolute (bottom-relative) index. */
+  removeSlotAt(index: number): void {
+    this.nm.splice(index, 1);
+    this.dm.splice(index, 1);
   }
 
   get depth(): number { return this.nm.length; }
@@ -58,16 +218,29 @@ export class ECTracker {
     throw new Error(`ECTracker: '${name}' not on stack [${this.nm.join(',')}]`);
   }
 
-  pushBytes(n: string, v: Uint8Array): void { this._e({ op: 'push', value: v }); this.nm.push(n); }
-  pushInt(n: string, v: bigint): void { this._e({ op: 'push', value: v }); this.nm.push(n); }
-  dup(n: string): void { this._e({ op: 'dup' }); this.nm.push(n); }
-  drop(): void { this._e({ op: 'drop' }); this.nm.pop(); }
+  pushBytes(n: string, v: Uint8Array): void {
+    this._e({ op: 'push', value: v });
+    // A byte blob is not a number until BIN2NUM decides how to read it.
+    this.pushTracked(n, Dom.Unknown);
+  }
+  pushInt(n: string, v: bigint): void {
+    this._e({ op: 'push', value: v });
+    this.pushTracked(n, v >= 0n ? Dom.NonNegative : Dom.Unknown);
+  }
+  dup(n: string): void {
+    this._e({ op: 'dup' });
+    this.pushTracked(n, this.dm[this.dm.length - 1] ?? Dom.Unknown);
+  }
+  drop(): void { this._e({ op: 'drop' }); this.nm.pop(); this.dm.pop(); }
   nip(): void {
     this._e({ op: 'nip' });
     const L = this.nm.length;
-    if (L >= 2) this.nm.splice(L - 2, 1);
+    if (L >= 2) { this.nm.splice(L - 2, 1); this.dm.splice(L - 2, 1); }
   }
-  over(n: string): void { this._e({ op: 'over' }); this.nm.push(n); }
+  over(n: string): void {
+    this._e({ op: 'over' });
+    this.pushTracked(n, this.dm[this.dm.length - 2] ?? Dom.Unknown);
+  }
   swap(): void {
     this._e({ op: 'swap' });
     const L = this.nm.length;
@@ -75,6 +248,9 @@ export class ECTracker {
       const t = this.nm[L - 1];
       this.nm[L - 1] = this.nm[L - 2]!;
       this.nm[L - 2] = t!;
+      const d = this.dm[L - 1]!;
+      this.dm[L - 1] = this.dm[L - 2]!;
+      this.dm[L - 2] = d;
     }
   }
   rot(): void {
@@ -82,7 +258,9 @@ export class ECTracker {
     const L = this.nm.length;
     if (L >= 3) {
       const r = this.nm.splice(L - 3, 1)[0]!;
+      const d = this.dm.splice(L - 3, 1)[0]!;
       this.nm.push(r);
+      this.dm.push(d);
     }
   }
   op(code: string): void { this._e({ op: 'opcode', code }); }
@@ -91,26 +269,88 @@ export class ECTracker {
     if (d === 1) { this.swap(); return; }
     if (d === 2) { this.rot(); return; }
     this._e({ op: 'push', value: BigInt(d) });
-    this.nm.push(null);
+    this.pushTracked(null, Dom.NonNegative);
     this._e({ op: 'roll', depth: d });
-    this.nm.pop();
+    this.nm.pop(); this.dm.pop();
     const idx = this.nm.length - 1 - d;
     const r = this.nm.splice(idx, 1)[0] ?? null;
+    const rd = this.dm.splice(idx, 1)[0] ?? Dom.Unknown;
     this.nm.push(r);
+    this.dm.push(rd);
   }
   pick(d: number, n: string): void {
     if (d === 0) { this.dup(n); return; }
     if (d === 1) { this.over(n); return; }
     this._e({ op: 'push', value: BigInt(d) });
-    this.nm.push(null);
+    this.pushTracked(null, Dom.NonNegative);
     this._e({ op: 'pick', depth: d });
-    this.nm.pop();
-    this.nm.push(n);
+    this.nm.pop(); this.dm.pop();
+    // Once the depth literal is gone the copied slot sits at depth d.
+    this.pushTracked(n, this.dm[this.dm.length - 1 - d] ?? Dom.Unknown);
   }
   toTop(name: string): void { this.roll(this.findDepth(name)); }
   copyToTop(name: string, n?: string): void { this.pick(this.findDepth(name), n ?? name); }
-  toAlt(): void { this.op('OP_TOALTSTACK'); this.nm.pop(); }
-  fromAlt(n: string): void { this.op('OP_FROMALTSTACK'); this.nm.push(n); }
+
+  // -- constant pool --------------------------------------------------------
+  //
+  // A pooled constant is an ordinary tracked slot; nothing about the stack
+  // model changes. `pushConst` just chooses, per call site and by emitted
+  // bytes, between copying that slot and re-pushing the literal. Nested
+  // trackers built with `[...t.nm]` inherit the slot for free, so pooled
+  // constants work unchanged inside an `OP_IF` arm.
+
+  /** Park `value` in `slot` for the lifetime of this emitter. No-op when pooling is off. */
+  poolConstant(slot: string, value: bigint): void {
+    if (!this.pooling || this.nm.includes(slot)) return;
+    this.pushInt(slot, value);
+  }
+
+  /** Remove a pooled slot. No-op when pooling is off or the slot is absent. */
+  releaseConstant(slot: string): void {
+    if (!this.pooling || !this.nm.includes(slot)) return;
+    this.toTop(slot);
+    this.drop();
+  }
+
+  /**
+   * Materialize `value` on top as `name`, from the pooled `slot` when that is
+   * cheaper in emitted bytes than pushing the literal.
+   *
+   * The comparison is exact — `sizeOfPushValue` is the same encoder the emit
+   * pass uses — so pooling can never make a call site bigger. A pick at depth
+   * d costs `sizeOfPushValue(d) + 1`; depths 0 and 1 are OP_DUP / OP_OVER, 1
+   * byte each.
+   */
+  /** Emitted bytes a `pushConst` of this constant would cost right now. */
+  constCost(slot: string, value: bigint): number {
+    if (this.pooling && this.nm.includes(slot)) {
+      const d = this.findDepth(slot);
+      const pickCost = d <= 1 ? 1 : sizeOfPushValue(BigInt(d)) + 1;
+      if (pickCost < sizeOfPushValue(value)) return pickCost;
+    }
+    return sizeOfPushValue(value);
+  }
+
+  pushConst(slot: string, value: bigint, name: string): void {
+    if (this.pooling && this.nm.includes(slot)) {
+      const d = this.findDepth(slot);
+      const pickCost = d <= 1 ? 1 : sizeOfPushValue(BigInt(d)) + 1;
+      if (pickCost < sizeOfPushValue(value)) {
+        this.pick(d, name);
+        return;
+      }
+    }
+    this.pushInt(name, value);
+  }
+  toAlt(): void {
+    this.op('OP_TOALTSTACK');
+    this.nm.pop();
+    this.altDm.push(this.dm.pop() ?? Dom.Unknown);
+  }
+  fromAlt(n: string): void {
+    this.op('OP_FROMALTSTACK');
+    this.pushTracked(n, this.altDm.pop() ?? Dom.Unknown);
+  }
   rename(n: string): void {
     if (this.nm.length > 0)
       this.nm[this.nm.length - 1] = n;
@@ -118,24 +358,31 @@ export class ECTracker {
 
   /** Emit raw opcodes tracking only net stack effect. */
   rawBlock(consume: string[], produce: string | null, fn: (e: (op: StackOp) => void) => void): void {
-    for (let i = consume.length - 1; i >= 0; i--)
+    for (let i = consume.length - 1; i >= 0; i--) {
       this.nm.pop();
+      this.dm.pop();
+    }
     fn(this._e);
-    if (produce !== null)
-      this.nm.push(produce);
+    if (produce !== null) {
+      // Opaque opcodes: nothing is known about the result unless the caller
+      // proves it and records that with setDomain afterwards.
+      this.pushTracked(produce, Dom.Unknown);
+    }
   }
 
   /** Emit if/else with tracked stack effect. */
   emitIf(condName: string, thenFn: (e: (op: StackOp) => void) => void, elseFn: (e: (op: StackOp) => void) => void, resultName: string | null): void {
     this.toTop(condName);
-    this.nm.pop(); // condition consumed
+    this.nm.pop(); this.dm.pop(); // condition consumed
     const thenOps: StackOp[] = [];
     const elseOps: StackOp[] = [];
     thenFn((op) => thenOps.push(op));
     elseFn((op) => elseOps.push(op));
     this._e({ op: 'if', then: thenOps, else: elseOps });
-    if (resultName !== null)
-      this.nm.push(resultName);
+    if (resultName !== null) {
+      // A join over two arms this tracker did not analyse: nothing is known.
+      this.pushTracked(resultName, Dom.Unknown);
+    }
   }
 }
 
@@ -145,10 +392,9 @@ export class ECTracker {
 
 /** Push the field prime p onto the stack as a script number. */
 function pushFieldP(t: ECTracker, name: string): void {
-  // Push p directly as a BigInt — the emit pass encodes it as a proper
-  // little-endian sign-magnitude script number push.
-  t.pushInt(name, FIELD_P);
+  t.pushConst(POOL_FIELD_P, FIELD_P, name);
 }
+
 
 /**
  * Reduce a scalar to [0, n-1]: ((k mod n) + n) mod n.
@@ -165,7 +411,7 @@ function pushFieldP(t: ECTracker, name: string): void {
  * well defined.
  */
 function emitScalarReduce(t: ECTracker, kName: string, resultName: string): void {
-  t.pushInt('_n_red', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n_red');
   t.rawBlock([kName, '_n_red'], resultName, (e) => {
     e({ op: 'opcode', code: 'OP_2DUP' });
     e({ op: 'opcode', code: 'OP_MOD' });
@@ -179,10 +425,29 @@ function emitScalarReduce(t: ECTracker, kName: string, resultName: string): void
 }
 
 /**
+ * `a mod p` with no sign fix-up: 1 opcode instead of 7.
+ *
+ * Sound only when the dividend is provably >= 0, because `OP_MOD` takes the
+ * sign of the dividend. The caller proves that; this function does not check.
+ */
+function fieldModShort(t: ECTracker, aName: string, resultName: string): void {
+  t.toTop(aName);
+  pushFieldP(t, '_fmods_p');
+  t.rawBlock([aName, '_fmods_p'], resultName, (e) => {
+    e({ op: 'opcode', code: 'OP_MOD' });
+  });
+  t.setDomain(resultName, Dom.Reduced);
+}
+
+/**
  * fieldMod: reduce TOS mod p, ensure non-negative.
  * Expects 'aName' to be on the tracker stack.
  */
 function fieldMod(t: ECTracker, aName: string, resultName: string): void {
+  if (t.sinking && isNonNegative(t.domainOf(aName))) {
+    fieldModShort(t, aName, resultName);
+    return;
+  }
   t.toTop(aName);
   pushFieldP(t, '_fmod_p');
   // (a % p + p) % p
@@ -196,40 +461,90 @@ function fieldMod(t: ECTracker, aName: string, resultName: string): void {
     e({ op: 'swap' });                      // (a%p+p) p
     e({ op: 'opcode', code: 'OP_MOD' });    // ((a%p+p)%p)
   });
+  t.setDomain(resultName, Dom.Reduced);
 }
 
 /** fieldAdd: (a + b) mod p */
 function fieldAdd(t: ECTracker, aName: string, bName: string, resultName: string): void {
+  // Read the operand facts BEFORE rawBlock consumes their slots.
+  const sumNonNeg = isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName));
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_fadd_sum', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
+  if (sumNonNeg) t.setDomain('_fadd_sum', Dom.NonNegative);
   fieldMod(t, '_fadd_sum', resultName);
+}
+
+/**
+ * Does the cheap subtraction shape pay here?
+ *
+ * `a - b + p` then one OP_MOD references the prime TWICE; the shipping shape
+ * references it once and pays six more opcodes. So it only wins when the prime
+ * is cheap to materialise — i.e. when it is pooled. Without a pool this
+ * rewrite makes p256-wallet LARGER (958,792 -> 999,371 measured), which is why
+ * it is a cost comparison and not a flag.
+ */
+function cheapSubPays(t: ECTracker): boolean {
+  const c = t.constCost(POOL_FIELD_P, FIELD_P);
+  return 2 * c + 2 < c + 8;
 }
 
 /** fieldSub: (a - b) mod p (non-negative) */
 function fieldSub(t: ECTracker, aName: string, bName: string, resultName: string): void {
   t.toTop(aName);
   t.toTop(bName);
+  // The cheap shape needs a >= 0 AND b in [0, p): then a - b > -p, so a single
+  // shifted reduction is exact. `b >= 0` alone is NOT enough — a coordinate
+  // decoded from 32 unsigned bytes can exceed p by up to 2^32 + 977, which is
+  // precisely the ecAdd((0,1), (2^256-1,1)) counterexample.
+  const cheap = t.sinking
+    && isNonNegative(t.domainOf(aName))
+    && t.domainOf(bName) === Dom.Reduced
+    && cheapSubPays(t);
+
   t.rawBlock([aName, bName], '_fsub_diff', (e) => {
     e({ op: 'opcode', code: 'OP_SUB' });
   });
+
+  if (cheap) {
+    pushFieldP(t, '_fsub_p');
+    t.rawBlock(['_fsub_diff', '_fsub_p'], '_fsub_shift', (e) => {
+      e({ op: 'opcode', code: 'OP_ADD' });
+    });
+    t.setDomain('_fsub_shift', Dom.NonNegative);
+    fieldModShort(t, '_fsub_shift', resultName);
+    return;
+  }
   fieldMod(t, '_fsub_diff', resultName);
 }
 
-/** fieldMul: (a * b) mod p */
-function fieldMul(t: ECTracker, aName: string, bName: string, resultName: string): void {
+/**
+ * fieldMul: (a * b) mod p
+ *
+ * `productNonNegative` lets a caller assert the product's sign independently of
+ * the operands — `fieldSqr` uses it, since a*a >= 0 for any a whatsoever.
+ */
+function fieldMul(
+  t: ECTracker, aName: string, bName: string, resultName: string,
+  productNonNegative = false,
+): void {
+  const nonNeg = productNonNegative
+    || (isNonNegative(t.domainOf(aName)) && isNonNegative(t.domainOf(bName)));
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_fmul_prod', (e) => {
     e({ op: 'opcode', code: 'OP_MUL' });
   });
+  if (nonNeg) t.setDomain('_fmul_prod', Dom.NonNegative);
   fieldMod(t, '_fmul_prod', resultName);
 }
 
 /** fieldMulConst: (a * c) mod p where c is a small constant. Uses OP_2MUL for c=2. */
 function fieldMulConst(t: ECTracker, aName: string, c: bigint, resultName: string): void {
+  // Every call site passes a small positive c, so the product keeps a's sign.
+  const nonNeg = c > 0n && isNonNegative(t.domainOf(aName));
   t.toTop(aName);
   t.rawBlock([aName], '_fmc_prod', (e) => {
     if (c === 2n) {
@@ -239,13 +554,14 @@ function fieldMulConst(t: ECTracker, aName: string, c: bigint, resultName: strin
       e({ op: 'opcode', code: 'OP_MUL' });
     }
   });
+  if (nonNeg) t.setDomain('_fmc_prod', Dom.NonNegative);
   fieldMod(t, '_fmc_prod', resultName);
 }
 
-/** fieldSqr: (a * a) mod p */
+/** fieldSqr: (a * a) mod p. A square is non-negative whatever a's sign is. */
 function fieldSqr(t: ECTracker, aName: string, resultName: string): void {
   t.copyToTop(aName, '_fsqr_copy');
-  fieldMul(t, aName, '_fsqr_copy', resultName);
+  fieldMul(t, aName, '_fsqr_copy', resultName, true);
 }
 
 /**
@@ -304,8 +620,8 @@ function decomposePoint(t: ECTracker, pointName: string, xName: string, yName: s
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
   // Manually track the two new items
-  t.nm.push('_dp_xb');
-  t.nm.push('_dp_yb');
+  t.pushTracked('_dp_xb', Dom.Unknown);
+  t.pushTracked('_dp_yb', Dom.Unknown);
 
   // Convert y_bytes (on top) to num
   // Reverse from BE to LE, append 0x00 sign byte to ensure unsigned, then BIN2NUM
@@ -315,6 +631,10 @@ function decomposePoint(t: ECTracker, pointName: string, xName: string, yName: s
     e({ op: 'opcode', code: 'OP_CAT' });
     e({ op: 'opcode', code: 'OP_BIN2NUM' });
   });
+  // A 0x00 sign byte is appended before BIN2NUM, so the coordinate decodes
+  // UNSIGNED: >= 0, but it may be up to 2^256 - 1 and therefore >= p. That gap
+  // is exactly what the subtraction precondition turns on.
+  t.setDomain(yName, Dom.NonNegative);
 
   // Convert x_bytes to num
   t.toTop('_dp_xb');
@@ -324,6 +644,7 @@ function decomposePoint(t: ECTracker, pointName: string, xName: string, yName: s
     e({ op: 'opcode', code: 'OP_CAT' });
     e({ op: 'opcode', code: 'OP_BIN2NUM' });
   });
+  t.setDomain(xName, Dom.NonNegative);
 
   // Stack: [yName, xName] — swap to standard order [xName, yName]
   t.swap();
@@ -626,7 +947,7 @@ function jacobianToAffine(t: ECTracker, rxName: string, ryName: string): void {
  */
 function buildJacobianAddAffineInline(e: (op: StackOp) => void, t: ECTracker): void {
   // Create inner tracker with cloned stack state
-  jacobianAddAffineBody(new ECTracker([...t.nm], e), false);
+  jacobianAddAffineBody(new ECTracker([...t.nm], e, t.options, [...t.dm]), false);
 }
 
 /**
@@ -780,7 +1101,7 @@ function selectCoord(t: ECTracker, addName: string, dblName: string, condName: s
  * Stack layout: [..., ax, ay, _k, jx, jy, jz] — same in and out.
  */
 function buildJacobianAddOrDoubleInline(e: (op: StackOp) => void, t: ECTracker): void {
-  const it = new ECTracker([...t.nm], e);
+  const it = new ECTracker([...t.nm], e, t.options, [...t.dm]);
 
   // Keep the pre-add accumulator: it is what must be DOUBLED in the
   // exceptional case, and the add below consumes jx/jy/jz.
@@ -839,12 +1160,14 @@ function buildJacobianAddOrDoubleInline(e: (op: StackOp) => void, t: ECTracker):
  * Stack in: [point_a, point_b] (b on top)
  * Stack out: [result_point]
  */
-export function emitEcAdd(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pa', '_pb'], emit);
+export function emitEcAdd(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pa', '_pb'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
   decomposePoint(t, '_pa', 'px', 'py');
   decomposePoint(t, '_pb', 'qx', 'qy');
   affineAdd(t);
   composePoint(t, 'rx', 'ry', '_result');
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -858,8 +1181,10 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
  * This avoids the k+n overflow issue where bit 256 was only set for
  * large k, causing incorrect results for ~half of all scalar values.
  */
-export function emitEcMul(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt', '_k'], emit);
+export function emitEcMul(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt', '_k'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
+  t.poolConstant(POOL_GROUP_N, CURVE_N);
   decomposePoint(t, '_pt', 'ax', 'ay');
 
   // k' = k + 3n: guarantees bit 257 is set for MSB-first double-and-add.
@@ -870,15 +1195,15 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
   // usually an unlock argument — so reduce it first. See emitScalarReduce.
   t.toTop('_k');
   emitScalarReduce(t, '_k', '_kr');
-  t.pushInt('_n', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n');
   t.rawBlock(['_kr', '_n'], '_kn', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
-  t.pushInt('_n2', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n2');
   t.rawBlock(['_kn', '_n2'], '_kn2', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
-  t.pushInt('_n3', CURVE_N);
+  t.pushConst(POOL_GROUP_N, CURVE_N, '_n3');
   t.rawBlock(['_kn2', '_n3'], '_kn3', (e) => {
     e({ op: 'opcode', code: 'OP_ADD' });
   });
@@ -917,7 +1242,7 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
     // Move _bit to TOS and remove from tracker BEFORE generating add ops,
     // because OP_IF consumes _bit and the add ops run with _bit already gone.
     t.toTop('_bit');
-    t.nm.pop(); // _bit consumed by IF
+    t.popTracked(); // _bit consumed by IF
     const addOps: StackOp[] = [];
     const addEmit = (op: StackOp) => addOps.push(op);
     // Only the final step can be handed two equal operands — see
@@ -935,6 +1260,243 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
   t.toTop('_k'); t.drop();
 
   composePoint(t, '_rx', '_ry', '_result');
+  t.releaseConstant(POOL_GROUP_N);
+  t.releaseConstant(POOL_FIELD_P);
+}
+
+
+// ===========================================================================
+// Fixed-base comb (secp256k1)
+// ===========================================================================
+
+/**
+ * `k·G` by a Lim–Lee fixed-base comb instead of the 257-round binary ladder.
+ *
+ * The ladder doubles and conditionally adds once per SCALAR BIT. A comb splits
+ * the scalar into `w` blocks of `d` bits and reads one bit from each block per
+ * round, so it performs one doubling and one conditional add per COLUMN: the
+ * round count falls from `w*d` to `d` at the price of a `2^w - 1` entry table.
+ * G is a compile-time constant here, so the table costs nothing to build — it
+ * is `2·(2^w - 1)` literal pushes, resident for the whole emitter, read by
+ * every round with a 2-3 byte `OP_PICK`.
+ *
+ * This is the secp256k1 twin of `p256-p384-codegen.ts#cEmitCombMulGen`. The
+ * curve arithmetic is NOT shared: secp256k1 has `a = 0`, so `jacobianDouble`
+ * here computes `D = 3X²` where the NIST version computes `3(X-Z²)(X+Z²)`.
+ * Only `comb.ts` — the compile-time table and the interval checker — is common,
+ * and it takes `a` from the curve record rather than assuming it.
+ *
+ * SOUNDNESS. The cheap incomplete mixed add cannot represent a pre-add
+ * accumulator equal to the addend, its negation, or the point at infinity.
+ * `buildJacobianAddOrDoubleInline`'s comment justifies using it everywhere but
+ * the ladder's LAST step by an interval argument over `c_i mod n`, and insists
+ * that argument be re-derived by anything changing the offset or the iteration
+ * count. A comb changes both, so it is re-derived: `combSafeRounds` evaluates
+ * the same argument as executable interval arithmetic over the comb's own
+ * geometry, and any round it cannot prove gets the complete add-or-double form
+ * instead. Nothing is assumed safe.
+ *
+ * The other half of that argument is that the accumulator never starts at
+ * infinity, which needs the first digit non-zero. `combParams` searches for the
+ * scalar offset that guarantees it rather than reusing the ladder's hardcoded
+ * `+3n` — which happens to be right for secp256k1 at w=3 and is wrong for
+ * P-384.
+ *
+ * Stack in: [_k]. Stack out: [_result].
+ */
+function emitCombMulGen(
+  emit: (op: StackOp) => void,
+  w: number,
+  opts?: EcCodegenOptions,
+): boolean {
+  const curve = SECP256K1_COMB_CURVE;
+  const params = combParams(w, curve);
+  if (params === null) return false;
+  const { d, offsetMultiple } = params;
+  const table = combTable(w, d, curve);
+  const safe = combSafeRounds(params, curve);
+  const entries = (1 << w) - 1;
+
+  const t = new ECTracker(['_k'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
+  t.poolConstant(POOL_GROUP_N, CURVE_N);
+
+  // k' = (k mod n) + m*n. The reduce is what confines k to [0, n-1] and so what
+  // makes the interval argument apply at all; see emitScalarReduce.
+  t.toTop('_k');
+  emitScalarReduce(t, '_k', '_kr');
+  t.rename('_k');
+  for (let i = 0n; i < offsetMultiple; i++) {
+    t.pushConst(POOL_GROUP_N, CURVE_N, `_off${i}`);
+    t.rawBlock(['_k', `_off${i}`], '_k', (e) => {
+      e({ op: 'opcode', code: 'OP_ADD' });
+    });
+  }
+  t.setDomain('_k', Dom.NonNegative);
+
+  // Table, resident for the whole comb: picking an entry costs 2-3 bytes
+  // against a 34-byte literal push, and every round reads all of them.
+  for (let j = 1; j <= entries; j++) {
+    const pt = table[j]!;
+    t.pushInt(`_Tx${j}`, pt.x);
+    t.pushInt(`_Ty${j}`, pt.y);
+    t.setDomain(`_Tx${j}`, Dom.Reduced);
+    t.setDomain(`_Ty${j}`, Dom.Reduced);
+  }
+
+  /**
+   * Digit of round `i`, and the selected table entry, as `ax`/`ay`/`_flag`.
+   *
+   * Exactly one equality holds, so `Σ eq_j · T_j` is that entry's coordinate
+   * and every term is non-negative and below p — no reduction is needed, and
+   * the result is `Reduced` by construction. When the digit is zero every term
+   * vanishes and `_flag` is 0, so no add runs.
+   */
+  const emitSelect = (i: number): void => {
+    for (let b = 0; b < w; b++) {
+      const shift = i + b * d;
+      t.copyToTop('_k', `_kc${b}`);
+      if (shift === 0) {
+        t.rename(`_sh${b}`);
+      } else if (shift === 1) {
+        t.rawBlock([`_kc${b}`], `_sh${b}`, (e) => {
+          e({ op: 'opcode', code: 'OP_2DIV' });
+        });
+      } else {
+        t.pushInt(`_sd${b}`, BigInt(shift));
+        t.rawBlock([`_kc${b}`, `_sd${b}`], `_sh${b}`, (e) => {
+          e({ op: 'opcode', code: 'OP_RSHIFTNUM' });
+        });
+      }
+      t.pushInt(`_two${b}`, 2n);
+      t.rawBlock([`_sh${b}`, `_two${b}`], `_b${b}`, (e) => {
+        e({ op: 'opcode', code: 'OP_MOD' });
+      });
+      t.setDomain(`_b${b}`, Dom.Reduced);
+    }
+
+    t.toTop('_b0');
+    t.rename('_idx');
+    for (let b = 1; b < w; b++) {
+      t.toTop(`_b${b}`);
+      t.pushInt(`_wt${b}`, BigInt(1 << b));
+      t.rawBlock([`_b${b}`, `_wt${b}`], `_bw${b}`, (e) => {
+        e({ op: 'opcode', code: 'OP_MUL' });
+      });
+      t.toTop('_idx');
+      t.rawBlock([`_bw${b}`, '_idx'], '_idx', (e) => {
+        e({ op: 'opcode', code: 'OP_ADD' });
+      });
+    }
+    t.setDomain('_idx', Dom.Reduced);
+
+    for (let j = 1; j <= entries; j++) {
+      t.copyToTop('_idx', `_ic${j}`);
+      t.pushInt(`_jv${j}`, BigInt(j));
+      t.rawBlock([`_ic${j}`, `_jv${j}`], `_eq${j}`, (e) => {
+        e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+      });
+      t.setDomain(`_eq${j}`, Dom.Reduced);
+    }
+
+    for (const coord of ['x', 'y'] as const) {
+      const acc = coord === 'x' ? 'ax' : 'ay';
+      for (let j = 1; j <= entries; j++) {
+        t.copyToTop(`_eq${j}`, `_e${coord}${j}`);
+        t.copyToTop(`_T${coord}${j}`, `_t${coord}${j}`);
+        t.rawBlock([`_e${coord}${j}`, `_t${coord}${j}`], `_pr${coord}${j}`, (e) => {
+          e({ op: 'opcode', code: 'OP_MUL' });
+        });
+        if (j === 1) {
+          t.rename(acc);
+        } else {
+          t.toTop(acc);
+          t.rawBlock([`_pr${coord}${j}`, acc], acc, (e) => {
+            e({ op: 'opcode', code: 'OP_ADD' });
+          });
+        }
+      }
+      t.setDomain(acc, Dom.Reduced);
+    }
+
+    for (let j = entries; j >= 1; j--) { t.toTop(`_eq${j}`); t.drop(); }
+
+    t.toTop('_idx');
+    t.rawBlock(['_idx'], '_flag', (e) => {
+      e({ op: 'opcode', code: 'OP_0NOTEQUAL' });
+    });
+  };
+
+  // Round d-1 initialises the accumulator. The first digit is non-zero by
+  // construction (combParams), so this is a real point and never infinity.
+  emitSelect(d - 1);
+  t.toTop('_flag'); t.drop();
+  t.toTop('ax'); t.rename('jx');
+  t.toTop('ay'); t.rename('jy');
+  t.pushInt('jz', 1n);
+  t.setDomain('jz', Dom.Reduced);
+
+  for (let i = d - 2; i >= 0; i--) {
+    jacobianDouble(t);
+    emitSelect(i);
+
+    // `jacobianAddAffineBody` documents its layout as [..., ax, ay, jx, jy, jz]
+    // and replaces the accumulator IN PLACE at the top. The selection leaves
+    // ax/ay above jz, so restore the contract before the branch — otherwise the
+    // add arm would reorder the stack and the empty else arm would not, leaving
+    // the two arms with different layouts at OP_ENDIF.
+    t.toTop('_flag');
+    t.toAlt();
+    t.toTop('jx');
+    t.toTop('jy');
+    t.toTop('jz');
+    t.fromAlt('_flag');
+
+    t.popTracked(); // consumed by OP_IF
+    const addOps: StackOp[] = [];
+    const addEmit = (op: StackOp) => addOps.push(op);
+    if (safe[i]) buildJacobianAddAffineInline(addEmit, t);
+    else buildJacobianAddOrDoubleInline(addEmit, t);
+    emit({ op: 'if', then: addOps, else: [] });
+
+    // The addend was selected fresh for this round; the add only copied it.
+    t.toTop('ay'); t.drop();
+    t.toTop('ax'); t.drop();
+  }
+
+  jacobianToAffine(t, '_rx', '_ry');
+
+  for (let j = entries; j >= 1; j--) {
+    t.toTop(`_Ty${j}`); t.drop();
+    t.toTop(`_Tx${j}`); t.drop();
+  }
+  t.toTop('_k'); t.drop();
+
+  composePoint(t, '_rx', '_ry', '_result');
+  t.releaseConstant(POOL_GROUP_N);
+  t.releaseConstant(POOL_FIELD_P);
+  return true;
+}
+
+/**
+ * Emit the cheapest comb over the candidate window widths.
+ *
+ * Each candidate is rendered in full and scored with the same byte-cost model
+ * the emitter is measured by, and the smallest wins — the window width is not
+ * hardcoded. w=1 is the binary ladder and is excluded; beyond w=4 the `2^w`
+ * selection logic outgrows the saving.
+ *
+ * Returns null when no candidate could be built, so the caller falls back to
+ * the ladder rather than emitting nothing.
+ */
+function emitCombBest(opts?: EcCodegenOptions): StackOp[] | null {
+  let best: StackOp[] | null = null;
+  for (const w of [2, 3, 4]) {
+    const ops: StackOp[] = [];
+    if (!emitCombMulGen(op => ops.push(op), w, opts)) continue;
+    if (best === null || estimateScriptBytes(ops) < estimateScriptBytes(best)) best = ops;
+  }
+  return best;
 }
 
 /**
@@ -942,14 +1504,25 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
  * Stack in: [scalar]
  * Stack out: [result_point]
  */
-export function emitEcMulGen(emit: (op: StackOp) => void): void {
+export function emitEcMulGen(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  // G is a compile-time constant, so this is the one secp256k1 call site where
+  // a fixed-base comb applies. `emitEcMul` cannot use it: its base arrives at
+  // run time.
+  if (opts?.fixedBaseComb === true) {
+    const ops = emitCombBest(opts);
+    if (ops !== null) {
+      for (const op of ops) emit(op);
+      return;
+    }
+  }
+
   // Push generator point as 64-byte blob, then delegate to ecMul
   const gPoint = new Uint8Array(64);
   gPoint.set(bigintToBytes32(GEN_X), 0);
   gPoint.set(bigintToBytes32(GEN_Y), 32);
   emit({ op: 'push', value: gPoint });
   emit({ op: 'swap' }); // [point, scalar]
-  emitEcMul(emit);
+  emitEcMul(emit, opts);
 }
 
 /**
@@ -957,12 +1530,14 @@ export function emitEcMulGen(emit: (op: StackOp) => void): void {
  * Stack in: [point]
  * Stack out: [negated_point]
  */
-export function emitEcNegate(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitEcNegate(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
   decomposePoint(t, '_pt', '_nx', '_ny');
   pushFieldP(t, '_fp');
   fieldSub(t, '_fp', '_ny', '_neg_y');
   composePoint(t, '_nx', '_neg_y', '_result');
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**
@@ -970,8 +1545,9 @@ export function emitEcNegate(emit: (op: StackOp) => void): void {
  * Stack in: [point]
  * Stack out: [boolean]
  */
-export function emitEcOnCurve(emit: (op: StackOp) => void): void {
-  const t = new ECTracker(['_pt'], emit);
+export function emitEcOnCurve(emit: (op: StackOp) => void, opts?: EcCodegenOptions): void {
+  const t = new ECTracker(['_pt'], emit, opts);
+  t.poolConstant(POOL_FIELD_P, FIELD_P);
   decomposePoint(t, '_pt', '_x', '_y');
 
   // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1019,6 +1595,7 @@ export function emitEcOnCurve(emit: (op: StackOp) => void): void {
   t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
+  t.releaseConstant(POOL_FIELD_P);
 }
 
 /**

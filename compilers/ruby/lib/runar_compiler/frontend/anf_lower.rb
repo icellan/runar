@@ -25,6 +25,68 @@ module RunarCompiler
     # Public API
     # -------------------------------------------------------------------
 
+    # True for exactly the names LoweringContext#fresh_temp can mint.
+    # @param name [String]
+    # @return [Boolean]
+    def self.temp_shaped?(name)
+      name.length >= 2 && name[0] == "t" && name[1..].match?(/\A\d+\z/)
+    end
+
+    # Collect `t<digits>` variable-declaration names from a statement list.
+    # @param stmts [Array]
+    # @param out [Set]
+    def self.collect_decl_names(stmts, out)
+      stmts.each do |stmt|
+        case stmt
+        when VariableDeclStmt
+          out << stmt.name if temp_shaped?(stmt.name)
+        when IfStmt
+          collect_decl_names(stmt.then || [], out)
+          collect_decl_names(stmt.else_ || [], out)
+        when ForStmt
+          collect_decl_names([stmt.init, stmt.update].compact, out)
+          collect_decl_names(stmt.body || [], out)
+        end
+      end
+    end
+
+    # Every `t<digits>` identifier the contract's own source binds, so
+    # fresh_temp can never mint a name that shadows one.
+    #
+    # fresh_temp mints t0, t1, t2, ... while emit_named binds the developer's
+    # own locals into the SAME binding namespace. Nothing reserved them against
+    # each other, so a contract with a local named `t3` got a compiler temp
+    # named `t3` written on top of it, and the reference that read the user's
+    # value silently resolved to the compiler's.
+    #
+    # That deletes asserts. `const t3 = z - y; const t5 = y - t3;
+    # assert(t5 === this.want)` lowered `t5 := load_prop want` over the user's
+    # `t5`, leaving `assert(want === want)` -- always true, so the locking
+    # script carried no guard and any witness could spend it. FAIL-OPEN, and
+    # reachable with no branch involved.
+    #
+    # CONTRACT-wide, not method-wide, because private helpers are ANF-INLINED
+    # into their callers: a helper local named `t3` is emit_named into the
+    # CALLER's binding stream, so a per-method set would miss it.
+    #
+    # Only declarations and parameters are collected. An assignment target or a
+    # ++/-- operand must name something already declared or a parameter, so
+    # those are covered transitively. Only `t<digits>` names can ever collide,
+    # so nothing else is reserved and temp numbering is unchanged for every
+    # contract that does not already miscompile -- which is what leaves the
+    # goldens and the cross-tier hex parity untouched. All seven tiers
+    # implement this same rule.
+    # @param contract [ContractNode]
+    # @return [Set<String>]
+    def self.collect_reserved_temps(contract)
+      out = Set.new
+      ([contract.constructor] + contract.methods).each do |m|
+        m.params.each { |param| out << param.name if temp_shaped?(param.name) }
+        collect_decl_names(m.body || [], out)
+      end
+      out
+    end
+
     # Lower a type-checked Runar AST to ANF IR.
     #
     # Matches the TypeScript reference compiler's 04-anf-lower.ts exactly.
@@ -262,7 +324,10 @@ module RunarCompiler
       result = []
 
       # Lower constructor
+      reserved_temps = collect_reserved_temps(contract)
+
       ctor_ctx = LoweringContext.new(contract)
+      ctor_ctx.instance_variable_set(:@reserved_temps, reserved_temps)
       contract.constructor.params.each do |p|
         ctor_ctx.register_param_type(p.name, _type_node_to_string(p.type))
       end
@@ -289,6 +354,7 @@ module RunarCompiler
       # Lower each method
       contract.methods.each do |method|
         method_ctx = LoweringContext.new(contract)
+        method_ctx.instance_variable_set(:@reserved_temps, reserved_temps)
 
         # Issue #123: a non-default @sighash mode drives the OP_PUSH_TX binding
         # flag for any checkPreimage (auto-injected below, or a manual call) in
@@ -754,11 +820,15 @@ module RunarCompiler
         end
       end
 
-      # Generate a fresh temp name.
+      # Generate a fresh temp name that no user identifier can shadow.
       # @return [String]
       def fresh_temp
         name = "t#{@counter}"
         @counter += 1
+        while @reserved_temps.include?(name)
+          name = "t#{@counter}"
+          @counter += 1
+        end
         name
       end
 
@@ -897,6 +967,9 @@ module RunarCompiler
       def sub_context
         sub = LoweringContext.new(@contract)
         sub.instance_variable_set(:@counter, @counter)
+        # Same contract, same namespace: an arm's temps must dodge the same
+        # user identifiers the enclosing body does.
+        sub.instance_variable_set(:@reserved_temps, @reserved_temps)
         sub.instance_variable_set(:@local_names, @local_names.dup)
         sub.instance_variable_set(:@param_names, @param_names.dup)
         sub.instance_variable_set(:@param_types, @param_types.dup)

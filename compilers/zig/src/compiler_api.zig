@@ -15,6 +15,7 @@ const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
 const stack_lower = @import("passes/stack_lower.zig");
+const ec_emitters = @import("passes/helpers/ec_emitters.zig");
 const peephole = @import("passes/peephole.zig");
 const emit = @import("codegen/emit.zig");
 const input_limits = @import("frontend/input_limits.zig");
@@ -150,6 +151,22 @@ pub fn compileSourceWithOptions(
     file_name: []const u8,
     disable_constant_folding: bool,
 ) CompileError!CompileResult {
+    return compileSourceWithEcOptions(allocator, source, file_name, disable_constant_folding, .{});
+}
+
+/// As `compileSourceWithOptions`, plus the EXPERIMENTAL EC script-size options.
+///
+/// An all-false `ec_opts` keeps every EC emitter byte-identical to the shipping
+/// output — no golden, size baseline, or cross-tier hex comparison moves. See
+/// `ec_emitters.EcCodegenOptions` and
+/// docs/experiments/script-size-optimizer-results.md.
+pub fn compileSourceWithEcOptions(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    file_name: []const u8,
+    disable_constant_folding: bool,
+    ec_opts: ec_emitters.EcCodegenOptions,
+) CompileError!CompileResult {
     // Pass 0: DoS-bound size guard. Reject oversized source BEFORE any
     // tokenizer / arena allocator touches the input. BUG-008 follow-up.
     input_limits.assertSourceBytesUnderLimit(source) catch return error.SourceSizeExceeded;
@@ -194,7 +211,7 @@ pub fn compileSourceWithOptions(
     program = ec_optimizer.optimize(work, program) catch return error.ANFLowerFailed;
 
     // Pass 5: Stack Lower + Peephole
-    const stack_program = stack_lower.lower(work, program) catch return error.StackLowerFailed;
+    const stack_program = stack_lower.lowerOpts(work, program, ec_opts) catch return error.StackLowerFailed;
     const optimized_methods = peephole.optimize(work, stack_program.methods) catch return error.StackLowerFailed;
     const optimized_stack_program = types.StackProgram{
         .methods = optimized_methods,

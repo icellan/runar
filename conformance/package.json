@@ -12,6 +12,7 @@
     "test:parser-only": "tsx runner/index.ts --parser-only",
     "update-golden": "tsx runner/index.ts --update-golden",
     "script-size-check": "tsx runner/script-size-check.ts",
+    "script-metrics": "tsx runner/script-metrics.ts",
     "fuzz": "tsx fuzzer/index.ts",
     "fuzz:quick": "tsx fuzzer/index.ts --ir --compilers ts,go,rust,python,zig,ruby,java --render native --num 20",
     "fuzz:property": "tsx fuzzer/index.ts --property",
@@ -34,7 +35,9 @@
     "sdk-vertical:generate": "tsx sdk-vertical/generate.ts",
     "sdk-vertical:check": "tsx sdk-vertical/generate.ts --check",
     "differential-witness": "vitest run witnesses/differential.test.ts",
-    "mutation:score": "tsx mutation/run-mutation.ts"
+    "mutation:score": "tsx mutation/run-mutation.ts",
+    "ec-flag-parity:generate": "node scripts/gen-ec-flag-parity.mjs",
+    "ec-flag-parity": "vitest run ec-flag-parity/parity.test.ts"
   },
   "dependencies": {
     "fast-check": "^3.22.0"

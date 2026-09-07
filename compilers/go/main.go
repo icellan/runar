@@ -59,7 +59,6 @@ func rewriteSourceMapPaths(sm *compiler.SourceMap) *compiler.SourceMap {
 	return out
 }
 
-
 func main() {
 	// Subcommand dispatch: if the first arg looks like a subcommand
 	// (not a flag), route it to the dedicated handler. This lets us add
@@ -98,11 +97,17 @@ func main() {
 	emitIRTo := flag.String("emit-ir-to", "", "write the ANF IR JSON (same bytes as --emit-ir) to this path and CONTINUE compiling (requires --source)")
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
+	ecConstantPool := flag.Bool("ec-constant-pool", false, "EXPERIMENTAL: pool repeated EC curve constants (changes emitted bytes)")
+	ecReductionSinking := flag.Bool("ec-reduction-sinking", false, "EXPERIMENTAL: drop provably-dead sign fix-ups from EC modular reductions")
+	ecFixedBaseComb := flag.Bool("ec-fixed-base-comb", false, "EXPERIMENTAL: comb multiplication where the base point is a compile-time constant")
 	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
 	flag.Parse()
 
 	opts := compiler.CompileOptions{
 		DisableConstantFolding: *disableConstFold,
+		EcConstantPool:         *ecConstantPool,
+		EcReductionSinking:     *ecReductionSinking,
+		EcFixedBaseComb:        *ecFixedBaseComb,
 		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
 		// so the artifact carries the mapping table the user just asked for.
 		IncludeSourceMap: *emitSourceMap != "",

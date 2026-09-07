@@ -67,6 +67,14 @@ export { foldConstants } from './optimizer/constant-fold.js';
 export { eliminateDeadBindings } from './optimizer/dce.js';
 export { assembleArtifact } from './artifact/assembler.js';
 
+// Script-byte cost model + size instrumentation. Read-only: nothing here
+// changes compilation output, but `estimateScriptBytes` is the metric any
+// size-directed optimizer pass must compare candidates with, and it is
+// asserted byte-exact against the emitter over the whole conformance corpus.
+export { sizeOfStackOp, sizeOfPushValue, estimateScriptBytes } from './metrics/cost-model.js';
+export { analyzeScriptHex, stackOpMetrics } from './metrics/script-metrics.js';
+export type { ByteCategory, ConstantUse, ScriptMetrics, StackOpMetrics } from './metrics/script-metrics.js';
+
 export type { CompilerDiagnostic, Severity } from './errors.js';
 export { CompilerError, ParseError, ValidationError, TypeError, makeDiagnostic } from './errors.js';
 
@@ -157,6 +165,56 @@ export interface CompileOptions {
    * against bytes that were emitted without peephole rewriting.
    */
   disablePeephole?: boolean;
+
+  /**
+   * EXPERIMENTAL. Park each curve's field prime / group order in a stack slot
+   * inside the EC codegen modules instead of re-pushing the 33- or 49-byte
+   * literal at every modular reduction.
+   *
+   * Default false, and the emitters take an untouched code path when it is —
+   * so the checked-in goldens, `conformance/script-size-baseline.json`, and
+   * cross-tier hex parity are all unaffected while this is off. Turning it on
+   * changes the emitted bytes and is therefore a TS-tier-only experiment until
+   * the transformation is ported to the other six compilers. Measured effect:
+   * `verifyECDSA_P256` 974,024 -> 319,693 bytes (-67 %).
+   *
+   * See `docs/experiments/script-size-optimization-baseline.md`.
+   */
+  ecConstantPool?: boolean;
+
+  /**
+   * EXPERIMENTAL. Drop the sign fix-up from EC modular reductions wherever a
+   * sign lattice proves the dividend non-negative, and use the cheap
+   * `a - b + p` form where the subtrahend is proved reduced.
+   *
+   * Only pays alongside `ecConstantPool` — the cheap subtraction references the
+   * prime twice — and the codegen compares emitted bytes before choosing it.
+   * Measured: `verifyECDSA_P256` 304,463 -> ~180,000 bytes with both on.
+   */
+  ecReductionSinking?: boolean;
+
+  /**
+   * EXPERIMENTAL. Use a fixed-base comb instead of the binary ladder wherever
+   * the base point is a compile-time constant (`p256MulGen`, `p384MulGen`, and
+   * the `u1·G` half of ECDSA verification). One doubling and one add per COLUMN
+   * instead of per bit; the window width is chosen by the byte-cost model.
+   *
+   * Where the comb cannot prove the cheap incomplete addition safe it falls
+   * back to the complete add-or-double form — see `passes/comb.ts`.
+   * Measured: `verifyECDSA_P256` 195,120 -> 158,560 bytes.
+   */
+  ecFixedBaseComb?: boolean;
+
+  /**
+   * EXPERIMENTAL. Operand scheduling strategy for the ANF -> Stack pass.
+   *
+   * `'current'` (default) ships today's bytes. `'liveness'` parks a result on
+   * the alt stack when the next binding does not consume it, so the operands a
+   * chain reads repeatedly stay at depth 0/1 instead of sinking one slot per
+   * binding. TS-tier-only experiment while it is opt-in; see
+   * `docs/experiments/stack-scheduler-design.md`.
+   */
+  schedulerMode?: 'current' | 'liveness';
 
   /** Called between compilation passes with the current stage name and progress percentage (0-100). */
   onProgress?: (stage: string, percent: number) => void;
@@ -463,7 +521,12 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   // Pass 5-6: Stack lower + Peephole optimize + Emit
   try {
     onProgress?.('Stack lowering', 60);
-    const stackProgram = lowerToStack(optimizedAnf);
+    const stackProgram = lowerToStack(optimizedAnf, {
+      ecConstantPool: opts.ecConstantPool === true,
+      ecReductionSinking: opts.ecReductionSinking === true,
+      ecFixedBaseComb: opts.ecFixedBaseComb === true,
+      schedulerMode: opts.schedulerMode,
+    });
 
     // Apply peephole optimization to each method's ops (runs on Stack IR,
     // after the ANF conformance boundary, so it doesn't affect cross-compiler
@@ -552,6 +615,14 @@ export interface CompileFromANFOptions {
   disableEcOptimizer?: boolean;
   /** If true, skip the Stack IR peephole optimizer. See CompileOptions for context. */
   disablePeephole?: boolean;
+  /** EXPERIMENTAL. Pool repeated EC curve constants. See CompileOptions. */
+  ecConstantPool?: boolean;
+  /** EXPERIMENTAL. Sink EC modular reductions. See CompileOptions. */
+  ecReductionSinking?: boolean;
+  /** EXPERIMENTAL. Fixed-base comb for compile-time-known bases. See CompileOptions. */
+  ecFixedBaseComb?: boolean;
+  /** EXPERIMENTAL. Operand scheduling strategy. See CompileOptions. */
+  schedulerMode?: 'current' | 'liveness';
 }
 
 export interface CompileFromANFResult {
@@ -621,7 +692,12 @@ export function compileFromANF(
   // EC optimizer delegates internally to optimizer/dce.ts for dead-binding cleanup.
   const optimizedAnf = opts.disableEcOptimizer ? anf : optimizeEC(anf);
 
-  const stackProgram = lowerToStack(optimizedAnf);
+  const stackProgram = lowerToStack(optimizedAnf, {
+    ecConstantPool: opts.ecConstantPool === true,
+    ecReductionSinking: opts.ecReductionSinking === true,
+    ecFixedBaseComb: opts.ecFixedBaseComb === true,
+    schedulerMode: opts.schedulerMode,
+  });
   if (!opts.disablePeephole) {
     for (const method of stackProgram.methods) {
       method.ops = optimizeStackIR(method.ops);
