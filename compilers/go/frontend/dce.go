@@ -4,8 +4,9 @@ package frontend
 //
 // Removes bindings whose results are never referenced by other bindings,
 // preserving bindings with observable side effects (assert, update_prop,
-// check_preimage, add_output, raw_script). Iterates to a fixed point so
-// transitively dead bindings are also removed.
+// check_preimage, deserialize_state, add_output, add_raw_output,
+// add_data_output, call, method_call, raw_script). Iterates to a fixed point
+// so transitively dead bindings are also removed.
 //
 // This module is the canonical, standalone DCE pass for the Go compiler.
 // It mirrors the Zig reference implementation in
@@ -128,13 +129,18 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 			refs[sv] = true
 		}
 	case "add_raw_output", "add_data_output":
-		// Pre-existing silent fall-through preserved: the satoshis /
-		// scriptBytes operand refs are NOT collected here. The producing
-		// bindings stay live because (a) the operand-producing helpers
-		// in anf_lower currently inline as load_const / call which carry
-		// their own side-effects or feed update_prop chains, and
-		// (b) the add_raw_output binding itself is kept by HasSideEffect.
-		// Wiring real refs here is a separate fix.
+		// Both operands are read by codegen/stack.go lowerAddRawOutput, so
+		// their producing bindings must be kept live — matches the TS
+		// reference (optimizer/dce.ts collectRefsFromValue). Without this the
+		// add_raw_output binding (now correctly retained by HasSideEffect)
+		// would survive with its operand producers deleted, and stack
+		// lowering would resolve a binding that no longer exists.
+		if v.Satoshis != "" {
+			refs[v.Satoshis] = true
+		}
+		if v.ScriptBytes != "" {
+			refs[v.ScriptBytes] = true
+		}
 	case "deserialize_state":
 		// Pre-existing silent fall-through preserved: preimage ref is
 		// not collected here. The deserialize_state binding itself is
@@ -158,15 +164,13 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 func HasSideEffect(v *ir.ANFValue) bool {
 	switch v.Kind {
 	case "assert", "update_prop", "check_preimage", "add_output", "deserialize_state",
+		"add_raw_output", "add_data_output", // author-written transaction outputs
+		"call", "method_call", // a callee body may assert / write props
 		"raw_script": // opaque byte span — DCE must never eliminate it
 		return true
 	case "load_param", "load_prop", "load_const", "bin_op", "unary_op",
-		"get_state_script", "array_literal",
-		"add_raw_output", "add_data_output", "call", "method_call":
-		// Pre-existing silent fall-through preserved: these kinds were
-		// treated as effect-free by the old default. Wiring add_raw_output /
-		// add_data_output / call / method_call as effectful is a real fix
-		// owed but out of scope for the unknown-kind hardening pass.
+		"get_state_script", "array_literal":
+		// Pure ANF kinds — no observable effect, safe to DCE if unreferenced.
 		return false
 	case "if":
 		// If any branch has side effects, keep it
