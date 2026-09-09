@@ -4,8 +4,9 @@
  * Removes bindings whose results are never referenced by other bindings,
  * preserving bindings with observable side effects (assert, update_prop,
  * check_preimage, add_output, add_raw_output, add_data_output, call,
- * method_call, raw_script). Iterates to a fixed point so transitively
- * dead bindings are also removed.
+ * method_call, raw_script) and any `if` / `loop` whose nested bindings carry
+ * one. Iterates to a fixed point so transitively dead bindings are also
+ * removed.
  *
  * This module is the canonical, standalone DCE pass. It mirrors the
  * Zig reference implementation in `compilers/zig/src/passes/dce.zig`.
@@ -143,6 +144,19 @@ export function hasSideEffect(value: ANFValue): boolean {
     case 'method_call': // method calls may have side effects
     case 'raw_script':  // opaque byte span — DCE must never eliminate it
       return true;
+    // `if` / `loop` are effectful iff some NESTED binding is. Nested bindings
+    // live inside the parent node rather than flattened into the method body,
+    // so retention is all-or-nothing: dropping an unreferenced `if` would take
+    // every nested `assert` / `check_preimage` / `add_output` with it. Mirrors
+    // the Go tier's `frontend.HasSideEffect` and the Rust tier's
+    // `frontend::dce::has_side_effect`.
+    case 'if':
+      return (
+        value.then.some((b) => hasSideEffect(b.value)) ||
+        value.else.some((b) => hasSideEffect(b.value))
+      );
+    case 'loop':
+      return value.body.some((b) => hasSideEffect(b.value));
     // Pure ANF kinds — no side effect, safe to DCE if unreferenced.
     case 'load_param':
     case 'load_prop':
@@ -150,8 +164,6 @@ export function hasSideEffect(value: ANFValue): boolean {
     case 'get_state_script':
     case 'bin_op':
     case 'unary_op':
-    case 'if':
-    case 'loop':
     case 'array_literal':
       return false;
     default: {
