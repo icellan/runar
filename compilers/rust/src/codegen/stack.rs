@@ -1879,10 +1879,35 @@ impl LoweringContext {
                 self.emit_op(StackOp::Opcode(code.to_string()));
             }
         } else {
-            // Unknown function -- push a placeholder
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
-            self.sm.push(binding_name);
-            return;
+            // Unknown function. The previous behaviour here was to push a
+            // constant-0 placeholder and carry on, which had two consequences,
+            // both silent: the call's semantics became the literal `0` (a
+            // `hash160` guarding a P2PKH compiled away to `OP_0`, leaving
+            // `OP_0 OP_0 OP_EQUALVERIFY` — a check that always passes), and the
+            // arguments brought to the top of the stack above were removed from
+            // the MODEL by the loop just before this `if` without any opcode
+            // consuming them, so every later ROLL/PICK depth in the method was
+            // computed against a model short by `args.len()`.
+            //
+            // Refuse instead, the way the sibling name-resolution failures in
+            // this file already do. Pass 5 runs under `crate::refusal::
+            // catch_refusal`, so this surfaces to the caller as a diagnostic.
+            let loc = self
+                .current_source_loc
+                .as_ref()
+                .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column))
+                .unwrap_or_default();
+            panic!(
+                "Stack lowering: unknown function '{}'{} — the name resolves to \
+                 no builtin opcode sequence, intrinsic, crypto builtin, or \
+                 inlinable private method. Refusing to emit a constant-0 \
+                 placeholder: that would silently replace the call's result with \
+                 `0` and leave its {} argument(s) on the stack that the stack \
+                 model believes were consumed.",
+                func_name,
+                loc,
+                args.len()
+            );
         }
 
         if func_name == "split" {
