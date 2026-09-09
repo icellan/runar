@@ -842,7 +842,15 @@ class LoweringContext {
 
   /** Create a sub-context for nested blocks (if/else, loops). */
   subContext(): LoweringContext {
-    const sub = new LoweringContext(this.contract);
+    // Forward the side-effect summary. Without it `shouldInlinePrivate`
+    // short-circuits on `!this.sideEffects` in every nested context, so a
+    // `this.helper(...)` that emits an output stays a `method_call` inside an
+    // `if` arm / loop body: the arm registers no output refs (so
+    // `branchOutputRejectionReason` never runs), the method's continuation
+    // hash omits the output — and stack lowering splices the output bytes in
+    // anyway. The script then builds an output `hashOutputs` does not commit
+    // to, which a spending tx is free to drop.
+    const sub = new LoweringContext(this.contract, this.sideEffects);
     sub.counter = this.counter;
     // Share the parameter, local name sets, and aliases
     for (const p of this.paramNames) sub.paramNames.add(p);
