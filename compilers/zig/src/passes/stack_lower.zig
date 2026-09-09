@@ -2523,12 +2523,50 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// Variable-length byte reversal, byte-identical to the other six tiers
+    /// (see `compilers/go/codegen/stack.go#lowerReverseBytes`).
+    ///
+    /// Algorithm: split off the first byte repeatedly and prepend it to an
+    /// accumulator, unrolled 520 times (the maximum BSV stack-element size) so
+    /// any legal ByteString is fully reversed:
+    ///
+    ///     OP_0 OP_SWAP                       [result, data]
+    ///     520x OP_DUP OP_SIZE OP_NIP         push len(data)
+    ///          OP_IF                         while data is non-empty
+    ///            OP_1 OP_SPLIT               [result, head, tail]
+    ///            OP_SWAP OP_ROT OP_CAT       [tail, head||result]
+    ///            OP_SWAP                     [head||result, tail]
+    ///          OP_ENDIF
+    ///     OP_DROP                            drop the empty remainder
+    ///
+    /// This used to emit nothing at all, which made `reverseBytes` a silent
+    /// identity in this tier: `assert(reverseBytes(a) === b)` passed exactly
+    /// when `a === b`.
     fn lowerReverseBytes(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         try self.bringToTopAuto(args[0]);
-        // reverseBytes is typically unrolled at compile time for known sizes.
-        // For generic use, the value is left as-is (future optimization pass).
         _ = self.stack.pop();
+
+        try self.emitPushInt(0);
+        try self.emitOp(.op_swap);
+
+        var i: usize = 0;
+        while (i < 520) : (i += 1) {
+            try self.emitOp(.op_dup);
+            try self.emitOp(.op_size);
+            try self.emitOp(.op_nip);
+            try self.emitOp(.op_if);
+            try self.emitPushInt(1);
+            try self.emitOp(.op_split);
+            try self.emitOp(.op_swap);
+            try self.emitOp(.op_rot);
+            try self.emitOp(.op_cat);
+            try self.emitOp(.op_swap);
+            try self.emitOp(.op_endif);
+        }
+
+        try self.emitOp(.op_drop);
+
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
