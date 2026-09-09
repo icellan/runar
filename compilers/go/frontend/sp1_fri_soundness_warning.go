@@ -58,11 +58,12 @@ func statementsCallSP1Fri(stmts []Statement) bool {
 				return true
 			}
 		case AssignmentStmt:
-			if exprCallsSP1Fri(v.Value) {
+			// Target is an Expression too: `xs[verifySP1FRI(...)] = 1n`.
+			if exprCallsSP1Fri(v.Target) || exprCallsSP1Fri(v.Value) {
 				return true
 			}
 		case *AssignmentStmt:
-			if exprCallsSP1Fri(v.Value) {
+			if exprCallsSP1Fri(v.Target) || exprCallsSP1Fri(v.Value) {
 				return true
 			}
 		case ExpressionStmt:
@@ -82,11 +83,11 @@ func statementsCallSP1Fri(stmts []Statement) bool {
 				return true
 			}
 		case ForStmt:
-			if exprCallsSP1Fri(v.Condition) || statementsCallSP1Fri(v.Body) {
+			if forStmtCallsSP1Fri(v) {
 				return true
 			}
 		case *ForStmt:
-			if exprCallsSP1Fri(v.Condition) || statementsCallSP1Fri(v.Body) {
+			if forStmtCallsSP1Fri(*v) {
 				return true
 			}
 		case ReturnStmt:
@@ -102,6 +103,30 @@ func statementsCallSP1Fri(stmts []Statement) bool {
 	return false
 }
 
+// forStmtCallsSP1Fri walks every limb of a for loop. Init and Update are easy
+// to forget — Init is a VariableDeclStmt held by value and Update is a bare
+// Statement — and either one can host the built-in.
+func forStmtCallsSP1Fri(v ForStmt) bool {
+	if exprCallsSP1Fri(v.Init.Init) || exprCallsSP1Fri(v.Condition) {
+		return true
+	}
+	if v.Update != nil && statementsCallSP1Fri([]Statement{v.Update}) {
+		return true
+	}
+	return statementsCallSP1Fri(v.Body)
+}
+
+// exprCallsSP1Fri reports whether the expression reaches `verifySP1FRI` at any
+// depth.
+//
+// This switch MUST cover every type declared in ast.go that implements
+// Expression, in both its value and pointer form. Any type it misses is a
+// silent bypass of the refusal in Validate: the contract compiles clean into
+// the known-unsound verifier. Go does not check type-switch exhaustiveness, and
+// a fail-closed default is not usable here (it would refuse every contract
+// using a newly-added expression form), so the leaf cases below are listed
+// explicitly and TestSP1FriWalker_HandlesEveryDeclaredExpressionType fails the
+// build if ast.go grows a type this switch does not name.
 func exprCallsSP1Fri(e Expression) bool {
 	if e == nil {
 		return false
@@ -119,6 +144,53 @@ func exprCallsSP1Fri(e Expression) bool {
 		return exprCallsSP1Fri(v.Operand)
 	case *UnaryExpr:
 		return exprCallsSP1Fri(v.Operand)
+	case TernaryExpr:
+		return ternaryCallsSP1Fri(v)
+	case *TernaryExpr:
+		return ternaryCallsSP1Fri(*v)
+	case MemberExpr:
+		return exprCallsSP1Fri(v.Object)
+	case *MemberExpr:
+		return exprCallsSP1Fri(v.Object)
+	case IndexAccessExpr:
+		return exprCallsSP1Fri(v.Object) || exprCallsSP1Fri(v.Index)
+	case *IndexAccessExpr:
+		return exprCallsSP1Fri(v.Object) || exprCallsSP1Fri(v.Index)
+	case IncrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case *IncrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case DecrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case *DecrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case ArrayLiteralExpr:
+		return anyExprCallsSP1Fri(v.Elements)
+	case *ArrayLiteralExpr:
+		return anyExprCallsSP1Fri(v.Elements)
+
+	// Leaves: no sub-expressions to descend into. Named explicitly rather than
+	// swept up by a default so the exhaustiveness test can tell "handled" from
+	// "forgotten".
+	case Identifier, *Identifier,
+		BigIntLiteral, *BigIntLiteral,
+		BoolLiteral, *BoolLiteral,
+		ByteStringLiteral, *ByteStringLiteral,
+		PropertyAccessExpr, *PropertyAccessExpr:
+		return false
+	}
+	return false
+}
+
+func ternaryCallsSP1Fri(v TernaryExpr) bool {
+	return exprCallsSP1Fri(v.Condition) || exprCallsSP1Fri(v.Consequent) || exprCallsSP1Fri(v.Alternate)
+}
+
+func anyExprCallsSP1Fri(exprs []Expression) bool {
+	for _, e := range exprs {
+		if exprCallsSP1Fri(e) {
+			return true
+		}
 	}
 	return false
 }
@@ -134,10 +206,8 @@ func callExprIsSP1Fri(c CallExpr) bool {
 			return true
 		}
 	}
-	for _, a := range c.Args {
-		if exprCallsSP1Fri(a) {
-			return true
-		}
+	if exprCallsSP1Fri(c.Callee) {
+		return true
 	}
-	return false
+	return anyExprCallsSP1Fri(c.Args)
 }
