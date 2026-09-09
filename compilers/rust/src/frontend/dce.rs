@@ -3,8 +3,9 @@
 //! Removes bindings whose results are never referenced by other bindings,
 //! preserving bindings with observable side effects (assert, update_prop,
 //! check_preimage, add_output, add_raw_output, add_data_output, call,
-//! method_call, raw_script). Iterates to a fixed point so transitively
-//! dead bindings are also removed.
+//! method_call, raw_script) and any `if` / `loop` whose nested bindings carry
+//! one. Iterates to a fixed point so transitively dead bindings are also
+//! removed.
 //!
 //! This module is the canonical, standalone DCE pass for the Rust compiler.
 //! It mirrors the Zig reference implementation in
@@ -168,19 +169,43 @@ pub fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
 }
 
 /// Returns true if the binding has side effects and must not be eliminated.
+///
+/// An exhaustive `match` — NOT `matches!` — so a newly-added `ANFValue`
+/// variant is a compile error here rather than silently defaulting to
+/// "effect-free" and being deleted by DCE.
+///
+/// `If` and `Loop` recurse into their nested bindings: those bindings live
+/// inside the parent node rather than flattened into the method body, so
+/// retention is all-or-nothing. Dropping an unreferenced `if` would take
+/// every nested `assert` / `check_preimage` / `add_output` with it. Mirrors
+/// the Go tier's `frontend.HasSideEffect`.
 pub fn has_side_effect(value: &ANFValue) -> bool {
-    matches!(
-        value,
+    match value {
         ANFValue::Assert { .. }
-            | ANFValue::UpdateProp { .. }
-            | ANFValue::CheckPreimage { .. }
-            | ANFValue::DeserializeState { .. }
-            | ANFValue::AddOutput { .. }
-            | ANFValue::AddRawOutput { .. }
-            | ANFValue::AddDataOutput { .. }
-            | ANFValue::MethodCall { .. }
-            | ANFValue::Call { .. }
-            // opaque byte span — DCE must never eliminate it
-            | ANFValue::RawScript { .. }
-    )
+        | ANFValue::UpdateProp { .. }
+        | ANFValue::CheckPreimage { .. }
+        | ANFValue::DeserializeState { .. }
+        | ANFValue::AddOutput { .. }
+        | ANFValue::AddRawOutput { .. }
+        | ANFValue::AddDataOutput { .. }
+        | ANFValue::MethodCall { .. }
+        | ANFValue::Call { .. }
+        // opaque byte span — DCE must never eliminate it
+        | ANFValue::RawScript { .. } => true,
+
+        // Effectful only if some nested binding is.
+        ANFValue::If { then, else_branch, .. } => {
+            then.iter().any(|b| has_side_effect(&b.value))
+                || else_branch.iter().any(|b| has_side_effect(&b.value))
+        }
+        ANFValue::Loop { body, .. } => body.iter().any(|b| has_side_effect(&b.value)),
+
+        ANFValue::LoadParam { .. }
+        | ANFValue::LoadProp { .. }
+        | ANFValue::LoadConst { .. }
+        | ANFValue::BinOp { .. }
+        | ANFValue::UnaryOp { .. }
+        | ANFValue::GetStateScript {}
+        | ANFValue::ArrayLiteral { .. } => false,
+    }
 }
