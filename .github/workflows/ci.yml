@@ -464,6 +464,19 @@ jobs:
           npx tsx fuzz-regressions/replay.ts
       - name: Example tests (TS + Sol + Move)
         run: npx vitest run examples/ts/ examples/sol/ examples/move/
+      - name: Chronicle opcode-policy disclosure gate
+        # Compiled contracts require the Chronicle opcode policy: every stateful
+        # contract embeds OP_2MUL in its checkPreimage binding blob, and the EC /
+        # NIST-P / Merkle primitives emit OP_2DIV and OP_RSHIFTNUM. No user-facing
+        # document said so. This asserts the disclosure is present in README.md,
+        # SECURITY.md and the getting-started / integration / API guides, and that
+        # docs/chronicle-opcode-policy.md still names every Chronicle codepoint the
+        # emitter can produce — the liveness half reads the OPCODES table out of
+        # packages/runar-compiler/src/passes/06-emit.ts, so adding a Chronicle
+        # opcode without documenting it fails HERE, in the job that owns that file.
+        # Named explicitly because the repo-root tests/ directory is not covered by
+        # any glob in this workflow.
+        run: npx vitest run tests/chronicle-opcode-disclosure.test.ts
       - run: pnpm run typecheck
 
   go-compiler:

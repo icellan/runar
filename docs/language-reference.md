@@ -293,7 +293,7 @@ Bitwise operators work on both `bigint` and `ByteString` operands. When both ope
 | `a << b` | Left shift | `OP_LSHIFT` |
 | `a >> b` | Right shift | `OP_RSHIFT` |
 
-> **Warning: byte-array semantics.** In the BSV runtime (`@bsv/sdk` v2.0.5), `OP_LSHIFT` and `OP_RSHIFT` operate on **raw byte arrays** (big-endian unsigned shift), not on script numbers. They preserve the input byte length. This means that for multi-byte script numbers (which use sign-magnitude little-endian encoding), the result of `OP_RSHIFT` may differ from the expected arithmetic right-shift. If you need numeric right-shift behaviour, prefer `a / pow(2n, b)` (which compiles to `OP_DIV`-based sequences) instead of `a >> b`. The numeric variant `OP_RSHIFTNUM` (opcode 0xb7) is planned for the BSV 2026 CHRONICLE upgrade but is not yet widely available.
+> **Warning: byte-array semantics.** In the BSV runtime (`@bsv/sdk` v2.0.5), `OP_LSHIFT` and `OP_RSHIFT` operate on **raw byte arrays** (big-endian unsigned shift), not on script numbers. They preserve the input byte length. This means that for multi-byte script numbers (which use sign-magnitude little-endian encoding), the result of `OP_RSHIFT` may differ from the expected arithmetic right-shift. If you need numeric right-shift behaviour, prefer `a / pow(2n, b)` (which compiles to `OP_DIV`-based sequences) instead of `a >> b`. The numeric variant `OP_RSHIFTNUM` (opcode 0xb7) arrived with the BSV Chronicle upgrade, live on mainnet since block 943,816 (7 April 2026); it is not reachable from the `>>` operator, but the EC, NIST P-256/P-384 and Merkle primitives emit it internally — see [Chronicle Opcode Policy](./chronicle-opcode-policy.md).
 
 ### Unary
 

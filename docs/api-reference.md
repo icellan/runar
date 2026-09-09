@@ -2,6 +2,14 @@
 
 This document covers the Rúnar CLI commands and the SDK classes for deploying, calling, and managing smart contracts programmatically.
 
+> **Opcode policy.** Scripts produced by `runar compile` and broadcast by
+> `runar deploy` target the Chronicle opcode policy (SV Node v1.2.0), which
+> activated on BSV mainnet at block **943,816** on 7 April 2026. Stateful
+> contracts always contain `OP_2MUL`; EC, NIST P-256/P-384 and Merkle
+> primitives also emit `OP_2DIV` and `OP_RSHIFTNUM`. This affects which nodes
+> and which validation libraries can evaluate the output — see
+> [Chronicle Opcode Policy](./chronicle-opcode-policy.md).
+
 ---
 
 ## CLI Commands

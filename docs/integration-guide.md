@@ -2,6 +2,17 @@
 
 This guide walks through the full lifecycle of Rúnar smart contracts: writing, testing locally, compiling, deploying on-chain, and interacting with deployed contracts. It focuses on stateful contracts since they're the most interesting and the least obvious.
 
+> **Before you go on-chain: the Chronicle opcode policy.** Stateful contracts —
+> the subject of most of this guide — embed `OP_2MUL` in the `checkPreimage`
+> binding blob, and the EC / NIST P-256 / P-384 / Merkle primitives emit
+> `OP_2DIV` and `OP_RSHIFTNUM`. Those opcodes require the Chronicle policy
+> (SV Node v1.2.0), which activated on BSV mainnet at block **943,816** on
+> 7 April 2026. Nodes at or past that height accept these scripts. What still
+> matters is the tooling you validate with: a library on the pre-Chronicle
+> policy either aborts with `disabled opcode` or, for `0xb3`–`0xb7`, silently
+> treats them as no-ops and returns a wrong answer. See
+> [Chronicle Opcode Policy](./chronicle-opcode-policy.md).
+
 ---
 
 ## Local Development (No Blockchain Needed)

@@ -29,6 +29,20 @@ zig version      # 0.15.x (optional)
 java --version   # 17 or higher (optional)
 ```
 
+### Node policy
+
+Compiled contracts target the **Chronicle** opcode policy (SV Node v1.2.0),
+which activated on BSV mainnet at block **943,816** on 7 April 2026. Every
+stateful contract embeds `OP_2MUL`, and the EC / NIST P-256 / P-384 / Merkle
+primitives also emit `OP_2DIV` and `OP_RSHIFTNUM`. Mainnet and testnet nodes
+running v1.2.0 or later handle these; a private or older node needs
+`chronicleactivationheight` set, and a validation library still on the old
+policy will not evaluate the scripts the way a miner does.
+
+The P2PKH contract in this guide uses none of those opcodes. See
+[Chronicle Opcode Policy](./chronicle-opcode-policy.md) for which contract
+shapes do.
+
 ---
 
 ## Installation

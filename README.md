@@ -195,6 +195,22 @@ Bitcoin Script development today forces a choice between hand-writing opcodes (e
 
 ---
 
+## Node Requirement: the Chronicle Opcode Policy
+
+Rúnar emits Bitcoin Script for the **Chronicle** opcode policy (SV Node v1.2.0),
+which activated on BSV mainnet at block **943,816** on 7 April 2026. Every
+stateful contract carries `OP_2MUL` inside its `checkPreimage` binding blob, and
+the EC / NIST P-256 / P-384 / Merkle primitives also emit `OP_2DIV` and
+`OP_RSHIFTNUM`. Plain stateless contracts — P2PKH, multisig, escrow, tokens,
+the hash and post-quantum helpers — use none of these.
+
+Mainnet is past activation, so this is a tooling concern rather than a
+deployment blocker: a library still on the pre-Chronicle policy will not
+evaluate these scripts the way a miner does. The Rust `bsv-sdk` is one such
+library. See [Chronicle Opcode Policy](docs/chronicle-opcode-policy.md).
+
+---
+
 ## Quick Start
 
 ### TypeScript
@@ -450,6 +466,7 @@ The Zig example tree is backed by `packages/runar-zig` and a shared runner at `e
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation, first contract, compile, test, deploy |
 | [Language Reference](docs/language-reference.md) | Types, operators, built-in functions |
+| [Chronicle Opcode Policy](docs/chronicle-opcode-policy.md) | Which node policy compiled contracts require, and what stale tooling does with them |
 | [Contract Patterns](docs/contract-patterns.md) | P2PKH, escrow, tokens, auctions, covenants |
 | [1sat Ordinals & Tokens](docs/ordinals-guide.md) | NFT inscriptions, BSV-20/BSV-21 fungible tokens |
 | [Integration Guide](docs/integration-guide.md) | Full lifecycle: local dev, deploy, interact on-chain |
