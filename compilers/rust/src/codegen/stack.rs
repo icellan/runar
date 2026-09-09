@@ -1465,20 +1465,29 @@ impl LoweringContext {
         }
     }
 
+    /// Push a property `initialValue` straight from its IR JSON encoding.
+    ///
+    /// The encoding is the cross-tier one documented on
+    /// [`crate::ir::parse_const_value`], so decoding goes through that single
+    /// reader rather than being re-derived here. In particular an oversize
+    /// integer arrives EITHER as a decimal string with a trailing `n` (what
+    /// `frontend::anf_lower::bigint_to_json` writes) OR as an
+    /// arbitrary-precision JSON number (what the Go tier writes) — never as
+    /// hex. Only a plain string that is not a decimal-BigInt literal is hex
+    /// `ByteString` bytes.
     fn push_json_value(&mut self, val: &serde_json::Value) {
-        match val {
-            serde_json::Value::Bool(b) => {
-                self.emit_op(StackOp::Push(PushValue::Bool(*b)));
+        match crate::ir::parse_const_value(val) {
+            Some(ConstValue::Bool(b)) => {
+                self.emit_op(StackOp::Push(PushValue::Bool(b)));
             }
-            serde_json::Value::Number(n) => {
-                let i = n.as_i64().map(|v| v as i128).unwrap_or(0);
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(i))));
+            Some(ConstValue::Int(bi)) => {
+                self.emit_op(StackOp::Push(PushValue::Int(bi)));
             }
-            serde_json::Value::String(s) => {
-                let bytes = hex_to_bytes(s);
+            Some(ConstValue::Str(s)) => {
+                let bytes = hex_to_bytes(&s);
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
-            _ => {
+            None => {
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
             }
         }
