@@ -940,6 +940,8 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		methodParamTypes: make(map[string]string),
 		localAliases:     make(map[string]string),
 		localByteVars:    make(map[string]bool),
+		paramAliasStack:  make(map[string][]string),
+		sideEffects:      ctx.sideEffects, // read-only summary — a nested call site must make the same inlining decision as a top-level one
 		methodScope:      ctx.methodScope, // shared pointer — auto-injection registers propagate up
 		sighashFlag:      ctx.sighashFlag, // #123: nested manual checkPreimage inherits the method's mode
 		nested:           true,
@@ -964,6 +966,16 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	// Share local aliases
 	for k, v := range ctx.localAliases {
 		sub.localAliases[k] = v
+	}
+	// Deep-copy the inlined-param alias stack. inlinePrivateMethodCall pushes
+	// the caller's arg refs on the CURRENT context before lowering the private
+	// body; without this, an if/for/ternary inside that body would lower with
+	// no aliases and fall through to load_param naming the private's own
+	// parameter — a name the caller's ABI does not declare. Copied (not
+	// shared) because push/pop inside the nested block are balanced there and
+	// must not disturb the parent's frames.
+	for k, v := range ctx.paramAliasStack {
+		sub.paramAliasStack[k] = append([]string(nil), v...)
 	}
 	return sub
 }
