@@ -360,6 +360,13 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 method_ctx.sighash_flag = Some(v);
             }
         }
+        // A non-default @bindingVariant selects the compact 'all' binding for any
+        // checkPreimage in this method (auto-injected below, or a manual call).
+        if let Some(ref bv) = method.binding_variant {
+            if bv != "lowS" {
+                method_ctx.binding_variant = Some(bv.clone());
+            }
+        }
         // Register THIS method's declared params for method-scoped byte-type
         // analysis (issue #34). Auto-injected continuation params register
         // their types below, next to their add_param calls.
@@ -420,9 +427,11 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             });
             let check_result = method_ctx.emit(ANFValue::CheckPreimage {
                 preimage: preimage_ref,
-                // Omit for the default so the ANF (and pinned binding blob) is
-                // byte-identical; `sighash_flag` is None unless non-default.
+                // Omit each field for its default so the ANF (and pinned binding
+                // blob) is byte-identical; `sighash_flag` is None unless
+                // non-default, and `binding_variant` is None unless "all".
                 sighash_flag: method_ctx.sighash_flag,
+                binding_variant: method_ctx.binding_variant.clone(),
             });
             method_ctx.emit(ANFValue::Assert {
                 value: check_result,
@@ -846,6 +855,11 @@ struct LoweringContext<'a> {
     /// method's declared sighash. `None` = default ALL|FORKID, keeping the
     /// pinned binding blob unchanged.
     sighash_flag: Option<i64>,
+    /// The declared non-default `@bindingVariant` for the method being lowered,
+    /// so a MANUAL `checkPreimage(pre)` call AND the auto-injected covenant bind
+    /// under the same construction. `None` = default "lowS", keeping the pinned
+    /// blob unchanged. Propagated into sub-contexts like `sighash_flag`.
+    binding_variant: Option<String>,
     /// True in every context produced by `sub_context()` — inside an if arm, a
     /// loop body, or an inlined helper's block — and false only in the context a
     /// method's own body is lowered into.
@@ -874,6 +888,7 @@ impl<'a> LoweringContext<'a> {
             side_effects,
             method_scope: Rc::new(RefCell::new(MethodScope::default())),
             sighash_flag: None,
+            binding_variant: None,
             nested: false,
         }
     }
@@ -1039,6 +1054,8 @@ impl<'a> LoweringContext<'a> {
         // Issue #123: a manual checkPreimage inside a nested block must bind
         // under the method's declared @sighash mode.
         sub.sighash_flag = self.sighash_flag;
+        // Likewise a nested manual checkPreimage inherits the method's binding.
+        sub.binding_variant = self.binding_variant.clone();
         // `lift_branch_update_props` walks method.body and does NOT recurse, so
         // an `if` its recogniser accepts is only actually REWRITTEN at method
         // top level. `lower_if_statement` needs the same distinction before it
@@ -2275,6 +2292,9 @@ fn lower_call_expr(
                     // Issue #123: honour the method's declared @sighash on
                     // manual checkPreimage calls (None = default ALL|FORKID).
                     sighash_flag: ctx.sighash_flag,
+                    // Honour the method's declared @bindingVariant on manual
+                    // calls (None = default "lowS").
+                    binding_variant: ctx.binding_variant.clone(),
                 });
             }
         }
@@ -3307,9 +3327,10 @@ fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue
             name: name.clone(),
             value: r(v),
         },
-        ANFValue::CheckPreimage { preimage, sighash_flag } => ANFValue::CheckPreimage {
+        ANFValue::CheckPreimage { preimage, sighash_flag, binding_variant } => ANFValue::CheckPreimage {
             preimage: r(preimage),
             sighash_flag: *sighash_flag,
+            binding_variant: binding_variant.clone(),
         },
         ANFValue::DeserializeState { preimage } => ANFValue::DeserializeState {
             preimage: r(preimage),

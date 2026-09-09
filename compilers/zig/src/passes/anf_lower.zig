@@ -453,6 +453,14 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
                 method_sighash = st;
             }
         }
+        // A non-default @bindingVariant selects the compact 'all' binding for any
+        // checkPreimage in this method (auto-injected below, or a manual call).
+        // Codegen-only: unlike @sighash it does NOT ride on the ANF method / ABI.
+        if (method.binding_variant) |bv| {
+            if (!std.mem.eql(u8, bv, "lowS")) {
+                method_ctx.binding_variant = bv;
+            }
+        }
 
         if (contract.parent_class == .stateful_smart_contract and method.is_public) {
             try lowerStatefulPublicMethod(allocator, &method_ctx, method, contract, &embed_injected);
@@ -631,13 +639,18 @@ fn lowerStatefulPublicMethod(
     const sighash_mode: i32 = method.sighash_type orelse sighash_directive.SIGHASH_DEFAULT;
     const is_default_sighash = sighash_mode == sighash_directive.SIGHASH_DEFAULT;
 
-    // Inject checkPreimage(txPreimage). Omit the sighash flag for the default so
-    // the ANF (and pinned binding blob) is byte-identical to every existing
-    // contract.
+    // The declared per-method @bindingVariant (default "lowS"). Selects the
+    // compact 'all' Any-S blob for this method's auto-injected checkPreimage.
+    const binding_variant: []const u8 = method.binding_variant orelse "lowS";
+    const is_default_binding = std.mem.eql(u8, binding_variant, "lowS");
+
+    // Inject checkPreimage(txPreimage). Omit each field for its default so the
+    // ANF (and pinned binding blob) is byte-identical to every existing contract.
     const preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
     const check_result = try ctx.emit(.{ .check_preimage = .{
         .preimage = preimage_ref,
         .sighash_flag = if (is_default_sighash) 0 else sighash_mode,
+        .binding_variant = if (is_default_binding) "" else binding_variant,
     } });
     _ = try ctx.emit(.{ .assert = .{ .value = check_result } });
 
@@ -856,6 +869,11 @@ const LowerCtx = struct {
     /// keeping the pinned binding blob unchanged. Propagated into sub-contexts
     /// so a manual call inside an if/for body picks it up.
     sighash_flag: ?i32 = null,
+    /// The declared non-default `@bindingVariant` for the method being lowered,
+    /// so a MANUAL checkPreimage(pre) call binds under the same construction.
+    /// Null = default "lowS", keeping the pinned blob unchanged. Propagated into
+    /// sub-contexts like sighash_flag.
+    binding_variant: ?[]const u8 = null,
     /// True in every context produced by `subContext()` — inside an if arm, a
     /// loop body, or an inlined helper's block — and false only in the context
     /// a method's own body is lowered into. `liftBranchUpdateProps` walks
@@ -996,6 +1014,8 @@ const LowerCtx = struct {
         sub.counter = self.counter;
         // #123: nested manual checkPreimage inherits the method's mode.
         sub.sighash_flag = self.sighash_flag;
+        // Nested manual checkPreimage inherits the method's binding variant.
+        sub.binding_variant = self.binding_variant;
         sub.nested = true;
         // A refusal raised inside the branch must reach the same sink.
         sub.diagnostic = self.diagnostic;
@@ -1943,10 +1963,12 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     if (std.mem.eql(u8, c.callee, "checkPreimage")) {
         if (c.args.len >= 1) {
             const preimage_ref = try lowerExprToRef(ctx, c.args[0]);
-            // Issue #123: honour the method's declared @sighash on manual calls.
+            // Issue #123: honour the method's declared @sighash on manual calls,
+            // and its @bindingVariant selecting the compact 'all' blob.
             return try ctx.emit(.{ .check_preimage = .{
                 .preimage = preimage_ref,
                 .sighash_flag = ctx.sighash_flag orelse 0,
+                .binding_variant = ctx.binding_variant orelse "",
             } });
         }
     }
@@ -3131,7 +3153,11 @@ fn remapValueRefs(
             return .{ .update_prop = .{ .name = up.name, .value = r(name_map, up.value) } };
         },
         .check_preimage => |cp| {
-            return .{ .check_preimage = .{ .preimage = r(name_map, cp.preimage) } };
+            return .{ .check_preimage = .{
+                .preimage = r(name_map, cp.preimage),
+                .sighash_flag = cp.sighash_flag,
+                .binding_variant = cp.binding_variant,
+            } };
         },
         .deserialize_state => |ds| {
             return .{ .deserialize_state = .{ .preimage = r(name_map, ds.preimage) } };

@@ -60,7 +60,9 @@ export {
   emitCheckPreimageBindingRaw,
   checkPreimageBindingBytes,
   CHECK_PREIMAGE_BINDING_HEX,
+  CHECK_PREIMAGE_BINDING_ALL_HEX,
 } from './passes/oppushtx-codegen.js';
+export type { BindingVariant } from './passes/oppushtx-codegen.js';
 export { optimizeStackIR } from './optimizer/peephole.js';
 export { optimizeEC } from './optimizer/anf-ec.js';
 export { foldConstants } from './optimizer/constant-fold.js';

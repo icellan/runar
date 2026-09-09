@@ -157,6 +157,12 @@ pub struct MethodNode {
     /// auto-injected preimage-type assert, the OP_PUSH_TX binding flag, the
     /// ABI `sigHashType`, and the SDK-side preimage/signature construction.
     pub sighash_type: Option<i64>,
+    /// The Any-S binding construction declared via a
+    /// `/** @bindingVariant <lowS|all> */` directive on a public method. `None` =
+    /// no directive = the default "lowS" (byte-identical to the pinned binding
+    /// blob). `Some("all")` selects the compact non-low-S blob (valid only for
+    /// nVersion != 1). TypeScript-surface only, mirroring `@sighash`.
+    pub binding_variant: Option<String>,
     pub source_location: SourceLocation,
 }
 

@@ -10,6 +10,7 @@ require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
 require_relative "sighash_directive"
+require_relative "binding_variant_directive"
 require_relative "../codegen/emit"
 
 module RunarCompiler
@@ -181,10 +182,11 @@ module RunarCompiler
       }.freeze
 
       # Matches the author-facing comment directives (issue #109 @embedAlways,
-      # issue #123 @sighash). Word-boundary anchored to mirror the TS reference
-      # compiler's +/@embedAlways\b/+ / +/@sighash\b/+ scans so an identifier
-      # like +sighashType+ inside a comment does not register a directive.
-      DIRECTIVE_RE = /@(?:embedAlways|sighash)\b/
+      # issue #123 @sighash, @bindingVariant). Word-boundary anchored to mirror
+      # the TS reference compiler's +/@embedAlways\b/+ / +/@sighash\b/+ /
+      # +/@bindingVariant\b/+ scans so an identifier like +sighashType+ inside a
+      # comment does not register a directive.
+      DIRECTIVE_RE = /@(?:embedAlways|sighash|bindingVariant)\b/
 
       # Tokenize a source string into an array of Token structs.
       #
@@ -692,6 +694,7 @@ module RunarCompiler
         member_directives = gather_member_directives(location.line)
         embed_always = member_directives.any? { |d| d[:text].match?(/@embedAlways\b/) }
         sighash_text = member_directives.map { |d| d[:text] }.find { |t| t.match?(/@sighash\b/) }
+        binding_variant_text = member_directives.map { |d| d[:text] }.find { |t| t.match?(/@bindingVariant\b/) }
 
         # Collect modifiers: public, private, readonly
         visibility = "private"
@@ -733,7 +736,7 @@ module RunarCompiler
 
         # Method: name(...)
         if check(TOK_LPAREN)
-          return parse_method(member_name, visibility, location, sighash_text)
+          return parse_method(member_name, visibility, location, sighash_text, binding_variant_text)
         end
 
         # Property: name: Type (possibly with ; at end)
@@ -836,7 +839,7 @@ module RunarCompiler
 
       # -- Methods ----------------------------------------------------------
 
-      def parse_method(name, visibility, location, sighash_text = nil)
+      def parse_method(name, visibility, location, sighash_text = nil, binding_variant_text = nil)
         params = parse_params
 
         # Skip optional return type annotation
@@ -851,6 +854,9 @@ module RunarCompiler
         # type. Only public methods are spending entry points, so a directive on
         # a private helper is meaningless (error). Malformed flag lists error too.
         sighash_type = parse_sighash_on_method(name, visibility, sighash_text)
+        # `/** @bindingVariant <lowS|all> */` directive -> per-method Any-S binding
+        # construction. Same public-only / malformed-value rules as @sighash.
+        binding_variant = parse_binding_variant_on_method(name, visibility, binding_variant_text)
 
         MethodNode.new(
           name: name,
@@ -858,8 +864,32 @@ module RunarCompiler
           body: body,
           visibility: visibility,
           source_location: location,
-          sighash_type: sighash_type
+          sighash_type: sighash_type,
+          binding_variant: binding_variant
         )
+      end
+
+      # Resolve a method's `@bindingVariant` directive text to a variant string
+      # ("lowS" / "all"), or nil when there is no directive. Pushes a parse error
+      # for a directive on a non-public method or for an unknown variant.
+      # Mirrors parse_sighash_on_method.
+      def parse_binding_variant_on_method(name, visibility, binding_variant_text)
+        return nil if binding_variant_text.nil?
+
+        if visibility != "public"
+          add_error("@bindingVariant directive on non-public method '#{name}' has no effect — " \
+                    "only public methods are spending entry points")
+          return nil
+        end
+
+        result = BindingVariantDirective.extract_binding_variant_directive(binding_variant_text)
+        return nil if result.nil?
+
+        if result.key?(:error)
+          add_error("Method '#{name}': #{result[:error]}")
+          return nil
+        end
+        result[:value]
       end
 
       # Resolve a method's `@sighash` directive text to a numeric sighash type,

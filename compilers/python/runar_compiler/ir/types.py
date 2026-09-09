@@ -220,6 +220,13 @@ class ANFValue:
     #    blob. Only set for a method that declares a non-default @sighash mode.
     sighash_flag: int | None = None
 
+    # -- check_preimage: the Any-S binding construction (``None`` / ``"lowS"`` =
+    #    default low-S blob, byte-identical to the pinned cross-tier binding;
+    #    ``"all"`` = the compact non-low-S blob). Only set for a method that
+    #    declares ``@bindingVariant all``, keeping golden ANF unchanged for every
+    #    existing (default lowS) contract.
+    binding_variant: str | None = None
+
     # -- add_output --------------------------------------------------------
     satoshis: str | None = None
     state_values: list[str] | None = None
@@ -376,6 +383,7 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
         v.step = int(d.get("step"))
     v.preimage = d.get("preimage")
     v.sighash_flag = d.get("sighashFlag")
+    v.binding_variant = d.get("bindingVariant")
     v.satoshis = d.get("satoshis")
     v.state_values = d.get("stateValues")
     v.script_bytes = d.get("scriptBytes")

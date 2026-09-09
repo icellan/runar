@@ -67,17 +67,15 @@ fn detectFormat(path: []const u8) FileFormat {
 fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
     const format = detectFormat(file_name);
 
-    // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment
-    // directives are honoured ONLY on the `.runar.ts` surface (which implements
-    // them). The other eight surface parsers ignore comments, so they must
-    // reject a directive rather than silently drop it and change signing / DCE
-    // semantics. `.runar.ts` is exempt — its parser honours the directives.
+    // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) /
+    // `@bindingVariant` comment directives are honoured ONLY on the `.runar.ts`
+    // surface (which implements them). The other eight surface parsers ignore
+    // comments, so they must reject a directive rather than silently drop it and
+    // change signing / DCE semantics. `.runar.ts` is exempt — its parser
+    // honours the directives.
     if (format != .runar_ts) {
-        if (input_limits.containsDirectiveToken(source, "@sighash")) {
-            return .{ .contract = null, .errors = &.{input_limits.SIGHASH_DIRECTIVE_ERROR} };
-        }
-        if (input_limits.containsDirectiveToken(source, "@embedAlways")) {
-            return .{ .contract = null, .errors = &.{input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR} };
+        if (input_limits.unsupportedDirectiveError(source)) |msg| {
+            return .{ .contract = null, .errors = &.{msg} };
         }
     }
 

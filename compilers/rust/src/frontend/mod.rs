@@ -11,6 +11,7 @@ pub mod anf_optimize;
 pub mod constant_fold;
 pub mod dce;
 pub mod ast;
+pub mod binding_variant_directive;
 pub mod diagnostic;
 pub mod expand_fixed_arrays;
 pub mod input_limits;

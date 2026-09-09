@@ -184,6 +184,12 @@ pub const MethodNode = struct {
     /// the OP_PUSH_TX binding flag, the ABI sigHashType, and the SDK-side
     /// preimage construction. Honoured only on the `.runar.ts` surface.
     sighash_type: ?i32 = null,
+    /// Any-S binding construction declared via a `/** @bindingVariant <lowS|all> */`
+    /// directive on a public method. Null = no directive = the default "lowS"
+    /// (byte-identical to the pinned binding blob). "all" selects the compact
+    /// non-low-S blob (valid only for nVersion != 1). Honoured only on the
+    /// `.runar.ts` surface; the other formats fail closed at the parse dispatch.
+    binding_variant: ?[]const u8 = null,
 };
 pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "" };
 pub const ANFParam = ParamNode;
@@ -480,6 +486,11 @@ pub const CheckPreimage = struct {
     /// non-default @sighash mode, keeping golden ANF unchanged for every
     /// existing contract.
     sighash_flag: i32 = 0,
+    /// The Any-S binding construction ("" or "lowS" = default low-S blob,
+    /// byte-identical to the pinned cross-tier binding; "all" = the compact
+    /// non-low-S blob). Only set for a method that declares @bindingVariant all,
+    /// keeping golden ANF unchanged for every existing (default lowS) contract.
+    binding_variant: []const u8 = "",
 };
 pub const DeserializeState = struct { preimage: []const u8 };
 pub const ANFAddOutput = struct { satoshis: []const u8, state_values: []const []const u8 = &.{}, preimage: []const u8 = "", state_refs: []const []const u8 = &.{} };

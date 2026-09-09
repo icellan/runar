@@ -178,7 +178,9 @@ public final class AnfLoader {
             case "check_preimage" -> new CheckPreimage(
                 asString(obj.get("preimage")),
                 obj.containsKey("sighashFlag") && obj.get("sighashFlag") != null
-                    ? asInt(obj.get("sighashFlag")) : null
+                    ? asInt(obj.get("sighashFlag")) : null,
+                obj.containsKey("bindingVariant") && obj.get("bindingVariant") != null
+                    ? asString(obj.get("bindingVariant")) : null
             );
             case "deserialize_state" -> new DeserializeState(asString(obj.get("preimage")));
             case "add_output" -> {

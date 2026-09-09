@@ -328,6 +328,12 @@ class MethodNode:
     # preimage-type assert, the OP_PUSH_TX binding flag, the ABI ``sigHashType``,
     # and the SDK-side preimage/signature construction.
     sighash_type: int | None = None
+    # The Any-S binding construction declared via a
+    # ``/** @bindingVariant <lowS|all> */`` directive on a public method. ``None``
+    # = no directive = the default ``"lowS"`` (byte-identical to the pinned binding
+    # blob). ``"all"`` selects the compact non-low-S blob (valid only for
+    # nVersion != 1).
+    binding_variant: str | None = None
     source_location: SourceLocation = field(default_factory=SourceLocation)
 
 

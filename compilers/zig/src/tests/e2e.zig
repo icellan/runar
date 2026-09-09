@@ -667,7 +667,7 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
 
     try std.testing.expectEqualStrings(v1_hex, v2_hex);
 
-    // Byte-count lock-in: the canonical TS compiler produces 7624 bytes for
+    // Byte-count lock-in: the canonical TS compiler produces 7582 bytes for
     // both TicTacToe variants. Any divergence from this length indicates a
     // regression in Zig's stack lowering or branch-reconciliation logic.
     // (BUG-100 fix: checkPreimage now emits the 760-byte on-chain OP_PUSH_TX
@@ -692,11 +692,13 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // audits/v1-review/claude/repro/NEW-014-tictactoe-spends-at-9616.mts, which
     // plays a full game on the real @bsv/sdk Spend engine and proves that
     // moveAndWin on a board with NO line is still REJECTED.)
-    // The Any-S OP_PUSH_TX construction took this 9616 -> 7624: TicTacToe is
+    // The Any-S OP_PUSH_TX construction took this 9616 -> 7588: TicTacToe is
     // stateful with six covenant methods, each carrying one preimage-binding
-    // blob, so 6 x (760 - 428) = 1992 bytes come off. The NEW-014 note above
-    // still stands -- it is why the pre-Any-S number was 9616 and not 9494.
-    const expected_bytes: usize = 7624;
+    // blob, so 6 x (760 - 422) = 2028 bytes come off (the unified C=1 low-S blob
+    // is 422 bytes, up 1 from the earlier 421 after the OP_BIN2NUM insertion).
+    // The NEW-014 note above still stands -- it is why the pre-Any-S number was
+    // 9616 and not 9494.
+    const expected_bytes: usize = 7588;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

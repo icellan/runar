@@ -245,6 +245,13 @@ pub enum ANFValue {
         /// golden ANF stays unchanged for every existing contract.
         #[serde(rename = "sighashFlag", skip_serializing_if = "Option::is_none", default)]
         sighash_flag: Option<i64>,
+        /// The Any-S binding construction ("all" = the compact non-low-S blob;
+        /// absent / "lowS" = the default low-S blob, byte-identical to the pinned
+        /// cross-tier binding). Only set for a method that declares
+        /// `@bindingVariant all`, keeping golden ANF unchanged for every existing
+        /// (default lowS) contract.
+        #[serde(rename = "bindingVariant", skip_serializing_if = "Option::is_none", default)]
+        binding_variant: Option<String>,
     },
 
     #[serde(rename = "deserialize_state")]

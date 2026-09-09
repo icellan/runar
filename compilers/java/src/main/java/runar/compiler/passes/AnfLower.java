@@ -321,6 +321,16 @@ public final class AnfLower {
                 ctx.sighashFlag = sighashMode;
             }
 
+            // A non-default @bindingVariant selects the compact 'all' binding for
+            // any checkPreimage in this method (auto-injected below, or a manual
+            // call). null / "lowS" keeps the pinned binding blob unchanged.
+            String bindingVariant = method.bindingVariant() != null
+                ? method.bindingVariant() : BindingVariantDirective.DEFAULT;
+            boolean isDefaultBinding = BindingVariantDirective.DEFAULT.equals(bindingVariant);
+            if (!isDefaultBinding) {
+                ctx.bindingVariant = bindingVariant;
+            }
+
             boolean isStatefulPublic = contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT
                 && method.visibility() == Visibility.PUBLIC;
 
@@ -349,8 +359,12 @@ public final class AnfLower {
                 // binding flag byte (omit for the default so the ANF + pinned
                 // binding blob stay byte-identical for every existing contract).
                 String preimageRef = ctx.emit(new LoadParam("txPreimage"));
-                String checkResult = ctx.emit(
-                    new CheckPreimage(preimageRef, isDefaultSighash ? null : sighashMode));
+                // Omit each field for its default so the ANF (and the pinned
+                // binding blob) stays byte-identical for every existing contract.
+                String checkResult = ctx.emit(new CheckPreimage(
+                    preimageRef,
+                    isDefaultSighash ? null : sighashMode,
+                    isDefaultBinding ? null : bindingVariant));
                 ctx.emit(new Assert(checkResult));
 
                 // GAP-302 / #123: pin the sighash type to the declared mode
@@ -568,6 +582,10 @@ public final class AnfLower {
         // being lowered, so a MANUAL checkPreimage(pre) call binds under the
         // same mode as the method's declared sighash. null = default ALL|FORKID.
         Integer sighashFlag = null;
+        // The declared non-default @bindingVariant for the method being lowered,
+        // so a MANUAL checkPreimage(pre) call binds under the same construction.
+        // null = default "lowS", keeping the pinned binding blob unchanged.
+        String bindingVariant = null;
         /**
          * True in every context produced by {@link #subContext()} — inside an
          * if arm, a loop body, or an inlined helper's block — and false only in
@@ -753,6 +771,9 @@ public final class AnfLower {
             // manual checkPreimage() inside an if/else / ternary / inlined
             // branch binds under the same mode instead of the default.
             sub.sighashFlag = this.sighashFlag;
+            // Likewise propagate the method's declared @bindingVariant so a
+            // nested manual checkPreimage() inherits the same binding construction.
+            sub.bindingVariant = this.bindingVariant;
             // GAP-002: inherit the outer statement's source location so
             // bindings emitted inside an if/else / loop branch are still
             // mapped back to the originating AST statement.
@@ -1635,8 +1656,9 @@ public final class AnfLower {
             if (callee instanceof Identifier id2 && "checkPreimage".equals(id2.name())) {
                 if (!e.args().isEmpty()) {
                     String preimageRef = lowerExprToRef(e.args().get(0));
-                    // Issue #123: honour the method's declared @sighash on manual calls.
-                    return emit(new CheckPreimage(preimageRef, sighashFlag));
+                    // Issue #123: honour the method's declared @sighash and
+                    // @bindingVariant on manual calls.
+                    return emit(new CheckPreimage(preimageRef, sighashFlag, bindingVariant));
                 }
             }
 
@@ -2591,7 +2613,8 @@ public final class AnfLower {
             return new UpdateProp(up.name(), mapOr(up.value(), nameMap));
         }
         if (value instanceof CheckPreimage cp) {
-            return new CheckPreimage(mapOr(cp.preimage(), nameMap), cp.sighashFlag());
+            return new CheckPreimage(
+                mapOr(cp.preimage(), nameMap), cp.sighashFlag(), cp.bindingVariant());
         }
         if (value instanceof DeserializeState ds) {
             return new DeserializeState(mapOr(ds.preimage(), nameMap));

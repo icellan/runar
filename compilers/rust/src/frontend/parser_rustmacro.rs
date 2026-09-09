@@ -447,6 +447,7 @@ impl RustDslParser {
             visibility: Visibility::Public,
             source_location: loc,
             sighash_type: None,
+            binding_variant: None,
         };
 
         let contract = ContractNode {
@@ -620,7 +621,7 @@ impl RustDslParser {
         }
         self.expect(&TokenType::RBrace);
 
-        MethodNode { name, params, body, visibility, sighash_type: None, source_location: loc }
+        MethodNode { name, params, body, visibility, sighash_type: None, binding_variant: None, source_location: loc }
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {

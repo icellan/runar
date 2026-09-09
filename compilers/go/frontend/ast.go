@@ -121,6 +121,12 @@ type MethodNode struct {
 	// Drives the auto-injected preimage-type assert, the OP_PUSH_TX binding
 	// flag, the ABI sigHashType, and the SDK-side preimage construction.
 	SighashType *int
+
+	// BindingVariant is the Any-S binding construction declared via a
+	// `/** @bindingVariant <lowS|all> */` directive on a public method. Nil = no
+	// directive = the default "lowS" (byte-identical to the pinned binding blob).
+	// "all" selects the compact non-low-S blob (valid only for nVersion != 1).
+	BindingVariant *string
 }
 
 // ParamNode represents a method parameter.

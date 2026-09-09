@@ -22,6 +22,7 @@ from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 # directive, so this has zero golden impact.
 _SIGHASH_DIRECTIVE_RE = re.compile(r"@sighash\b")
 _EMBED_ALWAYS_DIRECTIVE_RE = re.compile(r"@embedAlways\b")
+_BINDING_VARIANT_DIRECTIVE_RE = re.compile(r"@bindingVariant\b")
 
 # Non-TS extension -> human-readable surface name for the diagnostic.
 # ``.runar.ts`` is intentionally absent: parser_ts honours the directives.
@@ -54,6 +55,12 @@ def _unsupported_directive_error(source: str, surface_name: str) -> str | None:
             f"@embedAlways directive (issue #109) is not supported by the {surface_name} "
             "surface parser; write the contract in TypeScript (.runar.ts) where "
             "@embedAlways is honoured"
+        )
+    if _BINDING_VARIANT_DIRECTIVE_RE.search(source):
+        return (
+            f"@bindingVariant directive is not supported by the {surface_name} "
+            "surface parser; write the contract in TypeScript (.runar.ts) where "
+            "@bindingVariant is honoured"
         )
     return None
 

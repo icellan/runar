@@ -309,6 +309,8 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
             .preimage = try allocator.dupe(u8, try getString(obj, "preimage")),
             // #123: optional non-default sighash flag (default 0 = ALL|FORKID).
             .sighash_flag = getOptionalI32(obj, "sighashFlag"),
+            // Optional non-default Any-S binding variant (default "" = lowS).
+            .binding_variant = try allocator.dupe(u8, getOptionalString(obj, "bindingVariant")),
         } },
         .deserialize_state => .{ .deserialize_state = .{
             .preimage = try allocator.dupe(u8, try getString(obj, "preimage")),
@@ -650,6 +652,16 @@ fn getOptionalI32(obj: std.json.ObjectMap, key: []const u8) i32 {
     return switch (val) {
         .integer => |i| @intCast(i),
         else => 0,
+    };
+}
+
+/// Read an optional string field, returning "" when absent or not a string.
+/// Used for the check_preimage `bindingVariant` (default "" = lowS).
+fn getOptionalString(obj: std.json.ObjectMap, key: []const u8) []const u8 {
+    const val = obj.get(key) orelse return "";
+    return switch (val) {
+        .string => |s| s,
+        else => "",
     };
 }
 
@@ -1179,7 +1191,16 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
         },
         .check_preimage => |cp| {
             try writer.writeAll("{\n");
-            // Sorted keys: kind, preimage, sighashFlag (#123, only when non-default)
+            // Sorted keys: bindingVariant (only when non-default), kind, preimage,
+            // sighashFlag (#123, only when non-default).
+            const emit_variant = cp.binding_variant.len != 0 and !std.mem.eql(u8, cp.binding_variant, "lowS");
+            if (emit_variant) {
+                try writeIndent(writer, depth + 1);
+                try writeJsonString(writer, "bindingVariant");
+                try writer.writeAll(": ");
+                try writeJsonString(writer, cp.binding_variant);
+                try writer.writeAll(",\n");
+            }
             try writeIndent(writer, depth + 1);
             try writeJsonString(writer, "kind");
             try writer.writeAll(": ");

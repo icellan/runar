@@ -704,22 +704,39 @@ module RunarCompiler::Codegen
     # The insecure legacy checkPreimage accepted a witness signature over the
     # real spending transaction and checked it against pubkey G, never reading
     # the pushed preimage -- so the preimage was decoupled from the tx. This
-    # derives the ECDSA signature FROM the preimage on-chain (s =
-    # Any-S: nonce k=1 so r = Gx, signing key d = 2^248 * Gx^-1 mod n so
-    # r*d == 2^248, giving s = z + 2^248 mod n for z = hash256(preimage); low-S,
-    # minimal DER), so OP_CHECKSIG passes only when hash256(preimage) equals the
-    # real tx sighash.
+    # derives the ECDSA signature FROM the preimage on-chain (Optimal OP_PUSH_TX),
+    # so OP_CHECKSIG passes only when hash256(preimage) equals the real tx
+    # sighash.
     #
-    # The construction compiles to a FIXED byte sequence identical across all
+    # Any-S construction: nonce k=1 so R = G and r = Gx needs no k-inverse
+    # multiply and no sign pad; signing key d = Gx^-1 mod n (C = 1), so r*d == 1
+    # and the addend s = z + 1 is a single OP_1ADD. Both variants share the C=1
+    # public key 038ff83d...9218 = d*G:
+    #   - lowS (default): s = lowS((z + 1) mod n) -- branchless low-S fixup,
+    #     canonical s <= n/2, accepted under the LOW_S rule (nVersion = 1).
+    #     421 bytes.
+    #   - all: s = z + 1 as-is (no mod-n, no low-S) -- 376 bytes; valid only for
+    #     spends with nVersion != 1, where LOW_S is not enforced.
+    #
+    # Each construction compiles to a FIXED byte sequence identical across all
     # seven tiers; it is the canonical output of the TypeScript reference
     # (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a
     # single opaque raw_bytes op (peephole barrier). The cross-tier conformance
-    # suite guards that this constant matches every other tier byte-for-byte.
+    # suite guards that these constants match every other tier byte-for-byte.
     CHECK_PREIMAGE_BINDING_HEX =
-      "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad"
+      "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
     CHECK_PREIMAGE_BINDING_BYTES = [CHECK_PREIMAGE_BINDING_HEX].pack("H*")
 
-    # The blob's tail, everything AFTER the appended BIP-143 sighash flag byte:
+    # The compact non-low-S ('all') construction: s = z + 1 without the mod-n +
+    # low-S fixup. ~45 bytes smaller; valid only for spends with nVersion != 1
+    # (the `@bindingVariant all` directive). Shares the C=1 pubkey tail with the
+    # low-S blob above.
+    CHECK_PREIMAGE_BINDING_ALL_HEX =
+      "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8b76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
+    CHECK_PREIMAGE_BINDING_ALL_BYTES = [CHECK_PREIMAGE_BINDING_ALL_HEX].pack("H*")
+
+    # The blob's tail, everything AFTER the appended BIP-143 sighash flag byte
+    # (shared by both variants):
     #
     #   ... 7c7e   01     41     7e     21 <33-byte pubkey>   ad
     #              ^^     ^^     ^^     ^^^^^^^^^^^^^^^^^^^   ^^
@@ -731,43 +748,53 @@ module RunarCompiler::Codegen
     # appended flag byte).
     SIGHASH_FLAG_TAIL_HEX =
       "7e" \
-      "21" "02b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0" \
+      "21" "038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218" \
       "ad"
 
-    # Byte offset of the sighash flag inside CHECK_PREIMAGE_BINDING_BYTES.
+    # Derive the byte offset of the appended sighash flag inside a binding blob.
     #
     # DERIVED from the blob itself rather than hardcoded: locate the unique
     # `OP_CAT || PUSH(pubkey) || OP_CHECKSIGVERIFY` tail and step back one byte. If
-    # the pinned constant is ever regenerated with a different layout this
-    # raises at load time — instead of silently pointing the setbyte below at
-    # an unrelated opcode, which would corrupt every non-default-sighash
-    # contract with no test failure to show for it.
-    SIGHASH_FLAG_BYTE_OFFSET = begin
+    # a pinned constant is ever regenerated with a different layout this raises at
+    # load time — instead of silently pointing the setbyte below at an unrelated
+    # opcode, which would corrupt every non-default-sighash contract with no test
+    # failure to show for it.
+    def self._derive_sighash_flag_offset(blob_bytes)
       tail = [SIGHASH_FLAG_TAIL_HEX].pack("H*")
-      idx = CHECK_PREIMAGE_BINDING_BYTES.index(tail)
+      idx = blob_bytes.index(tail)
       raise "check_preimage binding blob changed: sighash-flag tail not found" if idx.nil?
-      unless CHECK_PREIMAGE_BINDING_BYTES.index(tail, idx + 1).nil?
+      unless blob_bytes.index(tail, idx + 1).nil?
         raise "check_preimage binding blob changed: sighash-flag tail is not unique"
       end
 
       offset = idx - 1
-      unless CHECK_PREIMAGE_BINDING_BYTES.getbyte(offset) == 0x41 &&
-             CHECK_PREIMAGE_BINDING_BYTES.getbyte(offset - 1) == 0x01
+      unless blob_bytes.getbyte(offset) == 0x41 &&
+             blob_bytes.getbyte(offset - 1) == 0x01
         raise "check_preimage binding blob changed: byte @#{offset} is not an OP_DATA_1-pushed 0x41 sighash flag"
       end
       offset
     end
 
-    # Return the check_preimage binding blob for a given BIP-143 sighash flag.
-    # For the default 0x41 (or nil) this is the pinned constant unchanged; for a
-    # non-default mode only the single appended sighash flag byte differs.
-    # SIGHASH_FLAG_BYTE_OFFSET has already been validated against the blob's
-    # actual layout at load time, so no per-call re-check is needed.
-    def self.check_preimage_binding_bytes(sighash_flag = nil)
-      return CHECK_PREIMAGE_BINDING_BYTES if sighash_flag.nil? || (sighash_flag & 0xff) == 0x41
+    # Sighash-flag byte offsets, validated at load time against each blob's
+    # actual layout (the two blobs differ in length, so the offsets differ).
+    SIGHASH_FLAG_BYTE_OFFSET = _derive_sighash_flag_offset(CHECK_PREIMAGE_BINDING_BYTES)
+    SIGHASH_FLAG_BYTE_OFFSET_ALL = _derive_sighash_flag_offset(CHECK_PREIMAGE_BINDING_ALL_BYTES)
 
-      bytes = CHECK_PREIMAGE_BINDING_BYTES.dup
-      bytes.setbyte(SIGHASH_FLAG_BYTE_OFFSET, sighash_flag & 0xff)
+    # Return the check_preimage binding blob for a given BIP-143 sighash flag and
+    # Any-S binding variant. +variant+ is the declared @bindingVariant (nil/""/
+    # "lowS" = default low-S blob, "all" = the compact non-low-S blob). For the
+    # default 0x41 flag (or nil) the pinned constant is returned unchanged; for a
+    # non-default mode only the single appended sighash flag byte differs. The
+    # offsets have already been validated against each blob's actual layout at
+    # load time, so no per-call re-check is needed.
+    def self.check_preimage_binding_bytes(sighash_flag = nil, variant = nil)
+      variant = "lowS" if variant.nil? || variant.empty?
+      base = variant == "all" ? CHECK_PREIMAGE_BINDING_ALL_BYTES : CHECK_PREIMAGE_BINDING_BYTES
+      return base if sighash_flag.nil? || (sighash_flag & 0xff) == 0x41
+
+      offset = variant == "all" ? SIGHASH_FLAG_BYTE_OFFSET_ALL : SIGHASH_FLAG_BYTE_OFFSET
+      bytes = base.dup
+      bytes.setbyte(offset, sighash_flag & 0xff)
       bytes.freeze
     end
 
@@ -1442,7 +1469,7 @@ module RunarCompiler::Codegen
       when "loop"
         _lower_loop(name, value.count, value.body, value.iter_var, value.start, value.step, binding_index, last_uses)
       when "check_preimage"
-        _lower_check_preimage(name, value.preimage, value.sighash_flag, binding_index, last_uses)
+        _lower_check_preimage(name, value.preimage, value.sighash_flag, value.binding_variant, binding_index, last_uses)
       when "deserialize_state"
         _lower_deserialize_state(value.preimage, binding_index, last_uses)
       when "add_output"
@@ -3568,7 +3595,7 @@ module RunarCompiler::Codegen
     # check_preimage (OP_PUSH_TX)
     # -----------------------------------------------------------------
 
-    def _lower_check_preimage(binding_name, preimage, sighash_flag, binding_index, last_uses)
+    def _lower_check_preimage(binding_name, preimage, sighash_flag, binding_variant, binding_index, last_uses)
       # OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
       # current spending transaction. The signature is DERIVED FROM THE PREIMAGE
       # ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*k^-1 mod n,
@@ -3590,9 +3617,10 @@ module RunarCompiler::Codegen
       # blob). For the default ALL|FORKID (sighash_flag nil/0x41) the blob is
       # byte-identical to the pinned cross-tier constant; issue #123 lets a
       # method declare a non-default mode, which only changes the appended
-      # sighash flag byte. Declared in=1/out=1 so the static analyzer keeps the
+      # sighash flag byte, and the @bindingVariant directive selects the compact
+      # non-low-S 'all' blob. Declared in=1/out=1 so the static analyzer keeps the
       # depth consistent; net stack effect is zero.
-      emit_op({ op: "raw_bytes", raw_bytes: LoweringContext.check_preimage_binding_bytes(sighash_flag), in_arity: 1, out_arity: 1 })
+      emit_op({ op: "raw_bytes", raw_bytes: LoweringContext.check_preimage_binding_bytes(sighash_flag, binding_variant), in_arity: 1, out_arity: 1 })
 
       # Preimage remains on top. Rename for field extractors.
       @sm.pop

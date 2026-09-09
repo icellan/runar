@@ -992,6 +992,11 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
         # for the default (None) so existing ANF is byte-identical.
         if v.kind == "check_preimage" and v.sighash_flag is not None:
             d["sighashFlag"] = v.sighash_flag
+        # @bindingVariant: emit the non-default binding variant only when set, so
+        # golden ANF for every existing (default lowS) contract stays byte-identical.
+        if (v.kind == "check_preimage" and v.binding_variant is not None
+                and v.binding_variant != "lowS"):
+            d["bindingVariant"] = v.binding_variant
         if v.satoshis is not None:
             d["satoshis"] = v.satoshis
         if v.state_values is not None:

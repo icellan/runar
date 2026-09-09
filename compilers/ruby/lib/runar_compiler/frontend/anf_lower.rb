@@ -14,12 +14,17 @@ require "set"
 require_relative "../ir/types"
 require_relative "ast_nodes"
 require_relative "sighash_directive"
+require_relative "binding_variant_directive"
 
 module RunarCompiler
   module Frontend
     # SIGHASH_ALL | SIGHASH_FORKID — the default @sighash mode (issue #123).
     # Byte-identical to the historically-pinned covenant binding blob.
     SIGHASH_DEFAULT = SighashDirective::SIGHASH_DEFAULT
+
+    # The default Any-S binding construction (low-S). Byte-identical to the
+    # historically-pinned covenant binding blob.
+    BINDING_VARIANT_DEFAULT = BindingVariantDirective::BINDING_VARIANT_DEFAULT
 
     # -------------------------------------------------------------------
     # Public API
@@ -299,6 +304,14 @@ module RunarCompiler
           method_ctx.sighash_flag = method_sighash
         end
 
+        # A non-default @bindingVariant selects the compact 'all' binding for any
+        # checkPreimage in this method (auto-injected below, or a manual call).
+        # Omitted for the default so the ANF (and pinned binding blob) is unchanged.
+        method_binding_variant = method.respond_to?(:binding_variant) ? method.binding_variant : nil
+        if !method_binding_variant.nil? && method_binding_variant != BINDING_VARIANT_DEFAULT
+          method_ctx.binding_variant = method_binding_variant
+        end
+
         # Register the developer-declared param types scoped to this method
         # before lowering its body, so byte-type analysis sees only this
         # method's params (issue #34).
@@ -352,13 +365,15 @@ module RunarCompiler
           # the tx sighash under this mode) AND the runtime preimage-type assert.
           sighash_mode = method_sighash.nil? ? SIGHASH_DEFAULT : method_sighash
           is_default_sighash = sighash_mode == SIGHASH_DEFAULT
+          binding_variant = method_binding_variant.nil? ? BINDING_VARIANT_DEFAULT : method_binding_variant
 
           # Inject checkPreimage(txPreimage) at the start
           preimage_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
           check_result = method_ctx.emit(IR::ANFValue.new(kind: "check_preimage").tap do |v|
             v.preimage = preimage_ref
-            # Omit for the default so the ANF (and pinned binding blob) is unchanged.
+            # Omit each field for its default so the ANF (and pinned blob) is unchanged.
             v.sighash_flag = sighash_mode unless is_default_sighash
+            v.binding_variant = binding_variant unless binding_variant == BINDING_VARIANT_DEFAULT
           end)
           method_ctx.emit(_make_assert(check_result))
 
@@ -657,6 +672,8 @@ module RunarCompiler
         @method_scope = MethodScope.new
         # Issue #123: non-default @sighash flag for this method (nil = default).
         @sighash_flag = nil
+        # Non-default @bindingVariant for this method (nil = default "lowS").
+        @binding_variant = nil
         # True in every context produced by +sub_context+ -- inside an if arm, a
         # loop body, or an inlined helper's block -- and false only in the
         # context a method's own body is lowered into.
@@ -670,6 +687,11 @@ module RunarCompiler
       # lowered, so a MANUAL +checkPreimage(pre)+ call binds under the same mode
       # as the method's declared sighash. nil = default ALL|FORKID.
       attr_accessor :sighash_flag
+
+      # The declared non-default +@bindingVariant+ for the method being lowered,
+      # so a MANUAL +checkPreimage(pre)+ call binds under the same construction.
+      # nil = default "lowS", keeping the pinned blob unchanged.
+      attr_accessor :binding_variant
 
       # True in every context produced by +sub_context+. +_lift_branch_update_props+
       # walks method.body and does NOT recurse, so an +if+ its recogniser accepts
@@ -909,6 +931,9 @@ module RunarCompiler
         # Propagate the method's declared @sighash flag (issue #123) so a manual
         # checkPreimage inside an if/else branch binds under the same mode.
         sub.sighash_flag = @sighash_flag
+        # Propagate the method's declared @bindingVariant so a manual checkPreimage
+        # inside an if/else branch binds under the same construction.
+        sub.binding_variant = @binding_variant
         # _lift_branch_update_props walks method.body and does NOT recurse, so
         # an +if+ its recogniser accepts is only actually REWRITTEN at method
         # top level. lower_if_statement needs the same distinction before it
@@ -1499,6 +1524,8 @@ module RunarCompiler
               v.preimage = preimage_ref
               # Issue #123: honour the method's declared @sighash on manual calls.
               v.sighash_flag = @sighash_flag unless @sighash_flag.nil?
+              # Honour the method's declared @bindingVariant on manual calls.
+              v.binding_variant = @binding_variant unless @binding_variant.nil?
             end)
           end
         end

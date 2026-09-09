@@ -142,8 +142,9 @@ func stampSP1FriAck(res *ParseResult, source []byte) *ParseResult {
 // mirror the TypeScript compiler's `/@sighash\b/` / `/@embedAlways\b/` scans,
 // so an identifier like `sighashType` does not trip the guard.
 var (
-	sighashDirectiveRE     = regexp.MustCompile(`@sighash\b`)
-	embedAlwaysDirectiveRE = regexp.MustCompile(`@embedAlways\b`)
+	sighashDirectiveRE        = regexp.MustCompile(`@sighash\b`)
+	embedAlwaysDirectiveRE    = regexp.MustCompile(`@embedAlways\b`)
+	bindingVariantDirectiveRE = regexp.MustCompile(`@bindingVariant\b`)
 )
 
 func directiveGuardResult(msg string) *ParseResult {
@@ -161,6 +162,9 @@ func unsupportedDirectiveError(source []byte, surfaceName string) string {
 	}
 	if embedAlwaysDirectiveRE.Match(source) {
 		return fmt.Sprintf("@embedAlways directive (issue #109) is not supported by the %s surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured", surfaceName)
+	}
+	if bindingVariantDirectiveRE.Match(source) {
+		return fmt.Sprintf("@bindingVariant directive is not supported by the %s surface parser; write the contract in TypeScript (.runar.ts) where @bindingVariant is honoured", surfaceName)
 	}
 	return ""
 }
@@ -507,6 +511,8 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 
 	// Issue #123: `/** @sighash <FLAGS> */` directive → per-method sighash type.
 	sighashType := p.parseSighashOnMethod(node, name, visibility)
+	// `/** @bindingVariant <lowS|all> */` directive → per-method binding construction.
+	bindingVariant := p.parseBindingVariantOnMethod(node, name, visibility)
 
 	return MethodNode{
 		Name:           name,
@@ -514,8 +520,32 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 		Body:           body,
 		Visibility:     visibility,
 		SighashType:    sighashType,
+		BindingVariant: bindingVariant,
 		SourceLocation: p.loc(node),
 	}
+}
+
+// parseBindingVariantOnMethod detects + parses a `/** @bindingVariant <lowS|all> */`
+// directive on a method from its leading comment trivia. Returns the variant, or
+// nil when no directive is present. Mirrors parseSighashOnMethod.
+func (p *parseContext) parseBindingVariantOnMethod(node *sitter.Node, name, visibility string) *string {
+	comments := p.leadingCommentText(node)
+	result, present := extractBindingVariantDirective(comments)
+	if !present {
+		return nil
+	}
+	if visibility != "public" {
+		p.addError(fmt.Sprintf(
+			"@bindingVariant directive on non-public method '%s' has no effect — only public methods are spending entry points",
+			name))
+		return nil
+	}
+	if !result.ok() {
+		p.addError(fmt.Sprintf("Method '%s': %s", name, result.err))
+		return nil
+	}
+	v := result.value
+	return &v
 }
 
 // parseSighashOnMethod detects + parses a `/** @sighash <FLAGS> */` (or

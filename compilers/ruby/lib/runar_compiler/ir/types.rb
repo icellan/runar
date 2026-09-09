@@ -162,6 +162,12 @@ module RunarCompiler
                     #    (issue #123). nil = default ALL|FORKID (0x41),
                     #    byte-identical to the pinned cross-tier binding blob.
                     :sighash_flag,
+                    # -- check_preimage: the Any-S binding construction (nil/""/
+                    #    "lowS" = default low-S blob, byte-identical to the pinned
+                    #    cross-tier binding; "all" = the compact non-low-S blob).
+                    #    Only set for a method that declares @bindingVariant all,
+                    #    keeping golden ANF unchanged for every existing contract.
+                    :binding_variant,
                     # -- add_output ----------------------------------------
                     :satoshis,
                     :state_values,
@@ -211,6 +217,7 @@ module RunarCompiler
         @value_ref = nil
         @preimage = nil
         @sighash_flag = nil
+        @binding_variant = nil
         @satoshis = nil
         @state_values = nil
         @script_bytes = nil
@@ -365,6 +372,8 @@ module RunarCompiler
       v.preimage    = d["preimage"]
       # Issue #123: non-default sighash flag for a check_preimage node.
       v.sighash_flag = d["sighashFlag"]
+      # Non-default Any-S binding variant ("all") for a check_preimage node.
+      v.binding_variant = d["bindingVariant"]
       v.satoshis    = d["satoshis"]
       v.state_values = d["stateValues"]
       v.script_bytes = d["scriptBytes"]

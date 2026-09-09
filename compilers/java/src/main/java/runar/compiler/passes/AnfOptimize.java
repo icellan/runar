@@ -580,7 +580,11 @@ public final class AnfOptimize {
             return new UpdateProp(up.name(), resolve(up.value(), rename));
         }
         if (v instanceof CheckPreimage cp) {
-            return new CheckPreimage(resolve(cp.preimage(), rename));
+            // Preserve the declared @sighash flag + @bindingVariant across
+            // renaming (null for default contracts, so the pinned blob is
+            // unchanged).
+            return new CheckPreimage(
+                resolve(cp.preimage(), rename), cp.sighashFlag(), cp.bindingVariant());
         }
         if (v instanceof DeserializeState ds) {
             return new DeserializeState(resolve(ds.preimage(), rename));

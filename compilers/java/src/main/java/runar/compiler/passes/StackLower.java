@@ -97,54 +97,89 @@ public final class StackLower {
      * <p>The insecure legacy checkPreimage accepted a witness signature over the
      * real spending transaction and checked it against pubkey G, never reading
      * the pushed preimage — so the preimage was decoupled from the tx. This
-     * derives the ECDSA signature FROM the preimage on-chain (s = (hash256(
-     * Any-S: nonce k=1 so r = Gx, signing key d = 2^248 * Gx^-1 mod n so
-     * r*d == 2^248, giving s = z + 2^248 mod n; branchless low-S, minimal DER),
-     * so OP_CHECKSIG passes only when hash256(preimage) equals the real tx
-     * sighash.
+     * derives the ECDSA signature FROM the preimage on-chain, so OP_CHECKSIG
+     * passes only when hash256(preimage) equals the real tx sighash.
      *
-     * <p>The construction compiles to a FIXED byte sequence identical across all
+     * <p>Any-S construction: nonce k=1 so R = G and r = Gx needs no k-inverse
+     * multiply; signing key d = Gx^-1 mod n (C = 1), so r*d == 1 and the addend
+     * s = z + 1 is a single OP_1ADD. Both variants share the C=1 public key
+     * {@code 038ff83d...9218} = d*G:
+     * <ul>
+     *   <li>lowS (default): s = lowS((z + 1) mod n) — branchless low-S fixup,
+     *       canonical s ≤ n/2, accepted under the LOW_S rule (nVersion = 1).
+     *       421 bytes.</li>
+     *   <li>all: s = z + 1 as-is (no mod-n, no low-S) — compact, valid only for
+     *       spends with nVersion != 1, where LOW_S is not enforced.</li>
+     * </ul>
+     *
+     * <p>Each construction compiles to a FIXED byte sequence identical across all
      * seven tiers; it is the canonical output of the TypeScript reference
      * (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a
      * single opaque raw_bytes op (peephole barrier). The cross-tier conformance
-     * suite guards that this constant matches every other tier byte-for-byte.
+     * suite guards that these constants match every other tier byte-for-byte.
      */
     private static final String CHECK_PREIMAGE_BINDING_HEX =
+        
         "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
         + "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
         + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
-        + "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffff"
+        + "ffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f"
         + "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
         + "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
-        + "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        + "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
-        + "bf66a71ae74a1e83b0ad";
+        + "927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e230220"
+        + "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e"
+        + "01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c190560"
+        + "8b9218ad";
 
     /**
-     * Issue #123: the check-preimage binding blob for a declared @sighash mode.
-     * The default ALL|FORKID (null / 0x41) returns the pinned cross-tier
-     * constant verbatim. A non-default mode swaps ONLY the appended sighash flag
-     * byte — the unique {@code 01 41 7e} subsequence (OP_PUSHDATA(1) 0x41 OP_CAT)
-     * that appends the flag to the derived DER signature — leaving every other
-     * byte byte-identical to the default blob (matching the TypeScript reference
-     * {@code checkPreimageBindingBytes(sighashFlag)}).
+     * The compact non-low-S ('all') construction: s = z + 1 without the mod-n +
+     * low-S fixup. ~45 bytes smaller than the default lowS blob; valid only for
+     * spends with nVersion != 0x01000000 (selected by the {@code @bindingVariant
+     * all} directive). Shares the C=1 pubkey tail with the default blob.
      */
-    private static String checkPreimageBindingHex(Integer sighashFlag) {
+    private static final String CHECK_PREIMAGE_BINDING_ALL_HEX =
+        
+        "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
+        + "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e8b76927f76927f76927f76927f76927f76927f76927f76"
+        + "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f"
+        + "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac"
+        + "55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21"
+        + "038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
+
+    /**
+     * Issue #123 + @bindingVariant: the check-preimage binding blob for a
+     * declared @sighash mode and Any-S binding variant. {@code variant} is the
+     * declared {@code @bindingVariant} ({@code null} / {@code "lowS"} = default
+     * low-S blob, byte-identical to the pinned cross-tier binding; {@code "all"}
+     * = the compact non-low-S blob). The default ALL|FORKID (null / 0x41) returns
+     * the selected pinned constant verbatim. A non-default sighash mode swaps
+     * ONLY the appended sighash flag byte — the unique {@code 01 41 7e}
+     * subsequence (OP_PUSHDATA(1) 0x41 OP_CAT) that appends the flag to the
+     * derived DER signature — leaving every other byte byte-identical (matching
+     * the TypeScript reference {@code checkPreimageBindingBytes(flag, variant)}).
+     */
+    private static String checkPreimageBindingHex(Integer sighashFlag, String variant) {
+        String base = "all".equals(variant)
+            ? CHECK_PREIMAGE_BINDING_ALL_HEX
+            : CHECK_PREIMAGE_BINDING_HEX;
         if (sighashFlag == null || sighashFlag == SighashDirective.SIGHASH_DEFAULT) {
-            return CHECK_PREIMAGE_BINDING_HEX;
+            return base;
         }
-        int marker = CHECK_PREIMAGE_BINDING_HEX.indexOf("01417e");
+        int marker = base.indexOf("01417e");
         if (marker < 0) {
             // Defensive: the constant is pinned, so this cannot happen.
             throw new IllegalStateException("check-preimage binding: sighash flag byte not found");
         }
         String flagHex = String.format("%02x", sighashFlag & 0xff);
-        return CHECK_PREIMAGE_BINDING_HEX.substring(0, marker + 2)
+        return base.substring(0, marker + 2)
             + flagHex
-            + CHECK_PREIMAGE_BINDING_HEX.substring(marker + 4);
+            + base.substring(marker + 4);
     }
 
     // ------------------------------------------------------------------
@@ -1185,7 +1220,7 @@ public final class StackLower {
             } else if (v instanceof GetStateScript) {
                 lowerGetStateScript(name);
             } else if (v instanceof CheckPreimage cp) {
-                lowerCheckPreimage(name, cp.preimage(), cp.sighashFlag(), idx, lastUses);
+                lowerCheckPreimage(name, cp.preimage(), cp.sighashFlag(), cp.bindingVariant(), idx, lastUses);
             } else if (v instanceof DeserializeState ds) {
                 lowerDeserializeState(ds.preimage(), idx, lastUses);
             } else if (v instanceof AddOutput ao) {
@@ -3098,7 +3133,7 @@ public final class StackLower {
         // ---------------- check_preimage (OP_PUSH_TX) ----------------
 
         void lowerCheckPreimage(String bindingName, String preimage, Integer sighashFlag,
-                                int idx, Map<String, Integer> lastUses) {
+                                String bindingVariant, int idx, Map<String, Integer> lastUses) {
             // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to
             // the current spending transaction. The signature is DERIVED FROM THE
             // PREIMAGE ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*
@@ -3117,11 +3152,12 @@ public final class StackLower {
             bringToTop(preimage, isLastUse(preimage, idx, lastUses));
 
             // Derive + verify the signature on-chain (single opaque raw_bytes
-            // blob). For the default ALL|FORKID (sighashFlag null) the blob is
-            // byte-identical to the pinned cross-tier constant; issue #123 lets a
-            // method declare a different mode, which only changes the appended
-            // sighash flag byte. Net stack effect is zero.
-            emitCheckPreimageBinding(sighashFlag);
+            // blob). For the default ALL|FORKID (sighashFlag null) + default lowS
+            // variant the blob is byte-identical to the pinned cross-tier
+            // constant; issue #123 lets a method declare a different sighash mode
+            // (changes only the appended flag byte), and @bindingVariant all
+            // selects the compact non-low-S blob. Net stack effect is zero.
+            emitCheckPreimageBinding(sighashFlag, bindingVariant);
 
             // Preimage remains on top. Rename for field extractors.
             sm.pop();
@@ -3134,11 +3170,13 @@ public final class StackLower {
          * stack effect is 0 (preimage in → preimage out), declared as in=1/out=1
          * so the static analyzer keeps the depth consistent. The bytes are the
          * canonical construction shared byte-for-byte by all seven tiers for the
-         * default ALL|FORKID mode; issue #123 swaps only the appended sighash
-         * flag byte for a non-default declared mode.
+         * default ALL|FORKID mode + default lowS variant; issue #123 swaps only
+         * the appended sighash flag byte for a non-default declared mode, and
+         * @bindingVariant all selects the compact non-low-S blob.
          */
-        void emitCheckPreimageBinding(Integer sighashFlag) {
-            emitOp(new RawBytesOp(Emit.hexToBytes(checkPreimageBindingHex(sighashFlag)), 1, 1));
+        void emitCheckPreimageBinding(Integer sighashFlag, String bindingVariant) {
+            emitOp(new RawBytesOp(
+                Emit.hexToBytes(checkPreimageBindingHex(sighashFlag, bindingVariant)), 1, 1));
         }
 
         // ---------------- deserialize_state ----------------

@@ -505,6 +505,7 @@ impl<'a> SolParser<'a> {
                 visibility: Visibility::Public,
                 source_location: self.loc(),
                 sighash_type: None,
+                binding_variant: None,
             }
         });
 
@@ -717,6 +718,7 @@ impl<'a> SolParser<'a> {
             visibility: Visibility::Public,
             source_location: loc,
             sighash_type: None,
+            binding_variant: None,
         }
     }
 
@@ -789,6 +791,7 @@ impl<'a> SolParser<'a> {
             visibility,
             source_location: self.loc(),
             sighash_type: None,
+            binding_variant: None,
         }
     }
 

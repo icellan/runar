@@ -355,6 +355,11 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			methodCtx.sighashFlag = method.SighashType
 			methodSigHash = method.SighashType
 		}
+		// A non-default @bindingVariant selects the compact 'all' binding for any
+		// checkPreimage in this method (auto-injected below, or a manual call).
+		if method.BindingVariant != nil && *method.BindingVariant != "lowS" {
+			methodCtx.bindingVariant = method.BindingVariant
+		}
 
 		// Register the declared param NAMES so a bare identifier resolves to
 		// load_param before falling through to load_prop (issue #130). Without
@@ -397,13 +402,20 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 				sighashMode = *method.SighashType
 			}
 			isDefaultSighash := sighashMode == SighashDefault
+			bindingVariant := "lowS"
+			if method.BindingVariant != nil {
+				bindingVariant = *method.BindingVariant
+			}
 
 			// Inject checkPreimage(txPreimage) at the start.
 			preimageRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 			checkPre := ir.ANFValue{Kind: "check_preimage", Preimage: preimageRef}
-			// Omit for the default so the ANF (and pinned binding blob) is unchanged.
+			// Omit each field for its default so the ANF (and pinned blob) is unchanged.
 			if !isDefaultSighash {
 				checkPre.SighashFlag = sighashMode
+			}
+			if bindingVariant != "lowS" {
+				checkPre.BindingVariant = bindingVariant
 			}
 			checkResult := methodCtx.emit(checkPre)
 			methodCtx.emit(makeAssert(checkResult))
@@ -675,6 +687,11 @@ type lowerCtx struct {
 	// ALL|FORKID, keeping the pinned binding blob unchanged. Propagated into
 	// sub-contexts so a manual call inside an if/for body picks it up.
 	sighashFlag *int
+	// bindingVariant is the declared non-default `@bindingVariant` for the method
+	// being lowered, so a MANUAL checkPreimage(pre) call binds under the same
+	// construction. nil = default "lowS", keeping the pinned blob unchanged.
+	// Propagated into sub-contexts like sighashFlag.
+	bindingVariant *string
 	// nested is true in every context produced by subContext() — inside an if
 	// arm, a loop body, or an inlined helper's block — and false only in the
 	// context a method's own body is lowered into. liftBranchUpdateProps walks
@@ -942,6 +959,7 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		localByteVars:    make(map[string]bool),
 		methodScope:      ctx.methodScope, // shared pointer — auto-injection registers propagate up
 		sighashFlag:      ctx.sighashFlag, // #123: nested manual checkPreimage inherits the method's mode
+		bindingVariant:   ctx.bindingVariant, // nested manual checkPreimage inherits the method's binding
 		nested:           true,
 	}
 	// Share local name set
@@ -2003,6 +2021,10 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			// Issue #123: honour the method's declared @sighash on manual calls.
 			if ctx.sighashFlag != nil {
 				cp.SighashFlag = *ctx.sighashFlag
+			}
+			// Honour the method's declared @bindingVariant on manual calls.
+			if ctx.bindingVariant != nil {
+				cp.BindingVariant = *ctx.bindingVariant
 			}
 			return ctx.emit(cp)
 		}

@@ -8,13 +8,23 @@ from TS/Go/Rust on contracts with position-dispatch patterns (nested
 All 6 Rúnar compilers must produce byte-identical Bitcoin Script for the
 same canonical TypeScript source. For the canonical TicTacToe contracts
 (both v1 hand-rolled and v2 FixedArray), the expected locking script size
-is **7624 bytes** (15248 hex chars). Two independent changes moved this
-number and both are recorded, because a merged count that only mentions one
+is **7588 bytes** (15176 hex chars). Multiple independent changes moved this
+number and each is recorded, because a merged count that only mentions one
 of them is how a pin stops meaning anything.
 
-The Any-S OP_PUSH_TX construction took it 9616 -> 7624. TicTacToe is
-stateful with six covenant methods, and each carries one preimage-binding
-blob, so 6 x (760 - 428) = 1992 bytes come off. The blob is a fixed, opaque
+The lowS binding-blob OP_BIN2NUM insert took it 7582 -> 7588: an OP_BIN2NUM
+(0x81) was added to the default OP_PUSH_TX low-S construction (the lowS region
+``01007e8b...`` became ``01007e818b...``), growing the pinned lowS constant
+421 -> 422 bytes. TicTacToe's six covenant methods each carry one, so 6 x 1 = 6
+bytes go on. (The ``all`` binding blob, 376 bytes, is unchanged.)
+
+The @bindingVariant unification onto the C=1 key took it 7624 -> 7582: the
+default lowS preimage-binding blob shrank 428 -> 421 bytes, and TicTacToe's
+six covenant methods each carry one, so 6 x 7 = 42 bytes come off.
+
+Before that, the Any-S OP_PUSH_TX construction took it 9616 -> 7624. TicTacToe
+is stateful with six covenant methods, and each carries one preimage-binding
+blob, so 6 x (760 - 428) = 1992 bytes came off. The blob is a fixed, opaque
 constant pinned byte-identically across all seven tiers; see
 ``compilers/go/codegen/oppushtx.go`` and the security note on the PR.
 
@@ -67,7 +77,7 @@ TS_V1 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.runar.ts"
 TS_V2 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.v2.runar.ts"
 PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py"
 
-EXPECTED_BYTES = 7624
+EXPECTED_BYTES = 7588
 
 
 def _byte_len(hex_str: str) -> int:

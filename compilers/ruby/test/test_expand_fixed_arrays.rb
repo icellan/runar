@@ -343,8 +343,12 @@ class TestExpandFixedArrays < Minitest::Test
     # Then the Any-S OP_PUSH_TX construction took it 9616 -> 7624: TicTacToe
     # is stateful with six covenant methods, each carrying one
     # preimage-binding blob, so 6 x (760 - 428) = 1992 bytes come off.
-    assert_equal 7624, v1.script.length / 2, "v1 script must be 7624 bytes"
-    assert_equal 7624, v2.script.length / 2, "v2 script must be 7624 bytes"
+    # Re-updated for the unified C=1 low-S binding (default blob 428 -> 421 bytes):
+    # 6 x 7 = 42 more bytes come off, 7624 -> 7582.
+    # Then an OP_BIN2NUM (0x81) was inserted into the lowS construction (default
+    # blob 421 -> 422 bytes): 6 x 1 = 6 more bytes go on, 7582 -> 7588.
+    assert_equal 7588, v1.script.length / 2, "v1 script must be 7588 bytes"
+    assert_equal 7588, v2.script.length / 2, "v2 script must be 7588 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

@@ -7,6 +7,7 @@ test {
     _ = @import("frontend/input_limits.zig");
     _ = @import("frontend/input_limits_test.zig");
     _ = @import("frontend/sighash_directive.zig");
+    _ = @import("frontend/bindingvariant_directive.zig");
     _ = @import("codegen/opcodes.zig");
     _ = @import("codegen/emit.zig");
     _ = @import("passes/stack_lower.zig");

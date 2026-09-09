@@ -205,6 +205,13 @@ module RunarCompiler
              "this format (issue #109); it is honored only on the .runar.ts surface"
     end
 
+    # @bindingVariant is implemented for the .runar.ts surface; only the other
+    # 8 formats fail closed.
+    if source =~ /@bindingVariant\b/ && !is_ts
+      return "@bindingVariant directive is not supported by the Ruby compiler for " \
+             "this format; it is honored only on the .runar.ts surface"
+    end
+
     nil
   end
   private_class_method :_unsupported_directive_error
@@ -1107,6 +1114,13 @@ module RunarCompiler
       # Issue #123: a non-default @sighash mode threads the BIP-143 flag onto the
       # check_preimage node. Omitted for the default so existing ANF is unchanged.
       d["sighashFlag"] = v.sighash_flag if v.respond_to?(:sighash_flag) && !v.sighash_flag.nil?
+      # A non-default @bindingVariant ("all") threads the compact non-low-S blob
+      # selection onto the check_preimage node. Emitted only when set (and not the
+      # default "lowS"), so golden ANF for every existing contract stays unchanged.
+      if v.kind == "check_preimage" && v.respond_to?(:binding_variant) &&
+         !v.binding_variant.nil? && v.binding_variant != "lowS"
+        d["bindingVariant"] = v.binding_variant
+      end
       d["satoshis"] = v.satoshis unless v.satoshis.nil?
       d["stateValues"] = v.state_values unless v.state_values.nil?
       d["scriptBytes"] = v.script_bytes unless v.script_bytes.nil?

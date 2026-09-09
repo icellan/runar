@@ -1319,8 +1319,15 @@ impl LoweringContext {
             ANFValue::GetStateScript {} => {
                 self.lower_get_state_script(name);
             }
-            ANFValue::CheckPreimage { preimage, sighash_flag } => {
-                self.lower_check_preimage(name, preimage, *sighash_flag, binding_index, last_uses);
+            ANFValue::CheckPreimage { preimage, sighash_flag, binding_variant } => {
+                self.lower_check_preimage(
+                    name,
+                    preimage,
+                    *sighash_flag,
+                    binding_variant.as_deref(),
+                    binding_index,
+                    last_uses,
+                );
             }
             ANFValue::DeserializeState { preimage } => {
                 self.lower_deserialize_state(preimage, binding_index, last_uses);
@@ -3480,6 +3487,7 @@ impl LoweringContext {
         binding_name: &str,
         preimage: &str,
         sighash_flag: Option<i64>,
+        binding_variant: Option<&str>,
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
@@ -3503,8 +3511,9 @@ impl LoweringContext {
         // For the default ALL|FORKID (sighash_flag None) the blob is
         // byte-identical to the pinned cross-tier constant; issue #123 lets a
         // method declare a different mode, which only changes the appended
-        // sighash flag byte. Net stack effect is zero.
-        self.emit_check_preimage_binding(sighash_flag);
+        // sighash flag byte, and the @bindingVariant directive selects the
+        // compact non-low-S 'all' blob. Net stack effect is zero.
+        self.emit_check_preimage_binding(sighash_flag, binding_variant);
 
         // The preimage is now on top. Rename to binding name so field extractors
         // can reference it.
@@ -3518,9 +3527,12 @@ impl LoweringContext {
     /// effect is 0 (preimage in → preimage out), declared as in=1/out=1 so the
     /// static analyzer keeps the depth consistent. The stack tracker is updated
     /// by the caller (`lower_check_preimage`), mirroring the Go reference.
-    fn emit_check_preimage_binding(&mut self, sighash_flag: Option<i64>) {
+    /// `variant` is the declared `@bindingVariant` (`None`/`"lowS"` = default
+    /// low-S blob, `"all"` = the compact non-low-S blob).
+    fn emit_check_preimage_binding(&mut self, sighash_flag: Option<i64>, variant: Option<&str>) {
+        let variant = variant.unwrap_or("lowS");
         self.emit_op(StackOp::RawBytes {
-            bytes: super::oppushtx::check_preimage_binding_bytes_with_flag(sighash_flag),
+            bytes: super::oppushtx::check_preimage_binding_bytes_with_flag(sighash_flag, variant),
             in_arity: 1,
             out_arity: 1,
         });

@@ -60,6 +60,7 @@ from runar_compiler.frontend.side_effect_summary import (
     continuation_shape_for,
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
+from runar_compiler.frontend.binding_variant_directive import BINDING_VARIANT_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +383,10 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
         # this method.
         if method.sighash_type is not None and method.sighash_type != SIGHASH_DEFAULT:
             method_ctx.sighash_flag = method.sighash_type
+        # A non-default @bindingVariant selects the compact 'all' binding for any
+        # checkPreimage in this method (auto-injected below, or a manual call).
+        if method.binding_variant is not None and method.binding_variant != BINDING_VARIANT_DEFAULT:
+            method_ctx.binding_variant = method.binding_variant
         for p in method.params:
             method_ctx.register_param_type(p.name, _type_node_to_string(p.type))
 
@@ -423,13 +428,16 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # runtime preimage-type assert.
             sighash_mode = method.sighash_type if method.sighash_type is not None else SIGHASH_DEFAULT
             is_default_sighash = sighash_mode == SIGHASH_DEFAULT
+            binding_variant = method.binding_variant if method.binding_variant is not None else BINDING_VARIANT_DEFAULT
 
             # Inject checkPreimage(txPreimage) at the start
             preimage_ref = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
             check_pre_value = ANFValue(kind="check_preimage", preimage=preimage_ref)
-            # Omit for the default so the ANF (and pinned binding blob) is unchanged.
+            # Omit each field for its default so the ANF (and pinned blob) is unchanged.
             if not is_default_sighash:
                 check_pre_value.sighash_flag = sighash_mode
+            if binding_variant != BINDING_VARIANT_DEFAULT:
+                check_pre_value.binding_variant = binding_variant
             check_result = method_ctx.emit(check_pre_value)
             method_ctx.emit(_make_assert(check_result))
 
@@ -690,6 +698,11 @@ class _LowerCtx:
         # binds under the same mode as the method's declared sighash. ``None`` =
         # default ALL|FORKID, keeping the pinned binding blob unchanged.
         self.sighash_flag: int | None = None
+        # The declared non-default @bindingVariant for the method being lowered, so
+        # a MANUAL ``checkPreimage(pre)`` call binds under the same construction.
+        # ``None`` = default "lowS", keeping the pinned blob unchanged. Propagated
+        # into sub-contexts like ``sighash_flag``.
+        self.binding_variant: str | None = None
         # True in every context produced by ``sub_context()`` -- inside an if
         # arm, a loop body, or an inlined helper's block -- and False only in
         # the context a method's own body is lowered into.
@@ -869,6 +882,9 @@ class _LowerCtx:
         # Issue #123: a manual checkPreimage() inside a nested block must bind
         # under the same declared @sighash mode as the enclosing method.
         sub.sighash_flag = self.sighash_flag
+        # Likewise inherit the method's @bindingVariant so a nested manual
+        # checkPreimage() uses the same binding construction.
+        sub.binding_variant = self.binding_variant
         # Share the method-scoped param-type table by reference so if/else
         # sub-contexts resolve parameter types against the same method.
         sub._param_types = self._param_types
@@ -1443,6 +1459,9 @@ class _LowerCtx:
                 # Issue #123: honour the method's declared @sighash on manual calls.
                 if self.sighash_flag is not None:
                     cp.sighash_flag = self.sighash_flag
+                # Honour the method's declared @bindingVariant on manual calls.
+                if self.binding_variant is not None:
+                    cp.binding_variant = self.binding_variant
                 return self.emit(cp)
 
         # extractPrevOutputScript(inputIndex_literal, expectedScriptHash) -> ByteString.

@@ -57,6 +57,8 @@ import { parseRubySource } from './01-parse-ruby.js';
 import { parseZigSource } from './01-parse-zig.js';
 import { parseJavaSource } from './01-parse-java.js';
 import { extractSighashDirective } from './sighash-directive.js';
+import { extractBindingVariantDirective } from './bindingvariant-directive.js';
+import type { BindingVariant } from '../ir/anf-ir.js';
 import { OPCODES } from './06-emit.js';
 import {
   encodePushBigIntHex,
@@ -91,6 +93,7 @@ export interface ParseResult {
 // does not trip the guard.
 const SIGHASH_DIRECTIVE_RE = /@sighash\b/;
 const EMBED_ALWAYS_DIRECTIVE_RE = /@embedAlways\b/;
+const BINDING_VARIANT_DIRECTIVE_RE = /@bindingVariant\b/;
 
 // Extension → human-readable surface name for the diagnostic. `.runar.ts` is
 // intentionally absent: the default branch implements the directives.
@@ -116,6 +119,9 @@ function unsupportedDirectiveError(source: string, surfaceName: string): string 
   }
   if (EMBED_ALWAYS_DIRECTIVE_RE.test(source)) {
     return `@embedAlways directive (issue #109) is not supported by the ${surfaceName} surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured`;
+  }
+  if (BINDING_VARIANT_DIRECTIVE_RE.test(source)) {
+    return `@bindingVariant directive is not supported by the ${surfaceName} surface parser; write the contract in TypeScript (.runar.ts) where @bindingVariant is honoured`;
   }
   return null;
 }
@@ -410,6 +416,8 @@ function parseMethod(
 
   // Issue #123: `/** @sighash <FLAGS> */` directive → per-method sighash type.
   const sighashType = parseSighashOnMethod(method, name, visibility, file, errors);
+  // `/** @bindingVariant <VARIANT> */` directive → per-method binding construction.
+  const bindingVariant = parseBindingVariantOnMethod(method, name, visibility, file, errors);
 
   return {
     kind: 'method',
@@ -418,6 +426,7 @@ function parseMethod(
     body,
     visibility,
     ...(sighashType !== undefined ? { sighashType } : {}),
+    ...(bindingVariant !== undefined ? { bindingVariant } : {}),
     sourceLocation: locFromNode(method, file),
   };
 }
@@ -471,7 +480,55 @@ function parseSighashOnMethod(
   return result.value;
 }
 
+/**
+ * Detect + parse a `/** @bindingVariant <VARIANT> *\/` (or `// @bindingVariant ...`)
+ * directive on a method. Same two-surface trivia scan as `@sighash`. Returns the
+ * selected `BindingVariant`, or `undefined` when no directive is present. Pushes
+ * an error diagnostic for an unknown variant or a directive on a non-public
+ * method (only public methods are spending entry points).
+ */
+function parseBindingVariantOnMethod(
+  method: MethodDeclaration,
+  name: string,
+  visibility: 'public' | 'private',
+  file: string,
+  errors: CompilerDiagnostic[],
+): BindingVariant | undefined {
+  let text: string | undefined;
+  for (const jsdoc of method.getJsDocs()) {
+    if (BINDING_VARIANT_TOKEN_RE.test(jsdoc.getText())) { text = jsdoc.getText(); break; }
+  }
+  if (text === undefined) {
+    for (const range of method.getLeadingCommentRanges()) {
+      if (BINDING_VARIANT_TOKEN_RE.test(range.getText())) { text = range.getText(); break; }
+    }
+  }
+  if (text === undefined) return undefined;
+
+  if (visibility !== 'public') {
+    errors.push(makeDiagnostic(
+      `@bindingVariant directive on non-public method '${name}' has no effect — only public methods are spending entry points`,
+      'error',
+      locFromNode(method, file),
+    ));
+    return undefined;
+  }
+
+  const result = extractBindingVariantDirective(text);
+  if (result === null) return undefined;
+  if ('error' in result) {
+    errors.push(makeDiagnostic(
+      `Method '${name}': ${result.error}`,
+      'error',
+      locFromNode(method, file),
+    ));
+    return undefined;
+  }
+  return result.variant;
+}
+
 const SIGHASH_TOKEN_RE = /@sighash\b/;
+const BINDING_VARIANT_TOKEN_RE = /@bindingVariant\b/;
 
 // ---------------------------------------------------------------------------
 // Parameters

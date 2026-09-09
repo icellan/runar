@@ -165,12 +165,12 @@ test "C27: checkPreimage reachable only through a private helper still emits _co
     const artifact = try compileIrToArtifact(a, helper_ir);
     try std.testing.expect(std.mem.indexOf(u8, artifact, "\"usesCodePart\":true") != null);
 
-    // Cross-tier lock: TS, Go, Rust, Python, Ruby and Java all emit 540 bytes
-    // for this program (872 with the legacy 760-byte binding blob; the Any-S
-    // blob is 332 bytes smaller). Zig under-emitted while the private-method
-    // map was null.
+    // Cross-tier lock: TS, Go, Rust, Python, Ruby and Java all emit 534 bytes
+    // for this program (was 540 with the 428-byte Any-S blob; the unified C=1
+    // low-S blob is 422 bytes, 6 bytes smaller, after the OP_BIN2NUM insertion).
+    // Zig under-emitted while the private-method map was null.
     const hex = try scriptHex(artifact);
-    try std.testing.expectEqual(@as(usize, 540 * 2), hex.len);
+    try std.testing.expectEqual(@as(usize, 534 * 2), hex.len);
 }
 
 test "C27: the _codePart gate stays gated when no checkPreimage is reachable" {

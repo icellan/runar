@@ -133,48 +133,82 @@ class StackMethod:
 # fixed nonce, privkey d=1, low-S, minimal DER), so OP_CHECKSIG passes only when
 # hash256(preimage) equals the real tx sighash.
 #
-# The construction compiles to a FIXED byte sequence identical across all seven
+# Any-S construction: nonce k=1, so R = G and r = Gx needs no k-inverse multiply
+# and no sign pad; signing key d = Gx^-1 mod n (C = 1), so r*d == 1 and the addend
+# s = z + 1 is a single OP_1ADD. Both variants share the C=1 public key
+# 038ff83d...9218 = d*G:
+#   - lowS (default): s = lowS((z + 1) mod n) — branchless low-S fixup, canonical
+#     s <= n/2, accepted under the LOW_S rule (nVersion = 1). 421 bytes.
+#   - all: s = z + 1 as-is (no mod-n, no low-S) — 374 bytes; valid only for spends
+#     with nVersion != 1, where LOW_S is not enforced.
+#
+# Each construction compiles to a FIXED byte sequence identical across all seven
 # tiers; it is the canonical output of the TypeScript reference
 # (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a single
 # opaque raw_bytes op (peephole barrier). The cross-tier conformance suite
-# guards that this constant matches every other tier byte-for-byte.
+# guards that these constants match every other tier byte-for-byte.
 _CHECK_PREIMAGE_BINDING_HEX = (
     "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
     "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
     "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-    "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
-    "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
+    "7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffff"
+    "ffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f"
     "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
     "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
-    "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-    "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
-    "bf66a71ae74a1e83b0ad"
+    "927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e230220"
+    "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e"
+    "01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c190560"
+    "8b9218ad"
 )
 
+# _CHECK_PREIMAGE_BINDING_ALL_HEX is the compact non-low-S ('all') construction:
+# s = z + 1 without the mod-n + low-S fixup. ~45 bytes smaller; valid only for
+# spends with nVersion != 0x01000000 (selected by the @bindingVariant all
+# directive). Shares the same C=1 pubkey tail as the lowS blob above.
+_CHECK_PREIMAGE_BINDING_ALL_HEX = (
+    "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
+    "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e01007e8b76927f76927f76927f76927f76927f76927f76927f76"
+    "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f"
+    "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac"
+    "55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21"
+    "038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
+)
+
+# The default binding construction used when no @bindingVariant directive is
+# present. Mirrors the TS/Go reference; kept as a string so an unset variant
+# ("" or None) resolves to the low-S blob above (zero golden churn).
+_BINDING_VARIANT_DEFAULT = "lowS"
+
 # SIGHASH_ALL | SIGHASH_FORKID — default appended sighash flag byte in the
-# binding blob above. The append is encoded ``01<flag>7e`` (OP_DATA_1, flag byte,
-# OP_CAT); this pattern occurs exactly once in the canonical blob (issue #123).
+# binding blobs above. The append is encoded ``01<flag>7e`` (OP_DATA_1, flag byte,
+# OP_CAT); this pattern occurs exactly once in each canonical blob (issue #123).
 _SIGHASH_ALL_FORKID = 0x41
 _DEFAULT_SIGHASH_APPEND = "01417e"
 
 
-def _binding_hex_with_sighash_flag(sighash_flag: int) -> str:
-    """Return the canonical preimage-binding blob with its appended sighash flag
-    byte swapped for ``sighash_flag`` (issue #123).
+def _binding_hex_with_sighash_flag(sighash_flag: int, variant: str = _BINDING_VARIANT_DEFAULT) -> str:
+    """Return the canonical preimage-binding blob for ``variant`` ("lowS" default
+    or "all") with its appended sighash flag byte swapped for ``sighash_flag``
+    (issue #123 + @bindingVariant).
 
-    The default blob appends ``push(0x41) OP_CAT`` (``01417e``) exactly once. A
+    Each blob appends ``push(0x41) OP_CAT`` (``01417e``) exactly once. A
     non-default @sighash mode changes ONLY that byte — byte-exact equivalent to
-    the TS reference regenerating the blob with a different flag.
+    the TS reference regenerating the blob with a different flag. The @bindingVariant
+    directive independently selects which base blob (lowS/all) is swapped.
     """
+    base = _CHECK_PREIMAGE_BINDING_ALL_HEX if variant == "all" else _CHECK_PREIMAGE_BINDING_HEX
     replacement = f"01{sighash_flag & 0xFF:02x}7e"
-    if _CHECK_PREIMAGE_BINDING_HEX.count(_DEFAULT_SIGHASH_APPEND) != 1:
+    if base.count(_DEFAULT_SIGHASH_APPEND) != 1:
         # Defensive: the anchor must be unique or the substitution is unsafe.
         raise AssertionError(
             "check-preimage binding blob no longer has a unique sighash-flag anchor"
         )
-    return _CHECK_PREIMAGE_BINDING_HEX.replace(_DEFAULT_SIGHASH_APPEND, replacement)
+    return base.replace(_DEFAULT_SIGHASH_APPEND, replacement)
 
 
 # ---------------------------------------------------------------------------
@@ -1188,7 +1222,7 @@ class _LoweringContext:
         elif kind == "get_state_script":
             self._lower_get_state_script(name)
         elif kind == "check_preimage":
-            self._lower_check_preimage(name, value.preimage, value.sighash_flag, binding_index, last_uses)
+            self._lower_check_preimage(name, value.preimage, value.sighash_flag, value.binding_variant, binding_index, last_uses)
         elif kind == "deserialize_state":
             self._lower_deserialize_state(value.preimage, binding_index, last_uses)
         elif kind == "add_output":
@@ -3384,6 +3418,7 @@ class _LoweringContext:
 
     def _lower_check_preimage(self, binding_name: str, preimage: str,
                               sighash_flag: int | None,
+                              binding_variant: str | None,
                               binding_index: int, last_uses: dict[str, int]) -> None:
         # OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
         # current spending transaction. The signature is DERIVED FROM THE PREIMAGE
@@ -3407,15 +3442,17 @@ class _LoweringContext:
         # blob). For the default ALL|FORKID (sighash_flag None) the blob is
         # byte-identical to the pinned cross-tier constant; issue #123 lets a
         # method declare a different mode, which only changes the appended
-        # sighash flag byte. Net stack effect is zero.
-        self._emit_check_preimage_binding(sighash_flag)
+        # sighash flag byte, and the @bindingVariant directive selects the compact
+        # non-low-S 'all' blob. Net stack effect is zero.
+        self._emit_check_preimage_binding(sighash_flag, binding_variant)
 
         # Preimage remains on top.  Rename for field extractors.
         self.sm.pop()
         self.sm.push(binding_name)
         self._track_depth()
 
-    def _emit_check_preimage_binding(self, sighash_flag: int | None = None) -> None:
+    def _emit_check_preimage_binding(self, sighash_flag: int | None = None,
+                                     binding_variant: str | None = None) -> None:
         """Emit the on-chain preimage binding as one opaque raw_bytes op.
 
         Net stack effect is 0 (preimage in -> preimage out), declared as
@@ -3430,10 +3467,20 @@ class _LoweringContext:
         reference's ``emitCheckPreimageBinding(emit, sighashFlag)`` differs only
         in that push), so the default (None) blob is unchanged (zero golden
         churn) and every other mode swaps exactly that one byte.
+
+        @bindingVariant: ``binding_variant`` ("" / None / "lowS" = default low-S
+        blob, "all" = compact non-low-S blob) independently selects the base
+        construction. Only "all" changes the emitted bytes, so every default
+        (lowS) contract keeps its pinned blob.
         """
-        blob_hex = _CHECK_PREIMAGE_BINDING_HEX
-        if sighash_flag is not None and sighash_flag != _SIGHASH_ALL_FORKID:
-            blob_hex = _binding_hex_with_sighash_flag(sighash_flag)
+        variant = binding_variant if binding_variant else _BINDING_VARIANT_DEFAULT
+        is_default_variant = variant == _BINDING_VARIANT_DEFAULT
+        is_default_sighash = sighash_flag is None or sighash_flag == _SIGHASH_ALL_FORKID
+        if is_default_variant and is_default_sighash:
+            blob_hex = _CHECK_PREIMAGE_BINDING_HEX
+        else:
+            flag = _SIGHASH_ALL_FORKID if sighash_flag is None else sighash_flag
+            blob_hex = _binding_hex_with_sighash_flag(flag, variant)
         self.emit_op(StackOp(
             op="raw_bytes",
             raw_bytes=bytes.fromhex(blob_hex),
