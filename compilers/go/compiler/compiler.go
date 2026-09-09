@@ -118,6 +118,14 @@ type Groth16WAMeta struct {
 	// byte-identical VK files. It is NOT a cryptographic commitment to
 	// the VK semantics and should not be used for anything load-bearing.
 	VKDigest string `json:"vkDigest"`
+
+	// PublicInputs are the public-input scalars pinned into the locking
+	// script at compile time, as decimal strings. The emitted verifier
+	// asserts the spender's witness-supplied scalars equal these, and
+	// recomputes prepared_inputs from them on-chain. They are what makes
+	// the artifact a verifier for a SPECIFIC statement rather than for
+	// "some statement the spender chose".
+	PublicInputs []string `json:"publicInputs,omitempty"`
 }
 
 // Artifact is the final compiled output of a Rúnar compiler.

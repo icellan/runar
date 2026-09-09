@@ -1453,13 +1453,27 @@ func emitWAFinalExp(t *BN254Tracker, fPrefix, resultPrefix string) {
 //  6. Witness-assisted final exponentiation (prover supplies f_inv, a, b, c)
 //  7. Checks result == 1 in Fp12
 //
-// NOTE: Public inputs are NOT on the stack. The prover runs the MSM
-// off-chain (where 0 * IC = identity is handled natively) and supplies
-// the accumulated G1 point directly. The on-chain verifier does not
-// bind to specific public input values — the pairing check already
-// discriminates between valid and invalid prepared_inputs values. This
-// matches SP1's Solidity verifier, which computes the MSM via the BN254
-// EC precompile and passes the result to the pairing precompile.
+// SOUNDNESS WARNING — this variant does NOT bind public inputs. Public
+// inputs are not on the stack: the prover runs the MSM off-chain (where
+// 0 * IC = identity is handled natively) and supplies the accumulated G1
+// point directly, and the only check applied to it is an on-curve test.
+// The pairing check ties the proof to whatever prepared_inputs was
+// supplied; it does NOT tie prepared_inputs to any particular statement.
+// A prover free to choose their own public-input vector therefore picks
+// one they can satisfy, mints an honest proof for it, computes the
+// matching prepared_inputs, and passes every check — the script attests
+// that SOME statement was proven, not that a specific one was.
+//
+// Use this variant only where something outside the script fixes the
+// statement (e.g. a trusted prover, or a caller that already committed
+// to the public inputs elsewhere). For a self-contained verifier use
+// EmitGroth16VerifierWitnessAssistedWithMSM, which recomputes
+// IC[0] + sum(pub_j * IC[j+1]) on-chain from config.IC and the witness
+// scalars and requires it to equal prepared_inputs.
+//
+// SP1's Solidity verifier is not a counter-example: it computes the MSM
+// itself via the BN254 EC precompile from public inputs its caller
+// supplies, rather than accepting a prover-supplied accumulator.
 func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config) {
 	// Count Miller loop iterations for gradient allocation
 	naf := bn254SixXPlus2NAF
@@ -1549,19 +1563,21 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 	t.primeCacheActive = true
 	t.modThreshold = config.ModuloThreshold
 
-	// Step 2: Verify prepared_inputs (provided by prover as a witness).
+	// Step 2: On-curve check on the prover-supplied prepared_inputs.
 	//
 	// The prover computes prepared_inputs = IC[0] + sum(pub_j * IC[j+1])
-	// off-chain using any BN254 implementation (e.g., gnark-crypto). The
-	// on-chain verifier only needs to confirm the point is on the BN254 G1
-	// curve. A dishonest prover who supplies a wrong prepared_inputs value
-	// will fail the pairing check, so no explicit binding to the public
-	// inputs is needed on-chain.
+	// off-chain using any BN254 implementation (e.g., gnark-crypto), and
+	// this is the ONLY check applied to it: that the point is on the
+	// BN254 G1 curve.
 	//
-	// This design matches SP1's Solidity verifier, which does the MSM via
-	// the BN254 EC precompile off the verification logic path, and fixes
-	// the zero-input bug of the previous on-chain MSM (0 * IC = identity,
-	// which the strict Fp add helper cannot represent).
+	// That is NOT a binding to the public inputs, and the pairing check
+	// does not supply one: it forces the proof and prepared_inputs to be
+	// mutually consistent, which a prover who chose the public inputs
+	// themselves satisfies trivially. See the SOUNDNESS WARNING on this
+	// function. EmitGroth16VerifierWitnessAssistedWithMSM adds the real
+	// binding by recomputing the accumulator on-chain; it also handles the
+	// zero-input case (0 * IC = identity, which the strict Fp add helper
+	// cannot represent) explicitly.
 	emitWAG1OnCurveCheck(t, "_pi_x", "_pi_y")
 
 	// Step 2a: Curve-membership checks on the prover-supplied proof points.

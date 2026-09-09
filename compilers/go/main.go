@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/compilers/go/compiler"
@@ -241,6 +243,28 @@ func main() {
 	}
 }
 
+// groth16PubInputFlag collects repeated --pub flags into the public-input
+// vector pinned into the emitted verifier. Values are decimal integers; the
+// range check against the BN254 scalar field happens in CompileGroth16WA.
+type groth16PubInputFlag []*big.Int
+
+func (f *groth16PubInputFlag) String() string {
+	parts := make([]string, len(*f))
+	for i, v := range *f {
+		parts[i] = v.String()
+	}
+	return strings.Join(parts, ",")
+}
+
+func (f *groth16PubInputFlag) Set(v string) error {
+	n, ok := new(big.Int).SetString(strings.TrimSpace(v), 10)
+	if !ok {
+		return fmt.Errorf("--pub %q is not a decimal integer", v)
+	}
+	*f = append(*f, n)
+	return nil
+}
+
 // runGroth16WA implements the `runarc groth16-wa` subcommand. It reads a
 // `.groth16.vk.json` verifying key file and emits a Rúnar artifact JSON
 // containing the witness-assisted BN254 Groth16 verifier locking script
@@ -260,12 +284,19 @@ func runGroth16WA() error {
 	outPath := fs.String("out", "", "output artifact JSON path (required)")
 	contractName := fs.String("name", "", "contract name in the output artifact (default \"Groth16Verifier\")")
 	moduloThreshold := fs.Int("modulo-threshold", 0, "bytes threshold for deferred mod reduction; 0 = strict (recommended, ~718 KB for SP1 v6); 2048 follows the nChain paper but is MUCH slower on today's interpreters")
+	var pubInputs groth16PubInputFlag
+	fs.Var(&pubInputs, "pub", "public-input scalar to pin into the verifier, as a decimal integer; repeat once per public input (required)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: runar-compiler-go groth16-wa --vk <vk.json> --out <artifact.json> [--name <ContractName>] [--modulo-threshold <int>]")
+		fmt.Fprintln(fs.Output(), "Usage: runar-compiler-go groth16-wa --vk <vk.json> --out <artifact.json> --pub <scalar> [--pub <scalar> ...] [--name <ContractName>] [--modulo-threshold <int>]")
 		fmt.Fprintln(fs.Output())
 		fmt.Fprintln(fs.Output(), "Compiles a BN254 Groth16 witness-assisted verifier with a fixed verifying key")
 		fmt.Fprintln(fs.Output(), "baked in. The resulting Rúnar artifact can be deployed as a stateless contract")
 		fmt.Fprintln(fs.Output(), "via the Rúnar SDK. See spec/groth16_wa_vk.schema.json for the input format.")
+		fmt.Fprintln(fs.Output())
+		fmt.Fprintln(fs.Output(), "The public inputs are pinned into the script alongside the verifying key: the")
+		fmt.Fprintln(fs.Output(), "verifier recomputes IC[0] + sum(pub_j * IC[j+1]) on-chain and requires the")
+		fmt.Fprintln(fs.Output(), "spender's scalars to equal these. Without --pub the artifact would accept a")
+		fmt.Fprintln(fs.Output(), "proof of any statement the spender picked for themselves, so it is required.")
 		fmt.Fprintln(fs.Output())
 		fs.PrintDefaults()
 	}
@@ -285,6 +316,7 @@ func runGroth16WA() error {
 	artifact, err := compiler.CompileGroth16WA(*vkPath, compiler.Groth16WAOpts{
 		ContractName:    *contractName,
 		ModuloThreshold: *moduloThreshold,
+		PublicInputs:    pubInputs,
 	})
 	if err != nil {
 		return err
