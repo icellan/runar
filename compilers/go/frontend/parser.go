@@ -12,6 +12,7 @@ import (
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 
 	"github.com/icellan/runar/compilers/go/codegen"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
@@ -1743,7 +1744,15 @@ func (p *parseContext) parseArityLiteral(node *sitter.Node, fieldName string) (i
 			p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal, got '%s'", fieldName, text))
 			return 0, false
 		}
-		return bi.Int64(), true
+		// Range-check BEFORE narrowing: bi.Int64() truncates modulo 2^64, so
+		// `in_arity: 18446744073709551618` used to become 2 and compile to
+		// exactly the same bytes as `in_arity: 2`. CL-BUG-127.
+		n, err := ir.IntValueExact(bi, fmt.Sprintf("asm() %s", fieldName))
+		if err != nil {
+			p.addError(err.Error())
+			return 0, false
+		}
+		return int64(n), true
 	case "unary_expression":
 		p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal", fieldName))
 		return 0, false

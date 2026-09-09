@@ -1731,9 +1731,23 @@ func extractLoopShape(stmt ForStmt) (*big.Int, int, int) {
 		}
 	}
 
+	// Narrow the iteration count only AFTER range-checking the *big.Int.
+	// `int(count.Int64())` truncates modulo 2^64, so a bound of 2^63 used to
+	// yield a negative count (loop body silently dropped), 2^64+10 used to
+	// yield 10 (a script of the wrong length, no diagnostic), and 10^20 used
+	// to yield ~7.77e18 (unbounded-memory unrolling). CL-BUG-127.
 	n := 0
 	if count.Sign() > 0 {
-		n = int(count.Int64())
+		n = ir.MustIntValueExact(count, "for loop iteration count")
+		// ir.MaxLoopCount already bounds loop counts arriving on the `--ir`
+		// input path; a loop written in source deserves the same ceiling.
+		// Without it an in-int64 bound like 10^18 still wedges the unroller.
+		if n > ir.MaxLoopCount {
+			panic(fmt.Sprintf(
+				"For loop unrolls to %d iterations, exceeding the maximum loop count of %d.",
+				n, ir.MaxLoopCount,
+			))
+		}
 	}
 	return start, step, n
 }
@@ -2044,7 +2058,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		if !ok || idxLit.Value == nil {
 			return ctx.emit(makeLoadConstString(""))
 		}
-		idx := idxLit.Value.Int64()
+		idx := ir.MustIntValueExact(idxLit.Value, "extractPrevOutputScript: input index")
 		paramName := fmt.Sprintf("_prevOutScript_%d", idx)
 		ctx.methodScope.recordAutoInjectedParam(paramName, "ByteString")
 		ctx.addParam(paramName)
@@ -2099,7 +2113,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		if !ok || idxLit.Value == nil {
 			return ctx.emit(makeLoadConstString(""))
 		}
-		idx := idxLit.Value.Int64()
+		idx := ir.MustIntValueExact(idxLit.Value, "requireOutputP2PKH: output index")
 
 		ctx.methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString")
 		ctx.addParam("_serialisedOutputs")
@@ -2137,7 +2151,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 
 		// Substring extract at idx*34 length 34, assert equal.
 		serialisedRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_serialisedOutputs"})
-		offsetRef := ctx.emit(makeLoadConstInt(big.NewInt(idx * 34)))
+		offsetRef := ctx.emit(makeLoadConstInt(big.NewInt(int64(idx) * 34)))
 		lengthRef := ctx.emit(makeLoadConstInt(big.NewInt(34)))
 		extractedRef := ctx.emit(makeCall("substr", []string{serialisedRef, offsetRef, lengthRef}))
 		outEqRef := ctx.emit(ir.ANFValue{
@@ -2274,12 +2288,12 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		}
 		if len(e.Args) >= 2 {
 			if bi, ok := e.Args[1].(BigIntLiteral); ok && bi.Value != nil {
-				inArity = int(bi.Value.Int64())
+				inArity = ir.MustIntValueExact(bi.Value, "asm() in_arity")
 			}
 		}
 		if len(e.Args) >= 3 {
 			if bi, ok := e.Args[2].(BigIntLiteral); ok && bi.Value != nil {
-				outArity = int(bi.Value.Int64())
+				outArity = ir.MustIntValueExact(bi.Value, "asm() out_arity")
 			}
 		}
 		return ctx.emit(ir.ANFValue{

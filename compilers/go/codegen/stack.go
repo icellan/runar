@@ -1563,7 +1563,10 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 				idxArg,
 			))
 		}
-		idx := int(idxVal.Int64())
+		// Range-check the *big.Int BEFORE narrowing: idxVal.Int64() truncates
+		// modulo 2^64, so an index of 2^64+2 used to sail through the [0, 4]
+		// check below as slot 2. CL-BUG-127.
+		idx := ir.MustIntValueExact(idxVal, "groth16PublicInput: index")
 		if idx < 0 || idx > 4 {
 			panic(fmt.Sprintf("groth16PublicInput: index must be in [0, 4], got %d", idx))
 		}
@@ -5651,7 +5654,10 @@ func (ctx *loweringContext) lowerMerkleRoot(bindingName, funcName string, args [
 			funcName, depthArg,
 		))
 	}
-	depth := int(depthVal.Int64())
+	// Range-check the *big.Int BEFORE narrowing: depthVal.Int64() truncates
+	// modulo 2^64, so a depth of 2^64+8 used to pass the [1, 64] check below
+	// as depth 8. CL-BUG-127.
+	depth := ir.MustIntValueExact(depthVal, fmt.Sprintf("%s: depth", funcName))
 	if depth < 1 || depth > 64 {
 		panic(fmt.Sprintf("%s: depth must be between 1 and 64, got %d", funcName, depth))
 	}
@@ -5703,7 +5709,9 @@ func (ctx *loweringContext) lowerMerkleRootPoseidon2KB(bindingName string, args 
 			depthArg,
 		))
 	}
-	depth := int(depthVal.Int64())
+	// Range-check the *big.Int BEFORE narrowing (CL-BUG-127) — see
+	// lowerMerkleRoot for the modular-truncation failure mode.
+	depth := ir.MustIntValueExact(depthVal, "merkleRootPoseidon2KB: depth")
 	if depth < 1 || depth > 64 {
 		panic(fmt.Sprintf("merkleRootPoseidon2KB: depth must be between 1 and 64, got %d", depth))
 	}
