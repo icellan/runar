@@ -626,12 +626,7 @@ public final class StackLower {
     // ------------------------------------------------------------------
 
     public static StackProgram run(AnfProgram program) {
-        Map<String, AnfMethod> privateMethods = new HashMap<>();
-        for (AnfMethod m : program.methods()) {
-            if (!m.isPublic() && !"constructor".equals(m.name())) {
-                privateMethods.put(m.name(), m);
-            }
-        }
+        Map<String, AnfMethod> privateMethods = privateMethodMap(program);
 
         List<StackMethod> out = new ArrayList<>();
         for (AnfMethod m : program.methods()) {
@@ -640,6 +635,53 @@ public final class StackLower {
         }
 
         return new StackProgram(program.contractName(), out);
+    }
+
+    /**
+     * Whether this method's unlocking script is prefixed with the implicit
+     * {@code _codePart} parameter: true for continuation builders
+     * (add_output / add_raw_output / computeStateOutput) AND for methods that
+     * read a mutable variable-length (ByteString) state field, whose
+     * deserialization needs the preimage-relative offset (issue #100). Always
+     * false for methods that don't use checkPreimage at all.
+     *
+     * <p>R-007: exposed so the artifact assembler can publish it as
+     * {@code abi.methods[].usesCodePart}, which is what the SDK reads to decide
+     * whether to push {@code _codePart} — matching
+     * {@code compilers/go/codegen/stack.go}'s {@code UsesCodePart}. Extracted
+     * verbatim from {@link #lowerMethod}, which is still its only in-pass
+     * caller, so the two can never disagree.
+     */
+    public static boolean methodRequiresCodePart(
+        AnfMethod method,
+        List<AnfProperty> properties,
+        Map<String, AnfMethod> privateMethods
+    ) {
+        if (!methodUsesCheckPreimage(method.body(), privateMethods, new java.util.HashSet<>())) {
+            return false;
+        }
+        java.util.Set<String> varLenProps = new java.util.HashSet<>();
+        for (AnfProperty p : properties) {
+            if (!p.readonly() && "ByteString".equals(p.type())) varLenProps.add(p.name());
+        }
+        return methodUsesCodePart(method.body())
+            || methodReadsVarLenState(method.body(), varLenProps, privateMethods, new java.util.HashSet<>());
+    }
+
+    /**
+     * Private methods reachable from inlining, keyed by name. Mirrors the map
+     * {@link #run(AnfProgram)} builds; exposed so callers outside the pass
+     * (the R-007 artifact assembler) can evaluate
+     * {@link #methodRequiresCodePart} with the same inputs the pass used.
+     */
+    public static Map<String, AnfMethod> privateMethodMap(AnfProgram program) {
+        Map<String, AnfMethod> privateMethods = new HashMap<>();
+        for (AnfMethod m : program.methods()) {
+            if (!m.isPublic() && !"constructor".equals(m.name())) {
+                privateMethods.put(m.name(), m);
+            }
+        }
+        return privateMethods;
     }
 
     private static StackMethod lowerMethod(
@@ -664,12 +706,7 @@ public final class StackLower {
             // reads a mutable variable-length (ByteString) state field — the
             // var-length deserialization needs it for the preimage-relative
             // offset (issue #100).
-            java.util.Set<String> varLenProps = new java.util.HashSet<>();
-            for (AnfProperty p : properties) {
-                if (!p.readonly() && "ByteString".equals(p.type())) varLenProps.add(p.name());
-            }
-            if (methodUsesCodePart(method.body())
-                || methodReadsVarLenState(method.body(), varLenProps, privateMethods, new java.util.HashSet<>())) {
+            if (methodRequiresCodePart(method, properties, privateMethods)) {
                 paramNames.add(0, "_codePart");
             }
         }

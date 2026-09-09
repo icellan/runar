@@ -9,9 +9,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import runar.compiler.canonical.Jcs;
 import runar.compiler.frontend.ParserDispatch;
+import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfProgram;
+import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.ast.ContractNode;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.passes.AnfLoader;
@@ -181,6 +184,16 @@ public final class Cli {
             if (rc != 0) return rc;
         }
 
+        // R-007: --emit-artifact writes the deployable artifact JSON (script +
+        // constructorSlots + codeSep offsets + ABI). Like --emit-source-map it
+        // runs independently of --emit-ir / --hex, so one invocation can produce
+        // several artefacts; with no other output flag it is the sole output.
+        if (parsed.emitArtifact != null) {
+            int rc = writeArtifact(anf, parentClassName(contract), parsed.emitArtifact);
+            if (rc != 0) return rc;
+            if (!parsed.emitIr && !parsed.hex) return 0;
+        }
+
         if (parsed.emitIr) {
             out.println(Jcs.stringify(anf));
             return 0;
@@ -323,6 +336,16 @@ public final class Cli {
             if (rc != 0) return rc;
         }
 
+        // R-007: --emit-artifact also runs on the IR path. parentClass is not
+        // carried in the ANF IR JSON in ANY tier (it is `json:"-"` in Go), so
+        // the field is omitted here exactly as Go's CompileFromIR omits it; the
+        // SDK falls back to `stateFields non-empty` (RunarArtifact#parentStateful).
+        if (parsed.emitArtifact != null) {
+            int rc = writeArtifact(anf, null, parsed.emitArtifact);
+            if (rc != 0) return rc;
+            if (!parsed.emitIr && !parsed.hex) return 0;
+        }
+
         if (parsed.emitIr) {
             out.println(Jcs.stringify(anf));
             return 0;
@@ -334,6 +357,201 @@ public final class Cli {
 
         out.println(Jcs.stringify(anf));
         return 0;
+    }
+
+    /**
+     * The base class the source contract extends, as the artifact's
+     * {@code parentClass} string ("SmartContract" | "StatefulSmartContract" |
+     * "UnsafeSmartContract"). Authoritative stateful signal for the SDK's
+     * issue-#42/#44 terminal sighash subscript trim.
+     */
+    private static String parentClassName(ContractNode contract) {
+        return contract.parentClass() == null ? null : contract.parentClass().canonical();
+    }
+
+    /**
+     * R-007: lower ANF through stack + peephole + emit and write the deployable
+     * artifact JSON to {@code path}.
+     *
+     * <p>Field names and JSON shape follow the Go reference assembler
+     * ({@code compilers/go/compiler/compiler.go#assembleArtifact}) and are what
+     * {@code packages/runar-java}'s {@code RunarArtifact.fromJson} reads.
+     *
+     * <p><b>Known gaps vs. the Go assembler</b> (each degrades gracefully — the
+     * SDK treats the field as absent):
+     * <ul>
+     *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
+     *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
+     *       which therefore stays silent for Java-built artifacts.</li>
+     *   <li>{@code sigHashType} — Java's {@code AnfMethod} carries no
+     *       {@code @sighash} directive field (Go keeps it in-memory only), so a
+     *       non-default sighash mode is not published to the ABI.</li>
+     *   <li>{@code fixedArray} regrouping — Java's {@code AnfProperty} carries
+     *       no synthetic-array chain, so expanded FixedArray siblings appear as
+     *       individual ABI params / state fields rather than one logical entry.</li>
+     * </ul>
+     *
+     * <p>Returns 0 on success, non-zero on failure.
+     */
+    private int writeArtifact(AnfProgram anf, String parentClass, String path) {
+        try {
+            StackProgram stack = StackLower.run(anf);
+            StackProgram optimised = Peephole.run(stack);
+            Emit.EmitResultFull emit = Emit.runResultFull(optimised);
+
+            // Constructor params: every property WITHOUT a compile-time default
+            // (initialised properties are not constructor arguments).
+            List<AnfProperty> ctorProps = new ArrayList<>();
+            for (AnfProperty p : anf.properties()) {
+                if (p.initialValue() == null) ctorProps.add(p);
+            }
+            // State fields: the mutable properties. `index` is the property's
+            // position in declaration order (matching constructor arg order),
+            // NOT a sequential mutable counter — the SDK relies on that.
+            List<String> stateFieldJson = new ArrayList<>();
+            for (int i = 0; i < anf.properties().size(); i++) {
+                AnfProperty p = anf.properties().get(i);
+                if (p.readonly()) continue;
+                StringBuilder sf = new StringBuilder();
+                sf.append("{\"name\": ").append(jsonString(p.name()))
+                    .append(", \"type\": ").append(jsonString(p.type()))
+                    .append(", \"index\": ").append(i);
+                if (p.initialValue() != null) {
+                    sf.append(", \"initialValue\": ").append(Jcs.stringify(p.initialValue()));
+                }
+                sf.append('}');
+                stateFieldJson.add(sf.toString());
+            }
+            boolean isStateful = !stateFieldJson.isEmpty();
+
+            Map<String, AnfMethod> privateMethods = StackLower.privateMethodMap(anf);
+            List<String> methodJson = new ArrayList<>();
+            for (AnfMethod m : anf.methods()) {
+                if ("constructor".equals(m.name())) continue; // lives in abi.constructor
+                StringBuilder mb = new StringBuilder();
+                mb.append("{\"name\": ").append(jsonString(m.name())).append(", \"params\": [");
+                for (int i = 0; i < m.params().size(); i++) {
+                    if (i > 0) mb.append(", ");
+                    mb.append("{\"name\": ").append(jsonString(m.params().get(i).name()))
+                        .append(", \"type\": ").append(jsonString(m.params().get(i).type()))
+                        .append('}');
+                }
+                mb.append("], \"isPublic\": ").append(m.isPublic());
+                // Stateful public methods without a _changePKH param are terminal
+                // (they do not build a state continuation output).
+                if (isStateful && m.isPublic() && !hasParam(m, "_changePKH")) {
+                    mb.append(", \"isTerminal\": true");
+                }
+                // Issue #100: authoritative _codePart decision from stack lowering.
+                if (m.isPublic()
+                    && StackLower.methodRequiresCodePart(m, anf.properties(), privateMethods)) {
+                    mb.append(", \"usesCodePart\": true");
+                }
+                mb.append('}');
+                methodJson.add(mb.toString());
+            }
+
+            StringBuilder b = new StringBuilder(1024 + emit.scriptHex().length());
+            b.append("{\n");
+            b.append("  \"version\": ").append(jsonString(SCHEMA_VERSION)).append(",\n");
+            b.append("  \"compilerVersion\": ").append(jsonString(Version.VALUE + "-java")).append(",\n");
+            b.append("  \"contractName\": ").append(jsonString(anf.contractName())).append(",\n");
+            if (parentClass != null) {
+                b.append("  \"parentClass\": ").append(jsonString(parentClass)).append(",\n");
+            }
+            b.append("  \"abi\": {\n    \"constructor\": {\n      \"params\": [");
+            for (int i = 0; i < ctorProps.size(); i++) {
+                if (i > 0) b.append(", ");
+                b.append("{\"name\": ").append(jsonString(ctorProps.get(i).name()))
+                    .append(", \"type\": ").append(jsonString(ctorProps.get(i).type()))
+                    .append('}');
+            }
+            b.append("]\n    },\n    \"methods\": [");
+            appendJoined(b, methodJson);
+            b.append("]\n  },\n");
+            b.append("  \"script\": ").append(jsonString(emit.scriptHex())).append(",\n");
+            if (isStateful) {
+                b.append("  \"stateFields\": [");
+                appendJoined(b, stateFieldJson);
+                b.append("],\n");
+            }
+            if (!emit.constructorSlots().isEmpty()) {
+                List<String> slots = new ArrayList<>();
+                for (Emit.ConstructorSlot s : emit.constructorSlots()) {
+                    slots.add("{\"paramIndex\": " + s.paramIndex()
+                        + ", \"byteOffset\": " + s.byteOffset() + "}");
+                }
+                b.append("  \"constructorSlots\": [");
+                appendJoined(b, slots);
+                b.append("],\n");
+            }
+            if (!emit.codeSepIndexSlots().isEmpty()) {
+                List<String> slots = new ArrayList<>();
+                for (Emit.CodeSepIndexSlot s : emit.codeSepIndexSlots()) {
+                    slots.add("{\"byteOffset\": " + s.byteOffset()
+                        + ", \"codeSepIndex\": " + s.codeSepIndex() + "}");
+                }
+                b.append("  \"codeSepIndexSlots\": [");
+                appendJoined(b, slots);
+                b.append("],\n");
+            }
+            // -1 is the "no OP_CODESEPARATOR emitted" sentinel; omit the field.
+            if (emit.codeSeparatorIndex() >= 0) {
+                b.append("  \"codeSeparatorIndex\": ").append(emit.codeSeparatorIndex()).append(",\n");
+            }
+            if (!emit.codeSeparatorIndices().isEmpty()) {
+                b.append("  \"codeSeparatorIndices\": [");
+                for (int i = 0; i < emit.codeSeparatorIndices().size(); i++) {
+                    if (i > 0) b.append(", ");
+                    b.append(emit.codeSeparatorIndices().get(i));
+                }
+                b.append("],\n");
+            }
+            b.append("  \"buildTimestamp\": ").append(jsonString(buildTimestamp()));
+            // Stateful artifacts always carry the ANF so the SDK can auto-compute
+            // state transitions without a hand-written newState (matches Go).
+            if (isStateful) {
+                b.append(",\n  \"anf\": ").append(Jcs.stringify(anf));
+            }
+            b.append("\n}\n");
+
+            Path target = Path.of(path);
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.writeString(target, b.toString());
+            return 0;
+        } catch (IOException e) {
+            err.println("runar-java: failed to write artifact to " + path + ": " + e.getMessage());
+            return 74;
+        } catch (RuntimeException e) {
+            err.println("runar-java: artifact emit error: " + e.getMessage());
+            return 70;
+        }
+    }
+
+    /** Artifact schema version. Matches the Go tier's {@code schemaVersion}. */
+    private static final String SCHEMA_VERSION = "runar-v1.0.0-rc.1";
+
+    private static boolean hasParam(AnfMethod m, String name) {
+        for (var p : m.params()) {
+            if (name.equals(p.name())) return true;
+        }
+        return false;
+    }
+
+    private static void appendJoined(StringBuilder b, List<String> parts) {
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) b.append(", ");
+            b.append(parts.get(i));
+        }
+    }
+
+    private static String buildTimestamp() {
+        return java.time.Instant.now()
+            .truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString()
+            .replace("Z", "") + "Z";
     }
 
     /**
@@ -378,6 +596,7 @@ public final class Cli {
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
         stream.println("  --disable-constant-folding   disable the constant-folding optimizer (required for conformance)");
         stream.println("  --emit-source-map <path>     write the artifact's sourceMap JSON to <path>");
+        stream.println("  --emit-artifact <path>       write the deployable artifact JSON to <path>");
         stream.println("  --daemon                     run in daemon mode (line-delimited JSON RPC on stdin/stdout)");
         stream.println("  --version                    print version and exit");
         stream.println("  -h, --help                   print this help and exit");
@@ -636,6 +855,9 @@ public final class Cli {
         // can hand back both the IR and the script hex. Used by the
         // conformance runner's single-spawn mode.
         String emitIrTo;
+        // R-007: when non-null, write the deployable artifact JSON (script +
+        // constructorSlots + codeSep offsets + ABI) to this path.
+        String emitArtifact;
 
         static Args parse(String[] argv) {
             Args out = new Args();
@@ -650,6 +872,10 @@ public final class Cli {
                     out.emitIrTo = arg.substring("--emit-ir-to=".length());
                     continue;
                 }
+                if (arg.startsWith("--emit-artifact=")) {
+                    out.emitArtifact = arg.substring("--emit-artifact=".length());
+                    continue;
+                }
                 switch (arg) {
                     case "--source" -> out.source = requireValue(list, "--source");
                     case "--ir" -> out.ir = requireValue(list, "--ir");
@@ -659,6 +885,7 @@ public final class Cli {
                     case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
                     case "--emit-source-map" -> out.emitSourceMap = requireValue(list, "--emit-source-map");
+                    case "--emit-artifact" -> out.emitArtifact = requireValue(list, "--emit-artifact");
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
                     case "-h", "--help" -> out.help = true;

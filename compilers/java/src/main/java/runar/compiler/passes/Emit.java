@@ -56,6 +56,52 @@ public final class Emit {
     public record EmitResult(String scriptHex, List<RawScriptSpan> rawScriptSpans) {}
 
     /**
+     * Byte offset of a constructor-argument placeholder ({@link PlaceholderOp})
+     * in the emitted script. The deployment SDK splices the real argument value
+     * over the one-byte {@code OP_0} placeholder at {@code byteOffset}.
+     *
+     * <p>Mirrors {@code ConstructorSlot} in {@code compilers/go/codegen/emit.go}
+     * and the {@code constructorSlots} entries the other tiers write into the
+     * artifact. Field names match what
+     * {@code packages/runar-java}'s {@code RunarArtifact.ConstructorSlot} reads.
+     */
+    public record ConstructorSlot(int paramIndex, int byteOffset) {}
+
+    /**
+     * Byte offset of a codeSepIndex placeholder ({@link PushCodeSepIndexOp}) in
+     * the emitted script, together with the codeSeparatorIndex that was current
+     * at that point. The SDK replaces the {@code OP_0} placeholder at
+     * {@code byteOffset} with the deployment-adjusted index.
+     *
+     * <p>Mirrors {@code CodeSepIndexSlot} in {@code compilers/go/codegen/emit.go}.
+     */
+    public record CodeSepIndexSlot(int byteOffset, int codeSepIndex) {}
+
+    /**
+     * R-007: full emit result. Carries everything the deployment SDK needs to
+     * turn a script into a deployable locking script: the constructor-argument
+     * slot offsets, the codeSepIndex slot offsets, and the OP_CODESEPARATOR
+     * byte offsets.
+     *
+     * <p>{@code codeSeparatorIndex} is {@code -1} when no OP_CODESEPARATOR was
+     * emitted (matching the Go tier's sentinel); the artifact writer omits the
+     * field in that case.
+     *
+     * <p>{@link #runResult(StackProgram)} and
+     * {@link #runResultWithSourceMap(StackProgram)} are narrowing views over
+     * this record.
+     */
+    public record EmitResultFull(
+        String scriptHex,
+        List<RawScriptSpan> rawScriptSpans,
+        List<SourceMapping> sourceMap,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        int codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices
+    ) {}
+
+    /**
      * GAP-002: single source-map entry. Records the opcode index (0-based,
      * sequential over the emitted op stream — NOT the byte offset) and the
      * tier-local source location for that op. Mirrors the cross-tier
@@ -205,12 +251,15 @@ public final class Emit {
     }
 
     /**
-     * GAP-002: extended emit entry point that also walks the per-op
-     * {@code sourceLoc} field on every {@link StackOp} to build a parallel
-     * {@code SourceMapping} table. Ops with no {@code sourceLoc} are
-     * skipped — the resulting table is sparse over the opcode index space.
+     * R-007: the widest emit entry point. Adds the constructor-slot /
+     * codeSepIndex-slot / OP_CODESEPARATOR offset tables to what
+     * {@link #runResultWithSourceMap(StackProgram)} returns, so the CLI can
+     * write a deployable artifact.
+     *
+     * <p>Recording these offsets is purely observational — the emitted script
+     * bytes are identical to what the narrower entry points produce.
      */
-    public static EmitResultWithSourceMap runResultWithSourceMap(StackProgram program) {
+    public static EmitResultFull runResultFull(StackProgram program) {
         Ctx ctx = new Ctx();
 
         List<StackMethod> publicMethods = new java.util.ArrayList<>();
@@ -218,17 +267,34 @@ public final class Emit {
             if (!"constructor".equals(m.name())) publicMethods.add(m);
         }
 
-        if (publicMethods.isEmpty()) {
-            return new EmitResultWithSourceMap("", List.copyOf(ctx.rawScriptSpans), List.copyOf(ctx.sourceMap));
+        if (!publicMethods.isEmpty()) {
+            if (publicMethods.size() == 1) {
+                for (StackOp op : publicMethods.get(0).ops()) emitStackOp(op, ctx);
+            } else {
+                emitMethodDispatch(publicMethods, ctx);
+            }
         }
 
-        if (publicMethods.size() == 1) {
-            for (StackOp op : publicMethods.get(0).ops()) emitStackOp(op, ctx);
-        } else {
-            emitMethodDispatch(publicMethods, ctx);
-        }
+        return new EmitResultFull(
+            publicMethods.isEmpty() ? "" : ctx.hex.toString(),
+            List.copyOf(ctx.rawScriptSpans),
+            List.copyOf(ctx.sourceMap),
+            List.copyOf(ctx.constructorSlots),
+            List.copyOf(ctx.codeSepIndexSlots),
+            ctx.codeSeparatorIndex,
+            List.copyOf(ctx.codeSeparatorIndices)
+        );
+    }
 
-        return new EmitResultWithSourceMap(ctx.hex.toString(), List.copyOf(ctx.rawScriptSpans), List.copyOf(ctx.sourceMap));
+    /**
+     * GAP-002: extended emit entry point that also walks the per-op
+     * {@code sourceLoc} field on every {@link StackOp} to build a parallel
+     * {@code SourceMapping} table. Ops with no {@code sourceLoc} are
+     * skipped — the resulting table is sparse over the opcode index space.
+     */
+    public static EmitResultWithSourceMap runResultWithSourceMap(StackProgram program) {
+        EmitResultFull full = runResultFull(program);
+        return new EmitResultWithSourceMap(full.scriptHex(), full.rawScriptSpans(), full.sourceMap());
     }
 
     private static void emitMethodDispatch(List<StackMethod> methods, Ctx ctx) {
@@ -282,10 +348,10 @@ public final class Emit {
             ctx.emitOpcode(o.code());
         } else if (op instanceof IfOp ifo) {
             emitIf(ifo.thenBranch(), ifo.elseBranch(), ctx);
-        } else if (op instanceof PlaceholderOp) {
-            ctx.appendHex("00");
+        } else if (op instanceof PlaceholderOp ph) {
+            ctx.emitPlaceholder(ph.paramIndex().intValueExact());
         } else if (op instanceof PushCodeSepIndexOp) {
-            ctx.appendHex("00");
+            ctx.emitCodeSepIndexPlaceholder();
         } else if (op instanceof RawBytesOp rb) {
             // Opaque opcode-byte span from a raw_script ANF node. Written
             // verbatim with no re-encoding; the declared arities are
@@ -340,6 +406,13 @@ public final class Emit {
         // Mirrors the EmitContext pattern from the TS / Go / Rust / Python
         // / Zig / Ruby tiers.
         final java.util.List<SourceMapping> sourceMap = new java.util.ArrayList<>();
+        // R-007: deployment-artifact offset tables. Written alongside the hex,
+        // never in place of it — nothing here changes an emitted byte.
+        final java.util.List<ConstructorSlot> constructorSlots = new java.util.ArrayList<>();
+        final java.util.List<CodeSepIndexSlot> codeSepIndexSlots = new java.util.ArrayList<>();
+        final java.util.List<Integer> codeSeparatorIndices = new java.util.ArrayList<>();
+        /** Byte offset of the most recent OP_CODESEPARATOR; -1 when none was emitted. */
+        int codeSeparatorIndex = -1;
         int byteLength = 0;
         int opcodeIndex = 0;
         runar.compiler.ir.stack.StackSourceLoc pendingSourceLoc;
@@ -371,9 +444,40 @@ public final class Emit {
         void emitOpcode(String name) {
             Integer b = OPCODES.get(name);
             if (b == null) throw new RuntimeException("Unknown opcode: " + name);
+            // R-007: record the byte offset of every OP_CODESEPARATOR so the SDK
+            // can compute the BIP-143 subscript. Observational only — taken
+            // BEFORE appendHex, exactly as the Go tier does.
+            if ("OP_CODESEPARATOR".equals(name)) {
+                codeSeparatorIndex = byteLength;
+                codeSeparatorIndices.add(byteLength);
+            }
             recordSourceMapping();
             appendHex(byteToHex(b));
             opcodeIndex++;
+        }
+
+        /**
+         * R-007: write the one-byte {@code OP_0} constructor-argument
+         * placeholder and record its offset. Same bytes as the previous bare
+         * {@code appendHex("00")}; the slot entry is the only addition.
+         */
+        void emitPlaceholder(int paramIndex) {
+            constructorSlots.add(new ConstructorSlot(paramIndex, byteLength));
+            appendHex("00");
+        }
+
+        /**
+         * R-007: write the one-byte {@code OP_0} codeSepIndex placeholder and
+         * record its offset together with the codeSeparatorIndex current at
+         * this point (0 when no separator has been emitted yet, matching the
+         * Go tier's clamp).
+         */
+        void emitCodeSepIndexPlaceholder() {
+            codeSepIndexSlots.add(new CodeSepIndexSlot(
+                byteLength,
+                codeSeparatorIndex < 0 ? 0 : codeSeparatorIndex
+            ));
+            appendHex("00");
         }
 
         void emitPush(PushValue value) {
