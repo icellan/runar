@@ -656,9 +656,6 @@ class _MethodScope:
         self.auto_injected_params: list[ANFParam] = []
         # Set of names already recorded (dedup).
         self.auto_injected_set: set[str] = set()
-        # requireOutputP2PKH emits its hashOutputs(preimage) check at
-        # most ONCE per method body.
-        self.did_emit_hash_outputs_check: bool = False
 
     def record_auto_injected_param(self, name: str, typ: str) -> None:
         """Idempotent: second call with the same name is a no-op."""
@@ -725,6 +722,16 @@ class _LowerCtx:
         # Always non-None so sub-contexts inherit the same scope and
         # auto-injection registers regardless of nesting depth.
         self.method_scope: _MethodScope = method_scope if method_scope is not None else _MethodScope()
+        # requireOutputP2PKH emits its hashOutputs(preimage) commitment at most
+        # once per CONTROL-FLOW PATH -- deliberately NOT on ``method_scope``.
+        # A sub-context inherits the flag from its parent (the commitment on a
+        # dominating path really has been established), but its writes stay
+        # local, so an ``if``'s two arms cannot latch it for each other. Only
+        # one arm runs on chain, and the arm-local per-output assertion
+        # compares a substring of the attacker-supplied ``_serialisedOutputs``
+        # witness: without its own commitment that arm constrains nothing about
+        # the transaction's real outputs.
+        self.did_emit_hash_outputs_check: bool = False
 
     def push_param_alias(self, name: str, alias_ref: str) -> None:
         self._param_alias_stack.setdefault(name, []).append(alias_ref)
@@ -869,6 +876,11 @@ class _LowerCtx:
         # Issue #123: a manual checkPreimage() inside a nested block must bind
         # under the same declared @sighash mode as the enclosing method.
         sub.sighash_flag = self.sighash_flag
+        # Inherit (copy, not share) the output-hash commitment state: a
+        # commitment already emitted on the dominating path covers this block
+        # too, but a commitment emitted INSIDE this block must not be visible
+        # to the parent or to a sibling arm.
+        sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check
         # Share the method-scoped param-type table by reference so if/else
         # sub-contexts resolve parameter types against the same method.
         sub._param_types = self._param_types
@@ -1504,9 +1516,11 @@ class _LowerCtx:
         # paying `amount` satoshis to `pubkeyHash`. Auto-injects
         # `_serialisedOutputs` (once per method) and emits
         # hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
-        # first time the intrinsic is called in a method body. Subsequent
-        # calls in the same method skip the hashOutputs check (already
-        # established) and emit only the per-output substring assertion.
+        # first time the intrinsic is called on a given CONTROL-FLOW PATH.
+        # A later call on that same path skips the hashOutputs check (already
+        # established) and emits only the per-output substring assertion; a
+        # call in a sibling ``if`` arm re-emits it, because that arm does not
+        # execute the other arm's commitment.
         #
         # v1 assumes all outputs in the serialised set are exactly 34 bytes
         # (8-byte LE amount || 0x19 length || 25-byte P2PKH script). Byte
@@ -1523,9 +1537,9 @@ class _LowerCtx:
             self.add_param("_serialisedOutputs")
             self.register_param_type("_serialisedOutputs", "ByteString")
 
-            # Emit the hashOutputs(preimage) check exactly once per method.
-            if not self.method_scope.did_emit_hash_outputs_check:
-                self.method_scope.did_emit_hash_outputs_check = True
+            # Emit the hashOutputs(preimage) check exactly once per path.
+            if not self.did_emit_hash_outputs_check:
+                self.did_emit_hash_outputs_check = True
                 serialised_ref = self.emit(ANFValue(kind="load_param", name="_serialisedOutputs"))
                 actual_out_hash_ref = self.emit(_make_call("hash256", [serialised_ref]))
                 preimage_ref = self.emit(ANFValue(kind="load_param", name="txPreimage"))
