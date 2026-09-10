@@ -1578,6 +1578,15 @@ class LoweringContext {
     // Special handling for certain builtins
     if (func === 'assert') {
       // assert(value) => value OP_VERIFY
+      // A zero-argument call would emit no OP_VERIFY at all — silently deleting
+      // the check the contract relies on — and would skip the stackMap.push
+      // below, desyncing every later binding. Rejected here rather than
+      // defended against with extra opcodes (which would move bytes for every
+      // valid contract). Checking in the lowerer as well as the typechecker
+      // covers the `--ir` input path, which never runs a typecheck.
+      if (args.length < 1) {
+        throw new Error(`assert requires 1 argument, got ${args.length}`);
+      }
       if (args.length >= 1) {
         const arg = args[0]!;
         const isLast = this.isLastUse(arg, bindingIndex, lastUses);
@@ -1591,7 +1600,11 @@ class LoweringContext {
     }
 
     if (func === 'exit') {
-      // exit(condition) => condition OP_VERIFY — same as assert
+      // exit(condition) => condition OP_VERIFY — same as assert, and the same
+      // zero-argument hazard: no OP_VERIFY emitted, no stack slot registered.
+      if (args.length < 1) {
+        throw new Error(`exit requires 1 argument, got ${args.length}`);
+      }
       if (args.length >= 1) {
         const arg = args[0]!;
         const isLast = this.isLastUse(arg, bindingIndex, lastUses);
@@ -1605,6 +1618,12 @@ class LoweringContext {
 
     // pack() and toByteString() are type-level casts — no-ops at the script level
     if (func === 'pack' || func === 'toByteString') {
+      // With no argument there is nothing to rename: the binding never reaches
+      // the stack map, so any later reference to it resolves against the wrong
+      // slot. Reject instead of emitting a placeholder push.
+      if (args.length < 1) {
+        throw new Error(`${func} requires 1 argument, got ${args.length}`);
+      }
       if (args.length >= 1) {
         const arg = args[0]!;
         const isLast = this.isLastUse(arg, bindingIndex, lastUses);
