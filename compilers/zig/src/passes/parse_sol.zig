@@ -506,6 +506,12 @@ const Parser = struct {
             constructor = self.autoGenerateConstructor(properties.items);
         }
 
+        // Solidity names state variables WITHOUT a `this.` prefix, so every
+        // reference above is still a bare `.identifier`. Resolve them now that
+        // the whole contract — and therefore the complete property list — has
+        // been parsed. See `solResolveBarePropsStmts`.
+        self.solResolveBareProps(properties.items, methods.items);
+
         return ContractNode{
             .name = name_tok.text,
             .parent_class = parent_class,
@@ -809,6 +815,204 @@ const Parser = struct {
                 if (maybe) |e| return .{ .return_stmt = self.solRenameUnderscoreIdents(e, params) };
                 return stmt;
             },
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Bare state-variable resolution
+    // ------------------------------------------------------------------
+    //
+    // Solidity reads and writes contract state variables WITHOUT a `this.`
+    // prefix, so this parser produces `.identifier` where the ts / go / rust /
+    // python / ruby / java surfaces produce `.property_access`. The other six
+    // tiers close that gap in their own Solidity parsers, with a scope-aware
+    // post-parse rewrite:
+    //
+    //   packages/runar-compiler/src/passes/01-parse-sol.ts  resolvePropertyAccess
+    //   compilers/go/frontend/parser_sol.go                 solRewriteStmtBareProps
+    //   compilers/rust/src/frontend/parser_sol.rs           sol_rewrite_stmt_bare_props
+    //
+    // Zig was the only tier without one. ANF lowering hid that for a long
+    // time: `lowerIdentifier` and `lowerBinding`'s `writes_property` both fall
+    // back to "not a local AND names a property", so reads and `update_prop`
+    // writes still came out right and the surfaces agreed byte for byte.
+    //
+    // They stopped agreeing when `7dfb8c07` (R-028 sibling) keyed
+    // `methodMutatesState` -> `stmtMutatesStateRec` strictly on
+    // `Assign.target_is_property`, matching the reference's
+    // `stmt.target.kind === 'property_access'`. That walker has no local
+    // scope, so it cannot use the fallback — and with the flag never set on
+    // this surface, every bare state-variable write became invisible to the
+    // continuation-shape decision. A stateful `.runar.sol` contract compiled
+    // to a TERMINAL method: no `_changePKH` / `_changeAmount` / `_newAmount`,
+    // no `hashOutputs` continuation, no `_codePart` witness and hence none of
+    // R-010's `_codePart` authentication, on a script that still moves the
+    // contract's funds. Five conformance fixtures diverged from the other six
+    // tiers on `.runar.sol` alone.
+    //
+    // Fixing the AST rather than re-widening the walker keeps the flag's
+    // meaning intact, so R-028 sibling's own invariant survives: a LOCAL that
+    // merely shadows a property is in `locals` here and is left as an
+    // identifier, exactly as `lowerBinding` treats it.
+
+    /// Whether `name` refers to a contract property at this point in the
+    /// method body — i.e. it names one and no parameter or local declared so
+    /// far shadows it.
+    fn solIsBareProp(
+        name: []const u8,
+        properties: []const PropertyNode,
+        locals: *const std.StringHashMapUnmanaged(void),
+    ) bool {
+        if (locals.contains(name)) return false;
+        for (properties) |p| {
+            if (std.mem.eql(u8, p.name, name)) return true;
+        }
+        return false;
+    }
+
+    /// Rewrite every bare property reference inside `expr`. Compound nodes are
+    /// heap-allocated and mutated in place; only a bare `.identifier` needs a
+    /// new value returned, so callers must write the result back — the same
+    /// contract `solRenameUnderscoreIdents` uses.
+    fn solResolveBarePropsExpr(
+        self: *Parser,
+        expr: Expression,
+        properties: []const PropertyNode,
+        locals: *const std.StringHashMapUnmanaged(void),
+    ) Expression {
+        switch (expr) {
+            .identifier => |name| {
+                if (solIsBareProp(name, properties, locals)) {
+                    return .{ .property_access = .{ .object = "this", .property = name } };
+                }
+                return expr;
+            },
+            .binary_op => |bop| {
+                bop.left = self.solResolveBarePropsExpr(bop.left, properties, locals);
+                bop.right = self.solResolveBarePropsExpr(bop.right, properties, locals);
+                return expr;
+            },
+            .unary_op => |uop| {
+                uop.operand = self.solResolveBarePropsExpr(uop.operand, properties, locals);
+                return expr;
+            },
+            .call => |c| {
+                // The callee is a bareword name, not an expression: a bare
+                // call to a private helper is resolved by name downstream, so
+                // only the arguments carry references to rewrite.
+                for (c.args, 0..) |arg, i| {
+                    c.args[i] = self.solResolveBarePropsExpr(arg, properties, locals);
+                }
+                return expr;
+            },
+            .method_call => |mc| {
+                for (mc.args, 0..) |arg, i| {
+                    mc.args[i] = self.solResolveBarePropsExpr(arg, properties, locals);
+                }
+                return expr;
+            },
+            .ternary => |t| {
+                t.condition = self.solResolveBarePropsExpr(t.condition, properties, locals);
+                t.then_expr = self.solResolveBarePropsExpr(t.then_expr, properties, locals);
+                t.else_expr = self.solResolveBarePropsExpr(t.else_expr, properties, locals);
+                return expr;
+            },
+            .index_access => |ia| {
+                ia.object = self.solResolveBarePropsExpr(ia.object, properties, locals);
+                ia.index = self.solResolveBarePropsExpr(ia.index, properties, locals);
+                return expr;
+            },
+            .increment => |inc| {
+                inc.operand = self.solResolveBarePropsExpr(inc.operand, properties, locals);
+                return expr;
+            },
+            .decrement => |dec| {
+                dec.operand = self.solResolveBarePropsExpr(dec.operand, properties, locals);
+                return expr;
+            },
+            else => return expr,
+        }
+    }
+
+    /// Rewrite bare property references across `stmts`, threading the set of
+    /// names a parameter or an earlier local declaration shadows. `locals` is
+    /// cloned for each nested block so a local declared inside an `if` or a
+    /// loop does not leak out of it.
+    fn solResolveBarePropsStmts(
+        self: *Parser,
+        stmts: []Statement,
+        properties: []const PropertyNode,
+        locals: *std.StringHashMapUnmanaged(void),
+    ) void {
+        for (stmts) |*stmt| {
+            switch (stmt.*) {
+                .assign => |*a| {
+                    a.value = self.solResolveBarePropsExpr(a.value, properties, locals);
+                    // `Assign` stores a bare target NAME plus this flag rather
+                    // than a target expression, so the rewrite lands on the
+                    // flag. `index_target` is never populated on this surface
+                    // (`buildAssignment` has no index-access arm), so there is
+                    // no chain root to walk.
+                    if (!a.target_is_property and solIsBareProp(a.target, properties, locals)) {
+                        a.target_is_property = true;
+                    }
+                },
+                .const_decl => |*d| {
+                    d.value = self.solResolveBarePropsExpr(d.value, properties, locals);
+                    locals.put(self.allocator, d.name, {}) catch {};
+                },
+                .let_decl => |*d| {
+                    // The initializer is resolved in the scope BEFORE the
+                    // declaration: the new local does not shadow until after.
+                    if (d.value) |v| d.value = self.solResolveBarePropsExpr(v, properties, locals);
+                    locals.put(self.allocator, d.name, {}) catch {};
+                },
+                .expr_stmt => |*e| {
+                    e.expr = self.solResolveBarePropsExpr(e.expr, properties, locals);
+                },
+                .assert_stmt => |*a| {
+                    a.condition = self.solResolveBarePropsExpr(a.condition, properties, locals);
+                },
+                .if_stmt => |*i| {
+                    i.condition = self.solResolveBarePropsExpr(i.condition, properties, locals);
+                    var then_locals = locals.clone(self.allocator) catch return;
+                    defer then_locals.deinit(self.allocator);
+                    self.solResolveBarePropsStmts(i.then_body, properties, &then_locals);
+                    if (i.else_body) |eb| {
+                        var else_locals = locals.clone(self.allocator) catch return;
+                        defer else_locals.deinit(self.allocator);
+                        self.solResolveBarePropsStmts(eb, properties, &else_locals);
+                    }
+                },
+                .for_stmt => |*f| {
+                    // `ForStmt` carries integer bounds, not expressions — only
+                    // the loop variable and the body need scoping.
+                    var body_locals = locals.clone(self.allocator) catch return;
+                    defer body_locals.deinit(self.allocator);
+                    body_locals.put(self.allocator, f.var_name, {}) catch {};
+                    self.solResolveBarePropsStmts(f.body, properties, &body_locals);
+                },
+                .return_stmt => |*maybe| {
+                    if (maybe.*) |e| maybe.* = self.solResolveBarePropsExpr(e, properties, locals);
+                },
+            }
+        }
+    }
+
+    /// Entry point: resolve bare property references in every method body.
+    ///
+    /// The constructor is deliberately excluded, matching Go's
+    /// `parseSolConstructor`. Its writes are already carried by
+    /// `ConstructorNode.assignments` (name-keyed), and `passes/validate.zig`
+    /// uses `target_is_property` to reject writes to `readonly` properties —
+    /// which a constructor is the one place allowed to make.
+    fn solResolveBareProps(self: *Parser, properties: []const PropertyNode, methods: []MethodNode) void {
+        if (properties.len == 0) return;
+        for (methods) |*m| {
+            var locals: std.StringHashMapUnmanaged(void) = .empty;
+            defer locals.deinit(self.allocator);
+            for (m.params) |p| locals.put(self.allocator, p.name, {}) catch {};
+            self.solResolveBarePropsStmts(m.body, properties, &locals);
         }
     }
 

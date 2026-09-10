@@ -52,6 +52,7 @@ test {
     _ = @import("tests/sighash_validate_test.zig");
     _ = @import("tests/local_shadowing_property.zig");
     _ = @import("tests/shadowing_local_continuation_shape.zig");
+    _ = @import("tests/sol_bare_property_write_continuation.zig");
     _ = @import("tests/branch_lift_then_arm.zig");
     _ = @import("tests/readonly_property_assignment.zig");
     _ = @import("tests/property_initializer_literal.zig");
