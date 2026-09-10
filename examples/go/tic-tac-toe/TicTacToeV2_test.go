@@ -20,7 +20,7 @@ func TestTicTacToeV2_Compile(t *testing.T) {
 // FixedArray feature in the Go compiler. It compiles both the
 // hand-rolled v1 contract and the v2 FixedArray rewrite through the full
 // Go compiler pipeline and asserts that the resulting locking scripts
-// are byte-identical and have length 7624. (BUG-100: each of the three public
+// are byte-identical and have length 7778. (BUG-100: each of the three public
 // methods now carries the fixed on-chain OP_PUSH_TX preimage-binding blob, so
 // the script grew from the pre-fix 5087 bytes. #116: the numeric `!=` migration
 // to [OP_NUMEQUAL, OP_NOT] added one byte per numeric inequality, growing the
@@ -44,7 +44,16 @@ func TestTicTacToeV2_Compile(t *testing.T) {
 // moveAndWin on a board with NO line is still REJECTED. Any-S: the binding
 // blob itself shrank from 760 to 428 bytes, and TicTacToe is stateful with
 // six covenant methods carrying one blob each, so 6 x 332 = 1992 bytes come
-// off and the script goes 9616 -> 7624.)
+// off and the script goes 9616 -> 7624. R-010 (c2846d87): each covenant method
+// now AUTHENTICATES its spender-supplied `_codePart` against the executing
+// script rather than trusting it, growing the script from 7624 to 7778.
+// Attribution is measured, not inferred: compiling this contract with
+// packages/runar-compiler/src/passes/05-stack-lower.ts taken from c2846d87^
+// gives 7624 and from c2846d87 gives 7778, with nothing else changed. The two
+// later commits that touch that file add nothing here — R-054 (96065132) only
+// rejects degenerate checkMultiSig thresholds at compile time, and N-043
+// (c21b444f) emits its length pin solely on the variable-length-state path,
+// which this fixed-state contract never takes.)
 //
 // The v2 contract uses `Board [9]runar.Bigint`. The expand-fixed-arrays
 // pass runs between typecheck and ANF lowering, expanding the array
@@ -70,7 +79,7 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	v1Bytes := len(v1.Script) / 2
 	v2Bytes := len(v2.Script) / 2
 
-	const expectedBytes = 7624
+	const expectedBytes = 7778
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}
