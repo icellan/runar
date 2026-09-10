@@ -2269,6 +2269,75 @@ module RunarCompiler
     end
 
     # -------------------------------------------------------------------
+    # Continuation-shape AST descent (shared by all three effect walkers)
+    # -------------------------------------------------------------------
+    #
+    # Ports the descent of the reference +side_effect_summary+ module
+    # (packages/runar-compiler/src/passes/side-effect-summary.ts and the Go /
+    # Rust / Python peers). CL-BUG-155: the three walkers below used to visit
+    # only ExpressionStmt / IfStmt-bodies / ForStmt-body / ReturnStmt, so a
+    # side effect reachable through a variable-declaration initialiser, an
+    # if-condition, a loop header, an assignment's value or a call argument
+    # never reached the continuation-shape decision. Both failure modes are
+    # unsafe: an output intrinsic behind an initialiser makes the body load
+    # +_changePKH+ that the header never declared (stack lowering refuses),
+    # and a state mutation behind one silently marks the method TERMINAL, so
+    # the deployed script carries no continuation covenant at all.
+
+    # Child STATEMENTS of a statement, in reference-walk order.
+    # @return [Array<Statement>]
+    def self._child_statements(stmt)
+      if stmt.is_a?(IfStmt)
+        return (stmt.then || []) + (stmt.else_ || [])
+      end
+      if stmt.is_a?(ForStmt)
+        # The loop header is walked too: an effect can hide in init or update.
+        return [stmt.init, stmt.update].compact + (stmt.body || [])
+      end
+      []
+    end
+    private_class_method :_child_statements
+
+    # Child EXPRESSIONS carried directly by a statement.
+    # @return [Array<Expression>]
+    def self._statement_expressions(stmt)
+      return [stmt.target, stmt.value].compact if stmt.is_a?(AssignmentStmt)
+      return [stmt.expr].compact if stmt.is_a?(ExpressionStmt)
+      return [stmt.condition].compact if stmt.is_a?(IfStmt)
+      return [stmt.condition].compact if stmt.is_a?(ForStmt)
+      # parser_ruby promotes a private method's trailing ExpressionStmt to a
+      # ReturnStmt for implicit-return semantics, so effects land here too.
+      return [stmt.value].compact if stmt.is_a?(ReturnStmt)
+      return [stmt.init].compact if stmt.is_a?(VariableDeclStmt)
+      []
+    end
+    private_class_method :_statement_expressions
+
+    # Child EXPRESSIONS of an expression. Mirrors the reference +collectExpr+
+    # descent exactly -- note that an increment/decrement operand is NOT
+    # descended into (the reference stops after its property check).
+    # @return [Array<Expression>]
+    def self._child_expressions(expr)
+      if expr.is_a?(CallExpr)
+        kids = (expr.args || []).dup
+        # The callee subexpression can hold nested calls / member chains.
+        # An Identifier callee has no children, so skip it.
+        kids << expr.callee if expr.callee && !expr.callee.is_a?(Identifier)
+        return kids
+      end
+      return [expr.left, expr.right].compact if expr.is_a?(BinaryExpr)
+      return [expr.operand].compact if expr.is_a?(UnaryExpr)
+      if expr.is_a?(TernaryExpr)
+        return [expr.condition, expr.consequent, expr.alternate].compact
+      end
+      return [expr.object, expr.index].compact if expr.is_a?(IndexAccessExpr)
+      return [expr.object].compact if expr.is_a?(MemberExpr)
+      return (expr.elements || []).compact if expr.is_a?(ArrayLiteralExpr)
+      []
+    end
+    private_class_method :_child_expressions
+
+    # -------------------------------------------------------------------
     # State mutation analysis
     # -------------------------------------------------------------------
 
@@ -2299,52 +2368,25 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._stmt_mutates_state(stmt, mutable_props, contract, seen)
-      if stmt.is_a?(AssignmentStmt)
-        if stmt.target.is_a?(PropertyAccessExpr)
-          return mutable_props.include?(stmt.target.property)
-        end
-        return false
+      if stmt.is_a?(AssignmentStmt) && stmt.target.is_a?(PropertyAccessExpr) &&
+         mutable_props.include?(stmt.target.property)
+        return true
       end
 
-      if stmt.is_a?(ExpressionStmt)
-        return _expr_mutates_state(stmt.expr, mutable_props, contract, seen)
-      end
-
-      if stmt.is_a?(IfStmt)
-        return true if _body_mutates_state(stmt.then, mutable_props, contract, seen)
-        if stmt.else_ && stmt.else_.any?
-          return true if _body_mutates_state(stmt.else_, mutable_props, contract, seen)
-        end
-        return false
-      end
-
-      if stmt.is_a?(ForStmt)
-        if stmt.update && _stmt_mutates_state(stmt.update, mutable_props, contract, seen)
-          return true
-        end
-        return _body_mutates_state(stmt.body, mutable_props, contract, seen)
-      end
-
-      if stmt.is_a?(ReturnStmt) && stmt.value
-        return _expr_mutates_state(stmt.value, mutable_props, contract, seen)
-      end
-
-      false
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_mutates_state(e, mutable_props, contract, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_mutates_state(s, mutable_props, contract, seen) }
     end
     private_class_method :_stmt_mutates_state
 
     # @return [Boolean]
     def self._expr_mutates_state(expr, mutable_props, contract, seen)
       return false if expr.nil?
-      if expr.is_a?(IncrementExpr)
-        if expr.operand.is_a?(PropertyAccessExpr)
-          return mutable_props.include?(expr.operand.property)
-        end
-      end
-      if expr.is_a?(DecrementExpr)
-        if expr.operand.is_a?(PropertyAccessExpr)
-          return mutable_props.include?(expr.operand.property)
-        end
+      if expr.is_a?(IncrementExpr) || expr.is_a?(DecrementExpr)
+        # The reference stops here -- it does not descend into the operand.
+        return expr.operand.is_a?(PropertyAccessExpr) &&
+               mutable_props.include?(expr.operand.property)
       end
       if expr.is_a?(CallExpr)
         target = _resolve_private_method(expr.callee, contract)
@@ -2353,7 +2395,7 @@ module RunarCompiler
           return true if _body_mutates_state(target.body, mutable_props, contract, new_seen)
         end
       end
-      false
+      _child_expressions(expr).any? { |e| _expr_mutates_state(e, mutable_props, contract, seen) }
     end
     private_class_method :_expr_mutates_state
 
@@ -2393,27 +2435,10 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._stmt_has_add_output(stmt, contract, seen)
-      if stmt.is_a?(ExpressionStmt)
-        return _expr_has_add_output(stmt.expr, contract, seen)
-      end
-      if stmt.is_a?(IfStmt)
-        return true if _body_has_add_output(stmt.then, contract, seen)
-        if stmt.else_ && stmt.else_.any?
-          return true if _body_has_add_output(stmt.else_, contract, seen)
-        end
-        return false
-      end
-      if stmt.is_a?(ForStmt)
-        return _body_has_add_output(stmt.body, contract, seen)
-      end
-      # Ruby's parser_ruby promotes a private method's trailing
-      # ExpressionStmt to a ReturnStmt for implicit-return semantics, so
-      # `add_output(...)` calls in helper bodies wind up here. Walk the
-      # return value the same way an ExpressionStmt would be walked.
-      if stmt.is_a?(ReturnStmt) && stmt.value
-        return _expr_has_add_output(stmt.value, contract, seen)
-      end
-      false
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_has_add_output(e, contract, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_has_add_output(s, contract, seen) }
     end
     private_class_method :_stmt_has_add_output
 
@@ -2437,7 +2462,7 @@ module RunarCompiler
           return true if _body_has_add_output(target.body, contract, new_seen)
         end
       end
-      false
+      _child_expressions(expr).any? { |e| _expr_has_add_output(e, contract, seen) }
     end
     private_class_method :_expr_has_add_output
 
@@ -2460,23 +2485,10 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._stmt_has_add_data_output(stmt, contract, seen)
-      if stmt.is_a?(ExpressionStmt)
-        return _expr_has_add_data_output(stmt.expr, contract, seen)
-      end
-      if stmt.is_a?(IfStmt)
-        return true if _body_has_add_data_output(stmt.then, contract, seen)
-        if stmt.else_ && stmt.else_.any?
-          return true if _body_has_add_data_output(stmt.else_, contract, seen)
-        end
-        return false
-      end
-      if stmt.is_a?(ForStmt)
-        return _body_has_add_data_output(stmt.body, contract, seen)
-      end
-      if stmt.is_a?(ReturnStmt) && stmt.value
-        return _expr_has_add_data_output(stmt.value, contract, seen)
-      end
-      false
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_has_add_data_output(e, contract, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_has_add_data_output(s, contract, seen) }
     end
     private_class_method :_stmt_has_add_data_output
 
@@ -2500,7 +2512,7 @@ module RunarCompiler
           return true if _body_has_add_data_output(target.body, contract, new_seen)
         end
       end
-      false
+      _child_expressions(expr).any? { |e| _expr_has_add_data_output(e, contract, seen) }
     end
     private_class_method :_expr_has_add_data_output
 

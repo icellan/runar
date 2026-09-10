@@ -35,6 +35,7 @@ test {
     _ = @import("tests/branch_outputs_merged_locals.zig");
     _ = @import("tests/branch_merge_dead_arm_k1.zig");
     _ = @import("tests/private_varlen_state_read.zig");
+    _ = @import("tests/vardecl_side_effect_descent.zig");
     _ = @import("tests/private_check_preimage_recursion.zig");
     _ = @import("tests/math_builtins.zig");
     _ = @import("tests/integer_domain.zig");

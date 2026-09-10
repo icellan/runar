@@ -590,10 +590,12 @@ fn lowerConstructorBody(ctx: *LowerCtx, ctor: ConstructorNode) LowerError!void {
 /// unused value off the stack at method end. The field's bytes therefore remain
 /// in the deployed locking script for downstream recovery.
 ///
-/// The TypeScript reference achieves the same via a `load_prop` + `@ref` alias
-/// relying on a single-pass DCE. The Zig `ec_optimizer` runs a fixpoint DCE
-/// that would strip such an unreferenced alias chain, so the Zig tier marks the
-/// injected load_prop directly. The observable output is byte-identical.
+/// Every tier runs a fixpoint DCE, so the `load_prop` + `@ref` alias trick the
+/// other six tiers used to carry cannot work anywhere: sweep 1 drops the
+/// unreferenced alias, sweep 2 then drops the load_prop it was protecting.
+/// Marking the injected load_prop directly is now the shape in all seven tiers
+/// (R-032 for Rust/Python/Ruby/Java, N-021 for TypeScript/Go). The observable
+/// output is byte-identical.
 fn emitEmbedAlwaysPreservation(ctx: *LowerCtx, contract: ContractNode) LowerError!bool {
     var injected = false;
     for (contract.properties) |prop| {
@@ -2672,22 +2674,46 @@ fn bodyMutatesStateRec(stmts: []const Statement, contract: ContractNode, depth: 
     return false;
 }
 
+// CL-BUG-155: the two walkers below used to visit only `.expr_stmt`, the
+// bodies of `.if_stmt` / `.for_stmt` and `.return_stmt`. A `.const_decl` /
+// `.let_decl` / `.assert_stmt`, an if-condition, an assignment's value and a
+// call argument were all invisible, so a side effect reachable only through
+// one of them never reached the continuation-shape decision. The four tiers
+// that ship a dedicated `side_effect_summary` module (TS, Go, Rust, Python)
+// walk all of them; both failure modes here are unsafe. An output intrinsic
+// behind an initialiser makes the body load `_changePKH` that the method
+// header never declared (stack lowering then refuses), and a state mutation
+// behind one silently marks the method TERMINAL, so the deployed script
+// carries no continuation covenant at all.
+
 fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, depth: u32) bool {
     switch (stmt) {
         .assign => |assign| {
             for (contract.properties) |p| {
                 if (!p.readonly and std.mem.eql(u8, p.name, assign.target)) return true;
             }
+            return exprMutatesStateRec(assign.value, contract, depth);
+        },
+        .const_decl => |cd| return exprMutatesStateRec(cd.value, contract, depth),
+        .let_decl => |ld| {
+            if (ld.value) |v| return exprMutatesStateRec(v, contract, depth);
             return false;
         },
         .expr_stmt => |expr| return exprMutatesStateRec(expr.expr, contract, depth),
+        // The canonical AST has no assert node — the reference tiers see an
+        // expression-statement calling `assert` and walk its argument. The
+        // sol / rust / ruby surface parsers here lower it to `.assert_stmt`.
+        .assert_stmt => |as_s| return exprMutatesStateRec(as_s.condition, contract, depth),
         .if_stmt => |if_s| {
+            if (exprMutatesStateRec(if_s.condition, contract, depth)) return true;
             if (bodyMutatesStateRec(if_s.then_body, contract, depth)) return true;
             if (if_s.else_body) |eb| {
                 if (bodyMutatesStateRec(eb, contract, depth)) return true;
             }
             return false;
         },
+        // `ForStmt` carries an integer init/bound, not expressions, so the
+        // loop header holds nothing to walk.
         .for_stmt => |for_s| return bodyMutatesStateRec(for_s.body, contract, depth),
         .return_stmt => |maybe_expr| {
             if (maybe_expr) |expr| {
@@ -2695,12 +2721,13 @@ fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, depth: u32) bool
             }
             return false;
         },
-        else => return false,
     }
 }
 
 fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) bool {
     switch (expr) {
+        // The reference stops at an increment/decrement — it does not descend
+        // into the operand.
         .increment => |inc| {
             switch (inc.operand) {
                 .property_access => |pa| {
@@ -2738,6 +2765,27 @@ fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) boo
             }
             for (mc.args) |arg| {
                 if (exprMutatesStateRec(arg, contract, depth)) return true;
+            }
+        },
+        .binary_op => |bin| {
+            if (exprMutatesStateRec(bin.left, contract, depth)) return true;
+            if (exprMutatesStateRec(bin.right, contract, depth)) return true;
+        },
+        .unary_op => |un| {
+            if (exprMutatesStateRec(un.operand, contract, depth)) return true;
+        },
+        .ternary => |tern| {
+            if (exprMutatesStateRec(tern.condition, contract, depth)) return true;
+            if (exprMutatesStateRec(tern.then_expr, contract, depth)) return true;
+            if (exprMutatesStateRec(tern.else_expr, contract, depth)) return true;
+        },
+        .index_access => |idx| {
+            if (exprMutatesStateRec(idx.object, contract, depth)) return true;
+            if (exprMutatesStateRec(idx.index, contract, depth)) return true;
+        },
+        .array_literal => |elems| {
+            for (elems) |el| {
+                if (exprMutatesStateRec(el, contract, depth)) return true;
             }
         },
         else => {},
@@ -2788,13 +2836,26 @@ fn stmtHasIntrinsicCallRec(
 ) bool {
     switch (stmt) {
         .expr_stmt => |expr| return exprHasIntrinsicCallRec(expr.expr, params, contract, names, depth),
+        .const_decl => |cd| return exprHasIntrinsicCallRec(cd.value, params, contract, names, depth),
+        .let_decl => |ld| {
+            if (ld.value) |v| return exprHasIntrinsicCallRec(v, params, contract, names, depth);
+            return false;
+        },
+        .assign => |assign| return exprHasIntrinsicCallRec(assign.value, params, contract, names, depth),
+        // The canonical AST has no assert node — the reference tiers see an
+        // expression-statement calling `assert` and walk its argument. The
+        // sol / rust / ruby surface parsers here lower it to `.assert_stmt`.
+        .assert_stmt => |as_s| return exprHasIntrinsicCallRec(as_s.condition, params, contract, names, depth),
         .if_stmt => |if_s| {
+            if (exprHasIntrinsicCallRec(if_s.condition, params, contract, names, depth)) return true;
             if (bodyHasIntrinsicCallRec(if_s.then_body, params, contract, names, depth)) return true;
             if (if_s.else_body) |eb| {
                 if (bodyHasIntrinsicCallRec(eb, params, contract, names, depth)) return true;
             }
             return false;
         },
+        // `ForStmt` carries an integer init/bound, not expressions, so the
+        // loop header holds nothing to walk.
         .for_stmt => |for_s| return bodyHasIntrinsicCallRec(for_s.body, params, contract, names, depth),
         // Ruby's parse_ruby promotes a private method's trailing
         // expression-statement to a return-statement for implicit-return
@@ -2805,7 +2866,6 @@ fn stmtHasIntrinsicCallRec(
             }
             return false;
         },
-        else => return false,
     }
 }
 
@@ -2829,11 +2889,38 @@ fn exprHasIntrinsicCallRec(
                     if (bodyHasIntrinsicCallRec(target.body, target.params, contract, names, depth + 1)) return true;
                 }
             }
+            for (mc.args) |arg| {
+                if (exprHasIntrinsicCallRec(arg, params, contract, names, depth)) return true;
+            }
         },
         .call => |call| {
             // Bareword identifier call on a private helper.
             if (lookupPrivateMethod(contract, call.callee)) |target| {
                 if (bodyHasIntrinsicCallRec(target.body, target.params, contract, names, depth + 1)) return true;
+            }
+            for (call.args) |arg| {
+                if (exprHasIntrinsicCallRec(arg, params, contract, names, depth)) return true;
+            }
+        },
+        .binary_op => |bin| {
+            if (exprHasIntrinsicCallRec(bin.left, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(bin.right, params, contract, names, depth)) return true;
+        },
+        .unary_op => |un| {
+            if (exprHasIntrinsicCallRec(un.operand, params, contract, names, depth)) return true;
+        },
+        .ternary => |tern| {
+            if (exprHasIntrinsicCallRec(tern.condition, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(tern.then_expr, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(tern.else_expr, params, contract, names, depth)) return true;
+        },
+        .index_access => |idx| {
+            if (exprHasIntrinsicCallRec(idx.object, params, contract, names, depth)) return true;
+            if (exprHasIntrinsicCallRec(idx.index, params, contract, names, depth)) return true;
+        },
+        .array_literal => |elems| {
+            for (elems) |el| {
+                if (exprHasIntrinsicCallRec(el, params, contract, names, depth)) return true;
             }
         },
         else => {},

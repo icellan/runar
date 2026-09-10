@@ -2100,6 +2100,97 @@ public final class AnfLower {
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // Continuation-shape AST descent (shared by all three effect walkers)
+    // ------------------------------------------------------------------
+    //
+    // Ports the descent of the reference side_effect_summary module
+    // (packages/runar-compiler/src/passes/side-effect-summary.ts and the Go /
+    // Rust / Python peers). CL-BUG-155: the walkers below used to visit only
+    // ExpressionStatement / IfStatement bodies / ForStatement body /
+    // ReturnStatement, so a side effect reachable through a
+    // variable-declaration initialiser, an if-condition, a loop header, an
+    // assignment's value or a call argument never reached the
+    // continuation-shape decision. Both failure modes are unsafe: an output
+    // intrinsic behind an initialiser makes the body load _changePKH that the
+    // header never declared (stack lowering refuses), and a state mutation
+    // behind one silently marks the method TERMINAL, so the deployed script
+    // carries no continuation covenant at all.
+
+    /** Child STATEMENTS of a statement, in reference-walk order. */
+    private static List<Statement> childStatements(Statement stmt) {
+        if (stmt instanceof IfStatement i) {
+            List<Statement> out = new ArrayList<>(i.thenBody());
+            if (i.elseBody() != null) out.addAll(i.elseBody());
+            return out;
+        }
+        if (stmt instanceof ForStatement f) {
+            List<Statement> out = new ArrayList<>();
+            // The loop header is walked too: an effect can hide in init or update.
+            if (f.init() != null) out.add(f.init());
+            if (f.update() != null) out.add(f.update());
+            out.addAll(f.body());
+            return out;
+        }
+        return List.of();
+    }
+
+    /** Child EXPRESSIONS carried directly by a statement. */
+    private static List<Expression> statementExpressions(Statement stmt) {
+        List<Expression> out = new ArrayList<>();
+        if (stmt instanceof AssignmentStatement a) {
+            if (a.target() != null) out.add(a.target());
+            if (a.value() != null) out.add(a.value());
+        } else if (stmt instanceof ExpressionStatement es) {
+            if (es.expression() != null) out.add(es.expression());
+        } else if (stmt instanceof IfStatement i) {
+            if (i.condition() != null) out.add(i.condition());
+        } else if (stmt instanceof ForStatement f) {
+            if (f.condition() != null) out.add(f.condition());
+        } else if (stmt instanceof ReturnStatement r) {
+            // RbParser promotes a private method's trailing ExpressionStatement
+            // to a ReturnStatement for implicit-return semantics.
+            if (r.value() != null) out.add(r.value());
+        } else if (stmt instanceof VariableDeclStatement v) {
+            if (v.init() != null) out.add(v.init());
+        }
+        return out;
+    }
+
+    /**
+     * Child EXPRESSIONS of an expression. Mirrors the reference
+     * {@code collectExpr} descent exactly — note that an increment/decrement
+     * operand is NOT descended into (the reference stops after its property
+     * check).
+     */
+    private static List<Expression> childExpressions(Expression expr) {
+        List<Expression> out = new ArrayList<>();
+        if (expr instanceof CallExpr c) {
+            out.addAll(c.args());
+            // The callee subexpression can hold nested calls / member chains.
+            // An Identifier callee has no children, so skip it.
+            if (c.callee() != null && !(c.callee() instanceof Identifier)) out.add(c.callee());
+        } else if (expr instanceof BinaryExpr b) {
+            out.add(b.left());
+            out.add(b.right());
+        } else if (expr instanceof UnaryExpr u) {
+            out.add(u.operand());
+        } else if (expr instanceof TernaryExpr t) {
+            out.add(t.condition());
+            out.add(t.consequent());
+            out.add(t.alternate());
+        } else if (expr instanceof IndexAccessExpr ia) {
+            out.add(ia.object());
+            out.add(ia.index());
+        } else if (expr instanceof MemberExpr me) {
+            out.add(me.object());
+        } else if (expr instanceof ArrayLiteralExpr al) {
+            out.addAll(al.elements());
+        }
+        out.removeIf(java.util.Objects::isNull);
+        return out;
+    }
+
     static boolean methodMutatesState(MethodNode method, ContractNode contract) {
         Set<String> mutable = new HashSet<>();
         for (PropertyNode p : contract.properties()) {
@@ -2119,25 +2210,16 @@ public final class AnfLower {
 
     private static boolean stmtMutatesState(
             Statement stmt, Set<String> mutable, ContractNode contract, Set<String> seen) {
-        if (stmt instanceof AssignmentStatement a) {
-            return a.target() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
+        if (stmt instanceof AssignmentStatement a
+            && a.target() instanceof PropertyAccessExpr pa
+            && mutable.contains(pa.property())) {
+            return true;
         }
-        if (stmt instanceof ExpressionStatement es) {
-            return exprMutatesState(es.expression(), mutable, contract, seen);
+        for (Expression e : statementExpressions(stmt)) {
+            if (exprMutatesState(e, mutable, contract, seen)) return true;
         }
-        if (stmt instanceof IfStatement i) {
-            if (bodyMutatesState(i.thenBody(), mutable, contract, seen)) return true;
-            return i.elseBody() != null && bodyMutatesState(i.elseBody(), mutable, contract, seen);
-        }
-        if (stmt instanceof ForStatement f) {
-            if (f.update() != null && stmtMutatesState(f.update(), mutable, contract, seen)) return true;
-            return bodyMutatesState(f.body(), mutable, contract, seen);
-        }
-        // Ruby's RbParser promotes a private method's trailing
-        // ExpressionStatement to a ReturnStatement for implicit-return
-        // semantics. Walk the return value the same way.
-        if (stmt instanceof ReturnStatement r && r.value() != null) {
-            return exprMutatesState(r.value(), mutable, contract, seen);
+        for (Statement s : childStatements(stmt)) {
+            if (stmtMutatesState(s, mutable, contract, seen)) return true;
         }
         return false;
     }
@@ -2145,13 +2227,12 @@ public final class AnfLower {
     private static boolean exprMutatesState(
             Expression expr, Set<String> mutable, ContractNode contract, Set<String> seen) {
         if (expr == null) return false;
-        if (expr instanceof IncrementExpr ie
-            && ie.operand() instanceof PropertyAccessExpr pa) {
-            return mutable.contains(pa.property());
+        // The reference stops here — it does not descend into the operand.
+        if (expr instanceof IncrementExpr ie) {
+            return ie.operand() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
         }
-        if (expr instanceof DecrementExpr de
-            && de.operand() instanceof PropertyAccessExpr pa) {
-            return mutable.contains(pa.property());
+        if (expr instanceof DecrementExpr de) {
+            return de.operand() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
         }
         if (expr instanceof CallExpr c) {
             String name = calleeName(c.callee());
@@ -2161,6 +2242,9 @@ public final class AnfLower {
                 nextSeen.add(target.name());
                 if (bodyMutatesState(target.body(), mutable, contract, nextSeen)) return true;
             }
+        }
+        for (Expression child : childExpressions(expr)) {
+            if (exprMutatesState(child, mutable, contract, seen)) return true;
         }
         return false;
     }
@@ -2179,16 +2263,11 @@ public final class AnfLower {
     }
 
     private static boolean stmtHasAddOutput(Statement s, ContractNode contract, Set<String> seen) {
-        if (s instanceof ExpressionStatement es) return exprHasAddOutput(es.expression(), contract, seen);
-        if (s instanceof IfStatement i) {
-            if (bodyHasAddOutput(i.thenBody(), contract, seen)) return true;
-            return i.elseBody() != null && bodyHasAddOutput(i.elseBody(), contract, seen);
+        for (Expression e : statementExpressions(s)) {
+            if (exprHasAddOutput(e, contract, seen)) return true;
         }
-        if (s instanceof ForStatement f) return bodyHasAddOutput(f.body(), contract, seen);
-        // Ruby's RbParser promotes a private method's trailing
-        // ExpressionStatement to a ReturnStatement; walk the return value.
-        if (s instanceof ReturnStatement r && r.value() != null) {
-            return exprHasAddOutput(r.value(), contract, seen);
+        for (Statement inner : childStatements(s)) {
+            if (stmtHasAddOutput(inner, contract, seen)) return true;
         }
         return false;
     }
@@ -2214,6 +2293,9 @@ public final class AnfLower {
                 if (bodyHasAddOutput(target.body(), contract, nextSeen)) return true;
             }
         }
+        for (Expression child : childExpressions(e)) {
+            if (exprHasAddOutput(child, contract, seen)) return true;
+        }
         return false;
     }
 
@@ -2227,14 +2309,11 @@ public final class AnfLower {
     }
 
     private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, Set<String> seen) {
-        if (s instanceof ExpressionStatement es) return exprHasAddDataOutput(es.expression(), contract, seen);
-        if (s instanceof IfStatement i) {
-            if (bodyHasAddDataOutput(i.thenBody(), contract, seen)) return true;
-            return i.elseBody() != null && bodyHasAddDataOutput(i.elseBody(), contract, seen);
+        for (Expression e : statementExpressions(s)) {
+            if (exprHasAddDataOutput(e, contract, seen)) return true;
         }
-        if (s instanceof ForStatement f) return bodyHasAddDataOutput(f.body(), contract, seen);
-        if (s instanceof ReturnStatement r && r.value() != null) {
-            return exprHasAddDataOutput(r.value(), contract, seen);
+        for (Statement inner : childStatements(s)) {
+            if (stmtHasAddDataOutput(inner, contract, seen)) return true;
         }
         return false;
     }
@@ -2259,6 +2338,9 @@ public final class AnfLower {
                 nextSeen.add(target.name());
                 if (bodyHasAddDataOutput(target.body(), contract, nextSeen)) return true;
             }
+        }
+        for (Expression child : childExpressions(e)) {
+            if (exprHasAddDataOutput(child, contract, seen)) return true;
         }
         return false;
     }
