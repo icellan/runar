@@ -42,6 +42,7 @@ test {
     _ = @import("tests/integer_domain.zig");
     _ = @import("tests/hash_builtins.zig");
     _ = @import("tests/reverse_bytes.zig");
+    _ = @import("tests/r069_builtin_parity.zig");
     _ = @import("tests/check_multisig.zig");
     _ = @import("tests/language_constructs.zig");
     _ = @import("tests/frontend.zig");

@@ -1564,11 +1564,26 @@ const LowerCtx = struct {
         clamp,
         checkPreimage,
         deserializeState,
+        // R-069: `exit` and the `pack` / `toByteString` casts were absent from
+        // `builtin_map`, so contracts the other six tiers compile were
+        // rejected here with InvalidBuiltin.
+        exit_builtin,
+        byte_string_cast,
+        right,
         extractHashPrevouts,
         extractLocktime,
         extractOutpoint,
         extractOutputHash,
         extractSigHashType,
+        // R-069: the remaining BIP-143 field extractors. Only five of the
+        // twelve were mapped; the other seven failed to lower at all.
+        extractVersion,
+        extractHashSequence,
+        extractInputIndex,
+        extractScriptCode,
+        extractAmount,
+        extractSequence,
+        extractOutputs,
         buildChangeOutput,
         getStateScript,
         buildStateOutput,
@@ -1693,11 +1708,22 @@ const LowerCtx = struct {
         .{ "clamp", .clamp },
         .{ "checkPreimage", .checkPreimage },
         .{ "deserializeState", .deserializeState },
+        .{ "exit", .exit_builtin },
+        .{ "pack", .byte_string_cast },
+        .{ "toByteString", .byte_string_cast },
+        .{ "right", .right },
         .{ "extractHashPrevouts", .extractHashPrevouts },
         .{ "extractLocktime", .extractLocktime },
         .{ "extractOutpoint", .extractOutpoint },
         .{ "extractOutputHash", .extractOutputHash },
         .{ "extractSigHashType", .extractSigHashType },
+        .{ "extractVersion", .extractVersion },
+        .{ "extractHashSequence", .extractHashSequence },
+        .{ "extractInputIndex", .extractInputIndex },
+        .{ "extractScriptCode", .extractScriptCode },
+        .{ "extractAmount", .extractAmount },
+        .{ "extractSequence", .extractSequence },
+        .{ "extractOutputs", .extractOutputs },
         .{ "buildChangeOutput", .buildChangeOutput },
         .{ "getStateScript", .getStateScript },
         .{ "buildStateOutput", .buildStateOutput },
@@ -1829,7 +1855,22 @@ const LowerCtx = struct {
             // sighash flag). Default flag (0 = ALL|FORKID) is correct here.
             .checkPreimage => try self.lowerCheckPreimage(bind_name, args, 0),
             .deserializeState => try self.lowerDeserializeState(bind_name, args),
-            .extractHashPrevouts, .extractLocktime, .extractOutpoint, .extractOutputHash, .extractSigHashType => try self.lowerExtractor(bind_name, id, args),
+            .exit_builtin => try self.lowerExitBuiltin(bind_name, args),
+            .byte_string_cast => try self.lowerByteStringCast(bind_name, args),
+            .right => try self.lowerRight(bind_name, args),
+            .extractHashPrevouts,
+            .extractLocktime,
+            .extractOutpoint,
+            .extractOutputHash,
+            .extractSigHashType,
+            .extractVersion,
+            .extractHashSequence,
+            .extractInputIndex,
+            .extractScriptCode,
+            .extractAmount,
+            .extractSequence,
+            .extractOutputs,
+            => try self.lowerExtractor(bind_name, id, args),
             .sign => try self.lowerSign(bind_name, args),
             .buildChangeOutput => try self.lowerBuildChangeOutput(bind_name, args),
             .getStateScript => try self.lowerGetStateScript(bind_name),
@@ -2521,6 +2562,23 @@ const LowerCtx = struct {
         _ = bind_name;
     }
 
+    /// `exit(cond)` — the same OP_VERIFY as `assert`, but the binding stays in
+    /// the stack map as a dummy result.
+    ///
+    /// This is NOT `lowerAssertBuiltin` with a different name: every peer tier
+    /// (`05-stack-lower.ts` `func === 'exit'`, and the Go / Rust / Python /
+    /// Ruby ports) records a result slot for the call, and dropping it here
+    /// cost the tier the trailing OP_NIP the peers emit. Byte parity, not the
+    /// tidier stack model, is the contract.
+    fn lowerExitBuiltin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 1) return LowerError.InvalidBuiltin;
+        try self.bringToTopAuto(args[0]);
+        try self.emitOp(.op_verify);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
     fn lowerSplit(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 2) return LowerError.InvalidBuiltin;
         try self.bringToTopOperand(args[0], args); // data
@@ -2531,6 +2589,40 @@ const LowerCtx = struct {
         _ = self.stack.pop();
         try self.stack.push(self.allocator, null); // left part
         try self.stack.push(self.allocator, bind_name); // right part (top)
+        self.trackDepth();
+    }
+
+    /// `pack(v)` / `toByteString(v)` — type-level casts that emit no opcodes.
+    /// The argument is brought to the top of the stack and its slot is renamed
+    /// to the binding, exactly as `05-stack-lower.ts` does for both names.
+    fn lowerByteStringCast(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 1) return LowerError.InvalidBuiltin;
+        try self.bringToTopAuto(args[0]);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    /// `right(data, n)` — the LAST `n` bytes of `data`.
+    /// OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP, byte-identical to
+    /// `05-stack-lower.ts#lowerRight` and its Go / Rust / Python / Ruby peers.
+    fn lowerRight(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 2) return LowerError.InvalidBuiltin;
+        try self.bringToTopOperand(args[0], args); // data
+        try self.bringToTopOperand(args[1], args); // length
+
+        // Stack: <data> <len>
+        _ = self.stack.pop(); // len
+        _ = self.stack.pop(); // data
+
+        try self.emitOp(.op_swap); // <len> <data>
+        try self.emitOp(.op_size); // <len> <data> <size>
+        try self.emitOp(.op_rot); // <data> <size> <len>
+        try self.emitOp(.op_sub); // <data> <size-len>
+        try self.emitOp(.op_split); // <left> <right>
+        try self.emitOp(.op_nip); // <right>
+
+        try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
 
@@ -4198,11 +4290,145 @@ const LowerCtx = struct {
                 try self.emitOp(.op_drop);
                 _ = self.stack.pop();
             },
+            // R-069: the seven extractors the Zig tier used to reject.
+            // Each mirrors `05-stack-lower.ts#lowerExtractor` opcode for
+            // opcode; the peer tiers' bytes are the contract, not merely a
+            // semantically equivalent slice.
+            .extractVersion => {
+                // nVersion is the LEADING 4 bytes:
+                // <4> OP_SPLIT OP_DROP OP_BIN2NUM
+                try self.emitLeadingExtract(4, true);
+            },
+            .extractHashSequence => {
+                // Skip 4 + 32, take 32.
+                try self.emitAbsoluteExtract(36, 32, false);
+            },
+            .extractInputIndex => {
+                // The outpoint's vout field: 4 bytes at absolute offset 100.
+                try self.emitAbsoluteExtract(100, 4, true);
+            },
+            .extractAmount => {
+                // amount(8) sits 52 bytes from the end
+                // (8 + nSequence 4 + hashOutputs 32 + nLocktime 4 + sighashType 4).
+                try self.emitTrailingExtract(52, 8, true);
+            },
+            .extractSequence => {
+                // nSequence(4) sits 44 bytes from the end.
+                try self.emitTrailingExtract(44, 4, true);
+            },
+            .extractOutputs => {
+                // Alias of extractOutputHash: hashOutputs(32), 40 bytes from the end.
+                try self.emitTrailingExtract(40, 32, false);
+            },
+            .extractScriptCode => {
+                // Variable-length field at absolute offset 104, ending 52
+                // bytes before the end of the preimage.
+                try self.emitPushInt(104);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_split);
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_nip);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_size);
+                try self.stack.push(self.allocator, null);
+                try self.emitPushInt(52);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_sub);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_split);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_drop);
+                _ = self.stack.pop();
+            },
             else => return LowerError.InvalidBuiltin,
         }
 
         try self.stack.renameAtDepth(self.allocator, 0, bind_name);
         self.trackDepth();
+    }
+
+    /// Slice the LEADING `length` bytes off the value on top of the stack:
+    /// <length> OP_SPLIT OP_DROP [OP_BIN2NUM].
+    fn emitLeadingExtract(self: *LowerCtx, length: i64, bin2num: bool) !void {
+        try self.emitPushInt(length);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // left  (the field)
+        try self.stack.push(self.allocator, null); // right (the rest)
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        if (bin2num) try self.emitOp(.op_bin2num);
+    }
+
+    /// Slice the absolute byte range [start, start + length) out of the value
+    /// on top of the stack: <start> OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP
+    /// [OP_BIN2NUM].
+    fn emitAbsoluteExtract(self: *LowerCtx, start: i64, length: i64, bin2num: bool) !void {
+        try self.emitPushInt(start);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(length);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        if (bin2num) try self.emitOp(.op_bin2num);
+    }
+
+    /// Slice an end-relative field: OP_SIZE <trailing_offset> OP_SUB OP_SPLIT
+    /// OP_NIP <inner_length> OP_SPLIT OP_DROP [OP_BIN2NUM].
+    fn emitTrailingExtract(self: *LowerCtx, trailing_offset: i64, inner_length: i64, bin2num: bool) !void {
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(trailing_offset);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_sub);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        if (inner_length > 0) {
+            try self.emitPushInt(inner_length);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_split);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+        }
+        if (bin2num) try self.emitOp(.op_bin2num);
     }
 
     // emitVarintEncoding encodes a script number length on top of the stack

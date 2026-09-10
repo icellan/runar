@@ -167,6 +167,13 @@ public final class StackLower {
         return VARIABLE_LENGTH_STATE_TYPES.contains(t);
     }
 
+    /**
+     * Unrolled-loop bound for {@code reverseBytes}: 520 is the maximum BSV
+     * stack-element size, so the loop always drains the input. The count is
+     * part of the emitted bytes, so it must match every peer tier exactly.
+     */
+    private static final int REVERSE_BYTES_MAX_ITERATIONS = 520;
+
     // ------------------------------------------------------------------
     // Opcode maps
     // ------------------------------------------------------------------
@@ -1692,6 +1699,14 @@ public final class StackLower {
                 lowerSubstr(bindingName, args, idx, lastUses);
                 return;
             }
+            if ("right".equals(funcName)) {
+                lowerRight(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("reverseBytes".equals(funcName)) {
+                lowerReverseBytes(bindingName, args, idx, lastUses);
+                return;
+            }
             if ("safediv".equals(funcName) || "safemod".equals(funcName)) {
                 lowerSafeDivMod(bindingName, funcName, args, idx, lastUses);
                 return;
@@ -2003,6 +2018,87 @@ public final class StackLower {
         // Emitted opcodes (after stack is set up):
         //   OP_SPLIT OP_NIP OP_SPLIT OP_DROP
         // ------------------------------------------------------------------
+        /**
+         * right(data, n): the LAST n bytes of data.
+         * OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP — byte-identical to
+         * 05-stack-lower.ts#lowerRight and its Go / Rust / Python / Ruby peers.
+         */
+        void lowerRight(String bindingName, List<String> args, int idx,
+                        Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException("right requires 2 arguments");
+            }
+            String data = args.get(0);
+            String length = args.get(1);
+
+            bringToTop(data, operandConsume(data, args, idx, lastUses));
+            bringToTop(length, operandConsume(length, args, idx, lastUses));
+
+            // Stack: <data> <len>
+            sm.pop(); // len
+            sm.pop(); // data
+
+            emitOp(new SwapOp());                    // <len> <data>
+            emitOp(new OpcodeOp("OP_SIZE"));         // <len> <data> <size>
+            emitOp(new RotOp());                     // <data> <size> <len>
+            emitOp(new OpcodeOp("OP_SUB"));          // <data> <size-len>
+            emitOp(new OpcodeOp("OP_SPLIT"));        // <left> <right>
+            emitOp(new NipOp());                     // <right>
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        /**
+         * reverseBytes(data): variable-length byte reversal via a bounded,
+         * unrolled loop. Each iteration splits one byte off the front of the
+         * remaining data and prepends it to an accumulator:
+         *
+         * <pre>
+         *   OP_0 OP_SWAP
+         *   520x [ OP_DUP OP_SIZE OP_NIP
+         *          OP_IF OP_1 OP_SPLIT OP_SWAP OP_ROT OP_CAT OP_SWAP OP_ENDIF ]
+         *   OP_DROP
+         * </pre>
+         *
+         * 520 = the maximum BSV stack-element size, so every legal ByteString
+         * is fully drained. Byte-identical to 05-stack-lower.ts#lowerReverseBytes
+         * and its Go / Rust / Python / Zig peers.
+         */
+        void lowerReverseBytes(String bindingName, List<String> args, int idx,
+                               Map<String, Integer> lastUses) {
+            if (args.isEmpty()) {
+                throw new RuntimeException("reverseBytes requires 1 argument");
+            }
+            String arg = args.get(0);
+            bringToTop(arg, isLastUse(arg, idx, lastUses));
+            sm.pop();
+
+            // Push the empty accumulator, then swap the data back on top.
+            emitOp(new PushOp(PushValue.of(0)));
+            emitOp(new SwapOp());
+
+            for (int i = 0; i < REVERSE_BYTES_MAX_ITERATIONS; i++) {
+                // Stack: [result, data] — test whether data still has bytes.
+                emitOp(new DupOp());
+                emitOp(new OpcodeOp("OP_SIZE"));
+                emitOp(new NipOp());
+                emitOp(new IfOp(List.of(
+                    new PushOp(PushValue.of(1)),
+                    new OpcodeOp("OP_SPLIT"),
+                    new SwapOp(),
+                    new RotOp(),
+                    new OpcodeOp("OP_CAT"),
+                    new SwapOp())));
+            }
+
+            // Drop the drained remainder, leaving the reversed accumulator.
+            emitOp(new DropOp());
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
         void lowerSubstr(String bindingName, List<String> args, int idx,
                          Map<String, Integer> lastUses) {
             if (args.size() < 3) {
@@ -4314,6 +4410,13 @@ public final class StackLower {
             sm.pop();
 
             switch (funcName) {
+                case "extractVersion":
+                    // nVersion is the LEADING 4 bytes, so there is nothing to
+                    // skip: push 4, OP_SPLIT, OP_DROP the tail, OP_BIN2NUM.
+                    // emitAbsoluteSplit(0, 4, ...) would emit an extra
+                    // OP_0 OP_SPLIT OP_NIP prologue and diverge from the peers.
+                    emitLeadingExtract(4, true);
+                    break;
                 case "extractHashPrevouts":
                     emitAbsoluteSplit(4, 32, false);
                     break;
@@ -4364,6 +4467,25 @@ public final class StackLower {
          *                    keep the field as raw bytes; trailing extractors
          *                    that want a number should call {@link #emitTrailingExtract}.
          */
+        /**
+         * Slice the LEADING {@code length} bytes off the value on top of the
+         * stack: push length; OP_SPLIT; OP_DROP; optionally OP_BIN2NUM.
+         * The absolute-split helper cannot express this — its leading
+         * "push start; OP_SPLIT; OP_NIP" prologue is not a no-op at start 0.
+         */
+        private void emitLeadingExtract(int length, boolean emitBin2Num) {
+            emitOp(new PushOp(PushValue.of(length)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            if (emitBin2Num) {
+                emitOp(new OpcodeOp("OP_BIN2NUM"));
+            }
+        }
+
         private void emitAbsoluteSplit(int start, int length, boolean emitBin2Num) {
             emitOp(new PushOp(PushValue.of(start)));
             sm.push("");
