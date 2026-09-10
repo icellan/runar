@@ -7,11 +7,45 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFValue};
+use num_bigint::BigInt;
+use num_traits::Num;
+
+use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
 
 // ---------------------------------------------------------------------------
 // EC constants
 // ---------------------------------------------------------------------------
+
+/// secp256k1 group order. Every scalar a fusing rule folds is reduced modulo
+/// `n` into `[0, n)`, matching `CURVE_N` in the TS optimizer, `curveN` in the
+/// Go rules engine, and the same constant in the Python / Ruby / Java tiers.
+fn curve_n() -> &'static BigInt {
+    use std::sync::OnceLock;
+    static N: OnceLock<BigInt> = OnceLock::new();
+    N.get_or_init(|| {
+        BigInt::from_str_radix(
+            "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+            16,
+        )
+        .expect("secp256k1 order is a valid hex literal")
+    })
+}
+
+/// Reduce a folded scalar into `[0, n)`.
+///
+/// `num_bigint`'s `%` is a remainder (it keeps the dividend's sign), so the
+/// extra `+ n` step is what matches the other tiers: TS spells it
+/// `((x % N) + N) % N`, Go/Python/Ruby/Java get it for free from `big.Int.Mod`
+/// / Python `%` / `Integer#%` / `BigInteger.mod`.
+fn reduce_mod_n(v: BigInt) -> BigInt {
+    let n = curve_n();
+    let r = v % n;
+    if r.sign() == num_bigint::Sign::Minus {
+        r + n
+    } else {
+        r
+    }
+}
 
 /// Point at infinity: 64 zero bytes as hex.
 const INFINITY_HEX: &str = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
@@ -33,38 +67,35 @@ fn is_call_to<'a>(value: &'a ANFValue, func_name: &str) -> Option<&'a Vec<String
 }
 
 fn is_const_int(value: &ANFValue, n: i128) -> bool {
-    match value {
-        ANFValue::LoadConst { value: v } => {
-            if let Some(i) = v.as_i64() {
-                return i as i128 == n;
-            }
-            if let Some(f) = v.as_f64() {
-                return f as i128 == n;
-            }
-            false
-        }
-        _ => false,
-    }
+    get_const_int(value).is_some_and(|v| v == BigInt::from(n))
 }
 
-fn get_const_int(value: &ANFValue) -> Option<i128> {
+/// Decode a `load_const` scalar to an arbitrary-precision integer.
+///
+/// Routed through `ir::parse_const_value` — the single definition of the
+/// cross-tier `load_const` wire format — rather than `serde_json`'s
+/// `as_i64` / `as_f64`. Those two see only JSON *numbers*, but any bigint
+/// whose magnitude exceeds `Number.MAX_SAFE_INTEGER` is carried as a
+/// JS-style decimal string (`"115792089...n"`), which is exactly the shape a
+/// real secp256k1 scalar takes. Reading it as a number made every
+/// scalar-fusing EC rule decline on precisely the inputs that matter, in
+/// Rust alone (issue R-033 / CL-BUG-022).
+fn get_const_int(value: &ANFValue) -> Option<BigInt> {
     match value {
-        ANFValue::LoadConst { value: v } => {
-            if let Some(i) = v.as_i64() {
-                return Some(i as i128);
-            }
-            if let Some(f) = v.as_f64() {
-                let i = f as i128;
-                if (i as f64) == f {
-                    return Some(i);
-                }
-            }
-            None
-        }
+        ANFValue::LoadConst { value: v } => match parse_const_value(v) {
+            Some(ConstValue::Int(i)) => Some(i),
+            _ => None,
+        },
         _ => None,
     }
 }
 
+/// Exact-string match against a hex point constant.
+///
+/// Safe to leave as a raw string comparison: `parse_const_value` only treats
+/// a JSON string as a decimal BigInt when it carries the trailing `n`
+/// discriminator, and neither `INFINITY_HEX` (128 zeros) nor `G_HEX` does —
+/// so a decimal-BigInt payload can never be mistaken for either point.
 fn is_const_hex(value: &ANFValue, hex: &str) -> bool {
     match value {
         ANFValue::LoadConst { value: v } => v.as_str() == Some(hex),
@@ -134,9 +165,13 @@ fn make_load_const_hex(hex: &str) -> ANFValue {
     }
 }
 
-fn make_load_const_int(n: i128) -> ANFValue {
+/// Re-encode a folded scalar in the shared `load_const` wire format: a bare
+/// JSON number while it stays JS-safe, a `"...n"` decimal string once it does
+/// not. `n as i64` used to be the encoder, which silently wrapped any product
+/// past `i64::MAX`.
+fn make_load_const_int(n: &BigInt) -> ANFValue {
     ANFValue::LoadConst {
-        value: serde_json::json!(n as i64),
+        value: super::anf_lower::bigint_to_json(n),
     }
 }
 
@@ -220,19 +255,17 @@ fn try_rewrite(
                             let k1 = get_const_int(inner_scalar_val);
                             let k2 = get_const_int(scalar_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                // Only fold if product doesn't overflow i128
-                                if let Some(product) = k1.checked_mul(k2) {
-                                    let new_scalar_name = format!("{}_k", binding.name);
-                                    extra_bindings.push(ANFBinding {
-                                        name: new_scalar_name.clone(),
-                                        value: make_load_const_int(product),
-                                        source_loc: None,
-                                    });
-                                    return Some(ANFValue::Call {
-                                        func: "ecMul".to_string(),
-                                        args: vec![inner_point, new_scalar_name],
-                                    });
-                                }
+                                let product = reduce_mod_n(k1 * k2);
+                                let new_scalar_name = format!("{}_k", binding.name);
+                                extra_bindings.push(ANFBinding {
+                                    name: new_scalar_name.clone(),
+                                    value: make_load_const_int(&product),
+                                    source_loc: None,
+                                });
+                                return Some(ANFValue::Call {
+                                    func: "ecMul".to_string(),
+                                    args: vec![inner_point, new_scalar_name],
+                                });
                             }
                         }
                     }
@@ -287,18 +320,17 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if let Some(sum) = k1.checked_add(k2) {
-                                    let new_scalar_name = format!("{}_k", binding.name);
-                                    extra_bindings.push(ANFBinding {
-                                        name: new_scalar_name.clone(),
-                                        value: make_load_const_int(sum),
-                                        source_loc: None,
-                                    });
-                                    return Some(ANFValue::Call {
-                                        func: "ecMulGen".to_string(),
-                                        args: vec![new_scalar_name],
-                                    });
-                                }
+                                let sum = reduce_mod_n(k1 + k2);
+                                let new_scalar_name = format!("{}_k", binding.name);
+                                extra_bindings.push(ANFBinding {
+                                    name: new_scalar_name.clone(),
+                                    value: make_load_const_int(&sum),
+                                    source_loc: None,
+                                });
+                                return Some(ANFValue::Call {
+                                    func: "ecMulGen".to_string(),
+                                    args: vec![new_scalar_name],
+                                });
                             }
                         }
                     }
@@ -322,18 +354,17 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if let Some(sum) = k1.checked_add(k2) {
-                                    let new_scalar_name = format!("{}_k", binding.name);
-                                    extra_bindings.push(ANFBinding {
-                                        name: new_scalar_name.clone(),
-                                        value: make_load_const_int(sum),
-                                        source_loc: None,
-                                    });
-                                    return Some(ANFValue::Call {
-                                        func: "ecMul".to_string(),
-                                        args: vec![point_name, new_scalar_name],
-                                    });
-                                }
+                                let sum = reduce_mod_n(k1 + k2);
+                                let new_scalar_name = format!("{}_k", binding.name);
+                                extra_bindings.push(ANFBinding {
+                                    name: new_scalar_name.clone(),
+                                    value: make_load_const_int(&sum),
+                                    source_loc: None,
+                                });
+                                return Some(ANFValue::Call {
+                                    func: "ecMul".to_string(),
+                                    args: vec![point_name, new_scalar_name],
+                                });
                             }
                         }
                     }
