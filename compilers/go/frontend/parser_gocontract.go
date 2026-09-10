@@ -644,13 +644,37 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 			}
 		}
 
+		// A call target or an argument that does not convert must fail the
+		// whole call. Dropping an argument would silently change the call's
+		// arity — and for a variable-arity builtin that compiles clean as the
+		// wrong overload. Each site reports only if the recursive conversion
+		// did not already report a more precise cause, so one bad
+		// subexpression yields one diagnostic rather than a cascade.
+		before := len(p.errors)
 		callee := p.convertExpression(e.Fun)
-		var args []Expression
-		for _, arg := range e.Args {
-			a := p.convertExpression(arg)
-			if a != nil {
-				args = append(args, a)
+		if callee == nil {
+			if len(p.errors) == before {
+				pos := p.fset.Position(e.Fun.Pos())
+				p.addError(fmt.Sprintf(
+					"unsupported call target at %s:%d:%d — not valid in Rúnar contract",
+					p.fileName, pos.Line, pos.Column))
 			}
+			return nil
+		}
+		var args []Expression
+		for i, arg := range e.Args {
+			before = len(p.errors)
+			a := p.convertExpression(arg)
+			if a == nil {
+				if len(p.errors) == before {
+					pos := p.fset.Position(arg.Pos())
+					p.addError(fmt.Sprintf(
+						"unsupported expression at %s:%d:%d — argument %d of this call is not valid in Rúnar contract",
+						p.fileName, pos.Line, pos.Column, i+1))
+				}
+				return nil
+			}
+			args = append(args, a)
 		}
 		// runar.Assert(expr) -> assert(expr)
 		if ident, ok := callee.(Identifier); ok && ident.Name == "assert" {
