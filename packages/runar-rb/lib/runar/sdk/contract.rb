@@ -753,7 +753,7 @@ module Runar
             method_uses_code_part: method_uses_code_part
           )
 
-        sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
+        sighash = compute_bip143_sighash(final_preimage)
 
         build_prepared_call(
           sighash, final_preimage, final_op_push_tx_sig, signed_tx,
@@ -1047,6 +1047,30 @@ module Runar
 
       private
 
+      # Compute the BIP-143 sighash digest -- +hash256(preimage)+, i.e.
+      # +sha256(sha256(preimage))+ -- that is ACTUALLY ECDSA-signed by
+      # +OP_CHECKSIG+ on-chain. Returns +''+ for an empty preimage.
+      #
+      # Deep-review finding C19: +PreparedCall#sighash+ previously stored only
+      # +sha256(preimage)+ (a SINGLE hash). The default +call+ path never reads
+      # that field -- it re-derives the digest inside +LocalSigner#sign+
+      # (BIP143.bip143_sighash -> double SHA-256) -- so the bug stayed invisible
+      # there. But the documented multi-signer path hands +PreparedCall#sighash+
+      # to an EXTERNAL signer (a BRC-100-style +WalletSigner#sign_hash(digest)+
+      # wallet / hardware device) that ECDSA-signs those 32 bytes DIRECTLY with
+      # no further hashing. Handed the single-hashed value, such a signer signs
+      # the wrong message and the node's real +OP_CHECKSIG+ rejects the spend.
+      # Mirrors +computeBip143Sighash+ in packages/runar-sdk/src/contract.ts.
+      #
+      # @param preimage_hex [String] hex-encoded BIP-143 preimage
+      # @return [String] 64-char hex digest, or +''+ for an empty preimage
+      def compute_bip143_sighash(preimage_hex)
+        return '' if preimage_hex.nil? || preimage_hex.empty?
+
+        bytes = [preimage_hex].pack('H*')
+        Digest::SHA256.hexdigest(Digest::SHA256.digest(bytes))
+      end
+
       # ---------------------------------------------------------------------------
       # Initialisation helpers
       # ---------------------------------------------------------------------------
@@ -1247,7 +1271,7 @@ module Runar
           term_tx    = SDK.insert_unlocking_script(term_tx, 1, fee_unlock)
         end
 
-        sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
+        sighash = compute_bip143_sighash(final_preimage)
 
         PreparedCall.new(
           sighash: sighash,

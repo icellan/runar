@@ -443,7 +443,7 @@ prepared.tx_hex          # built transaction with placeholder sigs
 prepared.sig_indices     # arg indices that need external signatures
 ```
 
-The external signer signs `prepared.sighash` (or computes its own preimage from the tx) and produces a DER signature with the sighash flag byte appended.
+`prepared.sighash` is `hash256(preimage)` — `sha256(sha256(preimage))`, the BIP-143 digest `OP_CHECKSIG` verifies against. The external signer ECDSA-signs it **directly**, with no further hashing (`WalletSigner#sign_hash` forwards it to the wallet as `hash_to_sign:`), and produces a DER signature with the sighash flag byte appended. A signer that hashes it once more signs the wrong message and the node rejects the spend; hand it `prepared.preimage` instead if it wants to recompute the digest itself.
 
 `finalize_call(prepared, signatures, provider)` injects the signatures, computes the OP_PUSH_TX prefix if needed, broadcasts the transaction, and updates the tracked UTXO:
 
