@@ -101,10 +101,14 @@ func main() {
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
+	ackUnsoundSP1Fri := flag.Bool("acknowledge-unsound-sp1-fri", false,
+		"compile ANF IR that reaches the known-unsound SP1 FRI verifier (the --ir path has no source "+
+			"to carry @acknowledgeUnsoundSP1FriVerifier). See docs/sp1-fri-verifier.md")
 	flag.Parse()
 
 	opts := compiler.CompileOptions{
-		DisableConstantFolding: *disableConstFold,
+		DisableConstantFolding:   *disableConstFold,
+		AcknowledgeUnsoundSP1Fri: *ackUnsoundSP1Fri,
 		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
 		// so the artifact carries the mapping table the user just asked for.
 		IncludeSourceMap: *emitSourceMap != "",

@@ -4,6 +4,7 @@ test {
     _ = @import("ir/unknown_anf_kind.zig");
     _ = @import("ir/unknown_anf_kind_test.zig");
     _ = @import("ir/json_size_guard_test.zig");
+    _ = @import("ir/sp1_fri_ir_guard_test.zig");
     _ = @import("frontend/input_limits.zig");
     _ = @import("frontend/input_limits_test.zig");
     _ = @import("frontend/sighash_directive.zig");

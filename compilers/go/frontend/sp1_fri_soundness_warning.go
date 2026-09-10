@@ -20,14 +20,39 @@ package frontend
 //
 // Remove this warning when the per-query verification chain lands.
 
-const sp1FriSoundnessError = "verifySP1FRI: REFUSING to emit a known-unsound proof verifier. " +
+// sp1FriSoundnessRefusal is the shared body of the refusal. The two entry
+// points into the compiler reach it by different routes and offer different
+// escape hatches, so only the closing remedy sentence differs.
+const sp1FriSoundnessRefusal = "verifySP1FRI: REFUSING to emit a known-unsound proof verifier. " +
 	"The per-query chain (input-batch MMCS verify, FRI fold, final-poly equality) is not emitted, so " +
 	"the locking script ACCEPTS forged Merkle openings — an attacker spends with a fabricated proof. " +
 	"Replaying the corruption fixtures through the compiled covenant shows bad_merkle, bad_folding and " +
 	"bad_final_poly all ACCEPTED on-chain while the off-chain reference rejects them. This is NOT usable " +
-	"for a value-bearing covenant. If you are working on the verifier itself, add the comment directive " +
+	"for a value-bearing covenant. "
+
+const sp1FriSoundnessError = sp1FriSoundnessRefusal +
+	"If you are working on the verifier itself, add the comment directive " +
 	"@acknowledgeUnsoundSP1FriVerifier to the contract source to compile it anyway. See " +
 	"docs/sp1-fri-verifier.md."
+
+// SP1FriSoundnessIRError is the same refusal for the `--ir` /
+// CompileFromProgram entry points, which never run Validate and have no source
+// to carry the comment directive.
+//
+// The acknowledgement cannot live in the ANF IR. `ir.ANFProgram` carries no
+// representation of the directive — it is a frontend-AST field stripped by
+// lowering, and the emitted IR JSON is compared byte-for-byte across all seven
+// tiers, so a new field there would break parity. More importantly, IR handed
+// to `--ir` is untrusted input: a flag inside it would be written by whoever
+// authored the verifier call and would authorise nothing. So the acknowledgement
+// has to come from the invoker. See compiler/sp1_fri_ir_guard.go (R-012).
+const SP1FriSoundnessIRError = sp1FriSoundnessRefusal +
+	"This IR reaches the verifier without going through the frontend, so the " +
+	"@acknowledgeUnsoundSP1FriVerifier source directive was never consulted — the ANF IR carries no " +
+	"representation of it, and a flag inside attacker-supplied IR would authorise nothing anyway. " +
+	"If you are working on the verifier itself, acknowledge it on the invocation instead: pass " +
+	"--acknowledge-unsound-sp1-fri on the command line (or CompileOptions.AcknowledgeUnsoundSP1Fri). " +
+	"See docs/sp1-fri-verifier.md."
 
 const sp1FriSoundnessWarning = "verifySP1FRI: the emitted locking script is NOT a sound proof " +
 	"verifier at the PoC parameter set. The per-query chain (input-batch MMCS verify, FRI fold, " +

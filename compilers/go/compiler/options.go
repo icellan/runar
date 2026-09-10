@@ -19,6 +19,30 @@ type CompileOptions struct {
 	// ParseOnly stops compilation after the parse pass (pass 1).
 	ParseOnly bool
 
+	// AcknowledgeUnsoundSP1Fri authorises compiling a program that reaches the
+	// known-unsound SP1 FRI verifier when there is no source to carry the
+	// `@acknowledgeUnsoundSP1FriVerifier` comment directive — i.e. on the
+	// `--ir` / CompileFromProgram paths, which never run frontend.Validate.
+	//
+	// The acknowledgement deliberately lives here, on the INVOKER's options,
+	// and not in the ANF IR: IR fed to `--ir` is untrusted input, so a flag
+	// inside it would be written by the same party that wrote the verifier call
+	// and would authorise nothing. Surfaced on the CLI as
+	// `--acknowledge-unsound-sp1-fri`. See R-012 / CL-BUG-093 and
+	// compiler/sp1_fri_ir_guard.go.
+	AcknowledgeUnsoundSP1Fri bool
+
+	// sp1FriAdjudicatedByFrontend is set only by the in-package
+	// CompileFromSource path, after frontend.Validate has accepted the
+	// contract. It tells guardUnsoundSP1FriIR that the SP1 FRI refusal has
+	// already been decided against the real source — directive included — so
+	// the IR-path guard must not second-guess it.
+	//
+	// Unexported deliberately: a caller outside this package cannot set it, so
+	// every externally-constructed CompileOptions arrives with it false and the
+	// guard fails closed.
+	sp1FriAdjudicatedByFrontend bool
+
 	// ValidateOnly stops compilation after the validate pass (pass 2).
 	ValidateOnly bool
 

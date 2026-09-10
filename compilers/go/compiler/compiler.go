@@ -203,6 +203,14 @@ func disableFoldForIRInput(opts []CompileOptions) []CompileOptions {
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
 
+	// R-012: the IR entry points never run frontend.Validate, so the
+	// verifySP1FRI soundness refusal has to be re-asserted here against the
+	// ANF observable. No-op when the frontend already adjudicated it (source
+	// path) or the invoker acknowledged it. See sp1_fri_ir_guard.go.
+	if err := guardUnsoundSP1FriIR(program, o); err != nil {
+		return nil, err
+	}
+
 	// Bake constructor args into ANF properties.
 	if errs := applyConstructorArgs(program, o.ConstructorArgs); len(errs) > 0 {
 		return nil, fmt.Errorf("applyConstructorArgs: %s", strings.Join(errs, "; "))
@@ -471,8 +479,16 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 		return nil, err
 	}
 
-	// Feed into existing compilation pipeline (passes 4.25+)
-	return CompileFromProgram(program, opts...)
+	// Feed into existing compilation pipeline (passes 4.25+).
+	//
+	// frontend.Validate accepted this contract above, so the verifySP1FRI
+	// soundness refusal (and its @acknowledgeUnsoundSP1FriVerifier directive)
+	// has already been adjudicated against the real source. Mark the options so
+	// the IR-path guard in CompileFromProgram stands down instead of refusing
+	// what Validate just allowed. See sp1_fri_ir_guard.go (R-012).
+	o := mergeOptions(opts)
+	o.sp1FriAdjudicatedByFrontend = true
+	return CompileFromProgram(program, o)
 }
 
 // ParseAndValidateOnlyResult is the result of `ParseAndValidateOnly`. `Err`
