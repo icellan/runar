@@ -16,6 +16,150 @@ interface DeployCommandOptions {
   network: string;
   key: string;
   satoshis: string;
+  /**
+   * Constructor argument values, in `abi.constructor.params` order, as raw
+   * CLI strings. Parsed by `parseConstructorArgs` and spliced into the
+   * template's `constructorSlots` by the SDK.
+   */
+  args?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Constructor argument parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * How a constructor slot's deploy-time value is encoded into the script.
+ * Mirrors `ConstructorSlot.valueEncoding`; recomputed from the ABI type name
+ * for older artifacts that predate the enriched slot descriptors.
+ */
+type ArgEncoding = 'data' | 'scriptnum' | 'bool';
+
+function encodingForType(type: string): ArgEncoding {
+  switch (type) {
+    case 'bigint':
+    case 'int':
+    case 'number':
+      return 'scriptnum';
+    case 'boolean':
+    case 'bool':
+      return 'bool';
+    default:
+      // ByteString and every fixed-width byte type (PubKey, Addr, Ripemd160,
+      // Sha256, Sha1, Point, ...) are raw data pushes.
+      return 'data';
+  }
+}
+
+/**
+ * Parse `--args` values into the positional constructor argument list that
+ * `RunarContract` splices into `artifact.constructorSlots`.
+ *
+ * Parsing is type-directed: integers are decimal, byte strings are hex
+ * (optionally `0x`-prefixed), booleans are `true`/`false`. A value that does
+ * not match its parameter's type is rejected rather than coerced — a coerced
+ * constructor arg bakes the wrong value into a locking script, and the funds
+ * sent to that script are not recoverable.
+ *
+ * Omitting `--args` for a contract whose constructor declares parameters is an
+ * error. It used to zero-fill, which silently produced e.g. the P2PKH script
+ * `OP_DUP OP_HASH160 OP_0 OP_EQUALVERIFY OP_CHECKSIG` — an output nobody can
+ * ever spend.
+ *
+ * @throws Error with a human-readable message on any arity or type mismatch.
+ */
+export function parseConstructorArgs(
+  artifact: RunarArtifact,
+  rawArgs: string[] | undefined,
+): unknown[] {
+  const params = artifact.abi.constructor.params;
+
+  if (params.length === 0) {
+    if (rawArgs && rawArgs.length > 0) {
+      throw new Error(
+        `${artifact.contractName} has a zero-parameter constructor, but ${rawArgs.length} --args value(s) were supplied`,
+      );
+    }
+    return [];
+  }
+
+  if (!rawArgs || rawArgs.length === 0) {
+    throw new Error(
+      `${artifact.contractName} expects ${params.length} constructor argument(s) ` +
+        `(${params.map((p) => `${p.name}: ${p.type}`).join(', ')}), but none were supplied. ` +
+        `Pass them with --args. Deploying without them would bake zeros into the ` +
+        `locking script and lock the funds to a script nobody can spend.`,
+    );
+  }
+
+  if (rawArgs.length !== params.length) {
+    throw new Error(
+      `${artifact.contractName} expects ${params.length} constructor argument(s), got ${rawArgs.length}`,
+    );
+  }
+
+  // Index the enriched slot descriptors by paramIndex — they carry the
+  // authoritative encoding and fixed byte width when the artifact has them.
+  type Slot = NonNullable<RunarArtifact['constructorSlots']>[number];
+  const slotByParam = new Map<number, Slot>();
+  for (const slot of artifact.constructorSlots ?? []) {
+    slotByParam.set(slot.paramIndex, slot);
+  }
+
+  return params.map((param, i) => {
+    const raw = rawArgs[i]!;
+    const slot = slotByParam.get(i);
+    const label = `constructor arg ${i} (${param.name}: ${param.type})`;
+
+    if (param.fixedArray) {
+      throw new Error(
+        `${label} is a FixedArray<${param.fixedArray.elementType}, ${param.fixedArray.length}>, ` +
+          `which --args cannot express. Deploy this contract through the SDK.`,
+      );
+    }
+
+    const encoding: ArgEncoding = slot?.valueEncoding ?? encodingForType(param.type);
+
+    switch (encoding) {
+      case 'scriptnum': {
+        if (!/^-?(0|[1-9][0-9]*)$/.test(raw)) {
+          throw new Error(
+            `${label} must be a decimal integer, got '${raw}'`,
+          );
+        }
+        return BigInt(raw);
+      }
+      case 'bool': {
+        if (raw !== 'true' && raw !== 'false') {
+          throw new Error(`${label} must be 'true' or 'false', got '${raw}'`);
+        }
+        return raw === 'true';
+      }
+      case 'data': {
+        const hex = (raw.startsWith('0x') || raw.startsWith('0X')
+          ? raw.slice(2)
+          : raw
+        ).toLowerCase();
+        if (!/^[0-9a-f]*$/.test(hex)) {
+          throw new Error(
+            `${label} must be a hex byte string, got '${raw}'`,
+          );
+        }
+        if (hex.length % 2 !== 0) {
+          throw new Error(
+            `${label} must be a hex byte string with an even number of digits, got ${hex.length} digits`,
+          );
+        }
+        const expected = slot?.fixedValueByteLength;
+        if (expected !== undefined && hex.length / 2 !== expected) {
+          throw new Error(
+            `${label} expects ${expected} bytes, got ${hex.length / 2}`,
+          );
+        }
+        return hex;
+      }
+    }
+  });
 }
 
 /**
@@ -48,6 +192,18 @@ export async function deployCommand(
     return;
   }
 
+  // Resolve constructor args BEFORE touching keys or the network. These are
+  // baked into the locking script at `artifact.constructorSlots`, so getting
+  // them wrong (or defaulting them to zero) burns the deployed satoshis.
+  let constructorArgs: unknown[];
+  try {
+    constructorArgs = parseConstructorArgs(artifact, options.args);
+  } catch (err) {
+    console.error(`Invalid constructor arguments: ${(err as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+
   console.log(`Deploying contract: ${artifact.contractName}`);
   console.log(`  Network: ${network}`);
   console.log(`  Satoshis: ${options.satoshis}`);
@@ -75,11 +231,6 @@ export async function deployCommand(
     return;
   }
 
-  // Create contract instance with empty constructor args
-  // (the script from the artifact already has constructor params baked in)
-  const constructorArgs = new Array(artifact.abi.constructor.params.length).fill(
-    0n,
-  ) as unknown[];
   const contract = new RunarContract(artifact, constructorArgs);
 
   try {

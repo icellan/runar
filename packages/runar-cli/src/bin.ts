@@ -62,6 +62,12 @@ program
   .requiredOption('--network <network>', 'network (mainnet/testnet)')
   .requiredOption('--key <key>', 'private key (WIF format)')
   .option('--satoshis <n>', 'satoshis to lock', '10000')
+  .option(
+    '--args <values...>',
+    'constructor argument values in ABI order, spliced into the script at its constructorSlots ' +
+      '(integers decimal, byte strings hex, booleans true/false). Required when the constructor ' +
+      'declares parameters.',
+  )
   .action(deployCommand);
 
 program
