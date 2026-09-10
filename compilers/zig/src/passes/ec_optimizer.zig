@@ -10,6 +10,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const dce = @import("dce.zig");
+const const_arith = @import("const_arith.zig");
 const Allocator = std.mem.Allocator;
 
 // ============================================================================
@@ -18,6 +19,12 @@ const Allocator = std.mem.Allocator;
 
 /// Curve order N for secp256k1.
 const CURVE_N: u256 = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
+
+/// The same value as canonical hex text, for `Big.setString`. A folded scalar
+/// is a value mod N and routinely exceeds `i128`, so the reduction has to run
+/// at arbitrary precision — `u256` arithmetic cannot even hold `a + b` for
+/// two operands in [0, N).
+const CURVE_N_HEX = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
 
 /// Generator point X coordinate (hex).
 const GEN_X_HEX = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -93,7 +100,10 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod) !types.ANFMetho
 
         for (body) |binding| {
             var current = binding;
-            if (tryOptimize(allocator, current.value, &value_map, &fresh_counter)) |optimized| {
+            // `new_body` doubles as the prelude list: a rule that folds a new
+            // constant appends its binding here, i.e. immediately BEFORE the
+            // binding being rewritten (see `freshConstName`).
+            if (tryOptimize(allocator, current.value, &value_map, &fresh_counter, &new_body)) |optimized| {
                 current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
                 changed = true;
             }
@@ -141,6 +151,7 @@ fn tryOptimize(
     v: types.ANFValue,
     vm: *std.StringHashMap(types.ANFValue),
     counter: *u32,
+    prelude: *std.ArrayListUnmanaged(types.ANFBinding),
 ) ?types.ANFValue {
     const c = switch (v) {
         .call => |call| call,
@@ -159,19 +170,19 @@ fn tryOptimize(
         return makeRef(allocator, args[1]);
 
     // Rule 3: ecMul(x, 1) -> x
-    if (eql(func, "ecMul") and args.len == 2 and isConstInt(args[1], 1, vm))
+    if (eql(func, "ecMul") and args.len == 2 and isConstInt(allocator, args[1], 1, vm))
         return makeRef(allocator, args[0]);
 
     // Rule 4: ecMul(x, 0) -> INFINITY
-    if (eql(func, "ecMul") and args.len == 2 and isConstInt(args[1], 0, vm))
+    if (eql(func, "ecMul") and args.len == 2 and isConstInt(allocator, args[1], 0, vm))
         return makeConstHex(INFINITY_HEX);
 
     // Rule 5: ecMulGen(0) -> INFINITY
-    if (eql(func, "ecMulGen") and args.len == 1 and isConstInt(args[0], 0, vm))
+    if (eql(func, "ecMulGen") and args.len == 1 and isConstInt(allocator, args[0], 0, vm))
         return makeConstHex(INFINITY_HEX);
 
     // Rule 6: ecMulGen(1) -> G
-    if (eql(func, "ecMulGen") and args.len == 1 and isConstInt(args[0], 1, vm))
+    if (eql(func, "ecMulGen") and args.len == 1 and isConstInt(allocator, args[0], 1, vm))
         return makeConstHex(G_HEX);
 
     // Rule 7: ecNegate(ecNegate(x)) -> x
@@ -192,12 +203,16 @@ fn tryOptimize(
 
     // Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
     if (eql(func, "ecMul") and args.len == 2) {
-        if (getConstInt(args[1], vm)) |k2| {
+        if (getConstBig(allocator, args[1], vm)) |k2_loaded| {
+            var k2 = k2_loaded;
+            defer k2.deinit();
             if (resolveCall(args[0], vm)) |ic| {
                 if (eql(ic.func, "ecMul") and ic.args.len == 2) {
-                    if (getConstInt(ic.args[1], vm)) |k1| {
-                        const combined = mulModN(k1, k2);
-                        const fresh = freshConstName(allocator, combined, vm, counter);
+                    if (getConstBig(allocator, ic.args[1], vm)) |k1_loaded| {
+                        var k1 = k1_loaded;
+                        defer k1.deinit();
+                        const combined = combineModN(allocator, k1, k2, .mul) catch return null;
+                        const fresh = freshConstName(allocator, combined, vm, counter, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ ic.args[0], fresh });
                     }
                 }
@@ -213,11 +228,13 @@ fn tryOptimize(
             if (eql(lc.?.func, "ecMulGen") and lc.?.args.len == 1 and
                 eql(rc.?.func, "ecMulGen") and rc.?.args.len == 1)
             {
-                const k1 = getConstInt(lc.?.args[0], vm);
-                const k2 = getConstInt(rc.?.args[0], vm);
+                var k1 = getConstBig(allocator, lc.?.args[0], vm);
+                defer if (k1) |*m| m.deinit();
+                var k2 = getConstBig(allocator, rc.?.args[0], vm);
+                defer if (k2) |*m| m.deinit();
                 if (k1 != null and k2 != null) {
-                    const combined = addModN(k1.?, k2.?);
-                    const fresh = freshConstName(allocator, combined, vm, counter);
+                    const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
+                    const fresh = freshConstName(allocator, combined, vm, counter, prelude) orelse return null;
                     return makeCall(allocator, "ecMulGen", &.{fresh});
                 }
             }
@@ -233,11 +250,13 @@ fn tryOptimize(
                 eql(rc.?.func, "ecMul") and rc.?.args.len == 2)
             {
                 if (sameBinding(lc.?.args[0], rc.?.args[0], vm)) {
-                    const k1 = getConstInt(lc.?.args[1], vm);
-                    const k2 = getConstInt(rc.?.args[1], vm);
+                    var k1 = getConstBig(allocator, lc.?.args[1], vm);
+                    defer if (k1) |*m| m.deinit();
+                    var k2 = getConstBig(allocator, rc.?.args[1], vm);
+                    defer if (k2) |*m| m.deinit();
                     if (k1 != null and k2 != null) {
-                        const combined = addModN(k1.?, k2.?);
-                        const fresh = freshConstName(allocator, combined, vm, counter);
+                        const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
+                        const fresh = freshConstName(allocator, combined, vm, counter, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ lc.?.args[0], fresh });
                     }
                 }
@@ -291,26 +310,28 @@ fn isGenerator(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
     };
 }
 
-fn isConstInt(name: []const u8, n: i128, vm: *std.StringHashMap(types.ANFValue)) bool {
-    const val = resolve(name, vm) orelse return false;
-    return switch (val) {
-        .load_const => |lc| switch (lc.value) {
-            .integer => |v| v == n,
-            else => false,
-        },
-        else => false,
-    };
+fn isConstInt(allocator: Allocator, name: []const u8, n: i128, vm: *std.StringHashMap(types.ANFValue)) bool {
+    var v = getConstBig(allocator, name, vm) orelse return false;
+    defer v.deinit();
+    const got = v.toConst().toInt(i128) catch return false;
+    return got == n;
 }
 
-fn getConstInt(name: []const u8, vm: *std.StringHashMap(types.ANFValue)) ?i128 {
+/// Read a constant scalar at full precision from EITHER integer
+/// representation. `ConstValue` splits the one arbitrary-precision Rúnar
+/// integer domain across `integer: i128` and `big_integer: []const u8`
+/// (ir/types.zig), and a real secp256k1 scalar only ever lands in the latter —
+/// so matching `.integer` alone made every rule keyed on a constant scalar
+/// silently decline for exactly the operands that matter.
+///
+/// Caller owns the returned value and must `deinit` it.
+fn getConstBig(allocator: Allocator, name: []const u8, vm: *std.StringHashMap(types.ANFValue)) ?const_arith.Big {
     const val = resolve(name, vm) orelse return null;
-    return switch (val) {
-        .load_const => |lc| switch (lc.value) {
-            .integer => |v| v,
-            else => null,
-        },
-        else => null,
+    const lc = switch (val) {
+        .load_const => |c| c,
+        else => return null,
     };
+    return (const_arith.load(allocator, lc.value) catch return null) orelse null;
 }
 
 fn sameBinding(a: []const u8, b: []const u8, vm: *std.StringHashMap(types.ANFValue)) bool {
@@ -339,47 +360,79 @@ fn makeConstHex(hex: []const u8) types.ANFValue {
     return .{ .load_const = .{ .value = .{ .string = hex } } };
 }
 
-fn makeConstInt(n: i128) types.ANFValue {
-    return .{ .load_const = .{ .value = .{ .integer = n } } };
-}
-
 fn makeCall(allocator: Allocator, func: []const u8, args: []const []const u8) ?types.ANFValue {
     const owned = allocator.alloc([]const u8, args.len) catch return null;
     @memcpy(owned, args);
     return .{ .call = .{ .func = func, .args = owned } };
 }
 
-/// Insert a fresh constant binding into the value map and return its name.
-fn freshConstName(allocator: Allocator, value: i128, vm: *std.StringHashMap(types.ANFValue), counter: *u32) []const u8 {
+/// Bind a freshly folded constant and return its name.
+///
+/// The binding is appended to `prelude` — the rebuilt method body, at the
+/// point just before the binding currently being rewritten — as well as
+/// registered in the value map. Registering it in the value map alone is NOT
+/// enough: stack lowering walks the body, so a call referencing a name that
+/// never got a binding dies with `VariableNotFound` and the contract does not
+/// compile at all. Mirrors `AnfOptimize.freshConstName` (Java),
+/// `insertBefore` (Go), the `newBindings` list in `anf-ec.ts` (TypeScript)
+/// and `_fresh_const_name` / `fresh_const_name` (Python / Ruby).
+///
+/// Returns null when the binding could not be allocated, so the caller
+/// declines the rewrite rather than emitting a dangling reference.
+fn freshConstName(
+    allocator: Allocator,
+    value: types.ConstValue,
+    vm: *std.StringHashMap(types.ANFValue),
+    counter: *u32,
+    prelude: *std.ArrayListUnmanaged(types.ANFBinding),
+) ?[]const u8 {
     counter.* += 1;
-    const buf = allocator.alloc(u8, 24) catch return "";
-    const name = std.fmt.bufPrint(buf, "__ec_opt_{d}", .{counter.*}) catch return "";
-    vm.put(name, makeConstInt(value)) catch return "";
+    const buf = allocator.alloc(u8, 24) catch return null;
+    const name = std.fmt.bufPrint(buf, "__ec_opt_{d}", .{counter.*}) catch return null;
+    const binding_value = types.ANFValue{ .load_const = .{ .value = value } };
+    vm.put(name, binding_value) catch return null;
+    prelude.append(allocator, .{ .name = name, .value = binding_value, .source_loc = null }) catch return null;
     return name;
 }
 
 // ============================================================================
-// Modular arithmetic on u256
+// Modular arithmetic at arbitrary precision
 // ============================================================================
 
-fn addModN(a_signed: i128, b_signed: i128) i128 {
-    const a = toU256(a_signed);
-    const b = toU256(b_signed);
-    const sum: u256 = (a +% b) % CURVE_N;
-    return @intCast(sum);
-}
+const ModOp = enum { add, mul };
 
-fn mulModN(a_signed: i128, b_signed: i128) i128 {
-    const a = toU256(a_signed);
-    const b = toU256(b_signed);
-    const product: u256 = (a *% b) % CURVE_N;
-    return @intCast(product);
-}
+/// `(a + b) mod N` or `(a * b) mod N`, reduced into [0, N).
+///
+/// `divFloor` yields a remainder whose sign follows the (positive) divisor, so
+/// this is the Euclidean reduction that `BigInteger.mod` (Java) and `%`
+/// (Python / Ruby) produce — the tiers this port follows. The result is
+/// normalised back through `const_arith.store`, which keeps a value that fits
+/// `i128` in the `.integer` variant per the `ConstValue` contract and only
+/// reaches for `.big_integer` on overflow.
+fn combineModN(
+    allocator: Allocator,
+    a: const_arith.Big,
+    b: const_arith.Big,
+    comptime op: ModOp,
+) !types.ConstValue {
+    var n = try const_arith.Big.init(allocator);
+    defer n.deinit();
+    try n.setString(16, CURVE_N_HEX);
 
-fn toU256(v: i128) u256 {
-    if (v >= 0) return @intCast(v);
-    const abs: u256 = @intCast(-v);
-    return CURVE_N - (abs % CURVE_N);
+    var acc = try const_arith.Big.init(allocator);
+    defer acc.deinit();
+    switch (op) {
+        .add => try acc.add(&a, &b),
+        .mul => try acc.mul(&a, &b),
+    }
+
+    var q = try const_arith.Big.init(allocator);
+    defer q.deinit();
+    var r = try const_arith.Big.init(allocator);
+    defer r.deinit();
+    try q.divFloor(&r, &acc, &n);
+
+    return const_arith.store(allocator, r);
 }
 
 // ============================================================================
@@ -658,12 +711,47 @@ test "constants: G_HEX and INFINITY_HEX are 128 chars" {
 }
 
 // --- Modular arithmetic ---
-test "addModN: basic addition" {
-    try testing.expectEqual(@as(i128, 5), addModN(2, 3));
-    try testing.expectEqual(@as(i128, 0), addModN(0, 0));
+
+fn expectCombine(a_dec: []const u8, b_dec: []const u8, comptime op: ModOp, expected_dec: []const u8) !void {
+    const alloc = testing.allocator;
+    var a = try const_arith.Big.init(alloc);
+    defer a.deinit();
+    try a.setString(10, a_dec);
+    var b = try const_arith.Big.init(alloc);
+    defer b.deinit();
+    try b.setString(10, b_dec);
+
+    const got = try combineModN(alloc, a, b, op);
+    switch (got) {
+        .integer => |i| {
+            const text = try std.fmt.allocPrint(alloc, "{d}", .{i});
+            defer alloc.free(text);
+            try testing.expectEqualStrings(expected_dec, text);
+        },
+        .big_integer => |s| {
+            defer alloc.free(s);
+            try testing.expectEqualStrings(expected_dec, s);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
-test "mulModN: basic multiplication" {
-    try testing.expectEqual(@as(i128, 6), mulModN(2, 3));
-    try testing.expectEqual(@as(i128, 0), mulModN(0, 42));
+test "combineModN: basic addition" {
+    try expectCombine("2", "3", .add, "5");
+    try expectCombine("0", "0", .add, "0");
+}
+
+test "combineModN: basic multiplication" {
+    try expectCombine("2", "3", .mul, "6");
+    try expectCombine("0", "42", .mul, "0");
+}
+
+test "combineModN: operands past i128 reduce into [0, N)" {
+    // (N-7) + (N-6) mod N == N-13. Both operands and the result exceed i128,
+    // so this is the path the `.big_integer` variant exists for; the old
+    // `u256` implementation could not even hold the intermediate sum.
+    const n_minus_7 = "115792089237316195423570985008687907852837564279074904382605163141518161494330";
+    const n_minus_6 = "115792089237316195423570985008687907852837564279074904382605163141518161494331";
+    const n_minus_13 = "115792089237316195423570985008687907852837564279074904382605163141518161494324";
+    try expectCombine(n_minus_7, n_minus_6, .add, n_minus_13);
 }

@@ -54,6 +54,7 @@ test {
     _ = @import("tests/property_initializer_literal.zig");
     _ = @import("tests/loop_bound_narrowing.zig");
     _ = @import("tests/library_cli_parity.zig");
+    _ = @import("tests/n034_ec_fusing_rules.zig");
     _ = @import("compiler_api.zig");
     _ = @import("passes/helpers/koalabear_emitters.zig");
     _ = @import("passes/helpers/poseidon2_koalabear.zig");
