@@ -233,6 +233,21 @@ fn is_subtype(actual: &str, expected: &str) -> bool {
         return true;
     }
 
+    // N-027: <inferred> and <unknown> are compatible with anything, in both
+    // directions. Mirrors `isSubtype` in
+    // packages/runar-compiler/src/passes/03-typecheck.ts. Private method
+    // return types are inferred by an environment-free walk
+    // (`infer_method_return_type`), so a helper that returns an identifier, a
+    // property access, an index access, or a call to another private method
+    // is typed `<unknown>` — which is a "don't know", not a type. Without this
+    // clause Rust rejected contracts that TS, Go and Python all compile.
+    if actual == "<inferred>" || actual == "<unknown>" {
+        return true;
+    }
+    if expected == "<inferred>" || expected == "<unknown>" {
+        return true;
+    }
+
     // ByteString subtypes
     if expected == "ByteString" && is_bytestring_subtype(actual) {
         return true;
