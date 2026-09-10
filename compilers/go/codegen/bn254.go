@@ -1065,6 +1065,87 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker, strict 
 }
 
 // ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+// bn254G1InfinityFlag computes `_notinf`, 0 exactly when P == -Q and 1
+// otherwise, from px/py/qx/qy WITHOUT consuming them. Call it before
+// bn254G1AffineAdd; apply the result with bn254G1MaskInfinity afterwards.
+//
+// P + (-P) is the point at infinity, which affine x||y cannot represent. This
+// codegen already has an encoding for O -- the ALL-ZERO blob, which is what
+// bn254G1ScalarMul returns for k = 0 mod r (see
+// TestBN254G1ScalarMul_ScalarDomain) and what secp256k1 (ecAffineAdd) and both
+// NIST curves (cAffineAdd) return for their own P + (-P). bn254G1Add is a
+// general contract-callable builtin, so it owes callers the same answer rather
+// than the off-curve blob the unified slope produces there (py + qy == 0 and
+// bn254FieldInv is Fermat, so inv(0) = 0). O is not on the curve
+// (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r)) idiom still
+// rejects the result, and nothing here adds a failure channel to what is a
+// pure value-producing expression.
+//
+// THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+// j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+// w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+// P + Q is an ordinary point, not O. Masking on the denominator would answer
+// "infinity" there: on-curve-looking, plausible, and wrong -- the exact failure
+// mode 03f50d48 introduced on the NIST curves and f16790a9 had to undo. That
+// case keeps its fail-closed off-curve answer
+// (TestBN254G1AffineAdd_NegatedOperandStaysOffCurve). Testing px == qx ALONE
+// would be wrong for the same reason in the other direction: it would swallow
+// the doubling case.
+//
+// This is deliberately NOT inside bn254G1AffineAdd. The Groth16 MSM bind
+// (emitG1AffineAddNamed) shares that helper to accumulate vk_x against a
+// witness-supplied point, where an accumulator that collapses to the all-zero
+// blob would feed an encoding a pairing may read as the identity into the
+// verification equation. That path keeps its fail-closed behaviour and its
+// bytes unchanged.
+func bn254G1InfinityFlag(t *BN254Tracker) {
+	t.copyToTop("px", "_inf_px")
+	t.copyToTop("qx", "_inf_qx")
+	t.rawBlock([]string{"_inf_px", "_inf_qx"}, "_xeq", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("py", "_inf_py")
+	t.copyToTop("qy", "_inf_qy")
+	t.rawBlock([]string{"_inf_py", "_inf_qy"}, "_yeq", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	// cond = xeq AND yeq: 1 when doubling.
+	t.copyToTop("_xeq", "_xeq_c")
+	t.toTop("_yeq")
+	t.rawBlock([]string{"_xeq_c", "_yeq"}, "_cond", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	// notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+	// points are not equal, i.e. exactly the P == -Q case.
+	t.toTop("_xeq")
+	t.toTop("_cond")
+	t.rawBlock([]string{"_xeq", "_cond"}, "_notinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_SUB"})
+		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+	})
+}
+
+// bn254G1MaskInfinity zeroes rx and ry when `_notinf` is 0, consuming it.
+//
+// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+// and notinf is 0 or 1, so the product is canonical either way.
+func bn254G1MaskInfinity(t *BN254Tracker) {
+	t.toTop("rx")
+	t.copyToTop("_notinf", "_notinf_x")
+	t.rawBlock([]string{"rx", "_notinf_x"}, "rx", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.toTop("ry")
+	t.toTop("_notinf")
+	t.rawBlock([]string{"ry", "_notinf"}, "ry", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+}
+
+// ===========================================================================
 // G1 point negation
 // ===========================================================================
 
@@ -1138,7 +1219,11 @@ func EmitBN254G1Add(emit func(StackOp)) {
 	t.PushPrimeCache()
 	bn254DecomposePoint(t, "_pa", "px", "py")
 	bn254DecomposePoint(t, "_pb", "qx", "qy")
+	// The flag must be computed BEFORE the add: bn254G1AffineAdd consumes
+	// px/py/qx/qy.
+	bn254G1InfinityFlag(t)
 	bn254G1AffineAdd(t)
+	bn254G1MaskInfinity(t)
 	bn254ComposePoint(t, "rx", "ry", "_result")
 	t.PopPrimeCache()
 }

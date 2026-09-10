@@ -627,6 +627,11 @@ fn composePoint(t: *BN254Tracker, x_name: []const u8, y_name: []const u8, result
 /// (via the curve equation y^2 = x^3 + b) and collapses to the doubling slope
 /// 3*px^2 / (2*py) when P == Q.
 ///
+/// The remaining zero-denominator input (py + qy == 0) is handled by the
+/// caller: emitBN254G1Add masks P == -Q to the all-zero point at infinity
+/// (see g1InfinityFlag); the Groth16 MSM path shares this helper unmasked and
+/// stays fail-closed.
+///
 /// Expects px, py, qx, qy on the tracker. Consumes all four and produces rx, ry.
 fn g1AffineAdd(t: *BN254Tracker) !void {
     // s_num = px^2 + px*qx + qx^2
@@ -674,6 +679,84 @@ fn g1AffineAdd(t: *BN254Tracker) !void {
     try t.drop();
     try t.toTop("qy");
     try t.drop();
+}
+
+// ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+/// g1InfinityFlag computes `_notinf`, 0 exactly when P == -Q and 1 otherwise,
+/// reading px/py/qx/qy WITHOUT consuming them. Call it before g1AffineAdd;
+/// apply the result with g1MaskInfinity afterwards.
+///
+/// P + (-P) is the point at infinity, which affine x||y cannot represent. This
+/// codegen already has an encoding for O — the ALL-ZERO blob, which is what
+/// bn254G1ScalarMul returns for k = 0 mod r and what secp256k1 and both NIST
+/// curves return for their own P + (-P). bn254G1Add is a general
+/// contract-callable builtin, so it owes callers the same answer rather than
+/// the off-curve blob the unified slope produces there (py + qy == 0 and the
+/// field inverse is Fermat, so inv(0) = 0). O is not on the curve
+/// (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r)) idiom still
+/// rejects the result.
+///
+/// THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+/// j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+/// w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+/// P + Q is an ordinary point, not O. Masking on the denominator would answer
+/// "infinity" there: plausible and wrong — the exact failure mode 03f50d48
+/// introduced on the NIST curves and f16790a9 had to undo. Testing px == qx
+/// ALONE would be wrong in the other direction: it would swallow doubling.
+///
+/// Deliberately NOT inside g1AffineAdd: the Groth16 MSM bind shares that
+/// helper and keeps its fail-closed behaviour and its bytes unchanged.
+///
+/// Byte-identical to `bn254G1InfinityFlag` in compilers/go/codegen/bn254.go.
+fn g1InfinityFlag(t: *BN254Tracker) !void {
+    try t.copyToTop("px", "_inf_px");
+    try t.copyToTop("qx", "_inf_qx");
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_xeq");
+
+    try t.copyToTop("py", "_inf_py");
+    try t.copyToTop("qy", "_inf_qy");
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_yeq");
+
+    // cond = xeq AND yeq: 1 when doubling.
+    try t.copyToTop("_xeq", "_xeq_c");
+    try t.toTop("_yeq");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_cond");
+
+    // notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+    // points are not equal, i.e. exactly the P == -Q case.
+    try t.toTop("_xeq");
+    try t.toTop("_cond");
+    t.popNames(2);
+    try t.emitOpcode("OP_SUB");
+    try t.emitOpcode("OP_NOT");
+    try t.names.append(t.allocator, "_notinf");
+}
+
+/// g1MaskInfinity zeroes rx and ry when `_notinf` is 0, consuming it.
+///
+/// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+/// and notinf is 0 or 1, so the product is canonical either way.
+fn g1MaskInfinity(t: *BN254Tracker) !void {
+    try t.toTop("rx");
+    try t.copyToTop("_notinf", "_notinf_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "rx");
+
+    try t.toTop("ry");
+    try t.toTop("_notinf");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "ry");
 }
 
 // ===========================================================================
@@ -980,7 +1063,11 @@ fn emitBN254G1Add(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
     try decomposePoint(t, "_pa", "px", "py");
     try decomposePoint(t, "_pb", "qx", "qy");
+    // The flag must be computed BEFORE the add: g1AffineAdd consumes
+    // px/py/qx/qy.
+    try g1InfinityFlag(t);
     try g1AffineAdd(t);
+    try g1MaskInfinity(t);
     try composePoint(t, "rx", "ry", "_result");
     try t.popPrimeCache();
 }

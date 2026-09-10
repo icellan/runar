@@ -419,3 +419,60 @@ func TestBN254G1OnCurve_Script(t *testing.T) {
 		}
 	})
 }
+
+// TestBN254G1Add_PointAtInfinity pins the answer bn254G1Add gives for
+// P + (-P), the group identity, which affine x||y cannot represent.
+//
+// secp256k1 (ecAffineAdd) and the two NIST curves (cAffineAdd) already answer
+// this case with the ALL-ZERO blob, the same encoding their scalar mul returns
+// for k = 0, masked in with `notinf = NOT(px == qx AND NOT (py == qy))`.
+// bn254G1Add is a general contract-callable builtin with no Groth16-shaped
+// restriction on its operands, so it owes callers the same answer; before this
+// test it returned an off-curve blob instead, because the unified slope
+// denominator py + qy is zero here and Fermat gives inv(0) = 0.
+//
+// The mask keys on the PRECISE predicate px == qx AND py != qy, not on a zero
+// denominator: BN254 has j-invariant 0 and p = 1 mod 3, so (w*px, -py) also
+// zeroes the denominator while being a perfectly ordinary summand — that case
+// keeps its fail-closed off-curve answer and is covered by
+// TestBN254G1AffineAdd_NegatedOperandStaysOffCurve.
+func TestBN254G1Add_PointAtInfinity(t *testing.T) {
+	p := new(big.Int).Set(bn254FieldP)
+	gx := big.NewInt(1)
+	gy := big.NewInt(2)
+	x2, y2 := bn254ComputeDoubleG(t)
+	x3, y3 := bn254ComputeAddG_2G(t)
+	zx, zy := bn254AllZeroPoint()
+
+	neg := func(y *big.Int) *big.Int { return new(big.Int).Sub(p, y) }
+
+	cases := []struct {
+		name                   string
+		ax, ay, bx, by, xR, yR *big.Int
+	}{
+		// The item under test.
+		{"G+(-G)=O", gx, gy, gx, neg(gy), zx, zy},
+		{"(-G)+G=O", gx, neg(gy), gx, gy, zx, zy},
+		{"2G+(-2G)=O", x2, y2, x2, neg(y2), zx, zy},
+		// Controls: ordinary addition and doubling must be untouched.
+		{"G+2G=3G", gx, gy, x2, y2, x3, y3},
+		{"G+G=2G", gx, gy, gx, gy, x2, y2},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var ops []StackOp
+			ops = append(ops, pushPoint(tc.ax, tc.ay))
+			ops = append(ops, pushPoint(tc.bx, tc.by))
+			ops = append(ops, gatherOps(EmitBN254G1Add)...)
+			ops = append(ops, pushPoint(tc.xR, tc.yR))
+			ops = append(ops, opcode("OP_EQUALVERIFY"))
+			ops = append(ops, opcode("OP_1"))
+
+			if err := buildAndExecute(t, ops); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+		})
+	}
+}

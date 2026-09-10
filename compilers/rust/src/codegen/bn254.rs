@@ -654,6 +654,81 @@ pub(crate) fn bn254_compose_point(
 }
 
 // ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+/// bn254_g1_infinity_flag: computes `_notinf`, 0 exactly when P == -Q and 1
+/// otherwise, from px/py/qx/qy WITHOUT consuming them. Call it before
+/// bn254_g1_affine_add; apply the result with bn254_g1_mask_infinity after.
+///
+/// P + (-P) is the point at infinity, which affine x||y cannot represent. This
+/// codegen already has an encoding for O -- the ALL-ZERO blob, which is what
+/// bn254G1ScalarMul returns for k = 0 mod r and what secp256k1 (ec_affine_add)
+/// and both NIST curves (c_affine_add) return for their own P + (-P).
+/// bn254G1Add is a general contract-callable builtin, so it owes callers the
+/// same answer rather than the off-curve blob the unified slope produces there
+/// (py + qy == 0 and bn254_field_inv is Fermat, so inv(0) = 0). O is not on
+/// the curve (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r))
+/// idiom still rejects the result.
+///
+/// THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+/// j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+/// w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+/// P + Q is an ordinary point, not O. Masking on the denominator would answer
+/// "infinity" there: plausible and wrong -- the exact failure mode 03f50d48
+/// introduced on the NIST curves and f16790a9 had to undo. Testing px == qx
+/// ALONE would be wrong in the other direction: it would swallow doubling.
+///
+/// Deliberately NOT inside bn254_g1_affine_add: the Groth16 MSM bind shares
+/// that helper to accumulate vk_x against a witness-supplied point and keeps
+/// its fail-closed behaviour and its bytes unchanged.
+///
+/// Byte-identical to `bn254G1InfinityFlag` in compilers/go/codegen/bn254.go.
+pub(crate) fn bn254_g1_infinity_flag(t: &mut BN254Tracker) {
+    t.copy_to_top("px", "_inf_px");
+    t.copy_to_top("qx", "_inf_qx");
+    t.raw_block(&["_inf_px", "_inf_qx"], Some("_xeq"), |e| {
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+    });
+    t.copy_to_top("py", "_inf_py");
+    t.copy_to_top("qy", "_inf_qy");
+    t.raw_block(&["_inf_py", "_inf_qy"], Some("_yeq"), |e| {
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+    });
+    // cond = xeq AND yeq: 1 when doubling.
+    t.copy_to_top("_xeq", "_xeq_c");
+    t.to_top("_yeq");
+    t.raw_block(&["_xeq_c", "_yeq"], Some("_cond"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    // notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+    // points are not equal, i.e. exactly the P == -Q case.
+    t.to_top("_xeq");
+    t.to_top("_cond");
+    t.raw_block(&["_xeq", "_cond"], Some("_notinf"), |e| {
+        e(StackOp::Opcode("OP_SUB".into()));
+        e(StackOp::Opcode("OP_NOT".into()));
+    });
+}
+
+/// bn254_g1_mask_infinity: zeroes rx and ry when `_notinf` is 0, consuming it.
+///
+/// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+/// and notinf is 0 or 1, so the product is canonical either way.
+pub(crate) fn bn254_g1_mask_infinity(t: &mut BN254Tracker) {
+    t.to_top("rx");
+    t.copy_to_top("_notinf", "_notinf_x");
+    t.raw_block(&["rx", "_notinf_x"], Some("rx"), |e| {
+        e(StackOp::Opcode("OP_MUL".into()));
+    });
+    t.to_top("ry");
+    t.to_top("_notinf");
+    t.raw_block(&["ry", "_notinf"], Some("ry"), |e| {
+        e(StackOp::Opcode("OP_MUL".into()));
+    });
+}
+
+// ===========================================================================
 // Affine point addition (for bn254G1Add)
 // ===========================================================================
 
@@ -1016,7 +1091,11 @@ pub fn emit_bn254_g1_add(emit: &mut dyn FnMut(StackOp)) {
     t.push_prime_cache();
     bn254_decompose_point(&mut t, "_pa", "px", "py");
     bn254_decompose_point(&mut t, "_pb", "qx", "qy");
+    // The flag must be computed BEFORE the add: bn254_g1_affine_add consumes
+    // px/py/qx/qy.
+    bn254_g1_infinity_flag(&mut t);
     bn254_g1_affine_add(&mut t);
+    bn254_g1_mask_infinity(&mut t);
     bn254_compose_point(&mut t, "rx", "ry", "_result");
     t.pop_prime_cache();
 }

@@ -700,9 +700,84 @@ module RunarCompiler
       # collapses to 3*px^2/(2*py) when P == Q, which is the correct doubling
       # slope.
       #
-      # The only input that still fails is P == -Q (py + qy == 0, group
-      # identity), which is out of scope for Groth16 verifier usage.
+      # The remaining zero-denominator input (py + qy == 0) is handled by the
+      # caller: emit_bn254_g1_add masks P == -Q to the all-zero point at
+      # infinity (see bn254_g1_infinity_flag); the Groth16 MSM path shares
+      # this helper unmasked and stays fail-closed.
       #
+      # Compute `_notinf`, 0 exactly when P == -Q and 1 otherwise, reading
+      # px/py/qx/qy WITHOUT consuming them. Call it before
+      # bn254_g1_affine_add; apply the result with bn254_g1_mask_infinity.
+      #
+      # P + (-P) is the point at infinity, which affine x||y cannot represent.
+      # This codegen already has an encoding for O -- the ALL-ZERO blob, which
+      # is what bn254G1ScalarMul returns for k = 0 mod r and what secp256k1
+      # and both NIST curves return for their own P + (-P). bn254G1Add is a
+      # general contract-callable builtin, so it owes callers the same answer
+      # rather than the off-curve blob the unified slope produces there
+      # (py + qy == 0 and the field inverse is Fermat, so inv(0) = 0). O is
+      # not on the curve (0^2 != 0^3 + 3), so the documented
+      # assert(bn254G1OnCurve(r)) idiom still rejects the result.
+      #
+      # THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254
+      # has j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root
+      # of unity w and Q = (w*px, -py) is an ordinary point that also zeroes
+      # py + qy while P + Q is an ordinary point, not O. Masking on the
+      # denominator would answer "infinity" there: plausible and wrong -- the
+      # exact failure mode 03f50d48 introduced on the NIST curves and f16790a9
+      # had to undo. Testing px == qx ALONE would be wrong in the other
+      # direction: it would swallow doubling.
+      #
+      # Deliberately NOT inside bn254_g1_affine_add: the Groth16 MSM bind
+      # shares that helper and keeps its fail-closed behaviour and its bytes
+      # unchanged.
+      #
+      # Byte-identical to `bn254G1InfinityFlag` in
+      # compilers/go/codegen/bn254.go.
+      #
+      # @param t [BN254Tracker]
+      def self.bn254_g1_infinity_flag(t)
+        t.copy_to_top("px", "_inf_px")
+        t.copy_to_top("qx", "_inf_qx")
+        t.raw_block(%w[_inf_px _inf_qx], "_xeq",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL")) })
+        t.copy_to_top("py", "_inf_py")
+        t.copy_to_top("qy", "_inf_qy")
+        t.raw_block(%w[_inf_py _inf_qy], "_yeq",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL")) })
+        # cond = xeq AND yeq: 1 when doubling.
+        t.copy_to_top("_xeq", "_xeq_c")
+        t.to_top("_yeq")
+        t.raw_block(%w[_xeq_c _yeq], "_cond",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        # notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and
+        # the points are not equal, i.e. exactly the P == -Q case.
+        t.to_top("_xeq")
+        t.to_top("_cond")
+        fn = lambda { |e|
+          e.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+          e.call(make_stack_op(op: "opcode", code: "OP_NOT"))
+        }
+        t.raw_block(%w[_xeq _cond], "_notinf", fn)
+      end
+
+      # Zero rx and ry when `_notinf` is 0, consuming it.
+      #
+      # The mask is a bare OP_MUL with no reduction: rx, ry are already in
+      # [0, p) and notinf is 0 or 1, so the product is canonical either way.
+      #
+      # @param t [BN254Tracker]
+      def self.bn254_g1_mask_infinity(t)
+        t.to_top("rx")
+        t.copy_to_top("_notinf", "_notinf_x")
+        t.raw_block(%w[rx _notinf_x], "rx",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
+        t.to_top("ry")
+        t.to_top("_notinf")
+        t.raw_block(%w[ry _notinf], "ry",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
+      end
+
       # @param t [BN254Tracker]
       def self.bn254_g1_affine_add(t)
         # s_num = px^2 + px*qx + qx^2
@@ -1093,7 +1168,11 @@ module RunarCompiler
         t.push_prime_cache
         bn254_decompose_point(t, "_pa", "px", "py")
         bn254_decompose_point(t, "_pb", "qx", "qy")
+        # The flag must be computed BEFORE the add: bn254_g1_affine_add
+        # consumes px/py/qx/qy.
+        bn254_g1_infinity_flag(t)
         bn254_g1_affine_add(t)
+        bn254_g1_mask_infinity(t)
         bn254_compose_point(t, "rx", "ry", "_result")
         t.pop_prime_cache
       end
