@@ -47,6 +47,7 @@ test {
     _ = @import("tests/sighash_codegen.zig");
     _ = @import("tests/sighash_validate_test.zig");
     _ = @import("tests/local_shadowing_property.zig");
+    _ = @import("tests/branch_lift_then_arm.zig");
     _ = @import("tests/readonly_property_assignment.zig");
     _ = @import("tests/property_initializer_literal.zig");
     _ = @import("tests/loop_bound_narrowing.zig");

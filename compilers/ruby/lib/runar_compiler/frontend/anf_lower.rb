@@ -3070,26 +3070,26 @@ module RunarCompiler
             )
           end
 
-          # The then-branch value: remap the value_ref through branch_map
+          # An arm's VALUE is its LAST binding. value_bindings is everything
+          # before the original update_prop, which ends on the assigned value
+          # only when that value was computed INSIDE the arm. When the arm
+          # assigns something bound outside it — a local, or anything hoisted
+          # before the chain — value_bindings does not contain it and is
+          # usually empty, so the arm was emitted EMPTY and stack lowering
+          # padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+          # compiled to `this.c0 = 0`, silently corrupting state on the MATCHED
+          # branch. (TicTacToe's `this.cN = this.turn` escapes only because its
+          # load_prop lands inside the arm.)
+          #
+          # Materialise the value explicitly whenever the arm does not already
+          # end on it. When it does — every shape that compiled correctly
+          # before — this is a no-op and no bytes move.
           then_value_ref = branch_map[branch[:value_ref]] || branch[:value_ref]
-          # If there are no value_bindings, we need a load_prop for the value
-          if then_bindings.empty?
-            load_name = fresh.call
+          if then_bindings.empty? || then_bindings.last.name != then_value_ref
             then_bindings << IR::ANFBinding.new(
-              name: load_name,
-              value: IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = "turn" }
+              name: fresh.call,
+              value: _make_load_const_string("@ref:#{then_value_ref}")
             )
-            # We need the actual turn value — use the value_ref from the branch
-            # which points to a load_prop that was inside the original branch
-            then_bindings = branch[:value_bindings].map do |vb|
-              new_name = fresh.call
-              branch_map[vb.name] = new_name
-              IR::ANFBinding.new(
-                name: new_name,
-                value: _remap_value_refs(vb.value, branch_map)
-              )
-            end
-            then_value_ref = branch_map[branch[:value_ref]] || branch[:value_ref]
           end
 
           # Else branch: keep old property value

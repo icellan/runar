@@ -2976,6 +2976,29 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
         });
       }
 
+      // An arm's VALUE is its LAST binding. `valueBindings` is everything
+      // before the original `update_prop`, which ends on the assigned value
+      // only when that value was computed INSIDE the arm. When the arm assigns
+      // something bound outside it — a local, or anything hoisted before the
+      // chain — `valueBindings` does not contain it and is usually empty, so
+      // the arm was emitted EMPTY and stack lowering padded it with a zero
+      // push: `if (p == 0n) { this.c0 = someLocal; }` compiled to
+      // `this.c0 = 0`, silently corrupting state on the MATCHED branch.
+      // (TicTacToe's `this.cN = this.turn` escapes only because its
+      // `load_prop` lands inside the arm.)
+      //
+      // Materialise the value explicitly whenever the arm does not already end
+      // on it. When it does — every shape that compiled correctly before —
+      // this is a no-op and no bytes move.
+      const mappedValueRef = branchMap[branch.valueRef] ?? branch.valueRef;
+      const thenLast = thenBindings[thenBindings.length - 1];
+      if (!thenLast || thenLast.name !== mappedValueRef) {
+        thenBindings.push({
+          name: fresh(),
+          value: { kind: 'load_const', value: `@ref:${mappedValueRef}` },
+        });
+      }
+
       // Else branch: keep old property value
       const keepName = fresh();
       const elseBindings: ANFBinding[] = [

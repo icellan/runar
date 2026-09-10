@@ -2753,6 +2753,29 @@ public final class AnfLower {
                     thenBindings.add(new AnfBinding(newName, remapValueRefs(vb.value(), branchMap), null));
                 }
 
+                // An arm's VALUE is its LAST binding. valueBindings is
+                // everything before the original update_prop, which ends on the
+                // assigned value only when that value was computed INSIDE the
+                // arm. When the arm assigns something bound outside it — a
+                // local, or anything hoisted before the chain — valueBindings
+                // does not contain it and is usually empty, so the arm was
+                // emitted EMPTY and stack lowering padded it with a zero push:
+                // `if (p == 0n) { this.c0 = someLocal; }` compiled to
+                // `this.c0 = 0`, silently corrupting state on the MATCHED
+                // branch. (TicTacToe's `this.cN = this.turn` escapes only
+                // because its load_prop lands inside the arm.)
+                //
+                // Materialise the value explicitly whenever the arm does not
+                // already end on it. When it does — every shape that compiled
+                // correctly before — this is a no-op and no bytes move.
+                String mappedValueRef = branchMap.getOrDefault(branch.valueRef, branch.valueRef);
+                if (thenBindings.isEmpty()
+                    || !thenBindings.get(thenBindings.size() - 1).name().equals(mappedValueRef)) {
+                    String valueName = "t" + (nextIdx[0]++);
+                    thenBindings.add(new AnfBinding(valueName,
+                        makeLoadConstString("@ref:" + mappedValueRef), null));
+                }
+
                 String keepName = "t" + (nextIdx[0]++);
                 List<AnfBinding> elseBindings = new ArrayList<>();
                 elseBindings.add(new AnfBinding(keepName,

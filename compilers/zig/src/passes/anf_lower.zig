@@ -3432,6 +3432,32 @@ fn liftBranchUpdateProps(
                 });
             }
 
+            // An arm's VALUE is its LAST binding. value_bindings is everything
+            // before the original update_prop, which ends on the assigned value
+            // only when that value was computed INSIDE the arm. When the arm
+            // assigns something bound outside it — a local, or anything hoisted
+            // before the chain — value_bindings does not contain it and is
+            // usually empty, so the arm was emitted EMPTY and stack lowering
+            // padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+            // compiled to `this.c0 = 0`, silently corrupting state on the
+            // MATCHED branch. (TicTacToe's `this.cN = this.turn` escapes only
+            // because its load_prop lands inside the arm.)
+            //
+            // Materialise the value explicitly whenever the arm does not
+            // already end on it. When it does — every shape that compiled
+            // correctly before — this is a no-op and no bytes move.
+            const mapped_value_ref = branch_map.get(branch.value_ref) orelse branch.value_ref;
+            const needs_value = then_bindings.items.len == 0 or
+                !std.mem.eql(u8, then_bindings.items[then_bindings.items.len - 1].name, mapped_value_ref);
+            if (needs_value) {
+                try then_bindings.append(allocator, .{
+                    .name = try fctx.fresh(),
+                    .value = .{ .load_const = .{ .value = .{
+                        .string = try std.fmt.allocPrint(allocator, "@ref:{s}", .{mapped_value_ref}),
+                    } } },
+                });
+            }
+
             // Else branch: keep old property value.
             const keep_name = try fctx.fresh();
             var else_bindings_list: std.ArrayListUnmanaged(ANFBinding) = .empty;

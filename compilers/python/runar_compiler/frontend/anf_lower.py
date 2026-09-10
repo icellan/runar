@@ -2888,8 +2888,32 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     value=_remap_value_refs(vb.value, branch_map),
                 ))
 
-            # The branch's value_ref also needs remapping (it points into value_bindings)
+            # An arm's VALUE is its LAST binding. value_bindings is everything
+            # before the original update_prop, which ends on the assigned value
+            # only when that value was computed INSIDE the arm. When the arm
+            # assigns something bound outside it — a local, or anything hoisted
+            # before the chain — value_bindings does not contain it and is
+            # usually empty, so the arm was emitted EMPTY and stack lowering
+            # padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+            # compiled to `this.c0 = 0`, silently corrupting state on the
+            # MATCHED branch. (TicTacToe's `this.cN = this.turn` escapes only
+            # because its load_prop lands inside the arm.)
+            #
+            # Materialise the value explicitly whenever the arm does not
+            # already end on it. When it does — every shape that compiled
+            # correctly before — this is a no-op and no bytes move.
             mapped_value_ref = branch_map.get(branch.value_ref, branch.value_ref)
+            if not then_bindings or then_bindings[-1].name != mapped_value_ref:
+                value_name = fresh()
+                value_ref_str = "@ref:" + mapped_value_ref
+                then_bindings.append(ANFBinding(
+                    name=value_name,
+                    value=ANFValue(
+                        kind="load_const",
+                        raw_value=json.dumps(value_ref_str),
+                        const_string=value_ref_str,
+                    ),
+                ))
 
             # Else branch: keep old property value
             keep_name = fresh()
@@ -2906,11 +2930,6 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
             ]
 
             # Emit conditional if-expression
-            # Note: mapped_value_ref is computed above for symmetry with TS/Go,
-            # but the standard ANF invariant is that the last binding in
-            # value_bindings produces the value the original update_prop
-            # referenced, so it is already the last binding in then_bindings.
-            _ = mapped_value_ref  # reserved for invariant checks in tests
             cond_if_ref = fresh()
             result.append(ANFBinding(
                 name=cond_if_ref,

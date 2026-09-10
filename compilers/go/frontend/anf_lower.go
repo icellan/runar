@@ -3091,6 +3091,38 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 				})
 			}
 
+			// An arm's VALUE is its LAST binding. valueBindings is everything
+			// before the original update_prop, which ends on the assigned value
+			// only when that value was computed INSIDE the arm. When the arm
+			// assigns something bound outside it — a local, or anything hoisted
+			// before the chain — valueBindings does not contain it and is
+			// usually empty, so the arm was emitted EMPTY and stack lowering
+			// padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+			// compiled to `this.c0 = 0`, silently corrupting state on the
+			// MATCHED branch. (TicTacToe's `this.cN = this.turn` escapes only
+			// because its load_prop lands inside the arm.)
+			//
+			// Materialise the value explicitly whenever the arm does not
+			// already end on it. When it does — every shape that compiled
+			// correctly before — this is a no-op and no bytes move.
+			mappedValueRef := branch.valueRef
+			if mapped, ok := branchMap[mappedValueRef]; ok {
+				mappedValueRef = mapped
+			}
+			if len(thenBindings) == 0 || thenBindings[len(thenBindings)-1].Name != mappedValueRef {
+				valueName := fresh()
+				valueRefStr := "@ref:" + mappedValueRef
+				valueRaw, _ := json.Marshal(valueRefStr)
+				thenBindings = append(thenBindings, ir.ANFBinding{
+					Name: valueName,
+					Value: ir.ANFValue{
+						Kind:        "load_const",
+						RawValue:    valueRaw,
+						ConstString: &valueRefStr,
+					},
+				})
+			}
+
 			// Else branch: keep old property value
 			keepName := fresh()
 			refStr := "@ref:" + oldPropRef
