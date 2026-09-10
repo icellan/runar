@@ -510,6 +510,24 @@ class _RustParser:
 
     def parse_rust_type(self) -> TypeNode:
         tok = self.peek()
+
+        # Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+        # `[[Bigint; 2]; 2]` surface produces the same
+        # FixedArrayType(element=FixedArrayType(...)) shape the TS / Rust /
+        # Ruby tiers build.
+        if tok.kind == TOK_LBRACKET:
+            self.advance()
+            element = self.parse_rust_type()
+            self.expect(TOK_SEMI)
+            length_tok = self.expect(TOK_NUMBER)
+            try:
+                length = int(length_tok.value)
+            except ValueError:
+                length = 0
+                self.add_error(f"line {length_tok.line}: array length must be integer")
+            self.expect(TOK_RBRACKET)
+            return FixedArrayType(element=element, length=length)
+
         if tok.kind == TOK_IDENT:
             name = tok.value
             self.advance()

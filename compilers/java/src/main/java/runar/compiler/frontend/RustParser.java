@@ -633,6 +633,27 @@ public final class RustParser {
 
     private static TypeNode parseRustType(State s) {
         Token tok = s.peek();
+
+        // Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+        // `[[Bigint; 2]; 2]` surface produces the same
+        // FixedArrayType(FixedArrayType(...)) shape the TS / Rust / Ruby tiers
+        // build.
+        if (tok.kind == TOK_LBRACKET) {
+            s.advance();
+            TypeNode element = parseRustType(s);
+            s.expect(TOK_SEMI);
+            Token lengthTok = s.expect(TOK_NUMBER);
+            int length;
+            try {
+                length = Integer.parseInt(lengthTok.value);
+            } catch (NumberFormatException nfe) {
+                length = 0;
+                s.addError("line " + lengthTok.line + ": array length must be integer");
+            }
+            s.expect(TOK_RBRACKET);
+            return new FixedArrayType(element, length);
+        }
+
         if (tok.kind == TOK_IDENT) {
             String name = tok.value;
             s.advance();

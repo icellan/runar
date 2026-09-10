@@ -482,7 +482,7 @@ export const INPUT_FORMATS = [
   { ext: '.runar.java', compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'] as const },
 ] as const;
 
-type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];
+export type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];
 const EMPTY_COMPILERS: readonly CompilerId[] = [];
 
 export interface CompilerOutput {
@@ -1311,7 +1311,7 @@ export interface ParseOnlyResult {
   durationMs: number;
 }
 
-interface ParseOnlyDeps {
+export interface ParseOnlyDeps {
   source: string;
   sourceFile: string;
 }
@@ -1556,6 +1556,32 @@ async function runJavaParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
   }
 }
 
+/**
+ * Run ONE tier's `--parse-only` mode over one source. Returns `undefined` when
+ * that tier's binary is not available locally.
+ *
+ * Extracted from the switch inside `runAllParserOnlyChecks` so the same nine
+ * drivers can be pointed at a source that is NOT a conformance fixture. The
+ * parser-only matrix only walks `conformance/tests/*`, which is precisely why
+ * a `.runar.rs` surface form used by a checked-in example but by no fixture
+ * (`[T; N]`) could be unparseable in four tiers for as long as it liked.
+ */
+export async function runParseOnly(
+  compiler: CompilerId,
+  deps: ParseOnlyDeps,
+): Promise<ParseOnlyResult | undefined> {
+  switch (compiler) {
+    case 'ts':     return runTsParseOnly(deps);
+    case 'go':     return runGoParseOnly(deps);
+    case 'rust':   return runRustParseOnly(deps);
+    case 'python': return runPythonParseOnly(deps);
+    case 'zig':    return runZigParseOnly(deps);
+    case 'ruby':   return runRubyParseOnly(deps);
+    case 'java':   return runJavaParseOnly(deps);
+  }
+  return undefined;
+}
+
 export interface ParserCoverageEntry {
   fixture: string;
   format: string;
@@ -1634,18 +1660,7 @@ export async function runAllParserOnlyChecks(
         const source = readFileSync(format.sourceFile, 'utf-8');
         const deps: ParseOnlyDeps = { source, sourceFile: format.sourceFile };
         // Run all 7 compilers in parallel for this (fixture, format) pair.
-        const results = await Promise.all(compilers.map(async (c) => {
-          switch (c) {
-            case 'ts':     return runTsParseOnly(deps);
-            case 'go':     return runGoParseOnly(deps);
-            case 'rust':   return runRustParseOnly(deps);
-            case 'python': return runPythonParseOnly(deps);
-            case 'zig':    return runZigParseOnly(deps);
-            case 'ruby':   return runRubyParseOnly(deps);
-            case 'java':   return runJavaParseOnly(deps);
-          }
-          return undefined;
-        }));
+        const results = await Promise.all(compilers.map((c) => runParseOnly(c, deps)));
         return {
           fixture,
           format: format.ext,

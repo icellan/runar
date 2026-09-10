@@ -599,10 +599,29 @@ const Parser = struct {
                             const camel_name = snakeToCamel(self.allocator, field_name_tok.text);
                             if (!std.mem.eql(u8, camel_name, "txPreimage")) {
                                 const type_info = types.typeNodeToRunarType(field_type);
+                                // Capture FixedArray shape so expand_fixed_arrays.zig
+                                // can see the length + element type after typecheck.
+                                // PropertyNode flattens TypeNode to a RunarType, so
+                                // without these three fields a parsed `[T; N]` would
+                                // reach the pass as a shapeless `.fixed_array`.
+                                var fa_len: u32 = 0;
+                                var fa_elem: types.RunarType = .unknown;
+                                var fa_nested_len: u32 = 0;
+                                if (field_type == .fixed_array_type) {
+                                    fa_len = field_type.fixed_array_type.length;
+                                    const inner = field_type.fixed_array_type.element.*;
+                                    fa_elem = types.typeNodeToRunarType(inner);
+                                    if (inner == .fixed_array_type) {
+                                        fa_nested_len = inner.fixed_array_type.length;
+                                    }
+                                }
                                 properties.append(self.allocator, .{
                                     .name = camel_name,
                                     .type_info = type_info,
                                     .readonly = readonly,
+                                    .fixed_array_length = fa_len,
+                                    .fixed_array_element = fa_elem,
+                                    .fixed_array_nested_length = fa_nested_len,
                                 }) catch {};
                             }
                         } else {
@@ -770,6 +789,22 @@ const Parser = struct {
         // Skip optional & and mut (reference types)
         _ = self.match(.ampersand);
         _ = self.matchIdent("mut");
+
+        // Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+        // `[[Bigint; 2]; 2]` surface produces the same
+        // `.fixed_array_type{ .element = .fixed_array_type{...} }` shape the
+        // TS / Rust / Ruby tiers build.
+        if (self.current.kind == .lbracket) {
+            _ = self.bump();
+            const element = self.parseRustType();
+            _ = self.expect(.semicolon);
+            const length_tok = self.expect(.number) orelse return .{ .custom_type = "unknown" };
+            const length = std.fmt.parseInt(u32, length_tok.text, 10) catch 0;
+            _ = self.expect(.rbracket);
+            const elem_ptr = self.allocator.create(TypeNode) catch return .{ .custom_type = "unknown" };
+            elem_ptr.* = element;
+            return .{ .fixed_array_type = .{ .element = elem_ptr, .length = length } };
+        }
 
         if (self.current.kind == .ident) {
             const name = self.bump().text;
@@ -1195,6 +1230,26 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value, .source_loc = loc, .target_is_property = is_prop } };
+            },
+            .index_access => |ia| {
+                // `self.arr[idx] = value` — carry the full index-access target
+                // on the Assign so expand_fixed_arrays can rewrite it into
+                // direct-access / dispatch form. Without this arm the target
+                // collapsed to the literal name "unknown" below and the `.rs`
+                // surface silently diverged from every other surface of the
+                // same contract. Mirrors parse_ts.zig#buildAssignment.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                    .source_loc = loc,
+                    .target_is_property = is_prop,
+                } };
             },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };

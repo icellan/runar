@@ -3,6 +3,7 @@ package frontend
 import (
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -689,6 +690,26 @@ func (p *rustMacroParser) parseRustType() TypeNode {
 	// Skip optional & and mut (reference types)
 	p.match(rustTokAmp)
 	p.match(rustTokMut)
+
+	// Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+	// `[[Bigint; 2]; 2]` surface produces the same
+	// FixedArrayType{Element: FixedArrayType{...}} shape the TS / Rust / Ruby
+	// tiers build.
+	if p.current().kind == rustTokLBracket {
+		p.advance()
+		element := p.parseRustType()
+		p.expect(rustTokSemi)
+		lengthTok := p.current()
+		p.expect(rustTokNumber)
+		length := 0
+		if lengthTok.kind == rustTokNumber {
+			if n, err := strconv.Atoi(lengthTok.value); err == nil {
+				length = n
+			}
+		}
+		p.expect(rustTokRBracket)
+		return FixedArrayType{Element: element, Length: length}
+	}
 
 	if p.current().kind == rustTokIdent {
 		name := p.current().value
