@@ -544,6 +544,64 @@ function collectRefs(value: ANFValue): string[] {
 // Core lowering context
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// Fixed operand arities for the delegated EC / field codegen families.
+//
+// Each `emit*` entry point in ec-codegen.ts / p256-p384-codegen.ts /
+// bn254-codegen.ts / babybear-codegen.ts / koalabear-codegen.ts has a fixed
+// documented stack contract (e.g. emitEcPointX = "Stack in: [point]",
+// emitEcAdd = "Stack in: [point_a, point_b]"). The lowerers below pop
+// `args.length` stack-map entries before delegating, so a call whose arity
+// differs from the emitter's contract silently desyncs the stack map from the
+// runtime stack — later operands are addressed at the wrong depth and the
+// method epilogue's cleanup is short by the difference. Rejected up front,
+// with no defensive opcodes, so correct-arity calls are byte-identical.
+//
+// Rejecting here rather than only in 03-typecheck.ts also covers the `--ir`
+// input path, which never runs a typecheck.
+// ===========================================================================
+const EC_BUILTIN_ARITY: Record<string, number> = {
+  ecAdd: 2, ecMul: 2, ecMulGen: 1, ecNegate: 1, ecOnCurve: 1,
+  ecModReduce: 2, ecEncodeCompressed: 1, ecMakePoint: 2, ecPointX: 1, ecPointY: 1,
+};
+
+const NIST_EC_BUILTIN_ARITY: Record<string, number> = {
+  p256Add: 2, p256Mul: 2, p256MulGen: 1, p256Negate: 1, p256OnCurve: 1, p256EncodeCompressed: 1,
+  p384Add: 2, p384Mul: 2, p384MulGen: 1, p384Negate: 1, p384OnCurve: 1, p384EncodeCompressed: 1,
+};
+
+const BN254_BUILTIN_ARITY: Record<string, number> = {
+  bn254FieldAdd: 2, bn254FieldSub: 2, bn254FieldMul: 2, bn254FieldInv: 1, bn254FieldNeg: 1,
+  bn254G1Add: 2, bn254G1ScalarMul: 2, bn254G1Negate: 1, bn254G1OnCurve: 1,
+};
+
+const BB_FIELD_BUILTIN_ARITY: Record<string, number> = {
+  bbFieldAdd: 2, bbFieldSub: 2, bbFieldMul: 2, bbFieldInv: 1,
+  bbExt4Mul0: 8, bbExt4Mul1: 8, bbExt4Mul2: 8, bbExt4Mul3: 8,
+  bbExt4Inv0: 4, bbExt4Inv1: 4, bbExt4Inv2: 4, bbExt4Inv3: 4,
+};
+
+const KB_FIELD_BUILTIN_ARITY: Record<string, number> = {
+  kbFieldAdd: 2, kbFieldSub: 2, kbFieldMul: 2, kbFieldInv: 1,
+  kbExt4Mul0: 8, kbExt4Mul1: 8, kbExt4Mul2: 8, kbExt4Mul3: 8,
+  kbExt4Inv0: 4, kbExt4Inv1: 4, kbExt4Inv2: 4, kbExt4Inv3: 4,
+};
+
+/**
+ * Reject a delegated codegen call whose argument count does not match the
+ * emitter's fixed stack contract. `undefined` (unknown name) is left alone —
+ * the caller's `switch` default already throws a more specific error.
+ */
+function checkFixedArity(table: Record<string, number>, func: string, args: string[]): void {
+  const expected = table[func];
+  if (expected !== undefined && args.length !== expected) {
+    throw new Error(
+      `${func} requires exactly ${expected} argument${expected === 1 ? '' : 's'}, ` +
+      `got ${args.length}`,
+    );
+  }
+}
+
 class LoweringContext {
   private stackMap: StackMap;
   private ops: StackOp[] = [];
@@ -5319,6 +5377,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
+    checkFixedArity(EC_BUILTIN_ARITY, func, args);
+
     // Bring all args to stack top
     for (const arg of args) {
       this.bringToTop(arg, this.operandConsume(arg, args, bindingIndex, lastUses));
@@ -5356,6 +5416,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
+    checkFixedArity(NIST_EC_BUILTIN_ARITY, func, args);
+
     // Bring all args to stack top
     for (const arg of args) {
       this.bringToTop(arg, this.operandConsume(arg, args, bindingIndex, lastUses));
@@ -5417,6 +5479,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
+    checkFixedArity(BN254_BUILTIN_ARITY, func, args);
+
     // Bring all args to stack top
     for (const arg of args) {
       this.bringToTop(arg, this.operandConsume(arg, args, bindingIndex, lastUses));
@@ -5453,6 +5517,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
+    checkFixedArity(BB_FIELD_BUILTIN_ARITY, func, args);
+
     // Bring all args to stack top
     for (const arg of args) {
       this.bringToTop(arg, this.operandConsume(arg, args, bindingIndex, lastUses));
@@ -5492,6 +5558,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
+    checkFixedArity(KB_FIELD_BUILTIN_ARITY, func, args);
+
     // Bring all args to stack top
     for (const arg of args) {
       this.bringToTop(arg, this.operandConsume(arg, args, bindingIndex, lastUses));
