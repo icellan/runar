@@ -56,6 +56,7 @@ import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackMethod;
 import runar.compiler.ir.stack.StackOp;
 import runar.compiler.ir.stack.StackProgram;
+import runar.compiler.ir.stack.VerifyCodePartLenOp;
 import runar.compiler.ir.stack.SwapOp;
 
 /**
@@ -648,7 +649,106 @@ public final class StackLower {
             out.add(lowerMethod(m, program.properties(), privateMethods, scriptLevelCodeSeparator));
         }
 
+        pinCodePartLength(out, program.properties());
+
         return new StackProgram(program.contractName(), out);
+    }
+
+    /**
+     * R-095 — deploy-time byte GROWTH of the single OP_0 placeholder a
+     * constructor slot of this type occupies in the template, or {@code null}
+     * when the type has no compile-time width.
+     *
+     * <p>Mirrors the SDK's {@code encodeArg}: a fixed-size data type bakes as
+     * {@code <1-byte push header><N value bytes>}, so it grows the script by N;
+     * a boolean bakes as a single OP_TRUE/OP_0 opcode, so it grows it by
+     * nothing. {@code bigint} (minimally-encoded Script number) and
+     * {@code ByteString} (arbitrary-length data push) depend on the VALUE,
+     * which the compiler never sees — those return {@code null} and demote the
+     * pin to a lower bound.
+     */
+    private static Integer constructorSlotGrowth(String type) {
+        if (type == null) return null;
+        return switch (type) {
+            case "PubKey" -> 33;
+            case "Sha256" -> 32;
+            case "Addr", "Ripemd160" -> 20;
+            case "Point", "P256Point" -> 64;
+            case "P384Point" -> 96;
+            case "boolean" -> 0;
+            default -> null;
+        };
+    }
+
+    /**
+     * R-095 — resolve {@code delta} / {@code exact} on every
+     * {@link VerifyCodePartLenOp}.
+     *
+     * <p>A constructor slot exists only where a property is actually LOADED,
+     * and a method is lowered before the methods after it, so no single method
+     * knows the contract's full placeholder set. This runs once the whole
+     * program is lowered and counts the placeholders that were really emitted,
+     * so an unused readonly property contributes nothing — over-counting would
+     * inflate the pin and make every honest spend unspendable.
+     *
+     * <p>Methods {@code Emit} never writes (the constructor) are skipped: their
+     * placeholders never become deploy-time slots. {@link #run(AnfProgram)}
+     * already filters the constructor out of {@code methods}; the guard here
+     * mirrors the TS / Go references so a caller that hands in a wider list
+     * still gets the same answer.
+     */
+    static void pinCodePartLength(List<StackMethod> methods, List<AnfProperty> properties) {
+        List<VerifyCodePartLenOp> pins = new ArrayList<>();
+        List<Integer> placeholders = new ArrayList<>();
+
+        for (StackMethod m : methods) {
+            if ("constructor".equals(m.name())) continue;
+            collectCodePartPins(m.ops(), pins, placeholders);
+        }
+        if (pins.isEmpty()) return;
+
+        // Matches the paramIndex space lowerLoadProp assigns.
+        List<AnfProperty> ctorProps = new ArrayList<>();
+        for (AnfProperty p : properties) {
+            if (p.initialValue() == null) ctorProps.add(p);
+        }
+
+        int delta = 0;
+        boolean exact = true;
+        for (int paramIndex : placeholders) {
+            String type = (paramIndex >= 0 && paramIndex < ctorProps.size())
+                ? ctorProps.get(paramIndex).type()
+                : null;
+            Integer growth = constructorSlotGrowth(type);
+            if (growth == null) {
+                // No compile-time width. Growth is never negative, so the
+                // running sum stays a sound lower bound — just not an exact one.
+                exact = false;
+            } else {
+                delta += growth;
+            }
+        }
+
+        for (VerifyCodePartLenOp pin : pins) {
+            pin.resolve(delta, exact);
+        }
+    }
+
+    private static void collectCodePartPins(
+        List<StackOp> ops,
+        List<VerifyCodePartLenOp> pins,
+        List<Integer> placeholders
+    ) {
+        for (StackOp op : ops) {
+            if (op instanceof IfOp ifo) {
+                collectCodePartPins(ifo.thenBranch(), pins, placeholders);
+                if (ifo.elseBranch() != null) collectCodePartPins(ifo.elseBranch(), pins, placeholders);
+            } else if (op instanceof PlaceholderOp ph) {
+                placeholders.add(ph.paramIndex().intValueExact());
+            } else if (op instanceof VerifyCodePartLenOp v) {
+                pins.add(v);
+            }
+        }
     }
 
     /**
@@ -991,6 +1091,13 @@ public final class StackLower {
             if (op instanceof runar.compiler.ir.stack.PushCodeSepIndexOp p) {
                 if (p.sourceLoc() != null) return p;
                 return new runar.compiler.ir.stack.PushCodeSepIndexOp(sl);
+            }
+            if (op instanceof VerifyCodePartLenOp v) {
+                // Mutable op: stamp in place (as the TS tier does) so
+                // pinCodePartLength's later in-place resolve reaches the very
+                // instance the method's op list holds.
+                if (v.sourceLoc() == null) v.setSourceLoc(sl);
+                return v;
             }
             // RawBytesOp has no sourceLoc field — skip.
             return op;
@@ -3377,6 +3484,33 @@ public final class StackLower {
             //    excludes).
             emitOp(new OpcodeOp("OP_SIZE"));
             sm.push("");
+
+            // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state
+            //     path.
+            //
+            //     Clause 8a below pins the split point through the REMAINDER's
+            //     length, which only works while the state section is a
+            //     compile-time constant. With a ByteString state field it is
+            //     not, 8a is skipped, and the only surviving constraint on where
+            //     the code part ENDS is 8b's `rest[0] == 0x6a` — which a genuine
+            //     PREFIX of the executing script satisfies at any offset whose
+            //     byte happens to be 0x6a.
+            //
+            //     The state's length is unknown at compile time; the CODE's is
+            //     not. The emitted template's byte length is fixed once emit
+            //     finishes, and the only thing deployment adds is the growth of
+            //     the OP_0 placeholders. So the emitter back-patches
+            //     `emittedLength + delta` and pins SIZE(codePart) against it
+            //     directly, which no truncation can satisfy.
+            //
+            //     Stack effect is NET ZERO — the stack map is untouched.
+            if (fixedStateSectionLength() < 0) {
+                // delta / exact are refined by pinCodePartLength once every
+                // method has been lowered; the defaults are the SOUND ones (a
+                // lower bound of emittedLength + 0 holds for any deployment).
+                emitOp(new VerifyCodePartLenOp(0, false));
+            }
+
             emitOp(new PushOp(PushValue.of(2)));
             sm.push("");
             emitOp(new OpcodeOp("OP_SUB"));

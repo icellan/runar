@@ -121,6 +121,44 @@ export interface PushCodeSepIndexOp {
 }
 
 /**
+ * R-095 — pin `SIZE(_codePart)` against the code part's own DEPLOYED byte
+ * length.
+ *
+ * Consumes nothing: expects the numeric `SIZE(_codePart)` on top of the stack
+ * and leaves it there, aborting via OP_VERIFY when the claimed code part is
+ * not the length the deployed script actually has.
+ *
+ * The length is not known when the stack lowerer runs (byte offsets only
+ * exist after `emit`), so the emitter resolves it: it reserves a
+ * FIXED-WIDTH 9-byte sequence
+ *
+ *     OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+ *
+ * and back-patches `LL LL LL LL` (little-endian) plus the comparison opcode
+ * once the whole script has been emitted. The width is fixed so that the
+ * patched value can never change the length it is describing — a minimal
+ * script-number push would be self-referential.
+ *
+ * `delta` is the deploy-time byte GROWTH of the template's OP_0 placeholders,
+ * so `deployedCodeLen = emittedTemplateLen + delta`. `exact` says whether
+ * every placeholder's growth is type-determined:
+ *
+ *  - `exact: true`  → `SIZE(_codePart) == emittedLen + delta` (OP_NUMEQUAL).
+ *  - `exact: false` → `SIZE(_codePart) >= emittedLen + delta`
+ *    (OP_GREATERTHANOREQUAL). A variable-width readonly constructor argument
+ *    (`bigint`, `ByteString`) has no compile-time width, and placeholder
+ *    growth is never negative, so the sum is still a sound LOWER bound.
+ */
+export interface VerifyCodePartLenOp {
+  op: 'verify_code_part_len';
+  /** Deploy-time byte growth of the template's OP_0 placeholders. */
+  delta: number;
+  /** true → exact equality pin; false → lower-bound pin. */
+  exact: boolean;
+  sourceLoc?: StackSourceLoc;
+}
+
+/**
  * Opaque raw byte span produced by lowering a `raw_script` ANF node.
  *
  * Emitted verbatim by the emit pass. Treated as a hard barrier by every
@@ -152,4 +190,5 @@ export type StackOp =
   | TuckOp
   | PlaceholderOp
   | PushCodeSepIndexOp
+  | VerifyCodePartLenOp
   | RawBytesOp;

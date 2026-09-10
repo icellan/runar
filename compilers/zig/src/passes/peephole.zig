@@ -23,7 +23,9 @@ const max_iterations = 100;
 fn isPush(inst: Inst) bool {
     return switch (inst) {
         .push_int, .push_data, .push_bool, .push_big_int_decimal, .push_codesep_index, .placeholder => true,
-        .op, .raw_bytes => false,
+        // R-095: verify_code_part_len is a self-contained, stack-neutral
+        // verify sequence, not a push — no rewrite window may treat it as one.
+        .op, .raw_bytes, .verify_code_part_len => false,
     };
 }
 
@@ -129,6 +131,8 @@ fn instEql(a: Inst, b: Inst) bool {
         .push_data => |da| std.mem.eql(u8, da, b.push_data),
         .push_big_int_decimal => |sa| std.mem.eql(u8, sa, b.push_big_int_decimal),
         .push_codesep_index => true,
+        .verify_code_part_len => |va| va.delta == b.verify_code_part_len.delta and
+            va.exact == b.verify_code_part_len.exact,
         .placeholder => |pa| pa.param_index == b.placeholder.param_index,
         // raw_bytes is opaque; we never compare or rewrite across it, so
         // equality here is purely for completeness.

@@ -617,12 +617,29 @@ pub const StackInstruction = union(enum) {
     /// Decimal-string-encoded big integer push (mirrors PushValue.big_int_decimal).
     push_big_int_decimal: []const u8,
     push_codesep_index: void,
+    /// R-095 — pin SIZE(_codePart) against the code part's own DEPLOYED byte
+    /// length. Consumes nothing: expects the numeric SIZE(_codePart) on top of
+    /// the stack and leaves it there, aborting via OP_VERIFY when the claimed
+    /// code part is not the length the deployed script actually has. The
+    /// emitter reserves a FIXED-WIDTH 9-byte sequence and back-patches the
+    /// length once the whole script exists.
+    verify_code_part_len: VerifyCodePartLen,
     placeholder: Placeholder,
     /// Opaque opcode-byte span emitted verbatim by a raw_script ANF node.
     /// The peephole optimizer treats this as a hard barrier; the emitter
     /// writes the bytes as-is and records a `RawScriptSpan` in the artifact.
     raw_bytes: RawBytes,
 };
+
+/// Backing payload for the `verify_code_part_len` StackInstruction variant.
+///
+/// `delta` is the deploy-time byte growth of the template's OP_0 constructor
+/// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`. `exact`
+/// says whether every placeholder's growth is type-determined: true pins with
+/// OP_NUMEQUAL, false with OP_GREATERTHANOREQUAL (a variable-width readonly
+/// constructor argument has no compile-time width, and placeholder growth is
+/// never negative, so the sum is still a sound LOWER bound).
+pub const VerifyCodePartLen = struct { delta: i64, exact: bool };
 
 /// Backing payload for the `raw_bytes` StackInstruction variant. Bytes are
 /// emitted verbatim; in_arity / out_arity describe the declared stack effect

@@ -4000,6 +4000,41 @@ class LoweringContext {
     //    scriptCode excludes.
     this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
     this.stackMap.push(null);
+    // --- Stack: [..., preimage, scriptCode, codePart, SIZE(codePart)] ---
+
+    // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state path.
+    //
+    //     Clause 8a below pins the split point through the REMAINDER's length,
+    //     which only works while the state section is a compile-time constant.
+    //     With a ByteString state field it is not, 8a is skipped, and the only
+    //     surviving constraint on where the code part ENDS is 8b's
+    //     `rest[0] == 0x6a`. That is satisfiable by a genuine prefix: for any
+    //     offset k at which the executing script's own bytes hold 0x6a,
+    //     `_codePart = trueCodePart[:k]` reproduces itself through step 10 (it
+    //     IS a prefix) and hands 8b the script's own 0x6a. Executed against
+    //     the go-sdk interpreter this redirected 9,900 of 10,000 sat out of
+    //     `stateful-bytestring` at k = 715.
+    //
+    //     The state's length is unknown at compile time; the CODE's is not.
+    //     The emitted template's byte length is fixed once emit finishes, and
+    //     the only thing deployment adds is the growth of the OP_0
+    //     placeholders — which is type-determined for every fixed-width
+    //     readonly argument, and never negative for the rest. So the emitter
+    //     back-patches `emittedLength + delta` and pins SIZE(codePart) against
+    //     it directly, which no truncation can satisfy: a truncated claim is
+    //     strictly shorter than the script it was truncated from.
+    //
+    //     Cost: 9 bytes per authenticating method, and only on this path —
+    //     fixed-size-state contracts keep clause 8a untouched.
+    if (this.fixedStateSectionLength() === null) {
+      // delta / exact are refined by `pinCodePartLength` once every method has
+      // been lowered and the full placeholder set is known. The defaults here
+      // are the SOUND ones: a lower bound of `emittedLength + 0` holds for any
+      // deployment, so a caller that lowers a method in isolation still gets a
+      // script that honest spends satisfy.
+      this.emitOp({ op: 'verify_code_part_len', delta: 0, exact: false });
+    }
+
     this.emitOp({ op: 'push', value: 2n });
     this.stackMap.push(null);
     this.emitOp({ op: 'opcode', code: 'OP_SUB' });
@@ -4027,6 +4062,8 @@ class LoweringContext {
     //     a bare OP_RETURN that anyone can spend. `rest` is everything the
     //     locking script carries after the code part, i.e. the OP_RETURN
     //     separator plus the serialized state.
+    //     Variable-length state layouts are pinned by clause 6a instead, from
+    //     the CODE side.
     const fixedStateLen = this.fixedStateSectionLength();
     if (fixedStateLen !== null) {
       // Fixed-size state layout: the remainder's length is a compile-time
@@ -5861,10 +5898,98 @@ export function lowerToStack(program: ANFProgram): StackProgram {
     methods.push(stackMethod);
   }
 
+  pinCodePartLength(methods, program.properties);
+
   return {
     contractName: program.contractName,
     methods,
   };
+}
+
+/**
+ * Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot of
+ * this type occupies in the template, or `null` when the type has no
+ * compile-time width.
+ *
+ * Mirrors the SDK's `encodeArg` (packages/runar-sdk/src/contract.ts): a
+ * fixed-size data type bakes as `<1-byte push header><N value bytes>`, so it
+ * grows the script by N; a boolean bakes as a single OP_TRUE/OP_0 opcode, so
+ * it grows it by nothing. `bigint` (minimally-encoded Script number) and
+ * `ByteString` (arbitrary-length data push) depend on the VALUE, which the
+ * compiler never sees — those return `null` and demote the pin to a lower
+ * bound.
+ */
+function constructorSlotGrowth(type: string | undefined): number | null {
+  switch (type) {
+    case 'PubKey': return 33;
+    case 'Sha256': return 32;
+    case 'Addr':
+    case 'Ripemd160': return 20;
+    case 'Point':
+    case 'P256Point': return 64;
+    case 'P384Point': return 96;
+    case 'boolean': return 0;
+    default: return null;
+  }
+}
+
+/**
+ * R-095 — resolve `delta` / `exact` on every `verify_code_part_len` op.
+ *
+ * A constructor slot exists only where a property is actually LOADED, and a
+ * method is lowered before the methods after it, so no single method knows the
+ * contract's full placeholder set. This runs once the whole program is lowered
+ * and counts the placeholders that were really emitted, so an unused readonly
+ * property contributes nothing — over-counting would inflate the pin and make
+ * every honest spend unspendable.
+ */
+function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): void {
+  const pins: StackOp[] = [];
+  const placeholders: number[] = [];
+
+  const walk = (ops: StackOp[]): void => {
+    for (const op of ops) {
+      if (op.op === 'if') {
+        walk(op.then);
+        if (op.else) walk(op.else);
+      } else if (op.op === 'placeholder') {
+        placeholders.push(op.paramIndex);
+      } else if (op.op === 'verify_code_part_len') {
+        pins.push(op);
+      }
+    }
+  };
+  // Mirror `emit`'s own filter exactly: the constructor StackMethod is never
+  // emitted, so the placeholders it carries never become deploy-time slots and
+  // must not be counted. (MessageBoard's constructor holds two `message`
+  // placeholders; counting them demoted an otherwise-exact pin to a bound.)
+  for (const m of methods) {
+    if (m.name === 'constructor') continue;
+    walk(m.ops);
+  }
+  if (pins.length === 0) return;
+
+  // Matches the paramIndex space `lowerLoadProp` assigns.
+  const ctorProps = properties.filter(p => p.initialValue === undefined);
+
+  let delta = 0;
+  let exact = true;
+  for (const paramIndex of placeholders) {
+    const growth = constructorSlotGrowth(ctorProps[paramIndex]?.type);
+    if (growth === null) {
+      // No compile-time width. Growth is never negative, so the running sum
+      // stays a sound lower bound — just not an exact one.
+      exact = false;
+    } else {
+      delta += growth;
+    }
+  }
+
+  for (const pin of pins) {
+    if (pin.op !== 'verify_code_part_len') continue;
+    pin.delta = delta;
+    pin.exact = exact;
+  }
 }
 
 /**

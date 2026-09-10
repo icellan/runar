@@ -18,6 +18,14 @@ const Opcode = opcodes.Opcode;
 // Emit Context — accumulates hex, asm, and metadata during emission
 // ============================================================================
 
+/// One fixed-width length field reserved by `verify_code_part_len`, to be
+/// filled in once the whole script exists (R-095).
+pub const CodePartLenFixup = struct {
+    value_byte_offset: usize,
+    asm_index: usize,
+    delta: i64,
+};
+
 pub const EmitContext = struct {
     /// Raw script bytes accumulated during emission.
     script_bytes: std.ArrayListUnmanaged(u8) = .empty,
@@ -47,6 +55,8 @@ pub const EmitContext = struct {
     pending_source_loc: ?types.SourceLocation = null,
     /// Current opcode index (incremented per emitted instruction).
     opcode_index: u32 = 0,
+    /// R-095 — verify_code_part_len length fields awaiting back-patch.
+    code_part_len_fixups: std.ArrayListUnmanaged(CodePartLenFixup) = .empty,
     /// Allocator for all dynamic allocation.
     allocator: std.mem.Allocator,
 
@@ -55,6 +65,7 @@ pub const EmitContext = struct {
     }
 
     pub fn deinit(self: *EmitContext) void {
+        self.code_part_len_fixups.deinit(self.allocator);
         self.script_bytes.deinit(self.allocator);
         for (self.owned_asm_parts.items) |part| {
             self.allocator.free(part);
@@ -234,13 +245,60 @@ pub const EmitContext = struct {
         });
     }
 
+    /// R-095 — resolve every `verify_code_part_len` length field.
+    ///
+    /// Runs once the whole script has been emitted, because the value each
+    /// field carries is the DEPLOYED length of the very script it sits in:
+    ///
+    ///     deployedCodeLen = emitted template length
+    ///                     + growth of the constructor-arg placeholders (delta)
+    ///                     + growth of the codeSepIndex placeholders (0)
+    ///
+    /// Idempotent: it overwrites a fixed-width field in place rather than
+    /// splicing, so the script's length never changes.
+    ///
+    /// The codeSepIndex placeholders contribute nothing because post-R-010 the
+    /// separator is always at offset 1, so each bakes as the single opcode
+    /// byte OP_1. The guard is not decoration: if the separator ever moves,
+    /// the pin's arithmetic goes silently wrong and every honest spend of a
+    /// variable-length-state contract becomes unspendable.
+    pub fn applyCodePartLenFixups(self: *EmitContext) !void {
+        if (self.code_part_len_fixups.items.len == 0) return;
+        for (self.code_sep_index_slots.items) |slot| {
+            if (slot.code_sep_index != 1) return error.CodeSepIndexNotOne;
+        }
+        const total: i64 = @intCast(self.script_bytes.items.len);
+        for (self.code_part_len_fixups.items) |fixup| {
+            const deployed_len = total + fixup.delta;
+            if (deployed_len < 0 or deployed_len > 0x7fffffff) return error.CodePartLenOutOfRange;
+            const v: u32 = @intCast(deployed_len);
+            var i: usize = 0;
+            while (i < 4) : (i += 1) {
+                self.script_bytes.items[fixup.value_byte_offset + i] =
+                    @truncate((v >> @intCast(8 * i)) & 0xff);
+            }
+            const le = try std.fmt.allocPrint(self.allocator, "<{x:0>2}{x:0>2}{x:0>2}{x:0>2}>", .{
+                self.script_bytes.items[fixup.value_byte_offset],
+                self.script_bytes.items[fixup.value_byte_offset + 1],
+                self.script_bytes.items[fixup.value_byte_offset + 2],
+                self.script_bytes.items[fixup.value_byte_offset + 3],
+            });
+            try self.owned_asm_parts.append(self.allocator, le);
+            if (fixup.asm_index < self.asm_parts.items.len) {
+                self.asm_parts.items[fixup.asm_index] = le;
+            }
+        }
+    }
+
     /// Get the final hex-encoded script. Caller owns the returned memory.
     pub fn getHex(self: *EmitContext) ![]u8 {
+        try self.applyCodePartLenFixups();
         return opcodes.bytesToHex(self.allocator, self.script_bytes.items);
     }
 
     /// Get the final ASM text (space-separated). Caller owns the returned memory.
     pub fn getAsm(self: *EmitContext) ![]u8 {
+        try self.applyCodePartLenFixups();
         if (self.asm_parts.items.len == 0) {
             return try self.allocator.dupe(u8, "");
         }
@@ -338,6 +396,31 @@ pub fn emitStackInstruction(ctx: *EmitContext, inst: types.StackInstruction) !vo
             try ctx.code_sep_index_slots.append(ctx.allocator, .{
                 .byte_offset = byte_off,
                 .code_sep_index = code_sep_idx,
+            });
+        },
+        .verify_code_part_len => |pin| {
+            // R-095: pin SIZE(_codePart) against the code part's own deployed
+            // byte length.
+            //
+            //   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+            //
+            // LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
+            // Script number push: the value being patched IS the length of the
+            // script that contains it, so a width that varied with the value
+            // would be self-referential. OP_BIN2NUM normalises it back to a
+            // minimal Script number so the comparison is numeric.
+            try ctx.emitOpcode(.op_dup);
+            // +1 skips the single-byte push header the 4-byte data push carries.
+            const value_byte_offset: usize = @as(usize, ctx.byte_offset) + 1;
+            const asm_index = ctx.asm_parts.items.len;
+            try ctx.emitPushData(&[_]u8{ 0, 0, 0, 0 });
+            try ctx.emitOpcode(.op_bin2num);
+            try ctx.emitOpcode(if (pin.exact) .op_numequal else .op_greaterthanorequal);
+            try ctx.emitOpcode(.op_verify);
+            try ctx.code_part_len_fixups.append(ctx.allocator, .{
+                .value_byte_offset = value_byte_offset,
+                .asm_index = asm_index,
+                .delta = pin.delta,
             });
         },
         .placeholder => |ph| {

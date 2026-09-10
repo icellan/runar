@@ -3741,6 +3741,27 @@ module RunarCompiler::Codegen
 
       # 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
       emit_opcode("OP_SIZE"); @sm.push("")
+
+      # 6a. R-095 -- pin SIZE(codePart) itself on the VARIABLE-length-state path.
+      #
+      #     Clause 8a below pins the split point through the REMAINDER's length,
+      #     which only works while the state section is a compile-time constant.
+      #     With a ByteString state field it is not, 8a is skipped, and the only
+      #     surviving constraint on where the code part ENDS is 8b's
+      #     `rest[0] == 0x6a` -- which a genuine PREFIX of the executing script
+      #     satisfies at any offset whose byte happens to be 0x6a. The state's
+      #     length is unknown at compile time; the CODE's is not, so pin that
+      #     instead. See the TypeScript tier for the full argument.
+      #
+      #     Net stack effect is ZERO (the emitted sequence DUPs, compares and
+      #     VERIFYs), so the stack map is untouched.
+      if _fixed_state_section_length.nil?
+        # delta / exact are refined by Codegen._pin_code_part_length once every
+        # method has been lowered; the defaults are the SOUND ones (a lower
+        # bound of emittedLength + 0 holds for any deployment).
+        emit_op({ op: "verify_code_part_len", code_part_len_delta: 0, code_part_len_exact: false })
+      end
+
       emit_push_int(2); @sm.push("")
       emit_opcode("OP_SUB"); @sm.pop; @sm.pop; @sm.push("")
 
@@ -3753,7 +3774,8 @@ module RunarCompiler::Codegen
       # 8. Split scriptCode at n into the claimed code tail and the rest.
       emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
 
-      # 8a. Pin the split point.
+      # 8a. Pin the split point. Variable-length state layouts are pinned by
+      #     clause 6a instead, from the CODE side.
       fixed_state_len = _fixed_state_section_length
       unless fixed_state_len.nil?
         emit_opcode("OP_SIZE"); @sm.push("")
@@ -4548,9 +4570,99 @@ module RunarCompiler::Codegen
       methods << sm
     end
 
+    _pin_code_part_length(methods, program.properties)
+
     methods
   end
   private_class_method :_lower_to_stack_inner
+
+  # Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
+  # of this type occupies in the template. A type that is absent has no
+  # compile-time width.
+  #
+  # Mirrors the SDK's encodeArg: a fixed-size data type bakes as
+  # <1-byte push header><N value bytes>, so it grows the script by N; a boolean
+  # bakes as a single OP_TRUE/OP_0 opcode, so it grows it by nothing. `bigint`
+  # (minimally-encoded Script number) and `ByteString` (arbitrary-length data
+  # push) depend on the VALUE, which the compiler never sees -- those are
+  # absent here and demote the pin to a lower bound.
+  CONSTRUCTOR_SLOT_GROWTH = {
+    "PubKey" => 33,
+    "Sha256" => 32,
+    "Addr" => 20,
+    "Ripemd160" => 20,
+    "Point" => 64,
+    "P256Point" => 64,
+    "P384Point" => 96,
+    "boolean" => 0
+  }.freeze
+
+  # R-095 -- resolve :code_part_len_delta / :code_part_len_exact on every
+  # verify_code_part_len op.
+  #
+  # A constructor slot exists only where a property is actually LOADED, and a
+  # method is lowered before the methods after it, so no single method knows the
+  # contract's full placeholder set. This runs once the whole program is lowered
+  # and counts the placeholders that were really emitted, so an unused readonly
+  # property contributes nothing -- over-counting would inflate the pin and make
+  # every honest spend unspendable.
+  #
+  # Stack ops are plain Hashes, so the pins collected here are the live objects
+  # and are mutated in place.
+  #
+  # @api private
+  def self._pin_code_part_length(methods, properties)
+    pins = []
+    placeholders = []
+
+    walk = lambda do |ops|
+      ops.each do |op|
+        case op[:op]
+        when "if"
+          walk.call(op[:then] || op[:then_ops] || [])
+          walk.call(op[:else_ops] || [])
+        when "placeholder"
+          placeholders << op[:param_index]
+        when "verify_code_part_len"
+          pins << op
+        end
+      end
+    end
+
+    # Mirror Emit.emit's own filter exactly: the constructor StackMethod is
+    # never emitted, so the placeholders it carries never become deploy-time
+    # slots and must not be counted. (_lower_to_stack_inner already drops the
+    # constructor; the guard keeps the two filters aligned if that changes.)
+    methods.each do |m|
+      next if m[:name] == "constructor"
+
+      walk.call(m[:ops] || [])
+    end
+    return if pins.empty?
+
+    # Matches the paramIndex space _lower_load_prop assigns.
+    ctor_props = properties.select { |p| p.initial_value.nil? }
+
+    delta = 0
+    exact = true
+    placeholders.each do |param_index|
+      prop = param_index.is_a?(Integer) && param_index >= 0 ? ctor_props[param_index] : nil
+      growth = prop.nil? ? nil : CONSTRUCTOR_SLOT_GROWTH[prop.type]
+      if growth.nil?
+        # No compile-time width. Growth is never negative, so the running sum
+        # stays a sound lower bound -- just not an exact one.
+        exact = false
+      else
+        delta += growth
+      end
+    end
+
+    pins.each do |pin|
+      pin[:code_part_len_delta] = delta
+      pin[:code_part_len_exact] = exact
+    end
+  end
+  private_class_method :_pin_code_part_length
 
   # @api private
   # Whether a method's unlocking script carries the `_codePart` implicit

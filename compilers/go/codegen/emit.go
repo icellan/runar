@@ -198,6 +198,16 @@ type emitContext struct {
 	sourceMap            []SourceMapping
 	pendingSourceLoc     *ir.SourceLocation
 	rawScriptSpans       []RawScriptSpan
+	// R-095 — verify_code_part_len length fields awaiting back-patch.
+	codePartLenFixups []codePartLenFixup
+}
+
+// codePartLenFixup records one fixed-width length field reserved by
+// verify_code_part_len, to be filled in once the whole script exists.
+type codePartLenFixup struct {
+	valueByteOffset int
+	asmIndex        int
+	delta           int
 }
 
 func newEmitContext() *emitContext {
@@ -295,11 +305,76 @@ func (ctx *emitContext) emitRawBytes(bytes []byte, inArity, outArity int) {
 	})
 }
 
+// codeSepIndexGrowth is the deploy-time byte growth contributed by the
+// codeSepIndex placeholders.
+//
+// Each is a 1-byte OP_0 in the template that the SDK replaces with a push of
+// the adjusted separator index. Post-R-010 that index is always 1 (N-032: the
+// separator sits at offset 1 and no constructor slot precedes it), which bakes
+// as the single opcode byte OP_1 — zero growth. The guard is not decoration:
+// if the separator ever moves, the pin's arithmetic goes silently wrong and
+// every honest spend of a variable-length-state contract becomes unspendable.
+func (ctx *emitContext) codeSepIndexGrowth() (int, error) {
+	for _, slot := range ctx.codeSepIndexSlots {
+		if slot.CodeSepIndex != 1 {
+			return 0, fmt.Errorf(
+				"emit: codeSepIndex placeholder resolves to %d, not 1; the verify_code_part_len "+
+					"pin assumes the post-R-010 layout (a single OP_CODESEPARATOR at offset 1, so "+
+					"the placeholder bakes as OP_1 and adds no bytes)", slot.CodeSepIndex)
+		}
+	}
+	return 0, nil
+}
+
+// applyCodePartLenFixups resolves every verify_code_part_len length field
+// (R-095). Runs once the whole script has been emitted, because the value each
+// field carries is the DEPLOYED length of the very script it sits in:
+//
+//	deployedCodeLen = emitted template length
+//	                + growth of the constructor-arg placeholders (delta)
+//	                + growth of the codeSepIndex placeholders (0)
+//
+// Idempotent: it overwrites a fixed-width field rather than splicing, so the
+// script's length never changes.
+func (ctx *emitContext) applyCodePartLenFixups() error {
+	if len(ctx.codePartLenFixups) == 0 {
+		return nil
+	}
+	codeSepGrowth, err := ctx.codeSepIndexGrowth()
+	if err != nil {
+		return err
+	}
+	hex := strings.Join(ctx.hexParts, "")
+	for _, fixup := range ctx.codePartLenFixups {
+		deployedLen := ctx.byteLength + fixup.delta + codeSepGrowth
+		if deployedLen < 0 || deployedLen > 0x7fffffff {
+			return fmt.Errorf("emit: code part length %d does not fit the 4-byte pin field", deployedLen)
+		}
+		le := ""
+		for i := 0; i < 4; i++ {
+			le += fmt.Sprintf("%02x", (deployedLen>>(8*i))&0xff)
+		}
+		start := fixup.valueByteOffset * 2
+		hex = hex[:start] + le + hex[start+8:]
+		if fixup.asmIndex >= 0 && fixup.asmIndex < len(ctx.asmParts) {
+			ctx.asmParts[fixup.asmIndex] = "<" + le + ">"
+		}
+	}
+	ctx.hexParts = []string{hex}
+	return nil
+}
+
 func (ctx *emitContext) getHex() string {
+	if err := ctx.applyCodePartLenFixups(); err != nil {
+		panic(err)
+	}
 	return strings.Join(ctx.hexParts, "")
 }
 
 func (ctx *emitContext) getAsm() string {
+	if err := ctx.applyCodePartLenFixups(); err != nil {
+		panic(err)
+	}
 	return strings.Join(ctx.asmParts, " ")
 }
 
@@ -507,6 +582,42 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		// into the artifact's rawScriptSpans so the analyzer can treat the
 		// span as one opaque stack-effect step.
 		ctx.emitRawBytes(op.RawBytes, op.InArity, op.OutArity)
+	case "verify_code_part_len":
+		// R-095: pin SIZE(_codePart) against the code part's own deployed byte
+		// length.
+		//
+		//   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+		//
+		// LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
+		// Script number push: the value being patched IS the length of the
+		// script that contains it, so a width that varied with the value would
+		// be self-referential. OP_BIN2NUM normalises it back to a minimal
+		// Script number so the comparison is numeric.
+		if err := ctx.emitOpcode("OP_DUP"); err != nil {
+			return err
+		}
+		// +1 skips the single-byte push header the 4-byte data push carries.
+		valueByteOffset := ctx.byteLength + 1
+		asmIndex := len(ctx.asmParts)
+		ctx.emitPush(PushValue{Kind: "bytes", Bytes: make([]byte, 4)})
+		if err := ctx.emitOpcode("OP_BIN2NUM"); err != nil {
+			return err
+		}
+		cmp := "OP_GREATERTHANOREQUAL"
+		if op.CodePartLenExact {
+			cmp = "OP_NUMEQUAL"
+		}
+		if err := ctx.emitOpcode(cmp); err != nil {
+			return err
+		}
+		if err := ctx.emitOpcode("OP_VERIFY"); err != nil {
+			return err
+		}
+		ctx.codePartLenFixups = append(ctx.codePartLenFixups, codePartLenFixup{
+			valueByteOffset: valueByteOffset,
+			asmIndex:        asmIndex,
+			delta:           op.CodePartLenDelta,
+		})
 	case "push_codesep_index":
 		// Emit an OP_0 placeholder that the SDK will replace with the adjusted
 		// codeSeparatorIndex at runtime.

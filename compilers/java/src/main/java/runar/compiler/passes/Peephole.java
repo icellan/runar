@@ -135,6 +135,9 @@ public final class Peephole {
         if (op instanceof IfOp o) return o.sourceLoc();
         if (op instanceof runar.compiler.ir.stack.PlaceholderOp o) return o.sourceLoc();
         if (op instanceof runar.compiler.ir.stack.PushCodeSepIndexOp o) return o.sourceLoc();
+        // R-095: verify_code_part_len is inert here — no rewrite rule matches
+        // it and it is never treated as a push — but it does carry a loc.
+        if (op instanceof runar.compiler.ir.stack.VerifyCodePartLenOp o) return o.sourceLoc();
         return null;
     }
 

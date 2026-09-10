@@ -105,6 +105,17 @@ struct EmitContext {
     /// Pending source location to attach to the next emitted opcode.
     pending_source_loc: Option<crate::ir::SourceLocation>,
     raw_script_spans: Vec<RawScriptSpan>,
+    /// R-095 — `verify_code_part_len` length fields awaiting back-patch.
+    code_part_len_fixups: Vec<CodePartLenFixup>,
+}
+
+/// One fixed-width length field reserved by `VerifyCodePartLen`, to be filled
+/// in once the whole script exists.
+#[derive(Debug, Clone)]
+struct CodePartLenFixup {
+    value_byte_offset: usize,
+    asm_index: usize,
+    delta: i64,
 }
 
 impl EmitContext {
@@ -121,6 +132,7 @@ impl EmitContext {
             source_map: Vec::new(),
             pending_source_loc: None,
             raw_script_spans: Vec::new(),
+            code_part_len_fixups: Vec::new(),
         }
     }
 
@@ -210,12 +222,113 @@ impl EmitContext {
         });
     }
 
-    fn get_hex(&self) -> String {
-        self.hex_parts.join("")
+    /// R-095 — emit the 9-byte `SIZE(_codePart)` pin and register its length
+    /// field for back-patching.
+    ///
+    /// ```text
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// ```
+    ///
+    /// `LL LL LL LL` is a fixed-width little-endian field, not a minimal Script
+    /// number push: the value being patched IS the length of the script that
+    /// contains it, so a width that varied with the value would be
+    /// self-referential. `OP_BIN2NUM` normalises the fixed-width field back to a
+    /// minimal Script number so the comparison is numeric.
+    ///
+    /// `exact` is known here (the stack lowerer resolved it once every method
+    /// had been lowered), so only the four length bytes need patching.
+    fn emit_verify_code_part_len(&mut self, delta: i64, exact: bool) -> Result<(), String> {
+        self.emit_opcode("OP_DUP")?;
+        // +1 skips the single-byte push header the 4-byte data push carries.
+        let value_byte_offset = self.byte_length + 1;
+        let asm_index = self.asm_parts.len();
+        self.emit_push(&PushValue::Bytes(vec![0u8; 4]));
+        self.emit_opcode("OP_BIN2NUM")?;
+        self.emit_opcode(if exact { "OP_NUMEQUAL" } else { "OP_GREATERTHANOREQUAL" })?;
+        self.emit_opcode("OP_VERIFY")?;
+        self.code_part_len_fixups.push(CodePartLenFixup {
+            value_byte_offset,
+            asm_index,
+            delta,
+        });
+        Ok(())
     }
 
-    fn get_asm(&self) -> String {
-        self.asm_parts.join(" ")
+    /// Deploy-time byte growth contributed by the codeSepIndex placeholders.
+    ///
+    /// Each is a 1-byte OP_0 in the template that the SDK replaces with a push
+    /// of the adjusted separator index. Post-R-010 that index is always 1 (the
+    /// separator sits at offset 1 and no constructor slot precedes it), which
+    /// bakes as the single opcode byte OP_1 — zero growth. The guard is not
+    /// decoration: if the separator ever moves, the pin's arithmetic goes
+    /// silently wrong and every honest spend of a variable-length-state
+    /// contract becomes unspendable, so fail loudly instead.
+    fn code_sep_index_growth(&self) -> Result<i64, String> {
+        for slot in &self.code_sep_index_slots {
+            if slot.code_sep_index != 1 {
+                return Err(format!(
+                    "emit: codeSepIndex placeholder resolves to {}, not 1; the \
+                     verify_code_part_len pin assumes the post-R-010 layout (a single \
+                     OP_CODESEPARATOR at offset 1, so the placeholder bakes as OP_1 and \
+                     adds no bytes). Recompute the placeholder growth before moving the \
+                     separator.",
+                    slot.code_sep_index
+                ));
+            }
+        }
+        Ok(0)
+    }
+
+    /// R-095 — resolve every `verify_code_part_len` length field.
+    ///
+    /// Runs once the whole script has been emitted, because the value each
+    /// field carries is the DEPLOYED length of the very script it sits in:
+    ///
+    /// ```text
+    /// deployedCodeLen = emitted template length
+    ///                 + growth of the constructor-arg placeholders (`delta`)
+    ///                 + growth of the codeSepIndex placeholders (0)
+    /// ```
+    ///
+    /// Idempotent: it overwrites a fixed-width field rather than splicing, so
+    /// the script's length never changes and re-running produces the same bytes.
+    fn apply_code_part_len_fixups(&mut self) -> Result<(), String> {
+        if self.code_part_len_fixups.is_empty() {
+            return Ok(());
+        }
+        let code_sep_growth = self.code_sep_index_growth()?;
+        let mut hex = self.hex_parts.join("");
+        let fixups = self.code_part_len_fixups.clone();
+        for fixup in &fixups {
+            let deployed_len = self.byte_length as i64 + fixup.delta + code_sep_growth;
+            if deployed_len < 0 || deployed_len > 0x7fff_ffff {
+                return Err(format!(
+                    "emit: code part length {} does not fit the 4-byte pin field",
+                    deployed_len
+                ));
+            }
+            let mut le = String::new();
+            for i in 0..4 {
+                le.push_str(&format!("{:02x}", (deployed_len >> (8 * i)) & 0xff));
+            }
+            let start = fixup.value_byte_offset * 2;
+            hex = format!("{}{}{}", &hex[..start], le, &hex[start + 8..]);
+            if fixup.asm_index < self.asm_parts.len() {
+                self.asm_parts[fixup.asm_index] = format!("<{}>", le);
+            }
+        }
+        self.hex_parts = vec![hex];
+        Ok(())
+    }
+
+    fn get_hex(&mut self) -> Result<String, String> {
+        self.apply_code_part_len_fixups()?;
+        Ok(self.hex_parts.join(""))
+    }
+
+    fn get_asm(&mut self) -> Result<String, String> {
+        self.apply_code_part_len_fixups()?;
+        Ok(self.asm_parts.join(" "))
     }
 }
 
@@ -395,6 +508,12 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
             ctx.emit_raw_bytes(bytes, *in_arity, *out_arity);
             Ok(())
         }
+        StackOp::VerifyCodePartLen { delta, exact } => {
+            // R-095: pin SIZE(_codePart) against the code part's own deployed
+            // byte length. Fixed-width field, back-patched after the whole
+            // script exists.
+            ctx.emit_verify_code_part_len(*delta, *exact)
+        }
         StackOp::PushCodeSepIndex => {
             // Emit an OP_0 placeholder that the SDK will replace with the
             // adjusted codeSeparatorIndex at runtime.
@@ -504,9 +623,11 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         emit_method_dispatch(&refs, &mut ctx)?;
     }
 
+    let script_hex = ctx.get_hex()?;
+    let script_asm = ctx.get_asm()?;
     Ok(EmitResult {
-        script_hex: ctx.get_hex(),
-        script_asm: ctx.get_asm(),
+        script_hex,
+        script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
         code_separator_index: ctx.code_separator_index,
@@ -560,9 +681,11 @@ pub fn emit_method(method: &StackMethod) -> Result<EmitResult, String> {
         ctx.pending_source_loc = method.source_locs.get(idx).cloned().flatten();
         emit_stack_op(op, &mut ctx)?;
     }
+    let script_hex = ctx.get_hex()?;
+    let script_asm = ctx.get_asm()?;
     Ok(EmitResult {
-        script_hex: ctx.get_hex(),
-        script_asm: ctx.get_asm(),
+        script_hex,
+        script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
         code_separator_index: ctx.code_separator_index,

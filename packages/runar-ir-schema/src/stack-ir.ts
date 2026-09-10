@@ -111,6 +111,22 @@ export interface PushCodeSepIndexOp {
 }
 
 /**
+ * R-095 — pin `SIZE(_codePart)` against the code part's own DEPLOYED byte
+ * length. See `packages/runar-compiler/src/ir/stack-ir.ts` for the full
+ * contract; the emitter reserves a fixed-width 9-byte sequence and
+ * back-patches the length plus the comparison opcode after the whole script
+ * has been emitted.
+ */
+export interface VerifyCodePartLenOp {
+  op: 'verify_code_part_len';
+  /** Deploy-time byte growth of the template's OP_0 placeholders. */
+  delta: number;
+  /** true -> exact equality pin; false -> lower-bound pin. */
+  exact: boolean;
+  sourceLoc?: StackSourceLoc;
+}
+
+/**
  * Opaque raw byte span produced by lowering a `raw_script` ANF node.
  *
  * Emitted verbatim by the emit pass. Treated as a hard barrier by every
@@ -142,4 +158,5 @@ export type StackOp =
   | TuckOp
   | PlaceholderOp
   | PushCodeSepIndexOp
+  | VerifyCodePartLenOp
   | RawBytesOp;

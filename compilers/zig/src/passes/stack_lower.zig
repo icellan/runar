@@ -3035,6 +3035,26 @@ const LowerCtx = struct {
         // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
         try self.emitOp(.op_size);
         try self.stack.push(self.allocator, null);
+
+        // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state
+        //     path.
+        //
+        //     Clause 8a pins the split point through the REMAINDER's length,
+        //     which only works while the state section is a compile-time
+        //     constant. With a ByteString state field it is not, 8a is
+        //     skipped, and the only surviving constraint on where the code
+        //     part ENDS is 8b's `rest[0] == 0x6a` — which a genuine PREFIX of
+        //     the executing script satisfies at any offset whose byte happens
+        //     to be 0x6a. The state's length is unknown at compile time; the
+        //     CODE's is not, so pin that instead. See the TypeScript tier for
+        //     the full argument.
+        if (self.fixedStateSectionLength() == null) {
+            // delta/exact are refined by pinCodePartLength once every method
+            // has been lowered; the defaults are the sound ones (a lower bound
+            // of emittedLength + 0 holds for any deployment).
+            try self.emit(.{ .verify_code_part_len = .{ .delta = 0, .exact = false } });
+        }
+
         try self.emitPushInt(2);
         try self.stack.push(self.allocator, null);
         try self.emitOp(.op_sub);
@@ -5612,6 +5632,8 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         ctx.owned_push_data = .empty;
     }
 
+    pinCodePartLength(methods.items, program.properties);
+
     return .{
         .methods = try allocator.dupe(types.StackMethod, methods.items),
         .contract_name = program.contract_name,
@@ -5619,6 +5641,84 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         .constructor_params = program.constructor.params,
         .owned_push_data = try allocator.dupe([]u8, owned_push_data.items),
     };
+}
+
+/// Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
+/// of this type occupies in the template, or null when the type has no
+/// compile-time width.
+///
+/// Mirrors the SDK's `encodeArg`: a fixed-size data type bakes as
+/// `<1-byte push header><N value bytes>`, growing the script by N; a boolean
+/// bakes as one OP_TRUE/OP_0 opcode byte, growing it by nothing. `bigint`
+/// (minimally-encoded Script number) and `ByteString` (arbitrary-length data
+/// push) depend on the VALUE, which the compiler never sees.
+fn constructorSlotGrowth(type_name: []const u8) ?i64 {
+    if (std.mem.eql(u8, type_name, "PubKey")) return 33;
+    if (std.mem.eql(u8, type_name, "Sha256")) return 32;
+    if (std.mem.eql(u8, type_name, "Addr")) return 20;
+    if (std.mem.eql(u8, type_name, "Ripemd160")) return 20;
+    if (std.mem.eql(u8, type_name, "Point")) return 64;
+    if (std.mem.eql(u8, type_name, "P256Point")) return 64;
+    if (std.mem.eql(u8, type_name, "P384Point")) return 96;
+    if (std.mem.eql(u8, type_name, "boolean")) return 0;
+    return null;
+}
+
+/// R-095 — resolve delta/exact on every `verify_code_part_len` instruction.
+///
+/// A constructor slot exists only where a property is actually LOADED, and a
+/// method is lowered before the methods after it, so no single method knows
+/// the contract's full placeholder set. This runs once the whole program is
+/// lowered and counts the placeholders that were really emitted —
+/// over-counting would inflate the pin and make every honest spend
+/// unspendable. `lower` only ever appends PUBLIC methods, so the constructor's
+/// placeholders (which the emitter never writes) are already excluded.
+fn pinCodePartLength(methods: []types.StackMethod, properties: []const types.ANFProperty) void {
+    var pin_count: usize = 0;
+    var delta: i64 = 0;
+    var exact = true;
+
+    for (methods) |m| {
+        for (m.instructions) |inst| {
+            switch (inst) {
+                .verify_code_part_len => pin_count += 1,
+                .placeholder => |ph| {
+                    // Matches the paramIndex space lowerLoadProp assigns.
+                    var ctor_index: u32 = 0;
+                    var type_name: ?[]const u8 = null;
+                    for (properties) |prop| {
+                        if (prop.initial_value != null) continue;
+                        if (ctor_index == ph.param_index) {
+                            type_name = prop.type_name;
+                            break;
+                        }
+                        ctor_index += 1;
+                    }
+                    if (type_name) |t| {
+                        if (constructorSlotGrowth(t)) |growth| {
+                            delta += growth;
+                        } else {
+                            // No compile-time width. Growth is never negative,
+                            // so the running sum stays a sound lower bound.
+                            exact = false;
+                        }
+                    } else {
+                        exact = false;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    if (pin_count == 0) return;
+
+    for (methods) |m| {
+        for (m.instructions) |*inst| {
+            if (inst.* == .verify_code_part_len) {
+                inst.* = .{ .verify_code_part_len = .{ .delta = delta, .exact = exact } };
+            }
+        }
+    }
 }
 
 fn countPublicMethods(methods: []const types.ANFMethod) usize {

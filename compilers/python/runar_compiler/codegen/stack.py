@@ -108,6 +108,15 @@ class StackOp:
     in_arity: int = 0
     out_arity: int = 0
 
+    # verify_code_part_len (R-095) -- pin SIZE(_codePart) against the code
+    # part's own DEPLOYED byte length. code_part_len_delta is the deploy-time
+    # byte growth of the template's OP_0 placeholders; code_part_len_exact says
+    # whether that growth is fully type-determined (equality pin) or only a
+    # lower bound. Both are resolved by _pin_code_part_length once every method
+    # has been lowered; the emitter back-patches the length itself.
+    code_part_len_delta: int = 0
+    code_part_len_exact: bool = False
+
 
 @dataclass
 class StackMethod:
@@ -3519,6 +3528,32 @@ class _LoweringContext:
         # 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
         self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
         self.sm.push("")
+
+        # 6a. R-095 -- pin SIZE(codePart) itself on the VARIABLE-length-state
+        #     path.
+        #
+        #     Clause 8a below pins the split point through the REMAINDER's
+        #     length, which only works while the state section is a
+        #     compile-time constant. With a ByteString state field it is not,
+        #     8a is skipped, and the only surviving constraint on where the code
+        #     part ENDS is 8b's ``rest[0] == 0x6a`` -- which a genuine PREFIX of
+        #     the executing script satisfies at any offset whose byte happens to
+        #     be 0x6a. The state's length is unknown at compile time; the CODE's
+        #     is not, so pin that instead. See the TypeScript tier for the full
+        #     argument.
+        #
+        #     Stack effect is NET ZERO: the pin consumes nothing and leaves
+        #     SIZE(codePart) where it found it, so the stack map is untouched.
+        if self._fixed_state_section_length() is None:
+            # delta / exact are refined by _pin_code_part_length once every
+            # method has been lowered; the defaults are the sound ones (a lower
+            # bound of emitted_length + 0 holds for any deployment).
+            self.emit_op(StackOp(
+                op="verify_code_part_len",
+                code_part_len_delta=0,
+                code_part_len_exact=False,
+            ))
+
         self.emit_op(StackOp(op="push", value=big_int_push(2)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_SUB"))
@@ -5119,7 +5154,92 @@ def _lower_to_stack_inner(program: ANFProgram) -> list[StackMethod]:
         )
         methods.append(sm)
 
+    _pin_code_part_length(methods, program.properties)
+
     return methods
+
+
+def _constructor_slot_growth(typ: str) -> tuple[int, bool]:
+    """Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
+    of this type occupies in the template, and whether that growth is known at
+    compile time at all.
+
+    Mirrors the SDK's ``encodeArg``: a fixed-size data type bakes as
+    ``<1-byte push header><N value bytes>``, growing the script by N; a boolean
+    bakes as one OP_TRUE/OP_0 opcode byte, growing it by nothing. ``bigint``
+    (minimally-encoded Script number) and ``ByteString`` (arbitrary-length data
+    push) depend on the VALUE, which the compiler never sees.
+    """
+    if typ == "PubKey":
+        return 33, True
+    if typ == "Sha256":
+        return 32, True
+    if typ in ("Addr", "Ripemd160"):
+        return 20, True
+    if typ in ("Point", "P256Point"):
+        return 64, True
+    if typ == "P384Point":
+        return 96, True
+    if typ == "boolean":
+        return 0, True
+    return 0, False
+
+
+def _pin_code_part_length(
+    methods: list[StackMethod], properties: list[ANFProperty]
+) -> None:
+    """R-095 -- resolve ``code_part_len_delta`` / ``code_part_len_exact`` on
+    every ``verify_code_part_len`` op.
+
+    A constructor slot exists only where a property is actually LOADED, and a
+    method is lowered before the methods after it, so no single method knows the
+    contract's full placeholder set. This runs once the whole program is lowered
+    and counts the placeholders that were really emitted -- over-counting would
+    inflate the pin and make every honest spend unspendable. Methods that
+    ``emit`` never writes (the constructor) must not be counted; this tier
+    already drops the constructor before lowering, and the guard below keeps the
+    filter explicit and identical to the TS / Go tiers.
+    """
+    pins: list[StackOp] = []
+    placeholders: list[int] = []
+
+    def walk(ops: list[StackOp]) -> None:
+        for op in ops:
+            if op.op == "if":
+                walk(op.then)
+                walk(op.else_ops)
+            elif op.op == "placeholder":
+                placeholders.append(op.param_index)
+            elif op.op == "verify_code_part_len":
+                pins.append(op)
+
+    for m in methods:
+        if m.name == "constructor":
+            continue
+        walk(m.ops)
+    if not pins:
+        return
+
+    # Matches the paramIndex space _lower_load_prop assigns.
+    ctor_props = [p for p in properties if p.initial_value is None]
+
+    delta = 0
+    exact = True
+    for param_index in placeholders:
+        typ = ""
+        if 0 <= param_index < len(ctor_props):
+            typ = ctor_props[param_index].type
+        growth, known = _constructor_slot_growth(typ)
+        if not known:
+            # No compile-time width. Growth is never negative, so the running
+            # sum stays a sound lower bound -- just not an exact one.
+            exact = False
+        else:
+            delta += growth
+
+    for pin in pins:
+        pin.code_part_len_delta = delta
+        pin.code_part_len_exact = exact
 
 
 def _compute_uses_code_part(

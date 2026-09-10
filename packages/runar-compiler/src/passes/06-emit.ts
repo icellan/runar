@@ -267,6 +267,12 @@ class EmitContext {
   readonly sourceMap: SourceMapping[] = [];
   readonly constructorSlots: ConstructorSlot[] = [];
   readonly codeSepIndexSlots: CodeSepIndexSlot[] = [];
+  /** R-095 — `verify_code_part_len` length fields awaiting back-patch. */
+  private readonly codePartLenFixups: {
+    valueByteOffset: number;
+    asmIndex: number;
+    delta: number;
+  }[] = [];
   /** Byte offset of the last OP_CODESEPARATOR (undefined if none emitted) */
   codeSeparatorIndex?: number;
   /** Per-method OP_CODESEPARATOR byte offsets (in method emission order) */
@@ -337,6 +343,59 @@ class EmitContext {
     this.constructorSlots.push({ paramIndex, byteOffset });
   }
 
+  /**
+   * R-095 — emit the 9-byte `SIZE(_codePart)` pin and register its length
+   * field for back-patching.
+   *
+   *     OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+   *
+   * `LL LL LL LL` is a fixed-width little-endian field, not a minimal Script
+   * number push: the value being patched IS the length of the script that
+   * contains it, so a width that varied with the value would be
+   * self-referential. `OP_BIN2NUM` normalises the fixed-width field back to a
+   * minimal Script number so the comparison is numeric.
+   *
+   * `exact` is known here (the stack lowerer resolved it once every method had
+   * been lowered), so only the four length bytes need patching.
+   */
+  emitVerifyCodePartLen(delta: number, exact: boolean): void {
+    this.emitOpcode('OP_DUP');
+    // +1 skips the single-byte push header the 4-byte data push carries.
+    const valueByteOffset = this.byteLength + 1;
+    const asmIndex = this.asmParts.length;
+    this.emitPush(new Uint8Array(4));
+    this.emitOpcode('OP_BIN2NUM');
+    this.emitOpcode(exact ? 'OP_NUMEQUAL' : 'OP_GREATERTHANOREQUAL');
+    this.emitOpcode('OP_VERIFY');
+    this.codePartLenFixups.push({ valueByteOffset, asmIndex, delta });
+  }
+
+  /**
+   * Deploy-time byte growth contributed by the codeSepIndex placeholders.
+   *
+   * Each is a 1-byte OP_0 in the template that the SDK replaces with a push of
+   * the adjusted separator index. Post-R-010 that index is always 1 (see
+   * N-032: the separator sits at offset 1 and no constructor slot precedes
+   * it), which bakes as the single opcode byte OP_1 — zero growth. The guard
+   * is not decoration: if the separator ever moves, the pin's arithmetic goes
+   * silently wrong and every honest spend of a variable-length-state contract
+   * becomes unspendable, so fail loudly instead.
+   */
+  private codeSepIndexGrowth(): number {
+    let growth = 0;
+    for (const slot of this.codeSepIndexSlots) {
+      if (slot.codeSepIndex !== 1) {
+        throw new Error(
+          `emit: codeSepIndex placeholder resolves to ${slot.codeSepIndex}, not 1. ` +
+            `The verify_code_part_len pin assumes the post-R-010 layout (a single ` +
+            `OP_CODESEPARATOR at offset 1, so the placeholder bakes as OP_1 and adds ` +
+            `no bytes). Recompute the placeholder growth before moving the separator.`,
+        );
+      }
+    }
+    return growth;
+  }
+
   emitCodeSepIndexPlaceholder(): void {
     const byteOffset = this.byteLength;
     const codeSepIndex = this.codeSeparatorIndex ?? 0;
@@ -377,11 +436,46 @@ class EmitContext {
     });
   }
 
+  /**
+   * R-095 — resolve every `verify_code_part_len` length field.
+   *
+   * Runs once the whole script has been emitted, because the value each field
+   * carries is the DEPLOYED length of the very script it sits in:
+   *
+   *     deployedCodeLen = emitted template length
+   *                     + growth of the constructor-arg placeholders (`delta`)
+   *                     + growth of the codeSepIndex placeholders (0)
+   *
+   * Idempotent: it overwrites a fixed-width field rather than splicing, so the
+   * script's length never changes and re-running produces the same bytes.
+   */
+  private applyCodePartLenFixups(): void {
+    if (this.codePartLenFixups.length === 0) return;
+    const codeSepGrowth = this.codeSepIndexGrowth();
+    let hex = this.hexParts.join('');
+    for (const fixup of this.codePartLenFixups) {
+      const deployedLen = this.byteLength + fixup.delta + codeSepGrowth;
+      if (deployedLen < 0 || deployedLen > 0x7fffffff) {
+        throw new Error(`emit: code part length ${deployedLen} does not fit the 4-byte pin field`);
+      }
+      let le = '';
+      for (let i = 0; i < 4; i++) {
+        le += byteToHex((deployedLen >>> (8 * i)) & 0xff);
+      }
+      const start = fixup.valueByteOffset * 2;
+      hex = hex.slice(0, start) + le + hex.slice(start + 8);
+      this.asmParts[fixup.asmIndex] = `<${le}>`;
+    }
+    this.hexParts = [hex];
+  }
+
   getHex(): string {
+    this.applyCodePartLenFixups();
     return this.hexParts.join('');
   }
 
   getAsm(): string {
+    this.applyCodePartLenFixups();
     return this.asmParts.join(' ');
   }
 }
@@ -448,6 +542,12 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
 
     case 'placeholder':
       ctx.emitPlaceholder(op.paramIndex, op.paramName);
+      break;
+
+    case 'verify_code_part_len':
+      // R-095: pin SIZE(_codePart) against the code part's own deployed byte
+      // length. Fixed-width field, back-patched after the whole script exists.
+      ctx.emitVerifyCodePartLen(op.delta, op.exact);
       break;
 
     case 'push_codesep_index':

@@ -26,6 +26,7 @@ import runar.compiler.ir.stack.StackOp;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.ir.stack.SwapOp;
 import runar.compiler.ir.stack.TuckOp;
+import runar.compiler.ir.stack.VerifyCodePartLenOp;
 
 /**
  * Stack IR → Bitcoin Script hex emission (Pass 6).
@@ -320,6 +321,12 @@ public final class Emit {
             }
         }
 
+        // R-095: the pin's length field can only be filled in once the whole
+        // script exists. Mirrors the Go tier's applyCodePartLenFixups call from
+        // getHex()/getAsm(); runResultFull is the single funnel every emit
+        // entry point goes through, so once here is enough.
+        ctx.applyCodePartLenFixups();
+
         return new EmitResultFull(
             publicMethods.isEmpty() ? "" : ctx.hex.toString(),
             List.copyOf(ctx.rawScriptSpans),
@@ -397,6 +404,11 @@ public final class Emit {
             ctx.emitPlaceholder(ph.paramIndex().intValueExact());
         } else if (op instanceof PushCodeSepIndexOp) {
             ctx.emitCodeSepIndexPlaceholder();
+        } else if (op instanceof VerifyCodePartLenOp v) {
+            // R-095: pin SIZE(_codePart) against the code part's own deployed
+            // byte length. Fixed-width field, back-patched after the whole
+            // script exists.
+            ctx.emitVerifyCodePartLen(v.delta(), v.exact());
         } else if (op instanceof RawBytesOp rb) {
             // Opaque opcode-byte span from a raw_script ANF node. Written
             // verbatim with no re-encoding; the declared arities are
@@ -426,6 +438,7 @@ public final class Emit {
         if (op instanceof IfOp o) return o.sourceLoc();
         if (op instanceof PlaceholderOp o) return o.sourceLoc();
         if (op instanceof PushCodeSepIndexOp o) return o.sourceLoc();
+        if (op instanceof VerifyCodePartLenOp o) return o.sourceLoc();
         // RawBytesOp / others have no sourceLoc.
         return null;
     }
@@ -456,6 +469,8 @@ public final class Emit {
         final java.util.List<ConstructorSlot> constructorSlots = new java.util.ArrayList<>();
         final java.util.List<CodeSepIndexSlot> codeSepIndexSlots = new java.util.ArrayList<>();
         final java.util.List<Integer> codeSeparatorIndices = new java.util.ArrayList<>();
+        /** R-095: verify_code_part_len length fields awaiting back-patch. */
+        final java.util.List<CodePartLenFixup> codePartLenFixups = new java.util.ArrayList<>();
         /** Byte offset of the most recent OP_CODESEPARATOR; -1 when none was emitted. */
         int codeSeparatorIndex = -1;
         int byteLength = 0;
@@ -546,7 +561,101 @@ public final class Emit {
             rawScriptSpans.add(new RawScriptSpan(offset, bytes.length, inArity, outArity));
             opcodeIndex++;
         }
+
+        /**
+         * R-095 — emit the 9-byte {@code SIZE(_codePart)} pin and register its
+         * length field for back-patching.
+         *
+         * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY</pre>
+         *
+         * <p>{@code LL LL LL LL} is a fixed-width little-endian field, not a
+         * minimal Script number push: the value being patched IS the length of
+         * the script that contains it, so a width that varied with the value
+         * would be self-referential. {@code OP_BIN2NUM} normalises the
+         * fixed-width field back to a minimal Script number so the comparison
+         * is numeric.
+         */
+        void emitVerifyCodePartLen(int delta, boolean exact) {
+            emitOpcode("OP_DUP");
+            // +1 skips the single-byte push header the 4-byte data push carries.
+            int valueByteOffset = byteLength + 1;
+            emitPush(PushValue.ofHex("00000000"));
+            emitOpcode("OP_BIN2NUM");
+            emitOpcode(exact ? "OP_NUMEQUAL" : "OP_GREATERTHANOREQUAL");
+            emitOpcode("OP_VERIFY");
+            codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, delta));
+        }
+
+        /**
+         * Deploy-time byte growth contributed by the codeSepIndex placeholders.
+         *
+         * <p>Each is a 1-byte OP_0 in the template that the SDK replaces with a
+         * push of the adjusted separator index. Post-R-010 that index is always
+         * 1 (the separator sits at offset 1 and no constructor slot precedes
+         * it), which bakes as the single opcode byte OP_1 — zero growth. The
+         * guard is not decoration: if the separator ever moves, the pin's
+         * arithmetic goes silently wrong and every honest spend of a
+         * variable-length-state contract becomes unspendable, so fail loudly
+         * instead.
+         */
+        private int codeSepIndexGrowth() {
+            for (CodeSepIndexSlot slot : codeSepIndexSlots) {
+                if (slot.codeSepIndex() != 1) {
+                    throw new RuntimeException(
+                        "emit: codeSepIndex placeholder resolves to " + slot.codeSepIndex()
+                            + ", not 1. The verify_code_part_len pin assumes the post-R-010 layout"
+                            + " (a single OP_CODESEPARATOR at offset 1, so the placeholder bakes as"
+                            + " OP_1 and adds no bytes). Recompute the placeholder growth before"
+                            + " moving the separator."
+                    );
+                }
+            }
+            return 0;
+        }
+
+        /**
+         * R-095 — resolve every {@code verify_code_part_len} length field.
+         *
+         * <p>Runs once the whole script has been emitted, because the value each
+         * field carries is the DEPLOYED length of the very script it sits in:
+         *
+         * <pre>
+         * deployedCodeLen = emitted template length
+         *                 + growth of the constructor-arg placeholders (delta)
+         *                 + growth of the codeSepIndex placeholders (0)
+         * </pre>
+         *
+         * <p>Idempotent: it overwrites a fixed-width field rather than splicing,
+         * so the script's length never changes and re-running produces the same
+         * bytes.
+         */
+        void applyCodePartLenFixups() {
+            if (codePartLenFixups.isEmpty()) return;
+            int codeSepGrowth = codeSepIndexGrowth();
+            for (CodePartLenFixup fixup : codePartLenFixups) {
+                long deployedLen = (long) byteLength + fixup.delta() + codeSepGrowth;
+                if (deployedLen < 0 || deployedLen > 0x7fffffffL) {
+                    throw new RuntimeException(
+                        "emit: code part length " + deployedLen + " does not fit the 4-byte pin field"
+                    );
+                }
+                StringBuilder le = new StringBuilder(8);
+                for (int i = 0; i < 4; i++) {
+                    le.append(byteToHex((int) ((deployedLen >> (8 * i)) & 0xff)));
+                }
+                int start = fixup.valueByteOffset() * 2;
+                hex.replace(start, start + 8, le.toString());
+            }
+        }
     }
+
+    /**
+     * R-095: one fixed-width length field reserved by
+     * {@code verify_code_part_len}, to be filled in once the whole script
+     * exists. {@code delta} is the deploy-time growth of the constructor-arg
+     * placeholders.
+     */
+    private record CodePartLenFixup(int valueByteOffset, int delta) {}
 
     // ------------------------------------------------------------------
     // Script number encoding

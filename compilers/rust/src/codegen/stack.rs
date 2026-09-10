@@ -50,6 +50,38 @@ pub enum StackOp {
         param_name: String,
     },
     PushCodeSepIndex,
+    /// R-095 — pin `SIZE(_codePart)` against the code part's own DEPLOYED byte
+    /// length.
+    ///
+    /// Consumes nothing: expects the numeric `SIZE(_codePart)` on top of the
+    /// stack and leaves it there, aborting via OP_VERIFY when the claimed code
+    /// part is not the length the deployed script actually has.
+    ///
+    /// The length is not known when the stack lowerer runs (byte offsets only
+    /// exist after `emit`), so the emitter resolves it: it reserves a
+    /// FIXED-WIDTH 9-byte sequence
+    ///
+    /// ```text
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// ```
+    ///
+    /// and back-patches `LL LL LL LL` (little-endian) once the whole script has
+    /// been emitted. The width is fixed so that the patched value can never
+    /// change the length it is describing — a minimal script-number push would
+    /// be self-referential.
+    ///
+    /// `delta` is the deploy-time byte GROWTH of the template's OP_0
+    /// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`.
+    /// `exact` says whether every placeholder's growth is type-determined:
+    /// `true` → equality pin (OP_NUMEQUAL), `false` → lower-bound pin
+    /// (OP_GREATERTHANOREQUAL). Both are resolved by `pin_code_part_length`
+    /// once every method has been lowered.
+    VerifyCodePartLen {
+        /// Deploy-time byte growth of the template's OP_0 placeholders.
+        delta: i64,
+        /// true → exact equality pin; false → lower-bound pin.
+        exact: bool,
+    },
     /// An opaque opcode-byte span emitted verbatim by a `raw_script` ANF node.
     /// The stack effect is declared via `in_arity` / `out_arity`; the bytes are
     /// never inspected and the peephole optimizer treats this op as a hard
@@ -3746,6 +3778,35 @@ impl LoweringContext {
         // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
         self.emit_op(StackOp::Opcode("OP_SIZE".into()));
         self.sm.push("");
+
+        // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state
+        //     path.
+        //
+        //     Clause 8a below pins the split point through the REMAINDER's
+        //     length, which only works while the state section is a
+        //     compile-time constant. With a ByteString state field it is not,
+        //     8a is skipped, and the only surviving constraint on where the
+        //     code part ENDS is 8b's `rest[0] == 0x6a` — which a genuine PREFIX
+        //     of the executing script satisfies at any offset whose byte
+        //     happens to be 0x6a.
+        //
+        //     The state's length is unknown at compile time; the CODE's is not.
+        //     The emitted template's byte length is fixed once emit finishes,
+        //     and the only thing deployment adds is the growth of the OP_0
+        //     placeholders. So the emitter back-patches `emittedLength + delta`
+        //     and pins SIZE(codePart) against it directly, which no truncation
+        //     can satisfy. Net stack effect is zero.
+        //
+        //     Cost: 9 bytes per authenticating method, and only on this path —
+        //     fixed-size-state contracts keep clause 8a untouched.
+        if self.fixed_state_section_length().is_none() {
+            // delta / exact are refined by `pin_code_part_length` once every
+            // method has been lowered and the full placeholder set is known.
+            // The defaults here are the SOUND ones: a lower bound of
+            // `emittedLength + 0` holds for any deployment.
+            self.emit_op(StackOp::VerifyCodePartLen { delta: 0, exact: false });
+        }
+
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_SUB".into()));
@@ -3764,7 +3825,8 @@ impl LoweringContext {
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
 
-        // 8a. Pin the split point.
+        // 8a. Pin the split point. Variable-length state layouts are pinned by
+        //     clause 6a instead, from the CODE side.
         if let Some(fixed_state_len) = self.fixed_state_section_length() {
             self.emit_op(StackOp::Opcode("OP_SIZE".into()));
             self.sm.push("");
@@ -5654,7 +5716,119 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
         methods.push(sm);
     }
 
+    pin_code_part_length(&mut methods, &program.properties);
+
     Ok(methods)
+}
+
+/// Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot of
+/// this type occupies in the template, or `None` when the type has no
+/// compile-time width.
+///
+/// Mirrors the SDK's `encodeArg`: a fixed-size data type bakes as
+/// `<1-byte push header><N value bytes>`, so it grows the script by N; a
+/// boolean bakes as a single OP_TRUE/OP_0 opcode, so it grows it by nothing.
+/// `bigint` (minimally-encoded Script number) and `ByteString`
+/// (arbitrary-length data push) depend on the VALUE, which the compiler never
+/// sees — those return `None` and demote the pin to a lower bound.
+fn constructor_slot_growth(prop_type: &str) -> Option<i64> {
+    match prop_type {
+        "PubKey" => Some(33),
+        "Sha256" => Some(32),
+        "Addr" | "Ripemd160" => Some(20),
+        "Point" | "P256Point" => Some(64),
+        "P384Point" => Some(96),
+        "boolean" => Some(0),
+        _ => None,
+    }
+}
+
+/// Collect every `Placeholder` param index and note whether any
+/// `VerifyCodePartLen` pin is present, recursing into if/else branches.
+fn collect_code_part_len_inputs(ops: &[StackOp], placeholders: &mut Vec<usize>, has_pin: &mut bool) {
+    for op in ops {
+        match op {
+            StackOp::If { then_ops, else_ops } => {
+                collect_code_part_len_inputs(then_ops, placeholders, has_pin);
+                collect_code_part_len_inputs(else_ops, placeholders, has_pin);
+            }
+            StackOp::Placeholder { param_index, .. } => placeholders.push(*param_index),
+            StackOp::VerifyCodePartLen { .. } => *has_pin = true,
+            _ => {}
+        }
+    }
+}
+
+/// Write the resolved `delta` / `exact` onto every `VerifyCodePartLen` op.
+fn assign_code_part_len(ops: &mut [StackOp], new_delta: i64, new_exact: bool) {
+    for op in ops.iter_mut() {
+        match op {
+            StackOp::If { then_ops, else_ops } => {
+                assign_code_part_len(then_ops, new_delta, new_exact);
+                assign_code_part_len(else_ops, new_delta, new_exact);
+            }
+            StackOp::VerifyCodePartLen { delta, exact } => {
+                *delta = new_delta;
+                *exact = new_exact;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// R-095 — resolve `delta` / `exact` on every `VerifyCodePartLen` op.
+///
+/// A constructor slot exists only where a property is actually LOADED, and a
+/// method is lowered before the methods after it, so no single method knows the
+/// contract's full placeholder set. This runs once the whole program is lowered
+/// and counts the placeholders that were really emitted, so an unused readonly
+/// property contributes nothing — over-counting would inflate the pin and make
+/// every honest spend unspendable.
+///
+/// The `constructor` StackMethod is skipped because `emit` never writes it, so
+/// the placeholders it carries never become deploy-time slots. (Rust's
+/// `lower_to_stack_inner` already drops the constructor before this point; the
+/// filter mirrors `emit`'s own so the two can never drift.)
+fn pin_code_part_length(methods: &mut [StackMethod], properties: &[ANFProperty]) {
+    let mut placeholders: Vec<usize> = Vec::new();
+    let mut has_pin = false;
+    for m in methods.iter() {
+        if m.name == "constructor" {
+            continue;
+        }
+        collect_code_part_len_inputs(&m.ops, &mut placeholders, &mut has_pin);
+    }
+    if !has_pin {
+        return;
+    }
+
+    // Matches the paramIndex space `ctor_param_index_or_panic` assigns.
+    let ctor_props: Vec<&ANFProperty> = properties
+        .iter()
+        .filter(|p| p.initial_value.is_none())
+        .collect();
+
+    let mut delta: i64 = 0;
+    let mut exact = true;
+    for param_index in placeholders {
+        let prop_type = ctor_props
+            .get(param_index)
+            .map(|p| p.prop_type.as_str())
+            .unwrap_or("");
+        match constructor_slot_growth(prop_type) {
+            // No compile-time width. Growth is never negative, so the running
+            // sum stays a sound lower bound — just not an exact one.
+            None => exact = false,
+            Some(growth) => delta += growth,
+        }
+    }
+
+    for m in methods.iter_mut() {
+        if m.name == "constructor" {
+            continue;
+        }
+        assign_code_part_len(&mut m.ops, delta, exact);
+    }
 }
 
 /// Check whether a method's body contains a CheckPreimage binding,

@@ -42,6 +42,15 @@ type StackOp struct {
 	RawBytes []byte
 	InArity  int
 	OutArity int
+
+	// verify_code_part_len (R-095) — pin SIZE(_codePart) against the code
+	// part's own DEPLOYED byte length. CodePartLenDelta is the deploy-time
+	// byte growth of the template's OP_0 placeholders; CodePartLenExact says
+	// whether that growth is fully type-determined (equality pin) or only a
+	// lower bound. Both are resolved by pinCodePartLength once every method
+	// has been lowered; the emitter back-patches the length itself.
+	CodePartLenDelta int
+	CodePartLenExact bool
 }
 
 // PushValue holds the typed value for a push operation.
@@ -3927,6 +3936,24 @@ func (ctx *loweringContext) emitCodePartAuthentication() {
 	// 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode excludes).
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 	ctx.sm.push("")
+
+	// 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state path.
+	//
+	//     Clause 8a pins the split point through the REMAINDER's length, which
+	//     only works while the state section is a compile-time constant. With a
+	//     ByteString state field it is not, 8a is skipped, and the only
+	//     surviving constraint on where the code part ENDS is 8b's
+	//     `rest[0] == 0x6a` — which a genuine PREFIX of the executing script
+	//     satisfies at any offset whose byte happens to be 0x6a. The state's
+	//     length is unknown at compile time; the CODE's is not, so pin that
+	//     instead. See the TypeScript tier for the full argument.
+	if ctx.fixedStateSectionLength() < 0 {
+		// Delta/Exact are refined by pinCodePartLength once every method has
+		// been lowered; the defaults are the sound ones (a lower bound of
+		// emittedLength + 0 holds for any deployment).
+		ctx.emitOp(StackOp{Op: "verify_code_part_len", CodePartLenDelta: 0, CodePartLenExact: false})
+	}
+
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
@@ -5099,7 +5126,106 @@ func LowerToStack(program *ir.ANFProgram, opts ...LowerToStackOptions) (result [
 		methods = append(methods, *sm)
 	}
 
+	pinCodePartLength(methods, program.Properties)
+
 	return methods, nil
+}
+
+// constructorSlotGrowth returns the deploy-time byte GROWTH of the single OP_0
+// placeholder a constructor slot of this type occupies in the template, and
+// whether that growth is known at compile time at all.
+//
+// Mirrors the SDK's encodeArg: a fixed-size data type bakes as
+// <1-byte push header><N value bytes>, growing the script by N; a boolean
+// bakes as one OP_TRUE/OP_0 opcode byte, growing it by nothing. `bigint`
+// (minimally-encoded Script number) and `ByteString` (arbitrary-length data
+// push) depend on the VALUE, which the compiler never sees.
+func constructorSlotGrowth(typ string) (int, bool) {
+	switch typ {
+	case "PubKey":
+		return 33, true
+	case "Sha256":
+		return 32, true
+	case "Addr", "Ripemd160":
+		return 20, true
+	case "Point", "P256Point":
+		return 64, true
+	case "P384Point":
+		return 96, true
+	case "boolean":
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+// pinCodePartLength resolves CodePartLenDelta / CodePartLenExact on every
+// verify_code_part_len op (R-095).
+//
+// A constructor slot exists only where a property is actually LOADED, and a
+// method is lowered before the methods after it, so no single method knows the
+// contract's full placeholder set. This runs once the whole program is lowered
+// and counts the placeholders that were really emitted — over-counting would
+// inflate the pin and make every honest spend unspendable. Methods that Emit
+// never writes (the constructor) are already absent from `methods`.
+func pinCodePartLength(methods []StackMethod, properties []ir.ANFProperty) {
+	var pins []*StackOp
+	var placeholders []int
+
+	var walk func(ops []StackOp)
+	walk = func(ops []StackOp) {
+		for i := range ops {
+			op := &ops[i]
+			switch op.Op {
+			case "if":
+				walk(op.Then)
+				walk(op.Else)
+			case "placeholder":
+				placeholders = append(placeholders, op.ParamIndex)
+			case "verify_code_part_len":
+				pins = append(pins, op)
+			}
+		}
+	}
+	for i := range methods {
+		if methods[i].Name == "constructor" {
+			continue
+		}
+		walk(methods[i].Ops)
+	}
+	if len(pins) == 0 {
+		return
+	}
+
+	// Matches the paramIndex space lowerLoadProp assigns.
+	var ctorProps []ir.ANFProperty
+	for _, p := range properties {
+		if p.InitialValue == nil {
+			ctorProps = append(ctorProps, p)
+		}
+	}
+
+	delta := 0
+	exact := true
+	for _, paramIndex := range placeholders {
+		typ := ""
+		if paramIndex >= 0 && paramIndex < len(ctorProps) {
+			typ = ctorProps[paramIndex].Type
+		}
+		growth, known := constructorSlotGrowth(typ)
+		if !known {
+			// No compile-time width. Growth is never negative, so the running
+			// sum stays a sound lower bound — just not an exact one.
+			exact = false
+		} else {
+			delta += growth
+		}
+	}
+
+	for _, pin := range pins {
+		pin.CodePartLenDelta = delta
+		pin.CodePartLenExact = exact
+	}
 }
 
 // methodUsesCheckPreimage scans a method's bindings for check_preimage usage,
