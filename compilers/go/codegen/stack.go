@@ -2157,6 +2157,14 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	// checkPreimage inside an if-branch emits a stray per-method separator,
 	// which executes AFTER the script-level one and re-narrows scriptCode.
 	thenCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
+	// N-051: same reason as R-010 above. newLoweringContext starts with an
+	// EMPTY privateMethods map, so a `method_call` inside an arm found no
+	// callee, lowerMethodCall fell through to lowerCall, and the helper lowered
+	// to a bare push — the arm silently computed a value the source never asked
+	// for, and the callee body made no difference to the bytes. Private helpers
+	// are source-level substitution (spec/semantics.md §6.3), which stack
+	// lowering performs; an arm is not a different scope for that.
+	thenCtx.privateMethods = ctx.privateMethods
 	thenCtx.insideBranch = true
 	thenCtx.lowerBindings(thenBindings, ta)
 
@@ -2175,6 +2183,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	elseCtx.sm = ctx.sm.clone()
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
+	elseCtx.privateMethods = ctx.privateMethods // N-051, see thenCtx above
 	elseCtx.insideBranch = true
 	elseCtx.lowerBindings(elseBindings, ta)
 

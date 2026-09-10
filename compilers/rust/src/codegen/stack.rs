@@ -2224,6 +2224,15 @@ impl LoweringContext {
         // separator, which executes AFTER the script-level one and re-narrows
         // `scriptCode`.
         then_ctx.script_level_code_separator = self.script_level_code_separator;
+        // N-051: same reason as R-010 above. `LoweringContext::new` starts with
+        // an EMPTY `private_methods` map, so a `MethodCall` inside an arm found
+        // no callee and `lower_method_call` fell through to `lower_call`, which
+        // refused the unknown name. Rust rejected a program the spec allows
+        // (`spec/semantics.md` §6.3 — private helpers are source-level
+        // substitution, which stack lowering performs); Go and Python, lacking
+        // that guard, silently emitted a constant-0 placeholder instead. An arm
+        // is not a different scope for inlining.
+        then_ctx.private_methods = self.private_methods.clone();
         then_ctx.inside_branch = true;
         then_ctx.lower_bindings(then_bindings, terminal_assert);
 
@@ -2242,6 +2251,7 @@ impl LoweringContext {
         else_ctx.sm = self.sm.clone();
         else_ctx.outer_protected_refs = Some(protected_refs);
         else_ctx.script_level_code_separator = self.script_level_code_separator;
+        else_ctx.private_methods = self.private_methods.clone(); // N-051, see then_ctx above
         else_ctx.inside_branch = true;
         else_ctx.lower_bindings(else_bindings, terminal_assert);
 

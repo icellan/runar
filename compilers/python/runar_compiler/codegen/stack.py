@@ -1871,6 +1871,15 @@ class _LoweringContext:
         # separator, which executes AFTER the script-level one and re-narrows
         # scriptCode.
         then_ctx.script_level_code_separator = self.script_level_code_separator
+        # N-051: same reason as R-010 above. A fresh _LoweringContext starts
+        # with an EMPTY private_methods map, so a method_call inside an arm
+        # found no callee, _lower_method_call fell through to _lower_call, and
+        # the helper lowered to a bare push — the arm silently computed a value
+        # the source never asked for, and the callee body made no difference to
+        # the bytes. Private helpers are source-level substitution
+        # (spec/semantics.md §6.3), which stack lowering performs; an arm is not
+        # a different scope for that.
+        then_ctx.private_methods = self.private_methods
         then_ctx.inside_branch = True
         then_ctx.lower_bindings(then_bindings, terminal_assert)
 
@@ -1887,6 +1896,7 @@ class _LoweringContext:
         else_ctx.sm = self.sm.clone()
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.script_level_code_separator = self.script_level_code_separator
+        else_ctx.private_methods = self.private_methods  # N-051, see then_ctx above
         else_ctx.inside_branch = True
         else_ctx.lower_bindings(else_bindings, terminal_assert)
 
