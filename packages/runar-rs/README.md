@@ -1316,8 +1316,11 @@ fn build_call_transaction(
 Extended `build_call_transaction` with multi-output, additional contract
 inputs, and explicit data outputs. See [`src/sdk/calling.rs`](src/sdk/calling.rs).
 
-#### `pub fn build_deploy_transaction(...) -> (String, usize)`
-Build an unsigned deploy transaction. Returns `(tx_hex, input_count)`.
+#### `pub fn build_deploy_transaction(...) -> Result<(String, usize), String>`
+Build an unsigned deploy transaction. Returns `Ok((tx_hex, input_count))`, or
+`Err("buildDeployTransaction: insufficient funds. Need N sats, have M")` when
+the supplied UTXOs cannot cover `satoshis + fee` (same message as the Go
+tier's `BuildDeployTransaction`).
 
 ```rust
 fn build_deploy_transaction(
@@ -1327,7 +1330,7 @@ fn build_deploy_transaction(
     change_address: &str,
     change_script: &str,
     fee_rate: Option<i64>,
-) -> (String, usize) { panic!("doc example only") }
+) -> Result<(String, usize), String> { panic!("doc example only") }
 ```
 
 #### `pub fn build_inscription_envelope(content_type: &str, data: &str) -> String`
@@ -1930,6 +1933,7 @@ A handful of conditions panic instead of returning an error — they signal
 - `build_p2pkh_script` panics on a malformed Base58 address.
 - `build_deploy_transaction` panics if no UTXOs are passed (the caller
   controls UTXO selection — passing zero is a bug, not a runtime condition).
+  Insufficient funds is the opposite case and returns `Err`, not a panic.
 - `pow`, `mul_div`, `percent_of`, `sqrt`, `gcd` in the prelude panic on
   i64 overflow (Bitcoin Script supports arbitrary precision; Rust tests use
   i64 for ergonomics).

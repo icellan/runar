@@ -469,7 +469,7 @@ impl RunarContract {
             change_address,
             &change_script,
             Some(fee_rate),
-        );
+        )?;
 
         // Sign all inputs. Funding inputs are signed by funding_signer when set
         // (issue #134): the deploy signer may not own the funding coins.
@@ -3373,10 +3373,17 @@ mod tests {
     }
 
     // Row 332: Error on insufficient funds — a UTXO that is too small to
-    // cover both the requested satoshis and the fee causes a panic from
-    // build_deploy_transaction.
+    // cover both the requested satoshis and the fee must be reported as an
+    // `Err` VALUE carrying the needed and available amounts, not a panic.
+    //
+    // R-043: this test previously asserted `#[should_panic(expected =
+    // "insufficient funds")]`, i.e. it encoded the bug (a library crate
+    // aborting its caller's process on the single most predictable runtime
+    // condition in a deployment path) as intended behaviour. `deploy` returns
+    // `Result`, the Go tier returns an error for the same condition, and a
+    // caller must be able to handle it and keep running — so the assertion is
+    // inverted here.
     #[test]
-    #[should_panic(expected = "insufficient funds")]
     fn deploy_fails_insufficient_funds() {
         let artifact = make_artifact("51", simple_abi());
         let mut contract = RunarContract::new(artifact, vec![]);
@@ -3392,12 +3399,31 @@ mod tests {
             script: format!("76a914{}88ac", "00".repeat(20)),
         });
 
-        // This will panic inside build_deploy_transaction with "insufficient funds".
-        let _ = contract.deploy(&mut provider, &signer, &DeployOptions {
+        let result = contract.deploy(&mut provider, &signer, &DeployOptions {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
         });
+
+        // The caller gets a VALUE back, so this line is reached at all.
+        let err = result.expect_err("deploy must return Err on insufficient funds, not panic");
+        assert!(
+            err.contains("insufficient funds"),
+            "error should name the condition, got: {err}"
+        );
+        // The error must carry both amounts: need = 50_000 + fee(21) = 50_021,
+        // have = the single 1-satoshi UTXO.
+        assert!(
+            err.contains("50021"),
+            "error should carry the needed amount (50021), got: {err}"
+        );
+        assert!(
+            err.contains("have 1"),
+            "error should carry the available amount (1), got: {err}"
+        );
+
+        // Nothing was signed or broadcast, and the caller can continue.
+        assert!(provider.get_broadcasted_txs().is_empty());
     }
 
     #[test]
