@@ -1829,6 +1829,27 @@ public final class StackLower {
                     "checkMultiSig: array_literal metadata missing (sigs=" + sigsRef + ", pks=" + pksRef + ")");
             }
 
+            // Degenerate thresholds are rejected here, not defended against with
+            // extra opcodes — emitting a runtime guard would move bytes for every
+            // existing valid contract. Checking in the lowerer (rather than the
+            // typechecker) also covers the --ir input path, which never runs a
+            // typecheck.
+            if (sigElems.isEmpty()) {
+                throw new RuntimeException(
+                    "checkMultiSig requires at least one signature: the signature array is "
+                    + "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts "
+                    + "unconditionally (anyone-can-spend)");
+            }
+            if (pkElems.isEmpty()) {
+                throw new RuntimeException(
+                    "checkMultiSig requires at least one public key: the public key array is empty");
+            }
+            if (sigElems.size() > pkElems.size()) {
+                throw new RuntimeException(
+                    "checkMultiSig signature count (" + sigElems.size() + ") cannot exceed public "
+                    + "key count (" + pkElems.size() + "): the resulting script is unspendable");
+            }
+
             // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
             emitOp(new PushOp(PushValue.of(0)));
             sm.push("");

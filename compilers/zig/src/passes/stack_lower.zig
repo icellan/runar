@@ -237,6 +237,14 @@ const LowerError = error{
     /// whole 2026-08 branch/loop miscompile family. Silent until the UTXO is
     /// already locked, so we fail loudly at compile time instead.
     BranchResultDepthMismatch,
+    /// R-054: `checkMultiSig` with a degenerate threshold. An empty signature
+    /// array lowers to a 0-of-N check, which OP_CHECKMULTISIG accepts
+    /// unconditionally — an anyone-can-spend output produced from source that
+    /// reads like an authorization check. More signatures than public keys is
+    /// the opposite sign: an output no witness can ever satisfy. Both are
+    /// refused at compile time rather than defended against with extra
+    /// opcodes, which would move bytes for every existing valid contract.
+    DegenerateMultiSigThreshold,
 };
 
 const LowerCtx = struct {
@@ -2403,6 +2411,36 @@ const LowerCtx = struct {
         const pks_ref = args[1];
         const sig_elems = self.array_elements.get(sigs_ref) orelse return LowerError.InvalidBuiltin;
         const pk_elems = self.array_elements.get(pks_ref) orelse return LowerError.InvalidBuiltin;
+
+        // Degenerate thresholds are rejected here, not defended against with
+        // extra opcodes — emitting a runtime guard would move bytes for every
+        // existing valid contract. Checking in the lowerer (rather than the
+        // typechecker) also covers the `--ir` input path, which never runs a
+        // typecheck.
+        if (sig_elems.len == 0) {
+            std.log.warn(
+                "checkMultiSig requires at least one signature: the signature array is " ++
+                    "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts " ++
+                    "unconditionally (anyone-can-spend)",
+                .{},
+            );
+            return LowerError.DegenerateMultiSigThreshold;
+        }
+        if (pk_elems.len == 0) {
+            std.log.warn(
+                "checkMultiSig requires at least one public key: the public key array is empty",
+                .{},
+            );
+            return LowerError.DegenerateMultiSigThreshold;
+        }
+        if (sig_elems.len > pk_elems.len) {
+            std.log.warn(
+                "checkMultiSig signature count ({d}) cannot exceed public key count ({d}): " ++
+                    "the resulting script is unspendable",
+                .{ sig_elems.len, pk_elems.len },
+            );
+            return LowerError.DegenerateMultiSigThreshold;
+        }
 
         // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         try self.emitPushInt(0);

@@ -3651,6 +3651,23 @@ func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string
 		panic(fmt.Sprintf("checkMultiSig: array_literal metadata missing (sigs=%q, pks=%q)", sigsRef, pksRef))
 	}
 
+	// Degenerate thresholds are rejected here, not defended against with extra
+	// opcodes — emitting a runtime guard would move bytes for every existing
+	// valid contract. Checking in the lowerer (rather than the typechecker)
+	// also covers the --ir input path, which never runs a typecheck.
+	if len(sigElems) == 0 {
+		panic("checkMultiSig requires at least one signature: the signature array is " +
+			"empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts " +
+			"unconditionally (anyone-can-spend)")
+	}
+	if len(pkElems) == 0 {
+		panic("checkMultiSig requires at least one public key: the public key array is empty")
+	}
+	if len(sigElems) > len(pkElems) {
+		panic(fmt.Sprintf("checkMultiSig signature count (%d) cannot exceed public "+
+			"key count (%d): the resulting script is unspendable", len(sigElems), len(pkElems)))
+	}
+
 	// Dummy OP_0 (historical CHECKMULTISIG off-by-one).
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
 	ctx.sm.push("")

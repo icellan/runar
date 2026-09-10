@@ -3272,6 +3272,27 @@ class _LoweringContext:
                 f"checkMultiSig: array_literal metadata missing (sigs={sigs_ref!r}, pks={pks_ref!r})"
             )
 
+        # Degenerate thresholds are rejected here, not defended against with
+        # extra opcodes -- emitting a runtime guard would move bytes for every
+        # existing valid contract. Checking in the lowerer (rather than the
+        # typechecker) also covers the --ir input path, which never runs a
+        # typecheck.
+        if len(sig_elems) == 0:
+            raise RuntimeError(
+                "checkMultiSig requires at least one signature: the signature array is "
+                "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts "
+                "unconditionally (anyone-can-spend)"
+            )
+        if len(pk_elems) == 0:
+            raise RuntimeError(
+                "checkMultiSig requires at least one public key: the public key array is empty"
+            )
+        if len(sig_elems) > len(pk_elems):
+            raise RuntimeError(
+                f"checkMultiSig signature count ({len(sig_elems)}) cannot exceed public "
+                f"key count ({len(pk_elems)}): the resulting script is unspendable"
+            )
+
         # Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         self.emit_op(StackOp(op="push", value=big_int_push(0)))
         self.sm.push("")

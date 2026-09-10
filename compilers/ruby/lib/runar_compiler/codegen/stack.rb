@@ -2903,6 +2903,24 @@ module RunarCompiler::Codegen
         raise "checkMultiSig: array_literal metadata missing (sigs=#{sigs_ref.inspect}, pks=#{pks_ref.inspect})"
       end
 
+      # Degenerate thresholds are rejected here, not defended against with
+      # extra opcodes -- emitting a runtime guard would move bytes for every
+      # existing valid contract. Checking in the lowerer (rather than the
+      # typechecker) also covers the --ir input path, which never runs a
+      # typecheck.
+      if sig_elems.empty?
+        raise "checkMultiSig requires at least one signature: the signature array is " \
+              "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts " \
+              "unconditionally (anyone-can-spend)"
+      end
+      if pk_elems.empty?
+        raise "checkMultiSig requires at least one public key: the public key array is empty"
+      end
+      if sig_elems.length > pk_elems.length
+        raise "checkMultiSig signature count (#{sig_elems.length}) cannot exceed public " \
+              "key count (#{pk_elems.length}): the resulting script is unspendable"
+      end
+
       # Dummy OP_0 (historical CHECKMULTISIG off-by-one).
       emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(0) })
       @sm.push(nil)

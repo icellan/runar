@@ -3482,6 +3482,30 @@ impl LoweringContext {
             .cloned()
             .unwrap_or_else(|| panic!("checkMultiSig: array_literal metadata missing for pks={}", pks_ref));
 
+        // Degenerate thresholds are rejected here, not defended against with
+        // extra opcodes — emitting a runtime guard would move bytes for every
+        // existing valid contract. Checking in the lowerer (rather than the
+        // typechecker) also covers the `--ir` input path, which never runs a
+        // typecheck.
+        if sig_elems.is_empty() {
+            panic!(
+                "checkMultiSig requires at least one signature: the signature array is \
+                 empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts \
+                 unconditionally (anyone-can-spend)"
+            );
+        }
+        if pk_elems.is_empty() {
+            panic!("checkMultiSig requires at least one public key: the public key array is empty");
+        }
+        if sig_elems.len() > pk_elems.len() {
+            panic!(
+                "checkMultiSig signature count ({}) cannot exceed public key count ({}): \
+                 the resulting script is unspendable",
+                sig_elems.len(),
+                pk_elems.len()
+            );
+        }
+
         // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
         self.sm.push("");
