@@ -55,7 +55,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['let', 'let'], ['stateful', 'stateful'],
 ]);
 
-function tokenize(source: string): Token[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
@@ -155,7 +155,12 @@ function tokenize(source: string): Token[] {
       continue;
     }
 
-    // Skip unknown
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 
@@ -186,11 +191,12 @@ class SolParser {
   private tokens: Token[];
   private pos = 0;
   private file: string;
-  private errors: CompilerDiagnostic[] = [];
+  private errors: CompilerDiagnostic[];
 
-  constructor(tokens: Token[], file: string) {
+  constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -884,8 +890,16 @@ class SolParser {
       return { kind: 'identifier', name: t.value };
     }
 
+    // Nothing in the Solidity-like surface syntax can start an expression with
+    // this token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${t.value || t.type}'`,
+      'error',
+      { file: this.file, line: t.line, column: t.column },
+    ));
     this.advance();
-    return { kind: 'identifier', name: t.value };
+    return { kind: 'bigint_literal', value: 0n };
   }
 }
 
@@ -1026,7 +1040,8 @@ function resolvePropertyAccess(stmt: Statement, propNames: Set<string>, paramNam
 
 export function parseSolSource(source: string, fileName?: string): ParseResult {
   const file = fileName ?? 'contract.runar.sol';
-  const tokens = tokenize(source);
-  const parser = new SolParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new SolParser(tokens, file, errors);
   return parser.parse();
 }

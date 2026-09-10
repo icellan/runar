@@ -38,11 +38,17 @@ export abstract class ParserCore<T extends Token = Token> {
   protected tokens: T[];
   protected pos = 0;
   protected file: string;
-  protected errors: CompilerDiagnostic[] = [];
+  protected errors: CompilerDiagnostic[];
 
-  constructor(tokens: T[], file: string) {
+  /**
+   * `errors` is passed in (rather than created here) so a tokenizer can seed
+   * lexical diagnostics — an unrecognized character, say — that the parser
+   * then carries through to `ParseResult.errors`.
+   */
+  constructor(tokens: T[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   // -----------------------------------------------------------------------

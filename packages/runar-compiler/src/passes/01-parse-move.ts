@@ -52,7 +52,7 @@ const KEYWORDS: Record<string, TokenType> = {
   true: 'true', false: 'false', has: 'has',
 };
 
-function tokenize(source: string): Token[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
@@ -139,6 +139,12 @@ function tokenize(source: string): Token[] {
       continue;
     }
 
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 
@@ -172,11 +178,12 @@ class MoveParser {
   private tokens: Token[];
   private pos = 0;
   private file: string;
-  private errors: CompilerDiagnostic[] = [];
+  private errors: CompilerDiagnostic[];
 
-  constructor(tokens: Token[], file: string) {
+  constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -965,8 +972,17 @@ class MoveParser {
       };
       return { kind: 'identifier', name: builtinMap[name] || name };
     }
+
+    // Nothing in the Move surface syntax can start an expression with this
+    // token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${t.value || t.type}'`,
+      'error',
+      { file: this.file, line: t.line, column: t.column },
+    ));
     this.advance();
-    return { kind: 'identifier', name: t.value };
+    return { kind: 'bigint_literal', value: 0n };
   }
 }
 
@@ -1061,7 +1077,8 @@ function foldWhileAsFor(stmts: Statement[]): Statement[] {
 
 export function parseMoveSource(source: string, fileName?: string): ParseResult {
   const file = fileName ?? 'contract.runar.move';
-  const tokens = tokenize(source);
-  const parser = new MoveParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new MoveParser(tokens, file, errors);
   return parser.parse();
 }

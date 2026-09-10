@@ -277,7 +277,12 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       continue;
     }
 
-    // Unknown character: skip
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 

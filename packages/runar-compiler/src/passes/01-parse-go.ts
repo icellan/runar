@@ -31,6 +31,8 @@ import type {
 import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
+import type { CompilerDiagnostic } from '../errors.js';
+import { makeDiagnostic } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -67,7 +69,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['true', 'true'], ['false', 'false'],
 ]);
 
-function tokenize(source: string): GoToken[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): GoToken[] {
   const tokens: GoToken[] = [];
   let pos = 0;
   let line = 1;
@@ -220,7 +222,12 @@ function tokenize(source: string): GoToken[] {
       continue;
     }
 
-    // Skip unknown
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 
@@ -1216,9 +1223,16 @@ class GoParser extends ParserCore<GoToken> {
       return { kind: 'identifier', name: goToCamel(t.value) };
     }
 
-    // Fallback
+    // Nothing in the Go surface syntax can start an expression with this
+    // token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${t.value || t.type}'`,
+      'error',
+      this.loc(),
+    ));
     this.advance();
-    return { kind: 'identifier', name: t.value };
+    return { kind: 'bigint_literal', value: 0n };
   }
 
   /**
@@ -1247,7 +1261,8 @@ class GoParser extends ParserCore<GoToken> {
 
 export function parseGoSource(source: string, fileName?: string): ParseResult {
   const file = fileName ?? 'contract.runar.go';
-  const tokens = tokenize(source);
-  const parser = new GoParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new GoParser(tokens, file, errors);
   return parser.parse();
 }

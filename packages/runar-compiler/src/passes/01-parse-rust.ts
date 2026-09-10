@@ -33,6 +33,7 @@ import type {
 import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
+import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 
 // ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['self', 'self'],
 ]);
 
-function tokenize(source: string): RustToken[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): RustToken[] {
   const tokens: RustToken[] = [];
   let pos = 0;
   let line = 1;
@@ -194,7 +195,12 @@ function tokenize(source: string): RustToken[] {
       continue;
     }
 
-    // Skip unknown
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 
@@ -1174,9 +1180,16 @@ class RustParser extends ParserCore<RustToken> {
       return { kind: 'identifier', name };
     }
 
-    // Fallback
+    // Nothing in the Rust surface syntax can start an expression with this
+    // token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${t.value || t.type}'`,
+      'error',
+      this.loc(),
+    ));
     this.advance();
-    return { kind: 'identifier', name: t.value };
+    return { kind: 'bigint_literal', value: 0n };
   }
 }
 
@@ -1186,7 +1199,8 @@ class RustParser extends ParserCore<RustToken> {
 
 export function parseRustSource(source: string, fileName?: string): ParseResult {
   const file = fileName ?? 'contract.runar.rs';
-  const tokens = tokenize(source);
-  const parser = new RustParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new RustParser(tokens, file, errors);
   return parser.parse();
 }

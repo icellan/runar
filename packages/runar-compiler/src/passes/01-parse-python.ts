@@ -67,7 +67,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['assert', 'assert'],
 ]);
 
-function tokenize(source: string): Token[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   const lines = source.split('\n');
   const indentStack: number[] = [0];
@@ -355,7 +355,12 @@ function tokenize(source: string): Token[] {
         continue;
       }
 
-      // Skip unknown characters
+      // Unrecognized character — reject it rather than dropping it silently.
+      errors.push(makeDiagnostic(
+        `Unexpected character '${ch}'`,
+        'error',
+        { file, line: lineNum, column: col },
+      ));
       pos++;
     }
 
@@ -516,11 +521,12 @@ class PyParser {
   private tokens: Token[];
   private pos = 0;
   private file: string;
-  private errors: CompilerDiagnostic[] = [];
+  private errors: CompilerDiagnostic[];
 
-  constructor(tokens: Token[], file: string) {
+  constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -1642,7 +1648,8 @@ class PyParser {
 // ---------------------------------------------------------------------------
 
 export function parsePythonSource(source: string, fileName: string): ParseResult {
-  const tokens = tokenize(source);
-  const parser = new PyParser(tokens, fileName);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, fileName, errors);
+  const parser = new PyParser(tokens, fileName, errors);
   return parser.parse();
 }

@@ -66,7 +66,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['super', 'super'], ['require', 'require'], ['assert', 'assert'], ['do', 'do'],
 ]);
 
-function tokenize(source: string): Token[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   const lines = source.split('\n');
 
@@ -321,7 +321,12 @@ function tokenize(source: string): Token[] {
         continue;
       }
 
-      // Skip unknown characters
+      // Unrecognized character — reject it rather than dropping it silently.
+      errors.push(makeDiagnostic(
+        `Unexpected character '${ch}'`,
+        'error',
+        { file, line: lineNum, column: col },
+      ));
       pos++;
     }
 
@@ -551,14 +556,15 @@ class RbParser {
   private tokens: Token[];
   private pos = 0;
   private file: string;
-  private errors: CompilerDiagnostic[] = [];
+  private errors: CompilerDiagnostic[];
 
   /** Track locally declared variables per method scope to distinguish decl from assignment. */
   private declaredLocals: Set<string> = new Set();
 
-  constructor(tokens: Token[], file: string) {
+  constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -1829,7 +1835,8 @@ class RbParser {
 
 export function parseRubySource(source: string, fileName?: string): ParseResult {
   const file = fileName ?? 'contract.runar.rb';
-  const tokens = tokenize(source);
-  const parser = new RbParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new RbParser(tokens, file, errors);
   return parser.parse();
 }

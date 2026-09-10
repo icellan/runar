@@ -29,6 +29,7 @@ import type {
 import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
+import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 
 // ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['or', '||'],
 ]);
 
-function tokenize(source: string): ZigToken[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): ZigToken[] {
   const tokens: ZigToken[] = [];
   let pos = 0;
   let line = 1;
@@ -187,6 +188,12 @@ function tokenize(source: string): ZigToken[] {
       continue;
     }
 
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: tokenLine, column: tokenColumn },
+    ));
     advance();
   }
 
@@ -1219,8 +1226,16 @@ class ZigParser extends ParserCore<ZigToken> {
       return { kind: 'identifier', name: token.value };
     }
 
+    // Nothing in the Zig surface syntax can start an expression with this
+    // token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${token.value || token.type}'`,
+      'error',
+      this.loc(),
+    ));
     this.advance();
-    return { kind: 'identifier', name: token.value || 'unknown' };
+    return { kind: 'bigint_literal', value: 0n };
   }
 
   /** Check if any method body contains an assignment to self.<propName>. */
@@ -1448,7 +1463,8 @@ class ZigParser extends ParserCore<ZigToken> {
 
 export function parseZigSource(source: string, fileName?: string): ParseResult {
   const file = fileName ?? 'contract.runar.zig';
-  const tokens = tokenize(source);
-  const parser = new ZigParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new ZigParser(tokens, file, errors);
   return parser.parse();
 }
