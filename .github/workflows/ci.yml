@@ -477,6 +477,21 @@ jobs:
         # Named explicitly because the repo-root tests/ directory is not covered by
         # any glob in this workflow.
         run: npx vitest run tests/chronicle-opcode-disclosure.test.ts
+      - name: Release-script composition gate
+        # scripts/release.sh commits, tags, pushes and publishes. Two defects:
+        # it re-ran the `git add -A`/`git commit`/`git tag v<version>` that
+        # scripts/bump-version.sh had already performed (under `set -e` the
+        # duplicates exit 1 and 128, aborting the release AFTER the bump was
+        # committed and tagged and BEFORE anything was pushed — a half-finished
+        # release), and it invoked no test suite, lint or typecheck anywhere
+        # before publishing. This drives the script's --dry-run mode and asserts
+        # the ordered command plan: the gate runs before any mutation, the
+        # commit and v-tag stay delegated to bump-version.sh, and no
+        # side-effecting command bypasses the dry-run guard. Executes nothing —
+        # no build, no commit, no tag, no push, no publish.
+        # Named explicitly because the repo-root tests/ directory is not covered
+        # by any glob in this workflow.
+        run: npx vitest run tests/release-script.test.ts
       - run: pnpm run typecheck
 
   go-compiler:
