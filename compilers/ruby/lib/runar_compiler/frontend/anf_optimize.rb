@@ -14,6 +14,9 @@ require "json"
 require "set"
 require_relative "../ir/types"
 require_relative "dce"
+# Frontend._bigint_json_value — the canonical IR-JSON encoding for an integer,
+# used by make_const_int for the folded EC scalars this pass emits.
+require_relative "anf_lower"
 
 module RunarCompiler
   module Frontend
@@ -153,7 +156,10 @@ module RunarCompiler
           changed = false
           new_body = []
           method.body.each do |binding|
-            optimized = try_optimize(binding.value, value_map)
+            # +new_body+ doubles as the prelude list: a rule that folds a new
+            # constant appends its binding here, i.e. immediately BEFORE the
+            # binding being rewritten (see fresh_const_name).
+            optimized = try_optimize(binding.value, value_map, new_body)
             if optimized
               binding = IR::ANFBinding.new(
                 name: binding.name,
@@ -177,7 +183,7 @@ module RunarCompiler
       # Optimization rules
       # -----------------------------------------------------------------
 
-      def self.try_optimize(v, vm)
+      def self.try_optimize(v, vm, prelude)
         return nil unless v.kind == "call" && v.func && v.args
 
         func = v.func
@@ -237,7 +243,7 @@ module RunarCompiler
             k1 = get_const_int(inner.args[1], vm)
             if k1
               combined = (k1 * k2) % CURVE_N
-              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm)])
+              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm, prelude)])
             end
           end
         end
@@ -253,7 +259,7 @@ module RunarCompiler
             k2 = get_const_int(right_v.args[0], vm)
             if k1 && k2
               combined = (k1 + k2) % CURVE_N
-              return make_call("ecMulGen", [fresh_const_name(combined, vm)])
+              return make_call("ecMulGen", [fresh_const_name(combined, vm, prelude)])
             end
           end
         end
@@ -270,7 +276,7 @@ module RunarCompiler
               k2 = get_const_int(right_v.args[1], vm)
               if k1 && k2
                 combined = (k1 + k2) % CURVE_N
-                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm)])
+                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm, prelude)])
               end
             end
           end
@@ -384,7 +390,15 @@ module RunarCompiler
         v = IR::ANFValue.new(kind: "load_const")
         v.const_big_int = n
         v.const_int = n
-        v.raw_value = n
+        # A folded EC scalar is a value mod n, routinely far beyond
+        # Number.MAX_SAFE_INTEGER, and it now reaches the emitted IR JSON. Use
+        # the tier's canonical encoding (bare number when a double carries it
+        # losslessly, else the decimal digits with the JS BigInt `n` suffix, as
+        # a string) rather than a bare Integer, which --emit-ir would write as
+        # an unquoted 256-bit JSON number that every double-based consumer
+        # silently truncates. Same encoding as
+        # frontend/anf_lower.rb::_make_load_const_int.
+        v.raw_value = JSON.generate(Frontend._bigint_json_value(n))
         v
       end
       private_class_method :make_const_int
@@ -397,14 +411,25 @@ module RunarCompiler
       end
       private_class_method :make_call
 
-      # Insert a fresh constant binding into the value map and return its name.
+      # Bind a freshly folded constant and return its name.
       #
       # This is needed when optimization produces a new constant (e.g. k1*k2)
       # that needs to be referenced by name in a call.
-      def self.fresh_const_name(value, vm)
+      #
+      # The binding is appended to +prelude+ -- the rebuilt method body, at the
+      # point just before the binding currently being rewritten -- as well as
+      # registered in the value map. Registering it in the value map alone is
+      # not enough: stack lowering walks the body, so a call referencing a name
+      # that never got a binding dies with
+      # <tt>value "__ec_opt_N" not found on stack</tt>. Mirrors
+      # AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
+      # +newBindings+ list in anf-ec.ts (TypeScript).
+      def self.fresh_const_name(value, vm, prelude)
         self.fresh_counter += 1
         name = "__ec_opt_#{fresh_counter}"
-        vm[name] = make_const_int(value)
+        const = make_const_int(value)
+        vm[name] = const
+        prelude << IR::ANFBinding.new(name: name, value: const)
         name
       end
       private_class_method :fresh_const_name

@@ -485,10 +485,10 @@ class TestRule10EcAddMulGen:
         """ecAdd(ecMulGen(2), ecMulGen(3)) → ecMulGen(k1+k2).
 
         Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N).
-        The optimizer rewrites t4 from ecAdd to ecMulGen. The combined constant
-        is stored internally (in the optimizer's value map) as a fresh binding
-        name (e.g. '__ec_opt_N') rather than added to the binding list directly.
-        We verify t4 becomes ecMulGen with exactly 1 arg.
+        The optimizer rewrites t4 from ecAdd to ecMulGen and binds the combined
+        constant under a fresh name (e.g. '__ec_opt_N') inserted into the method
+        body just before t4. We verify t4 becomes ecMulGen with exactly 1 arg;
+        tests/test_n028_ec_fresh_const_binding.py pins the fresh binding itself.
         """
         bindings = [
             _load_const_int("t0", 2),
@@ -515,8 +515,6 @@ class TestRule10EcAddMulGen:
             f"expected ecMulGen to have 1 arg, got {len(t4.value.args)}"
         )
         # The arg is a fresh binding name whose value is 5 = (2+3) % CURVE_N.
-        # The fresh binding is stored in the optimizer's internal value map, not in
-        # the body list, so we can only verify the structural transformation here.
         combined_arg = t4.value.args[0]
         assert isinstance(combined_arg, str) and len(combined_arg) > 0, (
             f"expected ecMulGen arg to be a non-empty binding name, got: {combined_arg!r}"
