@@ -120,6 +120,11 @@ class StackMethod:
     # continuation builders OR terminal methods that read variable-length
     # (ByteString) state (issue #100). Propagated to ABIMethod.usesCodePart.
     uses_code_part: bool = False
+    # True if this method's lowering needs the script-level OP_CODESEPARATOR
+    # the emitter places at offset 1 of the locking script (R-010).
+    # Contract-level: true for every method of a contract in which ANY method
+    # authenticates a `_codePart` witness.
+    needs_code_separator: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +622,9 @@ class _LoweringContext:
         self.max_depth: int = 0
         self.properties: list[ANFProperty] = properties
         self.private_methods: dict[str, ANFMethod] = {}
+        # R-010: True when the emitter supplies the script-level
+        # OP_CODESEPARATOR, so _lower_check_preimage must not emit its own.
+        self.script_level_code_separator: bool = False
         self.local_bindings: dict[str, bool] = {}
         self.outer_protected_refs: Optional[set[str]] = None
         self.inside_branch: bool = False
@@ -1848,6 +1856,12 @@ class _LoweringContext:
         then_ctx = _LoweringContext(None, self.properties)
         then_ctx.sm = self.sm.clone()
         then_ctx.outer_protected_refs = protected_refs
+        # R-010: branch arms lower in a FRESH context, so the contract-level
+        # OP_CODESEPARATOR decision has to be carried in explicitly. Without
+        # this a checkPreimage inside an if-branch emits a stray per-method
+        # separator, which executes AFTER the script-level one and re-narrows
+        # scriptCode.
+        then_ctx.script_level_code_separator = self.script_level_code_separator
         then_ctx.inside_branch = True
         then_ctx.lower_bindings(then_bindings, terminal_assert)
 
@@ -1863,6 +1877,7 @@ class _LoweringContext:
         else_ctx = _LoweringContext(None, self.properties)
         else_ctx.sm = self.sm.clone()
         else_ctx.outer_protected_refs = protected_refs
+        else_ctx.script_level_code_separator = self.script_level_code_separator
         else_ctx.inside_branch = True
         else_ctx.lower_bindings(else_bindings, terminal_assert)
 
@@ -2920,93 +2935,7 @@ class _LoweringContext:
             # strip too few varint bytes and corrupt the subsequent
             # state-extraction OP_SPLITs (this is the bug fixed here — see
             # `integration/go/contracts/RollupBug.runar.go`).
-            self.emit_op(StackOp(op="push", value=big_int_push(1)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")  # firstByte
-            self.sm.push("")  # rest
-            self.emit_op(StackOp(op="swap"))
-            self.sm.swap()
-            # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-            # as negative script numbers.
-            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
-            # Stack: [..., rest, fb_num]
-
-            # emit_drop_more_varint_bytes drops `n` additional varint bytes
-            # from the top-of-stack `rest`. [..., rest] -> [..., rest_minus_n].
-            def emit_drop_more_varint_bytes(n: int) -> None:
-                self.emit_op(StackOp(op="push", value=big_int_push(n)))
-                self.sm.push("")
-                self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-                self.sm.pop(); self.sm.pop()
-                self.sm.push(""); self.sm.push("")
-                self.emit_op(StackOp(op="nip"))
-                self.sm.pop(); self.sm.pop()
-                self.sm.push("")
-
-            # IF fb_num < 253: 1-byte varint, drop fb_num.
-            self.emit_op(StackOp(op="dup"))
-            self.sm.dup()
-            self.emit_op(StackOp(op="push", value=big_int_push(253)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_IF"))
-            self.sm.pop()
-            sm_at_1_byte_if = self.sm.clone()
-            # THEN: 1-byte varint.
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_1_byte_if.clone()
-            # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-            self.emit_op(StackOp(op="dup"))
-            self.sm.dup()
-            self.emit_op(StackOp(op="push", value=big_int_push(254)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_IF"))
-            self.sm.pop()
-            sm_at_fe_if = self.sm.clone()
-            # THEN: 5-byte varint (0xfe + 4 bytes LE).
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            emit_drop_more_varint_bytes(4)
-            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_fe_if.clone()
-            # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-            self.emit_op(StackOp(op="dup"))
-            self.sm.dup()
-            self.emit_op(StackOp(op="push", value=big_int_push(255)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_IF"))
-            self.sm.pop()
-            sm_at_ff_if = self.sm.clone()
-            # THEN: 9-byte varint (0xff + 8 bytes LE).
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            emit_drop_more_varint_bytes(8)
-            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_ff_if.clone()
-            # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            emit_drop_more_varint_bytes(2)
-            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
-            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
-            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+            self._emit_strip_script_code_varint()
 
             # Compute skip = SIZE(_codePart) - codeSepIdx
             self.bring_to_top("_codePart", False)
@@ -3382,6 +3311,247 @@ class _LoweringContext:
     # check_preimage (OP_PUSH_TX)
     # -----------------------------------------------------------------
 
+    def _emit_strip_script_code_varint(self) -> None:
+        """Strip the BIP-143 scriptCode varint length prefix.
+
+        ``[..., varint || scriptCode]`` -> ``[..., scriptCode]``
+
+        All four varint shapes must be handled; stripping only the 1- and
+        3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+        65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+        ``Invalid OP_SPLIT range`` on regtest.
+        """
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")  # firstByte
+        self.sm.push("")  # rest
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        # as negative script numbers.
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        # Stack: [..., rest, fb_num]
+
+        # emit_drop_more_varint_bytes drops `n` additional varint bytes
+        # from the top-of-stack `rest`. [..., rest] -> [..., rest_minus_n].
+        def emit_drop_more_varint_bytes(n: int) -> None:
+            self.emit_op(StackOp(op="push", value=big_int_push(n)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="nip"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+        # IF fb_num < 253: 1-byte varint, drop fb_num.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(253)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_1_byte_if = self.sm.clone()
+        # THEN: 1-byte varint.
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_1_byte_if.clone()
+        # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(254)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_fe_if = self.sm.clone()
+        # THEN: 5-byte varint (0xfe + 4 bytes LE).
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        emit_drop_more_varint_bytes(4)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_fe_if.clone()
+        # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(255)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_ff_if = self.sm.clone()
+        # THEN: 9-byte varint (0xff + 8 bytes LE).
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        emit_drop_more_varint_bytes(8)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_ff_if.clone()
+        # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        emit_drop_more_varint_bytes(2)
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+
+    def _fixed_state_section_length(self) -> int | None:
+        """Byte length of the serialized state section (excluding the OP_RETURN
+        separator) when every mutable property is fixed-size, else ``None``.
+
+        Mirrors the size table in ``_lower_deserialize_state``; a ByteString
+        property makes the section variable-length and its exact length
+        un-pinnable at compile time.
+        """
+        sizes = {
+            "bigint": 8, "RabinSig": 8, "RabinPubKey": 8,
+            "boolean": 1, "PubKey": 33, "Addr": 20, "Ripemd160": 20,
+            "Sha256": 32, "Point": 64, "P256Point": 64, "P384Point": 96,
+        }
+        total = 0
+        for prop in self.properties:
+            if prop.readonly:
+                continue
+            size = sizes.get(prop.type)
+            if size is None:
+                return None
+            total += size
+        return total
+
+    def _emit_code_part_authentication(self) -> None:
+        """Bind the spender-supplied ``_codePart`` witness to the executing script.
+
+        R-010 / CL-BUG-091. ``_codePart`` is the locking script minus the
+        trailing ``OP_RETURN || state`` section. It is pushed by the spender and
+        OP_CAT'd verbatim as the script prefix of every reconstructed
+        state-continuation output, so an unauthenticated ``_codePart`` is a
+        complete break: the spender picks the script the contract's own funds
+        move to.
+
+        With the OP_CODESEPARATOR hoisted to offset 1 of the locking script, the
+        BIP-143 scriptCode carried in the (already tx-bound) preimage is
+
+            scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state
+
+        so the whole of ``_codePart`` is recoverable from it::
+
+            codePart == 0x61ab || scriptCode[0 : SIZE(codePart) - 2]
+
+        plus a pin on the split point, without which a spender could claim a
+        SHORTER code part whose bytes are a genuine prefix — in the degenerate
+        case just the two prologue bytes, which turns the continuation output
+        into a bare OP_RETURN that anyone can spend.
+
+        Consumes nothing: ``[..., preimage]`` in, ``[..., preimage]`` out,
+        aborting the script via OP_EQUALVERIFY when the witness does not match.
+        """
+        # 1. Work on a copy — the caller still needs the preimage.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+
+        # 2. Drop the fixed 104-byte BIP-143 header.
+        self.emit_op(StackOp(op="push", value=big_int_push(104)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="nip"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        # 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+        #    hashOutputs 32 + nLocktime 4 + sighashType 4).
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(52)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        # 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+        self._emit_strip_script_code_varint()
+
+        # 5. Copy the witness code part up.
+        self.bring_to_top("_codePart", False)
+        self.sm.rename_at_depth(0, "")
+
+        # 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        # 7. Reorder to [..., codePart, scriptCode, n].
+        self.emit_op(StackOp(op="rot"))
+        rotated = self.sm.remove_at_depth(2)
+        self.sm.push(rotated)
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+
+        # 8. Split scriptCode at n into the claimed code tail and the rest.
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+
+        # 8a. Pin the split point.
+        fixed_state_len = self._fixed_state_section_length()
+        if fixed_state_len is not None:
+            self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+            self.sm.push("")
+            self.emit_op(StackOp(op="push", value=big_int_push(1 + fixed_state_len)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUALVERIFY"))
+            self.sm.pop(); self.sm.pop()
+        # 8b. The byte immediately after the code part must be the OP_RETURN
+        #     separator.
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6a]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
+
+        # 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x61, 0xab]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        # 10. Byte-for-byte or the script dies here.
+        self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
+
     def _lower_check_preimage(self, binding_name: str, preimage: str,
                               sighash_flag: int | None,
                               binding_index: int, last_uses: dict[str, int]) -> None:
@@ -3394,10 +3564,19 @@ class _LoweringContext:
         # witness signature). See _emit_check_preimage_binding for the
         # construction.
 
-        # Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
-        # preimage is only the code after this point. This reduces preimage size
-        # for large scripts and is required for scripts > ~32KB.
-        self.emit_op(StackOp(op="opcode", code="OP_CODESEPARATOR"))
+        # R-010 / CL-BUG-091: OP_CODESEPARATOR placement. The separator used to
+        # sit at each method's entry, so the BIP-143 scriptCode covered only the
+        # code AFTER it — leaving the dispatch preamble and every preceding
+        # method body invisible to the running script, and those are exactly the
+        # bytes the spender-supplied `_codePart` claims to reproduce. When any
+        # method of this contract carries `_codePart`, the separator is emitted
+        # ONCE at offset 1 of the locking script instead.
+        if not self.script_level_code_separator:
+            # No `_codePart` anywhere in this contract, so nothing needs
+            # authenticating: keep the pre-R-010 layout — a separator right
+            # here, at the method's entry, which keeps scriptCode (and the
+            # preimage) small.
+            self.emit_op(StackOp(op="opcode", code="OP_CODESEPARATOR"))
 
         # Step 1: Bring preimage to top (non-consuming; kept for field extractors)
         is_last = self._is_last_use(preimage, binding_index, last_uses)
@@ -3409,6 +3588,12 @@ class _LoweringContext:
         # method declare a different mode, which only changes the appended
         # sighash flag byte. Net stack effect is zero.
         self._emit_check_preimage_binding(sighash_flag)
+
+        # R-010: the preimage is now proven to be THIS transaction's preimage,
+        # so its scriptCode field is authentic. Pin the spender-supplied
+        # `_codePart` to it before any continuation output is built from it.
+        if self.sm.has("_codePart"):
+            self._emit_code_part_authentication()
 
         # Preimage remains on top.  Rename for field extractors.
         self.sm.pop()
@@ -4883,20 +5068,68 @@ def _lower_to_stack_inner(program: ANFProgram) -> list[StackMethod]:
 
     methods: list[StackMethod] = []
 
+    # R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+    # decision, taken before any method is lowered.
+    #
+    #   * If any method authenticates a `_codePart` witness, the contract gets a
+    #     single separator at offset 1 of the locking script (emitted by `emit`)
+    #     and NO per-method ones, so scriptCode spans the whole script and every
+    #     byte of `_codePart` is recoverable from it.
+    #   * Otherwise nothing needs authenticating, and each checkPreimage keeps
+    #     its own separator at the method's entry — the pre-R-010 layout, which
+    #     keeps the preimage small and, for a stateless contract, keeps a user
+    #     checkSig on the near side of the separator where the SDK's signing
+    #     path expects it.
+    #
+    # The two schemes are never mixed: a per-method separator emitted after the
+    # script-level one would win and re-narrow scriptCode.
+    script_level_code_separator = any(
+        (m.name == "constructor" or m.is_public)
+        and _compute_uses_code_part(m, program.properties, private_methods)
+        for m in program.methods
+    )
+
     for method in program.methods:
         # Skip constructor and private methods
         if method.name == "constructor" or (not method.is_public and method.name != "constructor"):
             continue
-        sm = _lower_method_with_private_methods(method, program.properties, private_methods)
+        sm = _lower_method_with_private_methods(
+            method, program.properties, private_methods, script_level_code_separator,
+        )
         methods.append(sm)
 
     return methods
+
+
+def _compute_uses_code_part(
+    method: ANFMethod,
+    properties: list[ANFProperty],
+    private_methods: dict[str, ANFMethod],
+) -> bool:
+    """Whether a method's unlocking script carries the ``_codePart`` implicit
+    parameter: it verifies a preimage AND either builds a continuation output or
+    reads variable-length state (issue #100).
+
+    Hoisted out of ``_lower_method_with_private_methods`` because R-010 needs the
+    answer for EVERY method before lowering ANY of them — OP_CODESEPARATOR
+    placement is a contract-level decision (see ``_lower_to_stack_inner``).
+    """
+    if not _method_uses_check_preimage(method.body, private_methods):
+        return False
+    var_len_props = {
+        p.name for p in properties if not p.readonly and p.type == "ByteString"
+    }
+    return (
+        _method_uses_code_part(method.body)
+        or _method_reads_var_len_state(method.body, var_len_props, private_methods)
+    )
 
 
 def _lower_method_with_private_methods(
     method: ANFMethod,
     properties: list[ANFProperty],
     private_methods: dict[str, ANFMethod],
+    script_level_code_separator: bool = False,
 ) -> StackMethod:
     param_names = [p.name for p in method.params]
 
@@ -4913,16 +5146,16 @@ def _lower_method_with_private_methods(
     var_len_props = {
         p.name for p in properties if not p.readonly and p.type == "ByteString"
     }
-    uses_code_part = (
-        _method_uses_check_preimage(method.body, private_methods)
-        and (_method_uses_code_part(method.body)
-             or _method_reads_var_len_state(method.body, var_len_props, private_methods))
-    )
-    if _method_uses_check_preimage(method.body, private_methods) and uses_code_part:
+    uses_code_part = _compute_uses_code_part(method, properties, private_methods)
+    if uses_code_part:
         param_names = ["_codePart"] + param_names
 
     ctx = _LoweringContext(param_names, properties)
     ctx.private_methods = private_methods
+    # R-010: when the emitter places the script-level separator,
+    # _lower_check_preimage must NOT emit a per-method one — a later separator
+    # would win and re-narrow scriptCode, undoing the `_codePart` authentication.
+    ctx.script_level_code_separator = script_level_code_separator
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
@@ -4948,6 +5181,7 @@ def _lower_method_with_private_methods(
         ops=ctx.ops,
         max_stack_depth=ctx.max_depth,
         uses_code_part=uses_code_part,
+        needs_code_separator=script_level_code_separator,
     )
 
 

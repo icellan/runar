@@ -99,13 +99,18 @@ def _increment_ops() -> list[StackOp]:
 # ---------------------------------------------------------------------------
 
 def test_increment_emits_op_return_byte_push():
-    """add_output appends 0x6a (OP_RETURN-as-data) once into the script body
-    via a literal byte push, NOT via OP_RETURN opcode emission.
+    """add_output appends 0x6a (OP_RETURN-as-data) into the script body via a
+    literal byte push, NOT via OP_RETURN opcode emission.
+
+    Two such pushes now: add_output's own separator, plus the R-010
+    ``_codePart`` authentication, which pins the byte immediately after the
+    claimed code part to the OP_RETURN separator so a spender cannot claim a
+    short code part.
     """
     flat = _flatten_ops(_increment_ops())
     return_byte_pushes = [op for op in flat if _is_push_bytes(op, bytes([0x6A]))]
-    assert len(return_byte_pushes) == 1, (
-        f"expected exactly one push of bytes(0x6a), got {len(return_byte_pushes)}"
+    assert len(return_byte_pushes) == 2, (
+        f"expected exactly two pushes of bytes(0x6a), got {len(return_byte_pushes)}"
     )
 
 
@@ -149,14 +154,19 @@ def test_increment_emits_op_cat_for_concatenation():
     assert len(cats) >= 4, f"expected >=4 OP_CATs, got {len(cats)}"
 
 
-def test_increment_emits_op_codeseparator():
-    """Stateful methods inject OP_CODESEPARATOR at the start of the
-    checkPreimage flow so scriptCode in the BIP-143 preimage is reduced.
-    add_output runs after that.
+def test_increment_emits_no_per_method_codeseparator():
+    """R-010: OP_CODESEPARATOR is no longer part of a method's ops.
+
+    It used to be injected at each method's checkPreimage entry, which kept
+    the preimage small but hid the dispatch preamble and every preceding
+    method body from ``scriptCode`` — exactly the bytes the spender-supplied
+    ``_codePart`` claims to reproduce. The emitter now places a single
+    separator at offset 1 of the whole locking script instead; see
+    ``tests/codegen/test_codeseparator.py`` for the artifact-level pin.
     """
     flat = _flatten_ops(_increment_ops())
     cs = [op for op in flat if _is_opcode(op, "OP_CODESEPARATOR")]
-    assert len(cs) == 1, f"expected exactly 1 OP_CODESEPARATOR, got {len(cs)}"
+    assert len(cs) == 0, f"expected no per-method OP_CODESEPARATOR, got {len(cs)}"
 
 
 def test_increment_pushes_8_for_satoshis_and_state_widths():
@@ -174,7 +184,7 @@ def test_increment_pushes_8_for_satoshis_and_state_widths():
 
 # These counts pin the precise shape of the lowering. Update only if the
 # stateful-counter contract or add_output codegen changes intentionally.
-EXPECTED_INCREMENT_TOTAL_OPS = 154  # captured emission (incl. GAP-302 sighash-type pin; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard)
+EXPECTED_INCREMENT_TOTAL_OPS = 219  # captured emission (incl. GAP-302 sighash-type pin; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard; R-010: +65 ops for the `_codePart` authentication, minus the per-method OP_CODESEPARATOR now emitted once by the emitter)
 
 def test_increment_total_op_count_pinned():
     flat = _flatten_ops(_increment_ops())

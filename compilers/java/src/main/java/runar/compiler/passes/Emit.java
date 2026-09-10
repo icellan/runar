@@ -268,6 +268,51 @@ public final class Emit {
         }
 
         if (!publicMethods.isEmpty()) {
+            // R-010 / CL-BUG-091: a contract whose methods authenticate a
+            // `_codePart` witness gets ONE OP_CODESEPARATOR, and it goes at
+            // offset 1 of the locking script, behind a single OP_NOP.
+            //
+            // The separator used to be emitted per method, at the method's
+            // entry, which kept the preimage small but hid the dispatch
+            // preamble and every preceding method body from scriptCode — and
+            // those hidden bytes are exactly the ones the spender-supplied
+            // `_codePart` witness claims to reproduce. With the separator near
+            // the front, scriptCode == lockingScript[2:], so the script can pin
+            // `_codePart` byte for byte (see emitCodePartAuthentication in
+            // StackLower).
+            //
+            // The gate is `_codePart`, NOT "this contract verifies a preimage".
+            // A contract with no `_codePart` has no witness script to
+            // authenticate, so widening scriptCode buys it no security — and it
+            // costs correctness: the separator would land in front of any user
+            // `checkSig` in the method, while `packages/runar-sdk` signs a
+            // stateless contract's user signature over the FULL locking script.
+            // The node would verify that signature against `script[2:]` and the
+            // spend would fail (`examples/ts/covenant-vault`, a stateless
+            // contract that calls checkPreimage but never uses `_codePart`).
+            // Those contracts keep the pre-R-010 per-method separator, emitted
+            // by StackLower#lowerCheckPreimage.
+            //
+            // Offset 1, not 0: implementations that store "index of the last
+            // executed OP_CODESEPARATOR" in a zero-initialised field cannot
+            // tell "separator at offset 0" from "no separator seen" and fall
+            // back to the whole script. The BSV go-sdk interpreter does exactly
+            // this (thread.subScript: `if t.lastCodeSep > 0 { skip =
+            // t.lastCodeSep + 1 }`), while Bitcoin Core's pbegincodehash is a
+            // true position. Offset 1 keeps every implementation on the same
+            // side of that guard, and costs one byte.
+            boolean needsCodeSep = false;
+            for (StackMethod m : publicMethods) {
+                if (m.needsCodeSeparator()) {
+                    needsCodeSep = true;
+                    break;
+                }
+            }
+            if (needsCodeSep) {
+                ctx.emitOpcode("OP_NOP");
+                ctx.emitOpcode("OP_CODESEPARATOR");
+            }
+
             if (publicMethods.size() == 1) {
                 for (StackOp op : publicMethods.get(0).ops()) emitStackOp(op, ctx);
             } else {

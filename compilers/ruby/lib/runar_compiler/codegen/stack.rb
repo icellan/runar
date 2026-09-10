@@ -697,7 +697,11 @@ module RunarCompiler::Codegen
   class LoweringContext
     attr_accessor :sm, :ops, :max_depth, :properties, :private_methods,
                   :local_bindings, :outer_protected_refs, :inside_branch,
-                  :current_source_loc
+                  :current_source_loc,
+                  # R-010: true when the emitter supplies the script-level
+                  # OP_CODESEPARATOR, so _lower_check_preimage must not emit
+                  # its own.
+                  :script_level_code_separator
 
     # OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
     #
@@ -779,6 +783,7 @@ module RunarCompiler::Codegen
       @max_depth = 0
       @properties = properties
       @private_methods = {}
+      @script_level_code_separator = false
       @local_bindings = {}
       @array_lengths = {}
       @array_elements = {}
@@ -2182,6 +2187,11 @@ module RunarCompiler::Codegen
       then_ctx.outer_protected_refs = protected_refs
       then_ctx.inside_branch = true
       then_ctx.private_methods = @private_methods
+      # R-010: branch arms lower in a FRESH context, so the contract-level
+      # OP_CODESEPARATOR decision has to be carried in explicitly. Without this a
+      # checkPreimage inside an if-branch emits a stray per-method separator,
+      # which executes AFTER the script-level one and re-narrows scriptCode.
+      then_ctx.script_level_code_separator = @script_level_code_separator
       then_ctx.lower_bindings(then_bindings, terminal_assert)
 
       then_ctx.drain_branch_private_residue(pre_if_names)
@@ -2200,6 +2210,7 @@ module RunarCompiler::Codegen
       else_ctx.outer_protected_refs = protected_refs
       else_ctx.inside_branch = true
       else_ctx.private_methods = @private_methods
+      else_ctx.script_level_code_separator = @script_level_code_separator
       else_ctx.lower_bindings(else_bindings, terminal_assert)
 
       else_ctx.drain_branch_private_residue(pre_if_names)
@@ -3568,6 +3579,186 @@ module RunarCompiler::Codegen
     # check_preimage (OP_PUSH_TX)
     # -----------------------------------------------------------------
 
+    # Strip the BIP-143 scriptCode varint length prefix.
+    #
+    #   [..., varint || scriptCode]  ->  [..., scriptCode]
+    #
+    # All four varint shapes must be handled; stripping only the 1- and 3-byte
+    # forms corrupts extraction for scripts whose scriptCode exceeds 65,535
+    # bytes (e.g. embedded BN254 verifiers) and surfaces as
+    # `Invalid OP_SPLIT range` on regtest.
+    def _emit_strip_script_code_varint
+      emit_push_int(1); @sm.push("")
+      emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+      emit_op({ op: "swap" }); @sm.swap
+      # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+      # as negative script numbers.
+      emit_push_bytes([0].pack("C"))
+      @sm.push("")
+      emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_BIN2NUM")
+      # Stack: [..., rest, fb_num]
+
+      # emit_drop_more_varint_bytes drops `n` additional varint bytes
+      # from the top of stack `rest`. [..., rest] -> [..., rest_minus_n].
+      emit_drop_more_varint_bytes = lambda do |n|
+        emit_push_int(n); @sm.push("")
+        emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+        emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
+      end
+
+      # IF fb_num < 253: 1-byte varint, drop fb_num.
+      emit_op({ op: "dup" }); @sm.dup
+      emit_push_int(253); @sm.push("")
+      emit_opcode("OP_LESSTHAN"); @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF"); @sm.pop
+      sm_at_1byte_if = @sm.clone
+      # THEN: 1-byte varint
+      emit_op({ op: "drop" }); @sm.pop
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_1byte_if.clone
+      # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+      emit_op({ op: "dup" }); @sm.dup
+      emit_push_int(254); @sm.push("")
+      emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF"); @sm.pop
+      sm_at_fe_if = @sm.clone
+      # THEN: 5-byte varint (0xfe + 4 bytes LE).
+      emit_op({ op: "drop" }); @sm.pop
+      emit_drop_more_varint_bytes.call(4)
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_fe_if.clone
+      # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+      emit_op({ op: "dup" }); @sm.dup
+      emit_push_int(255); @sm.push("")
+      emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF"); @sm.pop
+      sm_at_ff_if = @sm.clone
+      # THEN: 9-byte varint (0xff + 8 bytes LE).
+      emit_op({ op: "drop" }); @sm.pop
+      emit_drop_more_varint_bytes.call(8)
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_ff_if.clone
+      # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+      emit_op({ op: "drop" }); @sm.pop
+      emit_drop_more_varint_bytes.call(2)
+      emit_opcode("OP_ENDIF")
+      emit_opcode("OP_ENDIF")
+      emit_opcode("OP_ENDIF")
+    end
+
+    # Byte length of the serialized state section (excluding the OP_RETURN
+    # separator) when every mutable property is fixed-size, else nil.
+    #
+    # Mirrors the size table in _lower_deserialize_state; a ByteString property
+    # makes the section variable-length and its exact length un-pinnable at
+    # compile time.
+    FIXED_STATE_FIELD_SIZES = {
+      "bigint" => 8, "RabinSig" => 8, "RabinPubKey" => 8,
+      "boolean" => 1, "PubKey" => 33, "Addr" => 20, "Ripemd160" => 20,
+      "Sha256" => 32, "Point" => 64, "P256Point" => 64, "P384Point" => 96
+    }.freeze
+
+    def _fixed_state_section_length
+      total = 0
+      @properties.each do |prop|
+        next if prop.readonly
+
+        size = FIXED_STATE_FIELD_SIZES[prop.type]
+        return nil if size.nil?
+
+        total += size
+      end
+      total
+    end
+
+    # Bind the spender-supplied `_codePart` witness to the executing script
+    # (R-010 / CL-BUG-091).
+    #
+    # `_codePart` is the locking script minus the trailing `OP_RETURN || state`
+    # section. It is pushed by the spender and OP_CAT'd verbatim as the script
+    # prefix of every reconstructed state-continuation output, so an
+    # unauthenticated `_codePart` is a complete break: the spender picks the
+    # script the contract's own funds move to.
+    #
+    # With the OP_CODESEPARATOR hoisted to offset 1 of the locking script, the
+    # BIP-143 scriptCode carried in the (already tx-bound) preimage is
+    #
+    #   scriptCode = lockingScript[2..] = codePart[2..] || 0x6a || state
+    #
+    # so the whole of `_codePart` is recoverable from it:
+    #
+    #   codePart == 0x61ab || scriptCode[0, SIZE(codePart) - 2]
+    #
+    # plus a pin on the split point, without which a spender could claim a
+    # SHORTER code part whose bytes are a genuine prefix — in the degenerate
+    # case just the two prologue bytes, which turns the continuation output
+    # into a bare OP_RETURN that anyone can spend.
+    #
+    # Consumes nothing: [..., preimage] in, [..., preimage] out, aborting the
+    # script via OP_EQUALVERIFY when the witness does not match.
+    def _emit_code_part_authentication
+      # 1. Work on a copy — the caller still needs the preimage.
+      emit_op({ op: "dup" }); @sm.dup
+
+      # 2. Drop the fixed 104-byte BIP-143 header.
+      emit_push_int(104); @sm.push("")
+      emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+      emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
+
+      # 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+      #    hashOutputs 32 + nLocktime 4 + sighashType 4).
+      emit_opcode("OP_SIZE"); @sm.push("")
+      emit_push_int(52); @sm.push("")
+      emit_opcode("OP_SUB"); @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+      emit_op({ op: "drop" }); @sm.pop
+
+      # 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+      _emit_strip_script_code_varint
+
+      # 5. Copy the witness code part up.
+      bring_to_top("_codePart", false)
+      @sm.rename_at_depth(0, "")
+
+      # 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+      emit_opcode("OP_SIZE"); @sm.push("")
+      emit_push_int(2); @sm.push("")
+      emit_opcode("OP_SUB"); @sm.pop; @sm.pop; @sm.push("")
+
+      # 7. Reorder to [..., codePart, scriptCode, n].
+      emit_op({ op: "rot" })
+      rotated = @sm.remove_at_depth(2)
+      @sm.push(rotated)
+      emit_op({ op: "swap" }); @sm.swap
+
+      # 8. Split scriptCode at n into the claimed code tail and the rest.
+      emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+
+      # 8a. Pin the split point.
+      fixed_state_len = _fixed_state_section_length
+      unless fixed_state_len.nil?
+        emit_opcode("OP_SIZE"); @sm.push("")
+        emit_push_int(1 + fixed_state_len); @sm.push("")
+        emit_opcode("OP_NUMEQUALVERIFY"); @sm.pop; @sm.pop
+      end
+      # 8b. The byte immediately after the code part must be the OP_RETURN
+      #     separator.
+      emit_push_int(1); @sm.push("")
+      emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+      emit_op({ op: "drop" }); @sm.pop
+      emit_push_bytes([0x6a].pack("C")); @sm.push("")
+      emit_opcode("OP_EQUALVERIFY"); @sm.pop; @sm.pop
+
+      # 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+      emit_push_bytes([0x61, 0xab].pack("C*")); @sm.push("")
+      emit_op({ op: "swap" }); @sm.swap
+      emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
+
+      # 10. Byte-for-byte or the script dies here.
+      emit_opcode("OP_EQUALVERIFY"); @sm.pop; @sm.pop
+    end
+
     def _lower_check_preimage(binding_name, preimage, sighash_flag, binding_index, last_uses)
       # OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
       # current spending transaction. The signature is DERIVED FROM THE PREIMAGE
@@ -3577,10 +3768,19 @@ module RunarCompiler::Codegen
       # closing BUG-100. The unlocking script pushes ONLY <preimage> (no witness
       # signature). See CHECK_PREIMAGE_BINDING_BYTES for the construction.
 
-      # Step 0: Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage
-      # is only the code after this point (smaller preimage; required for large
-      # scripts).
-      emit_opcode("OP_CODESEPARATOR")
+      # R-010 / CL-BUG-091: OP_CODESEPARATOR placement. The separator used to sit
+      # at each method's entry, so the BIP-143 scriptCode covered only the code
+      # AFTER it -- leaving the dispatch preamble and every preceding method
+      # body invisible to the running script, and those are exactly the bytes
+      # the spender-supplied `_codePart` claims to reproduce. When any method of
+      # this contract carries `_codePart`, the separator is emitted ONCE at
+      # offset 1 of the locking script instead (see Emit.emit in emit.rb).
+      unless @script_level_code_separator
+        # No `_codePart` anywhere in this contract, so nothing needs
+        # authenticating: keep the pre-R-010 layout -- a separator right here,
+        # at the method's entry, which keeps scriptCode (and the preimage) small.
+        emit_opcode("OP_CODESEPARATOR")
+      end
 
       # Step 1: Bring the preimage to the top (kept for field extractors below).
       is_last = _is_last_use(preimage, binding_index, last_uses)
@@ -3593,6 +3793,11 @@ module RunarCompiler::Codegen
       # sighash flag byte. Declared in=1/out=1 so the static analyzer keeps the
       # depth consistent; net stack effect is zero.
       emit_op({ op: "raw_bytes", raw_bytes: LoweringContext.check_preimage_binding_bytes(sighash_flag), in_arity: 1, out_arity: 1 })
+
+      # R-010: the preimage is now proven to be THIS transaction's preimage, so
+      # its scriptCode field is authentic. Pin the spender-supplied `_codePart`
+      # to it before any continuation output is built from it.
+      _emit_code_part_authentication if @sm.has?("_codePart")
 
       # Preimage remains on top. Rename for field extractors.
       @sm.pop
@@ -3863,63 +4068,7 @@ module RunarCompiler::Codegen
         # silently strip too few varint bytes and corrupt the subsequent
         # state-extraction OP_SPLITs — this surfaces as
         # `Invalid OP_SPLIT range` on regtest.
-        emit_push_int(1); @sm.push("")
-        emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-        emit_op({ op: "swap" }); @sm.swap
-        # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-        # as negative script numbers.
-        emit_push_bytes([0].pack("C"))
-        @sm.push("")
-        emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
-        emit_opcode("OP_BIN2NUM")
-        # Stack: [..., rest, fb_num]
-
-        # emit_drop_more_varint_bytes drops `n` additional varint bytes
-        # from the top of stack `rest`. [..., rest] -> [..., rest_minus_n].
-        emit_drop_more_varint_bytes = lambda do |n|
-          emit_push_int(n); @sm.push("")
-          emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-          emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
-        end
-
-        # IF fb_num < 253: 1-byte varint, drop fb_num.
-        emit_op({ op: "dup" }); @sm.dup
-        emit_push_int(253); @sm.push("")
-        emit_opcode("OP_LESSTHAN"); @sm.pop; @sm.pop; @sm.push("")
-        emit_opcode("OP_IF"); @sm.pop
-        sm_at_1byte_if = @sm.clone
-        # THEN: 1-byte varint
-        emit_op({ op: "drop" }); @sm.pop
-        emit_opcode("OP_ELSE")
-        @sm = sm_at_1byte_if.clone
-        # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-        emit_op({ op: "dup" }); @sm.dup
-        emit_push_int(254); @sm.push("")
-        emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
-        emit_opcode("OP_IF"); @sm.pop
-        sm_at_fe_if = @sm.clone
-        # THEN: 5-byte varint (0xfe + 4 bytes LE).
-        emit_op({ op: "drop" }); @sm.pop
-        emit_drop_more_varint_bytes.call(4)
-        emit_opcode("OP_ELSE")
-        @sm = sm_at_fe_if.clone
-        # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-        emit_op({ op: "dup" }); @sm.dup
-        emit_push_int(255); @sm.push("")
-        emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
-        emit_opcode("OP_IF"); @sm.pop
-        sm_at_ff_if = @sm.clone
-        # THEN: 9-byte varint (0xff + 8 bytes LE).
-        emit_op({ op: "drop" }); @sm.pop
-        emit_drop_more_varint_bytes.call(8)
-        emit_opcode("OP_ELSE")
-        @sm = sm_at_ff_if.clone
-        # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-        emit_op({ op: "drop" }); @sm.pop
-        emit_drop_more_varint_bytes.call(2)
-        emit_opcode("OP_ENDIF")
-        emit_opcode("OP_ENDIF")
-        emit_opcode("OP_ENDIF")
+        _emit_strip_script_code_varint
 
         # Compute skip = SIZE(_codePart) - codeSepIdx
         bring_to_top("_codePart", false)
@@ -4350,12 +4499,34 @@ module RunarCompiler::Codegen
     end
 
     methods = []
+
+    # R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+    # decision, taken before any method is lowered.
+    #
+    #   * If any method authenticates a `_codePart` witness, the contract gets a
+    #     single separator at offset 1 of the locking script (emitted by
+    #     Emit.emit) and NO per-method ones, so scriptCode spans the whole
+    #     script and every byte of `_codePart` is recoverable from it.
+    #   * Otherwise nothing needs authenticating, and each checkPreimage keeps
+    #     its own separator at the method's entry -- the pre-R-010 layout, which
+    #     keeps the preimage small and, for a stateless contract, keeps a user
+    #     checkSig on the near side of the separator where the SDK's signing
+    #     path expects it.
+    #
+    # The two schemes are never mixed: a per-method separator emitted after the
+    # script-level one would win and re-narrow scriptCode.
+    script_level_code_separator = program.methods.any? do |m|
+      (m.name == "constructor" || m.is_public) &&
+        _compute_uses_code_part(m, program.properties, private_methods)
+    end
+
     program.methods.each do |method|
       # Skip constructor and private methods
       next if method.name == "constructor"
       next if !method.is_public && method.name != "constructor"
 
-      sm = _lower_method_with_private_methods(method, program.properties, private_methods)
+      sm = _lower_method_with_private_methods(method, program.properties, private_methods,
+                                              script_level_code_separator)
       methods << sm
     end
 
@@ -4364,27 +4535,43 @@ module RunarCompiler::Codegen
   private_class_method :_lower_to_stack_inner
 
   # @api private
-  def self._lower_method_with_private_methods(method, properties, private_methods)
+  # Whether a method's unlocking script carries the `_codePart` implicit
+  # parameter: it verifies a preimage AND either builds a continuation output or
+  # reads variable-length state (issue #100).
+  #
+  # Hoisted out of _lower_method_with_private_methods because R-010 needs the
+  # answer for EVERY method before lowering ANY of them -- OP_CODESEPARATOR
+  # placement is a contract-level decision (see _lower_to_stack_inner).
+  def self._compute_uses_code_part(method, properties, private_methods)
+    return false unless method_uses_check_preimage?(method.body, private_methods)
+
+    var_len_props = properties.select { |p| !p.readonly && p.type == "ByteString" }.map(&:name)
+    method_uses_code_part?(method.body) ||
+      method_reads_var_len_state?(method.body, var_len_props, private_methods)
+  end
+
+  def self._lower_method_with_private_methods(method, properties, private_methods,
+                                              script_level_code_separator = false)
     param_names = method.params.map(&:name)
 
     # _codePart is needed for continuation builders (add_output/add_raw_output)
     # OR when the method reads a mutable variable-length (ByteString) state
     # field -- the deserialization needs it for the preimage-relative offset
     # (issue #100).
-    var_len_props = properties.select { |p| !p.readonly && p.type == "ByteString" }.map(&:name)
-    uses_code_part = method_uses_check_preimage?(method.body, private_methods) &&
-                     (method_uses_code_part?(method.body) ||
-                      method_reads_var_len_state?(method.body, var_len_props, private_methods))
+    #
     # BUG-100 fix: the OP_PUSH_TX signature is now derived on-chain from the
     # preimage (see _lower_check_preimage), so NO _opPushTxSig witness item is
     # pushed -- the unlocking script provides only the preimage (and _codePart
     # when needed).
-    if method_uses_check_preimage?(method.body, private_methods) && uses_code_part
-      param_names = ["_codePart"] + param_names
-    end
+    uses_code_part = _compute_uses_code_part(method, properties, private_methods)
+    param_names = ["_codePart"] + param_names if uses_code_part
 
     ctx = LoweringContext.new(param_names, properties)
     ctx.private_methods = private_methods
+    # R-010: when the emitter places the script-level separator,
+    # _lower_check_preimage must NOT emit a per-method one -- a later separator
+    # would win and re-narrow scriptCode, undoing the `_codePart` authentication.
+    ctx.script_level_code_separator = script_level_code_separator
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
@@ -4407,7 +4594,8 @@ module RunarCompiler::Codegen
             "(actual: #{ctx.max_depth}). Simplify the contract logic"
     end
 
-    { name: method.name, ops: ctx.ops, max_stack_depth: ctx.max_depth, uses_code_part: uses_code_part }
+    { name: method.name, ops: ctx.ops, max_stack_depth: ctx.max_depth, uses_code_part: uses_code_part,
+      needs_code_separator: script_level_code_separator }
   end
   private_class_method :_lower_method_with_private_methods
 

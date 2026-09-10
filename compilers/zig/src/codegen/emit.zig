@@ -425,6 +425,49 @@ fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []cons
     return null;
 }
 
+/// R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness gets
+/// ONE OP_CODESEPARATOR, and it goes at offset 1 of the locking script, behind a
+/// single OP_NOP.
+///
+/// The separator used to be emitted per method, at the method's entry, which
+/// kept the preimage small but hid the dispatch preamble and every preceding
+/// method body from scriptCode — and those hidden bytes are exactly the ones
+/// the spender-supplied `_codePart` witness claims to reproduce. With the
+/// separator near the front, scriptCode == lockingScript[2:], so the script
+/// can pin `_codePart` byte for byte (see emitCodePartAuthentication in
+/// stack_lower.zig).
+///
+/// The gate is `_codePart`, NOT "the method verifies a preimage". A contract
+/// that calls checkPreimage but never touches `_codePart` — a stateless
+/// covenant such as examples/ts/covenant-vault — has no witness to
+/// authenticate, so widening its scriptCode buys nothing. It also costs: the
+/// hoisted separator lands ahead of the user's own `checkSig`, so the node
+/// computes that signature's sighash over `script[2:]` while
+/// `packages/runar-sdk` signs a stateless contract over the FULL locking
+/// script, and the spend dies with "OP_CHECKSIGVERIFY requires that a valid
+/// signature is provided". Such contracts keep the pre-R-010 layout (a
+/// separator at the method's entry, emitted by lowerCheckPreimage).
+///
+/// Offset 1, not 0: implementations that store "index of the last executed
+/// OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+/// offset 0" from "no separator seen" and fall back to the whole script. The
+/// BSV go-sdk interpreter does exactly this (thread.subScript:
+/// `if t.lastCodeSep > 0 { skip = t.lastCodeSep + 1 }`), while Bitcoin Core's
+/// pbegincodehash is a true position. Offset 1 keeps every implementation on
+/// the same side of that guard, and costs one byte.
+fn emitCodeSeparatorPrologue(ctx: *EmitContext, methods: []const types.StackMethod) !void {
+    var needs_code_sep = false;
+    for (methods) |m| {
+        if (m.needs_code_separator) {
+            needs_code_sep = true;
+            break;
+        }
+    }
+    if (!needs_code_sep) return;
+    try ctx.emitOpcode(.op_nop);
+    try ctx.emitOpcode(.op_codeseparator);
+}
+
 /// Emit dispatch table with source map support (looks up source locs from ANF methods).
 ///
 /// Mirrors the TS reference compiler's emitMethodDispatch
@@ -439,6 +482,8 @@ fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []cons
 ///   OP_ENDIF (×(N-1) total ENDIFs)
 fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.StackMethod, anf_methods: []const types.ANFMethod) !void {
     if (methods.len == 0) return;
+
+    try emitCodeSeparatorPrologue(ctx, methods);
 
     if (methods.len == 1) {
         ctx.pending_source_loc = findMethodSourceLoc(anf_methods, methods[0].name);
@@ -476,6 +521,8 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
 /// Pattern: see `emitDispatchTableWithSourceMap`.
 pub fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !void {
     if (methods.len == 0) return;
+
+    try emitCodeSeparatorPrologue(ctx, methods);
 
     if (methods.len == 1) {
         // Single method: no dispatch needed, just emit the body

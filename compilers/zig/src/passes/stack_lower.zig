@@ -277,6 +277,11 @@ const LowerCtx = struct {
     renamed_params: std.StringHashMapUnmanaged([]const u8),
     /// Current ANF binding's source location — set before processing each binding.
     current_source_loc: ?types.SourceLocation = null,
+    /// R-010, contract-level: true when ANY public method of this contract
+    /// authenticates a `_codePart` witness, so the emitter puts ONE
+    /// OP_CODESEPARATOR at offset 1 of the locking script and
+    /// `lowerCheckPreimage` must NOT emit a per-method one.
+    script_level_code_separator: bool = false,
 
     fn init(allocator: Allocator, program: types.ANFProgram) LowerCtx {
         return .{
@@ -2797,6 +2802,277 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// Strip the BIP-143 scriptCode varint length prefix.
+    ///
+    ///     [..., varint || scriptCode]  ->  [..., scriptCode]
+    ///
+    /// All four varint shapes must be handled; stripping only the 1- and
+    /// 3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+    /// 65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+    /// `Invalid OP_SPLIT range` on regtest.
+    fn emitStripScriptCodeVarint(self: *LowerCtx) !void {
+        // SPLIT 1 -> [..., firstByte, rest]
+        try self.emitPushInt(1);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // firstByte
+        try self.stack.push(self.allocator, null); // rest
+        // SWAP -> [..., rest, firstByte]
+        try self.emitOp(.op_swap);
+        const vt_top = self.stack.pop();
+        const vt_next = self.stack.pop();
+        try self.stack.push(self.allocator, vt_top);
+        try self.stack.push(self.allocator, vt_next);
+        // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        // as negative script numbers.
+        try self.emitPushData(&.{0x00});
+        try self.stack.push(self.allocator, null);
+        // CAT -> [..., rest, firstByte||0x00]
+        try self.emitOp(.op_cat);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        // BIN2NUM -> [..., rest, fb_num]
+        try self.emitOp(.op_bin2num);
+
+        // IF fb_num < 253: 1-byte varint, drop fb_num.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        try self.emitPushInt(253);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_lessthan);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_1byte_if = try self.stack.clone(self.allocator);
+        // THEN: 1-byte varint
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_1byte_if;
+        sm_at_1byte_if = .{};
+
+        // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        try self.emitPushInt(254);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_fe_if = try self.stack.clone(self.allocator);
+        // THEN: 5-byte varint (0xfe + 4 bytes LE).
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitDropMoreVarintBytes(4);
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_fe_if;
+        sm_at_fe_if = .{};
+
+        // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        try self.emitPushInt(255);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_ff_if = try self.stack.clone(self.allocator);
+        // THEN: 9-byte varint (0xff + 8 bytes LE).
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitDropMoreVarintBytes(8);
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_ff_if;
+        sm_at_ff_if = .{};
+
+        // ELSE: fb_num must be 253 (0xfd) -- 3-byte varint.
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitDropMoreVarintBytes(2);
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+    }
+
+    /// Byte length of the serialized state section (excluding the OP_RETURN
+    /// separator) when every mutable property is fixed-size, and `null`
+    /// otherwise. Mirrors the size table in `lowerDeserializeState`; a
+    /// ByteString property makes the section variable-length and its exact
+    /// length un-pinnable at compile time.
+    fn fixedStateSectionLength(self: *const LowerCtx) ?i64 {
+        var total: i64 = 0;
+        for (self.program.properties) |prop| {
+            if (prop.readonly) continue;
+            const sz = statePropSize(prop) catch return null;
+            if (sz < 0) return null;
+            total += sz;
+        }
+        return total;
+    }
+
+    /// Bind the spender-supplied `_codePart` witness to the script that is
+    /// actually executing (R-010 / CL-BUG-091).
+    ///
+    /// `_codePart` is the locking script minus the trailing
+    /// `OP_RETURN || state` section. It is pushed by the spender and OP_CAT'd
+    /// verbatim as the script prefix of every reconstructed
+    /// state-continuation output, so an unauthenticated `_codePart` is a
+    /// complete break: the spender picks the script the contract's own funds
+    /// move to.
+    ///
+    /// With the OP_CODESEPARATOR hoisted to offset 1 of the locking script,
+    /// the BIP-143 scriptCode carried in the (already tx-bound) preimage is
+    ///
+    ///     scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state
+    ///
+    /// so the whole of `_codePart` is recoverable from it:
+    ///
+    ///     codePart == 0x61ab || scriptCode[0 : SIZE(codePart)-2]
+    ///
+    /// plus a pin on the split point, without which a spender could claim a
+    /// SHORTER code part whose bytes are a genuine prefix — in the degenerate
+    /// case just the two prologue bytes, which turns the continuation output
+    /// into a bare OP_RETURN that anyone can spend.
+    ///
+    /// Consumes nothing: [..., preimage] in, [..., preimage] out, aborting
+    /// the script via OP_EQUALVERIFY when the witness does not match.
+    fn emitCodePartAuthentication(self: *LowerCtx) !void {
+        // 1. Work on a copy — the caller still needs the preimage.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        self.trackDepth();
+
+        // 2. Drop the fixed 104-byte BIP-143 header.
+        try self.emitPushInt(104);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+        //    hashOutputs 32 + nLocktime 4 + sighashType 4).
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(52);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_sub);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+
+        // 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+        try self.emitStripScriptCodeVarint();
+
+        // 5. Copy the witness code part up.
+        try self.bringToTop("_codePart", false);
+        try self.stack.renameAtDepth(self.allocator, 0, null);
+
+        // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(2);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_sub);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // 7. Reorder to [..., codePart, scriptCode, n].
+        try self.emitOp(.op_rot);
+        const rotated = self.stack.peekAtDepth(2);
+        try self.stack.removeAtDepth(self.allocator, 2);
+        try self.stack.push(self.allocator, rotated);
+        try self.emitOp(.op_swap);
+        {
+            const top = self.stack.pop();
+            const next = self.stack.pop();
+            try self.stack.push(self.allocator, top);
+            try self.stack.push(self.allocator, next);
+        }
+
+        // 8. Split scriptCode at n into the claimed code tail and the rest.
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+
+        // 8a. Pin the split point.
+        if (self.fixedStateSectionLength()) |fixed_state_len| {
+            try self.emitOp(.op_size);
+            try self.stack.push(self.allocator, null);
+            try self.emitPushInt(1 + fixed_state_len);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_numequalverify);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+        }
+        // 8b. The byte immediately after the code part must be the OP_RETURN
+        //     separator.
+        try self.emitPushInt(1);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitPushData(&.{0x6a});
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_equalverify);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+
+        // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+        try self.emitPushData(&.{ 0x61, 0xab });
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_swap);
+        {
+            const top = self.stack.pop();
+            const next = self.stack.pop();
+            try self.stack.push(self.allocator, top);
+            try self.stack.push(self.allocator, next);
+        }
+        try self.emitOp(.op_cat);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // 10. Byte-for-byte or the script dies here.
+        try self.emitOp(.op_equalverify);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        self.trackDepth();
+    }
+
     fn lowerCheckPreimage(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, sighash_flag: i32) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
@@ -2807,9 +3083,23 @@ const LowerCtx = struct {
         // The unlocking script pushes ONLY <preimage> (no witness signature).
         // See emitCheckPreimageBinding for the construction.
 
-        // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
-        // the code after this point (smaller preimage; required for large scripts).
-        try self.emitOp(.op_codeseparator);
+        // R-010 / CL-BUG-091: where a `_codePart` witness exists ANYWHERE in
+        // this contract, NO separator is emitted here. It used to sit at each
+        // method's entry, so the BIP-143 scriptCode covered only the code
+        // AFTER it — leaving the dispatch preamble and every preceding method
+        // body invisible to the running script, and those are exactly the
+        // bytes the spender-supplied `_codePart` claims to reproduce. The
+        // emitter instead places one at offset 1 of the locking script (see
+        // emitCodeSeparatorPrologue in emit.zig).
+        if (!self.script_level_code_separator) {
+            // No `_codePart` anywhere in this contract, so nothing needs
+            // authenticating: keep the pre-R-010 layout — a separator right
+            // here, at the method's entry, which keeps scriptCode (and the
+            // preimage) small. Hoisting it would also move it ahead of any
+            // user `checkSig` in a stateless contract, whose signature
+            // packages/runar-sdk produces over the FULL locking script.
+            try self.emitOp(.op_codeseparator);
+        }
 
         // Bring the preimage to the top (kept for field extractors below).
         try self.bringToTopAuto(args[0]);
@@ -2820,6 +3110,13 @@ const LowerCtx = struct {
         // method declare a different mode, which only changes the appended
         // sighash flag byte. Net stack effect is zero.
         try self.emitCheckPreimageBinding(sighash_flag);
+
+        // R-010: the preimage is now proven to be THIS transaction's preimage,
+        // so its scriptCode field is authentic. Pin the spender-supplied
+        // `_codePart` to it before any continuation output is built from it.
+        if (self.stack.findDepth("_codePart") != null) {
+            try self.emitCodePartAuthentication();
+        }
 
         // Preimage remains on top. Rename for field extractors.
         try self.stack.renameAtDepth(self.allocator, 0, bind_name);
@@ -2983,101 +3280,7 @@ const LowerCtx = struct {
             // silently strip too few varint bytes and corrupt the subsequent
             // state-extraction OP_SPLITs.
 
-            // SPLIT 1 -> [..., firstByte, rest]
-            try self.emitPushInt(1);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_split);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null); // firstByte
-            try self.stack.push(self.allocator, null); // rest
-            // SWAP -> [..., rest, firstByte]
-            try self.emitOp(.op_swap);
-            const vt_top = self.stack.pop();
-            const vt_next = self.stack.pop();
-            try self.stack.push(self.allocator, vt_top);
-            try self.stack.push(self.allocator, vt_next);
-            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-            // as negative script numbers.
-            try self.emitPushData(&.{0x00});
-            try self.stack.push(self.allocator, null);
-            // CAT -> [..., rest, firstByte||0x00]
-            try self.emitOp(.op_cat);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            // BIN2NUM -> [..., rest, fb_num]
-            try self.emitOp(.op_bin2num);
-
-            // IF fb_num < 253: 1-byte varint, drop fb_num.
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            try self.emitPushInt(253);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_lessthan);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_if);
-            _ = self.stack.pop();
-            var sm_at_1byte_if = try self.stack.clone(self.allocator);
-            // THEN: 1-byte varint
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitOp(.op_else);
-            self.stack.deinit(self.allocator);
-            self.stack = sm_at_1byte_if;
-            sm_at_1byte_if = .{};
-
-            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            try self.emitPushInt(254);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_numequal);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_if);
-            _ = self.stack.pop();
-            var sm_at_fe_if = try self.stack.clone(self.allocator);
-            // THEN: 5-byte varint (0xfe + 4 bytes LE).
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitDropMoreVarintBytes(4);
-            try self.emitOp(.op_else);
-            self.stack.deinit(self.allocator);
-            self.stack = sm_at_fe_if;
-            sm_at_fe_if = .{};
-
-            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            try self.emitPushInt(255);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_numequal);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_if);
-            _ = self.stack.pop();
-            var sm_at_ff_if = try self.stack.clone(self.allocator);
-            // THEN: 9-byte varint (0xff + 8 bytes LE).
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitDropMoreVarintBytes(8);
-            try self.emitOp(.op_else);
-            self.stack.deinit(self.allocator);
-            self.stack = sm_at_ff_if;
-            sm_at_ff_if = .{};
-
-            // ELSE: fb_num must be 253 (0xfd) -- 3-byte varint.
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitDropMoreVarintBytes(2);
-            try self.emitOp(.op_endif);
-            try self.emitOp(.op_endif);
-            try self.emitOp(.op_endif);
+            try self.emitStripScriptCodeVarint();
 
             // Compute skip = SIZE(_codePart) - codeSepIdx
             // PICK _codePart (non-consuming)
@@ -4264,6 +4467,7 @@ const LowerCtx = struct {
         then_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         then_ctx.in_branch = true;
         then_ctx.copy_ref_aliases = self.copy_ref_aliases;
+        then_ctx.script_level_code_separator = self.script_level_code_separator;
         then_ctx.max_depth = self.max_depth;
         then_ctx.outer_protected_refs = &protected_refs;
         try then_ctx.lowerBindings(ie.then_bindings, terminal_assert);
@@ -4284,6 +4488,7 @@ const LowerCtx = struct {
         else_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         else_ctx.in_branch = true;
         else_ctx.copy_ref_aliases = self.copy_ref_aliases;
+        else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.max_depth = self.max_depth;
         else_ctx.outer_protected_refs = &protected_refs;
         const else_bindings = ie.else_bindings orelse &.{};
@@ -5318,6 +5523,20 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
     var owned_push_data = std.ArrayListUnmanaged([]u8).empty;
     defer owned_push_data.deinit(allocator);
 
+    // R-010: decide ONCE, before lowering anything, whether this contract
+    // authenticates a `_codePart` witness. The predicate is exactly the one
+    // `setupMethodStack` uses to push the implicit `_codePart` slot, so the
+    // emitter's offset-1 separator and `emitCodePartAuthentication` can never
+    // disagree about which layout a method was lowered for.
+    var script_level_code_separator = false;
+    for (program.methods) |method| {
+        if (!method.is_public) continue;
+        if (methodUsesCodePartFull(methodBindings(method), program.properties, program.methods)) {
+            script_level_code_separator = true;
+            break;
+        }
+    }
+
     for (program.methods) |method| {
         if (!method.is_public) continue;
 
@@ -5326,6 +5545,7 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
 
         try setupMethodStack(&ctx, program, method);
         ctx.copy_ref_aliases = false;
+        ctx.script_level_code_separator = script_level_code_separator;
 
         // Use body or bindings (whichever is populated)
         const bindings = if (method.body.len > 0) method.body else method.bindings;
@@ -5347,6 +5567,7 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
             .instructions = instructions,
             .max_stack_depth = ctx.max_depth,
             .instruction_source_locs = src_locs,
+            .needs_code_separator = script_level_code_separator,
         });
         try owned_push_data.appendSlice(allocator, ctx.owned_push_data.items);
         ctx.owned_push_data.deinit(allocator);

@@ -25,14 +25,14 @@ const maxStackDepth = 800
 
 // StackOp represents a single stack-machine operation.
 type StackOp struct {
-	Op         string    // "push", "dup", "swap", "roll", "pick", "drop", "opcode", "if", "nip", "over", "rot", "tuck", "placeholder", "raw_bytes"
-	Value      PushValue // for push ops
-	Depth      int       // for roll/pick (informational)
-	Code       string    // for opcode ops (e.g. "OP_ADD")
-	Then       []StackOp // for if ops
-	Else       []StackOp // for if ops
-	ParamIndex int       // for placeholder ops — index into constructor params
-	ParamName  string    // for placeholder ops — name of constructor param
+	Op         string             // "push", "dup", "swap", "roll", "pick", "drop", "opcode", "if", "nip", "over", "rot", "tuck", "placeholder", "raw_bytes"
+	Value      PushValue          // for push ops
+	Depth      int                // for roll/pick (informational)
+	Code       string             // for opcode ops (e.g. "OP_ADD")
+	Then       []StackOp          // for if ops
+	Else       []StackOp          // for if ops
+	ParamIndex int                // for placeholder ops — index into constructor params
+	ParamName  string             // for placeholder ops — name of constructor param
 	SourceLoc  *ir.SourceLocation // Debug: source location from ANF binding
 
 	// raw_bytes — opaque opcode-byte span emitted verbatim by a raw_script
@@ -46,10 +46,10 @@ type StackOp struct {
 
 // PushValue holds the typed value for a push operation.
 type PushValue struct {
-	Kind    string // "bigint", "bool", "bytes"
-	BigInt  *big.Int
-	Bool    bool
-	Bytes   []byte
+	Kind   string // "bigint", "bool", "bytes"
+	BigInt *big.Int
+	Bool   bool
+	Bytes  []byte
 }
 
 // StackMethod is the stack-lowered form of a single contract method.
@@ -62,6 +62,11 @@ type StackMethod struct {
 	// terminal methods that read variable-length (ByteString) state (issue
 	// #100). Propagated to ABIMethod.UsesCodePart for the SDK.
 	UsesCodePart bool
+	// NeedsCodeSeparator is true if this method's lowering needs the
+	// script-level OP_CODESEPARATOR the emitter places at offset 1 of the
+	// locking script (R-010). Contract-level: true for every method of a
+	// contract in which ANY method authenticates a `_codePart` witness.
+	NeedsCodeSeparator bool
 }
 
 // ---------------------------------------------------------------------------
@@ -98,25 +103,25 @@ func isVariableLengthStateType(t string) bool {
 // ---------------------------------------------------------------------------
 
 var builtinOpcodes = map[string][]string{
-	"sha256":       {"OP_SHA256"},
-	"ripemd160":    {"OP_RIPEMD160"},
-	"hash160":      {"OP_HASH160"},
-	"hash256":      {"OP_HASH256"},
-	"checkSig":     {"OP_CHECKSIG"},
+	"sha256":        {"OP_SHA256"},
+	"ripemd160":     {"OP_RIPEMD160"},
+	"hash160":       {"OP_HASH160"},
+	"hash256":       {"OP_HASH256"},
+	"checkSig":      {"OP_CHECKSIG"},
 	"checkMultiSig": {"OP_CHECKMULTISIG"},
-	"len":          {"OP_SIZE"},
-	"cat":          {"OP_CAT"},
-	"num2bin":      {"OP_NUM2BIN"},
-	"bin2num":      {"OP_BIN2NUM"},
-	"abs":          {"OP_ABS"},
-	"min":          {"OP_MIN"},
-	"max":          {"OP_MAX"},
-	"within":       {"OP_WITHIN"},
-	"split":        {"OP_SPLIT"},
-	"left":         {"OP_SPLIT", "OP_DROP"},
-	"int2str":      {"OP_NUM2BIN"},
-	"bool":         {"OP_0NOTEQUAL"},
-	"unpack":       {"OP_BIN2NUM"},
+	"len":           {"OP_SIZE"},
+	"cat":           {"OP_CAT"},
+	"num2bin":       {"OP_NUM2BIN"},
+	"bin2num":       {"OP_BIN2NUM"},
+	"abs":           {"OP_ABS"},
+	"min":           {"OP_MIN"},
+	"max":           {"OP_MAX"},
+	"within":        {"OP_WITHIN"},
+	"split":         {"OP_SPLIT"},
+	"left":          {"OP_SPLIT", "OP_DROP"},
+	"int2str":       {"OP_NUM2BIN"},
+	"bool":          {"OP_0NOTEQUAL"},
+	"unpack":        {"OP_BIN2NUM"},
 }
 
 // ---------------------------------------------------------------------------
@@ -622,14 +627,17 @@ type loweringContext struct {
 	ops            []StackOp
 	maxDepth       int
 	properties     []ir.ANFProperty
-	privateMethods map[string]*ir.ANFMethod // private methods available for inlining
-	localBindings      map[string]bool // binding names in current lowerBindings scope; used by @ref: handler
-	outerProtectedRefs map[string]bool // parent-scope refs that must not be consumed (used after current if-branch)
-	insideBranch       bool            // true when executing inside an if-branch; update_prop skips old-value removal
-	currentSourceLoc   *ir.SourceLocation // Debug: source location to attach to next emitted StackOps
-	constValues        map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
-	arrayLengths       map[string]int      // element counts for array_literal bindings (used by checkMultiSig)
-	arrayElements      map[string][]string // element refs for array_literal bindings (used by checkMultiSig)
+	privateMethods map[string]*ir.ANFMethod
+	// R-010: true when Emit supplies the script-level OP_CODESEPARATOR, so
+	// lowerCheckPreimage must not emit its own.
+	scriptLevelCodeSeparator bool                // private methods available for inlining
+	localBindings            map[string]bool     // binding names in current lowerBindings scope; used by @ref: handler
+	outerProtectedRefs       map[string]bool     // parent-scope refs that must not be consumed (used after current if-branch)
+	insideBranch             bool                // true when executing inside an if-branch; update_prop skips old-value removal
+	currentSourceLoc         *ir.SourceLocation  // Debug: source location to attach to next emitted StackOps
+	constValues              map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
+	arrayLengths             map[string]int      // element counts for array_literal bindings (used by checkMultiSig)
+	arrayElements            map[string][]string // element refs for array_literal bindings (used by checkMultiSig)
 
 	// renamedParams maps a method param name whose name collides with a MUTABLE
 	// property to the reserved stack-slot name its witness value lives under
@@ -712,11 +720,12 @@ func (ctx *loweringContext) emitOp(op StackOp) {
 // Leaves stack:  [..., script, varint_bytes]
 //
 // Bitcoin varint format:
-//   len < 0xfd:        1 byte (len itself)
-//   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
-//   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
-//   otherwise:         0xff + 8 bytes LE                (9 bytes — never used in
-//                                                        practice for BSV scripts)
+//
+//	len < 0xfd:        1 byte (len itself)
+//	len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+//	len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+//	otherwise:         0xff + 8 bytes LE                (9 bytes — never used in
+//	                                                     practice for BSV scripts)
 //
 // We must support all four shapes; emitting a 3-byte varint for a script whose
 // length exceeds 0xffff produces a truncated value that no longer matches what
@@ -769,7 +778,8 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
@@ -784,7 +794,8 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0x10000)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
@@ -800,7 +811,8 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0x100000000)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
@@ -839,7 +851,8 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -850,18 +863,22 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 	smEndTarget := ctx.sm.clone()
@@ -874,7 +891,8 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(256)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -885,25 +903,30 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4c}}})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
@@ -914,25 +937,30 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4d}}})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
@@ -950,8 +978,10 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
@@ -960,7 +990,8 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -969,8 +1000,10 @@ func (ctx *loweringContext) emitPushDataDecode() {
 
 	// THEN: fb < 76 → direct length
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	smEndTarget := ctx.sm.clone()
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
@@ -981,7 +1014,8 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(77)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
-	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.pop()
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
@@ -994,14 +1028,18 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 	ctx.sm = smAfterInnerIf.clone()
@@ -1012,14 +1050,18 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop(); ctx.sm.pop()
-	ctx.sm.push(""); ctx.sm.push("")
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
@@ -2101,6 +2143,11 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	thenCtx := newLoweringContext(nil, ctx.properties)
 	thenCtx.sm = ctx.sm.clone()
 	thenCtx.outerProtectedRefs = protectedRefs
+	// R-010: branch arms lower in a FRESH context, so the contract-level
+	// OP_CODESEPARATOR decision has to be carried in explicitly. Without this a
+	// checkPreimage inside an if-branch emits a stray per-method separator,
+	// which executes AFTER the script-level one and re-narrows scriptCode.
+	thenCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
 	thenCtx.insideBranch = true
 	thenCtx.lowerBindings(thenBindings, ta)
 
@@ -2118,6 +2165,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	elseCtx := newLoweringContext(nil, ctx.properties)
 	elseCtx.sm = ctx.sm.clone()
 	elseCtx.outerProtectedRefs = protectedRefs
+	elseCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
 	elseCtx.insideBranch = true
 	elseCtx.lowerBindings(elseBindings, ta)
 
@@ -2883,8 +2931,8 @@ func (ctx *loweringContext) lowerComputeStateOutputHash(bindingName string, args
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [prefix, amountAndTail]
 	ctx.sm.pop()
 	ctx.sm.pop()
-	ctx.sm.push("") // prefix
-	ctx.sm.push("") // amountAndTail
+	ctx.sm.push("")                // prefix
+	ctx.sm.push("")                // amountAndTail
 	ctx.emitOp(StackOp{Op: "nip"}) // drop prefix
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -2894,8 +2942,8 @@ func (ctx *loweringContext) lowerComputeStateOutputHash(bindingName string, args
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [amount(8), tail(44)]
 	ctx.sm.pop()
 	ctx.sm.pop()
-	ctx.sm.push("") // amount
-	ctx.sm.push("") // tail
+	ctx.sm.push("")                 // amount
+	ctx.sm.push("")                 // tail
 	ctx.emitOp(StackOp{Op: "drop"}) // drop tail
 	ctx.sm.pop()
 	// --- Stack: [..., stateBytes, amount(8LE)] ---
@@ -3254,105 +3302,7 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		// strip too few varint bytes and corrupt the subsequent
 		// state-extraction OP_SPLITs (this is the bug fixed here — see
 		// `integration/go/contracts/RollupBug.runar.go`).
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-		ctx.sm.pop()
-		ctx.sm.pop()
-		ctx.sm.push("") // firstByte
-		ctx.sm.push("") // rest
-		ctx.emitOp(StackOp{Op: "swap"})
-		ctx.sm.swap()
-		// Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-		// as negative script numbers.
-		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0}}})
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
-		ctx.sm.pop(); ctx.sm.pop()
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
-		// Stack: [..., rest, fb_num]
-
-		// emitDropMoreVarintBytes drops `n` additional varint bytes from
-		// the top of stack `rest`. Stack in: [..., rest], stack out:
-		// [..., rest_minus_n].
-		emitDropMoreVarintBytes := func(n int64) {
-			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(n)})
-			ctx.sm.push("")
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-			ctx.sm.pop()
-			ctx.sm.pop()
-			ctx.sm.push("")
-			ctx.sm.push("")
-			ctx.emitOp(StackOp{Op: "nip"})
-			ctx.sm.pop()
-			ctx.sm.pop()
-			ctx.sm.push("")
-		}
-
-		// IF fb_num < 253: 1-byte varint, drop fb_num.
-		ctx.emitOp(StackOp{Op: "dup"})
-		ctx.sm.push(ctx.sm.peekAtDepth(0))
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-		ctx.sm.pop(); ctx.sm.pop()
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
-		ctx.sm.pop()
-		smAt1ByteIf := ctx.sm.clone()
-		// THEN: 1-byte varint
-		ctx.emitOp(StackOp{Op: "drop"})
-		ctx.sm.pop()
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
-		ctx.sm = smAt1ByteIf.clone()
-		// ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-		ctx.emitOp(StackOp{Op: "dup"})
-		ctx.sm.push(ctx.sm.peekAtDepth(0))
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(254)})
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
-		ctx.sm.pop(); ctx.sm.pop()
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
-		ctx.sm.pop()
-		smAtFEIf := ctx.sm.clone()
-		// THEN: 5-byte varint (0xfe + 4 bytes LE).
-		ctx.emitOp(StackOp{Op: "drop"})
-		ctx.sm.pop()
-		emitDropMoreVarintBytes(4)
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
-		ctx.sm = smAtFEIf.clone()
-		// ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-		// NOTE: 0xff is physically unreachable on BSV (it signifies a
-		// scriptCode > 4 GiB, which no transaction policy permits). We
-		// handle it explicitly here anyway so that any future change to
-		// max-script-size doesn't turn this code path into silent
-		// corruption. See the matching comment on the outgoing varint
-		// emission near "0xff + 8-byte LE" for the full rationale.
-		ctx.emitOp(StackOp{Op: "dup"})
-		ctx.sm.push(ctx.sm.peekAtDepth(0))
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(255)})
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
-		ctx.sm.pop(); ctx.sm.pop()
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
-		ctx.sm.pop()
-		smAtFFIf := ctx.sm.clone()
-		// THEN: 9-byte varint (0xff + 8 bytes LE).
-		ctx.emitOp(StackOp{Op: "drop"})
-		ctx.sm.pop()
-		emitDropMoreVarintBytes(8)
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
-		ctx.sm = smAtFFIf.clone()
-		// ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-		ctx.emitOp(StackOp{Op: "drop"})
-		ctx.sm.pop()
-		emitDropMoreVarintBytes(2)
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+		ctx.emitStripScriptCodeVarint()
 
 		// Compute skip = SIZE(_codePart) - codeSepIdx
 		ctx.bringToTop("_codePart", false)
@@ -3452,15 +3402,18 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					// Variable-length byte-string: decode push-data
 					// prefix, extract data.
 					ctx.emitPushDataDecode() // [..., data, rest]
-					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.pop()
+					ctx.sm.pop()
 					ctx.sm.push(prop.Name)
 					ctx.sm.push("") // rest on top
 				} else {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(propSizes[i]))})
 					ctx.sm.push("")
 					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-					ctx.sm.pop(); ctx.sm.pop()
-					ctx.sm.push(""); ctx.sm.push("")
+					ctx.sm.pop()
+					ctx.sm.pop()
+					ctx.sm.push("")
+					ctx.sm.push("")
 					ctx.emitOp(StackOp{Op: "swap"})
 					ctx.sm.swap()
 					if isNumericStateType(prop.Type) {
@@ -3468,7 +3421,8 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					}
 					ctx.emitOp(StackOp{Op: "swap"})
 					ctx.sm.swap()
-					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.pop()
+					ctx.sm.pop()
 					ctx.sm.push(prop.Name)
 					ctx.sm.push("")
 				}
@@ -3738,6 +3692,288 @@ func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string
 	ctx.trackDepth()
 }
 
+// emitStripScriptCodeVarint strips the BIP-143 scriptCode varint length prefix.
+//
+//	[..., varint || scriptCode]  ->  [..., scriptCode]
+//
+// All four varint shapes must be handled; stripping only the 1- and 3-byte
+// forms corrupts extraction for scripts whose scriptCode exceeds 65,535 bytes
+// (e.g. embedded BN254 verifiers) and surfaces as `Invalid OP_SPLIT range` on
+// regtest.
+func (ctx *loweringContext) emitStripScriptCodeVarint() {
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // firstByte
+	ctx.sm.push("") // rest
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	// Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+	// as negative script numbers.
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	// Stack: [..., rest, fb_num]
+
+	// emitDropMoreVarintBytes drops `n` additional varint bytes from
+	// the top of stack `rest`. Stack in: [..., rest], stack out:
+	// [..., rest_minus_n].
+	emitDropMoreVarintBytes := func(n int64) {
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(n)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "nip"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+	}
+
+	// IF fb_num < 253: 1-byte varint, drop fb_num.
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push(ctx.sm.peekAtDepth(0))
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAt1ByteIf := ctx.sm.clone()
+	// THEN: 1-byte varint
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAt1ByteIf.clone()
+	// ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push(ctx.sm.peekAtDepth(0))
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(254)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAtFEIf := ctx.sm.clone()
+	// THEN: 5-byte varint (0xfe + 4 bytes LE).
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	emitDropMoreVarintBytes(4)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAtFEIf.clone()
+	// ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+	// NOTE: 0xff is physically unreachable on BSV (it signifies a
+	// scriptCode > 4 GiB, which no transaction policy permits). We
+	// handle it explicitly here anyway so that any future change to
+	// max-script-size doesn't turn this code path into silent
+	// corruption. See the matching comment on the outgoing varint
+	// emission near "0xff + 8-byte LE" for the full rationale.
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push(ctx.sm.peekAtDepth(0))
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(255)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAtFFIf := ctx.sm.clone()
+	// THEN: 9-byte varint (0xff + 8 bytes LE).
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	emitDropMoreVarintBytes(8)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAtFFIf.clone()
+	// ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	emitDropMoreVarintBytes(2)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+}
+
+// fixedStateSectionLength returns the byte length of the serialized state
+// section (excluding the OP_RETURN separator) when every mutable property is
+// fixed-size, and -1 otherwise. Mirrors the size table in
+// lowerDeserializeState; a ByteString property makes the section
+// variable-length and its exact length un-pinnable at compile time.
+func (ctx *loweringContext) fixedStateSectionLength() int {
+	total := 0
+	for _, prop := range ctx.properties {
+		if prop.Readonly {
+			continue
+		}
+		switch prop.Type {
+		case "bigint", "RabinSig", "RabinPubKey":
+			total += 8
+		case "boolean":
+			total++
+		case "PubKey":
+			total += 33
+		case "Addr", "Ripemd160":
+			total += 20
+		case "Sha256":
+			total += 32
+		case "Point", "P256Point":
+			total += 64
+		case "P384Point":
+			total += 96
+		default:
+			return -1
+		}
+	}
+	return total
+}
+
+// emitCodePartAuthentication binds the spender-supplied `_codePart` witness to
+// the script that is actually executing (R-010 / CL-BUG-091).
+//
+// `_codePart` is the locking script minus the trailing `OP_RETURN || state`
+// section. It is pushed by the spender and OP_CAT'd verbatim as the script
+// prefix of every reconstructed state-continuation output, so an
+// unauthenticated `_codePart` is a complete break: the spender picks the
+// script the contract's own funds move to.
+//
+// With the OP_CODESEPARATOR hoisted to offset 1 of the locking script, the
+// BIP-143 scriptCode carried in the (already tx-bound) preimage is
+//
+//	scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state
+//
+// so the whole of `_codePart` is recoverable from it:
+//
+//	codePart == 0x61ab || scriptCode[0 : SIZE(codePart)-2]
+//
+// plus a pin on the split point, without which a spender could claim a
+// SHORTER code part whose bytes are a genuine prefix — in the degenerate case
+// just the two prologue bytes, which turns the continuation output into a bare
+// OP_RETURN that anyone can spend.
+//
+// Consumes nothing: [..., preimage] in, [..., preimage] out, aborting the
+// script via OP_EQUALVERIFY when the witness does not match.
+func (ctx *loweringContext) emitCodePartAuthentication() {
+	// 1. Work on a copy — the caller still needs the preimage.
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.dup()
+
+	// 2. Drop the fixed 104-byte BIP-143 header.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(104)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "nip"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 + hashOutputs 32
+	//    + nLocktime 4 + sighashType 4).
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(52)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+
+	// 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+	ctx.emitStripScriptCodeVarint()
+
+	// 5. Copy the witness code part up.
+	ctx.bringToTop("_codePart", false)
+	ctx.sm.renameAtDepth(0, "")
+
+	// 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode excludes).
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// 7. Reorder to [..., codePart, scriptCode, n].
+	ctx.emitOp(StackOp{Op: "rot"})
+	rotated := ctx.sm.removeAtDepth(2)
+	ctx.sm.push(rotated)
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+
+	// 8. Split scriptCode at n into the claimed code tail and the remainder.
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+
+	// 8a. Pin the split point.
+	if fixedStateLen := ctx.fixedStateSectionLength(); fixedStateLen >= 0 {
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(1 + fixedStateLen))})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+	}
+	// 8b. The byte immediately after the code part must be the OP_RETURN
+	//     separator.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x6a}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+
+	// 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x61, 0xab}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// 10. Byte-for-byte or the script dies here.
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+}
+
 func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, sighashFlag int, bindingIndex int, lastUses map[string]int) {
 	// OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
 	// current spending transaction. The signature is DERIVED FROM THE PREIMAGE
@@ -3747,9 +3983,19 @@ func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, sig
 	// The unlocking script pushes ONLY <preimage> (no witness signature).
 	// See emitCheckPreimageBinding (oppushtx.go) for the construction.
 
-	// Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
-	// the code after this point (smaller preimage; required for large scripts).
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CODESEPARATOR"})
+	// R-010 / CL-BUG-091: OP_CODESEPARATOR placement. The separator used to sit
+	// at each method's entry, so the BIP-143 scriptCode covered only the code
+	// AFTER it — leaving the dispatch preamble and every preceding method body
+	// invisible to the running script, and those are exactly the bytes the
+	// spender-supplied `_codePart` claims to reproduce. When any method of this
+	// contract carries `_codePart`, the separator is emitted ONCE at offset 1 of
+	// the locking script instead (see Emit in emit.go).
+	if !ctx.scriptLevelCodeSeparator {
+		// No `_codePart` anywhere in this contract, so nothing needs
+		// authenticating: keep the pre-R-010 layout — a separator right here, at
+		// the method's entry, which keeps scriptCode (and the preimage) small.
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CODESEPARATOR"})
+	}
 
 	// Bring the preimage to the top (kept for field extractors below).
 	isLast := ctx.isLastUse(preimage, bindingIndex, lastUses)
@@ -3761,6 +4007,13 @@ func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, sig
 	// different mode, which only changes the appended sighash flag byte. Net
 	// stack effect is zero.
 	ctx.emitCheckPreimageBinding(sighashFlag)
+
+	// R-010: the preimage is now proven to be THIS transaction's preimage, so
+	// its scriptCode field is authentic. Pin the spender-supplied `_codePart`
+	// to it before any continuation output is built from it.
+	if ctx.sm.has("_codePart") {
+		ctx.emitCodePartAuthentication()
+	}
 
 	// Preimage remains on top. Rename for field extractors.
 	ctx.sm.pop()
@@ -4164,8 +4417,8 @@ func (ctx *loweringContext) lowerArrayAccess(bindingName string, args []string, 
 	ctx.bringToTop(index, indexConsume)
 
 	// OP_SPLIT at index: stack = [..., left, right]
-	ctx.sm.pop()  // index consumed
-	ctx.sm.pop()  // data consumed
+	ctx.sm.pop() // index consumed
+	ctx.sm.pop() // data consumed
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.push("") // left part (discard)
 	ctx.sm.push("") // right part (keep)
@@ -4181,8 +4434,8 @@ func (ctx *loweringContext) lowerArrayAccess(bindingName string, args []string, 
 	ctx.sm.push("")
 
 	// OP_SPLIT: split off first byte: stack = [..., firstByte, rest]
-	ctx.sm.pop()  // 1 consumed
-	ctx.sm.pop()  // right consumed
+	ctx.sm.pop() // 1 consumed
+	ctx.sm.pop() // right consumed
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.push("") // first byte (keep)
 	ctx.sm.push("") // rest (discard)
@@ -4334,12 +4587,12 @@ func (ctx *loweringContext) lowerRight(bindingName string, args []string, bindin
 	ctx.sm.pop() // len
 	ctx.sm.pop() // data
 
-	ctx.emitOp(StackOp{Op: "swap"})                          // <len> <data>
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})       // <len> <data> <size>
-	ctx.emitOp(StackOp{Op: "rot"})                            // <data> <size> <len>
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})        // <data> <size-len>
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})      // <left> <right>
-	ctx.emitOp(StackOp{Op: "nip"})                            // <right>
+	ctx.emitOp(StackOp{Op: "swap"})                     // <len> <data>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})  // <len> <data> <size>
+	ctx.emitOp(StackOp{Op: "rot"})                      // <data> <size> <len>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})   // <data> <size-len>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // <left> <right>
+	ctx.emitOp(StackOp{Op: "nip"})                      // <right>
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
@@ -4366,11 +4619,11 @@ func (ctx *loweringContext) lowerSafeDivMod(bindingName, funcName string, args [
 
 	// Stack: ... a b
 	// DUP b, check non-zero, then divide/mod
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"}) // ... a b b
-	ctx.sm.push("")                                     // extra b copy
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})       // ... a b b
+	ctx.sm.push("")                                         // extra b copy
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"}) // ... a b (b!=0)
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})    // ... a b (aborts if zero)
-	ctx.sm.pop() // remove the check result
+	ctx.sm.pop()                                            // remove the check result
 
 	// Pop both operands, emit div or mod
 	ctx.sm.pop() // b
@@ -4441,21 +4694,21 @@ func (ctx *loweringContext) lowerPow(bindingName string, args []string, bindingI
 	ctx.sm.pop() // base
 
 	// Stack: base exp
-	ctx.emitOp(StackOp{Op: "swap"})                          // exp base
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})    // exp base 1(acc)
+	ctx.emitOp(StackOp{Op: "swap"})                       // exp base
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)}) // exp base 1(acc)
 
 	const maxPowIterations = 32
 	for i := 0; i < maxPowIterations; i++ {
 		// Stack: exp base acc
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_PICK"})              // exp base acc exp
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_PICK"}) // exp base acc exp
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(i))})
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"})       // exp base acc (exp > i)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"}) // exp base acc (exp > i)
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
-				{Op: "over"},                            // exp base acc base
-				{Op: "opcode", Code: "OP_MUL"},          // exp base (acc*base)
+				{Op: "over"},                   // exp base acc base
+				{Op: "opcode", Code: "OP_MUL"}, // exp base (acc*base)
 			},
 		})
 	}
@@ -4601,14 +4854,14 @@ func (ctx *loweringContext) lowerGcd(bindingName string, args []string, bindingI
 	for i := 0; i < gcdIterations; i++ {
 		// Stack: a b
 		// if b != 0: a b -> b (a%b)
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})        // a b b
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})  // a b (b!=0)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})       // a b b
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"}) // a b (b!=0)
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
 				// a b -> b (a%b)
 				{Op: "opcode", Code: "OP_TUCK"}, // b a b
-				{Op: "opcode", Code: "OP_MOD"},   // b (a%b)
+				{Op: "opcode", Code: "OP_MOD"},  // b (a%b)
 			},
 		})
 	}
@@ -4680,18 +4933,18 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 	const log2Iterations = 64
 	for i := 0; i < log2Iterations; i++ {
 		// Stack: input counter
-		ctx.emitOp(StackOp{Op: "swap"})                                  // counter input
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})               // counter input input
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})            // counter input input 1
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"})        // counter input (input>1)
+		ctx.emitOp(StackOp{Op: "swap"})                           // counter input
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})         // counter input input
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})     // counter input input 1
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_GREATERTHAN"}) // counter input (input>1)
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
-				{Op: "push", Value: bigIntPush(2)},       // counter input 2
-				{Op: "opcode", Code: "OP_DIV"},           // counter (input/2)
-				{Op: "swap"},                             // (input/2) counter
-				{Op: "opcode", Code: "OP_1ADD"},          // (input/2) (counter+1)
-				{Op: "swap"},                             // (counter+1) (input/2)
+				{Op: "push", Value: bigIntPush(2)}, // counter input 2
+				{Op: "opcode", Code: "OP_DIV"},     // counter (input/2)
+				{Op: "swap"},                       // (input/2) counter
+				{Op: "opcode", Code: "OP_1ADD"},    // (input/2) (counter+1)
+				{Op: "swap"},                       // (counter+1) (input/2)
 			},
 		})
 		// Stack: counter input (or input counter if swapped back)
@@ -4745,6 +4998,27 @@ type LowerToStackOptions struct {
 // LowerToStack converts an ANF program to a slice of StackMethods.
 // Private methods are inlined at call sites rather than compiled separately.
 // The constructor is skipped since it's not emitted to Bitcoin Script.
+// computeUsesCodePart reports whether a method's unlocking script carries the
+// `_codePart` implicit parameter: it verifies a preimage AND either builds a
+// continuation output or reads variable-length state (issue #100).
+//
+// Hoisted out of lowerMethod because R-010 needs the answer for EVERY method
+// before lowering ANY of them — OP_CODESEPARATOR placement is a contract-level
+// decision (see LowerToStack).
+func computeUsesCodePart(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod) bool {
+	if !methodUsesCheckPreimageRec(method.Body, privateMethods, map[string]bool{}) {
+		return false
+	}
+	varLenProps := map[string]bool{}
+	for _, p := range properties {
+		if !p.Readonly && p.Type == "ByteString" {
+			varLenProps[p.Name] = true
+		}
+	}
+	return methodUsesCodePart(method.Body) ||
+		methodReadsVarLenStateRec(method.Body, varLenProps, privateMethods, map[string]bool{})
+}
+
 func LowerToStack(program *ir.ANFProgram, opts ...LowerToStackOptions) (result []StackMethod, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -4768,13 +5042,40 @@ func LowerToStack(program *ir.ANFProgram, opts ...LowerToStackOptions) (result [
 
 	var methods []StackMethod
 
+	// R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+	// decision, taken before any method is lowered.
+	//
+	//   * If any method authenticates a `_codePart` witness, the contract gets a
+	//     single separator at offset 1 of the locking script (emitted by Emit)
+	//     and NO per-method ones, so scriptCode spans the whole script and every
+	//     byte of `_codePart` is recoverable from it.
+	//   * Otherwise nothing needs authenticating, and each checkPreimage keeps
+	//     its own separator at the method's entry — the pre-R-010 layout, which
+	//     keeps the preimage small and, for a stateless contract, keeps a user
+	//     checkSig on the near side of the separator where the SDK's signing
+	//     path expects it.
+	//
+	// The two schemes are never mixed: a per-method separator emitted after the
+	// script-level one would win and re-narrow scriptCode.
+	scriptLevelCodeSeparator := false
+	for i := range program.Methods {
+		m := &program.Methods[i]
+		if m.Name != "constructor" && !m.IsPublic {
+			continue
+		}
+		if computeUsesCodePart(m, program.Properties, privateMethods) {
+			scriptLevelCodeSeparator = true
+			break
+		}
+	}
+
 	for i := range program.Methods {
 		method := &program.Methods[i]
 		// Skip constructor and private methods
 		if method.Name == "constructor" || (!method.IsPublic && method.Name != "constructor") {
 			continue
 		}
-		sm, err := lowerMethodWithPrivateMethodsAndOptions(method, program.Properties, privateMethods, o)
+		sm, err := lowerMethodWithPrivateMethodsAndOptions(method, program.Properties, privateMethods, o, scriptLevelCodeSeparator)
 		if err != nil {
 			return nil, err
 		}
@@ -5048,11 +5349,15 @@ func methodUsesCodePart(bindings []ir.ANFBinding) bool {
 	return false
 }
 
+// lowerMethodWithPrivateMethods lowers a single method in isolation (tests and
+// single-method entry points). R-010: with no sibling methods to consult, the
+// separator decision is taken from this method alone.
 func lowerMethodWithPrivateMethods(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod) (*StackMethod, error) {
-	return lowerMethodWithPrivateMethodsAndOptions(method, properties, privateMethods, LowerToStackOptions{})
+	scriptLevelCodeSeparator := computeUsesCodePart(method, properties, privateMethods)
+	return lowerMethodWithPrivateMethodsAndOptions(method, properties, privateMethods, LowerToStackOptions{}, scriptLevelCodeSeparator)
 }
 
-func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod, opts LowerToStackOptions) (*StackMethod, error) {
+func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod, opts LowerToStackOptions, scriptLevelCodeSeparator bool) (*StackMethod, error) {
 	paramNames := make([]string, len(method.Params))
 	for i, p := range method.Params {
 		paramNames[i] = p.Name
@@ -5067,21 +5372,17 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	// _codePart is needed for continuation builders (add_output/add_raw_output)
 	// OR when the method reads variable-length (ByteString) mutable state — the
 	// deserialization needs it for the preimage-relative offset (issue #100).
-	varLenProps := map[string]bool{}
-	for _, p := range properties {
-		if !p.Readonly && p.Type == "ByteString" {
-			varLenProps[p.Name] = true
-		}
-	}
-	usesCheckPreimage := methodUsesCheckPreimageRec(method.Body, privateMethods, map[string]bool{})
-	usesCodePart := usesCheckPreimage &&
-		(methodUsesCodePart(method.Body) || methodReadsVarLenStateRec(method.Body, varLenProps, privateMethods, map[string]bool{}))
-	if usesCheckPreimage && usesCodePart {
+	usesCodePart := computeUsesCodePart(method, properties, privateMethods)
+	if usesCodePart {
 		paramNames = append([]string{"_codePart"}, paramNames...)
 	}
 
 	ctx := newLoweringContext(paramNames, properties)
 	ctx.privateMethods = privateMethods
+	// R-010: when Emit places the script-level separator, lowerCheckPreimage
+	// must NOT emit a per-method one — a later separator would win and
+	// re-narrow scriptCode, undoing the `_codePart` authentication.
+	ctx.scriptLevelCodeSeparator = scriptLevelCodeSeparator
 	ctx.sp1FriParams = opts.SP1FriParams
 
 	// Mode 3: witness-assisted Groth16 verifier preamble. If the method
@@ -5127,10 +5428,11 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	}
 
 	return &StackMethod{
-		Name:          method.Name,
-		Ops:           ctx.ops,
-		MaxStackDepth: ctx.maxDepth,
-		UsesCodePart:  usesCodePart,
+		Name:               method.Name,
+		Ops:                ctx.ops,
+		MaxStackDepth:      ctx.maxDepth,
+		UsesCodePart:       usesCodePart,
+		NeedsCodeSeparator: scriptLevelCodeSeparator,
 	}, nil
 }
 
@@ -5579,9 +5881,9 @@ var bn254BuiltinNames = map[string]bool{
 	"bn254FieldAdd": true, "bn254FieldSub": true,
 	"bn254FieldMul": true, "bn254FieldInv": true,
 	"bn254FieldNeg": true,
-	"bn254G1Add": true, "bn254G1ScalarMul": true,
+	"bn254G1Add":    true, "bn254G1ScalarMul": true,
 	"bn254G1Negate": true, "bn254G1OnCurve": true,
-	"bn254Pairing":        true,
+	"bn254Pairing":       true,
 	"bn254MultiPairing4": true,
 	"bn254MultiPairing3": true,
 }

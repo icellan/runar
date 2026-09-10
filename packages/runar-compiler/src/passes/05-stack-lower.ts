@@ -575,6 +575,10 @@ class LoweringContext {
    */
   private readonly renamedParams: Map<string, string> = new Map();
 
+  /** R-010: true when the emitter supplies the script-level
+   *  OP_CODESEPARATOR, so `lowerCheckPreimage` must not emit its own. */
+  private scriptLevelCodeSeparator = false;
+
   constructor(
     params: string[],
     properties: ANFProperty[],
@@ -2235,6 +2239,11 @@ class LoweringContext {
     const thenCtx = new LoweringContext([], this._properties, this.privateMethods);
     thenCtx.stackMap = this.stackMap.clone();
     thenCtx.outerProtectedRefs = protectedRefs;
+    // R-010: branch arms lower in a FRESH context, so the contract-level
+    // OP_CODESEPARATOR decision has to be carried in explicitly. Without this a
+    // `checkPreimage` inside an if-branch emits a stray per-method separator,
+    // which executes AFTER the script-level one and re-narrows `scriptCode`.
+    thenCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
     thenCtx._insideBranch = true;
     thenCtx.lowerBindings(thenBindings, terminalAssert);
 
@@ -2270,6 +2279,7 @@ class LoweringContext {
     const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.outerProtectedRefs = protectedRefs;
+    elseCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
     elseCtx._insideBranch = true;
     elseCtx.lowerBindings(elseBindings, terminalAssert);
 
@@ -3611,94 +3621,7 @@ class LoweringContext {
       // varints corrupts state extraction for scripts whose scriptCode
       // exceeds 65,535 bytes (e.g. embedded BN254 verifiers) and
       // surfaces as `Invalid OP_SPLIT range` on regtest.
-      this.emitOp({ op: 'push', value: 1n });
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-      this.stackMap.pop(); this.stackMap.pop();
-      this.stackMap.push(null); // firstByte
-      this.stackMap.push(null); // rest
-      this.emitOp({ op: 'swap' }); // [rest, firstByte]
-      this.stackMap.swap();
-      // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-      // as negative script numbers.
-      this.emitOp({ op: 'push', value: new Uint8Array([0]) });
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_CAT' });
-      this.stackMap.pop(); this.stackMap.pop();
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
-      // Stack: [..., rest, fb_num]
-
-      // emitDropMoreVarintBytes drops `n` more varint bytes from the top
-      // of stack `rest`. [..., rest] -> [..., rest_minus_n].
-      const emitDropMoreVarintBytes = (n: bigint): void => {
-        this.emitOp({ op: 'push', value: n });
-        this.stackMap.push(null);
-        this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-        this.stackMap.pop(); this.stackMap.pop();
-        this.stackMap.push(null); this.stackMap.push(null);
-        this.emitOp({ op: 'nip' });
-        this.stackMap.pop(); this.stackMap.pop();
-        this.stackMap.push(null);
-      };
-
-      // IF fb_num < 253: 1-byte varint, drop fb_num.
-      this.emitOp({ op: 'dup' });
-      this.stackMap.dup();
-      this.emitOp({ op: 'push', value: 253n });
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });
-      this.stackMap.pop(); this.stackMap.pop();
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_IF' });
-      this.stackMap.pop();
-      const smAt1ByteIf = this.stackMap.clone();
-      this.emitOp({ op: 'drop' });
-      this.stackMap.pop();
-      this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-      this.stackMap = smAt1ByteIf.clone();
-      // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-      this.emitOp({ op: 'dup' });
-      this.stackMap.dup();
-      this.emitOp({ op: 'push', value: 254n });
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' });
-      this.stackMap.pop(); this.stackMap.pop();
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_IF' });
-      this.stackMap.pop();
-      const smAtFEIf = this.stackMap.clone();
-      // THEN: 5-byte varint (0xfe + 4 bytes LE).
-      this.emitOp({ op: 'drop' });
-      this.stackMap.pop();
-      emitDropMoreVarintBytes(4n);
-      this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-      this.stackMap = smAtFEIf.clone();
-      // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-      this.emitOp({ op: 'dup' });
-      this.stackMap.dup();
-      this.emitOp({ op: 'push', value: 255n });
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' });
-      this.stackMap.pop(); this.stackMap.pop();
-      this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_IF' });
-      this.stackMap.pop();
-      const smAtFFIf = this.stackMap.clone();
-      // THEN: 9-byte varint (0xff + 8 bytes LE).
-      this.emitOp({ op: 'drop' });
-      this.stackMap.pop();
-      emitDropMoreVarintBytes(8n);
-      this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-      this.stackMap = smAtFFIf.clone();
-      // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-      this.emitOp({ op: 'drop' });
-      this.stackMap.pop();
-      emitDropMoreVarintBytes(2n);
-      this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
-      this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
-      this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
-      // --- Stack: [..., scriptCode] ---
+      this.emitStripScriptCodeVarint();
 
       // Compute skip to state in scriptCode.
       // scriptCode = postSepCode + 0x6a + state
@@ -3848,6 +3771,288 @@ class LoweringContext {
     }
   }
 
+  /**
+   * Strip the BIP-143 scriptCode varint length prefix.
+   *
+   *   [..., varint || scriptCode]  ->  [..., scriptCode]
+   *
+   * All four varint shapes must be handled; stripping only the 1- and 3-byte
+   * forms corrupts extraction for scripts whose scriptCode exceeds 65,535
+   * bytes (e.g. embedded BN254 verifiers) and surfaces as
+   * `Invalid OP_SPLIT range` on regtest.
+   */
+  private emitStripScriptCodeVarint(): void {
+    this.emitOp({ op: 'push', value: 1n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); // firstByte
+    this.stackMap.push(null); // rest
+    this.emitOp({ op: 'swap' }); // [rest, firstByte]
+    this.stackMap.swap();
+    // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+    // as negative script numbers.
+    this.emitOp({ op: 'push', value: new Uint8Array([0]) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+    // Stack: [..., rest, fb_num]
+
+    // emitDropMoreVarintBytes drops `n` more varint bytes from the top
+    // of stack `rest`. [..., rest] -> [..., rest_minus_n].
+    const emitDropMoreVarintBytes = (n: bigint): void => {
+      this.emitOp({ op: 'push', value: n });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+      this.stackMap.pop(); this.stackMap.pop();
+      this.stackMap.push(null); this.stackMap.push(null);
+      this.emitOp({ op: 'nip' });
+      this.stackMap.pop(); this.stackMap.pop();
+      this.stackMap.push(null);
+    };
+
+    // IF fb_num < 253: 1-byte varint, drop fb_num.
+    this.emitOp({ op: 'dup' });
+    this.stackMap.dup();
+    this.emitOp({ op: 'push', value: 253n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop();
+    const smAt1ByteIf = this.stackMap.clone();
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAt1ByteIf.clone();
+    // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+    this.emitOp({ op: 'dup' });
+    this.stackMap.dup();
+    this.emitOp({ op: 'push', value: 254n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop();
+    const smAtFEIf = this.stackMap.clone();
+    // THEN: 5-byte varint (0xfe + 4 bytes LE).
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    emitDropMoreVarintBytes(4n);
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAtFEIf.clone();
+    // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+    this.emitOp({ op: 'dup' });
+    this.stackMap.dup();
+    this.emitOp({ op: 'push', value: 255n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop();
+    const smAtFFIf = this.stackMap.clone();
+    // THEN: 9-byte varint (0xff + 8 bytes LE).
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    emitDropMoreVarintBytes(8n);
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAtFFIf.clone();
+    // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    emitDropMoreVarintBytes(2n);
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    // --- Stack: [..., scriptCode] ---
+  }
+
+  /**
+   * Byte length of the serialized state section (excluding the OP_RETURN
+   * separator) when every mutable property is fixed-size, else `null`.
+   *
+   * Mirrors the size table in `lowerDeserializeState`; a ByteString property
+   * makes the section variable-length and the exact length un-pinnable at
+   * compile time.
+   */
+  private fixedStateSectionLength(): number | null {
+    let total = 0;
+    for (const prop of this._properties) {
+      if (prop.readonly) continue;
+      switch (prop.type) {
+        case 'bigint':
+        case 'RabinSig':
+        case 'RabinPubKey': total += 8; break;
+        case 'boolean': total += 1; break;
+        case 'PubKey': total += 33; break;
+        case 'Addr':
+        case 'Ripemd160': total += 20; break;
+        case 'Sha256': total += 32; break;
+        case 'Point':
+        case 'P256Point': total += 64; break;
+        case 'P384Point': total += 96; break;
+        default: return null;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * R-010 / CL-BUG-091 — bind the spender-supplied `_codePart` witness to the
+   * script that is actually executing.
+   *
+   * `_codePart` is the locking script minus the trailing `OP_RETURN || state`
+   * section. It is pushed by the spender and OP_CAT'd verbatim as the script
+   * prefix of every reconstructed state-continuation output, so an
+   * unauthenticated `_codePart` is a complete break: the spender picks the
+   * script the contract's own funds move to.
+   *
+   * With the OP_CODESEPARATOR hoisted to offset 1 of the locking script, the
+   * BIP-143 `scriptCode` carried in the (already tx-bound) preimage is
+   *
+   *     scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state
+   *
+   * so the whole of `_codePart` is recoverable from it:
+   *
+   *     codePart == 0x61ab || scriptCode[0 : SIZE(codePart) - 2]
+   *
+   * The leading `0x61ab` (OP_NOP, OP_CODESEPARATOR) matters as much as the
+   * tail — without pinning it a spender could set the first byte to `0x6a`,
+   * turning the continuation output into a bare OP_RETURN that anyone can
+   * spend.
+   *
+   * Consumes nothing: `[..., preimage]` in, `[..., preimage]` out, aborting
+   * the script via OP_EQUALVERIFY when the witness does not match.
+   */
+  private emitCodePartAuthentication(): void {
+    // Stack: [..., preimage]
+
+    // 1. Work on a copy — the caller still needs the preimage.
+    this.emitOp({ op: 'dup' });
+    this.stackMap.dup();
+
+    // 2. Drop the fixed 104-byte BIP-143 header (nVersion, hashPrevouts,
+    //    hashSequence, outpoint), leaving varint || scriptCode || tail.
+    this.emitOp({ op: 'push', value: 104n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'nip' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+
+    // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 + hashOutputs 32
+    //    + nLocktime 4 + sighashType 4).
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 52n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    // --- Stack: [..., preimage, varint || scriptCode] ---
+
+    // 4. Strip the length varint.
+    this.emitStripScriptCodeVarint();
+    // --- Stack: [..., preimage, scriptCode] ---
+
+    // 5. Copy the witness code part up.
+    this.bringToTop('_codePart', false);
+    this.stackMap.renameAtDepth(0, null);
+    // --- Stack: [..., preimage, scriptCode, codePart] ---
+
+    // 6. n = SIZE(codePart) - 2 — the length of the code part minus the
+    //    two prologue bytes (OP_NOP, OP_CODESEPARATOR) that the preimage's
+    //    scriptCode excludes.
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 2n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    // --- Stack: [..., preimage, scriptCode, codePart, n] ---
+
+    // 7. Reorder to [..., codePart, scriptCode, n].
+    this.emitOp({ op: 'rot' });
+    const rotated = this.stackMap.removeAtDepth(2);
+    this.stackMap.push(rotated);
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+
+    // 8. Split scriptCode at n into the claimed code tail and the remainder.
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    // --- Stack: [..., preimage, codePart, scriptCode[0:n], rest] ---
+
+    // 8a. Pin the split point. A prefix match alone is NOT enough: a spender
+    //     can claim a SHORTER code part whose bytes are a genuine prefix, and
+    //     the degenerate claim (just the two prologue bytes) turns the
+    //     continuation output into `OP_NOP OP_CODESEPARATOR OP_RETURN ...` —
+    //     a bare OP_RETURN that anyone can spend. `rest` is everything the
+    //     locking script carries after the code part, i.e. the OP_RETURN
+    //     separator plus the serialized state.
+    const fixedStateLen = this.fixedStateSectionLength();
+    if (fixedStateLen !== null) {
+      // Fixed-size state layout: the remainder's length is a compile-time
+      // constant, so the split point — and therefore SIZE(codePart) — is
+      // pinned exactly.
+      this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'push', value: BigInt(1 + fixedStateLen) });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
+      this.stackMap.pop(); this.stackMap.pop();
+    }
+    // 8b. Whatever the state layout, the byte immediately after the code part
+    //     must be the OP_RETURN separator.
+    this.emitOp({ op: 'push', value: 1n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: new Uint8Array([0x6a]) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+    this.stackMap.pop(); this.stackMap.pop();
+    // --- Stack: [..., preimage, codePart, scriptCode[0:n]] ---
+
+    // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR) that the
+    //    emitter guarantees at offsets 0 and 1 of every preimage-verifying
+    //    locking script.
+    this.emitOp({ op: 'push', value: new Uint8Array([0x61, 0xab]) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    // --- Stack: [..., preimage, codePart, 0xab || scriptCode[0:n]] ---
+
+    // 10. Byte-for-byte or the script dies here.
+    this.emitOp({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+    this.stackMap.pop(); this.stackMap.pop();
+    // --- Stack: [..., preimage] ---
+  }
+
+  setScriptLevelCodeSeparator(v: boolean): void {
+    this.scriptLevelCodeSeparator = v;
+  }
+
   private lowerCheckPreimage(
     bindingName: string,
     preimage: string,
@@ -3870,9 +4075,32 @@ class LoweringContext {
     // See emitCheckPreimageBinding (oppushtx-codegen.ts) for the construction,
     // validated end-to-end against the BSV Script interpreter.
 
-    // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
-    // the code after this point (smaller preimage; required for large scripts).
-    this.emitOp({ op: 'opcode', code: 'OP_CODESEPARATOR' });
+    // R-010 / CL-BUG-091: OP_CODESEPARATOR placement.
+    //
+    // R-010 / CL-BUG-091: the separator used to sit at each method's entry, so
+    // the BIP-143 `scriptCode` covered only the code AFTER it. Everything
+    // before it — the dispatch preamble and every preceding method body — was
+    // therefore invisible to the running script, and `_codePart` (which the
+    // SPENDER pushes, and which is OP_CAT'd verbatim as the script prefix of
+    // the reconstructed state-continuation output) could not be checked
+    // against it. A spender could substitute an arbitrary script — e.g. a
+    // P2PKH to their own key, or a bare OP_RETURN — and redirect the whole
+    // contract balance while the script still verified.
+    //
+    // The separator is now emitted ONCE, as the first byte of the locking
+    // script (see `emit()` in 06-emit.ts). `scriptCode` is then the entire
+    // locking script minus that leading byte, which makes every byte of
+    // `_codePart` observable on-chain and lets `emitCodePartAuthentication`
+    // below pin it exactly. The cost is a larger preimage for methods that
+    // are not the first in the dispatch table; the benefit is that the
+    // continuation output can no longer be forged.
+
+    if (!this.scriptLevelCodeSeparator) {
+      // No `_codePart` anywhere in this contract, so nothing needs
+      // authenticating: keep the pre-R-010 layout — a separator right here, at
+      // the method's entry, which keeps `scriptCode` (and the preimage) small.
+      this.emitOp({ op: 'opcode', code: 'OP_CODESEPARATOR' });
+    }
 
     // Bring the preimage to the top (kept for field extractors below).
     const isLast = this.isLastUse(preimage, bindingIndex, lastUses);
@@ -3886,6 +4114,13 @@ class LoweringContext {
     // effect is zero: the preimage is consumed internally as a copy and left on
     // top; OP_CHECKSIGVERIFY aborts the script unless the binding holds.
     emitCheckPreimageBindingRaw((op) => this.emitOp(op), sighashFlag);
+
+    // R-010: the preimage is now proven to be THIS transaction's preimage, so
+    // its `scriptCode` field is authentic. Pin the spender-supplied
+    // `_codePart` to it before any continuation output is built from it.
+    if (this.stackMap.has('_codePart')) {
+      this.emitCodePartAuthentication();
+    }
 
     // The preimage remains on top. Rename to the binding name so field
     // extractors can reference it.
@@ -5573,11 +5808,33 @@ export function lowerToStack(program: ANFProgram): StackProgram {
     }
   }
 
+  // R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+  // decision, taken before any method is lowered.
+  //
+  //  * If any method authenticates a `_codePart` witness, the contract gets a
+  //    single separator at offset 1 of the locking script (emitted by `emit`)
+  //    and NO per-method ones, so `scriptCode` spans the whole script and
+  //    every byte of `_codePart` is recoverable from it.
+  //  * Otherwise nothing needs authenticating, and each `checkPreimage` keeps
+  //    its own separator at the method's entry — the pre-R-010 layout, which
+  //    keeps the preimage small and, for a stateless contract, keeps a user
+  //    `checkSig` on the near side of the separator where the SDK's signing
+  //    path expects it.
+  //
+  // The two schemes are never mixed: a per-method separator emitted after the
+  // script-level one would win and re-narrow `scriptCode`.
+  const scriptLevelCodeSeparator = program.methods.some(
+    m => (m.name === 'constructor' || m.isPublic)
+      && computeUsesCodePart(m, program.properties, privateMethods),
+  );
+
   for (const method of program.methods) {
     if (method.name !== 'constructor' && !method.isPublic) {
       continue;
     }
-    const stackMethod = lowerMethod(method, program.properties, privateMethods);
+    const stackMethod = lowerMethod(
+      method, program.properties, privateMethods, scriptLevelCodeSeparator,
+    );
     methods.push(stackMethod);
   }
 
@@ -5673,10 +5930,33 @@ function methodUsesCodePart(bindings: ANFBinding[]): boolean {
   return false;
 }
 
+/**
+ * Whether a method's unlocking script carries the `_codePart` implicit
+ * parameter: it verifies a preimage AND either builds a continuation output or
+ * reads variable-length state (issue #100).
+ *
+ * Hoisted out of `lowerMethod` because R-010 needs the answer for EVERY method
+ * before lowering ANY of them — the OP_CODESEPARATOR placement is a
+ * contract-level decision (see `lowerToStack`).
+ */
+function computeUsesCodePart(
+  method: ANFMethod,
+  properties: ANFProperty[],
+  privateMethods: Map<string, ANFMethod>,
+): boolean {
+  if (!methodUsesCheckPreimage(method.body, privateMethods)) return false;
+  const varLenProps = new Set(
+    properties.filter(p => !p.readonly && p.type === 'ByteString').map(p => p.name),
+  );
+  return methodUsesCodePart(method.body)
+    || methodReadsVarLenState(method.body, varLenProps, privateMethods);
+}
+
 function lowerMethod(
   method: ANFMethod,
   properties: ANFProperty[],
   privateMethods: Map<string, ANFMethod>,
+  scriptLevelCodeSeparator: boolean,
 ): StackMethod {
   const paramNames = method.params.map(p => p.name);
 
@@ -5689,17 +5969,16 @@ function lowerMethod(
   // _codePart is needed for continuation builders (add_output/add_raw_output)
   // OR when the method reads variable-length (ByteString) mutable state — the
   // deserialization needs it for the preimage-relative offset (issue #100).
-  const varLenProps = new Set(
-    properties.filter(p => !p.readonly && p.type === 'ByteString').map(p => p.name),
-  );
-  const usesCodePart =
-    methodUsesCheckPreimage(method.body, privateMethods) &&
-    (methodUsesCodePart(method.body) || methodReadsVarLenState(method.body, varLenProps, privateMethods));
-  if (methodUsesCheckPreimage(method.body, privateMethods) && usesCodePart) {
+  const usesCodePart = computeUsesCodePart(method, properties, privateMethods);
+  if (usesCodePart) {
     paramNames.unshift('_codePart');
   }
 
   const ctx = new LoweringContext(paramNames, properties, privateMethods);
+  // R-010: when the emitter places the script-level separator, `checkPreimage`
+  // must NOT emit a per-method one — a later separator would win and re-narrow
+  // `scriptCode`, undoing the `_codePart` authentication.
+  ctx.setScriptLevelCodeSeparator(scriptLevelCodeSeparator);
   // Pass terminalAssert=true for public methods so the last assert leaves
   // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
   ctx.lowerBindings(method.body, method.isPublic);
@@ -5736,5 +6015,6 @@ function lowerMethod(
     ops,
     maxStackDepth,
     usesCodePart,
+    needsCodeSeparator: scriptLevelCodeSeparator,
   };
 }

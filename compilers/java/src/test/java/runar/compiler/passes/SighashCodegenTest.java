@@ -82,8 +82,11 @@ class SighashCodegenTest {
     /**
      * Java parity with the TypeScript reference: the SINGLE-safe counter under
      * SINGLE|FORKID differs from the default (ALL|FORKID) at EXACTLY two byte
-     * offsets — the OP_PUSH_TX binding flag byte (byte 393) and the
-     * auto-injected preimage-type assert const (byte 439) — each 0x41 -> 0x43.
+     * offsets — the OP_PUSH_TX binding flag byte (byte 394) and the
+     * auto-injected preimage-type assert const (byte 518) — each 0x41 -> 0x43.
+     * (R-010 moved both: +1 for the hoisted OP_NOP OP_CODESEPARATOR prologue,
+     * and the assert const additionally past the `_codePart` authentication
+     * sequence. Re-measured against the Go reference compiler.)
      * These are the exact positions measured from the TS compiler's scriptHex
      * (`compile(src, { disableConstantFolding: true })`), so a Java default that
      * already matches TS (cross-tier conformance) yields a byte-identical SINGLE.
@@ -102,7 +105,7 @@ class SighashCodegenTest {
                 assertEquals("43", single.substring(i, i + 2));
             }
         }
-        assertEquals(java.util.List.of(393, 439), diffBytes,
+        assertEquals(java.util.List.of(394, 518), diffBytes,
             "SINGLE must change exactly the binding flag byte + the preimage-type assert const");
     }
 }

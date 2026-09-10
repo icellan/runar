@@ -303,6 +303,12 @@ public final class Jcs {
             if (val instanceof Boolean bv && !bv && "isAutoInjectedStateCheck".equals(rc.getName())) {
                 continue;
             }
+            // Same omit-when-false convention, opted into declaratively by the
+            // component itself (e.g. StackMethod.needsCodeSeparator, a
+            // compiler-internal marker with no Stack-IR schema counterpart).
+            if (val instanceof Boolean bv2 && !bv2 && rc.getAnnotation(JsonOmitWhenFalse.class) != null) {
+                continue;
+            }
             JsonName override = rc.getAnnotation(JsonName.class);
             String key = override != null ? override.value() : rc.getName();
             map.put(key, val);

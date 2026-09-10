@@ -82,7 +82,7 @@ def _send_to_script_ops() -> list[StackOp]:
 # Pinned baseline captured from the Python implementation. This contract has
 # both an add_raw_output AND an add_output continuation, so the count covers
 # the complete sendToScript method.
-EXPECTED_TOTAL_OPS = 213  # captured baseline (incl. GAP-302 sighash-type pin; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard)
+EXPECTED_TOTAL_OPS = 278  # captured baseline (incl. GAP-302 sighash-type pin; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard; R-010: +65 ops for the `_codePart` authentication, minus the per-method OP_CODESEPARATOR now emitted once by the emitter)
 
 
 def test_send_to_script_total_op_count_pinned():
@@ -147,14 +147,18 @@ def test_send_to_script_does_not_emit_op_return_opcode():
     )
 
 
-def test_send_to_script_emits_codeseparator_once():
-    """OP_CODESEPARATOR is injected exactly once at the checkPreimage entry
-    of the stateful method, regardless of subsequent add_raw_output / add_output
-    calls.
+def test_send_to_script_emits_no_per_method_codeseparator():
+    """R-010: OP_CODESEPARATOR is no longer part of a method's ops.
+
+    It used to be injected at the checkPreimage entry of each method, which
+    hid the dispatch preamble and every preceding method body from the
+    BIP-143 ``scriptCode`` — exactly the bytes the spender-supplied
+    ``_codePart`` claims to reproduce. The emitter now places a single
+    separator at offset 1 of the whole locking script instead.
     """
     flat = _flatten_ops(_send_to_script_ops())
     cs = [op for op in flat if _is_opcode(op, "OP_CODESEPARATOR")]
-    assert len(cs) == 1, f"expected exactly 1 OP_CODESEPARATOR, got {len(cs)}"
+    assert len(cs) == 0, f"expected no per-method OP_CODESEPARATOR, got {len(cs)}"
 
 
 # ---------------------------------------------------------------------------

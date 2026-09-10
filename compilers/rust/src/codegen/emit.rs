@@ -476,6 +476,23 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         });
     }
 
+    // R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+    // gets ONE OP_CODESEPARATOR, at offset 1 of the locking script, behind a
+    // single OP_NOP. Contracts with no `_codePart` keep the pre-R-010
+    // per-method separators (emitted by lower_check_preimage) instead. Emitting it per method (at the method's entry) hid the dispatch
+    // preamble and every preceding method body from scriptCode — exactly the
+    // bytes the spender-supplied `_codePart` witness claims to reproduce.
+    //
+    // Offset 1, not 0: implementations that store "index of the last executed
+    // OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+    // offset 0" from "no separator seen" and fall back to the whole script (the
+    // BSV go-sdk interpreter does exactly this). Offset 1 keeps every
+    // implementation on the same side of that guard, and costs one byte.
+    if public_methods.iter().any(|m| m.needs_code_separator) {
+        ctx.emit_opcode("OP_NOP")?;
+        ctx.emit_opcode("OP_CODESEPARATOR")?;
+    }
+
     if public_methods.len() == 1 {
         let m = &public_methods[0];
         for (idx, op) in m.ops.iter().enumerate() {
@@ -574,6 +591,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -603,6 +621,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -641,6 +660,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -672,6 +692,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         // Apply peephole optimization before emit (as the compiler pipeline does)
@@ -681,6 +702,7 @@ mod tests {
             max_stack_depth: method.max_stack_depth,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit(&[optimized_method]).expect("emit should succeed");
@@ -717,6 +739,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -756,6 +779,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -789,6 +813,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -821,6 +846,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -950,6 +976,7 @@ mod tests {
                 max_stack_depth: m.max_stack_depth,
                 source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
             })
             .collect();
 
@@ -997,6 +1024,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -1125,6 +1153,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         // OP_17 would be 0x61. A push-data encoded 17 would be "0111" (length 1, value 0x11).
@@ -1155,6 +1184,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         // OP_PUSHDATA2 = 0x4d, followed by length in 2 bytes LE: 256 = 0x0001 LE = 00 01
@@ -1230,6 +1260,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         assert_eq!(
@@ -1251,6 +1282,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         assert_eq!(
@@ -1275,6 +1307,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         assert!(
@@ -1582,8 +1615,11 @@ mod tests {
     #[test]
     fn test_stateful_counter_exact_byte_golden() {
         // Stateful contract with implicit txPreimage + state-continuation +
-        // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
-        // injection (0xab at position 2), the BIP-143 generator pubkey
+        // change-output plumbing. The asserted hex covers the R-010 script
+        // prologue (OP_NOP OP_CODESEPARATOR — `61ab` — at offsets 0 and 1, one
+        // separator for the whole locking script rather than one per method)
+        // and the `_codePart` authentication it enables, the BIP-143 generator
+        // pubkey
         // (0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),
         // the GAP-302 sighash-type pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP
         // OP_BIN2NUM <0x41> OP_NUMEQUALVERIFY, right after checkPreimage), and
@@ -1612,22 +1648,24 @@ mod tests {
         // byte-identical to the post-#116 TS reference.
         let hex = compile_to_fold_off_hex(source, "Counter.runar.ts");
         let expected = concat!(
-            "76ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f",
-            "517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e",
-            "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e",
-            "7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048af",
-            "e6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776",
-            "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f",
+            "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f51",
+            "7f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c",
+            "7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c",
+            "7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048",
+            "afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d94959377",
             "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692",
-            "7f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e",
-            "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e",
-            "7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8",
-            "1798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d13",
-            "82a2bf66a71ae74a1e83b0ad69768254947f778101419d7601687f7782012c947f758258947f",
-            "758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f75677603",
-            "0000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f",
-            "7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58",
-            "807c7e67007b7577687eaa7b820128947f7701207f75877777",
+            "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76",
+            "927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c",
+            "7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c",
+            "7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16",
+            "f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d",
+            "1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375",
+            "677602fe009c6375547f77677602ff009c6375587f776775527f7768686855798252947b7c7f",
+            "82599d517f75016a880261ab7c7e8869768254947f778101419d7601687f7782012c947f7582",
+            "58947f758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f75",
+            "6776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e6759",
+            "80587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac",
+            "7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
         );
         assert_eq!(hex, expected);
     }

@@ -523,6 +523,37 @@ export function emit(program: StackProgram): EmitResult {
     };
   }
 
+  // R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+  // gets ONE OP_CODESEPARATOR, and it goes near the front of the locking
+  // script.
+  //
+  // The gate is `_codePart`, not "verifies a preimage": widening `scriptCode`
+  // for a contract that never touches `_codePart` buys no security and moves
+  // any user `checkSig` to the far side of the separator, which the SDK's
+  // stateless signing path (which signs over the FULL script) does not expect.
+  //
+  // The separator used to be emitted per method, at the method's entry, which
+  // kept the preimage small but hid the dispatch preamble and every preceding
+  // method body from `scriptCode` — and those hidden bytes are exactly the
+  // ones the spender-supplied `_codePart` witness claims to reproduce. With
+  // the separator at offset 0, `scriptCode == lockingScript[1:]`, so the
+  // script can pin `_codePart` byte for byte (see `emitCodePartAuthentication`
+  // in 05-stack-lower.ts).
+  //
+  // The separator sits at offset 1, behind a single OP_NOP, NOT at offset 0.
+  // Offset 0 is a booby trap: implementations that store "index of the last
+  // executed OP_CODESEPARATOR" in a zero-initialised field cannot distinguish
+  // "separator at offset 0" from "no separator seen", and fall back to the
+  // whole script. The BSV go-sdk interpreter does exactly this
+  // (`thread.subScript`: `if t.lastCodeSep > 0 { skip = t.lastCodeSep + 1 }`),
+  // while Bitcoin Core's `pbegincodehash` is a true position and yields
+  // `script[1:]`. Emitting at offset 1 keeps every implementation on the same
+  // side of that guard, and costs one byte.
+  if (publicMethods.some(m => m.needsCodeSeparator)) {
+    ctx.emitOpcode('OP_NOP');
+    ctx.emitOpcode('OP_CODESEPARATOR');
+  }
+
   if (publicMethods.length === 1) {
     // Single public method — no dispatch needed, emit its ops directly.
     const method = publicMethods[0]!;

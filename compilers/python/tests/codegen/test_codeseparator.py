@@ -2,9 +2,13 @@
 ``codeSeparatorIndices`` artifact JSON fields with the correct shape and
 values for stateful contracts.
 
-Stateful contracts inject OP_CODESEPARATOR at the start of each public
-method's checkPreimage flow. The artifact MUST surface the byte offset(s)
-of those separators so the SDK can:
+Stateful contracts carry exactly ONE OP_CODESEPARATOR, at offset 1 of the
+locking script (behind a single OP_NOP). R-010 / CL-BUG-091 moved it there
+from each public method's checkPreimage flow: a per-method separator hid the
+dispatch preamble and every preceding method body from the BIP-143
+``scriptCode``, and those are exactly the bytes the spender-supplied
+``_codePart`` witness claims to reproduce, so nothing could authenticate it.
+The artifact MUST surface the byte offset(s) so the SDK can:
   * Build BIP-143 preimages whose scriptCode begins after the separator.
   * Pin the same offset across deploy/call transactions.
 
@@ -40,9 +44,11 @@ def test_stateful_artifact_has_code_separator_index():
     assert art.code_separator_index is not None, (
         "stateful contract artifact must populate code_separator_index"
     )
-    # The OP_CODESEPARATOR must land within the script body (positive offset).
-    assert art.code_separator_index > 0, (
-        f"code_separator_index must be > 0; got {art.code_separator_index}"
+    # R-010: the single separator sits at offset 1, behind the OP_NOP that
+    # keeps it clear of the "0 means no separator" sentinel some interpreters
+    # use (the BSV go-sdk among them).
+    assert art.code_separator_index == 1, (
+        f"code_separator_index must be 1; got {art.code_separator_index}"
     )
 
 
@@ -52,11 +58,11 @@ def test_stateful_artifact_has_code_separator_indices_list():
         "stateful contract artifact must populate code_separator_indices"
     )
     assert isinstance(art.code_separator_indices, list)
-    # Counter has 2 public methods (increment, decrement), each auto-injects
-    # one OP_CODESEPARATOR -> exactly 2 entries.
-    assert len(art.code_separator_indices) == 2, (
-        f"Counter has 2 public methods, expected 2 separator indices; "
-        f"got {len(art.code_separator_indices)}"
+    # R-010: one separator for the whole locking script, shared by every
+    # public method, so exactly one entry regardless of method count.
+    assert art.code_separator_indices == [1], (
+        f"expected a single separator at offset 1; "
+        f"got {art.code_separator_indices}"
     )
 
 

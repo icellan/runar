@@ -885,10 +885,14 @@ func TestStateful_Decrement(t *testing.T) {
 	// Continuation state: count=4
 	continuationScriptHex := codePartHex + "6a" + serializeBigintState(4)
 
-	// The second OP_CODESEPARATOR is for the decrement method.
-	codeSepOffset := findCodeSeparatorOffset(codePartHex, 1)
+	// R-010: there is exactly ONE OP_CODESEPARATOR, at offset 1 of the locking
+	// script, shared by every method. It used to be emitted per method at the
+	// method's entry, which hid the dispatch preamble and all preceding method
+	// bodies from the preimage's scriptCode — and those are precisely the bytes
+	// the spender-supplied `_codePart` claims to reproduce.
+	codeSepOffset := findCodeSeparatorOffset(codePartHex, 0)
 	if codeSepOffset < 0 {
-		t.Fatal("second OP_CODESEPARATOR not found")
+		t.Fatal("OP_CODESEPARATOR not found")
 	}
 
 	prevSatoshis := uint64(10000)

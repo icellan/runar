@@ -198,10 +198,12 @@ class ArtifactEmissionTest {
         assertEquals(indices.get(indices.size() - 1), csIndex,
             "codeSeparatorIndex must be the last (most recent) separator offset");
 
-        // Cross-tier pin: captured from the Go reference compiler at the base
-        // commit via `compilers/go/runar-go --source <this file>`.
-        assertEquals(608, csIndex.intValue(), "codeSeparatorIndex must match the Go tier");
-        assertEquals(List.of(6, 608), indices, "codeSeparatorIndices must match the Go tier");
+        // Cross-tier pin: captured from the Go reference compiler via
+        // `compilers/go/runar-go --source <this file>`. R-010 replaced the
+        // per-method separators with a single one at offset 1, behind an
+        // OP_NOP, so that scriptCode == lockingScript[2:].
+        assertEquals(1, csIndex.intValue(), "codeSeparatorIndex must match the Go tier");
+        assertEquals(List.of(1), indices, "codeSeparatorIndices must match the Go tier");
     }
 
     // ------------------------------------------------------------------

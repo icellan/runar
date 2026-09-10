@@ -524,6 +524,22 @@ def emit(methods: list[StackMethod]) -> EmitResult:
     if not public_methods:
         return EmitResult(script_hex="", script_asm="", source_map=[], constructor_slots=[])
 
+    # R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+    # gets ONE OP_CODESEPARATOR, at offset 1 of the locking script, behind a
+    # single OP_NOP. Contracts with no `_codePart` keep the pre-R-010 per-method
+    # separators (emitted by _lower_check_preimage) instead. Emitting it per method (at the method's entry) hid the dispatch
+    # preamble and every preceding method body from scriptCode — exactly the
+    # bytes the spender-supplied `_codePart` witness claims to reproduce.
+    #
+    # Offset 1, not 0: implementations that store "index of the last executed
+    # OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+    # offset 0" from "no separator seen" and fall back to the whole script (the
+    # BSV go-sdk interpreter does exactly this). Offset 1 keeps every
+    # implementation on the same side of that guard, and costs one byte.
+    if any(m.needs_code_separator for m in public_methods):
+        ctx.emit_opcode("OP_NOP")
+        ctx.emit_opcode("OP_CODESEPARATOR")
+
     if len(public_methods) == 1:
         # Single public method -- no dispatch needed
         for op in public_methods[0].ops:

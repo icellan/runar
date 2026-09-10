@@ -343,8 +343,11 @@ class TestExpandFixedArrays < Minitest::Test
     # Then the Any-S OP_PUSH_TX construction took it 9616 -> 7624: TicTacToe
     # is stateful with six covenant methods, each carrying one
     # preimage-binding blob, so 6 x (760 - 428) = 1992 bytes come off.
-    assert_equal 7624, v1.script.length / 2, "v1 script must be 7624 bytes"
-    assert_equal 7624, v2.script.length / 2, "v2 script must be 7624 bytes"
+    # Then R-010 took it 7624 -> 7778: each of the six methods now
+    # authenticates its `_codePart` witness against the preimage's scriptCode,
+    # and the six per-method OP_CODESEPARATORs collapse into one at offset 1.
+    assert_equal 7778, v1.script.length / 2, "v1 script must be 7778 bytes"
+    assert_equal 7778, v2.script.length / 2, "v2 script must be 7778 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

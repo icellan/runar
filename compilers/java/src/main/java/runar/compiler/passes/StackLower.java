@@ -628,10 +628,24 @@ public final class StackLower {
     public static StackProgram run(AnfProgram program) {
         Map<String, AnfMethod> privateMethods = privateMethodMap(program);
 
+        // R-010: the single script-level OP_CODESEPARATOR is a CONTRACT-level
+        // decision, keyed on `_codePart` — not on "this method verifies a
+        // preimage". It has to be known before any method is lowered, because
+        // it decides whether that method emits a separator of its own. See
+        // {@link #lowerCheckPreimage} and {@code Emit#runResultFull}.
+        boolean scriptLevelCodeSeparator = false;
+        for (AnfMethod m : program.methods()) {
+            if ("constructor".equals(m.name()) || !m.isPublic()) continue;
+            if (methodRequiresCodePart(m, program.properties(), privateMethods)) {
+                scriptLevelCodeSeparator = true;
+                break;
+            }
+        }
+
         List<StackMethod> out = new ArrayList<>();
         for (AnfMethod m : program.methods()) {
             if ("constructor".equals(m.name()) || !m.isPublic()) continue;
-            out.add(lowerMethod(m, program.properties(), privateMethods));
+            out.add(lowerMethod(m, program.properties(), privateMethods, scriptLevelCodeSeparator));
         }
 
         return new StackProgram(program.contractName(), out);
@@ -687,7 +701,8 @@ public final class StackLower {
     private static StackMethod lowerMethod(
         AnfMethod method,
         List<AnfProperty> properties,
-        Map<String, AnfMethod> privateMethods
+        Map<String, AnfMethod> privateMethods,
+        boolean scriptLevelCodeSeparator
     ) {
         List<String> paramNames = new ArrayList<>();
         for (AnfParam p : method.params()) paramNames.add(p.name());
@@ -712,6 +727,7 @@ public final class StackLower {
         }
 
         LoweringContext ctx = new LoweringContext(paramNames, properties, privateMethods);
+        ctx.scriptLevelCodeSeparator = scriptLevelCodeSeparator;
         ctx.lowerBindings(method.body(), method.isPublic());
 
         // Strip excess stack items below the top-of-stack boolean (CLEANSTACK).
@@ -733,7 +749,7 @@ public final class StackLower {
                 + " (actual: " + ctx.maxDepth + ")");
         }
 
-        return new StackMethod(method.name(), ctx.ops, ctx.maxDepth);
+        return new StackMethod(method.name(), ctx.ops, ctx.maxDepth, scriptLevelCodeSeparator);
     }
 
     /**
@@ -839,6 +855,13 @@ public final class StackLower {
         Map<String, Boolean> localBindings = new HashMap<>();
         Set<String> outerProtectedRefs;
         boolean insideBranch;
+        /**
+         * R-010, contract-level: true when ANY public method of this contract
+         * authenticates a {@code _codePart} witness, in which case the emitter
+         * puts a single OP_CODESEPARATOR at offset 1 of the locking script and
+         * {@link #lowerCheckPreimage} emits none of its own.
+         */
+        boolean scriptLevelCodeSeparator;
         /**
          * Method params whose names collide with a MUTABLE property. Maps the
          * param name to the reserved stack-slot name its witness value lives
@@ -981,6 +1004,12 @@ public final class StackLower {
             // body must resolve to the same reserved renamed slot the parent set
             // up (the parent copied its renamed slot names into c.sm above).
             c.renamedParams = this.renamedParams;
+            // R-010: branch arms lower in a FRESH context, so the contract-level
+            // OP_CODESEPARATOR decision has to be carried in explicitly. Without
+            // this a checkPreimage inside an if-branch emits a stray per-method
+            // separator, which executes AFTER the script-level one and
+            // re-narrows scriptCode.
+            c.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
             // GAP-002: nested branches keep the outer statement's loc by
             // default; the inner binding loop will override on each step.
             c.currentSourceLoc = this.currentSourceLoc;
@@ -3134,6 +3163,256 @@ public final class StackLower {
 
         // ---------------- check_preimage (OP_PUSH_TX) ----------------
 
+        /**
+         * Strip the BIP-143 scriptCode varint length prefix.
+         *
+         * <p>{@code [..., varint || scriptCode]} -&gt; {@code [..., scriptCode]}
+         *
+         * <p>All four varint shapes must be handled; stripping only the 1- and
+         * 3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+         * 65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+         * {@code Invalid OP_SPLIT range} on regtest.
+         */
+        void emitStripScriptCodeVarint() {
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); // firstByte
+            sm.push(""); // rest
+            emitOp(new SwapOp());
+            sm.swap();
+            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't
+            // interpreted as negative script numbers.
+            emitOp(new PushOp(PushValue.ofHex("00")));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            // Stack: [..., rest, fb_num]
+
+            // IF fb_num < 253: 1-byte varint, drop fb_num.
+            emitOp(new DupOp());
+            sm.dup();
+            emitOp(new PushOp(PushValue.of(253)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_LESSTHAN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAt1ByteIf = sm.clone0();
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAt1ByteIf.slots);
+            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+            emitOp(new DupOp());
+            sm.dup();
+            emitOp(new PushOp(PushValue.of(254)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAtFEIf = sm.clone0();
+            // THEN: 5-byte varint (0xfe + 4 bytes LE).
+            emitOp(new DropOp());
+            sm.pop();
+            emitDropMoreVarintBytes(4);
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAtFEIf.slots);
+            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+            // NOTE: 0xff is physically unreachable on BSV (it signifies a
+            // scriptCode > 4 GiB, which no transaction policy permits). We
+            // handle it explicitly here anyway so that any future change to
+            // max-script-size doesn't turn this code path into silent
+            // corruption.
+            emitOp(new DupOp());
+            sm.dup();
+            emitOp(new PushOp(PushValue.of(255)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAtFFIf = sm.clone0();
+            // THEN: 9-byte varint (0xff + 8 bytes LE).
+            emitOp(new DropOp());
+            sm.pop();
+            emitDropMoreVarintBytes(8);
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAtFFIf.slots);
+            // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+            emitOp(new DropOp());
+            sm.pop();
+            emitDropMoreVarintBytes(2);
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+        }
+
+        /**
+         * Byte length of the serialized state section (excluding the OP_RETURN
+         * separator) when every mutable property is fixed-size, and {@code -1}
+         * otherwise. Mirrors the size table in {@link #lowerDeserializeState};
+         * a ByteString property makes the section variable-length and its exact
+         * length un-pinnable at compile time.
+         */
+        int fixedStateSectionLength() {
+            int total = 0;
+            for (AnfProperty prop : properties) {
+                if (prop.readonly()) continue;
+                switch (prop.type()) {
+                    case "bigint", "RabinSig", "RabinPubKey" -> total += 8;
+                    case "boolean" -> total += 1;
+                    case "PubKey" -> total += 33;
+                    case "Addr", "Ripemd160" -> total += 20;
+                    case "Sha256" -> total += 32;
+                    case "Point", "P256Point" -> total += 64;
+                    case "P384Point" -> total += 96;
+                    default -> {
+                        return -1;
+                    }
+                }
+            }
+            return total;
+        }
+
+        /**
+         * Bind the spender-supplied {@code _codePart} witness to the script that
+         * is actually executing (R-010 / CL-BUG-091).
+         *
+         * <p>{@code _codePart} is the locking script minus the trailing
+         * {@code OP_RETURN || state} section. It is pushed by the spender and
+         * OP_CAT'd verbatim as the script prefix of every reconstructed
+         * state-continuation output, so an unauthenticated {@code _codePart} is
+         * a complete break: the spender picks the script the contract's own
+         * funds move to.
+         *
+         * <p>With the OP_CODESEPARATOR hoisted to offset 1 of the locking
+         * script, the BIP-143 scriptCode carried in the (already tx-bound)
+         * preimage is
+         *
+         * <pre>scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state</pre>
+         *
+         * so the whole of {@code _codePart} is recoverable from it:
+         *
+         * <pre>codePart == 0x61ab || scriptCode[0 : SIZE(codePart) - 2]</pre>
+         *
+         * plus a pin on the split point, without which a spender could claim a
+         * SHORTER code part whose bytes are a genuine prefix — in the degenerate
+         * case just the two prologue bytes, which turns the continuation output
+         * into a bare OP_RETURN that anyone can spend.
+         *
+         * <p>Consumes nothing: {@code [..., preimage]} in,
+         * {@code [..., preimage]} out, aborting the script via OP_EQUALVERIFY
+         * when the witness does not match.
+         */
+        void emitCodePartAuthentication() {
+            // 1. Work on a copy — the caller still needs the preimage.
+            emitOp(new DupOp());
+            sm.dup();
+
+            // 2. Drop the fixed 104-byte BIP-143 header.
+            emitOp(new PushOp(PushValue.of(104)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+            //    hashOutputs 32 + nLocktime 4 + sighashType 4).
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(52)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SUB"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+
+            // 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+            emitStripScriptCodeVarint();
+
+            // 5. Copy the witness code part up.
+            bringToTop("_codePart", false);
+            sm.renameAtDepth(0, "");
+
+            // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode
+            //    excludes).
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(2)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SUB"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            // 7. Reorder to [..., codePart, scriptCode, n].
+            emitOp(new RotOp());
+            String rotated = sm.removeAtDepth(2);
+            sm.push(rotated);
+            emitOp(new SwapOp());
+            sm.swap();
+
+            // 8. Split scriptCode at n into the claimed code tail and the
+            //    remainder.
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+
+            // 8a. Pin the split point.
+            int fixedStateLen = fixedStateSectionLength();
+            if (fixedStateLen >= 0) {
+                emitOp(new OpcodeOp("OP_SIZE"));
+                sm.push("");
+                emitOp(new PushOp(PushValue.of(1 + fixedStateLen)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
+                sm.pop(); sm.pop();
+            }
+            // 8b. The byte immediately after the code part must be the
+            //     OP_RETURN separator.
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.ofHex("6a")));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+            sm.pop(); sm.pop();
+
+            // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+            emitOp(new PushOp(PushValue.ofHex("61ab")));
+            sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            // 10. Byte-for-byte or the script dies here.
+            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+            sm.pop(); sm.pop();
+        }
+
         void lowerCheckPreimage(String bindingName, String preimage, Integer sighashFlag,
                                 int idx, Map<String, Integer> lastUses) {
             // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to
@@ -3145,10 +3424,26 @@ public final class StackLower {
             // pushes ONLY <preimage> (no witness signature). See
             // emitCheckPreimageBinding for the construction.
 
-            // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is
-            // only the code after this point (smaller preimage; required for
-            // large scripts).
-            emitOp(new OpcodeOp("OP_CODESEPARATOR"));
+            if (!scriptLevelCodeSeparator) {
+                // No `_codePart` anywhere in this contract, so nothing needs
+                // authenticating: keep the pre-R-010 layout — a separator right
+                // here, at the method's entry, which keeps scriptCode (and the
+                // preimage) small.
+                //
+                // This is not just an optimisation. Widening scriptCode to the
+                // whole script would move the separator IN FRONT of any user
+                // `checkSig` in the method, and `packages/runar-sdk` signs a
+                // stateless contract's user signature over the FULL locking
+                // script — the node would then verify it against `script[2:]`
+                // and the spend would fail (`examples/ts/covenant-vault`).
+                emitOp(new OpcodeOp("OP_CODESEPARATOR"));
+            }
+            // Otherwise NO OP_CODESEPARATOR is emitted here. R-010 /
+            // CL-BUG-091: a per-method separator left the dispatch preamble and
+            // every preceding method body invisible to the running script, and
+            // those are exactly the bytes the spender-supplied `_codePart`
+            // claims to reproduce. The separator is emitted once instead, at
+            // offset 1 of the locking script (see Emit#runResultFull).
 
             // Bring the preimage to the top (kept for field extractors below).
             bringToTop(preimage, isLastUse(preimage, idx, lastUses));
@@ -3159,6 +3454,14 @@ public final class StackLower {
             // method declare a different mode, which only changes the appended
             // sighash flag byte. Net stack effect is zero.
             emitCheckPreimageBinding(sighashFlag);
+
+            // R-010: the preimage is now proven to be THIS transaction's
+            // preimage, so its scriptCode field is authentic. Pin the
+            // spender-supplied `_codePart` to it before any continuation output
+            // is built from it.
+            if (sm.has("_codePart")) {
+                emitCodePartAuthentication();
+            }
 
             // Preimage remains on top. Rename for field extractors.
             sm.pop();
@@ -3290,83 +3593,7 @@ public final class StackLower {
                 // scriptCode exceeds 65,535 bytes (e.g. embedded BN254
                 // verifiers) and surfaces as `Invalid OP_SPLIT range` on
                 // regtest.
-                emitOp(new PushOp(PushValue.of(1)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_SPLIT"));
-                sm.pop(); sm.pop();
-                sm.push(""); // firstByte
-                sm.push(""); // rest
-                emitOp(new SwapOp());
-                sm.swap();
-                // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't
-                // interpreted as negative script numbers.
-                emitOp(new PushOp(PushValue.ofHex("00")));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_CAT"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_BIN2NUM"));
-                // Stack: [..., rest, fb_num]
-
-                // IF fb_num < 253: 1-byte varint, drop fb_num.
-                emitOp(new DupOp());
-                sm.dup();
-                emitOp(new PushOp(PushValue.of(253)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_LESSTHAN"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_IF"));
-                sm.pop();
-                StackMap smAt1ByteIf = sm.clone0();
-                emitOp(new DropOp());
-                sm.pop();
-                emitOp(new OpcodeOp("OP_ELSE"));
-                sm.slots.clear();
-                sm.slots.addAll(smAt1ByteIf.slots);
-                // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-                emitOp(new DupOp());
-                sm.dup();
-                emitOp(new PushOp(PushValue.of(254)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_NUMEQUAL"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_IF"));
-                sm.pop();
-                StackMap smAtFEIf = sm.clone0();
-                // THEN: 5-byte varint (0xfe + 4 bytes LE).
-                emitOp(new DropOp());
-                sm.pop();
-                emitDropMoreVarintBytes(4);
-                emitOp(new OpcodeOp("OP_ELSE"));
-                sm.slots.clear();
-                sm.slots.addAll(smAtFEIf.slots);
-                // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-                emitOp(new DupOp());
-                sm.dup();
-                emitOp(new PushOp(PushValue.of(255)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_NUMEQUAL"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_IF"));
-                sm.pop();
-                StackMap smAtFFIf = sm.clone0();
-                // THEN: 9-byte varint (0xff + 8 bytes LE).
-                emitOp(new DropOp());
-                sm.pop();
-                emitDropMoreVarintBytes(8);
-                emitOp(new OpcodeOp("OP_ELSE"));
-                sm.slots.clear();
-                sm.slots.addAll(smAtFFIf.slots);
-                // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-                emitOp(new DropOp());
-                sm.pop();
-                emitDropMoreVarintBytes(2);
-                emitOp(new OpcodeOp("OP_ENDIF"));
-                emitOp(new OpcodeOp("OP_ENDIF"));
-                emitOp(new OpcodeOp("OP_ENDIF"));
+                emitStripScriptCodeVarint();
                 // --- Stack: [..., scriptCode] ---
 
                 // Compute skip = SIZE(_codePart) - codeSepIdx.

@@ -89,6 +89,11 @@ pub struct StackMethod {
     /// continuation builders OR terminal methods that read variable-length
     /// (ByteString) state (issue #100). Propagated to ABIMethod.uses_code_part.
     pub uses_code_part: bool,
+    /// True if this method's lowering needs the script-level OP_CODESEPARATOR
+    /// the emitter places at offset 1 of the locking script (R-010).
+    /// Contract-level: true for every method of a contract in which ANY method
+    /// authenticates a `_codePart` witness.
+    pub needs_code_separator: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +652,9 @@ struct LoweringContext {
     max_depth: usize,
     properties: Vec<ANFProperty>,
     private_methods: HashMap<String, ANFMethod>,
+    /// R-010: true when the emitter supplies the script-level
+    /// OP_CODESEPARATOR, so `lower_check_preimage` must not emit its own.
+    script_level_code_separator: bool,
     /// Binding names defined in the current lowerBindings scope.
     /// Used by @ref: handler to decide whether to consume (local) or copy (outer-scope).
     local_bindings: HashSet<String>,
@@ -680,6 +688,7 @@ impl LoweringContext {
             max_depth: 0,
             properties: properties.to_vec(),
             private_methods: HashMap::new(),
+            script_level_code_separator: false,
             local_bindings: HashSet::new(),
             outer_protected_refs: None,
             inside_branch: false,
@@ -2177,6 +2186,12 @@ impl LoweringContext {
         let mut then_ctx = LoweringContext::new(&[], &self.properties);
         then_ctx.sm = self.sm.clone();
         then_ctx.outer_protected_refs = Some(protected_refs.clone());
+        // R-010: branch arms lower in a FRESH context, so the contract-level
+        // OP_CODESEPARATOR decision has to be carried in explicitly. Without
+        // this a `checkPreimage` inside an if-branch emits a stray per-method
+        // separator, which executes AFTER the script-level one and re-narrows
+        // `scriptCode`.
+        then_ctx.script_level_code_separator = self.script_level_code_separator;
         then_ctx.inside_branch = true;
         then_ctx.lower_bindings(then_bindings, terminal_assert);
 
@@ -2194,6 +2209,7 @@ impl LoweringContext {
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
         else_ctx.sm = self.sm.clone();
         else_ctx.outer_protected_refs = Some(protected_refs);
+        else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.inside_branch = true;
         else_ctx.lower_bindings(else_bindings, terminal_assert);
 
@@ -3509,6 +3525,258 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// Strip the BIP-143 scriptCode varint length prefix.
+    ///
+    ///   `[..., varint || scriptCode]` -> `[..., scriptCode]`
+    ///
+    /// All four varint shapes must be handled; stripping only the 1- and
+    /// 3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+    /// 65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+    /// `Invalid OP_SPLIT range` on regtest.
+    fn emit_strip_script_code_varint(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); // firstByte
+        self.sm.push(""); // rest
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        // as negative script numbers.
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        // Stack: [..., rest, fb_num]
+
+        // emit_drop_more_varint_bytes drops `n` additional varint bytes
+        // from the top-of-stack `rest`. Stack in: [..., rest], stack out:
+        // [..., rest_minus_n].
+        fn emit_drop_more_varint_bytes(ctx: &mut LoweringContext, n: i128) {
+            ctx.emit_op(StackOp::Push(PushValue::Int(BigInt::from(n))));
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.sm.push("");
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Nip);
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.sm.push("");
+        }
+
+        // IF fb_num < 253: 1-byte varint, drop fb_num.
+        self.emit_op(StackOp::Dup);
+        let top0 = self.sm.peek_at_depth(0).to_string();
+        self.sm.push(&top0);
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(253))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_1_byte_if = self.sm.clone();
+        // THEN: 1-byte varint
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_1_byte_if.clone();
+        // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        self.emit_op(StackOp::Dup);
+        let top1 = self.sm.peek_at_depth(0).to_string();
+        self.sm.push(&top1);
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(254))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_fe_if = self.sm.clone();
+        // THEN: 5-byte varint (0xfe + 4 bytes LE).
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        emit_drop_more_varint_bytes(self, 4);
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_fe_if.clone();
+        // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        self.emit_op(StackOp::Dup);
+        let top2 = self.sm.peek_at_depth(0).to_string();
+        self.sm.push(&top2);
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(255))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_ff_if = self.sm.clone();
+        // THEN: 9-byte varint (0xff + 8 bytes LE).
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        emit_drop_more_varint_bytes(self, 8);
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_ff_if.clone();
+        // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        emit_drop_more_varint_bytes(self, 2);
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+    }
+
+    /// Byte length of the serialized state section (excluding the OP_RETURN
+    /// separator) when every mutable property is fixed-size, else `None`.
+    ///
+    /// Mirrors the size table in `lower_deserialize_state`; a ByteString
+    /// property makes the section variable-length and its exact length
+    /// un-pinnable at compile time.
+    fn fixed_state_section_length(&self) -> Option<usize> {
+        let mut total = 0usize;
+        for prop in &self.properties {
+            if prop.readonly {
+                continue;
+            }
+            total += match prop.prop_type.as_str() {
+                "bigint" | "RabinSig" | "RabinPubKey" => 8,
+                "boolean" => 1,
+                "PubKey" => 33,
+                "Addr" | "Ripemd160" => 20,
+                "Sha256" => 32,
+                "Point" | "P256Point" => 64,
+                "P384Point" => 96,
+                _ => return None,
+            };
+        }
+        Some(total)
+    }
+
+    /// Bind the spender-supplied `_codePart` witness to the script that is
+    /// actually executing (R-010 / CL-BUG-091).
+    ///
+    /// `_codePart` is the locking script minus the trailing
+    /// `OP_RETURN || state` section. It is pushed by the spender and OP_CAT'd
+    /// verbatim as the script prefix of every reconstructed state-continuation
+    /// output, so an unauthenticated `_codePart` is a complete break: the
+    /// spender picks the script the contract's own funds move to.
+    ///
+    /// With the OP_CODESEPARATOR hoisted to offset 1 of the locking script,
+    /// the BIP-143 scriptCode carried in the (already tx-bound) preimage is
+    ///
+    ///   `scriptCode = lockingScript[2..] = codePart[2..] || 0x6a || state`
+    ///
+    /// so the whole of `_codePart` is recoverable from it:
+    ///
+    ///   `codePart == 0x61ab || scriptCode[0 .. SIZE(codePart) - 2]`
+    ///
+    /// plus a pin on the split point, without which a spender could claim a
+    /// SHORTER code part whose bytes are a genuine prefix — in the degenerate
+    /// case just the two prologue bytes, which turns the continuation output
+    /// into a bare OP_RETURN that anyone can spend.
+    ///
+    /// Consumes nothing: `[..., preimage]` in, `[..., preimage]` out, aborting
+    /// the script via OP_EQUALVERIFY when the witness does not match.
+    fn emit_code_part_authentication(&mut self) {
+        // 1. Work on a copy — the caller still needs the preimage.
+        self.emit_op(StackOp::Dup);
+        self.sm.dup();
+
+        // 2. Drop the fixed 104-byte BIP-143 header.
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(104))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Nip);
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+        //    hashOutputs 32 + nLocktime 4 + sighashType 4).
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(52))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+
+        // 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+        self.emit_strip_script_code_varint();
+
+        // 5. Copy the witness code part up.
+        self.bring_to_top("_codePart", false);
+        self.sm.rename_at_depth(0, "");
+
+        // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        // 7. Reorder to [..., codePart, scriptCode, n].
+        self.emit_op(StackOp::Rot);
+        let rotated = self.sm.remove_at_depth(2);
+        self.sm.push(&rotated);
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+
+        // 8. Split scriptCode at n into the claimed code tail and the rest.
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+
+        // 8a. Pin the split point.
+        if let Some(fixed_state_len) = self.fixed_state_section_length() {
+            self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+            self.sm.push("");
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1 + fixed_state_len))));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+            self.sm.pop(); self.sm.pop();
+        }
+        // 8b. The byte immediately after the code part must be the OP_RETURN
+        //     separator.
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
+
+        // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x61, 0xab])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        // 10. Byte-for-byte or the script dies here.
+        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
+    }
+
     fn lower_check_preimage(
         &mut self,
         binding_name: &str,
@@ -3525,9 +3793,20 @@ impl LoweringContext {
         // The unlocking script pushes ONLY <preimage> (no witness signature).
         // See emit_check_preimage_binding (oppushtx.rs) for the construction.
 
-        // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
-        // the code after this point (smaller preimage; required for large scripts).
-        self.emit_op(StackOp::Opcode("OP_CODESEPARATOR".to_string()));
+        // R-010 / CL-BUG-091: OP_CODESEPARATOR placement. The separator used to
+        // sit at each method's entry, so the BIP-143 scriptCode covered only
+        // the code AFTER it — leaving the dispatch preamble and every preceding
+        // method body invisible to the running script, and those are exactly
+        // the bytes the spender-supplied `_codePart` claims to reproduce. When
+        // any method of this contract carries `_codePart`, the separator is
+        // emitted ONCE at offset 1 of the locking script instead.
+        if !self.script_level_code_separator {
+            // No `_codePart` anywhere in this contract, so nothing needs
+            // authenticating: keep the pre-R-010 layout — a separator right
+            // here, at the method's entry, which keeps `scriptCode` (and the
+            // preimage) small.
+            self.emit_op(StackOp::Opcode("OP_CODESEPARATOR".to_string()));
+        }
 
         // Bring the preimage to the top (kept for field extractors below).
         let is_last = self.is_last_use(preimage, binding_index, last_uses);
@@ -3539,6 +3818,13 @@ impl LoweringContext {
         // method declare a different mode, which only changes the appended
         // sighash flag byte. Net stack effect is zero.
         self.emit_check_preimage_binding(sighash_flag);
+
+        // R-010: the preimage is now proven to be THIS transaction's preimage,
+        // so its scriptCode field is authentic. Pin the spender-supplied
+        // `_codePart` to it before any continuation output is built from it.
+        if self.sm.has("_codePart") {
+            self.emit_code_part_authentication();
+        }
 
         // The preimage is now on top. Rename to binding name so field extractors
         // can reference it.
@@ -3692,101 +3978,7 @@ impl LoweringContext {
             // strip too few varint bytes and corrupt the subsequent
             // state-extraction OP_SPLITs (this is the bug fixed here — see
             // `integration/go/contracts/RollupBug.runar.go`).
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push(""); // firstByte
-            self.sm.push(""); // rest
-            self.emit_op(StackOp::Swap);
-            self.sm.swap();
-            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-            // as negative script numbers.
-            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_CAT".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
-            // Stack: [..., rest, fb_num]
-
-            // emit_drop_more_varint_bytes drops `n` additional varint bytes
-            // from the top-of-stack `rest`. Stack in: [..., rest], stack out:
-            // [..., rest_minus_n].
-            fn emit_drop_more_varint_bytes(ctx: &mut LoweringContext, n: i128) {
-                ctx.emit_op(StackOp::Push(PushValue::Int(BigInt::from(n))));
-                ctx.sm.push("");
-                ctx.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-                ctx.sm.pop();
-                ctx.sm.pop();
-                ctx.sm.push("");
-                ctx.sm.push("");
-                ctx.emit_op(StackOp::Nip);
-                ctx.sm.pop();
-                ctx.sm.pop();
-                ctx.sm.push("");
-            }
-
-            // IF fb_num < 253: 1-byte varint, drop fb_num.
-            self.emit_op(StackOp::Dup);
-            let top0 = self.sm.peek_at_depth(0).to_string();
-            self.sm.push(&top0);
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(253))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_IF".into()));
-            self.sm.pop();
-            let sm_at_1_byte_if = self.sm.clone();
-            // THEN: 1-byte varint
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_1_byte_if.clone();
-            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-            self.emit_op(StackOp::Dup);
-            let top1 = self.sm.peek_at_depth(0).to_string();
-            self.sm.push(&top1);
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(254))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_IF".into()));
-            self.sm.pop();
-            let sm_at_fe_if = self.sm.clone();
-            // THEN: 5-byte varint (0xfe + 4 bytes LE).
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            emit_drop_more_varint_bytes(self, 4);
-            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_fe_if.clone();
-            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-            self.emit_op(StackOp::Dup);
-            let top2 = self.sm.peek_at_depth(0).to_string();
-            self.sm.push(&top2);
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(255))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_IF".into()));
-            self.sm.pop();
-            let sm_at_ff_if = self.sm.clone();
-            // THEN: 9-byte varint (0xff + 8 bytes LE).
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            emit_drop_more_varint_bytes(self, 8);
-            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_ff_if.clone();
-            // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            emit_drop_more_varint_bytes(self, 2);
-            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
-            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
-            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+            self.emit_strip_script_code_varint();
 
             // Compute skip = SIZE(_codePart) - codeSepIdx
             self.bring_to_top("_codePart", false);
@@ -5404,12 +5596,37 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
 
     let mut methods = Vec::new();
 
+    // R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+    // decision, taken before any method is lowered.
+    //
+    //   * If any method authenticates a `_codePart` witness, the contract gets a
+    //     single separator at offset 1 of the locking script (emitted by `emit`)
+    //     and NO per-method ones, so `scriptCode` spans the whole script and
+    //     every byte of `_codePart` is recoverable from it.
+    //   * Otherwise nothing needs authenticating, and each `checkPreimage` keeps
+    //     its own separator at the method's entry — the pre-R-010 layout, which
+    //     keeps the preimage small and, for a stateless contract, keeps a user
+    //     `checkSig` on the near side of the separator where the SDK's signing
+    //     path expects it.
+    //
+    // The two schemes are never mixed: a per-method separator emitted after the
+    // script-level one would win and re-narrow `scriptCode`.
+    let script_level_code_separator = program.methods.iter().any(|m| {
+        (m.name == "constructor" || m.is_public)
+            && compute_uses_code_part(m, &program.properties, &private_methods)
+    });
+
     for method in &program.methods {
         // Skip constructor and private methods
         if method.name == "constructor" || (!method.is_public && method.name != "constructor") {
             continue;
         }
-        let sm = lower_method_with_private_methods(method, &program.properties, &private_methods)?;
+        let sm = lower_method_with_private_methods(
+            method,
+            &program.properties,
+            &private_methods,
+            script_level_code_separator,
+        )?;
         methods.push(sm);
     }
 
@@ -5550,10 +5767,35 @@ fn method_reads_var_len_state_rec(
     false
 }
 
+/// Whether a method's unlocking script carries the `_codePart` implicit
+/// parameter: it verifies a preimage AND either builds a continuation output or
+/// reads variable-length state (issue #100).
+///
+/// Hoisted out of `lower_method_with_private_methods` because R-010 needs the
+/// answer for EVERY method before lowering ANY of them — OP_CODESEPARATOR
+/// placement is a contract-level decision (see `lower_to_stack_inner`).
+fn compute_uses_code_part(
+    method: &ANFMethod,
+    properties: &[ANFProperty],
+    private_methods: &HashMap<String, ANFMethod>,
+) -> bool {
+    if !method_uses_check_preimage(&method.body, Some(private_methods)) {
+        return false;
+    }
+    let var_len_props: HashSet<String> = properties
+        .iter()
+        .filter(|p| !p.readonly && p.prop_type == "ByteString")
+        .map(|p| p.name.clone())
+        .collect();
+    method_uses_code_part(&method.body)
+        || method_reads_var_len_state(&method.body, &var_len_props, Some(private_methods))
+}
+
 fn lower_method_with_private_methods(
     method: &ANFMethod,
     properties: &[ANFProperty],
     private_methods: &HashMap<String, ANFMethod>,
+    script_level_code_separator: bool,
 ) -> Result<StackMethod, String> {
     let mut param_names: Vec<String> = method.params.iter().map(|p| p.name.clone()).collect();
 
@@ -5572,15 +5814,17 @@ fn lower_method_with_private_methods(
         .filter(|p| !p.readonly && p.prop_type == "ByteString")
         .map(|p| p.name.clone())
         .collect();
-    let uses_code_part = method_uses_check_preimage(&method.body, Some(private_methods))
-        && (method_uses_code_part(&method.body)
-            || method_reads_var_len_state(&method.body, &var_len_props, Some(private_methods)));
+    let uses_code_part = compute_uses_code_part(method, properties, private_methods);
     if uses_code_part {
         param_names.insert(0, "_codePart".to_string());
     }
 
     let mut ctx = LoweringContext::new(&param_names, properties);
     ctx.private_methods = private_methods.clone();
+    // R-010: when `emit` places the script-level separator, `lower_check_preimage`
+    // must NOT emit a per-method one — a later separator would win and re-narrow
+    // `scriptCode`, undoing the `_codePart` authentication.
+    ctx.script_level_code_separator = script_level_code_separator;
     // Pass terminal_assert=true for public methods so the last assert leaves
     // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
     ctx.lower_bindings(&method.body, method.is_public);
@@ -5611,6 +5855,7 @@ fn lower_method_with_private_methods(
         ops: ctx.ops,
         max_stack_depth: ctx.max_depth,
         uses_code_part,
+        needs_code_separator: script_level_code_separator,
     })
 }
 

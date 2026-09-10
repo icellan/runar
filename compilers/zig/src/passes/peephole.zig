@@ -166,6 +166,7 @@ pub fn optimize(allocator: Allocator, methods: []const types.StackMethod) ![]typ
             .instruction_source_locs = opt.locs,
             .ops = method.ops,
             .max_stack_depth = method.max_stack_depth,
+            .needs_code_separator = method.needs_code_separator,
         };
     }
     return result;

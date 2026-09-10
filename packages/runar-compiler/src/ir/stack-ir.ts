@@ -20,6 +20,15 @@ export interface StackMethod {
   maxStackDepth: number;
   /** True if the unlocking script is prefixed with `_codePart` (issue #100). */
   usesCodePart?: boolean;
+  /** True if this method's lowering needs the script-level OP_CODESEPARATOR
+   *  the emitter places at offset 1 of the locking script (R-010).
+   *
+   *  Equal to `usesCodePart`: only a method that authenticates a `_codePart`
+   *  witness needs `scriptCode` widened to cover the whole script. Methods
+   *  that verify a preimage but never touch `_codePart` do not, and widening
+   *  it for them would move the user's `checkSig` to the far side of the
+   *  separator — which the stateless SDK signing path does not expect. */
+  needsCodeSeparator?: boolean;
 }
 
 /** Optional source location for debug source maps. */

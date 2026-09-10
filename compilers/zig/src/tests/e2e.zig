@@ -696,7 +696,11 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // stateful with six covenant methods, each carrying one preimage-binding
     // blob, so 6 x (760 - 428) = 1992 bytes come off. The NEW-014 note above
     // still stands -- it is why the pre-Any-S number was 9616 and not 9494.
-    const expected_bytes: usize = 7624;
+    // (R-010: the per-method OP_CODESEPARATOR is replaced by ONE hoisted
+    // `OP_NOP OP_CODESEPARATOR` prologue at offset 1, and every checkPreimage
+    // site gains the `_codePart` authentication sequence that pins the
+    // spender-supplied code part to the executing script — 7624 -> 7778.)
+    const expected_bytes: usize = 7778;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 
@@ -711,8 +715,10 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // (`007c517f7b7b7c7e...`) to a 4-byte-per-element fan-out, so the prefix
     // is now `OP_1 OP_SPLIT` repeated. Taken verbatim from the merged
     // compiler's output for examples/ts/tic-tac-toe/TicTacToe.runar.ts.
+    // (R-010: the prologue is now `OP_NOP OP_CODESEPARATOR` (`61ab`) ahead of
+    // the dispatch table, and the per-method `ab` after `OP_DROP` is gone.)
     const expected_prefix =
-        "76009c637576ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f51";
+        "61ab76009c63757676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f";
     try std.testing.expectEqualStrings(expected_prefix, v1_hex[0..expected_prefix.len]);
 }
 

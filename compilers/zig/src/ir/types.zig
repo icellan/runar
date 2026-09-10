@@ -552,6 +552,11 @@ pub const StackMethod = struct {
     max_stack_depth: u32 = 0,
     /// Parallel array to `instructions`: source location for each instruction (for source maps).
     instruction_source_locs: []?SourceLocation = &.{},
+    /// True if this method's lowering needs the script-level OP_CODESEPARATOR
+    /// the emitter places at offset 1 of the locking script (R-010).
+    /// Contract-level: true for every method of a contract in which ANY method
+    /// authenticates a `_codePart` witness.
+    needs_code_separator: bool = false,
 };
 
 pub const StackOp = union(enum) {

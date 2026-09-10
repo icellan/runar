@@ -38,7 +38,7 @@ public final class Peephole {
         List<StackMethod> optimised = new ArrayList<>(program.methods().size());
         for (StackMethod m : program.methods()) {
             List<StackOp> ops = optimize(m.ops());
-            optimised.add(new StackMethod(m.name(), ops, m.maxStackDepth()));
+            optimised.add(new StackMethod(m.name(), ops, m.maxStackDepth(), m.needsCodeSeparator()));
         }
         return new StackProgram(program.contractName(), optimised);
     }
