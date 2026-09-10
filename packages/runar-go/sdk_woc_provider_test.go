@@ -16,7 +16,10 @@ import (
 // HTTP calls hit the test handler.
 func newTestWoCProvider(handler http.HandlerFunc) (*WhatsOnChainProvider, *httptest.Server) {
 	server := httptest.NewServer(handler)
-	p := NewWhatsOnChainProvider("mainnet")
+	p, err := NewWhatsOnChainProvider("mainnet")
+	if err != nil {
+		panic(err)
+	}
 	p.baseURL = server.URL
 	return p, server
 }
@@ -26,7 +29,10 @@ func newTestWoCProvider(handler http.HandlerFunc) (*WhatsOnChainProvider, *httpt
 // ---------------------------------------------------------------------------
 
 func TestWhatsOnChainProvider_NetworkURLs(t *testing.T) {
-	mainnet := NewWhatsOnChainProvider("mainnet")
+	mainnet, err := NewWhatsOnChainProvider("mainnet")
+	if err != nil {
+		t.Fatalf("mainnet: unexpected error %v", err)
+	}
 	if mainnet.baseURL != "https://api.whatsonchain.com/v1/bsv/main" {
 		t.Errorf("mainnet URL: got %q", mainnet.baseURL)
 	}
@@ -34,19 +40,25 @@ func TestWhatsOnChainProvider_NetworkURLs(t *testing.T) {
 		t.Errorf("mainnet network: got %q", mainnet.GetNetwork())
 	}
 
-	testnet := NewWhatsOnChainProvider("testnet")
+	testnet, err := NewWhatsOnChainProvider("testnet")
+	if err != nil {
+		t.Fatalf("testnet: unexpected error %v", err)
+	}
 	if testnet.baseURL != "https://api.whatsonchain.com/v1/bsv/test" {
 		t.Errorf("testnet URL: got %q", testnet.baseURL)
 	}
 
-	defaultNet := NewWhatsOnChainProvider("")
-	if defaultNet.GetNetwork() != "mainnet" {
-		t.Errorf("default network: got %q", defaultNet.GetNetwork())
+	// R-051: an empty network is rejected, never defaulted to mainnet.
+	if _, err := NewWhatsOnChainProvider(""); err == nil {
+		t.Error("empty network: expected rejection, got a provider")
 	}
 }
 
 func TestWhatsOnChainProvider_FeeRate(t *testing.T) {
-	p := NewWhatsOnChainProvider("mainnet")
+	p, err := NewWhatsOnChainProvider("mainnet")
+	if err != nil {
+		t.Fatalf("constructor error: %v", err)
+	}
 	rate, err := p.GetFeeRate()
 	if err != nil {
 		t.Fatalf("GetFeeRate error: %v", err)

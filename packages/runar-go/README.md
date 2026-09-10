@@ -623,16 +623,20 @@ The RPC provider implements all `Provider` methods over `getrawtransaction`, `se
 ### `WhatsOnChainProvider`
 
 ```go
-provider := runar.NewWhatsOnChainProvider("mainnet") // or "testnet"
+provider, err := runar.NewWhatsOnChainProvider("mainnet") // or "testnet"
 ```
+
+The network must be exactly `"mainnet"` or `"testnet"`. Any other value — including the empty string — returns an error rather than defaulting, so a typo can never silently point the SDK at live mainnet.
 
 Wraps the public WhatsOnChain API at `https://api.whatsonchain.com/v1/bsv/{main,test}`. Note that WoC does not return locking scripts in its UTXO list response, so `GetUtxos(...).Script` will be empty — fetch the parent transaction with `GetTransaction` if you need the script.
 
 ### `GorillaPoolProvider`
 
 ```go
-provider := runar.NewGorillaPoolProvider("mainnet") // or "testnet"
+provider, err := runar.NewGorillaPoolProvider("mainnet") // or "testnet"
 ```
+
+The network must be exactly `"mainnet"` or `"testnet"`; any other value returns an error rather than defaulting.
 
 Wraps the GorillaPool 1sat Ordinals API. In addition to the `Provider` interface this provider exposes ordinal-specific methods: `GetInscriptionsByAddress`, `GetInscription`, `GetBSV20Balance`, `GetBSV20Utxos`, `GetBSV21Balance`, `GetBSV21Utxos`.
 
@@ -1110,7 +1114,7 @@ Produce a typed Go wrapper source file for the given artifact. See [Section 10](
 
 ```go
 type GorillaPoolProvider struct { Network string; /* unexported */ }
-func NewGorillaPoolProvider(network string) *GorillaPoolProvider
+func NewGorillaPoolProvider(network string) (*GorillaPoolProvider, error)
 
 func (p *GorillaPoolProvider) GetInscriptionsByAddress(address string) ([]InscriptionInfo, error)
 func (p *GorillaPoolProvider) GetInscription(inscriptionId string) (*InscriptionDetail, error)
@@ -1656,7 +1660,7 @@ func NewWalletSigner(opts WalletSignerOptions) *WalletSigner
 
 ```go
 type WhatsOnChainProvider struct { Network string; /* unexported */ }
-func NewWhatsOnChainProvider(network string) *WhatsOnChainProvider
+func NewWhatsOnChainProvider(network string) (*WhatsOnChainProvider, error)
 ```
 
 Plus the standard `Provider` interface methods. [sdk_woc_provider.go](sdk_woc_provider.go).

@@ -1235,6 +1235,11 @@ Endpoints used: `/address/{addr}/unspent`, `/tx/raw`,
 `/tx/hash/{txid}`, `/tx/{txid}/hex`. The unspent listing does not
 include the locking script — fetch via `getUtxo(...)` when needed.
 
+The network must be exactly `"mainnet"` or `"testnet"`. `null`, the empty
+string, and any typo throw `IllegalArgumentException` rather than defaulting,
+so an unvalidated value can never silently point the SDK at live mainnet.
+The same rule applies to `GorillaPoolProvider`.
+
 ### `GorillaPoolProvider` — REST against GorillaPool / 1sat ordinals
 
 ```java

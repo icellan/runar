@@ -48,8 +48,13 @@ class GorillaPoolProviderTest {
     }
 
     @Test
-    void emptyOrNullNetworkDefaultsToMainnet() {
-        assertEquals("mainnet", new GorillaPoolProvider("").getNetwork());
+    void emptyOrNullNetworkIsRejectedNotDefaultedToMainnet() {
+        // R-051: an unparseable network is a programming error, not a default.
+        assertThrows(IllegalArgumentException.class, () -> new GorillaPoolProvider(""));
+        assertThrows(IllegalArgumentException.class, () -> new GorillaPoolProvider((String) null));
+        assertThrows(IllegalArgumentException.class, () -> new GorillaPoolProvider("mainnett"));
+        // The no-arg constructor still selects mainnet — that is an explicit
+        // choice at the call site, not an unvalidated string.
         assertEquals("mainnet", new GorillaPoolProvider().getNetwork());
     }
 

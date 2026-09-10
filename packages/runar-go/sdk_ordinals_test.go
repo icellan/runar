@@ -424,7 +424,10 @@ func TestGorillaPoolProvider_ImplementsProvider(t *testing.T) {
 }
 
 func TestGorillaPoolProvider_NetworkURLs(t *testing.T) {
-	mainnet := NewGorillaPoolProvider("mainnet")
+	mainnet, err := NewGorillaPoolProvider("mainnet")
+	if err != nil {
+		t.Fatalf("mainnet: unexpected error %v", err)
+	}
 	if mainnet.baseURL != "https://ordinals.gorillapool.io/api" {
 		t.Errorf("mainnet URL: got %q", mainnet.baseURL)
 	}
@@ -432,19 +435,25 @@ func TestGorillaPoolProvider_NetworkURLs(t *testing.T) {
 		t.Errorf("mainnet network: got %q", mainnet.GetNetwork())
 	}
 
-	testnet := NewGorillaPoolProvider("testnet")
+	testnet, err := NewGorillaPoolProvider("testnet")
+	if err != nil {
+		t.Fatalf("testnet: unexpected error %v", err)
+	}
 	if testnet.baseURL != "https://testnet.ordinals.gorillapool.io/api" {
 		t.Errorf("testnet URL: got %q", testnet.baseURL)
 	}
 
-	defaultNet := NewGorillaPoolProvider("")
-	if defaultNet.GetNetwork() != "mainnet" {
-		t.Errorf("default network: got %q", defaultNet.GetNetwork())
+	// R-051: an empty network is rejected, never defaulted to mainnet.
+	if _, err := NewGorillaPoolProvider(""); err == nil {
+		t.Error("empty network: expected rejection, got a provider")
 	}
 }
 
 func TestGorillaPoolProvider_FeeRate(t *testing.T) {
-	p := NewGorillaPoolProvider("mainnet")
+	p, err := NewGorillaPoolProvider("mainnet")
+	if err != nil {
+		t.Fatalf("constructor error: %v", err)
+	}
 	rate, err := p.GetFeeRate()
 	if err != nil {
 		t.Fatalf("GetFeeRate error: %v", err)

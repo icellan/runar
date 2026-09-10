@@ -31,20 +31,24 @@ type GorillaPoolProvider struct {
 }
 
 // NewGorillaPoolProvider creates a new GorillaPoolProvider for the given network.
-// Network must be "mainnet" or "testnet" (defaults to "mainnet" if empty).
-func NewGorillaPoolProvider(network string) *GorillaPoolProvider {
-	if network == "" {
-		network = "mainnet"
-	}
-	baseURL := "https://ordinals.gorillapool.io/api"
-	if network == "testnet" {
+// Network must be exactly "mainnet" or "testnet". Any other value — including the
+// empty string — is rejected rather than defaulted, so a typo or an unvalidated
+// user-supplied value can never silently point the SDK at live mainnet.
+func NewGorillaPoolProvider(network string) (*GorillaPoolProvider, error) {
+	var baseURL string
+	switch network {
+	case "mainnet":
+		baseURL = "https://ordinals.gorillapool.io/api"
+	case "testnet":
 		baseURL = "https://testnet.ordinals.gorillapool.io/api"
+	default:
+		return nil, fmt.Errorf("runar: invalid network %q: must be \"mainnet\" or \"testnet\"", network)
 	}
 	return &GorillaPoolProvider{
 		Network: network,
 		baseURL: baseURL,
 		client:  &http.Client{},
-	}
+	}, nil
 }
 
 // ---------------------------------------------------------------------------

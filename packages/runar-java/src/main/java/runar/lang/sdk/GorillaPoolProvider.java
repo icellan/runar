@@ -29,6 +29,7 @@ public final class GorillaPoolProvider implements Provider {
     private final String baseUrl;
     private final HttpTransport transport;
 
+    /** Explicitly selects mainnet. Use {@link #GorillaPoolProvider(String)} to choose. */
     public GorillaPoolProvider() {
         this("mainnet", HttpTransport.jdkDefault());
     }
@@ -39,9 +40,17 @@ public final class GorillaPoolProvider implements Provider {
 
     // Package-private full constructor so tests can inject a fake transport.
     GorillaPoolProvider(String network, HttpTransport transport) {
-        String n = (network == null || network.isEmpty()) ? "mainnet" : network;
-        this.network = n;
-        this.baseUrl = "testnet".equals(n)
+        // Network must be exactly "mainnet" or "testnet". Any other value —
+        // including null and the empty string — is rejected rather than
+        // defaulted, so a typo or an unvalidated user-supplied value can never
+        // silently point the SDK at live mainnet.
+        if (!"mainnet".equals(network) && !"testnet".equals(network)) {
+            throw new IllegalArgumentException(
+                "invalid network " + (network == null ? "null" : "\"" + network + "\"")
+                    + ": must be \"mainnet\" or \"testnet\"");
+        }
+        this.network = network;
+        this.baseUrl = "testnet".equals(network)
             ? "https://testnet.ordinals.gorillapool.io/api"
             : "https://ordinals.gorillapool.io/api";
         this.transport = transport == null ? HttpTransport.jdkDefault() : transport;

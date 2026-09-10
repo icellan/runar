@@ -24,20 +24,24 @@ type WhatsOnChainProvider struct {
 }
 
 // NewWhatsOnChainProvider creates a new WhatsOnChainProvider for the given network.
-// Network must be "mainnet" or "testnet" (defaults to "mainnet" if empty).
-func NewWhatsOnChainProvider(network string) *WhatsOnChainProvider {
-	if network == "" {
-		network = "mainnet"
-	}
-	baseURL := "https://api.whatsonchain.com/v1/bsv/main"
-	if network == "testnet" {
+// Network must be exactly "mainnet" or "testnet". Any other value — including the
+// empty string — is rejected rather than defaulted, so a typo or an unvalidated
+// user-supplied value can never silently point the SDK at live mainnet.
+func NewWhatsOnChainProvider(network string) (*WhatsOnChainProvider, error) {
+	var baseURL string
+	switch network {
+	case "mainnet":
+		baseURL = "https://api.whatsonchain.com/v1/bsv/main"
+	case "testnet":
 		baseURL = "https://api.whatsonchain.com/v1/bsv/test"
+	default:
+		return nil, fmt.Errorf("runar: invalid network %q: must be \"mainnet\" or \"testnet\"", network)
 	}
 	return &WhatsOnChainProvider{
 		Network: network,
 		baseURL: baseURL,
 		client:  &http.Client{},
-	}
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
