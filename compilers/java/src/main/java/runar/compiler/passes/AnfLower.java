@@ -2324,6 +2324,17 @@ public final class AnfLower {
             }
         }
 
+        // Range-check the arbitrary-precision count BEFORE narrowing it.
+        // intValueExact() refuses rather than truncating, so this tier never
+        // emitted a loop of the wrong length — but its message names neither
+        // the loop nor a limit, and it says nothing at all about a count like
+        // 10001 that fits an int perfectly well and still unrolls further than
+        // any script can. CL-BUG-088.
+        if (count.compareTo(BigInteger.valueOf(Loop.MAX_LOOP_COUNT)) > 0) {
+            throw new IllegalStateException(
+                "For loop unrolls to " + count + " iterations, exceeding the maximum loop count of "
+                    + Loop.MAX_LOOP_COUNT + ".");
+        }
         int c = count.signum() <= 0 ? 0 : count.intValueExact();
         return new LoopShape(start, step, c);
     }

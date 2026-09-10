@@ -286,3 +286,15 @@ export type ANFValue =
  * recognise the same block.
  */
 export const MERGED_LOCAL_TEMP_PREFIX = '__merge$';
+
+/**
+ * Maximum number of iterations a single loop binding may unroll to.
+ *
+ * The bound already existed on the `--ir` input path (Go's `ir.MaxLoopCount`,
+ * Python's `MAX_LOOP_COUNT`, Ruby's `IR::MAX_LOOP_COUNT`) but nothing applied
+ * it to a loop written in source, in any tier. A source contract could
+ * therefore ask for an unroll count no machine can honour, and each tier failed
+ * differently — precision loss here, a silently dropped loop body in Go and
+ * Rust, a panic in Zig. CL-BUG-088.
+ */
+export const MAX_LOOP_COUNT = 10000;

@@ -66,6 +66,14 @@ pub const LowerError = error{
     /// layout assertion satisfied by coincidence. Refused rather than
     /// miscompiled.
     ShadowedResultName,
+    /// A for loop's compile-time bound unrolls to more iterations than
+    /// `types.MAX_LOOP_COUNT` allows — or to a count no machine integer can
+    /// hold. The count is narrowed to a `u32` to drive the unroller, and
+    /// `@intCast` on an out-of-range value is illegal behaviour (a
+    /// safety-checked panic in Debug/ReleaseSafe, undefined behaviour in
+    /// ReleaseFast), so the magnitude has to be refused BEFORE the narrowing.
+    /// CL-BUG-088.
+    LoopCountTooLarge,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -1031,6 +1039,18 @@ const LowerCtx = struct {
         sink.message = std.fmt.allocPrint(self.allocator, fmt, args) catch null;
     }
 
+    /// Refuse a loop whose iteration count overflowed the i64 arithmetic that
+    /// computes it. The bound is all that is left to name — the count itself is
+    /// the thing that could not be represented.
+    fn refuseLoopCount(self: *LowerCtx, bound: i64) LowerError {
+        self.setDiagnostic(
+            "For loop unrolls to more iterations than can be counted (bound {d}), " ++
+                "exceeding the maximum loop count of {d}.",
+            .{ bound, types.MAX_LOOP_COUNT },
+        );
+        return LowerError.LoopCountTooLarge;
+    }
+
     fn syncCounter(self: *LowerCtx, sub: *const LowerCtx) void {
         if (sub.counter > self.counter) {
             self.counter = sub.counter;
@@ -1644,8 +1664,29 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     const step: i8 = if (for_s.descending) -1 else 1;
 
     // count = number of iterations before the condition first turns false.
-    const base: i64 = if (for_s.descending) start - for_s.bound else for_s.bound - start;
-    const raw: i64 = base + (if (for_s.inclusive) @as(i64, 1) else 0);
+    //
+    // Range-check the count BEFORE narrowing it. `@intCast` to the `u32` count
+    // is illegal behaviour for an out-of-range value — a safety-checked panic
+    // in Debug/ReleaseSafe, undefined behaviour in ReleaseFast — and a bound of
+    // 2^32 + 5 reaches it from an ordinary `i64` literal. The subtraction and
+    // the inclusive `+ 1` can overflow `i64` outright at the extremes, so both
+    // are checked too; an overflow means a magnitude far past the ceiling,
+    // which is the same refusal. CL-BUG-088.
+    const base: i64 = if (for_s.descending)
+        std.math.sub(i64, start, for_s.bound) catch return ctx.refuseLoopCount(for_s.bound)
+    else
+        std.math.sub(i64, for_s.bound, start) catch return ctx.refuseLoopCount(for_s.bound);
+    const raw: i64 = if (for_s.inclusive)
+        std.math.add(i64, base, 1) catch return ctx.refuseLoopCount(for_s.bound)
+    else
+        base;
+    if (raw > types.MAX_LOOP_COUNT) {
+        ctx.setDiagnostic(
+            "For loop unrolls to {d} iterations, exceeding the maximum loop count of {d}.",
+            .{ raw, types.MAX_LOOP_COUNT },
+        );
+        return LowerError.LoopCountTooLarge;
+    }
     const count: u32 = if (raw > 0) @intCast(raw) else 0;
 
     // Lower body. The body repeats, so every read anywhere in it is a read that

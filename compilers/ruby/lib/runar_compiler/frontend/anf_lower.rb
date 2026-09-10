@@ -12,6 +12,7 @@
 require "json"
 require "set"
 require_relative "../ir/types"
+require_relative "../ir/loader"
 require_relative "ast_nodes"
 require_relative "sighash_directive"
 
@@ -2545,6 +2546,18 @@ module RunarCompiler
         else
           raise "For loop counting down (i--) must use '>' or '>=' (got '#{op}')."
         end
+      end
+
+      # Bound the arbitrary-precision count BEFORE handing it to the unroller.
+      # Ruby Integers do not truncate, so `[0, count].max` faithfully preserves
+      # a bound of 10**20 and the unroller then tries to honour it — a hang, not
+      # a diagnostic. MAX_LOOP_COUNT already bounded loop counts arriving on the
+      # `--ir` path; a loop written in source deserves the same ceiling.
+      # CL-BUG-088.
+      max_count = ::RunarCompiler::IR::MAX_LOOP_COUNT
+      if count > max_count
+        raise "For loop unrolls to #{count} iterations, " \
+              "exceeding the maximum loop count of #{max_count}."
       end
 
       { start: start, step: step, count: [0, count].max }

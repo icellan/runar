@@ -1916,6 +1916,21 @@ fn extract_loop_shape(
         }
     };
 
+    // Range-check the arbitrary-precision count BEFORE narrowing it.
+    // `to_i64()` returns `None` for anything outside i64, so `unwrap_or(0)`
+    // turned an astronomically large bound into ZERO iterations: the loop body
+    // — which may carry the contract's `assert(checkSig(..))` — vanished from
+    // the emitted script with no diagnostic (CL-BUG-088 / CL-BUG-151). The
+    // ceiling is what actually stops it: 10001, and 10^18, both fit an i64.
+    if count > BigInt::from(crate::ir::loader::MAX_LOOP_COUNT) {
+        panic!(
+            "For loop unrolls to {} iterations, exceeding the maximum loop count of {}.",
+            count,
+            crate::ir::loader::MAX_LOOP_COUNT
+        );
+    }
+    // Below the ceiling the narrowing cannot fail; a non-positive count is the
+    // "condition already false" case and unrolls zero times.
     let count = count.to_i64().unwrap_or(0).max(0) as usize;
     (start, step, count)
 }

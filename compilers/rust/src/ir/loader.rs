@@ -85,6 +85,16 @@ impl std::error::Error for IRLoaderError {}
 // Validation
 // ---------------------------------------------------------------------------
 
+/// Maximum number of iterations a single loop binding may unroll to.
+///
+/// The bound already existed on the `--ir` input path in the Go tier
+/// (`ir.MaxLoopCount`) but nothing applied it to a loop written in source, in
+/// any tier. A source contract could therefore ask for an unroll count no
+/// machine can honour, and each tier failed differently — here `to_i64()`
+/// returned `None` and `unwrap_or(0)` silently DROPPED the loop body.
+/// CL-BUG-088.
+pub const MAX_LOOP_COUNT: u32 = 10_000;
+
 /// Known ANF value kinds.
 const KNOWN_KINDS: &[&str] = &[
     "load_param",

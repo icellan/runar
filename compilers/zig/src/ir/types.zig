@@ -233,6 +233,16 @@ pub const Assign = struct {
     index_target: ?*IndexAccess = null,
 };
 pub const IfStmt = struct { condition: Expression, then_body: []Statement, else_body: ?[]Statement = null, source_loc: ?SourceLocation = null };
+/// Maximum number of iterations a single loop binding may unroll to.
+///
+/// The bound already existed on the `--ir` input path in the Go, Python and
+/// Ruby tiers but nothing applied it to a loop written in source, in any tier.
+/// A source contract could therefore ask for an unroll count no machine can
+/// honour, and each tier failed differently — here `@intCast` to the `u32`
+/// count is a safety-checked panic in Debug/ReleaseSafe and undefined
+/// behaviour in ReleaseFast. CL-BUG-088.
+pub const MAX_LOOP_COUNT: i64 = 10_000;
+
 // `descending` records whether the source condition counted down (`>`/`>=`).
 // `inclusive` records whether the source comparison was inclusive (`<=`/`>=`).
 // Issue #121: the ANF loop node now carries an explicit start value and step

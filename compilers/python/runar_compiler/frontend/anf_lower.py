@@ -60,6 +60,7 @@ from runar_compiler.frontend.side_effect_summary import (
     continuation_shape_for,
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
+from runar_compiler.ir.loader import MAX_LOOP_COUNT
 
 
 # ---------------------------------------------------------------------------
@@ -2385,6 +2386,18 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
             raise ValueError(
                 f"For loop counting down (i--) must use '>' or '>=' (got '{op}')."
             )
+
+    # Bound the arbitrary-precision count BEFORE handing it to the unroller.
+    # Python integers do not truncate, so `max(0, count)` faithfully preserves a
+    # bound of 10**20 and the unroller then tries to honour it — a hang, not a
+    # diagnostic. MAX_LOOP_COUNT already bounded loop counts arriving on the
+    # `--ir` path; a loop written in source deserves the same ceiling.
+    # CL-BUG-088.
+    if count > MAX_LOOP_COUNT:
+        raise ValueError(
+            f"For loop unrolls to {count} iterations, exceeding the maximum "
+            f"loop count of {MAX_LOOP_COUNT}."
+        )
 
     return start, step, max(0, count)
 

@@ -31,7 +31,7 @@ import type {
   BinOp,
   ANFUnaryOp,
 } from '../ir/index.js';
-import { MERGED_LOCAL_TEMP_PREFIX } from '../ir/index.js';
+import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
@@ -1659,7 +1659,18 @@ function extractLoopShape(
     }
   }
 
-  return { start, step, count: Math.max(0, Number(count)) };
+  // Range-check the arbitrary-precision count BEFORE narrowing it.
+  // `Number(count)` silently loses precision above 2^53 and becomes `Infinity`
+  // above ~1.8e308, so the unroll loop downstream used to run an astronomically
+  // large — or literally infinite — number of iterations, exhausting the heap
+  // rather than reporting anything. The ceiling is what actually stops it:
+  // 10001 fits every machine integer there is. CL-BUG-088.
+  if (count > BigInt(MAX_LOOP_COUNT)) {
+    throw new Error(
+      `For loop unrolls to ${count} iterations, exceeding the maximum loop count of ${MAX_LOOP_COUNT}.`,
+    );
+  }
+  return { start, step, count: count > 0n ? Number(count) : 0 };
 }
 
 /**
