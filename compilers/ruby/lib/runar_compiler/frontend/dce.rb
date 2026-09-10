@@ -131,6 +131,13 @@ module RunarCompiler
 
       def self.has_side_effect?(v)
         kind = v.kind
+        # Issue #109 (+@embedAlways+): a +load_prop+ injected to force a readonly
+        # field into the deployed locking script carries +preserve = true+, so
+        # DCE must keep it even though nothing references it. Ordinary
+        # load_props (preserve = false) remain freely eliminable. Mirrors
+        # compilers/zig/src/passes/dce.zig.
+        return v.preserve == true if kind == "load_prop"
+
         return true  if SIDE_EFFECT_KINDS.include?(kind)
         return false if SIDE_EFFECT_FREE_KINDS.include?(kind)
 

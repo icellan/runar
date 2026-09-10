@@ -166,6 +166,14 @@ def has_side_effect(v: ANFValue) -> bool:
     if v.kind not in _DCE_KNOWN_KINDS:
         raise UnknownANFKindError(v.kind, "constant-fold.hasSideEffect")
 
+    # Issue #109 (``@embedAlways``): a ``load_prop`` injected to force a readonly
+    # field into the deployed locking script carries ``preserve=True``, so DCE
+    # must keep it even though nothing references it. Ordinary load_props
+    # (``preserve=False``) remain freely eliminable. Mirrors
+    # ``compilers/zig/src/passes/dce.zig``.
+    if v.kind == "load_prop":
+        return v.preserve
+
     return v.kind in (
         "assert",
         "update_prop",

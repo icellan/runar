@@ -320,6 +320,10 @@ _IR_EXCLUDED_FIELDS = frozenset({
     # In-memory carrier for the artifact's top-level parentClass field.
     # Excluded from --emit-ir so it never affects cross-tier ANF parity.
     "parent_class",
+    # Issue #109 (@embedAlways): compiler-internal DCE opt-out flag on
+    # load_prop. The Zig reference keeps it out of the emitted IR too, so
+    # excluding it here keeps the cross-tier ANF bytes identical.
+    "preserve",
 })
 
 

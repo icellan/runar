@@ -180,7 +180,16 @@ module RunarCompiler
                     # assert. Off-chain SDK interpreters skip this assert via a
                     # direct marker lookup instead of structural / taint
                     # heuristics that misfire on developer covenant asserts.
-                    :is_auto_injected_state_check
+                    :is_auto_injected_state_check,
+                    # -- load_prop ------------------------------------------
+                    # Issue #109 (+@embedAlways+): when true, dead-binding DCE
+                    # must NOT remove this binding even though nothing
+                    # references it. Set only on the +load_prop+ that ANF
+                    # lowering injects for an +@embedAlways+ readonly field.
+                    # In-memory only -- the artifact serializer never writes
+                    # it, so the cross-tier ANF IR JSON stays byte-identical
+                    # (matches compilers/zig/src/ir/types.zig).
+                    :preserve
 
       def initialize(kind: "", **_opts)
         @kind = kind
@@ -219,6 +228,7 @@ module RunarCompiler
         @in_arity = nil
         @out_arity = nil
         @is_auto_injected_state_check = false
+        @preserve = false
       end
     end
 

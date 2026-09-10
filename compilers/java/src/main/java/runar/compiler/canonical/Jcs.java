@@ -309,6 +309,10 @@ public final class Jcs {
             if (val instanceof Boolean bv2 && !bv2 && rc.getAnnotation(JsonOmitWhenFalse.class) != null) {
                 continue;
             }
+            // Compiler-internal component: never written, whatever its value.
+            if (rc.getAnnotation(JsonSkip.class) != null) {
+                continue;
+            }
             JsonName override = rc.getAnnotation(JsonName.class);
             String key = override != null ? override.value() : rc.getName();
             map.put(key, val);

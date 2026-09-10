@@ -121,6 +121,9 @@ module RunarCompiler
         nv.state_values = v.state_values&.dup
         nv.script_bytes = v.script_bytes
         nv.elements     = v.elements&.dup
+        # Issue #109: the @embedAlways DCE opt-out flag must survive the EC
+        # deep-copy -- dead-binding elimination runs on THIS copy.
+        nv.preserve     = v.preserve
         nv.then  = v.then&.map  { |b| deep_copy_binding(b) }
         nv.else_ = v.else_&.map { |b| deep_copy_binding(b) }
         nv.body  = v.body&.map  { |b| deep_copy_binding(b) }

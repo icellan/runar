@@ -559,6 +559,7 @@ mod tests {
                         name: "_t1".to_string(),
                         value: ANFValue::LoadProp {
                             name: "count".to_string(),
+                            preserve: false,
                         },
                         source_loc: None,
                     },
@@ -600,7 +601,7 @@ mod tests {
 
         // Verify specific binding kinds survived the round-trip
         assert!(matches!(&loaded.methods[0].body[0].value, ANFValue::LoadParam { name } if name == "amount"));
-        assert!(matches!(&loaded.methods[0].body[1].value, ANFValue::LoadProp { name } if name == "count"));
+        assert!(matches!(&loaded.methods[0].body[1].value, ANFValue::LoadProp { name, .. } if name == "count"));
         assert!(matches!(&loaded.methods[0].body[2].value, ANFValue::BinOp { op, .. } if op == "+"));
         assert!(matches!(&loaded.methods[0].body[3].value, ANFValue::UpdateProp { name, .. } if name == "count"));
     }

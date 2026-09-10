@@ -389,3 +389,91 @@ fn embed_always_warns_for_stripped_field_and_not_for_annotated() {
         on
     );
 }
+
+// ---------------------------------------------------------------------------
+// #109 regression — @embedAlways must survive a FIXED-POINT DCE.
+//
+// The preservation used to be an alias pair: the injected `load_prop` plus a
+// `load_const("@ref:<t>")` binding whose only job was to make the `load_prop`
+// look referenced. That survives ONE DCE sweep but not the fixed-point loop in
+// `frontend::dce`: sweep 1 drops the now-unreferenced alias, sweep 2 then drops
+// the `load_prop` it was protecting, and BOTH halves vanish.
+//
+// DCE only runs from inside the EC optimizer's changed-gate (`optimize_ec`
+// returns early when no rule fired), so the probe below has to arm it:
+// `ecMulGen(1n)` folds to the generator constant (rule 6), which flips
+// `changed` and lets dead-binding elimination run.
+//
+// Zig marks the injected `load_prop` itself with `preserve = true` and reads
+// that flag in `hasSideEffect`; this tier now does the same.
+// ---------------------------------------------------------------------------
+
+/// EC-armed probe. `metadataId` (param 1) carries DIRECTIVE; `droppedField`
+/// (param 2) is an un-annotated, unreferenced control that MUST still be
+/// eliminated, so a passing test cannot be satisfied by "retain everything".
+fn ec_meta_src(directive: &str) -> String {
+    format!(
+        r#"
+    class EcMeta extends SmartContract {{
+      readonly pubKeyHash: Ripemd160;
+      {}
+      readonly metadataId: ByteString;
+      readonly droppedField: ByteString;
+      constructor(pubKeyHash: Ripemd160, metadataId: ByteString, droppedField: ByteString) {{
+        super(pubKeyHash, metadataId, droppedField);
+        this.pubKeyHash = pubKeyHash;
+        this.metadataId = metadataId;
+        this.droppedField = droppedField;
+      }}
+      public unlock(sig: Sig, pubKey: PubKey) {{
+        const g = ecMulGen(1n);
+        assert(ecPointX(g) > 0n);
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+      }}
+    }}"#,
+        directive
+    )
+}
+
+#[test]
+fn embed_always_survives_fixed_point_dce_in_ec_armed_method() {
+    let src = ec_meta_src("/** @embedAlways */");
+    let r = compile(&src, "EcMeta.runar.ts");
+    assert!(r.artifact.is_some(), "{:?}", errors_of(&src));
+    let slots = r.artifact.unwrap().constructor_slots;
+    assert!(
+        slots.iter().any(|s| s.param_index == 1),
+        "@embedAlways metadataId must survive fixed-point DCE, slots: {:?}",
+        slots.iter().map(|s| s.param_index).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn ec_armed_un_annotated_dead_field_is_still_eliminated() {
+    // Control: the fix must not degenerate into "keep every load_prop".
+    for directive in ["", "/** @embedAlways */"] {
+        let r = compile(&ec_meta_src(directive), "EcMeta.runar.ts");
+        let slots = r.artifact.unwrap().constructor_slots;
+        assert!(
+            !slots.iter().any(|s| s.param_index == 2),
+            "un-annotated droppedField must stay eliminated (directive={:?})",
+            directive
+        );
+    }
+}
+
+#[test]
+fn ec_armed_embed_always_changes_the_emitted_script() {
+    let off = compile(&ec_meta_src(""), "EcMeta.runar.ts");
+    let on = compile(&ec_meta_src("/** @embedAlways */"), "EcMeta.runar.ts");
+    let off_hex = off.script_hex.unwrap();
+    let on_hex = on.script_hex.unwrap();
+    assert_ne!(off_hex, on_hex, "@embedAlways must change the EC-armed script");
+    assert!(
+        on_hex.len() > off_hex.len(),
+        "annotated hex ({}) must exceed un-annotated ({})",
+        on_hex.len(),
+        off_hex.len()
+    );
+}

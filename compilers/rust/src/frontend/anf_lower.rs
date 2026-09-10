@@ -716,26 +716,27 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
     result
 }
 
-/// Issue #109: emit the DCE-surviving preservation pair for each
+/// Issue #109: emit the DCE-surviving preservation `load_prop` for each
 /// `@embedAlways` readonly field into the given (public) method context.
 ///
-/// Reproduces exactly what a hand-written `const _bind = this.field;` lowers
-/// to: a `load_prop` followed by a `load_const("@ref:<t>")` alias. The alias
-/// marks the `load_prop` as referenced (see `collect_refs_from_value` in
-/// `frontend/dce.rs`), so dead-binding DCE keeps it; stack lowering then emits
-/// the field's constructor-slot placeholder and NIPs the unused value off the
-/// stack at method end, so the field's bytes remain in the deployed script.
+/// The injected `load_prop` carries `preserve = true`, so `dce::has_side_effect`
+/// keeps it even though nothing references it; stack lowering then emits the
+/// field's constructor-slot placeholder and NIPs the unused value off the stack
+/// at method end, so the field's bytes remain in the deployed script.
+///
+/// This used to emit an alias pair instead — the `load_prop` plus a
+/// `load_const("@ref:<t>")` whose only job was to make the `load_prop` look
+/// referenced. That survives ONE DCE sweep but not the fixed-point loop in
+/// `frontend::dce`: sweep 1 drops the now-unreferenced alias, sweep 2 then drops
+/// the `load_prop` it was protecting, and both halves vanish. Marking the node
+/// itself does not depend on a referencing binding surviving. Mirrors the Zig
+/// reference (`compilers/zig/src/passes/anf_lower.zig`).
 fn emit_embed_always_preservation(ctx: &mut LoweringContext, fields: &[&PropertyNode]) {
     for field in fields {
-        let load_ref = ctx.emit(ANFValue::LoadProp {
+        ctx.emit(ANFValue::LoadProp {
             name: field.name.clone(),
+            preserve: true,
         });
-        ctx.emit_named(
-            &format!("__embedAlways_{}", field.name),
-            ANFValue::LoadConst {
-                value: serde_json::Value::String(format!("@ref:{}", load_ref)),
-            },
-        );
     }
 }
 
@@ -1647,7 +1648,10 @@ fn append_branch_results(
     for (i, name) in result_names.iter().enumerate() {
         let temp = format!("{}{}", MERGED_LOCAL_TEMP_PREFIX, i);
         if props.contains(name) {
-            branch_ctx.emit_named(&temp, ANFValue::LoadProp { name: name.clone() });
+            branch_ctx.emit_named(
+                &temp,
+                ANFValue::LoadProp { name: name.clone(), preserve: false },
+            );
         } else {
             branch_ctx.emit_named(
                 &temp,
@@ -2014,6 +2018,7 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             if ctx.is_property(property) {
                 return ctx.emit(ANFValue::LoadProp {
                     name: property.clone(),
+                    preserve: false,
                 });
             }
             // this.txPreimage in StatefulSmartContract -> load_param (it's an
@@ -2026,6 +2031,7 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             // this.x -> load_prop
             ctx.emit(ANFValue::LoadProp {
                 name: property.clone(),
+                preserve: false,
             })
         }
 
@@ -2107,6 +2113,7 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
     if ctx.is_property(name) {
         return ctx.emit(ANFValue::LoadProp {
             name: name.to_string(),
+            preserve: false,
         });
     }
 
@@ -2132,6 +2139,7 @@ fn lower_member_expr(
             if ctx.is_property(property) {
                 return ctx.emit(ANFValue::LoadProp {
                     name: property.to_string(),
+                    preserve: false,
                 });
             }
             if ctx.is_param(property) {
@@ -2141,6 +2149,7 @@ fn lower_member_expr(
             }
             return ctx.emit(ANFValue::LoadProp {
                 name: property.to_string(),
+                preserve: false,
             });
         }
     }
@@ -3563,6 +3572,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 name: old_prop_ref.clone(),
                 value: ANFValue::LoadProp {
                     name: branch.prop_name.clone(),
+                    preserve: false,
                 },
                 source_loc: None,
             });
@@ -4277,7 +4287,7 @@ class Countdown extends SmartContract {
         for b in bindings {
             match &b.value {
                 ANFValue::LoadParam { name: pn } if kind_is_param && pn == name => n += 1,
-                ANFValue::LoadProp { name: pn } if !kind_is_param && pn == name => n += 1,
+                ANFValue::LoadProp { name: pn, .. } if !kind_is_param && pn == name => n += 1,
                 ANFValue::If { then, else_branch, .. } => {
                     n += count_loads(then, kind_is_param, name);
                     n += count_loads(else_branch, kind_is_param, name);

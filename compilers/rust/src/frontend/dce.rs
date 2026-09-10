@@ -200,8 +200,14 @@ pub fn has_side_effect(value: &ANFValue) -> bool {
         }
         ANFValue::Loop { body, .. } => body.iter().any(|b| has_side_effect(&b.value)),
 
+        // Issue #109 (`@embedAlways`): a `load_prop` injected to force a
+        // readonly field into the deployed locking script carries
+        // `preserve = true`, so DCE must keep it even though nothing
+        // references it. Ordinary load_props (preserve = false) remain freely
+        // eliminable. Mirrors `compilers/zig/src/passes/dce.zig`.
+        ANFValue::LoadProp { preserve, .. } => *preserve,
+
         ANFValue::LoadParam { .. }
-        | ANFValue::LoadProp { .. }
         | ANFValue::LoadConst { .. }
         | ANFValue::BinOp { .. }
         | ANFValue::UnaryOp { .. }

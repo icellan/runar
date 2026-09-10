@@ -139,7 +139,17 @@ pub enum ANFValue {
     LoadParam { name: String },
 
     #[serde(rename = "load_prop")]
-    LoadProp { name: String },
+    LoadProp {
+        name: String,
+        /// Issue #109 (`@embedAlways`): when true, dead-binding DCE must NOT
+        /// remove this binding even though nothing references it. Set only on
+        /// the `load_prop` that ANF lowering injects for an `@embedAlways`
+        /// readonly field. In-memory only — never serialized, so the cross-tier
+        /// ANF IR JSON stays byte-identical (matches the Zig reference in
+        /// `compilers/zig/src/ir/types.zig`).
+        #[serde(default, skip)]
+        preserve: bool,
+    },
 
     #[serde(rename = "load_const")]
     LoadConst { value: serde_json::Value },

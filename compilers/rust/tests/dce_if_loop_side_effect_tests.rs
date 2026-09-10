@@ -108,7 +108,7 @@ fn guard_clause_survives_ec_optimizer_dce() {
     );
     assert!(
         then.iter()
-            .any(|b| matches!(&b.value, ANFValue::LoadProp { name } if name == "pubKeyHash")),
+            .any(|b| matches!(&b.value, ANFValue::LoadProp { name, .. } if name == "pubKeyHash")),
         "retained `if` lost the `this.pubKeyHash` load it guards on"
     );
 }

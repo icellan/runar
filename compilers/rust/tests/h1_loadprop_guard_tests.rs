@@ -43,7 +43,7 @@ fn program_with_unknown_load_prop() -> ANFProgram {
             body: vec![
                 ANFBinding {
                     name: "t0".to_string(),
-                    value: ANFValue::LoadProp { name: "ghost".to_string() },
+                    value: ANFValue::LoadProp { name: "ghost".to_string(), preserve: false },
                     source_loc: Some(SourceLocation {
                         file: "Ghost.runar.ts".to_string(),
                         line: 7,
@@ -112,7 +112,7 @@ fn real_ctor_param_prop_lowers_without_error() {
             body: vec![
                 ANFBinding {
                     name: "t0".to_string(),
-                    value: ANFValue::LoadProp { name: "pk".to_string() },
+                    value: ANFValue::LoadProp { name: "pk".to_string(), preserve: false },
                     source_loc: None,
                 },
                 ANFBinding {

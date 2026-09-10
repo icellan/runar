@@ -2041,20 +2041,26 @@ public final class AnfLower {
     }
 
     /**
-     * Issue #109: emit the DCE-surviving preservation pair for each
+     * Issue #109: emit the DCE-surviving preservation {@code load_prop} for each
      * {@code @embedAlways} readonly field, into the given (public) method
-     * context. Reproduces exactly what a hand-written {@code const _bind =
-     * this.field;} lowers to: a {@code load_prop} followed by a
-     * {@code load_const("@ref:<t>")} alias. The alias marks the {@code load_prop}
-     * as referenced, so dead-binding DCE keeps it; stack lowering then emits the
-     * field's constructor-slot placeholder and NIPs the unused value off the
-     * stack at method end. The field's bytes therefore remain in the deployed
-     * locking script for downstream recovery.
+     * context. The injected node carries {@code preserve = true}, so
+     * {@code Dce.hasSideEffect} keeps it even though nothing references it;
+     * stack lowering then emits the field's constructor-slot placeholder and
+     * NIPs the unused value off the stack at method end. The field's bytes
+     * therefore remain in the deployed locking script for downstream recovery.
+     *
+     * <p>This used to emit an alias pair instead — the {@code load_prop} plus a
+     * {@code load_const("@ref:<t>")} whose only job was to make the
+     * {@code load_prop} look referenced. That survives ONE DCE sweep but not the
+     * fixed-point loop in {@link Dce}: sweep 1 drops the now-unreferenced alias,
+     * sweep 2 then drops the {@code load_prop} it was protecting, and both
+     * halves vanish. Marking the node itself does not depend on a referencing
+     * binding surviving. Mirrors the Zig reference
+     * ({@code compilers/zig/src/passes/anf_lower.zig}).
      */
     private static void emitEmbedAlwaysPreservation(LowerCtx ctx, List<PropertyNode> fields) {
         for (PropertyNode field : fields) {
-            String loadRef = ctx.emit(new LoadProp(field.name()));
-            ctx.emitNamed("__embedAlways_" + field.name(), makeLoadConstString("@ref:" + loadRef));
+            ctx.emit(new LoadProp(field.name(), /* preserve */ true));
         }
     }
 

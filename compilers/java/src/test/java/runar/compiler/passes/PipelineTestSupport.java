@@ -40,6 +40,20 @@ final class PipelineTestSupport {
         return Emit.run(stack);
     }
 
+    /** Fold-OFF compile → the constructor-slot parameter indexes, in emitted order. */
+    static java.util.List<Integer> slotParamIndexes(String src, String file) throws Exception {
+        ContractNode contract = parseValidated(src, file);
+        contract = ExpandFixedArrays.run(contract);
+        Typecheck.run(contract);
+        AnfProgram anf = AnfLower.run(contract);
+        anf = Cli.optimizeAnf(anf, /* disableConstantFolding */ true);
+        StackProgram stack = StackLower.run(anf);
+        stack = Peephole.run(stack);
+        return Emit.runResultFull(stack).constructorSlots().stream()
+            .map(Emit.ConstructorSlot::paramIndex)
+            .toList();
+    }
+
     /** Fold-OFF optimized ANF as canonical JSON. */
     static String anfJson(String src, String file) throws Exception {
         ContractNode contract = parseValidated(src, file);

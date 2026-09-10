@@ -5725,7 +5725,7 @@ fn method_reads_var_len_state_rec(
 ) -> bool {
     for b in bindings {
         match &b.value {
-            ANFValue::LoadProp { name } => {
+            ANFValue::LoadProp { name, .. } => {
                 if var_len_props.contains(name) {
                     return true;
                 }
@@ -5939,6 +5939,7 @@ mod tests {
                         name: "t2".to_string(),
                         value: ANFValue::LoadProp {
                             name: "pubKeyHash".to_string(),
+                            preserve: false,
                         },
                         source_loc: None,
                     },
@@ -7095,7 +7096,7 @@ mod tests {
                     },
                     ANFBinding {
                         name: "t3".to_string(),
-                        value: ANFValue::LoadProp { name: "target".to_string() },
+                        value: ANFValue::LoadProp { name: "target".to_string(), preserve: false },
                         source_loc: None,
                     },
                     ANFBinding {

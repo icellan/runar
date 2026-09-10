@@ -235,6 +235,15 @@ class ANFValue:
     in_arity: int | None = None
     out_arity: int | None = None
 
+    # -- load_prop -----------------------------------------------------------
+    # Issue #109 (``@embedAlways``): when True, dead-binding DCE must NOT remove
+    # this binding even though nothing references it. Set only on the
+    # ``load_prop`` that ANF lowering injects for an ``@embedAlways`` readonly
+    # field. In-memory only -- ``_serialize_anf_program`` never writes it, so the
+    # cross-tier ANF IR JSON stays byte-identical (matches the Zig reference in
+    # ``compilers/zig/src/ir/types.zig``).
+    preserve: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Constant decoding

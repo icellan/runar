@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn test_load_prop_unchanged() {
         let p = make_program(vec![make_method("m", vec![
-            b("t0", ANFValue::LoadProp { name: "pk".to_string() }),
+            b("t0", ANFValue::LoadProp { name: "pk".to_string(), preserve: false }),
         ])]);
         let r = fold_constants_only(&p);
         match &r.methods[0].body[0].value {

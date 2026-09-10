@@ -172,7 +172,7 @@ fn in_arm_value_shape_is_unchanged() {
             l.prop
         );
         match &l.then[0].value {
-            ANFValue::LoadProp { name } => assert_eq!(name, "turn"),
+            ANFValue::LoadProp { name, .. } => assert_eq!(name, "turn"),
             other => panic!("then-arm for this.{} should be load_prop turn, got {other:?}", l.prop),
         }
     }

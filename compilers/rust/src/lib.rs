@@ -147,7 +147,7 @@ fn collect_load_prop_refs(
 ) {
     for binding in bindings {
         match &binding.value {
-            ir::ANFValue::LoadProp { name } => {
+            ir::ANFValue::LoadProp { name, .. } => {
                 out.insert(name.clone());
             }
             ir::ANFValue::If { then, else_branch, .. } => {

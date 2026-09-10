@@ -221,9 +221,16 @@ public final class Dce {
             }
             return false;
         }
+        // Issue #109 (@embedAlways): a load_prop injected to force a readonly
+        // field into the deployed locking script carries `preserve = true`, so
+        // DCE must keep it even though nothing references it. Ordinary
+        // load_props (preserve = false) remain freely eliminable. Mirrors
+        // compilers/zig/src/passes/dce.zig.
+        if (v instanceof LoadProp lp) {
+            return lp.preserve();
+        }
         // Pure values — safe for DCE to drop when unreferenced.
         if (v instanceof LoadParam
-            || v instanceof LoadProp
             || v instanceof LoadConst
             || v instanceof GetStateScript
             || v instanceof BinOp

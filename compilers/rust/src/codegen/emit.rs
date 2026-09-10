@@ -1081,7 +1081,7 @@ mod tests {
                     },
                     ANFBinding {
                         name: "t2".to_string(),
-                        value: ANFValue::LoadProp { name: "pubKeyHash".to_string() },
+                        value: ANFValue::LoadProp { name: "pubKeyHash".to_string(), preserve: false },
                         source_loc: None,
                     },
                     ANFBinding {
@@ -1367,7 +1367,7 @@ mod tests {
                         },
                         ANFBinding {
                             name: "t1".to_string(),
-                            value: ANFValue::LoadProp { name: "x".to_string() },
+                            value: ANFValue::LoadProp { name: "x".to_string(), preserve: false },
                             source_loc: None,
                         },
                         ANFBinding {

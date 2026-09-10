@@ -619,23 +619,25 @@ def _lower_params(params: list) -> list[ANFParam]:
 
 
 def _emit_embed_always_preservation(ctx: "_LowerCtx", fields: list) -> None:
-    """Issue #109: emit the DCE-surviving preservation pair for each
+    """Issue #109: emit the DCE-surviving preservation ``load_prop`` for each
     ``@embedAlways`` readonly field, into the given (public) method context.
 
-    Reproduces exactly what a hand-written ``const _bind = this.field;`` lowers
-    to: a ``load_prop`` followed by a ``load_const("@ref:<t>")`` alias. The alias
-    marks the ``load_prop`` as referenced (see ``collect_refs`` in the DCE pass),
-    so dead-binding DCE keeps it; stack lowering then emits the field's
-    constructor-slot placeholder and NIPs the unused value off the stack at
-    method end. The field's bytes therefore remain in the deployed locking
-    script for downstream recovery.
+    The injected ``load_prop`` carries ``preserve=True``, so ``has_side_effect``
+    in the DCE pass keeps it even though nothing references it; stack lowering
+    then emits the field's constructor-slot placeholder and NIPs the unused
+    value off the stack at method end. The field's bytes therefore remain in the
+    deployed locking script for downstream recovery.
+
+    This used to emit an alias pair instead -- the ``load_prop`` plus a
+    ``load_const("@ref:<t>")`` whose only job was to make the ``load_prop`` look
+    referenced. That survives ONE DCE sweep but not the fixed-point loop in
+    ``frontend/dce.py``: sweep 1 drops the now-unreferenced alias, sweep 2 then
+    drops the ``load_prop`` it was protecting, and both halves vanish. Marking
+    the node itself does not depend on a referencing binding surviving. Mirrors
+    the Zig reference (``compilers/zig/src/passes/anf_lower.zig``).
     """
     for field in fields:
-        load_ref = ctx.emit(ANFValue(kind="load_prop", name=field.name))
-        ctx.emit_named(
-            f"__embedAlways_{field.name}",
-            _make_load_const_string(f"@ref:{load_ref}"),
-        )
+        ctx.emit(ANFValue(kind="load_prop", name=field.name, preserve=True))
 
 
 # ---------------------------------------------------------------------------
