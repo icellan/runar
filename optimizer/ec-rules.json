@@ -48,7 +48,7 @@
     "name": "ec-mul-associative",
     "match": { "func": "ecMul", "args": [{ "func": "ecMul", "args": ["$p", "$k1"] }, "$k2"] },
     "replace": { "func": "ecMul", "args": ["$p", { "op": "*", "args": ["$k1", "$k2"] }] },
-    "supported": ["ts"]
+    "note": "CONSTANT-OPERAND PRECONDITION, as for ec-mulgen-linear: k1 * k2 is folded mod n at rewrite time, so both scalars must resolve to compile-time constants (opOperandsAreConst in compilers/go/frontend/ec_rules_engine.go). Runtime scalars are left alone — an unlock-argument scalar is attacker-chosen and cannot be reduced by the compiler, and firing there is exactly the CL-BUG-017 divergence R-031 closed. This rule and ec-mul-distributive carried \"supported\": [\"ts\"] long after Rust, Python, Ruby and Java implemented them; the Go engine is the only tier that reads the tag, so it was the only tier declining the rewrite — a live 5-vs-1 hex divergence on any nested ecMul with constant scalars. Pinned by TestECOptimizer_MulAssociative* in compilers/go/frontend."
   },
   {
     "name": "ec-mulgen-linear",
@@ -58,9 +58,9 @@
   },
   {
     "name": "ec-mul-distributive",
-    "match": { "func": "ecAdd", "args": [{ "func": "ecMul", "args": ["$k1", "$p"] }, { "func": "ecMul", "args": ["$k2", "$p"] }] },
-    "replace": { "func": "ecMul", "args": [{ "op": "+", "args": ["$k1", "$k2"] }, "$p"] },
-    "supported": ["ts"]
+    "match": { "func": "ecAdd", "args": [{ "func": "ecMul", "args": ["$p", "$k1"] }, { "func": "ecMul", "args": ["$p", "$k2"] }] },
+    "replace": { "func": "ecMul", "args": ["$p", { "op": "+", "args": ["$k1", "$k2"] }] },
+    "note": "OPERAND ORDER: ecMul is ecMul(point, scalar) (packages/runar-lang/src/builtins.ts). This rule used to be spelled ecMul($k1, $p) / ecMul($k2, $p), which bound the POINT to $k1/$k2 and unified $p on the SCALAR — so the replace template summed two POINTS into the scalar slot. It was inert only because the rule also carried \"supported\": [\"ts\"] and the TS tier never reads this file; dropping that tag without fixing the spelling made the Go engine rewrite ecAdd(ecMul(P, k), ecMul(Q, k)) into ecMul(P + Q, k). Because $p now sits in the point slot, unification gives the same-point precondition the six hand-written tiers spell explicitly (leftVal.args[0] === rightVal.args[0] in anf-ec.ts, _same_binding in anf_optimize.py, and the equivalents in Rust/Ruby/Java). CONSTANT-OPERAND PRECONDITION: as for ec-mulgen-linear, the rewrite fires only when both scalars are compile-time constants so the sum can be folded mod n at rewrite time (opOperandsAreConst in compilers/go/frontend/ec_rules_engine.go). Pinned by TestECOptimizer_MulDistributive* in compilers/go/frontend."
   },
   {
     "name": "ec-mul-generator-specialize",

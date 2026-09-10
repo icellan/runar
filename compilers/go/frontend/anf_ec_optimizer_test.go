@@ -984,6 +984,47 @@ func TestECOptimizer_AllJSONRulesTakeEffect(t *testing.T) {
 				}
 			},
 		},
+		"ec-mul-associative": {
+			bindings: []ir.ANFBinding{
+				loadParamBinding("p", "pointArg"),
+				loadConstBigInt("k1", 3),
+				loadConstBigInt("k2", 5),
+				callBinding("t3", "ecMul", []string{"p", "k1"}),
+				callBinding("t4", "ecMul", []string{"t3", "k2"}),
+				assertBinding("t5", "t4"),
+			},
+			target: "t4",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "call" || b.Value.Func != "ecMul" || len(b.Value.Args) != 2 {
+					t.Errorf("ec-mul-associative: expected a 2-arg ecMul call, got %+v", b.Value)
+					return
+				}
+				if b.Value.Args[0] != "p" {
+					t.Errorf("ec-mul-associative: expected the inner point p in the point slot, got %q", b.Value.Args[0])
+				}
+			},
+		},
+		"ec-mul-distributive": {
+			bindings: []ir.ANFBinding{
+				loadParamBinding("p", "pointArg"),
+				loadConstBigInt("k1", 3),
+				loadConstBigInt("k2", 5),
+				callBinding("t3", "ecMul", []string{"p", "k1"}),
+				callBinding("t4", "ecMul", []string{"p", "k2"}),
+				callBinding("t5", "ecAdd", []string{"t3", "t4"}),
+				assertBinding("t6", "t5"),
+			},
+			target: "t5",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "call" || b.Value.Func != "ecMul" || len(b.Value.Args) != 2 {
+					t.Errorf("ec-mul-distributive: expected a 2-arg ecMul call, got %+v", b.Value)
+					return
+				}
+				if b.Value.Args[0] != "p" {
+					t.Errorf("ec-mul-distributive: expected the shared point p in the point slot, got %q", b.Value.Args[0])
+				}
+			},
+		},
 		"ec-mul-generator-specialize": {
 			bindings: []ir.ANFBinding{
 				loadConstHex("t0", gHex),
@@ -1094,21 +1135,77 @@ func TestECOptimizer_NewJSONRulePickedUp(t *testing.T) {
 	}
 }
 
-// TestECOptimizer_RulesSupportedFieldRespected verifies that rules tagged
-// supported: ["ts"] are skipped by the Go engine. We rely on the two rules
-// in ec-rules.json (ec-mul-associative, ec-mul-distributive) being so
-// tagged; if someone removes the tag (implementing them in Go), this test
-// will point out that the coverage case in TestECOptimizer_AllJSONRulesTakeEffect
-// must be updated.
+// TestECOptimizer_RulesSupportedFieldRespected verifies that the "supported"
+// field still gates this engine: a rule that does not list "go" is skipped,
+// one that does is applied.
+//
+// It used to assert that against the two REAL rules that carried
+// supported: ["ts"] — ec-mul-associative and ec-mul-distributive. That tag had
+// gone stale: Rust, Python, Ruby and Java all implement both rewrites, so Go
+// was the only tier declining them and the same source compiled to different
+// script hex depending on which tier compiled it. Pinning the mechanism to
+// injected rules instead of to live reference data is what stops this test
+// from re-freezing a tag nobody re-checks (R-236 / CL-GAP-007: no reader of
+// the supported lists ever compared them against the tiers that actually
+// implement each rule).
 func TestECOptimizer_RulesSupportedFieldRespected(t *testing.T) {
-	active := ECRuleNames()
-	activeSet := make(map[string]bool, len(active))
-	for _, n := range active {
+	// Two nonsense-but-harmless aliasing rules. The baseline Go optimizer
+	// rewrites neither ecOnCurve($x) nor ecNegate($x) to an alias, so any
+	// rewrite observed here must have come from the injected JSON.
+	testJSON := []byte(`[
+		{
+			"name": "test-rule-without-go",
+			"match": { "func": "ecOnCurve", "args": ["$x"] },
+			"replace": "$x",
+			"supported": ["ts"]
+		},
+		{
+			"name": "test-rule-with-go",
+			"match": { "func": "ecNegate", "args": ["$x"] },
+			"replace": "$x",
+			"supported": ["ts", "go"]
+		}
+	]`)
+
+	prev, err := SetECRulesForTesting(testJSON)
+	if err != nil {
+		t.Fatalf("SetECRulesForTesting: %v", err)
+	}
+	defer RestoreECRulesForTesting(prev)
+
+	activeSet := make(map[string]bool)
+	for _, n := range ECRuleNames() {
 		activeSet[n] = true
 	}
-	for _, unsupported := range []string{"ec-mul-associative", "ec-mul-distributive"} {
-		if activeSet[unsupported] {
-			t.Errorf("rule %q is tagged supported:[ts] in ec-rules.json but is active for Go — update the coverage case in TestECOptimizer_AllJSONRulesTakeEffect and remove this guard", unsupported)
-		}
+	if activeSet["test-rule-without-go"] {
+		t.Error(`rule tagged supported:["ts"] is reported active for Go`)
+	}
+	if !activeSet["test-rule-with-go"] {
+		t.Error(`rule tagged supported:["ts","go"] is NOT reported active for Go`)
+	}
+
+	// Both bindings stay live (t1 feeds t2, t2 feeds the assert) so neither can
+	// be removed by dead-binding elimination instead of by a rule.
+	body := getMethodBody(OptimizeEC(makeTestProgram([]ir.ANFBinding{
+		loadConstHex("t0", strings.Repeat("ab", 64)),
+		callBinding("t1", "ecNegate", []string{"t0"}),
+		callBinding("t2", "ecOnCurve", []string{"t1"}),
+		assertBinding("t3", "t2"),
+	})))
+
+	t1 := findBinding(body, "t1")
+	if t1 == nil {
+		t.Fatal("t1 missing after optimization")
+	}
+	if t1.Value.Kind != "load_const" || t1.Value.ConstString == nil || *t1.Value.ConstString != "@ref:t0" {
+		t.Errorf("rule listing \"go\" did not fire: t1 is %+v", t1.Value)
+	}
+
+	t2 := findBinding(body, "t2")
+	if t2 == nil {
+		t.Fatal("t2 missing after optimization")
+	}
+	if t2.Value.Kind != "call" || t2.Value.Func != "ecOnCurve" {
+		t.Errorf("rule tagged supported:[\"ts\"] fired in Go: t2 became %+v", t2.Value)
 	}
 }
