@@ -175,7 +175,12 @@ function tryRewrite(
         const k1 = k1Val ? getConstInt(k1Val) : undefined;
         const k2 = getConstInt(k2Val);
         if (k1 !== undefined && k2 !== undefined) {
-          const product = (k1 * k2) % CURVE_N;
+          // Normalise into [0, CURVE_N). JavaScript's `%` is truncated, so a
+          // negative constant scalar would otherwise fuse to a negative value
+          // while every other tier (Go/Rust/Python/Zig/Ruby/Java) reduces
+          // Euclidean-style — a cross-tier hex divergence. Rules 10 and 11
+          // below use the same normalisation.
+          const product = ((k1 * k2) % CURVE_N + CURVE_N) % CURVE_N;
           const newScalarName = `${binding.name}_k`;
           newBindings.push({ name: newScalarName, value: makeLoadConst(product) });
           return { kind: 'call', func: 'ecMul', args: [innerPoint, newScalarName] };
