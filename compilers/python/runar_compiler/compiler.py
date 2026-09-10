@@ -119,44 +119,24 @@ COMPILER_VERSION = "1.0.0-rc.1-python"
 # Frontend stub imports (filled in as parsers are ported)
 # ---------------------------------------------------------------------------
 
-def _parse_source(source: bytes, file_name: str) -> Any:
-    """Dispatch to the correct parser based on file extension.
+def _parse_source(source: str, file_name: str) -> Any:
+    """Parse a source file, dispatching on its extension.
 
-    Returns a ParseResult-like object (from the frontend package).
+    Thin delegation to ``parser_dispatch.parse_source`` — the SINGLE
+    extension-dispatch chain. This used to be a second, hand-maintained
+    nine-way copy of that chain, and the copy carried neither the 4 MiB
+    ``MAX_SOURCE_BYTES`` DoS bound nor the fail-closed ``@sighash`` /
+    ``@embedAlways`` guard for the non-TS surfaces. Since every production
+    entry point (``compile_from_source``, ``compile_source_to_ir``, the
+    ``*_with_result`` variants, and every ``__main__`` CLI flag) reaches the
+    parser through here, both guards were unreachable in shipped code while
+    the test suite exercised only the guarded copy. Do NOT reintroduce a
+    per-format dispatch here — add formats to ``parser_dispatch`` instead.
+
+    Returns a :class:`ParseResult` from the frontend package.
     """
-    lower = file_name.lower()
-    if lower.endswith(".runar.py"):
-        from runar_compiler.frontend.parser_python import parse_python
-        return parse_python(source, file_name)
-    elif lower.endswith(".runar.ts"):
-        from runar_compiler.frontend.parser_ts import parse_ts
-        return parse_ts(source, file_name)
-    elif lower.endswith(".runar.sol"):
-        from runar_compiler.frontend.parser_sol import parse_sol
-        return parse_sol(source, file_name)
-    elif lower.endswith(".runar.move"):
-        from runar_compiler.frontend.parser_move import parse_move
-        return parse_move(source, file_name)
-    elif lower.endswith(".runar.go"):
-        from runar_compiler.frontend.parser_go import parse_go
-        return parse_go(source, file_name)
-    elif lower.endswith(".runar.rs"):
-        from runar_compiler.frontend.parser_rust import parse_rust
-        return parse_rust(source, file_name)
-    elif lower.endswith(".runar.rb"):
-        from runar_compiler.frontend.parser_ruby import parse_ruby
-        return parse_ruby(source, file_name)
-    elif lower.endswith(".runar.zig"):
-        from runar_compiler.frontend.parser_zig import parse_zig
-        return parse_zig(source, file_name)
-    elif lower.endswith(".runar.java"):
-        from runar_compiler.frontend.parser_java import parse_java
-        return parse_java(source, file_name)
-    else:
-        raise ValueError(
-            f"Unsupported source format: {file_name}. "
-            f"Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
-        )
+    from runar_compiler.frontend.parser_dispatch import parse_source
+    return parse_source(source, file_name)
 
 
 def _validate(contract: Any) -> Any:

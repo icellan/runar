@@ -191,6 +191,13 @@ def main() -> None:
         except CompilationError as e:
             print(f"Compilation error: {e}", file=sys.stderr)
             sys.exit(1)
+        except Exception as e:
+            # Frontend guards (e.g. SourceSizeExceededError from the 4 MiB
+            # MAX_SOURCE_BYTES bound) are not CompilationError. Report them the
+            # way the --source compile path below does instead of dumping a
+            # traceback for what is an ordinary input rejection.
+            print(f"Compilation error: {e}", file=sys.stderr)
+            sys.exit(1)
         # Serialize the ANFProgram to camelCase JSON (matching Go/TS output)
         ir_json = json.dumps(_anf_to_camel_dict(program), indent=2, default=str)
         print(ir_json)
@@ -209,6 +216,13 @@ def main() -> None:
                 disable_constant_folding=args.disable_constant_folding,
             )
         except CompilationError as e:
+            print(f"Compilation error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            # Frontend guards (e.g. SourceSizeExceededError from the 4 MiB
+            # MAX_SOURCE_BYTES bound) are not CompilationError. Report them the
+            # way the --source compile path below does instead of dumping a
+            # traceback for what is an ordinary input rejection.
             print(f"Compilation error: {e}", file=sys.stderr)
             sys.exit(1)
         ir_json = json.dumps(_anf_to_camel_dict(program), indent=2, default=str)
