@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -9,9 +11,32 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 const contractSats = 20000
+
+// maxCompileBodyBytes caps the /api/compile request body. The endpoint is
+// unauthenticated and hands caller-supplied bytes to the full compiler
+// pipeline, so an unbounded body is a free amplification primitive: the cap
+// is enforced while reading, not after buffering. 1 MiB is ~300x the largest
+// bundled example contract.
+//
+// A variable rather than a constant so tests can shrink it.
+var maxCompileBodyBytes int64 = 1 << 20 // 1 MiB
+
+// compileTimeout bounds a single playground compile so no one request can
+// occupy a handler goroutine indefinitely. Must stay below serverWriteTimeout
+// or the connection is torn down before the error response is written.
+var compileTimeout = 10 * time.Second
+
+// Connection-level deadlines. Without these a bare http.ListenAndServe lets a
+// slowloris client hold a connection (and its goroutine) open forever.
+const (
+	serverReadTimeout  = 15 * time.Second
+	serverWriteTimeout = 30 * time.Second
+	serverIdleTimeout  = 60 * time.Second
+)
 
 type RoundResult struct {
 	Round     int    `json:"round"`
@@ -69,6 +94,18 @@ type LogEntry struct {
 var game = &GameState{Phase: "init"}
 
 func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	srv := newServer(port)
+
+	log.Printf("PriceBet webapp listening on %s", srv.Addr)
+	log.Fatal(srv.ListenAndServe())
+}
+
+func newServer(port string) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/init", handleInit)
@@ -88,13 +125,14 @@ func main() {
 		http.ServeFile(w, r, "static/index.html")
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	return &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       serverReadTimeout,
+		ReadHeaderTimeout: serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
 	}
-
-	log.Printf("PriceBet webapp listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -503,6 +541,10 @@ func handleLang(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// compileSourceFn is the compile entry point used by handleCompile. It is a
+// variable so tests can substitute a stub.
+var compileSourceFn = compileSource
+
 // handleCompile is the playground endpoint: it accepts arbitrary Rúnar
 // source for any supported input format and returns the compiled locking
 // script. The filename's extension drives parser dispatch (".runar.java"
@@ -515,12 +557,20 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxCompileBodyBytes)
+
 	var req struct {
 		Source   string `json:"source"`
 		Filename string `json:"filename"`
 		Lang     string `json:"lang"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(w, fmt.Sprintf("request body exceeds %d bytes", maxCompileBodyBytes),
+				http.StatusRequestEntityTooLarge)
+			return
+		}
 		jsonError(w, "bad request: "+err.Error(), 400)
 		return
 	}
@@ -542,17 +592,41 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 		filename = spec.filename
 	}
 
-	scriptHex, scriptAsm, err := compileSource([]byte(req.Source), filename)
-	if err != nil {
-		jsonError(w, err.Error(), 400)
-		return
-	}
+	// The compiler pipeline is synchronous and has no cancellation hook, so
+	// run it on its own goroutine and stop waiting once the deadline passes.
+	// The goroutine is left to finish on its own -- the buffered channel means
+	// it never blocks -- so a pathological compile still burns one worker, but
+	// it no longer holds the client connection or the handler goroutine.
+	ctx, cancel := context.WithTimeout(r.Context(), compileTimeout)
+	defer cancel()
 
-	jsonResponse(w, map[string]string{
-		"scriptHex": scriptHex,
-		"scriptAsm": scriptAsm,
-		"filename":  filename,
-	})
+	type compileResult struct {
+		scriptHex string
+		scriptAsm string
+		err       error
+	}
+	resultCh := make(chan compileResult, 1)
+	go func() {
+		hex, asm, err := compileSourceFn([]byte(req.Source), filename)
+		resultCh <- compileResult{hex, asm, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		jsonError(w, fmt.Sprintf("compile exceeded %s", compileTimeout),
+			http.StatusServiceUnavailable)
+		return
+	case res := <-resultCh:
+		if res.err != nil {
+			jsonError(w, res.err.Error(), 400)
+			return
+		}
+		jsonResponse(w, map[string]string{
+			"scriptHex": res.scriptHex,
+			"scriptAsm": res.scriptAsm,
+			"filename":  filename,
+		})
+	}
 }
 
 // supportedLangs returns the language menu presented to the frontend. The
