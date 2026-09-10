@@ -5782,9 +5782,19 @@ fn compute_uses_code_part(
     if !method_uses_check_preimage(&method.body, Some(private_methods)) {
         return false;
     }
+    // R-015 (CL-BUG-138): this set MUST classify exactly what
+    // `is_variable_length_state_type` classifies — the size table in
+    // `lower_deserialize_state` and `fixed_state_section_length` both treat
+    // `Sig` and `SigHashPreimage` as push-data-framed variable-length state
+    // (as does the SDK's deploy-time `encodeStateValue`), so filtering on
+    // `ByteString` alone here left `uses_code_part` false for a terminal
+    // method reading a mutable `Sig` field. `lower_deserialize_state` then hit
+    // its `!self.sm.has("_codePart")` shortcut, pushed NO mutable property, and
+    // every `load_prop` fell through to the DEPLOY-TIME constructor
+    // placeholder instead of the live on-chain value.
     let var_len_props: HashSet<String> = properties
         .iter()
-        .filter(|p| !p.readonly && p.prop_type == "ByteString")
+        .filter(|p| !p.readonly && is_variable_length_state_type(&p.prop_type))
         .map(|p| p.name.clone())
         .collect();
     method_uses_code_part(&method.body)
@@ -5809,11 +5819,10 @@ fn lower_method_with_private_methods(
     // OR when the method reads a mutable variable-length (ByteString) state
     // field — the deserialization needs it for the preimage-relative offset
     // (issue #100).
-    let var_len_props: std::collections::HashSet<String> = properties
-        .iter()
-        .filter(|p| !p.readonly && p.prop_type == "ByteString")
-        .map(|p| p.name.clone())
-        .collect();
+    // (The var-length property set itself lives in `compute_uses_code_part`,
+    // which R-010 hoisted out of this function; the copy that used to sit here
+    // was dead and, being a second hand-maintained copy of the type list, was
+    // the R-015 divergence waiting to happen again.)
     let uses_code_part = compute_uses_code_part(method, properties, private_methods);
     if uses_code_part {
         param_names.insert(0, "_codePart".to_string());
