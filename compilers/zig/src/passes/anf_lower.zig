@@ -2700,8 +2700,22 @@ fn bodyMutatesStateRec(stmts: []const Statement, contract: ContractNode, depth: 
 fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, depth: u32) bool {
     switch (stmt) {
         .assign => |assign| {
-            for (contract.properties) |p| {
-                if (!p.readonly and std.mem.eql(u8, p.name, assign.target)) return true;
+            // R-028 sibling: `assign.target` is a BARE name — every surface
+            // parser strips the `this.` — so the name alone cannot tell a
+            // property write from a local that shadows a property. Only
+            // `target_is_property` can, and `lowerBinding` above already keys
+            // its `update_prop` emission on it. Comparing the bare name here
+            // meant the two disagreed within the tier: the rebind lowered as a
+            // local, yet the method was still declared as mutating, which
+            // injected `_changePKH` / `_changeAmount` / `_newAmount` and a
+            // state continuation that the six reference tiers do not emit
+            // (`side-effect-summary.ts` keys on the target node's KIND being a
+            // property access). Same bare-name confusion the lowering path was
+            // fixed for in `tests/local_shadowing_property.zig`.
+            if (assign.target_is_property) {
+                for (contract.properties) |p| {
+                    if (!p.readonly and std.mem.eql(u8, p.name, assign.target)) return true;
+                }
             }
             return exprMutatesStateRec(assign.value, contract, depth);
         },
