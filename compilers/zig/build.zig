@@ -33,6 +33,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    // `src/tests/library_cli_parity.zig` (R-027) shells out to the built
+    // `zig-out/bin/runar-zig` to prove the library entry point and the CLI are
+    // one compiler, so the unit-test step must build+install the binary first.
+    // Without this the parity test would compare against a stale binary.
+    run_unit_tests.step.dependOn(b.getInstallStep());
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
