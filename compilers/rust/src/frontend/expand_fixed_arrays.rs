@@ -23,6 +23,14 @@
 //!       - Nested literal-index chain (`self.grid[0][1]`) -> resolve to a
 //!         single synthetic leaf.
 //!       - Runtime index on nested FixedArray -> compile error.
+//!   - `self.board[idx]++` / `--` in statement position -> desugared to
+//!     `self.board[idx] = self.board[idx] +/- 1` before the index rewrite,
+//!     so the write goes through the dispatch chain above. Downstream,
+//!     both `anf_lower` and `side_effect_summary` only recognise an
+//!     increment as a state mutation when its operand is a bare property
+//!     access, so without this the mutation is silently discarded AND the
+//!     method is classified terminal (no continuation assertion at all).
+//!     The same shape in expression position is a compile error.
 //!   - Non-pure index/value expressions are hoisted to fresh
 //!     `__idx_K` / `__val_K` bindings.
 
@@ -677,6 +685,48 @@ impl<'a> ExpandContext<'a> {
             _ => unreachable!(),
         };
         let mut prelude: Vec<Statement> = Vec::new();
+
+        // `self.board[idx]++` / `--` in statement position. The generic
+        // expression rewrite below turns `self.board[idx]` into a read
+        // dispatch ternary, and both ANF lowering and the side-effect
+        // summary only recognise an increment as a state mutation when its
+        // operand is a bare `PropertyAccess`. Left alone, the new value is
+        // computed and DISCARDED: no `update_prop`, `mutates_state` stays
+        // false, and `ContinuationShape` calls the method terminal, so NO
+        // continuation assertion is injected for a method that does mutate
+        // state. Desugar to the assignment form, which already routes
+        // through `rewrite_array_write`. Statement position discards the
+        // expression's value, so prefix and postfix are equivalent here.
+        if let Expression::IncrementExpr { operand, .. }
+        | Expression::DecrementExpr { operand, .. } = &expression
+        {
+            if matches!(operand.as_ref(), Expression::IndexAccess { .. }) {
+                let op = if matches!(expression, Expression::IncrementExpr { .. }) {
+                    BinaryOp::Add
+                } else {
+                    BinaryOp::Sub
+                };
+                // Bind every impure index to a `const` first: the desugar
+                // names the element twice (read + write) and each index must
+                // be evaluated exactly once.
+                let target = self.stabilize_index_chain(operand, &mut prelude);
+                let assignment = Statement::Assignment {
+                    target: target.clone(),
+                    value: Expression::BinaryExpr {
+                        op,
+                        left: Box::new(target),
+                        right: Box::new(Expression::BigIntLiteral {
+                            value: BigInt::from(1),
+                        }),
+                    },
+                    source_location: loc,
+                };
+                let mut out = prelude;
+                out.extend(self.rewrite_assignment(&assignment));
+                return out;
+            }
+        }
+
         let new_expr = self.rewrite_expression(&expression, &mut prelude);
         let mut out = prelude;
         out.push(Statement::ExpressionStatement {
@@ -684,6 +734,57 @@ impl<'a> ExpandContext<'a> {
             source_location: loc,
         });
         out
+    }
+
+    /// `self.board[idx]++` used for its VALUE (not in statement position)
+    /// cannot be desugared to an assignment, and the increment lowering has
+    /// no way to write back through a dispatch chain. Silently dropping the
+    /// write is the dangerous outcome — reject it instead.
+    fn reject_array_element_mutation_in_expression(&mut self, operand: &Expression, op: &str) {
+        if !matches!(operand, Expression::IndexAccess { .. }) {
+            return;
+        }
+        let mut base = operand;
+        while let Expression::IndexAccess { object, .. } = base {
+            base = object;
+        }
+        if self.try_resolve_array_base(base).is_some() {
+            self.errors.push(Diagnostic::error(
+                format!(
+                    "`{}` on a FixedArray element is only supported as a statement; \
+                     assign the result explicitly instead",
+                    op
+                ),
+                None,
+            ));
+        }
+    }
+
+    /// Rewrite every index in an index-access chain so the chain can be
+    /// safely duplicated: impure indices are hoisted to a fresh `__idx_K`
+    /// binding, pure ones are left in place. The base object is returned
+    /// untouched — `rewrite_assignment` resolves it.
+    fn stabilize_index_chain(
+        &mut self,
+        expr: &Expression,
+        prelude: &mut Vec<Statement>,
+    ) -> Expression {
+        match expr {
+            Expression::IndexAccess { object, index } => {
+                let new_object = self.stabilize_index_chain(object, prelude);
+                let new_index = if is_pure_reference(index) {
+                    index.as_ref().clone()
+                } else {
+                    let rewritten = self.rewrite_expression(index, prelude);
+                    self.hoist_if_impure(rewritten, prelude, HoistTag::Idx)
+                };
+                Expression::IndexAccess {
+                    object: Box::new(new_object),
+                    index: Box::new(new_index),
+                }
+            }
+            other => other.clone(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -745,6 +846,7 @@ impl<'a> ExpandContext<'a> {
                 }
             }
             Expression::IncrementExpr { operand, prefix } => {
+                self.reject_array_element_mutation_in_expression(operand, "++");
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::IncrementExpr {
                     operand: Box::new(o),
@@ -752,6 +854,7 @@ impl<'a> ExpandContext<'a> {
                 }
             }
             Expression::DecrementExpr { operand, prefix } => {
+                self.reject_array_element_mutation_in_expression(operand, "--");
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::DecrementExpr {
                     operand: Box::new(o),
