@@ -29,6 +29,13 @@ Scope & rules:
   fallback.
 * Runtime index write (``self.board[i] = v``) emits a full if/else-if chain
   with an explicit final ``assert(False)`` out-of-range guard.
+* ``self.board[idx]++`` / ``--`` in statement position is desugared to
+  ``self.board[idx] = self.board[idx] +/- 1`` before the index rewrite, so the
+  write goes through the dispatch chain above. Downstream, both ``anf_lower``
+  and ``side_effect_summary`` only recognise an increment as a state mutation
+  when its operand is a bare property access, so without this the mutation is
+  silently discarded AND the method is classified terminal (no continuation
+  assertion at all). The same shape in expression position is a compile error.
 * Nested runtime indexing is rejected with a diagnostic — only literal
   index chains (``self.grid[0][1]``) are supported on nested arrays.
 * Side-effectful index or value expressions are hoisted to fresh synthetic
@@ -534,11 +541,87 @@ class _ExpandContext:
         self, stmt: ExpressionStmt
     ) -> list[Statement]:
         prelude: list[Statement] = []
+
+        # `this.board[idx]++` / `--` in statement position. The generic
+        # expression rewrite below turns `this.board[idx]` into a read dispatch
+        # ternary, and both ANF lowering and the side-effect summary only
+        # recognise an increment as a state mutation when its operand is a bare
+        # PropertyAccessExpr. Left alone, the new value is computed and
+        # DISCARDED: no update_prop, mutates_state stays False, and
+        # continuation_shape_for calls the method terminal, so NO continuation
+        # assertion is injected for a method that does mutate state. Desugar to
+        # the assignment form, which already routes through
+        # `_rewrite_array_write`. Statement position discards the expression's
+        # value, so prefix and postfix are equivalent here.
+        if isinstance(stmt.expr, (IncrementExpr, DecrementExpr)) and isinstance(
+            stmt.expr.operand, IndexAccessExpr
+        ):
+            op = "+" if isinstance(stmt.expr, IncrementExpr) else "-"
+            # Bind every impure index to a `const` first: the desugar names the
+            # element twice (read + write) and each index must be evaluated once.
+            target = self._stabilize_index_chain(
+                stmt.expr.operand, prelude, stmt.source_location
+            )
+            assignment = AssignmentStmt(
+                target=target,
+                value=BinaryExpr(
+                    op=op,
+                    left=_clone_expr(target),
+                    right=BigIntLiteral(value=1),
+                ),
+                source_location=stmt.source_location,
+            )
+            return [*prelude, *self._rewrite_assignment(assignment)]
+
         new_expr = self._rewrite_expression(stmt.expr, prelude) if stmt.expr is not None else None
         return [
             *prelude,
             ExpressionStmt(expr=new_expr, source_location=stmt.source_location),
         ]
+
+    def _reject_array_element_mutation_in_expression(
+        self, operand: Expression, op: str
+    ) -> None:
+        """Reject ``this.board[idx]++`` used for its VALUE.
+
+        It cannot be desugared to an assignment, and the increment lowering has
+        no way to write back through a dispatch chain. Silently dropping the
+        write is the dangerous outcome.
+        """
+        if not isinstance(operand, IndexAccessExpr):
+            return
+        base: Expression = operand
+        while isinstance(base, IndexAccessExpr):
+            base = base.object
+        if self._try_resolve_array_base(base) is not None:
+            self._add_error(
+                f"`{op}` on a FixedArray element is only supported as a "
+                "statement; assign the result explicitly instead",
+                SourceLocation(),
+            )
+
+    def _stabilize_index_chain(
+        self,
+        expr: Expression,
+        prelude: list[Statement],
+        loc: SourceLocation,
+    ) -> Expression:
+        """Make an index-access chain safe to duplicate.
+
+        Impure indices are hoisted to a fresh ``__idx_K`` binding, pure ones are
+        left in place. The base object is returned untouched —
+        ``_rewrite_assignment`` resolves it.
+        """
+        if not isinstance(expr, IndexAccessExpr):
+            return _clone_expr(expr)
+        new_object = self._stabilize_index_chain(expr.object, prelude, loc)
+        if _is_pure_reference(expr.index):
+            new_index = _clone_expr(expr.index)
+        else:
+            new_index = self._hoist_if_impure(
+                self._rewrite_expression(expr.index, prelude), prelude, loc, "idx"
+            )
+        return IndexAccessExpr(object=new_object, index=new_index)
 
     # ------------------------------------------------------------------
     # Expression rewriting
@@ -569,9 +652,11 @@ class _ExpandContext:
             alt = self._rewrite_expression(expr.alternate, prelude)
             return TernaryExpr(condition=cond, consequent=cons, alternate=alt)
         if isinstance(expr, IncrementExpr):
+            self._reject_array_element_mutation_in_expression(expr.operand, "++")
             operand = self._rewrite_expression(expr.operand, prelude)
             return IncrementExpr(operand=operand, prefix=expr.prefix)
         if isinstance(expr, DecrementExpr):
+            self._reject_array_element_mutation_in_expression(expr.operand, "--")
             operand = self._rewrite_expression(expr.operand, prelude)
             return DecrementExpr(operand=operand, prefix=expr.prefix)
         if isinstance(expr, ArrayLiteralExpr):

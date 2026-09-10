@@ -58,6 +58,15 @@ import runar.compiler.ir.ast.VariableDeclStatement;
  * reads/writes replaced by direct property access (literal index) or
  * dispatch (runtime index).
  *
+ * <p>{@code this.board[idx]++} / {@code --} in statement position is desugared
+ * to {@code this.board[idx] = this.board[idx] +/- 1} before the index rewrite,
+ * so the write goes through the dispatch chain. Downstream, both
+ * {@link AnfLower}'s increment lowering and its mutates-state recursion only
+ * recognise an increment as a state mutation when its operand is a bare
+ * property access, so without this the mutation is silently discarded AND the
+ * method is classified terminal (no continuation assertion at all). The same
+ * shape in expression position is a compile error.
+ *
  * <p>Cross-compiler conformance requires byte-identical output from
  * identical input, so synthetic names ({@code __0}, {@code __1}, &hellip;),
  * traversal order, and dispatch shape must match every other compiler
@@ -577,12 +586,89 @@ public final class ExpandFixedArrays {
 
         List<Statement> rewriteExpressionStmt(ExpressionStatement stmt) {
             List<Statement> prelude = new ArrayList<>();
+
+            // `this.board[idx]++` / `--` in statement position. The generic
+            // expression rewrite below turns `this.board[idx]` into a read
+            // dispatch ternary, and both ANF lowering and the mutates-state
+            // recursion only recognise an increment as a state mutation when
+            // its operand is a bare PropertyAccessExpr. Left alone, the new
+            // value is computed and DISCARDED: no update_prop, the method is
+            // classified terminal, and NO continuation assertion is injected
+            // for a method that does mutate state. Desugar to the assignment
+            // form, which already routes through rewriteArrayWrite. Statement
+            // position discards the expression's value, so prefix and postfix
+            // are equivalent here.
+            Expression incOperand = null;
+            Expression.BinaryOp incOp = null;
+            if (stmt.expression() instanceof IncrementExpr ie) {
+                incOperand = ie.operand();
+                incOp = Expression.BinaryOp.ADD;
+            } else if (stmt.expression() instanceof DecrementExpr de) {
+                incOperand = de.operand();
+                incOp = Expression.BinaryOp.SUB;
+            }
+            if (incOperand instanceof IndexAccessExpr) {
+                // Bind every impure index to a `const` first: the desugar names
+                // the element twice (read + write) and each index must be
+                // evaluated exactly once.
+                Expression target =
+                    stabilizeIndexChain(incOperand, prelude, stmt.sourceLocation());
+                AssignmentStatement assignment = new AssignmentStatement(
+                    target,
+                    new BinaryExpr(incOp, cloneExpression(target), new BigIntLiteral(BigInteger.ONE)),
+                    stmt.sourceLocation()
+                );
+                List<Statement> outAll = new ArrayList<>(prelude);
+                outAll.addAll(rewriteAssignment(assignment));
+                return outAll;
+            }
+
             Expression newExpr = stmt.expression() != null
                 ? rewriteExpression(stmt.expression(), prelude)
                 : null;
             List<Statement> outAll = new ArrayList<>(prelude);
             outAll.add(new ExpressionStatement(newExpr, stmt.sourceLocation()));
             return outAll;
+        }
+
+        /**
+         * {@code this.board[idx]++} used for its VALUE (not in statement
+         * position) cannot be desugared to an assignment, and the increment
+         * lowering has no way to write back through a dispatch chain. Silently
+         * dropping the write is the dangerous outcome — reject it instead.
+         */
+        void rejectArrayElementMutationInExpression(Expression operand, String op) {
+            if (!(operand instanceof IndexAccessExpr)) return;
+            Expression base = operand;
+            while (base instanceof IndexAccessExpr idx) {
+                base = idx.object();
+            }
+            if (tryResolveArrayBase(base) != null) {
+                error(
+                    "`" + op + "` on a FixedArray element is only supported as a statement; "
+                        + "assign the result explicitly instead",
+                    null
+                );
+            }
+        }
+
+        /**
+         * Rewrite every index in an index-access chain so the chain can be
+         * safely duplicated: impure indices are hoisted to a fresh
+         * {@code __idx_K} binding, pure ones are left in place. The base object
+         * is returned untouched — {@code rewriteAssignment} resolves it.
+         */
+        Expression stabilizeIndexChain(
+            Expression expr,
+            List<Statement> prelude,
+            SourceLocation loc
+        ) {
+            if (!(expr instanceof IndexAccessExpr idx)) return cloneExpression(expr);
+            Expression newObject = stabilizeIndexChain(idx.object(), prelude, loc);
+            Expression newIndex = isPureReference(idx.index())
+                ? cloneExpression(idx.index())
+                : hoistIfImpure(rewriteExpression(idx.index(), prelude), prelude, loc, "idx");
+            return new IndexAccessExpr(newObject, newIndex);
         }
 
         // --------------------------------------------------------------
@@ -622,10 +708,12 @@ public final class ExpandFixedArrays {
                 return new TernaryExpr(cond, cons, alt);
             }
             if (expr instanceof IncrementExpr ie) {
+                rejectArrayElementMutationInExpression(ie.operand(), "++");
                 Expression operand = rewriteExpression(ie.operand(), prelude);
                 return new IncrementExpr(operand, ie.prefix());
             }
             if (expr instanceof DecrementExpr de) {
+                rejectArrayElementMutationInExpression(de.operand(), "--");
                 Expression operand = rewriteExpression(de.operand(), prelude);
                 return new DecrementExpr(operand, de.prefix());
             }

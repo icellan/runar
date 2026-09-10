@@ -2310,3 +2310,80 @@ test "isBigintFamily: comprehensive" {
     try std.testing.expect(!isBigintFamily(.boolean));
     try std.testing.expect(!isBigintFamily(.pub_key));
 }
+
+// ---------------------------------------------------------------------------
+// N-019 tripwire: FixedArray element reads are untypeable in this tier.
+// ---------------------------------------------------------------------------
+
+// `inferExprType`'s `.index_access` arm returns `.unknown` unconditionally — it
+// never resolves a FixedArray property base to its element type. Every read of
+// an array element used as an arithmetic operand is therefore a hard type
+// error, INCLUDING the literal-index form and the `arr[i] = arr[i] + 1` shape
+// that N-019's desugar targets in the other six tiers. Runtime-index WRITES
+// (`this.board[i] = v`) are unaffected and compile today.
+//
+// This is a loud refusal, not a silent miscompile: unlike the six tiers where
+// `this.board[i]++` emitted NO state continuation at all (leaving the spending
+// path unconstrained — the N-019 fund-loss bug), Zig rejects the contract
+// outright. The N-019 pass-3b desugar is therefore NOT ported here: it would be
+// dead code behind this type error.
+//
+// WHEN THIS TEST STARTS FAILING, the typechecker has learned to type array
+// element reads — and `this.board[i]++` will begin compiling in this tier with
+// the N-019 defect intact. Port the pass-3b desugar from
+// `passes/expand_fixed_arrays.zig`'s peers (Go / TS / Python / Ruby / Java /
+// Rust) BEFORE relaxing this.
+fn n019ArrayElementIncrementContract(alloc: Allocator) !ContractNode {
+    const board_read = try alloc.create(types.IndexAccess);
+    board_read.* = .{
+        .object = .{ .property_access = .{ .object = "this", .property = "board" } },
+        .index = .{ .identifier = "i" },
+    };
+    const inc = try alloc.create(types.IncrementExpr);
+    inc.* = .{ .operand = .{ .index_access = board_read }, .prefix = false };
+
+    const body = try alloc.alloc(Statement, 1);
+    body[0] = .{ .expr_stmt = .{ .expr = .{ .increment = inc } } };
+
+    const params = try alloc.alloc(types.ParamNode, 1);
+    params[0] = .{ .name = "i", .type_info = .bigint };
+
+    const methods = try alloc.alloc(MethodNode, 1);
+    methods[0] = .{ .name = "bump", .is_public = true, .params = params, .body = body };
+
+    const props = try alloc.alloc(types.PropertyNode, 1);
+    props[0] = .{
+        .name = "board",
+        .type_info = .fixed_array,
+        .readonly = false,
+        .fixed_array_length = 3,
+        .fixed_array_element = .bigint,
+    };
+
+    return .{
+        .name = "BumpIncr",
+        .parent_class = .stateful_smart_contract,
+        .properties = props,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+}
+
+test "N-019: `this.board[i]++` is rejected, not silently miscompiled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const contract = try n019ArrayElementIncrementContract(alloc);
+    const result = try typeCheck(alloc, contract);
+
+    // Assert the SPECIFIC refusal, not merely "some error": a generic error
+    // would let the tripwire pass for an unrelated reason and stop guarding.
+    var saw_increment_refusal = false;
+    for (result.errors) |msg| {
+        if (std.mem.indexOf(u8, msg, "++ operator requires bigint") != null) {
+            saw_increment_refusal = true;
+        }
+    }
+    try std.testing.expect(saw_increment_refusal);
+}
