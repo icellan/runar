@@ -585,6 +585,11 @@ fn pyConvertName(allocator: Allocator, name: []const u8) []const u8 {
         .{ "bin2num", "bin2num" },
         .{ "log2", "log2" },
         .{ "div_mod", "divmod" },
+        // 'to' collapses to the digit '2', which no mechanical rule produces.
+        .{ "int_to_str", "int2str" },
+        // The all-caps PKH token does not survive snake -> camel either
+        // (it would come back as `requireOutputP2pkh`).
+        .{ "require_output_p2pkh", "requireOutputP2PKH" },
         .{ "tx_preimage", "txPreimage" },
         .{ "sha256_compress", "sha256Compress" },
         .{ "sha256_finalize", "sha256Finalize" },

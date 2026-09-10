@@ -141,6 +141,15 @@ fn map_builtin_name(name: &str) -> String {
         "ec_point_y" => return "ecPointY".to_string(),
         "mul_div" => return "mulDiv".to_string(),
         "percent_of" => return "percentOf".to_string(),
+        // Names the mechanical snake -> camel rule cannot produce: a digit
+        // ('to' -> '2') or an all-lowercase builtin with no interior capital.
+        "int_to_str" => return "int2str".to_string(),
+        "safe_div" => return "safediv".to_string(),
+        "safe_mod" => return "safemod".to_string(),
+        "div_mod" => return "divmod".to_string(),
+        // The all-caps PKH token does not survive snake -> camel either
+        // (it would come back as `requireOutputP2pkh`).
+        "require_output_p2pkh" => return "requireOutputP2PKH".to_string(),
         "add_output" => return "addOutput".to_string(),
         "add_raw_output" => return "addRawOutput".to_string(),
         "add_data_output" => return "addDataOutput".to_string(),

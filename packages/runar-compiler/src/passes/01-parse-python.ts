@@ -458,6 +458,15 @@ function mapBuiltinName(name: string): string {
     'merkle_root_hash256': 'merkleRootHash256',
     'mul_div': 'mulDiv',
     'percent_of': 'percentOf',
+    // Names the mechanical snake -> camel rule cannot produce: a digit
+    // ('to' -> '2') or an all-lowercase builtin with no interior capital.
+    'int_to_str': 'int2str',
+    'safe_div': 'safediv',
+    'safe_mod': 'safemod',
+    'div_mod': 'divmod',
+    // The all-caps PKH token does not survive snake -> camel either
+    // (it would come back as `requireOutputP2pkh`).
+    'require_output_p2pkh': 'requireOutputP2PKH',
     'add_output': 'addOutput',
     'add_raw_output': 'addRawOutput',
     'add_data_output': 'addDataOutput',

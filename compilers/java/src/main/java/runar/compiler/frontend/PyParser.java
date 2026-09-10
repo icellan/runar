@@ -223,6 +223,9 @@ public final class PyParser {
         m.put("num2bin", "num2bin");
         m.put("bin2num", "bin2num");
         m.put("int_to_str", "int2str");
+        // The all-caps PKH token does not survive snake -> camel
+        // (it would come back as `requireOutputP2pkh`).
+        m.put("require_output_p2pkh", "requireOutputP2PKH");
         m.put("log2", "log2");
         m.put("div_mod", "divmod");
         m.put("EC_P", "EC_P");

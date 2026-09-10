@@ -570,6 +570,10 @@ var pySpecialNames = map[string]string{
 	"add_data_output":  "addDataOutput",
 	"get_state_script": "getStateScript",
 
+	// Intent sub-covenant intrinsics (BSVM Phase 13). The all-caps PKH token
+	// does not survive snake -> camel (it comes back as requireOutputP2pkh).
+	"require_output_p2pkh": "requireOutputP2PKH",
+
 	// Transaction intrinsics
 	"extract_locktime":     "extractLocktime",
 	"extract_output_hash":  "extractOutputHash",
@@ -594,6 +598,8 @@ var pySpecialNames = map[string]string{
 	"bin2num":  "bin2num",
 	"log2":    "log2",
 	"div_mod": "divmod",
+	// 'to' collapses to the digit '2', which no mechanical rule produces.
+	"int_to_str": "int2str",
 
 	// EC constants
 	"EC_P": "EC_P",
