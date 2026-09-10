@@ -63,7 +63,11 @@ export interface DeployOptions {
  * internals consumed by `finalizeCall()`.
  */
 export interface PreparedCall {
-  /** BIP-143 sighash (hex) — what external signers ECDSA-sign. */
+  /**
+   * BIP-143 sighash (hex) — `hash256(preimage)`, i.e. `sha256(sha256(...))`.
+   * External signers ECDSA-sign these 32 bytes DIRECTLY, with no further
+   * hashing (see `WalletSigner.signHash`).
+   */
   sighash: string;
   /** Full BIP-143 preimage (hex). */
   preimage: string;

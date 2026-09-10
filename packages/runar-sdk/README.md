@@ -306,7 +306,7 @@ const { txid } = await contract.finalizeCall(prepared, signatures);
 
 `prepareCall` already signs P2PKH funding inputs and any additional contract inputs (when `additionalContractInputs` is set). It only leaves the primary contract input's `Sig` parameters as 72-byte placeholders for the external signer.
 
-`prepared.sighash` is `SHA256(prepared.preimage)` — the inner SHA-256 of the BIP-143 double-hash. Most wallets expect the unhashed sighash; `WalletSigner.signHash` accepts it directly. If your signer expects the raw preimage (to recompute and verify the sighash itself), use `prepared.preimage`.
+`prepared.sighash` is `hash256(prepared.preimage)` — `sha256(sha256(preimage))`, the BIP-143 digest `OP_CHECKSIG` verifies against. External signers ECDSA-sign it **directly**, with no further hashing: that is exactly what `WalletSigner.signHash` does (it forwards the value as BRC-100 `hashToDirectlySign`). Do not hash it again — a signature over `sha256(prepared.sighash)` is a signature over the wrong message, and the node rejects the spend. If your signer wants to recompute and verify the digest itself, hand it `prepared.preimage` instead.
 
 For complete examples, see `packages/runar-sdk/src/__tests__/external-signer.test.ts`.
 
