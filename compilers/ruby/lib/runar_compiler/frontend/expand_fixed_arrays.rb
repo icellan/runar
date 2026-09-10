@@ -618,7 +618,12 @@ module RunarCompiler
         when CallExpr
           CallExpr.new(
             callee: rewrite_expression(expr.callee, prelude),
-            args: expr.args.map { |a| rewrite_expression(a, prelude) }
+            args: expr.args.map { |a| rewrite_expression(a, prelude) },
+            # R-026: the captured return type of an expression-form `asm<T>()`
+            # decides whether `+` lowers to OP_CAT or OP_ADD. Dropping it here
+            # turned a byte concat into a numeric add for any contract that
+            # also declares a FixedArray property.
+            asm_return_type: expr.asm_return_type
           )
         when MethodCallExpr
           MethodCallExpr.new(
@@ -976,7 +981,8 @@ module RunarCompiler
         when UnaryExpr
           UnaryExpr.new(op: expr.op, operand: clone_expr(expr.operand))
         when CallExpr
-          CallExpr.new(callee: clone_expr(expr.callee), args: expr.args.map { |a| clone_expr(a) })
+          CallExpr.new(callee: clone_expr(expr.callee), args: expr.args.map { |a| clone_expr(a) },
+                       asm_return_type: expr.asm_return_type)
         when MethodCallExpr
           MethodCallExpr.new(
             object: clone_expr(expr.object),

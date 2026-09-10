@@ -44,12 +44,26 @@ Scope & rules:
   are compile errors.
 * ``FixedArray[void, N]`` is rejected.
 
+Field preservation (R-025/R-026). Every node this pass produces from an
+existing node is built with :func:`dataclasses.replace`, never field-by-field.
+Reconstructing a node by naming its fields silently reverts any field the
+reconstruction forgot to its dataclass default, and two such fields were lost
+here before: ``MethodNode.sighash_type`` (a declared ``@sighash SINGLE|FORKID``
+compiled as the default ``ALL|FORKID`` — a different signature-hash commitment
+than the author wrote, with no diagnostic, because validation had already
+accepted the directive), ``CallExpr.asm_return_type`` (an expression-form
+``asm<ByteString>()`` lost its byte tag, so ``+`` emitted OP_ADD instead of
+OP_CAT). ``replace`` cannot drop a field that is added later; explicit field
+lists can. Freshly minted nodes (dispatch chains, the
+out-of-range ``assert(False)``) have no source node and are constructed
+directly.
+
 This is a direct port of ``packages/runar-compiler/src/passes/03b-expand-fixed-arrays.ts``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from runar_compiler.frontend.ast_nodes import (
@@ -128,13 +142,11 @@ def expand_fixed_arrays(contract: ContractNode) -> ExpandFixedArraysResult:
     if ctx.errors:
         return ExpandFixedArraysResult(contract=contract, errors=ctx.errors)
 
-    rewritten = ContractNode(
-        name=contract.name,
-        parent_class=contract.parent_class,
+    rewritten = replace(
+        contract,
         properties=new_properties,
         constructor=new_constructor,
         methods=new_methods,
-        source_file=contract.source_file,
     )
     return ExpandFixedArraysResult(contract=rewritten, errors=[])
 
@@ -347,13 +359,7 @@ class _ExpandContext:
 
     def rewrite_method(self, method: MethodNode) -> MethodNode:
         new_body = self._rewrite_statements(method.body)
-        return MethodNode(
-            name=method.name,
-            params=method.params,
-            body=new_body,
-            visibility=method.visibility,
-            source_location=method.source_location,
-        )
+        return replace(method, body=new_body)
 
     def _rewrite_statements(self, stmts: list[Statement]) -> list[Statement]:
         out: list[Statement] = []
@@ -387,24 +393,12 @@ class _ExpandContext:
         if stmt_form is not None:
             prelude, fallback_init, dispatch = stmt_form
             # Replace original with [prelude..., let v = fallback, if-chain...]
-            new_decl = VariableDeclStmt(
-                name=stmt.name,
-                type=stmt.type,
-                mutable=True,
-                init=fallback_init,
-                source_location=stmt.source_location,
-            )
+            new_decl = replace(stmt, mutable=True, init=fallback_init)
             return [*prelude, new_decl, *dispatch]
 
         prelude: list[Statement] = []
         new_init = self._rewrite_expression(stmt.init, prelude) if stmt.init is not None else None
-        new_decl = VariableDeclStmt(
-            name=stmt.name,
-            type=stmt.type,
-            mutable=stmt.mutable,
-            init=new_init,
-            source_location=stmt.source_location,
-        )
+        new_decl = replace(stmt, init=new_init)
         return [*prelude, new_decl]
 
     def _rewrite_assignment(self, stmt: AssignmentStmt) -> list[Statement]:
@@ -419,10 +413,10 @@ class _ExpandContext:
                 rewritten_value = self._rewrite_expression(stmt.value, prelude)
                 return [
                     *prelude,
-                    AssignmentStmt(
+                    replace(
+                        stmt,
                         target=PropertyAccessExpr(property=resolved),
                         value=rewritten_value,
-                        source_location=stmt.source_location,
                     ),
                 ]
 
@@ -439,10 +433,10 @@ class _ExpandContext:
             new_value = self._rewrite_expression(stmt.value, prelude)
             return [
                 *prelude,
-                AssignmentStmt(
+                replace(
+                    stmt,
                     target=IndexAccessExpr(object=new_obj, index=new_index),
                     value=new_value,
-                    source_location=stmt.source_location,
                 ),
             ]
 
@@ -453,22 +447,14 @@ class _ExpandContext:
             )
             if stmt_form is not None:
                 prelude_local, fallback_init, dispatch = stmt_form
-                fallback_assign = AssignmentStmt(
-                    target=stmt.target,
-                    value=fallback_init,
-                    source_location=stmt.source_location,
-                )
+                fallback_assign = replace(stmt, value=fallback_init)
                 return [*prelude_local, fallback_assign, *dispatch]
 
         new_target = self._rewrite_expression(stmt.target, prelude)
         new_value = self._rewrite_expression(stmt.value, prelude)
         return [
             *prelude,
-            AssignmentStmt(
-                target=new_target,
-                value=new_value,
-                source_location=stmt.source_location,
-            ),
+            replace(stmt, target=new_target, value=new_value),
         ]
 
     def _rewrite_if_statement(self, stmt: IfStmt) -> list[Statement]:
@@ -478,12 +464,7 @@ class _ExpandContext:
         new_else = self._rewrite_statements(stmt.else_) if stmt.else_ else []
         return [
             *prelude,
-            IfStmt(
-                condition=new_cond,
-                then=new_then,
-                else_=new_else,
-                source_location=stmt.source_location,
-            ),
+            replace(stmt, condition=new_cond, then=new_then, else_=new_else),
         ]
 
     def _rewrite_for_statement(self, stmt: ForStmt) -> list[Statement]:
@@ -508,22 +489,16 @@ class _ExpandContext:
 
         new_init_stmt: VariableDeclStmt | None = None
         if stmt.init is not None:
-            new_init_stmt = VariableDeclStmt(
-                name=stmt.init.name,
-                type=stmt.init.type,
-                mutable=stmt.init.mutable,
-                init=new_init_init,
-                source_location=stmt.init.source_location,
-            )
+            new_init_stmt = replace(stmt.init, init=new_init_init)
 
         return [
             *prelude,
-            ForStmt(
+            replace(
+                stmt,
                 init=new_init_stmt,
                 condition=new_cond,
                 update=new_update,
                 body=new_body,
-                source_location=stmt.source_location,
             ),
         ]
 
@@ -532,10 +507,7 @@ class _ExpandContext:
             return [stmt]
         prelude: list[Statement] = []
         new_value = self._rewrite_expression(stmt.value, prelude)
-        return [
-            *prelude,
-            ReturnStmt(value=new_value, source_location=stmt.source_location),
-        ]
+        return [*prelude, replace(stmt, value=new_value)]
 
     def _rewrite_expression_statement(
         self, stmt: ExpressionStmt
@@ -574,10 +546,7 @@ class _ExpandContext:
             return [*prelude, *self._rewrite_assignment(assignment)]
 
         new_expr = self._rewrite_expression(stmt.expr, prelude) if stmt.expr is not None else None
-        return [
-            *prelude,
-            ExpressionStmt(expr=new_expr, source_location=stmt.source_location),
-        ]
+        return [*prelude, replace(stmt, expr=new_expr)]
 
     def _reject_array_element_mutation_in_expression(
         self, operand: Expression, op: str
@@ -621,7 +590,7 @@ class _ExpandContext:
             new_index = self._hoist_if_impure(
                 self._rewrite_expression(expr.index, prelude), prelude, loc, "idx"
             )
-        return IndexAccessExpr(object=new_object, index=new_index)
+        return replace(expr, object=new_object, index=new_index)
 
     # ------------------------------------------------------------------
     # Expression rewriting
@@ -635,35 +604,35 @@ class _ExpandContext:
         if isinstance(expr, BinaryExpr):
             left = self._rewrite_expression(expr.left, prelude)
             right = self._rewrite_expression(expr.right, prelude)
-            return BinaryExpr(op=expr.op, left=left, right=right)
+            return replace(expr, left=left, right=right)
         if isinstance(expr, UnaryExpr):
             operand = self._rewrite_expression(expr.operand, prelude)
-            return UnaryExpr(op=expr.op, operand=operand)
+            return replace(expr, operand=operand)
         if isinstance(expr, CallExpr):
             callee = self._rewrite_expression(expr.callee, prelude)
             args = [self._rewrite_expression(a, prelude) for a in expr.args]
-            return CallExpr(callee=callee, args=args)
+            return replace(expr, callee=callee, args=args)
         if isinstance(expr, MemberExpr):
             obj = self._rewrite_expression(expr.object, prelude)
-            return MemberExpr(object=obj, property=expr.property)
+            return replace(expr, object=obj)
         if isinstance(expr, TernaryExpr):
             cond = self._rewrite_expression(expr.condition, prelude)
             cons = self._rewrite_expression(expr.consequent, prelude)
             alt = self._rewrite_expression(expr.alternate, prelude)
-            return TernaryExpr(condition=cond, consequent=cons, alternate=alt)
+            return replace(expr, condition=cond, consequent=cons, alternate=alt)
         if isinstance(expr, IncrementExpr):
             self._reject_array_element_mutation_in_expression(expr.operand, "++")
             operand = self._rewrite_expression(expr.operand, prelude)
-            return IncrementExpr(operand=operand, prefix=expr.prefix)
+            return replace(expr, operand=operand)
         if isinstance(expr, DecrementExpr):
             self._reject_array_element_mutation_in_expression(expr.operand, "--")
             operand = self._rewrite_expression(expr.operand, prelude)
-            return DecrementExpr(operand=operand, prefix=expr.prefix)
+            return replace(expr, operand=operand)
         if isinstance(expr, ArrayLiteralExpr):
             elements = [
                 self._rewrite_expression(e, prelude) for e in expr.elements
             ]
-            return ArrayLiteralExpr(elements=elements)
+            return replace(expr, elements=elements)
         # Leaf expressions: Identifier, BigIntLiteral, BoolLiteral,
         # ByteStringLiteral, PropertyAccessExpr — no rewriting needed.
         return expr
@@ -683,13 +652,13 @@ class _ExpandContext:
             # Not a fixed-array property — recurse into sub-expressions.
             obj = self._rewrite_expression(expr.object, prelude)
             idx = self._rewrite_expression(expr.index, prelude)
-            return IndexAccessExpr(object=obj, index=idx)
+            return replace(expr, object=obj, index=idx)
 
         meta = self.array_map.get(base_name) or self.synthetic_arrays.get(base_name)
         if meta is None:
             obj = self._rewrite_expression(expr.object, prelude)
             idx = self._rewrite_expression(expr.index, prelude)
-            return IndexAccessExpr(object=obj, index=idx)
+            return replace(expr, object=obj, index=idx)
 
         loc = SourceLocation()  # expression source loc unavailable in Python AST
         literal = self._as_literal_index(expr.index)
@@ -844,10 +813,10 @@ class _ExpandContext:
             slot = meta.slot_names[literal]
             return [
                 *prelude,
-                AssignmentStmt(
+                replace(
+                    stmt,
                     target=PropertyAccessExpr(property=slot),
                     value=rewritten_value,
-                    source_location=loc,
                 ),
             ]
 
@@ -1012,45 +981,34 @@ def _is_pure_reference(expr: Expression) -> bool:
 
 
 def _clone_expr(expr: Expression) -> Expression:
-    if isinstance(expr, BigIntLiteral):
-        return BigIntLiteral(value=expr.value)
-    if isinstance(expr, BoolLiteral):
-        return BoolLiteral(value=expr.value)
-    if isinstance(expr, ByteStringLiteral):
-        return ByteStringLiteral(value=expr.value)
-    if isinstance(expr, Identifier):
-        return Identifier(name=expr.name)
-    if isinstance(expr, PropertyAccessExpr):
-        return PropertyAccessExpr(property=expr.property)
+    if isinstance(expr, (BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
+                         PropertyAccessExpr)):
+        return replace(expr)
     if isinstance(expr, BinaryExpr):
-        return BinaryExpr(
-            op=expr.op,
-            left=_clone_expr(expr.left),
-            right=_clone_expr(expr.right),
+        return replace(
+            expr, left=_clone_expr(expr.left), right=_clone_expr(expr.right)
         )
-    if isinstance(expr, UnaryExpr):
-        return UnaryExpr(op=expr.op, operand=_clone_expr(expr.operand))
+    if isinstance(expr, (UnaryExpr, IncrementExpr, DecrementExpr)):
+        return replace(expr, operand=_clone_expr(expr.operand))
     if isinstance(expr, CallExpr):
-        return CallExpr(
+        return replace(
+            expr,
             callee=_clone_expr(expr.callee),
             args=[_clone_expr(a) for a in expr.args],
         )
     if isinstance(expr, MemberExpr):
-        return MemberExpr(object=_clone_expr(expr.object), property=expr.property)
+        return replace(expr, object=_clone_expr(expr.object))
     if isinstance(expr, TernaryExpr):
-        return TernaryExpr(
+        return replace(
+            expr,
             condition=_clone_expr(expr.condition),
             consequent=_clone_expr(expr.consequent),
             alternate=_clone_expr(expr.alternate),
         )
     if isinstance(expr, IndexAccessExpr):
-        return IndexAccessExpr(
-            object=_clone_expr(expr.object), index=_clone_expr(expr.index)
+        return replace(
+            expr, object=_clone_expr(expr.object), index=_clone_expr(expr.index)
         )
-    if isinstance(expr, IncrementExpr):
-        return IncrementExpr(operand=_clone_expr(expr.operand), prefix=expr.prefix)
-    if isinstance(expr, DecrementExpr):
-        return DecrementExpr(operand=_clone_expr(expr.operand), prefix=expr.prefix)
     if isinstance(expr, ArrayLiteralExpr):
-        return ArrayLiteralExpr(elements=[_clone_expr(e) for e in expr.elements])
+        return replace(expr, elements=[_clone_expr(e) for e in expr.elements])
     return expr

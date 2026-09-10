@@ -812,7 +812,11 @@ impl<'a> ExpandContext<'a> {
                     operand: Box::new(o),
                 }
             }
-            Expression::CallExpr { callee, args, .. } => {
+            Expression::CallExpr {
+                callee,
+                args,
+                asm_return_type,
+            } => {
                 let c = self.rewrite_expression(callee, prelude);
                 let new_args: Vec<Expression> = args
                     .iter()
@@ -821,7 +825,12 @@ impl<'a> ExpandContext<'a> {
                 Expression::CallExpr {
                     callee: Box::new(c),
                     args: new_args,
-                    asm_return_type: None,
+                    // R-026: the captured return type of an expression-form
+                    // `asm<T>()` decides whether `+` lowers to OP_CAT or
+                    // OP_ADD. Dropping it here turned a byte concat into a
+                    // numeric add for any contract that also declares a
+                    // FixedArray property.
+                    asm_return_type: asm_return_type.clone(),
                 }
             }
             Expression::MemberExpr { object, property } => {

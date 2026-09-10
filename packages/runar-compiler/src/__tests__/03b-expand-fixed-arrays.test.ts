@@ -379,4 +379,64 @@ describe('expandFixedArrays', () => {
       expect(bin.left.kind).toBe('ternary_expr');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Field preservation (R-025 / R-026)
+  // -------------------------------------------------------------------------
+  //
+  // This pass rebuilds AST nodes as it rewrites them. The reference tier copies
+  // with object spread, so it preserves fields it never names — but six ports
+  // reconstruct field-by-field, and there each unnamed field silently reverts
+  // to its default. Two fields were being lost in the ports, both of which move
+  // emitted bytes. These tests pin the invariant here so a porter has something
+  // to port, and so a future spread-to-explicit-fields refactor of this file
+  // goes red instead of quiet.
+  describe('preserves fields it does not rewrite', () => {
+    it('keeps a non-default @sighash on a method it rewrites', () => {
+      // Validate has already ACCEPTED the directive by the time this pass runs;
+      // losing it compiles a different signature-hash commitment than declared.
+      const src = `
+        class Boardy extends StatefulSmartContract {
+          board: FixedArray<bigint, 3> = [0n, 0n, 0n];
+          n: bigint;
+          constructor(n: bigint) { super(n); this.n = n; }
+          /** @sighash SINGLE|FORKID */
+          public bump(): void {
+            this.addOutput(1000n, this.board[0], this.board[1], this.board[2], this.n);
+          }
+        }
+      `;
+      const before = parseContract(src);
+      expect(before.methods.find(m => m.name === 'bump')?.sighashType).toBe(0x43);
+
+      const { contract, errors } = expand(src);
+      expect(errors).toEqual([]);
+      expect(contract.methods.find(m => m.name === 'bump')?.sighashType).toBe(0x43);
+    });
+
+    it('keeps asmReturnType on an expression-form asm<T>() call', () => {
+      // The captured T is what tells ANF lowering the value is byte-typed,
+      // which is what makes `+` lower to OP_CAT rather than OP_ADD.
+      const src = `
+        class Boardy extends UnsafeSmartContract {
+          readonly board: FixedArray<bigint, 3> = [1n, 2n, 3n];
+          readonly n: bigint;
+          constructor(n: bigint) { super(n); this.n = n; }
+          public go(): void {
+            const a: ByteString = asm<ByteString>({ body: '00', in_arity: 0, out_arity: 1 });
+            const c: ByteString = a + a;
+            assert(len(c) === 2n);
+            assert(this.board[0] === this.n);
+          }
+        }
+      `;
+      const { contract, errors } = expand(src);
+      expect(errors).toEqual([]);
+      const decl = methodBody(contract, 'go')[0] as Extract<Statement, { kind: 'variable_decl' }>;
+      expect(decl.name).toBe('a');
+      const call = decl.init as Extract<Expression, { kind: 'call_expr' }>;
+      expect(call.kind).toBe('call_expr');
+      expect(call.asmReturnType).toBe('ByteString');
+    });
+  });
 });

@@ -397,7 +397,13 @@ public final class ExpandFixedArrays {
                 method.params(),
                 newBody,
                 method.visibility(),
-                method.sourceLocation()
+                method.sourceLocation(),
+                // R-025: the 5-arg convenience constructor defaults sighashType
+                // to null, i.e. the default ALL|FORKID. Validate has already
+                // ACCEPTED a non-default @sighash by the time this pass runs,
+                // so dropping it here silently compiles a different
+                // signature-hash commitment than the author declared.
+                method.sighashType()
             );
         }
 
@@ -695,7 +701,11 @@ public final class ExpandFixedArrays {
                 for (Expression a : ce.args()) {
                     args.add(rewriteExpression(a, prelude));
                 }
-                return new CallExpr(callee, args);
+                // R-026: the 2-arg convenience constructor defaults
+                // asmReturnType to null. It carries the captured return type of
+                // an expression-form `asm<T>()`, without which the call is
+                // treated as void.
+                return new CallExpr(callee, args, ce.asmReturnType());
             }
             if (expr instanceof MemberExpr me) {
                 Expression obj = rewriteExpression(me.object(), prelude);
@@ -1085,7 +1095,7 @@ public final class ExpandFixedArrays {
         if (expr instanceof CallExpr ce) {
             List<Expression> args = new ArrayList<>(ce.args().size());
             for (Expression a : ce.args()) args.add(cloneExpression(a));
-            return new CallExpr(cloneExpression(ce.callee()), args);
+            return new CallExpr(cloneExpression(ce.callee()), args, ce.asmReturnType());
         }
         if (expr instanceof MemberExpr me) {
             return new MemberExpr(cloneExpression(me.object()), me.property());
