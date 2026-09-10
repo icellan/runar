@@ -1905,21 +1905,29 @@ const Parser = struct {
     fn methodToConstructor(self: *Parser, m: MethodNode) ConstructorNode {
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: see parse_ts.methodToConstructor — the full body minus the
+        // `super(...)` call, so nothing is silently discarded.
+        var body: std.ArrayListUnmanaged(Statement) = .empty;
 
         for (m.body) |stmt| {
             switch (stmt) {
-                .expr_stmt => |expr| switch (expr.expr) {
-                    .call => |call| {
-                        if (std.mem.eql(u8, call.callee, "super")) {
-                            for (call.args) |arg| super_args.append(self.allocator, arg) catch {};
-                        }
-                    },
-                    else => {},
+                .expr_stmt => |expr| {
+                    switch (expr.expr) {
+                        .call => |call| {
+                            if (std.mem.eql(u8, call.callee, "super")) {
+                                for (call.args) |arg| super_args.append(self.allocator, arg) catch {};
+                                continue;
+                            }
+                        },
+                        else => {},
+                    }
+                    body.append(self.allocator, stmt) catch {};
                 },
                 .assign => |assign| {
                     assignments.append(self.allocator, .{ .target = assign.target, .value = assign.value }) catch {};
+                    body.append(self.allocator, stmt) catch {};
                 },
-                else => {},
+                else => body.append(self.allocator, stmt) catch {},
             }
         }
 
@@ -1927,6 +1935,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = body.items,
         };
     }
 

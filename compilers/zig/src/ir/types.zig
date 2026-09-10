@@ -170,7 +170,29 @@ pub const PropertyNode = struct {
     /// properties. The chain is outermost-first.
     synthetic_array_chain: ?[]const SyntheticArrayLevel = null,
 };
-pub const ConstructorNode = struct { params: []ParamNode, super_args: []Expression, assignments: []AssignmentNode };
+pub const ConstructorNode = struct {
+    params: []ParamNode,
+    super_args: []Expression,
+    assignments: []AssignmentNode,
+    /// R-040: the constructor's FULL statement body, in source order, minus
+    /// the `super(...)` call (ANF lowering emits that from `super_args`,
+    /// because several surfaces have no `super` for the author to write).
+    ///
+    /// `super_args` + `assignments` alone describe only the two statement
+    /// shapes the artifact's constructor slots need. Every other statement an
+    /// author writes in a constructor — an `assert` on an argument, a local
+    /// declaration — used to be dropped here with no diagnostic, while the
+    /// other six tiers lower the whole body (TS: `lowerStatements(
+    /// contract.constructor.body, ctorCtx)`), so their constructor ANF
+    /// carried statements Zig's did not.
+    ///
+    /// Populated by the six surfaces with an explicit constructor body
+    /// (`.runar.{ts,sol,py,rb,java}` and the `.runar.zig` `init`). Left empty
+    /// by the synthesized constructors (`.runar.{go,rs,move}`, and each
+    /// surface's `autoGenerateConstructor`), which have no source body at all;
+    /// lowering falls back to `assignments` for those.
+    body: []const Statement = &.{},
+};
 pub const MethodNode = struct {
     name: []const u8,
     is_public: bool,

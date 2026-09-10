@@ -56,6 +56,7 @@ test {
     _ = @import("tests/library_cli_parity.zig");
     _ = @import("tests/n034_ec_fusing_rules.zig");
     _ = @import("tests/py_builtin_alias_parity.zig");
+    _ = @import("tests/constructor_body_statements.zig");
     _ = @import("compiler_api.zig");
     _ = @import("passes/helpers/koalabear_emitters.zig");
     _ = @import("passes/helpers/poseidon2_koalabear.zig");

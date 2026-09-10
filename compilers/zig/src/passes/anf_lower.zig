@@ -571,7 +571,18 @@ fn lowerConstructorBody(ctx: *LowerCtx, ctor: ConstructorNode) LowerError!void {
         .args = try arg_refs.toOwnedSlice(ctx.allocator),
     } });
 
-    // Lower constructor assignments: this.x = param
+    // R-040: a surface with an explicit constructor body hands us the whole
+    // thing (super call already stripped), so lower it statement by statement
+    // exactly as the other six tiers do. Anything else — an `assert` on a
+    // constructor argument, a local declaration — used to be silently dropped
+    // here, because only `assignments` was ever read.
+    if (ctor.body.len > 0) {
+        try lowerStatements(ctx, ctor.body);
+        return;
+    }
+
+    // Synthesized constructor (no source body): lower the assignments the
+    // parser derived from the property list. `this.x = param`.
     for (ctor.assignments) |assign| {
         const value_ref = try lowerExprToRef(ctx, assign.value);
         _ = try ctx.emit(.{ .update_prop = .{

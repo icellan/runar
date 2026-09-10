@@ -634,6 +634,13 @@ const Parser = struct {
         if (self.expect(.lbrace) == null) return null;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
         var found_struct_return = false;
+        // R-040: statements the `init` body carries beyond the `return .{...}`
+        // struct literal — `runar.assert(...)` on a parameter, a local `const`.
+        // These used to be parsed and thrown away (`_ = self.parseStatement()`),
+        // so an argument check written in `init` existed in six tiers' ANF and
+        // in none of Zig's. The field writes are appended after them, since the
+        // struct-return literal is by construction the last statement.
+        var ctor_body: std.ArrayListUnmanaged(Statement) = .empty;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             if (self.current.kind == .kw_return) {
@@ -653,7 +660,9 @@ const Parser = struct {
                 continue;
             }
 
-            _ = self.parseStatement();
+            if (self.parseStatement()) |stmt| {
+                ctor_body.append(self.allocator, stmt) catch {};
+            }
         }
 
         _ = self.expect(.rbrace);
@@ -672,6 +681,14 @@ const Parser = struct {
             }
         }
 
+        for (assignments.items) |assign| {
+            ctor_body.append(self.allocator, .{ .assign = .{
+                .target = assign.target,
+                .value = assign.value,
+                .target_is_property = true,
+            } }) catch {};
+        }
+
         // Auto-generate super() args from constructor params (matching TS/Go/Rust/Python
         // behavior — all format parsers auto-inject super() as the first statement).
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
@@ -683,6 +700,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = ctor_body.items,
         };
     }
 

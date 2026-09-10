@@ -706,20 +706,23 @@ const Parser = struct {
         // the stripped param name so the ANF lowerer treats them consistently
         // with the other compilers (TS/Go/Rust/Python/Ruby).
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: the full constructor body, in source order, with the
+        // underscore rename applied to EVERY statement rather than only to
+        // assignment right-hand sides. Solidity has no `super` to write, so
+        // nothing is stripped here; ANF lowering emits super from
+        // `super_args` and then lowers this list. Without it a
+        // `require(_target > 0)` in a constructor was parsed and thrown away.
+        var ctor_body: std.ArrayListUnmanaged(Statement) = .empty;
         for (body) |stmt| {
             switch (stmt) {
                 .assign => |assign| {
                     const renamed_value = self.solRenameUnderscoreIdents(assign.value, params);
                     assignments.append(self.allocator, .{ .target = assign.target, .value = renamed_value }) catch {};
+                    var renamed = assign;
+                    renamed.value = renamed_value;
+                    ctor_body.append(self.allocator, .{ .assign = renamed }) catch {};
                 },
-                .expr_stmt => |expr| {
-                    // Check if it's a call to assert/require (skip)
-                    switch (expr.expr) {
-                        .call => {},
-                        else => {},
-                    }
-                },
-                else => {},
+                else => ctor_body.append(self.allocator, self.solRenameStmt(stmt, params)) catch {},
             }
         }
 
@@ -734,6 +737,15 @@ const Parser = struct {
                             .target = prop.name,
                             .value = .{ .identifier = param.name },
                         }) catch {};
+                        // Keep `body` a complete description of the
+                        // constructor: the auto-generated writes have no
+                        // source statement, so append them after whatever the
+                        // author did write.
+                        ctor_body.append(self.allocator, .{ .assign = .{
+                            .target = prop.name,
+                            .value = .{ .identifier = param.name },
+                            .target_is_property = true,
+                        } }) catch {};
                         break;
                     }
                 }
@@ -744,7 +756,60 @@ const Parser = struct {
             .params = params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = ctor_body.items,
         };
+    }
+
+    /// Apply `solRenameUnderscoreIdents` to every expression a statement
+    /// carries. The expression walker mutates nested nodes in place and only
+    /// ever RETURNS a new value for a bare identifier, so a statement whose
+    /// expression is a bare `_name` needs the returned value written back.
+    fn solRenameStmt(self: *Parser, stmt: Statement, params: []const ParamNode) Statement {
+        switch (stmt) {
+            .const_decl => |d| {
+                var out = d;
+                out.value = self.solRenameUnderscoreIdents(d.value, params);
+                return .{ .const_decl = out };
+            },
+            .let_decl => |d| {
+                var out = d;
+                if (d.value) |v| out.value = self.solRenameUnderscoreIdents(v, params);
+                return .{ .let_decl = out };
+            },
+            .assign => |a| {
+                var out = a;
+                out.value = self.solRenameUnderscoreIdents(a.value, params);
+                return .{ .assign = out };
+            },
+            .expr_stmt => |e| {
+                var out = e;
+                out.expr = self.solRenameUnderscoreIdents(e.expr, params);
+                return .{ .expr_stmt = out };
+            },
+            .assert_stmt => |a| {
+                var out = a;
+                out.condition = self.solRenameUnderscoreIdents(a.condition, params);
+                return .{ .assert_stmt = out };
+            },
+            .if_stmt => |i| {
+                var out = i;
+                out.condition = self.solRenameUnderscoreIdents(i.condition, params);
+                for (out.then_body, 0..) |s, idx| out.then_body[idx] = self.solRenameStmt(s, params);
+                if (out.else_body) |eb| {
+                    for (eb, 0..) |s, idx| eb[idx] = self.solRenameStmt(s, params);
+                }
+                return .{ .if_stmt = out };
+            },
+            .for_stmt => |f| {
+                var out = f;
+                for (out.body, 0..) |s, idx| out.body[idx] = self.solRenameStmt(s, params);
+                return .{ .for_stmt = out };
+            },
+            .return_stmt => |maybe| {
+                if (maybe) |e| return .{ .return_stmt = self.solRenameUnderscoreIdents(e, params) };
+                return stmt;
+            },
+        }
     }
 
     /// Auto-generate a constructor for contracts without an explicit one.
