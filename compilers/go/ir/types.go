@@ -114,6 +114,15 @@ type ANFValue struct {
 	// load_param, load_prop, update_prop
 	Name string `json:"name,omitempty"`
 
+	// load_prop only. Issue #109 (`@embedAlways`): when true, dead-binding DCE
+	// must NOT remove this binding even though nothing references it. Set only
+	// on the load_prop that ANF lowering injects for an `@embedAlways` readonly
+	// field (frontend.emitEmbedAlwaysPreservation). In-memory only — `json:"-"`
+	// keeps it out of the emitted ANF IR JSON, so cross-tier IR stays
+	// byte-identical (matches the Zig reference in compilers/zig/src/ir/types.zig
+	// and Rust's `#[serde(skip)]`).
+	Preserve bool `json:"-"`
+
 	// load_const — the raw JSON value is decoded separately
 	RawValue json.RawMessage `json:"value,omitempty"`
 

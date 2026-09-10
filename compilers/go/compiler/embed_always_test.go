@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -140,4 +141,108 @@ func anyWarnContains(r *CompileResult, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// #109 regression — @embedAlways must survive a FIXED-POINT DCE.
+//
+// The preservation used to be an alias pair: the injected load_prop plus a
+// load_const("@ref:<t>") binding whose only job was to make the load_prop look
+// referenced. That survives ONE DCE sweep but not the fixed-point loop in
+// frontend.EliminateDeadBindings: sweep 1 drops the now-unreferenced alias,
+// sweep 2 then drops the load_prop it was protecting, and BOTH halves vanish.
+//
+// DCE only runs from inside the EC optimizer's changed-gate (optimizeMethodEC
+// calls EliminateDeadBindings only `if anyChanged`), so the probe below has to
+// arm it: ecMulGen(1n) folds to the generator constant (rule 6), which flips
+// anyChanged and lets dead-binding elimination run. Every pre-existing test in
+// this file uses an EC-free contract, so DCE never ran on them at all.
+//
+// Zig marks the injected load_prop itself with preserve = true and reads that
+// flag in hasSideEffect; this tier now does the same.
+// ---------------------------------------------------------------------------
+
+// ecMetaSource is an EC-armed probe. metadataId carries the directive;
+// droppedField is an un-annotated, unreferenced control that MUST still be
+// eliminated, so a passing test cannot be satisfied by "retain everything".
+func ecMetaSource(directive string) string {
+	return `
+import { SmartContract, assert, Addr, PubKey, Sig, ByteString, hash160, checkSig, ecMulGen, ecPointX } from 'runar-lang';
+class EcMeta extends SmartContract {
+  readonly pubKeyHash: Addr;
+  ` + directive + `
+  readonly metadataId: ByteString;
+  readonly droppedField: ByteString;
+  constructor(pubKeyHash: Addr, metadataId: ByteString, droppedField: ByteString) {
+    super(pubKeyHash, metadataId, droppedField);
+    this.pubKeyHash = pubKeyHash;
+    this.metadataId = metadataId;
+    this.droppedField = droppedField;
+  }
+  public unlock(sig: Sig, pubKey: PubKey) {
+    const g = ecMulGen(1n);
+    assert(ecPointX(g) > 0n);
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+`
+}
+
+func TestEmbedAlways_SurvivesFixedPointDCEInECArmedMethod(t *testing.T) {
+	r := CompileFromSourceStrWithResult(ecMetaSource("/** @embedAlways */"), "EcMeta.runar.ts", CompileOptions{})
+	if !r.Success {
+		t.Fatalf("compile failed: %v", diagMessages(r))
+	}
+	names := slotNames(r)
+	if !contains(names, "metadataId") {
+		t.Fatalf("@embedAlways metadataId must survive fixed-point DCE; slots=%v", names)
+	}
+}
+
+func TestEmbedAlways_ECArmedUnannotatedDeadFieldStillEliminated(t *testing.T) {
+	for _, directive := range []string{"", "/** @embedAlways */"} {
+		r := CompileFromSourceStrWithResult(ecMetaSource(directive), "EcMeta.runar.ts", CompileOptions{})
+		if !r.Success {
+			t.Fatalf("compile failed (directive=%q): %v", directive, diagMessages(r))
+		}
+		names := slotNames(r)
+		if contains(names, "droppedField") {
+			t.Fatalf("un-annotated droppedField must stay eliminated (directive=%q); slots=%v", directive, names)
+		}
+	}
+}
+
+func TestEmbedAlways_ECArmedChangesTheEmittedScript(t *testing.T) {
+	off := CompileFromSourceStrWithResult(ecMetaSource(""), "EcMeta.runar.ts", CompileOptions{})
+	on := CompileFromSourceStrWithResult(ecMetaSource("/** @embedAlways */"), "EcMeta.runar.ts", CompileOptions{})
+	if !off.Success || !on.Success {
+		t.Fatalf("compile failed: off=%v on=%v", diagMessages(off), diagMessages(on))
+	}
+	if off.ScriptHex == on.ScriptHex {
+		t.Fatalf("@embedAlways must change the EC-armed script; both = %s", off.ScriptHex)
+	}
+	if len(on.ScriptHex) <= len(off.ScriptHex) {
+		t.Fatalf("annotated hex (%d) must exceed un-annotated (%d)", len(on.ScriptHex), len(off.ScriptHex))
+	}
+}
+
+// The preserve flag is compiler-internal: it must never reach the emitted ANF
+// IR JSON, or the cross-tier IR comparison would diverge from the six tiers
+// that keep it in memory only.
+func TestEmbedAlways_PreserveFlagIsNeverSerialized(t *testing.T) {
+	r := CompileFromSourceStrWithResult(ecMetaSource("/** @embedAlways */"), "EcMeta.runar.ts", CompileOptions{})
+	if !r.Success {
+		t.Fatalf("compile failed: %v", diagMessages(r))
+	}
+	if r.ANF == nil {
+		t.Fatal("compile result carries no ANF program")
+	}
+	blob, err := json.Marshal(r.ANF)
+	if err != nil {
+		t.Fatalf("marshal ANF: %v", err)
+	}
+	if strings.Contains(string(blob), "preserve") {
+		t.Fatalf("emitted ANF IR JSON must not carry a preserve key:\n%s", blob)
+	}
 }

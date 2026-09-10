@@ -60,9 +60,28 @@ export interface LoadParam {
   name: string;
 }
 
+/**
+ * Issue #109 (`@embedAlways`): marks a `load_prop` that dead-binding DCE must
+ * NOT remove even though nothing references it. Set only on the `load_prop`
+ * that ANF lowering injects for an `@embedAlways` readonly field
+ * (`emitEmbedAlwaysPreservation` in `passes/04-anf-lower.ts`); ordinary
+ * `load_prop`s leave it unset and stay freely eliminable.
+ *
+ * Keyed by a symbol rather than a string because the flag is compiler-internal
+ * and must never reach the wire: `JSON.stringify` skips symbol-keyed
+ * properties, so the emitted ANF IR JSON stays byte-identical to the six other
+ * tiers, each of which suppresses the field with its own serializer's opt-out
+ * (Rust `#[serde(skip)]`, Go `json:"-"`, Python `_IR_EXCLUDED_FIELDS`, Java
+ * `@JsonSkip`, Zig's hand-written writer). Object spread and `Object.assign`
+ * both copy enumerable symbol keys, so the flag survives the optimizer passes
+ * that rebuild bindings.
+ */
+export const PRESERVE = Symbol('runar.anf.preserve');
+
 export interface LoadProp {
   kind: 'load_prop';
   name: string;
+  [PRESERVE]?: boolean;
 }
 
 export interface LoadConst {

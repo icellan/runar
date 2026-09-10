@@ -31,7 +31,7 @@ import type {
   BinOp,
   ANFUnaryOp,
 } from '../ir/index.js';
-import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT } from '../ir/index.js';
+import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
@@ -528,24 +528,26 @@ function lowerParams(params: ParamNode[]): ANFParam[] {
 }
 
 /**
- * Issue #109: emit the DCE-surviving preservation pair for each
+ * Issue #109: emit the DCE-surviving preservation `load_prop` for each
  * `@embedAlways` readonly field, into the given (public) method context.
  *
- * Reproduces exactly what a hand-written `const _bind = this.field;` lowers
- * to: a `load_prop` followed by a `load_const("@ref:<t>")` alias. The alias
- * marks the `load_prop` as referenced (see `collectRefsFromValue` in
- * `optimizer/dce.ts`), so dead-binding DCE keeps it; stack lowering then
- * emits the field's constructor-slot placeholder and NIPs the unused value
- * off the stack at method end. The field's bytes therefore remain in the
- * deployed locking script for downstream recovery.
+ * The injected `load_prop` carries `[PRESERVE]: true`, so `hasSideEffect` in
+ * `optimizer/dce.ts` keeps it even though nothing references it; stack
+ * lowering then emits the field's constructor-slot placeholder and NIPs the
+ * unused value off the stack at method end. The field's bytes therefore
+ * remain in the deployed locking script for downstream recovery.
+ *
+ * This used to emit an alias pair instead — the `load_prop` plus a
+ * `load_const("@ref:<t>")` whose only job was to make the `load_prop` look
+ * referenced. That survives ONE DCE sweep but not the fixed-point loop in
+ * `optimizer/dce.ts`: sweep 1 drops the now-unreferenced alias, sweep 2 then
+ * drops the `load_prop` it was protecting, and both halves vanish. Marking the
+ * node itself does not depend on a referencing binding surviving. Mirrors the
+ * Zig reference (`compilers/zig/src/passes/anf_lower.zig`).
  */
 function emitEmbedAlwaysPreservation(ctx: LoweringContext, fields: PropertyNode[]): void {
   for (const field of fields) {
-    const loadRef = ctx.emit({ kind: 'load_prop', name: field.name });
-    ctx.emitNamed(`__embedAlways_${field.name}`, {
-      kind: 'load_const',
-      value: `@ref:${loadRef}`,
-    });
+    ctx.emit({ kind: 'load_prop', name: field.name, [PRESERVE]: true });
   }
 }
 

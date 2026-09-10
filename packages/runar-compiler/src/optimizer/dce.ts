@@ -25,6 +25,7 @@ import type {
   ANFBinding,
   ANFValue,
 } from '../ir/index.js';
+import { PRESERVE } from '../ir/index.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -157,9 +158,15 @@ export function hasSideEffect(value: ANFValue): boolean {
       );
     case 'loop':
       return value.body.some((b) => hasSideEffect(b.value));
+    // Issue #109 (`@embedAlways`): a `load_prop` injected to force a readonly
+    // field into the deployed locking script carries `[PRESERVE]: true`, so
+    // DCE must keep it even though nothing references it. Ordinary load_props
+    // leave the flag unset and remain freely eliminable. Mirrors
+    // `compilers/zig/src/passes/dce.zig`.
+    case 'load_prop':
+      return value[PRESERVE] === true;
     // Pure ANF kinds — no side effect, safe to DCE if unreferenced.
     case 'load_param':
-    case 'load_prop':
     case 'load_const':
     case 'get_state_script':
     case 'bin_op':

@@ -602,19 +602,24 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	return result
 }
 
-// emitEmbedAlwaysPreservation emits the DCE-surviving preservation pair for
-// each `@embedAlways` readonly field into the given (public) method context
-// (issue #109). Reproduces exactly what a hand-written `const _bind =
-// this.field;` lowers to: a load_prop followed by a load_const("@ref:<t>")
-// alias. The alias marks the load_prop as referenced (see dce.go), so
-// dead-binding DCE keeps it; stack lowering then emits the field's
-// constructor-slot placeholder and NIPs the unused value off the stack at
-// method end. The field's bytes therefore remain in the deployed locking
-// script for downstream recovery.
+// emitEmbedAlwaysPreservation emits the DCE-surviving preservation load_prop
+// for each `@embedAlways` readonly field into the given (public) method
+// context (issue #109). The injected load_prop carries Preserve = true, so
+// HasSideEffect (dce.go) keeps it even though nothing references it; stack
+// lowering then emits the field's constructor-slot placeholder and NIPs the
+// unused value off the stack at method end. The field's bytes therefore remain
+// in the deployed locking script for downstream recovery.
+//
+// This used to emit an alias pair instead — the load_prop plus a
+// load_const("@ref:<t>") whose only job was to make the load_prop look
+// referenced. That survives ONE DCE sweep but not the fixed-point loop in
+// EliminateDeadBindings: sweep 1 drops the now-unreferenced alias, sweep 2 then
+// drops the load_prop it was protecting, and both halves vanish. Marking the
+// node itself does not depend on a referencing binding surviving. Mirrors the
+// Zig reference (compilers/zig/src/passes/anf_lower.zig).
 func emitEmbedAlwaysPreservation(ctx *lowerCtx, fields []PropertyNode) {
 	for _, field := range fields {
-		loadRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: field.Name})
-		ctx.emitNamed("__embedAlways_"+field.Name, makeLoadConstString("@ref:"+loadRef))
+		ctx.emit(ir.ANFValue{Kind: "load_prop", Name: field.Name, Preserve: true})
 	}
 }
 

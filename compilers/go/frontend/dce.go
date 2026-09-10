@@ -189,7 +189,14 @@ func HasSideEffect(v *ir.ANFValue) bool {
 		"call", "method_call", // a callee body may assert / write props
 		"raw_script": // opaque byte span — DCE must never eliminate it
 		return true
-	case "load_param", "load_prop", "load_const", "bin_op", "unary_op",
+	case "load_prop":
+		// Issue #109 (`@embedAlways`): a load_prop injected to force a readonly
+		// field into the deployed locking script carries Preserve = true, so DCE
+		// must keep it even though nothing references it. Ordinary load_props
+		// (Preserve = false) remain freely eliminable. Mirrors
+		// compilers/zig/src/passes/dce.zig.
+		return v.Preserve
+	case "load_param", "load_const", "bin_op", "unary_op",
 		"get_state_script", "array_literal":
 		// Pure ANF kinds — no observable effect, safe to DCE if unreferenced.
 		return false
