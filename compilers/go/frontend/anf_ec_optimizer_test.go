@@ -673,27 +673,31 @@ func TestANFECOptimizer_Rule10_EcAddMulGenMulGen(t *testing.T) {
 	}
 }
 
-// TestECOptimizer_MulGenLinearRuntimeSumIsUnreduced pins the RUNTIME (both
-// scalars non-constant) path of the ec-mulgen-linear rule: the helper binding
-// the rule engine synthesizes for k1 + k2 is a plain bin_op "+" with NO mod-n
-// applied — buildOpHelper in ec_rules_engine.go only folds mod n when BOTH
-// operands are load_const bigints (the compile-time path); runtime operands
-// fall through to a bare bin_op.
+// TestECOptimizer_MulGenLinearSkipsRuntimeScalars pins the RUNTIME (both
+// scalars non-constant) path of the ec-mulgen-linear rule: the rule does NOT
+// fire, so the ecAdd survives untouched.
 //
-// This is sound ONLY because emitEcMulGen's scalar reduce (emitScalarReduce
-// in codegen/ec.go, called via ecEmitScalarReduce) puts the unreduced sum back
-// into [0, n-1] before the ladder ever sees it. That reduce is therefore the
-// load-bearing dependency for this rewrite: delete or weaken it and
-// ec-mulgen-linear silently miscompiles every k1 + k2 >= n. See the
-// "LOAD-BEARING DEPENDENCY" note on the ec-mulgen-linear rule in
-// frontend/ec-rules.json and ec-scalar-domain.test.ts.
-func TestECOptimizer_MulGenLinearRuntimeSumIsUnreduced(t *testing.T) {
+// ec-rules.json carries no "supported" tag on this rule, which means every
+// tier implements it — and every tier must implement it the SAME way, or the
+// same source compiles to different scripts depending on who compiled it
+// (conformance invariant 2). The other six tiers (TS, Rust, Python, Zig,
+// Ruby, Java) all require BOTH scalars to resolve to compile-time constants
+// and fold the sum mod n at rewrite time. Go used to fire the rule
+// unconditionally, synthesising a bare `bin_op "+"` helper for runtime
+// scalars; that produced a valid script (emitEcMulGen's scalar reduce puts
+// the unreduced sum back into [0, n-1] before the ladder, so it was never
+// WRONG) but a DIFFERENT script from every other tier.
+//
+// The guard now lives in applyReplace: a rule whose replace template contains
+// an {"op": ...} argument is skipped unless both operands resolve to
+// load_const bigints. See ec_rules_engine.go.
+func TestECOptimizer_MulGenLinearSkipsRuntimeScalars(t *testing.T) {
 	// Build ANF with:
 	//   k1 = load_param "k1Arg"    <- runtime (unlock argument), not load_const
 	//   k2 = load_param "k2Arg"    <- runtime (unlock argument), not load_const
 	//   t2 = ecMulGen(k1)
 	//   t3 = ecMulGen(k2)
-	//   t4 = ecAdd(t2, t3)         <- should become ecMulGen(<helper>)
+	//   t4 = ecAdd(t2, t3)         <- must stay an ecAdd
 	//   assert(t4)
 	k1 := loadParamBinding("k1", "k1Arg")
 	k2 := loadParamBinding("k2", "k2Arg")
@@ -711,31 +715,31 @@ func TestECOptimizer_MulGenLinearRuntimeSumIsUnreduced(t *testing.T) {
 	if t4Result == nil {
 		t.Fatal("expected binding t4 to exist after optimization")
 	}
-	if t4Result.Value.Kind != "call" || t4Result.Value.Func != "ecMulGen" {
-		t.Fatalf("expected t4 to be ecMulGen after ec-mulgen-linear, got %s(%s)", t4Result.Value.Func, strings.Join(t4Result.Value.Args, ", "))
+	if t4Result.Value.Kind != "call" || t4Result.Value.Func != "ecAdd" {
+		t.Fatalf("expected t4 to stay ecAdd for runtime scalars, got %s %s(%s)",
+			t4Result.Value.Kind, t4Result.Value.Func, strings.Join(t4Result.Value.Args, ", "))
 	}
-	if len(t4Result.Value.Args) != 1 {
-		t.Fatalf("expected ecMulGen to take exactly one scalar arg, got %v", t4Result.Value.Args)
-	}
-
-	helperName := t4Result.Value.Args[0]
-	helper := findBinding(body, helperName)
-	if helper == nil {
-		t.Fatalf("expected helper binding %q for k1+k2 to exist after optimization", helperName)
+	if len(t4Result.Value.Args) != 2 || t4Result.Value.Args[0] != "t2" || t4Result.Value.Args[1] != "t3" {
+		t.Errorf("expected t4 to keep its original operands, got %v", t4Result.Value.Args)
 	}
 
-	// The load-bearing assertion: the helper is a bare bin_op "+" over the two
-	// original runtime scalars, with no mod-n (or any other) wrapping — the
-	// rule engine's compile-time fold path (which DOES reduce mod n) never
-	// fires here because neither k1 nor k2 resolves to a load_const bigint.
-	if helper.Value.Kind != "bin_op" {
-		t.Fatalf("expected helper %q to be a bin_op (unreduced runtime sum), got Kind=%q", helperName, helper.Value.Kind)
+	// No synthesized scalar-sum helper of any kind may be left behind.
+	for _, b := range body {
+		if b.Value.Kind == "bin_op" {
+			t.Errorf("unexpected synthesized bin_op helper %q (%s %s %s) — the rule must not fire",
+				b.Name, b.Value.Left, b.Value.Op, b.Value.Right)
+		}
 	}
-	if helper.Value.Op != "+" {
-		t.Errorf("expected helper %q Op to be %q, got %q", helperName, "+", helper.Value.Op)
+
+	// Both generator multiplications must survive: two in, two out.
+	mulGens := 0
+	for _, b := range body {
+		if b.Value.Kind == "call" && b.Value.Func == "ecMulGen" {
+			mulGens++
+		}
 	}
-	if helper.Value.Left != "k1" || helper.Value.Right != "k2" {
-		t.Errorf("expected helper %q to sum k1 and k2, got Left=%q Right=%q", helperName, helper.Value.Left, helper.Value.Right)
+	if mulGens != 2 {
+		t.Errorf("expected 2 surviving ecMulGen calls, got %d", mulGens)
 	}
 }
 
