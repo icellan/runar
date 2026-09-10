@@ -4228,7 +4228,12 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "{} requires 1 argument", func_name);
+        assert!(
+            args.len() == 1,
+            "{} requires exactly 1 argument, got {}",
+            func_name,
+            args.len()
+        );
         let is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], is_last);
 
@@ -4546,7 +4551,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "__array_access requires 2 arguments (object, index)");
+        assert!(
+            args.len() == 2,
+            "__array_access requires exactly 2 arguments (object, index), got {}",
+            args.len()
+        );
 
         let obj = &args[0];
         let index = &args[1];
@@ -4604,7 +4613,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "reverseBytes requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "reverseBytes requires exactly 1 argument, got {}",
+            args.len()
+        );
         let is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], is_last);
 
@@ -4650,7 +4663,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "substr requires 3 arguments");
+        assert!(
+            args.len() == 3,
+            "substr requires exactly 3 arguments, got {}",
+            args.len()
+        );
 
         let data = &args[0];
         let start = &args[1];
@@ -4701,7 +4718,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 4, "verifyRabinSig requires 4 arguments");
+        assert!(
+            args.len() == 4,
+            "verifyRabinSig requires exactly 4 arguments, got {}",
+            args.len()
+        );
 
         // Bring all 4 args to the top in argument order: msg sig padding pubKey
         for arg in args {
@@ -4730,7 +4751,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "sign requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "sign requires exactly 1 argument, got {}",
+            args.len()
+        );
         let x = &args[0];
 
         let x_is_last = self.is_last_use(x, binding_index, last_uses);
@@ -4761,7 +4786,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "right requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "right requires exactly 2 arguments, got {}",
+            args.len()
+        );
         let data = &args[0];
         let length = &args[1];
 
@@ -4795,7 +4824,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "verifyWOTS requires 3 arguments: msg, sig, pubkey");
+        assert!(
+            args.len() == 3,
+            "verifyWOTS requires exactly 3 arguments (msg, sig, pubkey), got {}",
+            args.len()
+        );
 
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4822,8 +4855,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 3,
-            "verifySLHDSA requires 3 arguments: msg, sig, pubkey"
+            args.len() == 3,
+            "verifySLHDSA requires exactly 3 arguments (msg, sig, pubkey), got {}",
+            args.len()
         );
 
         // Bring args to top in order: msg, sig, pubkey
@@ -4854,8 +4888,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 2,
-            "sha256Compress requires 2 arguments: state, block"
+            args.len() == 2,
+            "sha256Compress requires exactly 2 arguments (state, block), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4879,8 +4914,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 3,
-            "sha256Finalize requires 3 arguments: state, remaining, msgBitLen"
+            args.len() == 3,
+            "sha256Finalize requires exactly 3 arguments (state, remaining, msgBitLen), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4904,8 +4940,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 2,
-            "blake3Compress requires 2 arguments: chainingValue, block"
+            args.len() == 2,
+            "blake3Compress requires exactly 2 arguments (chainingValue, block), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4929,8 +4966,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 1,
-            "blake3Hash requires 1 argument: message"
+            args.len() == 1,
+            "blake3Hash requires exactly 1 argument (message), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -5272,7 +5310,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "safediv requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "safediv requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5301,7 +5343,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "safemod requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "safemod requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5330,7 +5376,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "clamp requires 3 arguments");
+        assert!(
+            args.len() == 3,
+            "clamp requires exactly 3 arguments, got {}",
+            args.len()
+        );
 
         let val_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], val_consume);
@@ -5365,7 +5415,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "pow requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "pow requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let base_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], base_consume);
@@ -5411,7 +5465,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "mulDiv requires 3 arguments");
+        assert!(
+            args.len() == 3,
+            "mulDiv requires exactly 3 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5444,7 +5502,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "percentOf requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "percentOf requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let amount_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], amount_consume);
@@ -5473,7 +5535,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "sqrt requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "sqrt requires exactly 1 argument, got {}",
+            args.len()
+        );
 
         let n_is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], n_is_last);
@@ -5525,7 +5591,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "gcd requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "gcd requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5581,7 +5651,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "divmod requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "divmod requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5623,7 +5697,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "log2 requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "log2 requires exactly 1 argument, got {}",
+            args.len()
+        );
 
         let n_is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], n_is_last);
