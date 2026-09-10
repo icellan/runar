@@ -30,7 +30,7 @@ type TokenType =
   | 'public' | 'private' | 'immutable' | 'require' | 'if' | 'else'
   | 'for' | 'return' | 'true' | 'false' | 'let' | 'stateful'
   | 'ident' | 'number' | 'hexstring'
-  | '(' | ')' | '{' | '}' | '[' | ']' | ';' | ',' | '.' | ':'
+  | '(' | ')' | '{' | '}' | '[' | ']' | ';' | ',' | '.' | ':' | '?'
   | '+' | '-' | '*' | '/' | '%'
   | '==' | '!=' | '<' | '<=' | '>' | '>=' | '&&' | '||'
   | '<<' | '>>'
@@ -116,7 +116,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     if (ch === '-' && peekN(1) === '=') { advance(); advance(); add('-=', '-=', l, c); continue; }
 
     // Single-char operators & punctuation
-    const singles = '(){}[];,.:+-*/%<>=&|^~!';
+    const singles = '(){}[];,.:?+-*/%<>=&|^~!';
     if (singles.includes(ch as string)) {
       advance();
       add(ch as TokenType, ch, l, c);
@@ -699,7 +699,26 @@ class SolParser {
 
   // Expression parsing with precedence climbing
   private parseExpression(): Expression {
-    return this.parseOr();
+    return this.parseTernary();
+  }
+
+  /**
+   * Conditional operator `cond ? a : b`.
+   *
+   * Binds looser than `||` and is right-associative, so `a ? b : c ? d : e`
+   * nests as `a ? b : (c ? d : e)`. Mirrors Go's `parseSolTernary`
+   * (compilers/go/frontend/parser_sol.go), which every other tier follows.
+   */
+  private parseTernary(): Expression {
+    const condition = this.parseOr();
+    if (this.current().type === '?') {
+      this.advance();
+      const consequent = this.parseExpression();
+      this.expect(':');
+      const alternate = this.parseExpression();
+      return { kind: 'ternary_expr', condition, consequent, alternate };
+    }
+    return condition;
   }
 
   private parseOr(): Expression {
