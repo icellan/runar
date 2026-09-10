@@ -27,4 +27,16 @@ swc_ecma_ast = "0.118"
 # upstream wrap that packages/runar-rs's ScriptVm uses; pulled in here
 # directly because runar-lang depends on this crate and importing it back
 # would create a dependency cycle.
-bsv-sdk = ">=0.1, <0.3"
+#
+# >=0.2.89 is a REQUIREMENT, not a preference: 0.1.x builds the BIP-143
+# `hashPrevouts` in the wrong order for `input_index > 0` (see
+# docs/audit/upstream-bsv-sdk-bip143-hashprevouts.md). This crate's `debug`
+# subcommand only ever spends at index 0, so it does not hit the defect
+# itself -- the floor is here so the whole in-repo Rust graph resolves to
+# ONE bsv-sdk. `packages/runar-rs` path-depends on this crate and requires
+# >=0.2.89; leaving this crate at >=0.1 let its own lockfile settle on a
+# version below the floor (it held 0.2.82), so the compiler's `Spend` and
+# the SDK's `ScriptVm` were documented as "the same upstream" while
+# actually building different interpreters. `<0.3` keeps the two crates on
+# a single copy of bsv-sdk; moving to 0.4.x must bump both in one commit.
+bsv-sdk = ">=0.2.89, <0.3"

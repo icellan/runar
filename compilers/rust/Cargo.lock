@@ -134,12 +134,13 @@ dependencies = [
 
 [[package]]
 name = "bsv-sdk"
-version = "0.2.82"
+version = "0.2.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd05bd7d2eb9e3b4bd5436dc90fd917f7028589b2907a1df2a4667aab74f3ca1"
+checksum = "f5cb2792e1c396895f1cad8ef2034ee8fac58eb3ea53fca25bbdafa4050b9728"
 dependencies = [
  "async-trait",
  "getrandom",
+ "serde_json",
  "thiserror",
 ]
 
