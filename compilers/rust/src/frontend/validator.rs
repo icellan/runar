@@ -997,10 +997,19 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
         Statement::ForStatement {
             condition,
             init,
+            update,
             body,
             ..
         } => {
             validate_expression(condition, errors);
+
+            // R-029 / CL-BUG-008: constrain the update clause. Nothing used to
+            // look at it — not this pass, not the type checker, not lowering —
+            // so it was a hole in the language's central rule that only Rúnar
+            // builtins and contract methods may be called, and any side effect
+            // written there vanished from the emitted script without a
+            // diagnostic.
+            validate_for_update(init, condition, update, errors);
 
             // Check that the loop bound is a compile-time constant. Non-zero
             // starts and countdown loops (`i--` with `>`/`>=`) are supported:
@@ -1034,6 +1043,121 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
                 validate_expression(v, errors);
             }
         }
+    }
+}
+
+/// Reject any for-loop update clause the loop model cannot represent
+/// (R-029 / CL-BUG-008).
+///
+/// The ANF `loop` node carries exactly `{ count, iter_var, start, step, body }`
+/// and synthesizes the iterator on unrolled iteration `k` as
+/// `start + k * step`. There is no slot for an arbitrary update statement, and
+/// `extract_loop_step` only ever understood a unit step — everything else was
+/// silently coerced to `+1` (or `-1` from the comparison direction) and the
+/// clause itself was discarded. That made three distinct failures indis-
+/// tinguishable from a correct compile:
+///
+///   * `for (let i = 0n; i < 5n; undefinedFn())` produced byte-identical
+///     output to `i++`. A nonexistent function name raised nothing.
+///   * `for (let i = 0n; i < 5n; this.count++)` dropped the state write.
+///   * `for (int i = 0; i < 6; i += 2)` unrolled 6 times over 0..5 instead of
+///     3 times over 0,2,4 (the Go tier's CL-BUG-128, same family).
+///
+/// Rejecting is the fix rather than lowering: appending the update's lowering
+/// to the loop body would re-emit `i++` as a dead binding on every loop that
+/// already compiles correctly, moving bytes across the whole corpus to express
+/// nothing.
+///
+/// The accepted set is every shape the nine frontends actually synthesize:
+/// `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+/// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
+/// the effect-free no-op sentinel (a literal or a bare identifier) that the
+/// while-shaped parsers synthesize when the source has no continue expression
+/// at all.
+///
+/// The advanced variable must be the declared iterator or the identifier the
+/// condition tests. Both are needed: the Zig parser only folds
+/// `var i = 0; while (i < N) : (i += 1)` into a single ForStatement when the
+/// declaration is the immediately preceding statement, so an unfolded loop
+/// carries the placeholder `__while_no_init` as its init while the update
+/// advances the real `i` named in the condition.
+fn validate_for_update(
+    init: &Statement,
+    condition: &Expression,
+    update: &Statement,
+    errors: &mut Vec<Diagnostic>,
+) {
+    // Names the update is allowed to advance: the declared iterator, plus the
+    // identifier the condition tests (see the doc comment's Zig case).
+    let mut allowed: Vec<&str> = Vec::new();
+    if let Statement::VariableDecl { name, .. } = init {
+        allowed.push(name.as_str());
+    }
+    if let Expression::BinaryExpr { left, .. } = condition {
+        if let Expression::Identifier { name } = left.as_ref() {
+            allowed.push(name.as_str());
+        }
+    }
+
+    if for_update_is_representable(&allowed, update) {
+        return;
+    }
+
+    errors.push(Diagnostic::error(
+        "For loop update must advance the loop variable by one (`i++`, `i--`, \
+         `i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a \
+         unit step, so any other update clause -- a function call, a state mutation, or a \
+         non-unit step such as `i += 2` -- cannot be represented and would be discarded",
+        None,
+    ));
+}
+
+/// True when `expr` names one of the identifiers the update is allowed to
+/// advance. A property access, an index access or anything else is never
+/// accepted: those are the side effects that used to be dropped.
+fn is_allowed_loop_var(allowed: &[&str], expr: &Expression) -> bool {
+    match expr {
+        Expression::Identifier { name } => allowed.iter().any(|a| *a == name.as_str()),
+        _ => false,
+    }
+}
+
+fn is_literal_one(expr: &Expression) -> bool {
+    matches!(expr, Expression::BigIntLiteral { value } if *value == num_bigint::BigInt::from(1))
+}
+
+fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
+    match update {
+        Statement::ExpressionStatement { expression, .. } => match expression {
+            Expression::IncrementExpr { operand, .. }
+            | Expression::DecrementExpr { operand, .. } => is_allowed_loop_var(allowed, operand),
+            // The no-op sentinel a while-shaped frontend synthesizes when the
+            // source carries no continue expression: `zig`'s `while (c) {}`,
+            // `move`'s `while (c) {}`, `go`'s `for c {}`. Reading a literal or
+            // a bare identifier has no effect, so discarding it loses nothing.
+            Expression::BigIntLiteral { .. }
+            | Expression::BoolLiteral { .. }
+            | Expression::Identifier { .. } => true,
+            _ => false,
+        },
+        // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+        Statement::Assignment { target, value, .. } => {
+            if !is_allowed_loop_var(allowed, target) {
+                return false;
+            }
+            match value {
+                Expression::BinaryExpr { op, left, right } => match op {
+                    BinaryOp::Add => {
+                        (is_allowed_loop_var(allowed, left) && is_literal_one(right))
+                            || (is_literal_one(left) && is_allowed_loop_var(allowed, right))
+                    }
+                    BinaryOp::Sub => is_allowed_loop_var(allowed, left) && is_literal_one(right),
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 

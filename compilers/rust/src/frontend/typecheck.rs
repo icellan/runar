@@ -562,6 +562,7 @@ terminal (no state mutation)",
             Statement::ForStatement {
                 init,
                 condition,
+                update,
                 body,
                 ..
             } => {
@@ -574,6 +575,16 @@ terminal (no state mutation)",
                         cond_type
                     ));
                 }
+                // R-029 / CL-BUG-008: the update clause used to fall into the
+                // rest pattern and was never checked, so `for (let i = 0n;
+                // i < 3n; undefinedFn())` compiled clean -- a hole in the rule
+                // that only Rúnar builtins and contract methods are callable
+                // (CLAUDE.md names `console.log` explicitly). The validator
+                // separately restricts the clause to a unit-step advance;
+                // this is the type-level half of the same guard, and it is
+                // what catches an unknown name on the `--ir`-adjacent paths
+                // that skip validation.
+                self.check_statement(update, env);
                 self.check_statements(body, env);
                 env.pop_scope();
             }

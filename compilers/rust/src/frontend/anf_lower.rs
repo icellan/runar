@@ -1946,8 +1946,24 @@ fn extract_loop_step(condition: &Expression, update: &Statement) -> i64 {
             _ => {}
         }
     }
-    // Fall back to the comparison direction for other unit-step spellings
-    // (e.g. `i = i + 1n`): `<`/`<=` counts up, `>`/`>=` counts down.
+    // `i += 1` reaches the AST as `i = i + 1` from the solidity, zig and java
+    // frontends. Read the direction off the operator rather than guessing it
+    // from the comparison: a source that spells `i = i + 1n` against a `>`
+    // bound then reaches the count computation with step +1 and is refused
+    // there ("counting up must use '<' or '<='"), instead of quietly counting
+    // down in the opposite direction from what the source says (R-029).
+    if let Statement::Assignment { value, .. } = update {
+        if let Expression::BinaryExpr { op, .. } = value {
+            match op {
+                BinaryOp::Add => return 1,
+                BinaryOp::Sub => return -1,
+                _ => {}
+            }
+        }
+    }
+    // Fall back to the comparison direction for the effect-free no-op sentinel
+    // a while-shaped frontend synthesizes when the source carries no continue
+    // expression: `<`/`<=` counts up, `>`/`>=` counts down.
     if let Expression::BinaryExpr { op, .. } = condition {
         if *op == BinaryOp::Gt || *op == BinaryOp::Ge {
             return -1;
