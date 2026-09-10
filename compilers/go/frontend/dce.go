@@ -128,6 +128,14 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 		for _, sv := range v.StateValues {
 			refs[sv] = true
 		}
+		// Preimage completes parity with the TS reference. Both frontends
+		// emit add_output with preimage="" today, so this is latent — but
+		// the --ir path deserializes the field, and codegen/stack.go
+		// (collectRefs / lowerAddOutput) reads it, so a non-empty preimage
+		// arriving that way would dangle exactly like deserialize_state's.
+		if v.Preimage != "" {
+			refs[v.Preimage] = true
+		}
 	case "add_raw_output", "add_data_output":
 		// Both operands are read by codegen/stack.go lowerAddRawOutput, so
 		// their producing bindings must be kept live — matches the TS
@@ -142,11 +150,24 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 			refs[v.ScriptBytes] = true
 		}
 	case "deserialize_state":
-		// Pre-existing silent fall-through preserved: preimage ref is
-		// not collected here. The deserialize_state binding itself is
-		// kept by HasSideEffect.
+		// The binding itself is kept by HasSideEffect, but codegen
+		// (stack.go lowerDeserializeState) brings the preimage to TOS, so
+		// its producer must stay live too — otherwise the consumer outlives
+		// its producer and stack lowering panics with
+		// `value "…" not found on stack`. Matches the TS reference
+		// (optimizer/dce.ts collectRefsFromValue).
+		if v.Preimage != "" {
+			refs[v.Preimage] = true
+		}
 	case "array_literal":
-		// Pre-existing silent fall-through preserved.
+		// array_literal is pure, but it survives whenever a consumer
+		// (checkMultiSig) references it. lowerCheckMultiSig pulls each
+		// element to TOS at the use site, so the element producers must
+		// stay live — same dangling shape as above. Matches the TS
+		// reference (optimizer/dce.ts collectRefsFromValue).
+		for _, elem := range v.Elements {
+			refs[elem] = true
+		}
 	case "get_state_script", "raw_script":
 		// no SSA operand refs.
 	default:
