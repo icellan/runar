@@ -743,9 +743,69 @@ const TypeChecker = struct {
     // Binary expression type checking
     // ------------------------------------------------------------------
 
+    /// N-097: type an operand of a binary expression, resolving a FixedArray
+    /// ELEMENT READ (`this.<prop>[idx]`) to the array's declared element type.
+    ///
+    /// This is the R-073 shape (`1f8eb8a9`) applied to the read side: the type
+    /// is read off the DECLARED property, at the one site that needs it, rather
+    /// than taught to `inferExprType`. `inferExprType(.index_access)` still
+    /// returns `.unknown` for every caller — see `operandElementType` for why
+    /// that separation is load-bearing.
+    ///
+    /// `inferExprType` is called first and unconditionally: it is what reports
+    /// "array index must be bigint" and what walks the index sub-expression for
+    /// affine-consumption tracking. Only its RESULT is substituted, and only
+    /// when it came back `.unknown` — a tier that already has an opinion keeps
+    /// it.
+    fn inferOperandType(self: *TypeChecker, expr: Expression, env: *TypeEnv) RunarType {
+        const inferred = self.inferExprType(expr, env);
+        if (inferred != .unknown) return inferred;
+        return self.operandElementType(expr, env) orelse inferred;
+    }
+
+    /// The declared element type of `this.<prop>[idx]`, or null when the
+    /// expression is not a resolvable single-level read of a FixedArray
+    /// property.
+    ///
+    /// SCOPE — why this is not simply `inferExprType(.index_access)`:
+    ///
+    /// The N-019 tripwire at the bottom of this file forbids typing element
+    /// reads in general, because the `.increment` / `.decrement` arms would
+    /// then accept `this.board[i]++`. This tier's `expand_fixed_arrays`
+    /// rewrites an increment by recursing into its operand, so a runtime-index
+    /// increment becomes `increment(<read-dispatch ternary>)`: it increments a
+    /// temporary, writes back to no slot, and emits no state continuation —
+    /// the N-019 fund-loss defect verbatim. The pass-3b increment desugar that
+    /// the other six tiers carry is not ported here.
+    ///
+    /// Keeping the resolution in a helper that only `checkBinaryExpr` calls is
+    /// what keeps that shut: the increment arms still call `inferExprType`,
+    /// still see `.unknown`, and still refuse. The tripwire test is unmodified
+    /// and still passes.
+    ///
+    /// Only a `this.<prop>` base is resolved. A local that merely shares the
+    /// array's name parses as `.identifier`, not `.property_access`, so
+    /// shadowing cannot borrow the property's element type. A nested chain
+    /// (`this.grid[0][1]`) has an `.index_access` object and is absent from
+    /// `prop_elem_types` anyway — it stays `.unknown`, the documented R-073
+    /// residual gap.
+    fn operandElementType(self: *TypeChecker, expr: Expression, env: *TypeEnv) ?RunarType {
+        const ia = switch (expr) {
+            .index_access => |p| p.*,
+            else => return null,
+        };
+        const base = switch (ia.object) {
+            .property_access => |pa| pa,
+            else => return null,
+        };
+        if (!std.mem.eql(u8, base.object, "this")) return null;
+        if (env.lookup(base.property) != null) return null;
+        return self.prop_elem_types.get(base.property);
+    }
+
     fn checkBinaryExpr(self: *TypeChecker, bin: *const types.BinaryOp, env: *TypeEnv) RunarType {
-        const left_type = self.inferExprType(bin.left, env);
-        const right_type = self.inferExprType(bin.right, env);
+        const left_type = self.inferOperandType(bin.left, env);
+        const right_type = self.inferOperandType(bin.right, env);
 
         switch (bin.op) {
             // ByteString concatenation: ByteString + ByteString -> ByteString
@@ -2391,11 +2451,17 @@ test "isBigintFamily: comprehensive" {
 // ---------------------------------------------------------------------------
 
 // `inferExprType`'s `.index_access` arm returns `.unknown` unconditionally — it
-// never resolves a FixedArray property base to its element type. Every read of
-// an array element used as an arithmetic operand is therefore a hard type
-// error, INCLUDING the literal-index form and the `arr[i] = arr[i] + 1` shape
-// that N-019's desugar targets in the other six tiers. Runtime-index WRITES
-// (`this.board[i] = v`) are unaffected and compile today.
+// never resolves a FixedArray property base to its element type, and it must
+// keep not doing so.
+//
+// N-097 UPDATE: arithmetic and relational OPERANDS no longer depend on that
+// arm. `checkBinaryExpr` routes its two operands through `inferOperandType`,
+// which reads the element type off the declared property (the R-073 shape), so
+// `assert(this.xs[0] >= 0n)` and the `arr[i] = arr[i] + 1` shape now compile
+// here and are byte-identical to the other six tiers. What did NOT move, and
+// what this tripwire still guards, is the `.increment` / `.decrement` arms:
+// they call `inferExprType` directly, still see `.unknown`, and still refuse.
+// Runtime-index WRITES (`this.board[i] = v`) were always unaffected.
 //
 // This is a loud refusal, not a silent miscompile: unlike the six tiers where
 // `this.board[i]++` emitted NO state continuation at all (leaving the spending
@@ -2403,11 +2469,13 @@ test "isBigintFamily: comprehensive" {
 // outright. The N-019 pass-3b desugar is therefore NOT ported here: it would be
 // dead code behind this type error.
 //
-// WHEN THIS TEST STARTS FAILING, the typechecker has learned to type array
+// WHEN THIS TEST STARTS FAILING, the `.increment` arm has learned to type array
 // element reads — and `this.board[i]++` will begin compiling in this tier with
 // the N-019 defect intact. Port the pass-3b desugar from
 // `passes/expand_fixed_arrays.zig`'s peers (Go / TS / Python / Ruby / Java /
-// Rust) BEFORE relaxing this.
+// Rust) BEFORE relaxing this. Widening `inferOperandType` is NOT a substitute:
+// it is reached only from `checkBinaryExpr`, which is exactly why it is safe.
+// See `src/tests/n097_fixed_array_element_read.zig`.
 fn n019ArrayElementIncrementContract(alloc: Allocator) !ContractNode {
     const board_read = try alloc.create(types.IndexAccess);
     board_read.* = .{
