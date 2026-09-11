@@ -945,9 +945,65 @@ public final class Validate {
             if (f.init() != null) {
                 validateExpression(f.init().init());
             }
+            validateForUpdate(f);
             for (Statement s : f.body()) {
                 validateStatement(s);
             }
+        }
+
+        /**
+         * Reject any for-loop update clause the loop model cannot represent (R-065).
+         *
+         * <p>The ANF {@code loop} node carries exactly {@code {count, iterVar, start, step, body}}
+         * and synthesizes the iterator on unrolled iteration k as {@code start + k*step}. There is
+         * no slot for an arbitrary update statement, and {@code AnfLower}'s
+         * {@code extractLoopStep} only ever understood a unit step — everything else was silently
+         * coerced to {@code +1} (or {@code -1} from the comparison direction) and the clause itself
+         * was discarded. That made three distinct failures indistinguishable from a correct
+         * compile:
+         *
+         * <ul>
+         *   <li>{@code for (let i = 0n; i < 3n; undefinedFn())} produced byte-identical output. A
+         *       nonexistent function name raised nothing.
+         *   <li>{@code for (let i = 0n; i < 3n; this.count++)} dropped the state write.
+         *   <li>{@code while (i < 5) : (i += 2)} unrolled 5 times over i = 0..4 instead of 3 times
+         *       over i = 0,2,4.
+         * </ul>
+         *
+         * <p>{@code spec/grammar.md}'s ForStatement production admits only
+         * {@code Identifier ('++' | '--')}, and its Statement Restrictions say "The loop variable
+         * MUST use simple increment ({@code ++}) or decrement ({@code --})". So rejecting is the
+         * fix rather than lowering: appending the update's lowering to the loop body would re-emit
+         * {@code i++} as a dead binding on every loop that already compiles correctly, moving bytes
+         * across the whole corpus to express nothing.
+         *
+         * <p>The accepted set is every shape the nine frontends actually synthesize:
+         * {@code i++}/{@code i--}/{@code ++i}/{@code --i}; the assignment spelling
+         * {@code i = i + 1} / {@code i = i - 1} / {@code i = 1 + i} that {@code i += 1} becomes in
+         * the Solidity, Zig and Java parsers; and the effect-free no-op sentinel (a literal or a
+         * bare identifier) that the while-shaped parsers synthesize when the source has no continue
+         * expression at all.
+         *
+         * <p>The advanced variable must be the declared iterator or the identifier the condition
+         * tests. Both are needed: the Zig parser only folds
+         * {@code var i = 0; while (i < N) : (i += 1)} into a single ForStatement when the
+         * declaration is the immediately preceding statement, so an unfolded loop carries a
+         * placeholder init while the update advances the real {@code i} named in the condition.
+         */
+        private void validateForUpdate(ForStatement f) {
+            List<String> allowed = new ArrayList<>();
+            if (f.init() != null) {
+                allowed.add(f.init().name());
+            }
+            if (f.condition() instanceof BinaryExpr be && be.left() instanceof Identifier id) {
+                allowed.add(id.name());
+            }
+
+            if (isRepresentableForUpdate(allowed, f.update())) {
+                return;
+            }
+
+            error(LOOP_UPDATE_DIAGNOSTIC, f.sourceLocation());
         }
 
         // --------------------------------------------------------------
@@ -1225,6 +1281,72 @@ public final class Validate {
         if (e instanceof UnaryExpr u && u.op() == Expression.UnaryOp.NEG) {
             return isCompileTimeConstant(u.operand());
         }
+        return false;
+    }
+
+    /**
+     * Shared verbatim with the other six tiers. Per-tier diagnostic drift on the same rejection is
+     * a recurring defect in this repo, so the string is mirrored, character for character, in
+     * {@code packages/runar-compiler/src/passes/02-validate.ts},
+     * {@code compilers/go/frontend/validator.go},
+     * {@code compilers/rust/src/frontend/validator.rs},
+     * {@code compilers/python/runar_compiler/frontend/validator.py},
+     * {@code compilers/zig/src/frontend/validator.zig} and
+     * {@code compilers/ruby/lib/runar_compiler/frontend/validator.rb}.
+     */
+    private static final String LOOP_UPDATE_DIAGNOSTIC =
+        "For loop update must advance the loop variable by one (`i++`, `i--`, "
+            + "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a "
+            + "unit step, so any other update clause -- a function call, a state mutation, or a "
+            + "non-unit step such as `i += 2` -- cannot be represented and would be discarded";
+
+    /**
+     * True when {@code e} names one of the identifiers the update is allowed to advance. A property
+     * access, an index access or anything else is never accepted: those are the side effects that
+     * used to be dropped.
+     */
+    private static boolean isAllowedLoopVar(List<String> allowed, Expression e) {
+        return e instanceof Identifier id && allowed.contains(id.name());
+    }
+
+    private static boolean isLiteralOne(Expression e) {
+        return e instanceof BigIntLiteral b && b.value() != null
+            && b.value().equals(java.math.BigInteger.ONE);
+    }
+
+    private static boolean isRepresentableForUpdate(List<String> allowed, Statement update) {
+        if (update instanceof ExpressionStatement es) {
+            Expression e = es.expression();
+            if (e instanceof IncrementExpr inc) {
+                return isAllowedLoopVar(allowed, inc.operand());
+            }
+            if (e instanceof DecrementExpr dec) {
+                return isAllowedLoopVar(allowed, dec.operand());
+            }
+            // The no-op sentinel a while-shaped frontend synthesizes when the source carries no
+            // continue expression: zig's `while (c) {}`, move's `while (c) {}`, go's `for c {}`.
+            // Reading a literal or a bare identifier has no effect, so discarding it loses nothing.
+            return e instanceof BigIntLiteral || e instanceof BoolLiteral || e instanceof Identifier;
+        }
+
+        if (update instanceof AssignmentStatement as) {
+            // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+            if (!isAllowedLoopVar(allowed, as.target())) {
+                return false;
+            }
+            if (!(as.value() instanceof BinaryExpr be)) {
+                return false;
+            }
+            if (be.op() == Expression.BinaryOp.ADD) {
+                return (isAllowedLoopVar(allowed, be.left()) && isLiteralOne(be.right()))
+                    || (isLiteralOne(be.left()) && isAllowedLoopVar(allowed, be.right()));
+            }
+            if (be.op() == Expression.BinaryOp.SUB) {
+                return isAllowedLoopVar(allowed, be.left()) && isLiteralOne(be.right());
+            }
+            return false;
+        }
+
         return false;
     }
 

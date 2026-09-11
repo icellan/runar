@@ -816,6 +816,13 @@ class TypeChecker {
             stmt.sourceLocation,
           ));
         }
+        // R-065: the update clause used to be skipped entirely, so
+        // `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole in
+        // the rule that only Rúnar builtins and contract methods are callable
+        // (CLAUDE.md names `console.log` explicitly). `02-validate.ts`
+        // separately restricts the clause to a unit-step advance; this is the
+        // type-level half of the same guard.
+        this.checkStatement(stmt.update, env);
         // Check body
         this.checkStatements(stmt.body, env, stmt.sourceLocation);
         env.popScope();

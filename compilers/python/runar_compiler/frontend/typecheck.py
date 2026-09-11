@@ -494,6 +494,13 @@ class _TypeChecker:
                 self._add_error(
                     f"for loop condition must be boolean, got '{cond_type}'"
                 )
+            # R-065: the update clause used to be skipped entirely, so
+            # ``for (let i = 0n; i < 3n; undefinedFn())`` compiled clean -- a
+            # hole in the rule that only Rúnar builtins and contract methods
+            # are callable (CLAUDE.md names ``console.log`` explicitly).
+            # validator.py separately restricts the clause to a unit-step
+            # advance; this is the type-level half of the same guard.
+            self._check_statement(stmt.update, env)
             self._check_statements(stmt.body, env)
             env.pop_scope()
 

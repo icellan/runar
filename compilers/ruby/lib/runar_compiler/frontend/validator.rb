@@ -633,7 +633,116 @@ module RunarCompiler
         end
 
         validate_expression(stmt.init.init)
+        validate_for_update(stmt)
         stmt.body.each { |s| validate_statement(s) }
+      end
+
+      # Shared verbatim with the other six tiers. Per-tier diagnostic drift on
+      # the same rejection is a recurring defect in this repo, so the string is
+      # mirrored, character for character, in
+      # packages/runar-compiler/src/passes/02-validate.ts,
+      # compilers/go/frontend/validator.go,
+      # compilers/rust/src/frontend/validator.rs,
+      # compilers/python/runar_compiler/frontend/validator.py,
+      # compilers/zig/src/frontend/validator.zig and
+      # compilers/java/src/main/java/runar/compiler/passes/Validate.java.
+      LOOP_UPDATE_DIAGNOSTIC =
+        "For loop update must advance the loop variable by one (`i++`, `i--`, " \
+        "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a " \
+        "unit step, so any other update clause -- a function call, a state mutation, or a " \
+        "non-unit step such as `i += 2` -- cannot be represented and would be discarded"
+
+      # Reject any for-loop update clause the loop model cannot represent
+      # (R-065).
+      #
+      # The ANF `loop` node carries exactly `{count, iterVar, start, step, body}`
+      # and synthesizes the iterator on unrolled iteration k as
+      # `start + k*step`. There is no slot for an arbitrary update statement,
+      # and `extract_loop_step` only ever understood a unit step -- everything
+      # else was silently coerced to `+1` (or `-1` from the comparison
+      # direction) and the clause itself was discarded. That made three distinct
+      # failures indistinguishable from a correct compile:
+      #
+      #   * `for (let i = 0n; i < 3n; undefinedFn())` produced byte-identical
+      #     output. A nonexistent function name raised nothing.
+      #   * `for (let i = 0n; i < 3n; this.count++)` dropped the state write.
+      #   * `while (i < 5) : (i += 2)` unrolled 5 times over i = 0..4 instead of
+      #     3 times over i = 0,2,4.
+      #
+      # spec/grammar.md's ForStatement production admits only
+      # `Identifier ('++' | '--')`, and its Statement Restrictions say "The loop
+      # variable MUST use simple increment (`++`) or decrement (`--`)". So
+      # rejecting is the fix rather than lowering: appending the update's
+      # lowering to the loop body would re-emit `i++` as a dead binding on every
+      # loop that already compiles correctly, moving bytes across the whole
+      # corpus to express nothing.
+      #
+      # The accepted set is every shape the nine frontends actually synthesize:
+      # `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` /
+      # `i = i - 1` / `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and
+      # Java parsers; and the effect-free no-op sentinel (a literal or a bare
+      # identifier) that the while-shaped parsers synthesize when the source has
+      # no continue expression at all.
+      #
+      # The advanced variable must be the declared iterator or the identifier
+      # the condition tests. Both are needed: the Zig parser only folds
+      # `var i = 0; while (i < N) : (i += 1)` into a single ForStmt when the
+      # declaration is the immediately preceding statement, so an unfolded loop
+      # carries a placeholder init while the update advances the real `i` named
+      # in the condition.
+      def validate_for_update(stmt)
+        allowed = []
+        allowed << stmt.init.name unless stmt.init.nil?
+        if stmt.condition.is_a?(BinaryExpr) && stmt.condition.left.is_a?(Identifier)
+          allowed << stmt.condition.left.name
+        end
+
+        return if representable_for_update?(allowed, stmt.update)
+
+        add_error(LOOP_UPDATE_DIAGNOSTIC, loc: stmt.source_location)
+      end
+
+      # True when `expr` names one of the identifiers the update is allowed to
+      # advance. A property access, an index access or anything else is never
+      # accepted: those are the side effects that used to be dropped.
+      def allowed_loop_var?(allowed, expr)
+        expr.is_a?(Identifier) && allowed.include?(expr.name)
+      end
+
+      def literal_one?(expr)
+        expr.is_a?(BigIntLiteral) && expr.value == 1
+      end
+
+      def representable_for_update?(allowed, update)
+        case update
+        when ExpressionStmt
+          e = update.expr
+          return allowed_loop_var?(allowed, e.operand) if e.is_a?(IncrementExpr) || e.is_a?(DecrementExpr)
+
+          # The no-op sentinel a while-shaped frontend synthesizes when the
+          # source carries no continue expression: zig's `while (c) {}`, move's
+          # `while (c) {}`, go's `for c {}`. Reading a literal or a bare
+          # identifier has no effect, so discarding it loses nothing.
+          e.is_a?(BigIntLiteral) || e.is_a?(BoolLiteral) || e.is_a?(Identifier)
+        when AssignmentStmt
+          # `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+          return false unless allowed_loop_var?(allowed, update.target)
+
+          v = update.value
+          return false unless v.is_a?(BinaryExpr)
+
+          case v.op
+          when "+"
+            (allowed_loop_var?(allowed, v.left) && literal_one?(v.right)) ||
+              (literal_one?(v.left) && allowed_loop_var?(allowed, v.right))
+          when "-"
+            allowed_loop_var?(allowed, v.left) && literal_one?(v.right)
+          else
+            false
+          end
+        else
+          false
+        end
       end
 
       # -------------------------------------------------------------------

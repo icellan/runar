@@ -918,9 +918,138 @@ func (ctx *validationContext) validateForStatement(stmt ForStmt) {
 	}
 
 	ctx.validateExpression(stmt.Init.Init)
+	ctx.validateForUpdate(stmt)
 	for _, s := range stmt.Body {
 		ctx.validateStatement(s)
 	}
+}
+
+// loopUpdateDiagnosticMsg is shared verbatim with the other six tiers. Per-tier
+// diagnostic drift on the same rejection is a recurring defect in this repo, so
+// the string is pinned here and mirrored, character for character, in
+// packages/runar-compiler/src/passes/02-validate.ts,
+// compilers/rust/src/frontend/validator.rs,
+// compilers/python/runar_compiler/frontend/validator.py,
+// compilers/zig/src/frontend/validator.zig,
+// compilers/ruby/lib/frontend/validator.rb and
+// compilers/java/src/main/java/runar/compiler/passes/Validate.java.
+const loopUpdateDiagnosticMsg = "For loop update must advance the loop variable by one (`i++`, `i--`, " +
+	"`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a " +
+	"unit step, so any other update clause -- a function call, a state mutation, or a " +
+	"non-unit step such as `i += 2` -- cannot be represented and would be discarded"
+
+// validateForUpdate rejects any for-loop update clause the loop model cannot
+// represent (R-065).
+//
+// The ANF `loop` node carries exactly `{count, iterVar, start, step, body}` and
+// synthesizes the iterator on unrolled iteration k as `start + k*step`. There
+// is no slot for an arbitrary update statement, and extractLoopStep only ever
+// understood a unit step — everything else was silently coerced to `+1` (or
+// `-1` from the comparison direction) and the clause itself was discarded. That
+// made three distinct failures indistinguishable from a correct compile:
+//
+//   - `for (let i = 0n; i < 3n; undefinedFn())` produced byte-identical output.
+//     A nonexistent function name raised nothing.
+//   - `for (let i = 0n; i < 3n; this.count++)` dropped the state write.
+//   - `for (let i = 0n; i < 5n; i += 2n)` unrolled 5 times over i = 0..4 instead
+//     of 3 times over i = 0,2,4.
+//
+// spec/grammar.md's ForStatement production admits only
+// `Identifier ('++' | '--')`, and its Statement Restrictions say "The loop
+// variable MUST use simple increment (`++`) or decrement (`--`)". So rejecting
+// is the fix rather than lowering: appending the update's lowering to the loop
+// body would re-emit `i++` as a dead binding on every loop that already
+// compiles correctly, moving bytes across the whole corpus to express nothing.
+//
+// The accepted set is every shape the nine frontends actually synthesize:
+// `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
+// the effect-free no-op sentinel (a literal or a bare identifier) that the
+// while-shaped parsers synthesize when the source has no continue expression at
+// all.
+//
+// The advanced variable must be the declared iterator or the identifier the
+// condition tests. Both are needed: the Zig parser only folds
+// `var i = 0; while (i < N) : (i += 1)` into a single ForStmt when the
+// declaration is the immediately preceding statement, so an unfolded loop
+// carries a placeholder init while the update advances the real `i` named in
+// the condition.
+func (ctx *validationContext) validateForUpdate(stmt ForStmt) {
+	// Names the update is allowed to advance: the declared iterator, plus the
+	// identifier the condition tests (see the doc comment's Zig case).
+	allowed := []string{stmt.Init.Name}
+	if bin, ok := stmt.Condition.(BinaryExpr); ok {
+		if id, ok := bin.Left.(Identifier); ok {
+			allowed = append(allowed, id.Name)
+		}
+	}
+
+	if isRepresentableForUpdate(allowed, stmt.Update) {
+		return
+	}
+
+	loc := stmt.SourceLocation
+	ctx.addErrorWithLoc(loopUpdateDiagnosticMsg, &loc)
+}
+
+// isAllowedLoopVar reports whether expr names one of the identifiers the update
+// is allowed to advance. A property access, an index access or anything else is
+// never accepted: those are the side effects that used to be dropped.
+func isAllowedLoopVar(allowed []string, expr Expression) bool {
+	id, ok := expr.(Identifier)
+	if !ok {
+		return false
+	}
+	for _, a := range allowed {
+		if a == id.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func isLiteralOne(expr Expression) bool {
+	lit, ok := expr.(BigIntLiteral)
+	return ok && lit.Value != nil && lit.Value.IsInt64() && lit.Value.Int64() == 1
+}
+
+func isRepresentableForUpdate(allowed []string, update Statement) bool {
+	switch u := update.(type) {
+	case ExpressionStmt:
+		switch e := u.Expr.(type) {
+		case IncrementExpr:
+			return isAllowedLoopVar(allowed, e.Operand)
+		case DecrementExpr:
+			return isAllowedLoopVar(allowed, e.Operand)
+		case BigIntLiteral, BoolLiteral, Identifier:
+			// The no-op sentinel a while-shaped frontend synthesizes when the
+			// source carries no continue expression: zig's `while (c) {}`,
+			// move's `while (c) {}`, go's `for c {}`. Reading a literal or a
+			// bare identifier has no effect, so discarding it loses nothing.
+			return true
+		}
+		return false
+
+	case AssignmentStmt:
+		// `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+		if !isAllowedLoopVar(allowed, u.Target) {
+			return false
+		}
+		bin, ok := u.Value.(BinaryExpr)
+		if !ok {
+			return false
+		}
+		switch bin.Op {
+		case "+":
+			return (isAllowedLoopVar(allowed, bin.Left) && isLiteralOne(bin.Right)) ||
+				(isLiteralOne(bin.Left) && isAllowedLoopVar(allowed, bin.Right))
+		case "-":
+			return isAllowedLoopVar(allowed, bin.Left) && isLiteralOne(bin.Right)
+		}
+		return false
+	}
+
+	return false
 }
 
 // isCompileTimeConstant reports whether a for-loop bound can be unrolled into

@@ -659,6 +659,14 @@ public final class Typecheck {
                 if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
                     error("for-loop condition must be boolean, got '" + cond + "'");
                 }
+                // R-065: the update clause used to be skipped entirely, so
+                // `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole in the
+                // rule that only Rúnar builtins and contract methods are callable (CLAUDE.md
+                // names `console.log` explicitly). Validate separately restricts the clause to
+                // a unit-step advance; this is the type-level half of the same guard.
+                if (f.update() != null) {
+                    checkStatement(f.update(), env);
+                }
                 checkStatements(f.body(), env);
                 env.pop();
             } else if (s instanceof ExpressionStatement e) {

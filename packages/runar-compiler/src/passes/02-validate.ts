@@ -880,10 +880,119 @@ function validateForStatement(
   // Validate init
   validateExpression(stmt.init.init, ctx);
 
+  validateForUpdate(stmt, ctx);
+
   // Validate body
   for (const s of stmt.body) {
     validateStatement(s, ctx);
   }
+}
+
+/**
+ * Reject any for-loop update clause the loop model cannot represent (R-065).
+ *
+ * The ANF `loop` node carries exactly `{ count, iterVar, start, step, body }`
+ * and synthesizes the iterator on unrolled iteration k as `start + k*step`.
+ * There is no slot for an arbitrary update statement, and `extractLoopStep`
+ * only ever understood a unit step — everything else was silently coerced to
+ * `+1` (or `-1` from the comparison direction) and the clause itself was
+ * discarded. That made three distinct failures indistinguishable from a
+ * correct compile:
+ *
+ *   * `for (let i = 0n; i < 5n; undefinedFn())` produced byte-identical
+ *     output. A nonexistent function name raised nothing.
+ *   * `for (let i = 0n; i < 5n; this.count++)` dropped the state write.
+ *   * `while (i < 10) : (i += 2)` (Zig frontend) unrolled 10 times over
+ *     i = 0..9 instead of 5 times over i = 0,2,4,6,8.
+ *
+ * `spec/grammar.md`'s ForStatement production admits only
+ * `Identifier ('++' | '--')`, and its Statement Restrictions say "The loop
+ * variable MUST use simple increment (`++`) or decrement (`--`)". So rejecting
+ * is the fix rather than lowering: appending the update's lowering to the loop
+ * body would re-emit `i++` as a dead binding on every loop that already
+ * compiles correctly, moving bytes across the whole corpus to express nothing.
+ *
+ * The accepted set is every shape the nine frontends actually synthesize:
+ * `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+ * `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
+ * the effect-free no-op sentinel (a literal or a bare identifier) that the
+ * while-shaped parsers synthesize when the source has no continue expression
+ * at all.
+ *
+ * The advanced variable must be the declared iterator or the identifier the
+ * condition tests. Both are needed: the Zig parser only folds
+ * `var i = 0; while (i < N) : (i += 1)` into a single for_statement when the
+ * declaration is the immediately preceding statement, so an unfolded loop
+ * carries a placeholder init while the update advances the real `i` named in
+ * the condition.
+ *
+ * The diagnostic text is shared verbatim with the other six tiers.
+ */
+function validateForUpdate(
+  stmt: Extract<Statement, { kind: 'for_statement' }>,
+  ctx: ValidationContext,
+): void {
+  // Names the update is allowed to advance: the declared iterator, plus the
+  // identifier the condition tests (see the doc comment's Zig case).
+  const allowed: string[] = [stmt.init.name];
+  if (stmt.condition.kind === 'binary_expr' && stmt.condition.left.kind === 'identifier') {
+    allowed.push(stmt.condition.left.name);
+  }
+
+  if (isRepresentableForUpdate(allowed, stmt.update)) return;
+
+  ctx.errors.push(makeDiagnostic(
+    'For loop update must advance the loop variable by one (`i++`, `i--`, ' +
+    '`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a ' +
+    'unit step, so any other update clause -- a function call, a state mutation, or a ' +
+    'non-unit step such as `i += 2` -- cannot be represented and would be discarded',
+    'error',
+    stmt.sourceLocation,
+  ));
+}
+
+/**
+ * True when `expr` names one of the identifiers the update is allowed to
+ * advance. A property access, an index access or anything else is never
+ * accepted: those are the side effects that used to be dropped.
+ */
+function isAllowedLoopVar(allowed: string[], expr: Expression): boolean {
+  return expr.kind === 'identifier' && allowed.includes(expr.name);
+}
+
+function isLiteralOne(expr: Expression): boolean {
+  return expr.kind === 'bigint_literal' && expr.value === 1n;
+}
+
+function isRepresentableForUpdate(allowed: string[], update: Statement): boolean {
+  if (update.kind === 'expression_statement') {
+    const e = update.expression;
+    if (e.kind === 'increment_expr' || e.kind === 'decrement_expr') {
+      return isAllowedLoopVar(allowed, e.operand);
+    }
+    // The no-op sentinel a while-shaped frontend synthesizes when the source
+    // carries no continue expression: zig's `while (c) {}`, move's
+    // `while (c) {}`, go's `for c {}`. Reading a literal or a bare identifier
+    // has no effect, so discarding it loses nothing.
+    return e.kind === 'bigint_literal' || e.kind === 'bool_literal' || e.kind === 'identifier';
+  }
+
+  // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+  if (update.kind === 'assignment') {
+    if (!isAllowedLoopVar(allowed, update.target)) return false;
+    const v = update.value;
+    if (v.kind !== 'binary_expr') return false;
+    if (v.op === '+') {
+      return (isAllowedLoopVar(allowed, v.left) && isLiteralOne(v.right)) ||
+        (isLiteralOne(v.left) && isAllowedLoopVar(allowed, v.right));
+    }
+    if (v.op === '-') {
+      return isAllowedLoopVar(allowed, v.left) && isLiteralOne(v.right);
+    }
+    return false;
+  }
+
+  return false;
 }
 
 function isCompileTimeConstant(expr: Expression): boolean {

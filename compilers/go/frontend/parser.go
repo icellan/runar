@@ -1128,6 +1128,25 @@ func (p *parseContext) parseVariableDeclFromForInit(node *sitter.Node) *Variable
 }
 
 func (p *parseContext) parseForUpdate(node *sitter.Node, loc SourceLocation) Statement {
+	// R-065: `parseExpression` has no case for `assignment_expression` or
+	// `augmented_assignment_expression`, so `i = i + 2n` and `i += 2n` both
+	// returned nil and fell through to the no-op sentinel below -- the update
+	// clause was DISCARDED at parse time and the loop then unrolled with the
+	// step the comparison direction implied. Route both through the same
+	// desugaring an assignment in statement position gets (`i += 2n` becomes
+	// `i = i + 2n`), so the validator sees the real update and can accept the
+	// unit step / reject everything else.
+	switch node.Type() {
+	case "assignment_expression":
+		if stmt := p.parseAssignment(node, loc); stmt != nil {
+			return stmt
+		}
+	case "augmented_assignment_expression":
+		if stmt := p.parseAugmentedAssignment(node, loc); stmt != nil {
+			return stmt
+		}
+	}
+
 	expr := p.parseExpression(node)
 	if expr == nil {
 		return ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc}

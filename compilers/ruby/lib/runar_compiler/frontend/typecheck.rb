@@ -757,6 +757,13 @@ module RunarCompiler
           if cond_type != "boolean"
             add_error("for loop condition must be boolean, got '#{cond_type}'")
           end
+          # R-065: the update clause used to be skipped entirely, so
+          # `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole
+          # in the rule that only Runar builtins and contract methods are
+          # callable (CLAUDE.md names `console.log` explicitly). validator.rb
+          # separately restricts the clause to a unit-step advance; this is the
+          # type-level half of the same guard.
+          check_statement(stmt.update, env) unless stmt.update.nil?
           check_statements(stmt.body, env)
           env.pop_scope
 

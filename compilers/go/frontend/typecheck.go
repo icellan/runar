@@ -833,6 +833,13 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		if condType != "boolean" {
 			tc.addError(fmt.Sprintf("for loop condition must be boolean, got '%s'", condType))
 		}
+		// R-065: the update clause used to be skipped entirely, so
+		// `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole in
+		// the rule that only Rúnar builtins and contract methods are callable
+		// (CLAUDE.md names `console.log` explicitly). validator.go separately
+		// restricts the clause to a unit-step advance; this is the type-level
+		// half of the same guard.
+		tc.checkStatement(s.Update, env)
 		tc.checkStatements(s.Body, env)
 		env.popScope()
 

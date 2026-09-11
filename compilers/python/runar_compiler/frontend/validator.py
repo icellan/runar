@@ -698,9 +698,64 @@ class _ValidationContext:
             if not _is_compile_time_constant(stmt.condition.right):
                 self._add_error("for loop bound must be a compile-time constant")
 
-        self._validate_expression(stmt.init.init)
+        if stmt.init is not None:
+            self._validate_expression(stmt.init.init)
+        self._validate_for_update(stmt)
         for s in stmt.body:
             self._validate_statement(s)
+
+    def _validate_for_update(self, stmt: ForStmt) -> None:
+        """Reject any for-loop update clause the loop model cannot represent
+        (R-065).
+
+        The ANF ``loop`` node carries exactly ``{count, iterVar, start, step,
+        body}`` and synthesizes the iterator on unrolled iteration k as
+        ``start + k*step``. There is no slot for an arbitrary update statement,
+        and ``_extract_loop_step`` only ever understood a unit step —
+        everything else was silently coerced to ``+1`` (or ``-1`` from the
+        comparison direction) and the clause itself was discarded. That made
+        three distinct failures indistinguishable from a correct compile:
+
+        * ``for (let i = 0n; i < 3n; undefinedFn())`` produced byte-identical
+          output. A nonexistent function name raised nothing.
+        * ``for (let i = 0n; i < 3n; this.count++)`` dropped the state write.
+        * ``while (i < 5) : (i += 2)`` unrolled 5 times over i = 0..4 instead
+          of 3 times over i = 0,2,4.
+
+        ``spec/grammar.md``'s ForStatement production admits only
+        ``Identifier ('++' | '--')``, and its Statement Restrictions say "The
+        loop variable MUST use simple increment (``++``) or decrement
+        (``--``)". So rejecting is the fix rather than lowering: appending the
+        update's lowering to the loop body would re-emit ``i++`` as a dead
+        binding on every loop that already compiles correctly, moving bytes
+        across the whole corpus to express nothing.
+
+        The accepted set is every shape the nine frontends actually
+        synthesize: ``i++``/``i--``/``++i``/``--i``; the assignment spelling
+        ``i = i + 1`` / ``i = i - 1`` / ``i = 1 + i`` that ``i += 1`` becomes in
+        the Solidity, Zig and Java parsers; and the effect-free no-op sentinel
+        (a literal or a bare identifier) that the while-shaped parsers
+        synthesize when the source has no continue expression at all.
+
+        The advanced variable must be the declared iterator or the identifier
+        the condition tests. Both are needed: the Zig parser only folds
+        ``var i = 0; while (i < N) : (i += 1)`` into a single ForStmt when the
+        declaration is the immediately preceding statement, so an unfolded loop
+        carries a placeholder init while the update advances the real ``i``
+        named in the condition.
+        """
+        allowed: list[str] = []
+        if stmt.init is not None:
+            allowed.append(stmt.init.name)
+        if isinstance(stmt.condition, BinaryExpr) and isinstance(
+            stmt.condition.left, Identifier
+        ):
+            allowed.append(stmt.condition.left.name)
+
+        if _is_representable_for_update(allowed, stmt.update):
+            return
+
+        self._add_error(LOOP_UPDATE_DIAGNOSTIC, stmt.source_location)
 
     # -------------------------------------------------------------------
     # Expression validation
@@ -875,6 +930,64 @@ def _ends_with_terminal_asm(body: list[Statement]) -> bool:
             _ends_with_terminal_asm(last.else_) or _ends_with_assert(last.else_)
         )
         return then_ends and else_ends
+
+    return False
+
+
+# Shared verbatim with the other six tiers. Per-tier diagnostic drift on the
+# same rejection is a recurring defect in this repo, so the string is mirrored,
+# character for character, in
+# packages/runar-compiler/src/passes/02-validate.ts,
+# compilers/go/frontend/validator.go, compilers/rust/src/frontend/validator.rs,
+# compilers/zig/src/frontend/validator.zig,
+# compilers/ruby/lib/frontend/validator.rb and
+# compilers/java/src/main/java/runar/compiler/passes/Validate.java.
+LOOP_UPDATE_DIAGNOSTIC = (
+    "For loop update must advance the loop variable by one (`i++`, `i--`, "
+    "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a "
+    "unit step, so any other update clause -- a function call, a state mutation, or a "
+    "non-unit step such as `i += 2` -- cannot be represented and would be discarded"
+)
+
+
+def _is_allowed_loop_var(allowed: list[str], expr: Expression | None) -> bool:
+    """True when ``expr`` names one of the identifiers the update may advance.
+
+    A property access, an index access or anything else is never accepted:
+    those are the side effects that used to be dropped.
+    """
+    return isinstance(expr, Identifier) and expr.name in allowed
+
+
+def _is_literal_one(expr: Expression | None) -> bool:
+    return isinstance(expr, BigIntLiteral) and expr.value == 1
+
+
+def _is_representable_for_update(allowed: list[str], update: Statement | None) -> bool:
+    if isinstance(update, ExpressionStmt):
+        e = update.expr
+        if isinstance(e, (IncrementExpr, DecrementExpr)):
+            return _is_allowed_loop_var(allowed, e.operand)
+        # The no-op sentinel a while-shaped frontend synthesizes when the source
+        # carries no continue expression: zig's ``while (c) {}``, move's
+        # ``while (c) {}``, go's ``for c {}``. Reading a literal or a bare
+        # identifier has no effect, so discarding it loses nothing.
+        return isinstance(e, (BigIntLiteral, BoolLiteral, Identifier))
+
+    if isinstance(update, AssignmentStmt):
+        # ``i += 1`` / ``i -= 1`` arrive here as ``i = i + 1`` / ``i = i - 1``.
+        if not _is_allowed_loop_var(allowed, update.target):
+            return False
+        v = update.value
+        if not isinstance(v, BinaryExpr):
+            return False
+        if v.op == "+":
+            return (
+                _is_allowed_loop_var(allowed, v.left) and _is_literal_one(v.right)
+            ) or (_is_literal_one(v.left) and _is_allowed_loop_var(allowed, v.right))
+        if v.op == "-":
+            return _is_allowed_loop_var(allowed, v.left) and _is_literal_one(v.right)
+        return False
 
     return False
 
