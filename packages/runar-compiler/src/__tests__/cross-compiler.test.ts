@@ -677,6 +677,82 @@ class PreimageStateRead extends StatefulSmartContract {
 }
 `;
 
+/**
+ * Stateful contracts whose single mutable property is a FIXED-width curve
+ * point — the mirror image of the `Sig` cases above.
+ *
+ * `P256Point` (64 bytes) and `P384Point` (96 bytes) are `ByteString` subtypes
+ * with a hard, compile-time-known width, exactly like `Point` (64). All seven
+ * backends serialize them raw, un-framed — `P256Point` lowers byte-identically
+ * to `Point` — and the TS-tier assertions plus the measured digests live in
+ * `curve-point-state-width.test.ts`.
+ *
+ * Nothing in the repo (no example, no conformance fixture) declares a
+ * curve-point state property, so these four contracts are the only thing
+ * holding the seven tiers together on this width. Without them a tier could
+ * silently start push-data-framing either type — the exact drift that made
+ * `Sig` a fund-loss bug in six tiers.
+ */
+const P256_STATE_WRITE_SOURCE = `
+class P256StateWrite extends StatefulSmartContract {
+  tag: P256Point;
+
+  constructor(tag: P256Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: P256Point) {
+    this.tag = next;
+  }
+}
+`;
+
+const P256_STATE_READ_SOURCE = `
+class P256StateRead extends StatefulSmartContract {
+  tag: P256Point;
+
+  constructor(tag: P256Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
+const P384_STATE_WRITE_SOURCE = `
+class P384StateWrite extends StatefulSmartContract {
+  tag: P384Point;
+
+  constructor(tag: P384Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: P384Point) {
+    this.tag = next;
+  }
+}
+`;
+
+const P384_STATE_READ_SOURCE = `
+class P384StateRead extends StatefulSmartContract {
+  tag: P384Point;
+
+  constructor(tag: P384Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
 const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'P2PKH', source: P2PKH_SOURCE },
   { name: 'HashLock', source: HASHLOCK_SOURCE },
@@ -686,6 +762,10 @@ const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'SigStateRead', source: SIG_STATE_READ_SOURCE },
   { name: 'PreimageStateWrite', source: PREIMAGE_STATE_WRITE_SOURCE },
   { name: 'PreimageStateRead', source: PREIMAGE_STATE_READ_SOURCE },
+  { name: 'P256StateWrite', source: P256_STATE_WRITE_SOURCE },
+  { name: 'P256StateRead', source: P256_STATE_READ_SOURCE },
+  { name: 'P384StateWrite', source: P384_STATE_WRITE_SOURCE },
+  { name: 'P384StateRead', source: P384_STATE_READ_SOURCE },
 ];
 
 
