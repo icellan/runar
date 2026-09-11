@@ -2869,8 +2869,12 @@ module RunarCompiler::Codegen
           @sm.push("")
           emit_opcode("OP_NUM2BIN")
           @sm.pop # pop the width
-        when "ByteString"
-          # Prepend push-data length prefix (matching SDK format)
+        when *RunarCompiler::Codegen::VARIABLE_LENGTH_STATE_TYPES.to_a
+          # Prepend push-data length prefix (matching SDK format).
+          # MUST classify exactly what the deserializer decodes, or the
+          # continuation this method builds cannot be read by the next spend:
+          # the reader would take the value's own first byte (a DER 0x30, say)
+          # as a push length.
           emit_push_data_encode
         end
 
@@ -4009,7 +4013,8 @@ module RunarCompiler::Codegen
         elsif prop.type == "boolean"
           emit_push_int(1); @sm.push("")
           emit_opcode("OP_NUM2BIN"); @sm.pop
-        elsif prop.type == "ByteString"
+        elsif RunarCompiler::Codegen.variable_length_state_type?(prop.type)
+          # Push-data length prefix -- MUST match what the deserializer decodes.
           emit_push_data_encode
         end
 
@@ -4236,7 +4241,8 @@ module RunarCompiler::Codegen
         elsif prop.type == "boolean"
           emit_push_int(1); @sm.push("")
           emit_opcode("OP_NUM2BIN"); @sm.pop
-        elsif prop.type == "ByteString"
+        elsif RunarCompiler::Codegen.variable_length_state_type?(prop.type)
+          # Push-data length prefix -- MUST match what the deserializer decodes.
           emit_push_data_encode
         end
 
@@ -4685,7 +4691,15 @@ module RunarCompiler::Codegen
   def self._compute_uses_code_part(method, properties, private_methods)
     return false unless method_uses_check_preimage?(method.body, private_methods)
 
-    var_len_props = properties.select { |p| !p.readonly && p.type == "ByteString" }.map(&:name)
+    # R-015 (CL-BUG-138): this set MUST classify exactly what
+    # `variable_length_state_type?` classifies. Filtering on "ByteString" alone
+    # left `uses_code_part` false for a terminal method reading a mutable `Sig`
+    # field; the deserializer then hit its "no _codePart" shortcut, pushed NO
+    # mutable property, and every `load_prop` fell through to the DEPLOY-TIME
+    # constructor placeholder instead of the live on-chain value.
+    var_len_props = properties
+                    .select { |p| !p.readonly && RunarCompiler::Codegen.variable_length_state_type?(p.type) }
+                    .map(&:name)
     method_uses_code_part?(method.body) ||
       method_reads_var_len_state?(method.body, var_len_props, private_methods)
   end

@@ -2560,8 +2560,12 @@ class _LoweringContext:
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()  # pop the width
-            elif prop.type == "ByteString":
-                # Prepend push-data length prefix (matching SDK format)
+            elif is_variable_length_state_type(prop.type):
+                # Prepend push-data length prefix (matching SDK format).
+                # MUST classify exactly what ``_lower_deserialize_state``
+                # decodes, or the continuation this method builds cannot be
+                # read by the next spend: the reader would take the value's own
+                # first byte (a DER 0x30, say) as a push length.
                 self.emit_push_data_encode()
 
             if not first:
@@ -3107,10 +3111,11 @@ class _LoweringContext:
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()
-            elif prop.type == "ByteString":
-                # Prepend push-data length prefix (matching SDK format)
+            elif is_variable_length_state_type(prop.type):
+                # Prepend push-data length prefix (matching SDK format).
+                # MUST classify exactly what ``_lower_deserialize_state`` decodes.
                 self.emit_push_data_encode()
-            # Other byte types used as-is
+            # Fixed-width byte types are used as-is
 
             # Concatenate with accumulator
             self.sm.pop()
@@ -5267,8 +5272,17 @@ def _compute_uses_code_part(
     """
     if not _method_uses_check_preimage(method.body, private_methods):
         return False
+    # R-015 (CL-BUG-138): this set MUST classify exactly what
+    # ``is_variable_length_state_type`` classifies. Filtering on "ByteString"
+    # alone left ``uses_code_part`` False for a terminal method reading a
+    # mutable ``Sig`` field; ``_lower_deserialize_state`` then hit its "no
+    # _codePart" shortcut, pushed NO mutable property, and every ``load_prop``
+    # fell through to the DEPLOY-TIME constructor placeholder instead of the
+    # live on-chain value.
     var_len_props = {
-        p.name for p in properties if not p.readonly and p.type == "ByteString"
+        p.name
+        for p in properties
+        if not p.readonly and is_variable_length_state_type(p.type)
     }
     return (
         _method_uses_code_part(method.body)
@@ -5291,12 +5305,12 @@ def _lower_method_with_private_methods(
     # preimage — see _lower_check_preimage — so NO _opPushTxSig witness item is
     # pushed. The unlocking script provides only the preimage.)
     # _codePart is needed for continuation builders (add_output/add_raw_output)
-    # OR when the method reads a mutable variable-length (ByteString) state
-    # field — the deserialization needs it for the preimage-relative offset
-    # (issue #100).
-    var_len_props = {
-        p.name for p in properties if not p.readonly and p.type == "ByteString"
-    }
+    # OR when the method reads a mutable variable-length state field — the
+    # deserialization needs it for the preimage-relative offset (issue #100).
+    # (The var-length property set itself lives in ``_compute_uses_code_part``,
+    # which R-010 hoisted out of this function; the copy that used to sit here
+    # was dead and, being a second hand-maintained copy of the type list, was
+    # the R-015 divergence waiting to happen again.)
     uses_code_part = _compute_uses_code_part(method, properties, private_methods)
     if uses_code_part:
         param_names = ["_codePart"] + param_names

@@ -2901,11 +2901,16 @@ func (ctx *loweringContext) lowerGetStateScript(bindingName string) {
 			ctx.sm.push("")
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 			ctx.sm.pop() // pop the width
-		} else if prop.Type == "ByteString" {
-			// Prepend push-data length prefix (matching SDK format)
+		} else if isVariableLengthStateType(prop.Type) {
+			// Prepend push-data length prefix (matching SDK format).
+			// MUST classify exactly what lowerDeserializeState decodes, or
+			// the continuation this method builds cannot be read by the next
+			// spend: the reader would take the value's own first byte (a DER
+			// 0x30, say) as a push length.
 			ctx.emitPushDataEncode()
 		}
-		// Other byte-typed properties (PubKey, Sig, etc.) need no conversion.
+		// Fixed-width byte-typed properties (PubKey, Sha256, Addr, ...) need
+		// no conversion.
 
 		if !first {
 			ctx.sm.pop()
@@ -3507,11 +3512,12 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 			ctx.sm.push("")
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 			ctx.sm.pop()
-		} else if prop.Type == "ByteString" {
-			// Prepend push-data length prefix (matching SDK format)
+		} else if isVariableLengthStateType(prop.Type) {
+			// Prepend push-data length prefix (matching SDK format).
+			// MUST classify exactly what lowerDeserializeState decodes.
 			ctx.emitPushDataEncode()
 		}
-		// Other byte types used as-is
+		// Fixed-width byte types are used as-is
 
 		// Concatenate with accumulator
 		ctx.sm.pop()
@@ -5062,9 +5068,15 @@ func computeUsesCodePart(method *ir.ANFMethod, properties []ir.ANFProperty, priv
 	if !methodUsesCheckPreimageRec(method.Body, privateMethods, map[string]bool{}) {
 		return false
 	}
+	// R-015 (CL-BUG-138): this set MUST classify exactly what
+	// isVariableLengthStateType classifies. Filtering on "ByteString" alone
+	// left usesCodePart false for a terminal method reading a mutable Sig
+	// field; lowerDeserializeState then hit its "no _codePart" shortcut,
+	// pushed NO mutable property, and every load_prop fell through to the
+	// DEPLOY-TIME constructor placeholder instead of the live on-chain value.
 	varLenProps := map[string]bool{}
 	for _, p := range properties {
-		if !p.Readonly && p.Type == "ByteString" {
+		if !p.Readonly && isVariableLengthStateType(p.Type) {
 			varLenProps[p.Name] = true
 		}
 	}

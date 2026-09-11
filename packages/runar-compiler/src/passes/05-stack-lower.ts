@@ -3144,13 +3144,15 @@ class LoweringContext {
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
         this.stackMap.pop(); // pop the width
-      } else if (prop.type === 'ByteString') {
-        // Prepend push-data length prefix (matching SDK format)
+      } else if (isVariableLengthStateType(prop.type)) {
+        // Prepend push-data length prefix (matching SDK format).
+        // MUST be the same set `lowerDeserializeState` decodes, or the
+        // continuation this method builds cannot be read by the next spend.
         this.emitPushDataEncode();
       }
-      // For other byte types (PubKey, Sig, Sha256, Ripemd160, Addr, Point,
-      // P256Point, P384Point, SigHashPreimage), no conversion needed — they
-      // are already fixed-width byte strings.
+      // For the fixed-width byte types (PubKey, Sha256, Ripemd160, Addr,
+      // Point, P256Point, P384Point), no conversion needed — they are already
+      // fixed-width byte strings.
 
       if (!first) {
         // Concatenate with previous
@@ -3486,12 +3488,13 @@ class LoweringContext {
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
         this.stackMap.pop();
-      } else if (prop.type === 'ByteString') {
-        // Prepend push-data length prefix (matching SDK format)
+      } else if (isVariableLengthStateType(prop.type)) {
+        // Prepend push-data length prefix (matching SDK format).
+        // MUST be the same set `lowerDeserializeState` decodes.
         this.emitPushDataEncode();
       }
-      // Other byte types (PubKey, Sig, Sha256, Ripemd160, Addr, Point,
-      // P256Point, P384Point, SigHashPreimage) used as-is.
+      // The fixed-width byte types (PubKey, Sha256, Ripemd160, Addr, Point,
+      // P256Point, P384Point) are used as-is.
 
       // Concatenate with accumulator
       this.stackMap.pop();
@@ -3629,7 +3632,14 @@ class LoweringContext {
         case 'P256Point': propSizes.push(64); break;
         // P-384 point: x[48] || y[48] = 96 bytes.
         case 'P384Point': propSizes.push(96); break;
-        case 'ByteString': propSizes.push(-1); hasVariableLength = true; break;
+        // Push-data framed — the length is not known until runtime. Sig and
+        // SigHashPreimage share ByteString's framing (see
+        // `isVariableLengthStateType`); `02-validate.ts` permits both as state
+        // property types, and omitting them here made the TS tier the only one
+        // of seven that could not compile such a contract at all.
+        case 'ByteString':
+        case 'Sig':
+        case 'SigHashPreimage': propSizes.push(-1); hasVariableLength = true; break;
         default:
           throw new Error(`deserialize_state: unsupported type '${prop.type}' for '${prop.name}'`);
       }
@@ -3757,8 +3767,8 @@ class LoweringContext {
       // ByteString: push-data decode (variable-length prefix)
       if (stateProps.length === 1) {
         const prop = stateProps[0]!;
-        if (prop.type === 'ByteString') {
-          // Single ByteString field: decode push-data prefix, drop trailing empty
+        if (isVariableLengthStateType(prop.type)) {
+          // Single variable-length field: decode push-data prefix, drop trailing empty
           this.emitPushDataDecode(); // [..., data, remaining]
           this.emitOp({ op: 'drop' }); // drop remaining (should be empty for single field)
           this.stackMap.pop();
@@ -3774,8 +3784,8 @@ class LoweringContext {
           const prop = stateProps[i]!;
 
           if (i < stateProps.length - 1) {
-            if (prop.type === 'ByteString') {
-              // ByteString: decode push-data prefix, extract data
+            if (isVariableLengthStateType(prop.type)) {
+              // Variable-length: decode push-data prefix, extract data
               // Stack: [..., remaining_state]
               this.emitPushDataDecode(); // [..., data, rest]
               // data is the property value, rest continues
@@ -3806,8 +3816,8 @@ class LoweringContext {
             }
           } else {
             // Last property — remaining bytes are this property
-            if (prop.type === 'ByteString') {
-              // Last ByteString: decode push-data prefix, drop trailing empty
+            if (isVariableLengthStateType(prop.type)) {
+              // Last variable-length field: decode push-data prefix, drop trailing empty
               this.emitPushDataDecode(); // [..., data, remaining]
               this.emitOp({ op: 'drop' }); // drop remaining (should be empty)
               this.stackMap.pop();
@@ -6112,6 +6122,27 @@ function methodUsesCheckPreimage(
 }
 
 /**
+ * State-field types stored with a push-data length prefix, so the on-chain
+ * reader must `emitPushDataDecode` them and the on-chain writer must
+ * `emitPushDataEncode` them.
+ *
+ * Single source of truth for that classification. Every site that used to test
+ * the literal string `'ByteString'` must go through here: the SDKs'
+ * deploy-time `encodeStateValue` (packages/runar-sdk/src/state.ts) enumerates
+ * the FIXED-SIZE types — PubKey, Addr, Ripemd160, Sha256, Point, P256Point,
+ * P384Point — and push-data-frames everything else, `Sig` and
+ * `SigHashPreimage` included. A writer and a reader that disagree about this
+ * set build a continuation output the next spend cannot decode.
+ *
+ * `RabinSig` / `RabinPubKey` are deliberately absent: they are bigint aliases
+ * stored as a bare 8-byte NUM2BIN word (see `isNumericStateType` peers in the
+ * other tiers).
+ */
+function isVariableLengthStateType(type: string): boolean {
+  return type === 'ByteString' || type === 'Sig' || type === 'SigHashPreimage';
+}
+
+/**
  * Whether a method READS a mutable variable-length (ByteString) state field's
  * value (via load_prop). Issue #100: such a terminal method needs `_codePart`
  * for the preimage-relative state offset. Narrowed to the live var-length read
@@ -6180,8 +6211,15 @@ function computeUsesCodePart(
   privateMethods: Map<string, ANFMethod>,
 ): boolean {
   if (!methodUsesCheckPreimage(method.body, privateMethods)) return false;
+  // R-015 (CL-BUG-138): this set MUST classify exactly what
+  // `isVariableLengthStateType` classifies. Filtering on `ByteString` alone
+  // left `usesCodePart` false for a terminal method reading a mutable `Sig`
+  // field; `lowerDeserializeState` then hit its `!stackMap.has('_codePart')`
+  // shortcut, pushed NO mutable property, and every `load_prop` fell through
+  // to the DEPLOY-TIME constructor placeholder instead of the live on-chain
+  // value.
   const varLenProps = new Set(
-    properties.filter(p => !p.readonly && p.type === 'ByteString').map(p => p.name),
+    properties.filter(p => !p.readonly && isVariableLengthStateType(p.type)).map(p => p.name),
   );
   return methodUsesCodePart(method.body)
     || methodReadsVarLenState(method.body, varLenProps, privateMethods);

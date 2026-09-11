@@ -6160,7 +6160,17 @@ fn methodReadsVarLenStateRec(
         switch (binding.value) {
             .load_prop => |lp| {
                 for (properties) |prop| {
-                    if (!prop.readonly and prop.type_info == .byte_string and std.mem.eql(u8, prop.name, lp.name)) return true;
+                    // R-015 (CL-BUG-138): this test MUST classify exactly what
+                    // `LowerCtx.isVariableLengthStateType` classifies. Matching
+                    // `.byte_string` alone left `usesCodePart` false for a
+                    // terminal method reading a mutable `Sig` field;
+                    // `lowerDeserializeState` then hit its "no _codePart"
+                    // shortcut, pushed NO mutable property, and every
+                    // `load_prop` fell through to the DEPLOY-TIME constructor
+                    // placeholder instead of the live on-chain value.
+                    if (!prop.readonly and
+                        LowerCtx.isVariableLengthStateType(prop.type_info) and
+                        std.mem.eql(u8, prop.name, lp.name)) return true;
                 }
             },
             .@"if" => |ie| {

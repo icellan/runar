@@ -2996,11 +2996,15 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop(); // pop the width
-            } else if prop.prop_type == "ByteString" {
-                // Prepend push-data length prefix (matching SDK format)
+            } else if is_variable_length_state_type(&prop.prop_type) {
+                // Prepend push-data length prefix (matching SDK format).
+                // MUST classify exactly what `lower_deserialize_state` decodes,
+                // or the continuation this method builds cannot be read by the
+                // next spend: the reader would take the value's own first byte
+                // (a DER 0x30, say) as a push length.
                 self.emit_push_data_encode();
             }
-            // Other byte types (PubKey, Sig, Sha256, etc.) need no conversion
+            // Fixed-width byte types (PubKey, Sha256, Addr, ...) need no conversion
 
             if !first {
                 self.sm.pop();
@@ -3328,8 +3332,9 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop();
-            } else if prop.prop_type == "ByteString" {
-                // Prepend push-data length prefix (matching SDK format)
+            } else if is_variable_length_state_type(&prop.prop_type) {
+                // Prepend push-data length prefix (matching SDK format).
+                // MUST classify exactly what `lower_deserialize_state` decodes.
                 self.emit_push_data_encode();
             }
 

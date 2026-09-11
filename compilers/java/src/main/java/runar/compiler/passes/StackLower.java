@@ -781,9 +781,15 @@ public final class StackLower {
         if (!methodUsesCheckPreimage(method.body(), privateMethods, new java.util.HashSet<>())) {
             return false;
         }
+        // R-015 (CL-BUG-138): this set MUST classify exactly what
+        // isVariableLengthStateType classifies. Filtering on "ByteString" alone
+        // left usesCodePart false for a terminal method reading a mutable Sig
+        // field; lowerDeserializeState then hit its "no _codePart" shortcut,
+        // pushed NO mutable property, and every load_prop fell through to the
+        // DEPLOY-TIME constructor placeholder instead of the live on-chain value.
         java.util.Set<String> varLenProps = new java.util.HashSet<>();
         for (AnfProperty p : properties) {
-            if (!p.readonly() && "ByteString".equals(p.type())) varLenProps.add(p.name());
+            if (!p.readonly() && isVariableLengthStateType(p.type())) varLenProps.add(p.name());
         }
         return methodUsesCodePart(method.body())
             || methodReadsVarLenState(method.body(), varLenProps, privateMethods, new java.util.HashSet<>());
@@ -3368,7 +3374,12 @@ public final class StackLower {
                     sm.push("");
                     emitOp(new OpcodeOp("OP_NUM2BIN"));
                     sm.pop();
-                } else if ("ByteString".equals(prop.type())) {
+                } else if (isVariableLengthStateType(prop.type())) {
+                    // Prepend the push-data length prefix (matching the SDK
+                    // format). MUST classify exactly what the deserializer
+                    // decodes, or the continuation this method builds cannot be
+                    // read by the next spend: the reader would take the value's
+                    // own first byte (a DER 0x30, say) as a push length.
                     emitPushDataEncode();
                 }
 
@@ -4119,7 +4130,9 @@ public final class StackLower {
                     sm.push("");
                     emitOp(new OpcodeOp("OP_NUM2BIN"));
                     sm.pop();
-                } else if ("ByteString".equals(prop.type())) {
+                } else if (isVariableLengthStateType(prop.type())) {
+                    // Push-data length prefix — MUST match what the
+                    // deserializer decodes.
                     emitPushDataEncode();
                 }
                 sm.pop(); sm.pop();

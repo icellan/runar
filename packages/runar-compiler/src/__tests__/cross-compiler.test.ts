@@ -595,11 +595,97 @@ class MultiSig2of3 extends SmartContract {
 }
 `;
 
+/**
+ * Stateful contracts whose single mutable property is a variable-length
+ * (push-data-framed) state type.
+ *
+ * `Sig` and `SigHashPreimage` are stored exactly like `ByteString` — all seven
+ * SDKs' `encodeStateValue` enumerate the fixed-size types and push-data-frame
+ * everything else — but three separate type lists in the stack-lowering pass
+ * disagreed, each in a different subset of tiers:
+ *
+ *   * the state WRITER (`add_output` / `compute_state_bytes`) framed only the
+ *     literal `ByteString`, so the continuation a mutating method built could
+ *     not be decoded by the next spend's reader — present in 6 tiers, Zig
+ *     alone was right;
+ *   * `computeUsesCodePart`'s var-length property set likewise, so a terminal
+ *     read of the field fell back to the deploy-time constructor placeholder —
+ *     present in 6 tiers, Rust alone was right (fixed by bc6cf19a / R-015);
+ *   * the TS reader's size table had no case at all and threw.
+ *
+ * Because every tier consumes the SAME ANF IR here, these four contracts pin
+ * the seven backends against each other on both faces of the bug: `*Write`
+ * exercises the writer, `*Read` the `_codePart` / deserialize path.
+ */
+const SIG_STATE_WRITE_SOURCE = `
+class SigStateWrite extends StatefulSmartContract {
+  tag: Sig;
+
+  constructor(tag: Sig) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: Sig) {
+    this.tag = next;
+  }
+}
+`;
+
+const SIG_STATE_READ_SOURCE = `
+class SigStateRead extends StatefulSmartContract {
+  tag: Sig;
+
+  constructor(tag: Sig) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
+const PREIMAGE_STATE_WRITE_SOURCE = `
+class PreimageStateWrite extends StatefulSmartContract {
+  tag: SigHashPreimage;
+
+  constructor(tag: SigHashPreimage) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: SigHashPreimage) {
+    this.tag = next;
+  }
+}
+`;
+
+const PREIMAGE_STATE_READ_SOURCE = `
+class PreimageStateRead extends StatefulSmartContract {
+  tag: SigHashPreimage;
+
+  constructor(tag: SigHashPreimage) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
 const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'P2PKH', source: P2PKH_SOURCE },
   { name: 'HashLock', source: HASHLOCK_SOURCE },
   { name: 'Escrow', source: ESCROW_SOURCE },
   { name: 'MultiSig2of3', source: MULTISIG_SOURCE },
+  { name: 'SigStateWrite', source: SIG_STATE_WRITE_SOURCE },
+  { name: 'SigStateRead', source: SIG_STATE_READ_SOURCE },
+  { name: 'PreimageStateWrite', source: PREIMAGE_STATE_WRITE_SOURCE },
+  { name: 'PreimageStateRead', source: PREIMAGE_STATE_READ_SOURCE },
 ];
 
 
