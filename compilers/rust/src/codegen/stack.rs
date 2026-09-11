@@ -195,10 +195,30 @@ fn is_merkle_builtin(name: &str) -> bool {
     matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
 }
 
+/// Fixed byte width a numeric state-field type occupies in the state section,
+/// or 0 when the type is not numeric state.
+///
+/// Single source of truth for BOTH sides of the state section: the READER
+/// (`is_numeric_state_type`, below) and the two state SERIALIZERS in
+/// `lower_get_state_script` / `lower_add_output`. Those serializers used to
+/// carry their own literal `prop.prop_type == "bigint"` test and drifted from
+/// this list when the reader alone was widened for `RabinSig` / `RabinPubKey`
+/// — a writer that emits a value's minimal script-number encoding into a
+/// section the reader splits at a fixed width builds a continuation its own
+/// script cannot re-read.
+fn numeric_state_type_width(t: &str) -> usize {
+    match t {
+        // `RabinSig`/`RabinPubKey` are bigint aliases, same 8-byte layout.
+        "bigint" | "RabinSig" | "RabinPubKey" => 8,
+        "boolean" => 1,
+        _ => 0,
+    }
+}
+
 /// State-field types that are stored as script numbers (require OP_BIN2NUM
-/// after extraction). `RabinSig`/`RabinPubKey` are bigint aliases.
+/// after extraction).
 fn is_numeric_state_type(t: &str) -> bool {
-    matches!(t, "bigint" | "boolean" | "RabinSig" | "RabinPubKey")
+    numeric_state_type_width(t) > 0
 }
 
 /// State-field types that are stored with a push-data length prefix and thus
@@ -2985,14 +3005,13 @@ impl LoweringContext {
                 self.sm.push("");
             }
 
-            // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-            if prop.prop_type == "bigint" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(8))));
-                self.sm.push("");
-                self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
-                self.sm.pop(); // pop the width
-            } else if prop.prop_type == "boolean" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+            // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+            // The width MUST come from `numeric_state_type_width` — the same
+            // table the reader splits on — or this continuation cannot be
+            // re-read.
+            let numeric_width = numeric_state_type_width(&prop.prop_type);
+            if numeric_width > 0 {
+                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(numeric_width))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop(); // pop the width
@@ -3322,13 +3341,10 @@ impl LoweringContext {
             let consume = self.operand_consume(value_ref, &output_operands, binding_index, last_uses);
             self.bring_to_top(value_ref, consume);
 
-            if prop.prop_type == "bigint" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(8))));
-                self.sm.push("");
-                self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
-                self.sm.pop();
-            } else if prop.prop_type == "boolean" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+            // Same table as the reader — see `numeric_state_type_width`.
+            let numeric_width = numeric_state_type_width(&prop.prop_type);
+            if numeric_width > 0 {
+                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(numeric_width))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop();

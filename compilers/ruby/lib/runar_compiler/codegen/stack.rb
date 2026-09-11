@@ -670,13 +670,32 @@ module RunarCompiler::Codegen
   # State-property type classification helpers
   # -----------------------------------------------------------------------
 
+  # Fixed byte width each numeric state type occupies in the state section.
+  # Single source of truth for BOTH sides of the section: the READER
+  # (`numeric_state_type?`) and the state SERIALIZERS in
+  # `_lower_get_state_script` / `_lower_add_output`. Those serializers used to
+  # carry their own literal `prop.type == "bigint"` test and drifted from this
+  # table when the reader alone was widened for RabinSig / RabinPubKey -- a
+  # writer that emits a value's minimal script-number encoding into a section
+  # the reader splits at a fixed width builds a continuation its own script
+  # cannot re-read. `RabinSig`/`RabinPubKey` are bigint aliases.
+  NUMERIC_STATE_TYPE_WIDTHS = { "bigint" => 8, "RabinSig" => 8, "RabinPubKey" => 8, "boolean" => 1 }.freeze
+
   # State-field types that are stored as script numbers (require OP_BIN2NUM
-  # after extraction). `RabinSig`/`RabinPubKey` are bigint aliases.
-  NUMERIC_STATE_TYPES = %w[bigint boolean RabinSig RabinPubKey].to_set.freeze
+  # after extraction).
+  NUMERIC_STATE_TYPES = NUMERIC_STATE_TYPE_WIDTHS.keys.to_set.freeze
 
   # State-field types that are stored with a push-data length prefix and thus
   # require `emit_push_data_decode` instead of a fixed OP_SPLIT.
   VARIABLE_LENGTH_STATE_TYPES = %w[ByteString Sig SigHashPreimage].to_set.freeze
+
+  # Fixed byte width of a numeric state type, or 0 if it is not numeric state.
+  #
+  # @param t [String]
+  # @return [Integer]
+  def self.numeric_state_type_width(t)
+    NUMERIC_STATE_TYPE_WIDTHS.fetch(t, 0)
+  end
 
   # @param t [String]
   # @return [Boolean]
@@ -2857,15 +2876,13 @@ module RunarCompiler::Codegen
           @sm.push("")
         end
 
-        # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
+        # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+        # The width MUST come from `numeric_state_type_width` -- the same table
+        # the reader splits on -- or this continuation cannot be re-read.
+        numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)
         case prop.type
-        when "bigint"
-          emit_push_int(8)
-          @sm.push("")
-          emit_opcode("OP_NUM2BIN")
-          @sm.pop # pop the width
-        when "boolean"
-          emit_push_int(1)
+        when *RunarCompiler::Codegen::NUMERIC_STATE_TYPES.to_a
+          emit_push_int(numeric_width)
           @sm.push("")
           emit_opcode("OP_NUM2BIN")
           @sm.pop # pop the width
@@ -4006,12 +4023,12 @@ module RunarCompiler::Codegen
           @sm.push("")
         end
 
-        # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-        if prop.type == "bigint"
-          emit_push_int(8); @sm.push("")
-          emit_opcode("OP_NUM2BIN"); @sm.pop
-        elsif prop.type == "boolean"
-          emit_push_int(1); @sm.push("")
+        # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+        # The width MUST come from `numeric_state_type_width` -- the same table
+        # the reader splits on -- or this continuation cannot be re-read.
+        numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)
+        if numeric_width.positive?
+          emit_push_int(numeric_width); @sm.push("")
           emit_opcode("OP_NUM2BIN"); @sm.pop
         elsif RunarCompiler::Codegen.variable_length_state_type?(prop.type)
           # Push-data length prefix -- MUST match what the deserializer decodes.
@@ -4235,11 +4252,10 @@ module RunarCompiler::Codegen
         consume = _operand_consume(value_ref, output_operands, binding_index, last_uses)
         bring_to_top(value_ref, consume)
 
-        if prop.type == "bigint"
-          emit_push_int(8); @sm.push("")
-          emit_opcode("OP_NUM2BIN"); @sm.pop
-        elsif prop.type == "boolean"
-          emit_push_int(1); @sm.push("")
+        # Same table as the reader -- see `numeric_state_type_width`.
+        numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)
+        if numeric_width.positive?
+          emit_push_int(numeric_width); @sm.push("")
           emit_opcode("OP_NUM2BIN"); @sm.pop
         elsif RunarCompiler::Codegen.variable_length_state_type?(prop.type)
           # Push-data length prefix -- MUST match what the deserializer decodes.

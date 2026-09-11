@@ -82,16 +82,32 @@ type StackMethod struct {
 // State-property type classification
 // ---------------------------------------------------------------------------
 
+// numericStateTypeWidth returns the fixed byte width a numeric state-property
+// type occupies in the state section, or 0 when the type is not numeric state.
+//
+// It is the single source of truth for BOTH sides of the state section: the
+// READER (isNumericStateType, below) and the two state SERIALIZERS in
+// lowerGetStateScript / lowerAddOutput. Those serializers used to carry their
+// own literal `prop.Type == "bigint"` test and drifted from this list when
+// e06f8c2c widened only the reader for RabinSig / RabinPubKey — a writer that
+// emits a value's minimal script-number encoding into a section the reader
+// splits at a fixed width builds a continuation its own script cannot re-read.
+func numericStateTypeWidth(t string) int {
+	switch t {
+	// RabinSig and RabinPubKey are bigint aliases and share the 8-byte layout.
+	case "bigint", "RabinSig", "RabinPubKey":
+		return 8
+	case "boolean":
+		return 1
+	}
+	return 0
+}
+
 // isNumericStateType reports whether a state-property type is stored on the
 // stack as a Script number and therefore requires OP_BIN2NUM after extraction
-// from the scriptCode. RabinSig and RabinPubKey are bigint aliases and share
-// the 8-byte layout.
+// from the scriptCode.
 func isNumericStateType(t string) bool {
-	switch t {
-	case "bigint", "boolean", "RabinSig", "RabinPubKey":
-		return true
-	}
-	return false
+	return numericStateTypeWidth(t) > 0
 }
 
 // isVariableLengthStateType reports whether a state-property type is stored
@@ -2890,14 +2906,11 @@ func (ctx *loweringContext) lowerGetStateScript(bindingName string) {
 			ctx.sm.push("")
 		}
 
-		// Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-		if prop.Type == "bigint" {
-			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
-			ctx.sm.push("")
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-			ctx.sm.pop() // pop the width
-		} else if prop.Type == "boolean" {
-			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+		// Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+		// The width MUST come from numericStateTypeWidth — the same table the
+		// reader splits on — or this continuation cannot be re-read.
+		if width := numericStateTypeWidth(prop.Type); width > 0 {
+			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(width))})
 			ctx.sm.push("")
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 			ctx.sm.pop() // pop the width
@@ -3501,14 +3514,10 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 		consume := ctx.operandConsume(valueRef, outputOperands, bindingIndex, lastUses)
 		ctx.bringToTop(valueRef, consume)
 
-		// Convert numeric/boolean values to fixed-width bytes
-		if prop.Type == "bigint" {
-			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
-			ctx.sm.push("")
-			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
-			ctx.sm.pop()
-		} else if prop.Type == "boolean" {
-			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+		// Convert numeric/boolean values to fixed-width bytes. Same table as the
+		// reader — see numericStateTypeWidth.
+		if width := numericStateTypeWidth(prop.Type); width > 0 {
+			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(width))})
 			ctx.sm.push("")
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 			ctx.sm.pop()

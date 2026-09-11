@@ -44,14 +44,22 @@ MAX_STACK_DEPTH = 800
 #   * Fixed-length byte strings: extracted with a plain fixed-size OP_SPLIT.
 # ---------------------------------------------------------------------------
 
-_NUMERIC_STATE_TYPES: frozenset[str] = frozenset({
-    "bigint",
-    "boolean",
+# Fixed byte width each numeric state type occupies in the state section. This
+# is the single source of truth for BOTH sides of the section: the READER
+# (``is_numeric_state_type``) and the two state SERIALIZERS in
+# ``_lower_get_state_script`` / ``_lower_add_output``. Those serializers used to
+# carry their own literal ``prop.type == "bigint"`` test and drifted from this
+# table when the reader alone was widened for RabinSig / RabinPubKey -- a writer
+# that emits a value's minimal script-number encoding into a section the reader
+# splits at a fixed width builds a continuation its own script cannot re-read.
+_NUMERIC_STATE_TYPE_WIDTHS: dict[str, int] = {
+    "bigint": 8,
     # RabinSig / RabinPubKey are bigint aliases -- same 8-byte script-number
     # layout in state.
-    "RabinSig",
-    "RabinPubKey",
-})
+    "RabinSig": 8,
+    "RabinPubKey": 8,
+    "boolean": 1,
+}
 
 _VARIABLE_LENGTH_STATE_TYPES: frozenset[str] = frozenset({
     "ByteString",
@@ -60,9 +68,14 @@ _VARIABLE_LENGTH_STATE_TYPES: frozenset[str] = frozenset({
 })
 
 
+def numeric_state_type_width(t: str) -> int:
+    """Fixed byte width of a numeric state type, or 0 if it is not numeric."""
+    return _NUMERIC_STATE_TYPE_WIDTHS.get(t, 0)
+
+
 def is_numeric_state_type(t: str) -> bool:
     """State types that are stored as script numbers (need OP_BIN2NUM)."""
-    return t in _NUMERIC_STATE_TYPES
+    return t in _NUMERIC_STATE_TYPE_WIDTHS
 
 
 def is_variable_length_state_type(t: str) -> bool:
@@ -2549,14 +2562,13 @@ class _LoweringContext:
                 self.emit_op(StackOp(op="push", value=big_int_push(0)))
                 self.sm.push("")
 
-            # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-            if prop.type == "bigint":
-                self.emit_op(StackOp(op="push", value=big_int_push(8)))
-                self.sm.push("")
-                self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
-                self.sm.pop()  # pop the width
-            elif prop.type == "boolean":
-                self.emit_op(StackOp(op="push", value=big_int_push(1)))
+            # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+            # The width MUST come from ``numeric_state_type_width`` -- the same
+            # table the reader splits on -- or this continuation cannot be
+            # re-read.
+            numeric_width = numeric_state_type_width(prop.type)
+            if numeric_width:
+                self.emit_op(StackOp(op="push", value=big_int_push(numeric_width)))
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()  # pop the width
@@ -3100,14 +3112,11 @@ class _LoweringContext:
             consume = self._operand_consume(value_ref, output_operands, binding_index, last_uses)
             self.bring_to_top(value_ref, consume)
 
-            # Convert numeric/boolean values to fixed-width bytes
-            if prop.type == "bigint":
-                self.emit_op(StackOp(op="push", value=big_int_push(8)))
-                self.sm.push("")
-                self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
-                self.sm.pop()
-            elif prop.type == "boolean":
-                self.emit_op(StackOp(op="push", value=big_int_push(1)))
+            # Convert numeric/boolean values to fixed-width bytes. Same table as
+            # the reader -- see ``numeric_state_type_width``.
+            numeric_width = numeric_state_type_width(prop.type)
+            if numeric_width:
+                self.emit_op(StackOp(op="push", value=big_int_push(numeric_width)))
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()

@@ -152,15 +152,33 @@ public final class StackLower {
     // State-field type classification (mirrors stack.py)
     // ------------------------------------------------------------------
 
-    private static final Set<String> NUMERIC_STATE_TYPES = Set.of(
-        "bigint", "boolean", "RabinSig", "RabinPubKey"
+    /**
+     * Fixed byte width each numeric state type occupies in the state section.
+     *
+     * <p>Single source of truth for BOTH sides of the section: the READER
+     * ({@link #isNumericStateType}) and the two state SERIALIZERS in
+     * {@code lowerGetStateScript} / {@code lowerAddOutput}. Those serializers
+     * used to carry their own literal {@code "bigint".equals(prop.type())} test
+     * and drifted from this table when the reader alone was widened for
+     * {@code RabinSig} / {@code RabinPubKey} — a writer that emits a value's
+     * minimal script-number encoding into a section the reader splits at a
+     * fixed width builds a continuation its own script cannot re-read.
+     * {@code RabinSig} / {@code RabinPubKey} are bigint aliases.
+     */
+    private static final Map<String, Integer> NUMERIC_STATE_TYPE_WIDTHS = Map.of(
+        "bigint", 8, "RabinSig", 8, "RabinPubKey", 8, "boolean", 1
     );
     private static final Set<String> VARIABLE_LENGTH_STATE_TYPES = Set.of(
         "ByteString", "Sig", "SigHashPreimage"
     );
 
+    /** Fixed byte width of a numeric state type, or 0 if it is not numeric state. */
+    private static int numericStateTypeWidth(String t) {
+        return NUMERIC_STATE_TYPE_WIDTHS.getOrDefault(t, 0);
+    }
+
     private static boolean isNumericStateType(String t) {
-        return NUMERIC_STATE_TYPES.contains(t);
+        return NUMERIC_STATE_TYPE_WIDTHS.containsKey(t);
     }
 
     private static boolean isVariableLengthStateType(String t) {
@@ -3364,13 +3382,12 @@ public final class StackLower {
                     sm.push("");
                 }
 
-                if ("bigint".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(8)));
-                    sm.push("");
-                    emitOp(new OpcodeOp("OP_NUM2BIN"));
-                    sm.pop();
-                } else if ("boolean".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(1)));
+                // The width MUST come from numericStateTypeWidth — the same
+                // table the reader splits on — or this continuation cannot be
+                // re-read.
+                int numericWidth = numericStateTypeWidth(prop.type());
+                if (numericWidth > 0) {
+                    emitOp(new PushOp(PushValue.of(numericWidth)));
                     sm.push("");
                     emitOp(new OpcodeOp("OP_NUM2BIN"));
                     sm.pop();
@@ -4120,13 +4137,10 @@ public final class StackLower {
                 String valueRef = stateValues.get(i);
                 AnfProperty prop = stateProps.get(i);
                 bringToTop(valueRef, operandConsume(valueRef, outputOperands, idx, lastUses));
-                if ("bigint".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(8)));
-                    sm.push("");
-                    emitOp(new OpcodeOp("OP_NUM2BIN"));
-                    sm.pop();
-                } else if ("boolean".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(1)));
+                // Same table as the reader — see numericStateTypeWidth.
+                int numericWidth = numericStateTypeWidth(prop.type());
+                if (numericWidth > 0) {
+                    emitOp(new PushOp(PushValue.of(numericWidth)));
                     sm.push("");
                     emitOp(new OpcodeOp("OP_NUM2BIN"));
                     sm.pop();

@@ -1459,3 +1459,123 @@ describe.skipIf(!javaJarPath)('Cross-compiler: TS IR -> Java Script', () => {
     }, 60_000);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Mutable `RabinSig` / `RabinPubKey` state width — all seven tiers
+// ---------------------------------------------------------------------------
+//
+// `RabinSig` / `RabinPubKey` are `bigint` ALIASES: a mutable one is stored in
+// the state section as a bare 8-byte OP_NUM2BIN word. Every tier's READER says
+// so (`isNumericStateType` and its peers, the deserialize size table, the fixed
+// state-section length). Go, Rust, Python, Ruby and Java's state SERIALIZERS
+// did NOT — they tested the literal `bigint` — so those five wrote a MINIMAL
+// script-number encoding into a section their own script reads as fixed 8.
+//
+// For any value whose minimal encoding is not exactly 8 bytes the continuation
+// is unreadable by the next spend: deploy succeeds, the first spend succeeds,
+// and the UTXO that spend creates is dead. `31276a06` widened writer and reader
+// in TS; `e06f8c2c` widened only Go's reader, and four tiers followed Go.
+//
+// These cases lower the SAME TS-produced ANF through all seven backends, so a
+// divergence can only be the stack-lowering serializer. Every tier's own
+// `bigint` output is the reference, because that is the path whose writer and
+// reader are known to agree.
+// ---------------------------------------------------------------------------
+
+/** Mutating method, implicit continuation — the compute-state-bytes writer. */
+function rabinWriteSource(propType: string): string {
+  return `import { StatefulSmartContract } from 'runar-lang';
+class RabinStateWrite extends StatefulSmartContract {
+  tag: ${propType};
+  constructor(tag: ${propType}) { super(tag); this.tag = tag; }
+  public update(next: ${propType}): void { this.tag = next; }
+}
+`;
+}
+
+/** Mutating method with an EXPLICIT addOutput — the add-output writer. */
+function rabinAddOutputSource(propType: string): string {
+  return `import { StatefulSmartContract } from 'runar-lang';
+class RabinStateAddOutput extends StatefulSmartContract {
+  tag: ${propType};
+  constructor(tag: ${propType}) { super(tag); this.tag = tag; }
+  public update(next: ${propType}): void { this.tag = next; this.addOutput(1000n, next); }
+}
+`;
+}
+
+const RABIN_STATE_SHAPES = [
+  { label: 'implicit continuation', build: rabinWriteSource, file: 'RabinStateWrite' },
+  { label: 'explicit addOutput', build: rabinAddOutputSource, file: 'RabinStateAddOutput' },
+] as const;
+
+const RABIN_STATE_TIERS: { name: string; skip: boolean; run: (ir: string) => CompilerOutput }[] = [
+  { name: 'Go', skip: !hasGo, run: runGoCompiler },
+  { name: 'Rust', skip: !rustBinaryPath, run: runRustCompiler },
+  { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+  { name: 'Zig', skip: !zigBinaryPath, run: runZigCompiler },
+  { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+  { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+];
+
+describe('Cross-compiler: mutable Rabin state is a fixed 8-byte word in all 7 tiers', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-rabin-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. */
+  function lowerToIr(source: string, name: string): { irPath: string; tsHex: string } {
+    const tsResult = compile(source);
+    if (!tsResult.success) {
+      throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+    }
+    const irPath = join(tempDir, `${name}.anf.json`);
+    writeFileSync(irPath, anfToJson(tsResult.anf!));
+    return { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+  }
+
+  for (const { label, build, file } of RABIN_STATE_SHAPES) {
+    for (const propType of ['RabinSig', 'RabinPubKey'] as const) {
+      it(`${label}: a mutable ${propType} field lowers to the bigint bytes in every tier`, () => {
+        const controlName = `${file}-bigint`;
+        const rabinName = `${file}-${propType}`;
+        const control = lowerToIr(build('bigint'), controlName);
+        const rabin = lowerToIr(build(propType), rabinName);
+
+        // TS is the reference. Its writer and reader were widened together in
+        // 31276a06, so its Rabin bytes ARE its bigint bytes.
+        expect(rabin.tsHex).toBe(control.tsHex);
+
+        for (const tier of RABIN_STATE_TIERS) {
+          if (tier.skip) continue;
+          const controlHex = requireHex(tier.run(control.irPath), tier.name, controlName)
+            .toLowerCase();
+          const rabinHex = requireHex(tier.run(rabin.irPath), tier.name, rabinName)
+            .toLowerCase();
+
+          // Each tier against its OWN bigint output: a tier whose serializer
+          // still tests the literal `bigint` fails here even if every tier
+          // fails together.
+          expect(
+            rabinHex,
+            `${tier.name}: a mutable ${propType} field is not serialized as the fixed ` +
+              `8-byte word its own reader splits (writer/reader split)`,
+          ).toBe(controlHex);
+
+          // And against TS, so the seven stay byte-identical.
+          expect(rabinHex, `${tier.name} diverges from the TS reference`).toBe(rabin.tsHex);
+        }
+      }, 180_000);
+    }
+  }
+});
