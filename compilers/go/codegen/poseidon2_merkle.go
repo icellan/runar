@@ -192,3 +192,46 @@ func EmitPoseidon2MerkleRoot(emit func(StackOp), depth int) {
 	emit(StackOp{Op: "drop"})
 	// Stack: [..., root_0..root_7]
 }
+
+// poseidon2RootPackBase is the radix used to pack the 8-element Poseidon2
+// KoalaBear root into a single Script integer. Every KoalaBear element is
+// < p = 2^31 - 2^24 + 1 < 2^32, so base-2^32 positional packing is INJECTIVE
+// over the whole root: two roots pack to the same integer if and only if all
+// eight of their elements are equal.
+const poseidon2RootPackBase = int64(1) << 32
+
+// EmitPoseidon2RootPack folds the 8-element Poseidon2 KoalaBear root that
+// EmitPoseidon2MerkleRoot leaves on the stack into ONE Script integer.
+//
+// Stack in:  [..., root_0, root_1, ..., root_7]   (root_7 on top)
+// Stack out: [..., packed]
+//
+// where packed = Σ root_i · (2^32)^i — i.e. root_7 is the most significant
+// limb and root_0 the least significant.
+//
+// WHY THIS EXISTS (CL-BUG-099 / R-056). The Rúnar type system has no
+// multi-word return type: `merkleRootPoseidon2KB` is declared to return one
+// `bigint`. The dispatch used to reconcile that by emitting seven OP_NIPs,
+// keeping root_7 and discarding root_0..root_6 — so a contract writing
+// `assert(merkleRootPoseidon2KB(...) === expected)` authenticated against a
+// SINGLE ~31-bit field element. Second-preimage work against such a check is
+// ~2^31 Poseidon2 permutations and birthday work ~2^15.5.
+//
+// Packing keeps the declared return type (one `bigint`) while making every
+// limb load-bearing: equality on the packed value is equality on all eight
+// limbs. Misuse is fail-closed — a contract that compares the result against
+// a single limb simply never spends.
+//
+// This is deliberately NOT applied inside EmitPoseidon2MerkleRoot: the SP1
+// FRI verifier (sp1_fri.go emitMerkleVerify) consumes the eight raw limbs and
+// does its own 8 × OP_NUMEQUALVERIFY against a caller-supplied expected root.
+func EmitPoseidon2RootPack(emit func(StackOp)) {
+	// Horner from the top of the stack down. After step k the top holds
+	// Σ_{j=7-k..7} root_j · (2^32)^(j-(7-k)) and root_(6-k) sits directly
+	// below it, so OP_ADD folds in the next limb with no rolls at all.
+	for i := 0; i < 7; i++ {
+		emit(StackOp{Op: "push", Value: bigIntPush(poseidon2RootPackBase)})
+		emit(StackOp{Op: "opcode", Code: "OP_MUL"})
+		emit(StackOp{Op: "opcode", Code: "OP_ADD"})
+	}
+}

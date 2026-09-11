@@ -167,7 +167,14 @@ var builtinFunctions = map[string]funcSig{
 	"groth16PublicInput": {params: []string{"bigint"}, returnType: "bigint"},
 	"merkleRootSha256":      {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
 	"merkleRootHash256":     {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
-	"merkleRootPoseidon2KB": {params: nil, returnType: "bigint"}, // variable arity: 8 leaf + depth*8 proof + index + depth; validated in checkCallArgs
+	// Variable arity: 8 leaf + depth*8 proof + index + depth; validated in
+	// checkCallArgs. The Poseidon2 root is EIGHT KoalaBear elements; the single
+	// declared `bigint` is the base-2^32 packing of all eight (root_7 most
+	// significant), emitted by codegen EmitPoseidon2RootPack. The packing is
+	// injective (each limb < p < 2^32), so comparing the result against an
+	// expected value authenticates the WHOLE root. It used to be root_7 alone
+	// — a ~31-bit check (CL-BUG-099).
+	"merkleRootPoseidon2KB": {params: nil, returnType: "bigint"},
 	"abs":               {params: []string{"bigint"}, returnType: "bigint"},
 	"min":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
 	"max":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},

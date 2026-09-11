@@ -33,9 +33,22 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //   - sumcheckRounds = 4 (production: log2(trace_length))
 //   - numPolynomials = 2 (production: varies per AIR)
 //
-// The Poseidon2 Merkle root comparison checks the first element of the
-// 8-element digest (collision resistance ~2^31). Production implementations
-// verify all 8 elements via the codegen layer (not the contract DSL).
+// # Poseidon2 Merkle root comparison
+//
+// merkleRootPoseidon2KB returns the base-2^32 packing of ALL EIGHT KoalaBear
+// root elements (root_7 most significant, see codegen EmitPoseidon2RootPack).
+// The packing is injective, so each `runar.Assert(qNRootN == v.CommitRootN)`
+// below authenticates the whole 8-element digest. Before CL-BUG-099 was fixed
+// the builtin returned root[7] alone and these comparisons were ~31-bit checks.
+//
+// Consequence for deployment: CommitRoot0 / FriCommitRoot0 must be supplied as
+// the PACKED root, not as a single field element. `runar.Bigint` is the Go-side
+// mock type (int64) and cannot hold a 248-bit packed value; the Rúnar type is
+// arbitrary-precision `bigint`, so the compiled script and the SDK handle it
+// fine, but the off-chain mock `runar.MerkleRootPoseidon2KBv` (which still
+// returns root[0] as an int64) does NOT agree with the emitted script. This
+// contract has no native-Go execution test, only a compile test, so that
+// divergence is currently unexercised — see the R-056 report.
 type BasefoldVerifier struct {
 	runar.SmartContract
 	// CommitRoot0 is the first element of the Poseidon2 Merkle root for committed

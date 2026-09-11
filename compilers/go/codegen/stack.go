@@ -6243,12 +6243,15 @@ func (ctx *loweringContext) lowerMerkleRootPoseidon2KB(bindingName string, args 
 	emitFn := func(op StackOp) { ctx.emitOp(op) }
 	EmitPoseidon2MerkleRoot(emitFn, depth)
 
-	// The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
-	// The type system returns a single bigint, so only root_7 (top) is accessible.
-	// Drop the lower 7 elements with OP_NIP to keep the stack clean.
-	for i := 0; i < 7; i++ {
-		ctx.emitOp(StackOp{Op: "nip"})
-	}
+	// The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top)
+	// but the type system models the result as a single `bigint`. CL-BUG-099:
+	// this used to be reconciled with seven OP_NIPs, which kept root_7 and threw
+	// away root_0..root_6 — reducing `assert(merkleRootPoseidon2KB(...) === e)`
+	// to an authentication against ONE ~31-bit KoalaBear element. Pack the eight
+	// limbs into one Script integer instead: base-2^32 packing is injective over
+	// the full root (every limb < p < 2^32), so equality on the packed value is
+	// equality on all eight limbs.
+	EmitPoseidon2RootPack(emitFn)
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
 }
