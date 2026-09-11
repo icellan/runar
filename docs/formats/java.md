@@ -10,7 +10,7 @@
 
 The Java format lets you write Rúnar contracts as plain Java classes extending `SmartContract` or `StatefulSmartContract`. Contracts use standard Java syntax with camelCase naming, annotations for Rúnar-specific metadata (`@Public`, `@Readonly`), and `java.math.BigInteger` in place of a bespoke bigint literal.
 
-The parser is built on the standard-JDK `javax.tools.JavaCompiler` + `com.sun.source.tree` API, so no third-party parser dependency is required. Non-contract Java constructs (inner classes, lambdas, switch expressions, generics beyond `FixedArray`, try/catch, annotations other than `@Readonly` / `@Public` / `@Stateful`) are rejected at parse time — the parser prefers loud failures over silent divergence from the other compilers.
+The parser is built on the standard-JDK `javax.tools.JavaCompiler` + `com.sun.source.tree` API, so no third-party parser dependency is required. Non-contract Java constructs (inner classes, lambdas, switch expressions, generic types, try/catch, annotations other than `@Readonly` / `@Public` / `@Stateful`) are rejected at parse time — the parser prefers loud failures over silent divergence from the other compilers.
 
 See [`docs/java-tier-plan.md`](../java-tier-plan.md) for the full roadmap covering compiler, SDK, conformance, and integration milestones.
 
@@ -152,10 +152,53 @@ Special identifiers:
 | `RabinPubKey` | `RabinPubKey` |
 | `Ripemd160` / `Hash160` | `Ripemd160` |
 | `OpCodeType` | `OpCodeType` |
-| `FixedArray<T, N>` | Fixed-size array (expanded to scalar properties during ANF) |
 | `@Readonly` | Marks property `readonly: true` |
 
-`FixedArray` requires exactly two type arguments. The length argument must be an integer literal — the parser does not resolve symbolic constants into the type position. A future pass may relax this.
+### `FixedArray` is not currently expressible on the Java surface
+
+The other eight surfaces spell a fixed-size array with the length carried in
+the type — `FixedArray<bigint, 9>` (TypeScript), `FixedArray[Bigint, 9]`
+(Python, Ruby), `[9]runar.Bigint` (Go), `[Bigint; 9]` (Rust), `[9]i64` (Zig),
+`T[N]` (Solidity-like), `FixedArray<T, N>` (Move-like). **The Java surface has
+no working equivalent**, and a Java contract cannot currently declare a
+`FixedArray` property.
+
+The reason is a hard one: the Java frontend is built on `javax.tools.JavaCompiler`,
+so a Rúnar Java contract must first be syntactically valid Java — and an integer
+literal in a type-argument list is not. It fails in javac's *parse* phase, before
+any type resolution, so no annotation, import, or compiler flag can get past it:
+
+```
+$ javac -XDshould-stop.at=PARSE Probe.java
+Probe.java:2: error: illegal start of type
+    FixedArray<Bigint, 9> board;
+                       ^
+```
+
+That leaves no spelling the toolchain accepts. All three candidates are dead:
+
+| Spelling | Result |
+|----------|--------|
+| `FixedArray<Bigint, 9>` | Java tier: `illegal start of type` (javac). The other six tiers parse it fine. |
+| `FixedArray<Bigint>` | All seven tiers: `FixedArray requires 2 type arguments (element, length)` |
+| `Bigint[]` | Java tier: `unsupported type node ARRAY_TYPE`. Go/Zig: `property initializer must be a literal value`. Would not reach `expand_fixed_arrays` even if it parsed, so byte parity would fail. |
+
+`JavaParser#parseFixedArrayLength` requires a `LiteralTree` in the second
+type-argument position — a tree javac's parser can never produce — so that
+branch is unreachable, and the arity check above it is the only path a
+`FixedArray` type ever takes.
+
+**This is an open design decision, not a scheduled fix.** Resolving it means
+either introducing length-marker types (`FixedArray<Bigint, N9>`) and teaching
+all seven Java-surface parsers to resolve them, or declaring `FixedArray`
+permanently unsupported on the Java surface and recording the exclusion.
+`runar.lang.types.FixedArray` still ships in `packages/runar-java` pending that
+decision. Until it is made, port array-shaped contracts to Java by declaring the
+elements as individual scalar properties — which is what `expand_fixed_arrays`
+produces anyway, so the emitted script is byte-identical. See
+`examples/java/src/main/java/runar/examples/tic-tac-toe/TicTacToe.runar.java`,
+whose nine `c0`–`c8` properties compile to the same script as the
+`FixedArray`-backed versions on the other eight surfaces.
 
 ---
 
@@ -362,7 +405,7 @@ The `runar-java` package (`packages/runar-java/`) provides:
 
 - **Base classes:** `SmartContract`, `StatefulSmartContract`
 - **Annotations:** `@Public`, `@Readonly`, `@Stateful` (all in `runar.lang.annotations`)
-- **Types:** `Addr`, `Sig`, `PubKey`, `ByteString`, `Point`, `P256Point`, `P384Point`, `Sha256Digest`, `SigHashPreimage`, `RabinSig`, `RabinPubKey`, `Ripemd160`, `OpCodeType`, `FixedArray<T, N>` — all in `runar.lang.types`
+- **Types:** `Addr`, `Sig`, `PubKey`, `ByteString`, `Point`, `P256Point`, `P384Point`, `Sha256Digest`, `SigHashPreimage`, `RabinSig`, `RabinPubKey`, `Ripemd160`, `OpCodeType` — all in `runar.lang.types`. (`FixedArray<T>` also ships there but is **not usable from contract source** — see [`FixedArray` is not currently expressible on the Java surface](#fixedarray-is-not-currently-expressible-on-the-java-surface).)
 - **Builtins:** `Builtins.assertThat`, `Builtins.hash160`, `Builtins.checkSig`, and peers (static methods)
 - **Off-chain simulator:** `runar.lang.runtime` (milestone 11)
 - **SDK:** `RunarContract`, `Provider`, `Signer`, transaction builders, `PreparedCall` (milestones 8–10)
@@ -377,5 +420,5 @@ Requires JDK 17 as the compile target (JDK 21 LTS works for local development). 
 - **Cross-compiler parity via milestone 7.** Today only the Java compiler can parse `.runar.java`. The TypeScript, Go, Rust, Python, Zig, and Ruby compilers gain hand-written `.runar.java` parsers in milestone 7 of the tier plan, at which point the format joins the shared conformance matrix.
 - **Package-private contracts only.** The compound `.runar.java` filename forces contract classes to be package-private. Cross-package consumption depends on the typed-wrapper codegen (milestone 10).
 - **No string literals in contract source.** Use `ByteString.fromHex("...")` for raw bytes.
-- **`FixedArray` length must be an integer literal.** Symbolic constants in the type position are not resolved yet.
+- **`FixedArray` cannot be declared at all.** Not a "length must be a literal" restriction — an integer literal in a Java type-argument list is a javac *syntax* error, so no spelling works. The design decision is open; see [`FixedArray` is not currently expressible on the Java surface](#fixedarray-is-not-currently-expressible-on-the-java-surface). Use individual scalar properties, which emit byte-identical script.
 - **No nested blocks, try/catch, lambdas, switch expressions, or non-Rúnar annotations.** The parser rejects anything outside the frozen Rúnar subset.

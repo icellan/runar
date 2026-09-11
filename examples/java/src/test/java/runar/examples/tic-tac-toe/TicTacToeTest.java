@@ -1,11 +1,14 @@
 package runar.examples.tictactoe;
 
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import runar.lang.runtime.ContractSimulator;
+import runar.lang.sdk.CompileCheck;
 import runar.lang.types.Bigint;
 import runar.lang.types.PubKey;
 import runar.lang.types.Sig;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -60,5 +63,24 @@ class TicTacToeTest {
         sim.call("join", BOB, SIG);
         // Turn is 1 (X = Alice), but Bob tries to move.
         assertThrows(AssertionError.class, () -> sim.call("move", Bigint.ZERO, BOB, SIG));
+    }
+
+    /**
+     * Runs the contract source through the Rúnar Java frontend
+     * (parse → validate → typecheck).
+     *
+     * <p>Without this, the simulator tests above exercise the file only as
+     * ordinary Java — javac compiles it, JUnit runs it, and nothing ever
+     * asks a Rúnar compiler whether it is valid Rúnar. That is how the v2
+     * sibling came to use four constructs no tier accepts while still
+     * showing a green build.
+     */
+    @Test
+    void contractCompiles() {
+        Path source = Path.of(
+            "src", "main", "java", "runar", "examples", "tic-tac-toe",
+            "TicTacToe.runar.java"
+        );
+        assertDoesNotThrow(() -> CompileCheck.run(source));
     }
 }
