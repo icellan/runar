@@ -251,6 +251,27 @@ const BIGINT_SUBTYPES = new Set<TType>([
   'bigint', 'RabinSig', 'RabinPubKey',
 ]);
 
+/**
+ * Is `t` a member of the ByteString family — i.e. does a value of this type
+ * sit on the stack as a BYTE STRING rather than as a script NUMBER?
+ *
+ * N-076: this predicate is the single source of truth for that question, and
+ * `04-anf-lower.ts` consults it rather than keeping a second copy of the list.
+ * The two lists had already drifted: the lowerer's copy carried `RabinSig` and
+ * `RabinPubKey`, which are `BIGINT_SUBTYPES` here, so `===` on a Rabin value
+ * was annotated `bytes` and `+` on one lowered to OP_CAT.
+ *
+ * Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+ * with OP_ADD. Getting it backwards is a correctness defect in both
+ * directions — OP_EQUAL on a number is over-strict (rejects a valid witness
+ * that encodes the same value with different bytes), OP_NUMEQUAL on a hash is
+ * under-strict (a trailing high-order zero compares equal), and OP_CAT where
+ * OP_ADD belongs is a plain miscompile.
+ */
+export function isByteStringFamilyType(t: string): boolean {
+  return BYTESTRING_SUBTYPES.has(t as TType);
+}
+
 function isSubtype(actual: TType, expected: TType): boolean {
   if (actual === expected) return true;
 

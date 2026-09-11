@@ -2232,20 +2232,21 @@ fn lower_binary_expr(
     // can choose OP_EQUAL vs OP_NUMEQUAL.
     // For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
     // For bitwise &, |, ^, annotate byte-typed operands.
-    let result_type = if op.as_str() == "===" || op.as_str() == "!==" {
-        if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
-            Some("bytes".to_string())
-        } else {
-            None
+    //
+    // N-076: "+" used to be named in the comment above and MISSING from the
+    // match below, so `s + t` on two ByteStrings lowered to OP_ADD in this
+    // tier and to OP_CAT in the other six. Executed: `"aa" + "bb" === "aabb"`
+    // was FALSE here and TRUE everywhere else. Keep the operator set here and
+    // the comment in step.
+    let result_type = match op.as_str() {
+        "===" | "!==" | "+" | "&" | "|" | "^" => {
+            if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
+                Some("bytes".to_string())
+            } else {
+                None
+            }
         }
-    } else if op.as_str() == "&" || op.as_str() == "|" || op.as_str() == "^" {
-        if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
-            Some("bytes".to_string())
-        } else {
-            None
-        }
-    } else {
-        None
+        _ => None,
     };
 
     ctx.emit(ANFValue::BinOp {
@@ -2919,11 +2920,20 @@ fn lower_decrement_expr(
 // Type inference helpers for equality semantics
 // ---------------------------------------------------------------------------
 
-/// Byte-typed primitive names -- values that are already byte sequences.
-const BYTE_TYPES: &[&str] = &[
-    "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr", "SigHashPreimage",
-    "RabinSig", "RabinPubKey", "Point", "P256Point", "P384Point",
-];
+/// Does a value of this type sit on the stack as a BYTE STRING rather than as
+/// a script NUMBER?
+///
+/// N-076: there is deliberately no list here. `typecheck::is_bytestring_subtype`
+/// is the authority. The second, hand-maintained copy this replaces carried
+/// `RabinSig` and `RabinPubKey`, which the type checker files under
+/// `is_bigint_subtype` -- so `===` on a Rabin value emitted OP_EQUAL and, far
+/// worse, `+` on one emitted OP_CAT where the source said addition.
+///
+/// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+/// with OP_ADD.
+fn is_byte_type(type_name: &str) -> bool {
+    super::typecheck::is_bytestring_subtype(type_name)
+}
 
 /// Builtin functions that return byte-typed values.
 const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
@@ -2970,12 +2980,12 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
         Expression::Identifier { name } => {
             // Check if it's a parameter or property with a byte type
             if let Some(t) = get_param_type(name, ctx) {
-                if BYTE_TYPES.contains(&t.as_str()) {
+                if is_byte_type(&t) {
                     return true;
                 }
             }
             if let Some(t) = get_property_type(name, ctx) {
-                if BYTE_TYPES.contains(&t.as_str()) {
+                if is_byte_type(&t) {
                     return true;
                 }
             }
@@ -2987,7 +2997,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
 
         Expression::PropertyAccess { property } => {
             if let Some(t) = get_property_type(property, ctx) {
-                if BYTE_TYPES.contains(&t.as_str()) {
+                if is_byte_type(&t) {
                     return true;
                 }
             }
@@ -2998,7 +3008,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
             if let Expression::Identifier { name } = object.as_ref() {
                 if name == "this" {
                     if let Some(t) = get_property_type(property, ctx) {
-                        if BYTE_TYPES.contains(&t.as_str()) {
+                        if is_byte_type(&t) {
                             return true;
                         }
                     }

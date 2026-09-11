@@ -61,6 +61,7 @@ from runar_compiler.frontend.side_effect_summary import (
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
 from runar_compiler.ir.loader import MAX_LOOP_COUNT
+from runar_compiler.frontend.typecheck import _BYTESTRING_SUBTYPES
 
 
 # ---------------------------------------------------------------------------
@@ -95,20 +96,18 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
 # Byte-typed expression detection
 # ---------------------------------------------------------------------------
 
-_BYTE_TYPES: frozenset[str] = frozenset({
-    "ByteString",
-    "PubKey",
-    "Sig",
-    "Sha256",
-    "Ripemd160",
-    "Addr",
-    "SigHashPreimage",
-    "RabinSig",
-    "RabinPubKey",
-    "Point",
-    "P256Point",
-    "P384Point",
-})
+# N-076: there is deliberately no list here. typecheck._BYTESTRING_SUBTYPES is
+# the authority on whether a value of a given type sits on the stack as a BYTE
+# STRING rather than as a script NUMBER, and this module consults it.
+#
+# The second, hand-maintained copy this replaces carried "RabinSig" and
+# "RabinPubKey", which typecheck files under _BIGINT_SUBTYPES -- so `===` on a
+# Rabin value emitted OP_EQUAL and, far worse, `+` on one emitted OP_CAT where
+# the source said addition.
+#
+# Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added with
+# OP_ADD.
+_BYTE_TYPES = _BYTESTRING_SUBTYPES
 
 # Preimage field extractors that return BYTES (ByteString / Sha256).
 #

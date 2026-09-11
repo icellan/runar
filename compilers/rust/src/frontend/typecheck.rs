@@ -221,7 +221,13 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
 // ---------------------------------------------------------------------------
 
 /// ByteString subtypes -- types represented as byte strings on the stack.
-fn is_bytestring_subtype(t: &str) -> bool {
+///
+/// N-076: this is the SINGLE source of truth for "is a value of this type a
+/// byte string or a script number?", and `anf_lower.rs` consults it rather
+/// than keeping a second copy. The copy it replaces carried `RabinSig` and
+/// `RabinPubKey`, which `is_bigint_subtype` right below files as NUMBERS, so
+/// `===` on a Rabin value emitted OP_EQUAL and `+` on one emitted OP_CAT.
+pub(crate) fn is_bytestring_subtype(t: &str) -> bool {
     matches!(
         t,
         "ByteString" | "PubKey" | "Sig" | "Sha256" | "Ripemd160" | "Addr" | "SigHashPreimage" | "Point" | "P256Point" | "P384Point"

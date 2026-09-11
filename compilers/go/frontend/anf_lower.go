@@ -36,19 +36,19 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	}
 }
 
-var byteTypes = map[string]bool{
-	"ByteString":      true,
-	"PubKey":          true,
-	"Sig":             true,
-	"Sha256":          true,
-	"Ripemd160":       true,
-	"Addr":            true,
-	"SigHashPreimage": true,
-	"RabinSig":        true,
-	"RabinPubKey":     true,
-	"Point":           true,
-	"P256Point":       true,
-	"P384Point":       true,
+// isByteType reports whether a value of this type sits on the stack as a BYTE
+// STRING rather than as a script NUMBER.
+//
+// N-076: there is deliberately no list here. typecheck.go's
+// byteStringSubtypes is the authority. The second, hand-maintained copy this
+// replaces carried "RabinSig" and "RabinPubKey", which typecheck.go files
+// under bigintSubtypes — so `===` on a Rabin value emitted OP_EQUAL and, far
+// worse, `+` on one emitted OP_CAT where the source said addition.
+//
+// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+// with OP_ADD.
+func isByteType(typeName string) bool {
+	return byteStringSubtypes[typeName]
 }
 
 // Preimage field extractors that return BYTES (ByteString / Sha256).
@@ -125,10 +125,10 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 		return true
 
 	case Identifier:
-		if t, ok := ctx.getParamType(e.Name); ok && byteTypes[t] {
+		if t, ok := ctx.getParamType(e.Name); ok && isByteType(t) {
 			return true
 		}
-		if t, ok := ctx.getPropertyType(e.Name); ok && byteTypes[t] {
+		if t, ok := ctx.getPropertyType(e.Name); ok && isByteType(t) {
 			return true
 		}
 		if ctx.localByteVars[e.Name] {
@@ -137,14 +137,14 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 		return false
 
 	case PropertyAccessExpr:
-		if t, ok := ctx.getPropertyType(e.Property); ok && byteTypes[t] {
+		if t, ok := ctx.getPropertyType(e.Property); ok && isByteType(t) {
 			return true
 		}
 		return false
 
 	case MemberExpr:
 		if id, ok := e.Object.(Identifier); ok && id.Name == "this" {
-			if t, found := ctx.getPropertyType(e.Property); found && byteTypes[t] {
+			if t, found := ctx.getPropertyType(e.Property); found && isByteType(t) {
 				return true
 			}
 		}

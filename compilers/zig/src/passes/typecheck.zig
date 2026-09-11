@@ -226,7 +226,14 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
 // ============================================================================
 
 /// ByteString-family types: all are subtypes of ByteString.
-fn isByteFamily(t: RunarType) bool {
+///
+/// N-076: this is the SINGLE source of truth for "is a value of this type a
+/// byte string or a script number?", and `anf_lower.zig` consults it rather
+/// than keeping a second copy. The copy it replaces carried `.rabin_sig` and
+/// `.rabin_pub_key`, which `isBigintFamily` right below files as NUMBERS -- so
+/// `===` on a Rabin value emitted OP_EQUAL and, far worse, `+` on one emitted
+/// OP_CAT where the source said addition.
+pub fn isByteFamily(t: RunarType) bool {
     return switch (t) {
         .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr, .sig_hash_preimage, .point,
         .p256_point, .p384_point => true,

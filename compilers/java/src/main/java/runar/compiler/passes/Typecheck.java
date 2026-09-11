@@ -95,10 +95,28 @@ public final class Typecheck {
     // Type families
     // ------------------------------------------------------------------
 
-    private static final Set<String> BYTESTRING_SUBTYPES = Set.of(
+    /**
+     * N-076: this is the SINGLE source of truth for "is a value of this type a
+     * byte string or a script number?", and {@code AnfLower} consults it
+     * through {@link #isByteStringFamily} rather than keeping a second copy.
+     * The copy it replaces carried {@code RabinSig} and {@code RabinPubKey},
+     * which {@link #BIGINT_SUBTYPES} right below files as NUMBERS -- so
+     * {@code ===} on a Rabin value emitted OP_EQUAL and, far worse, {@code +}
+     * on one emitted OP_CAT where the source said addition.
+     */
+    static final Set<String> BYTESTRING_SUBTYPES = Set.of(
         "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr",
         "SigHashPreimage", "Point", "P256Point", "P384Point"
     );
+
+    /**
+     * Whether a value of this type sits on the stack as a BYTE STRING rather
+     * than as a script NUMBER. Anything NOT in this family is numeric:
+     * compared with OP_NUMEQUAL, added with OP_ADD.
+     */
+    static boolean isByteStringFamily(String typeName) {
+        return BYTESTRING_SUBTYPES.contains(typeName);
+    }
 
     private static final Set<String> BIGINT_SUBTYPES = Set.of(
         "bigint", "RabinSig", "RabinPubKey"

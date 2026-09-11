@@ -92,11 +92,17 @@ public final class AnfLower {
     // bindings carry the {@code result_type: "bytes"} annotation.
     // ------------------------------------------------------------------
 
-    private static final Set<String> BYTE_TYPES = Set.of(
-        "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr",
-        "SigHashPreimage", "RabinSig", "RabinPubKey",
-        "Point", "P256Point", "P384Point"
-    );
+    // N-076: there is deliberately no list here. Typecheck.BYTESTRING_SUBTYPES
+    // is the authority. The second, hand-maintained copy this replaces carried
+    // "RabinSig" and "RabinPubKey", which Typecheck files under
+    // BIGINT_SUBTYPES -- so === on a Rabin value emitted OP_EQUAL and, far
+    // worse, + on one emitted OP_CAT where the source said addition.
+    //
+    // Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+    // with OP_ADD.
+    private static boolean isByteType(String typeName) {
+        return Typecheck.isByteStringFamily(typeName);
+    }
 
     /**
      * Preimage field extractors that return BYTES ({@code ByteString} /
@@ -2018,21 +2024,21 @@ public final class AnfLower {
             if (expr instanceof ByteStringLiteral) return true;
             if (expr instanceof Identifier id) {
                 String t = getParamType(id.name());
-                if (t != null && BYTE_TYPES.contains(t)) return true;
+                if (t != null && isByteType(t)) return true;
                 t = getPropertyType(id.name());
-                if (t != null && BYTE_TYPES.contains(t)) return true;
+                if (t != null && isByteType(t)) return true;
                 if (localByteVars.contains(id.name())) return true;
                 return false;
             }
             if (expr instanceof PropertyAccessExpr pa) {
                 String t = getPropertyType(pa.property());
-                return t != null && BYTE_TYPES.contains(t);
+                return t != null && isByteType(t);
             }
             if (expr instanceof MemberExpr me
                 && me.object() instanceof Identifier id2
                 && "this".equals(id2.name())) {
                 String t = getPropertyType(me.property());
-                return t != null && BYTE_TYPES.contains(t);
+                return t != null && isByteType(t);
             }
             if (expr instanceof CallExpr ce) {
                 if (ce.callee() instanceof Identifier cid) {

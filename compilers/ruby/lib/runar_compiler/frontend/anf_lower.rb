@@ -15,6 +15,7 @@ require_relative "../ir/types"
 require_relative "../ir/loader"
 require_relative "ast_nodes"
 require_relative "sighash_directive"
+require_relative "typecheck"
 
 module RunarCompiler
   module Frontend
@@ -54,10 +55,19 @@ module RunarCompiler
     # Byte-typed expression detection
     # -------------------------------------------------------------------
 
-    BYTE_TYPES = %w[
-      ByteString PubKey Sig Sha256 Ripemd160 Addr SigHashPreimage
-      RabinSig RabinPubKey Point P256Point P384Point
-    ].to_set.freeze
+    # N-076: there is deliberately no list here. typecheck.rb's
+    # BYTESTRING_SUBTYPES is the authority on whether a value of a given type
+    # sits on the stack as a BYTE STRING rather than as a script NUMBER, and
+    # this module consults it.
+    #
+    # The second, hand-maintained copy this replaces carried "RabinSig" and
+    # "RabinPubKey", which typecheck.rb files under BIGINT_SUBTYPES -- so
+    # `===` on a Rabin value emitted OP_EQUAL and, far worse, `+` on one
+    # emitted OP_CAT where the source said addition.
+    #
+    # Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+    # with OP_ADD.
+    BYTE_TYPES = BYTESTRING_SUBTYPES
     private_constant :BYTE_TYPES
 
     BYTE_RETURNING_FUNCTIONS = %w[

@@ -35,6 +35,7 @@ import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
+import { isByteStringFamilyType } from './03-typecheck.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
@@ -2498,11 +2499,16 @@ function lowerDecrementExpr(
 // Type inference helpers for equality semantics
 // ---------------------------------------------------------------------------
 
-/** Byte-typed primitive names — values that are already byte sequences. */
-const BYTE_TYPES = new Set([
-  'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160', 'Addr', 'SigHashPreimage', 'Point',
-  'P256Point', 'P384Point',
-]);
+/**
+ * Byte-typed primitive names — values that are already byte sequences.
+ *
+ * N-076: there is deliberately no list here. The type checker's
+ * `BYTESTRING_SUBTYPES` is the authority and `isByteStringFamilyType` exposes
+ * it; a second, hand-maintained copy is how `RabinSig` / `RabinPubKey` ended
+ * up annotated `bytes` in six of seven tiers while every one of those tiers'
+ * own type checkers filed them under `BIGINT_SUBTYPES` — which made `===` on a
+ * Rabin value emit OP_EQUAL and, far worse, `+` on one emit OP_CAT.
+ */
 
 /**
  * Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
@@ -2558,9 +2564,9 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
     case 'identifier': {
       // Check if it's a parameter or property with a byte type
       const paramType = ctx.getParamType(expr.name);
-      if (paramType && BYTE_TYPES.has(paramType)) return true;
+      if (paramType && isByteStringFamilyType(paramType)) return true;
       const propType = ctx.getPropertyType(expr.name);
-      if (propType && BYTE_TYPES.has(propType)) return true;
+      if (propType && isByteStringFamilyType(propType)) return true;
       // Check if it's a local variable known to be byte-typed
       if (ctx.isLocalByteVar(expr.name)) return true;
       return false;
@@ -2569,14 +2575,14 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
     case 'property_access': {
       // this.x — check the property type
       const propType = ctx.getPropertyType(expr.property);
-      if (propType && BYTE_TYPES.has(propType)) return true;
+      if (propType && isByteStringFamilyType(propType)) return true;
       return false;
     }
 
     case 'member_expr': {
       if (expr.object.kind === 'identifier' && expr.object.name === 'this') {
         const propType = ctx.getPropertyType(expr.property);
-        if (propType && BYTE_TYPES.has(propType)) return true;
+        if (propType && isByteStringFamilyType(propType)) return true;
       }
       return false;
     }

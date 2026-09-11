@@ -17,6 +17,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const typecheck = @import("typecheck.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -142,13 +143,19 @@ pub fn lowerToANFWithDiagnostic(
 // Byte-type detection
 // ============================================================================
 
+/// Does a value of this type sit on the stack as a BYTE STRING rather than as
+/// a script NUMBER?
+///
+/// N-076: there is deliberately no switch prong list here. `typecheck.zig`'s
+/// `isByteFamily` is the authority. The second, hand-maintained copy this
+/// replaces carried `.rabin_sig` and `.rabin_pub_key`, which typecheck files
+/// under `isBigintFamily` -- so `===` on a Rabin value emitted OP_EQUAL and,
+/// far worse, `+` on one emitted OP_CAT where the source said addition.
+///
+/// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+/// with OP_ADD.
 fn isByteType(t: RunarType) bool {
-    return switch (t) {
-        .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr,
-        .sig_hash_preimage, .rabin_sig, .rabin_pub_key, .point,
-        .p256_point, .p384_point => true,
-        else => false,
-    };
+    return typecheck.isByteFamily(t);
 }
 
 fn isByteReturningFunction(name: []const u8) bool {
