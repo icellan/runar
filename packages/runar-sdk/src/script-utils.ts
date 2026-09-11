@@ -4,6 +4,7 @@
 
 import { Hash, Utils } from '@bsv/sdk';
 import type { RunarArtifact } from 'runar-ir-schema';
+import { abiValueEncoding } from 'runar-ir-schema';
 import { findLastOpReturn } from './state.js';
 
 /**
@@ -100,9 +101,14 @@ export function decodeScriptNumber(dataHex: string): bigint {
 }
 
 function interpretScriptElement(opcode: number, dataHex: string, type: string): unknown {
-  switch (type) {
-    case 'int':
-    case 'bigint': {
+  // Table-driven, NOT a hand-maintained `case` list: every spelling the
+  // compiler can emit must land in the right branch, and the two that did not
+  // (`RabinSig`/`RabinPubKey`, and the canonical `boolean`) each turned a
+  // value into a hex string here. `abiValueEncoding` is the same table the
+  // compiler stamps `ConstructorSlot.valueEncoding` from, so a new alias can
+  // only ever be added in one place.
+  switch (abiValueEncoding(type)) {
+    case 'scriptnum': {
       if (opcode === 0x00) return 0n;
       if (opcode >= 0x51 && opcode <= 0x60) return BigInt(opcode - 0x50);
       if (opcode === 0x4f) return -1n;

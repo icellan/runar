@@ -11,6 +11,7 @@ import {
   LocalSigner,
 } from 'runar-sdk';
 import type { RunarArtifact } from 'runar-sdk';
+import { abiValueEncoding } from 'runar-ir-schema';
 
 interface DeployCommandOptions {
   network: string;
@@ -28,28 +29,6 @@ interface DeployCommandOptions {
 // Constructor argument parsing
 // ---------------------------------------------------------------------------
 
-/**
- * How a constructor slot's deploy-time value is encoded into the script.
- * Mirrors `ConstructorSlot.valueEncoding`; recomputed from the ABI type name
- * for older artifacts that predate the enriched slot descriptors.
- */
-type ArgEncoding = 'data' | 'scriptnum' | 'bool';
-
-function encodingForType(type: string): ArgEncoding {
-  switch (type) {
-    case 'bigint':
-    case 'int':
-    case 'number':
-      return 'scriptnum';
-    case 'boolean':
-    case 'bool':
-      return 'bool';
-    default:
-      // ByteString and every fixed-width byte type (PubKey, Addr, Ripemd160,
-      // Sha256, Sha1, Point, ...) are raw data pushes.
-      return 'data';
-  }
-}
 
 /**
  * Parse `--args` values into the positional constructor argument list that
@@ -118,13 +97,38 @@ export function parseConstructorArgs(
       );
     }
 
-    const encoding: ArgEncoding = slot?.valueEncoding ?? encodingForType(param.type);
+    // The ABI type is authoritative — NOT the artifact's slot descriptor. An
+    // artifact compiled before the `RabinSig`/`RabinPubKey` classification was
+    // fixed says `'data'` for a slot the script consumes with OP_MOD; trusting
+    // that descriptor is exactly how a byte-reversed modulus got baked into a
+    // locking script. A descriptor that contradicts its own type is a stale
+    // artifact, and the only safe response is to refuse the deploy.
+    const encoding = abiValueEncoding(param.type);
+    if (slot?.valueEncoding !== undefined && slot.valueEncoding !== encoding) {
+      throw new Error(
+        `${label}: the artifact records valueEncoding '${slot.valueEncoding}' but the ` +
+          `ABI type '${param.type}' is encoded as '${encoding}'. This artifact predates ` +
+          `the slot-encoding fix — recompile it before deploying. Deploying on the stale ` +
+          `descriptor would bake a wrongly-encoded value into the locking script.`,
+      );
+    }
 
     switch (encoding) {
       case 'scriptnum': {
+        // Decimal, or an explicit `0x`-prefixed BIG-ENDIAN integer literal.
+        // A BARE hex string is refused on purpose: `12345678901234567890` is
+        // simultaneously a valid decimal and a valid hex byte string, so
+        // accepting it means guessing which the operator meant — and the
+        // wrong guess bakes a different number into the script. Script reads
+        // this slot little-endian; `encodeArg` does that conversion from the
+        // bigint, so the operator never types byte order.
+        const hexInt = /^(-?)0[xX]([0-9a-fA-F]+)$/.exec(raw);
+        // `BigInt('-0x…')` throws — the sign has to come off the literal.
+        if (hexInt) return (hexInt[1] === '-' ? -1n : 1n) * BigInt(`0x${hexInt[2]}`);
         if (!/^-?(0|[1-9][0-9]*)$/.test(raw)) {
           throw new Error(
-            `${label} must be a decimal integer, got '${raw}'`,
+            `${label} must be a decimal integer (or an explicit 0x-prefixed ` +
+              `big-endian hex integer), got '${raw}'`,
           );
         }
         return BigInt(raw);

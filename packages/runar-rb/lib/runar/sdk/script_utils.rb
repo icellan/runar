@@ -74,15 +74,42 @@ module Runar
       # @param data_hex [String] hex-encoded push data
       # @param type [String] Runar type name ('int', 'bigint', 'bool', etc.)
       # @return [Object] decoded value
+      # How a constructor-slot value of a given ABI type is encoded in the
+      # script. TABLE, not a hand-maintained +when+ list: the two spellings
+      # missing from the old case — the +bigint+ aliases +RabinSig+ /
+      # +RabinPubKey+, and the CANONICAL +boolean+ (only the +bool+ alias was
+      # handled) — each silently turned a value into a hex string on the way
+      # back off chain. Mirrors
+      # packages/runar-ir-schema/src/abi-type-encoding.ts, the same table the
+      # compiler stamps +ConstructorSlot#valueEncoding+ from.
+      ABI_VALUE_ENCODINGS = {
+        'bigint' => :scriptnum,
+        'int' => :scriptnum,
+        # RabinSig / RabinPubKey are bigint aliases; verifyRabinSig lowers to
+        # OP_MOD, which reads its operand as a little-endian sign-magnitude
+        # Script number — exactly what bigint gets.
+        'RabinSig' => :scriptnum,
+        'RabinPubKey' => :scriptnum,
+        # 'boolean' is canonical; 'bool' is the alias several frontends spell.
+        'boolean' => :bool,
+        'bool' => :bool
+      }.freeze
+
+      # Classify an ABI type name. ByteString and every fixed-width byte type
+      # fall through to :data (a raw push).
+      def abi_value_encoding(type)
+        ABI_VALUE_ENCODINGS.fetch(type, :data)
+      end
+
       def interpret_script_element(opcode, data_hex, type)
-        case type
-        when 'int', 'bigint'
+        case abi_value_encoding(type)
+        when :scriptnum
           return 0 if opcode == 0x00
           return opcode - 0x50 if opcode >= 0x51 && opcode <= 0x60
           return -1 if opcode == 0x4F
 
           decode_script_number(data_hex)
-        when 'bool'
+        when :bool
           return false if opcode == 0x00
           return true if opcode == 0x51
 

@@ -145,9 +145,46 @@ fn decode_script_number(data_hex: &str) -> i64 {
 }
 
 /// Interpret a script element according to the expected ABI type.
+/// How a constructor-slot value of the given ABI type is encoded in the script.
+///
+/// TABLE, not a `match` arm list: the two spellings missing from the old match
+/// — the `bigint` aliases `RabinSig` / `RabinPubKey`, and the CANONICAL
+/// `boolean` (only the `bool` alias was matched) — each silently turned a value
+/// into a hex string on the way back off chain. Mirrors
+/// `packages/runar-ir-schema/src/abi-type-encoding.ts`, the same table the
+/// compiler stamps `ConstructorSlot.valueEncoding` from.
+const ABI_VALUE_ENCODINGS: &[(&str, AbiValueEncoding)] = &[
+    ("bigint", AbiValueEncoding::ScriptNum),
+    ("int", AbiValueEncoding::ScriptNum),
+    // RabinSig / RabinPubKey are bigint aliases; `verifyRabinSig` lowers to
+    // OP_MOD, which reads its operand as a little-endian sign-magnitude Script
+    // number — exactly what `bigint` gets.
+    ("RabinSig", AbiValueEncoding::ScriptNum),
+    ("RabinPubKey", AbiValueEncoding::ScriptNum),
+    // `boolean` is canonical; `bool` is the alias several frontends spell.
+    ("boolean", AbiValueEncoding::Bool),
+    ("bool", AbiValueEncoding::Bool),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbiValueEncoding {
+    ScriptNum,
+    Bool,
+    /// ByteString and every fixed-width byte type: a raw data push.
+    Data,
+}
+
+fn abi_value_encoding(param_type: &str) -> AbiValueEncoding {
+    ABI_VALUE_ENCODINGS
+        .iter()
+        .find(|(name, _)| *name == param_type)
+        .map(|(_, enc)| *enc)
+        .unwrap_or(AbiValueEncoding::Data)
+}
+
 fn interpret_script_element(opcode: u8, data_hex: &str, param_type: &str) -> SdkValue {
-    match param_type {
-        "int" | "bigint" => {
+    match abi_value_encoding(param_type) {
+        AbiValueEncoding::ScriptNum => {
             if opcode == 0x00 {
                 return SdkValue::Int(0);
             }
@@ -159,7 +196,7 @@ fn interpret_script_element(opcode: u8, data_hex: &str, param_type: &str) -> Sdk
             }
             SdkValue::Int(decode_script_number(data_hex))
         }
-        "bool" => {
+        AbiValueEncoding::Bool => {
             if opcode == 0x00 {
                 return SdkValue::Bool(false);
             }
@@ -168,7 +205,7 @@ fn interpret_script_element(opcode: u8, data_hex: &str, param_type: &str) -> Sdk
             }
             SdkValue::Bool(data_hex != "00")
         }
-        _ => {
+        AbiValueEncoding::Data => {
             // S1: a ByteString (or other non-numeric) ctor arg whose 1-byte
             // value was MINIMALDATA-encoded as OP_1..OP_16 / OP_1NEGATE
             // carries no separate data bytes in the script —
@@ -610,4 +647,111 @@ mod tests {
         // Without state should still match
         assert!(matches_artifact(&artifact, "5151"));
     }
+
+// -----------------------------------------------------------------------
+// N-070 (extract half) — `interpret_script_element` must know every ABI type
+// spelling the compiler can emit.
+//
+// Two holes, identical in shape across all seven SDK tiers:
+//
+//   RabinSig / RabinPubKey — `bigint` ALIASES (runar-lang/src/types.ts:68-71)
+//     that `verifyRabinSig` consumes with OP_MOD, i.e. as a Script NUMBER.
+//     Absent from the match, so a restored contract's modulus came back as the
+//     little-endian hex blob "1581e97df4102211" instead of the number. Feed
+//     that back into a call and the rebuilt locking script no longer matches
+//     what is on chain.
+//
+//   boolean — the CANONICAL Rúnar primitive name; only the alias `bool` was
+//     matched. A boolean slot fell through to the byte arm, so `true` came
+//     back as the string "01" and `false` as "". Java's ContractScript was the
+//     only tier of seven that tested both spellings.
+//
+// NOTE ON WIDTH: `decode_script_number` returns i64, so this test uses a
+// modulus that fits. A real 128-byte Rabin modulus does not — a pre-existing,
+// type-INDEPENDENT limit of this tier's script-number decoder (it bites a plain
+// `bigint` ctor arg of the same size identically), out of scope here.
+// -----------------------------------------------------------------------
+
+const N070_MODULUS: i64 = 1_234_567_890_123_456_789;
+const N070_RABIN_PUSH: &str = "081581e97df4102211"; // minimal LE sign-magnitude
+const N070_BLOB: &str = "04deadbeef";
+
+/// Template: `<modulus@0> 7c <flag@2> 7c <blob@4> ac`
+fn n070_artifact(rabin_type: &str, bool_type: &str) -> RunarArtifact {
+    make_artifact(
+        "007c007c00ac",
+        vec![
+            AbiParam { name: "modulus".into(), param_type: rabin_type.into(), fixed_array: None },
+            AbiParam { name: "flag".into(), param_type: bool_type.into(), fixed_array: None },
+            AbiParam { name: "blob".into(), param_type: "ByteString".into(), fixed_array: None },
+        ],
+        vec![
+            ConstructorSlot { param_index: 0, byte_offset: 0 },
+            ConstructorSlot { param_index: 1, byte_offset: 2 },
+            ConstructorSlot { param_index: 2, byte_offset: 4 },
+        ],
+    )
+}
+
+fn n070_script(flag_opcode: &str) -> String {
+    format!("{N070_RABIN_PUSH}7c{flag_opcode}7c{N070_BLOB}ac")
+}
+
+#[test]
+fn n070_rabin_slots_extract_as_numbers() {
+    for type_name in ["RabinPubKey", "RabinSig"] {
+        let artifact = n070_artifact(type_name, "boolean");
+        let args = extract_constructor_args(&artifact, &n070_script("51")).unwrap();
+        assert_eq!(
+            args.get("modulus"),
+            Some(&SdkValue::Int(N070_MODULUS)),
+            "{type_name}: modulus must extract as a script number, got {:?}",
+            args.get("modulus")
+        );
+    }
+}
+
+#[test]
+fn n070_canonical_boolean_slot_extracts_as_bool() {
+    for (opcode, want) in [("51", true), ("00", false)] {
+        let artifact = n070_artifact("RabinPubKey", "boolean");
+        let args = extract_constructor_args(&artifact, &n070_script(opcode)).unwrap();
+        assert_eq!(
+            args.get("flag"),
+            Some(&SdkValue::Bool(want)),
+            "opcode {opcode}: got {:?}",
+            args.get("flag")
+        );
+    }
+}
+
+#[test]
+fn n070_boolean_and_bool_spellings_agree() {
+    for opcode in ["51", "00"] {
+        let canonical = extract_constructor_args(&n070_artifact("RabinPubKey", "boolean"), &n070_script(opcode)).unwrap();
+        let alias = extract_constructor_args(&n070_artifact("RabinPubKey", "bool"), &n070_script(opcode)).unwrap();
+        assert_eq!(canonical.get("flag"), alias.get("flag"), "opcode {opcode}");
+    }
+}
+
+/// CONTROL: the classes that already worked must not move.
+#[test]
+fn n070_control_other_types_unchanged() {
+    for type_name in ["bigint", "int"] {
+        let args = extract_constructor_args(&n070_artifact(type_name, "bool"), &n070_script("51")).unwrap();
+        assert_eq!(args.get("modulus"), Some(&SdkValue::Int(N070_MODULUS)), "{type_name}");
+    }
+    // A ByteString slot still comes back as its hex payload, NOT a number, and
+    // the offset walk past the wide Rabin push still lands on it.
+    let args = extract_constructor_args(&n070_artifact("RabinPubKey", "boolean"), &n070_script("51")).unwrap();
+    assert_eq!(args.get("blob"), Some(&SdkValue::Bytes("deadbeef".to_string())));
+    // S1: a 1-byte ByteString MINIMALDATA-encoded as OP_5 is still
+    // reconstructed from the opcode.
+    let s1 = extract_constructor_args(
+        &n070_artifact("RabinPubKey", "boolean"),
+        &format!("{N070_RABIN_PUSH}7c517c55ac"),
+    )
+    .unwrap();
+    assert_eq!(s1.get("blob"), Some(&SdkValue::Bytes("05".to_string())));
+}
 }

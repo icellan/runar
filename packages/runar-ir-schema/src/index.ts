@@ -113,6 +113,10 @@ export {
 } from './state-layout.js';
 export type { StateFieldEncoding } from './state-layout.js';
 
+// Constructor-slot value encoding (shared classification: compiler + CLI + SDKs)
+export { ABI_VALUE_ENCODINGS, abiValueEncoding } from './abi-type-encoding.js';
+export type { AbiValueEncoding } from './abi-type-encoding.js';
+
 // Validators
 export {
   validateANF,

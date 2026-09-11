@@ -17,7 +17,7 @@ import type {
 } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from '../passes/side-effect-summary.js';
 import { SIGHASH_DEFAULT } from '../passes/sighash-directive.js';
-import { annotateStateFieldLayout, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
+import { abiValueEncoding, annotateStateFieldLayout, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Artifact types (mirroring runar-ir-schema/artifact.ts)
@@ -679,13 +679,6 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
 // Verification-descriptor enrichment
 // ---------------------------------------------------------------------------
 
-/** Classify how a constructor arg of the given ABI type is encoded when
- *  spliced into its slot (see ConstructorSlot.valueEncoding). */
-function slotValueEncoding(type: string): 'data' | 'scriptnum' | 'bool' {
-  if (type === 'int' || type === 'bigint') return 'scriptnum';
-  if (type === 'bool' || type === 'boolean') return 'bool';
-  return 'data';
-}
 
 /**
  * Enrich raw emitter constructor slots with value-INDEPENDENT verification
@@ -705,7 +698,7 @@ function enrichConstructorSlots(
     if (!param) return out;
     out.name = param.name;
     out.type = param.type;
-    out.valueEncoding = slotValueEncoding(param.type);
+    out.valueEncoding = abiValueEncoding(param.type);
     if (out.valueEncoding === 'data') {
       const width = STATE_FIELD_WIDTHS[param.type];
       if (width && width.encoding === 'raw') {

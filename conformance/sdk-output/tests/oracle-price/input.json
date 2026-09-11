@@ -49,7 +49,7 @@
         "byteOffset": 8,
         "name": "oraclePubKey",
         "type": "RabinPubKey",
-        "valueEncoding": "data"
+        "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 1,

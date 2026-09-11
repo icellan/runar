@@ -245,6 +245,7 @@ test {
     _ = @import("sdk_woc_provider.zig");
     _ = @import("sdk_script_utils.zig");
     _ = @import("sdk_c9_s1_minimaldata_roundtrip_test.zig");
+    _ = @import("sdk_n070_slot_types_test.zig");
     _ = @import("sdk_state_range_guard_test.zig");
     _ = @import("sdk_anf_interpreter.zig");
     _ = @import("sdk_anf_interpreter_intent_test.zig");

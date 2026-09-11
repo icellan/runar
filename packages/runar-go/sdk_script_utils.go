@@ -103,9 +103,38 @@ func decodeScriptNumber(dataHex string) int64 {
 }
 
 // interpretScriptElement interprets a script element according to its type.
+// abiValueEncoding classifies an ABI type name by how its constructor-slot
+// value is encoded in the script. TABLE, not a `case` list: the two spellings
+// that were missing from the old switch — the bigint aliases RabinSig /
+// RabinPubKey, and the CANONICAL boolean (only the `bool` alias was handled) —
+// each silently turned a value into a hex string on the way back off chain.
+// Mirrors packages/runar-ir-schema/src/abi-type-encoding.ts, the same table the
+// compiler stamps ConstructorSlot.valueEncoding from.
+var abiValueEncodings = map[string]string{
+	"bigint": "scriptnum",
+	"int":    "scriptnum",
+	// RabinSig / RabinPubKey are bigint aliases; verifyRabinSig lowers to
+	// OP_MOD, which reads its operand as a little-endian sign-magnitude
+	// Script number — exactly what bigint gets.
+	"RabinSig":    "scriptnum",
+	"RabinPubKey": "scriptnum",
+	// boolean is canonical; bool is the alias several frontends spell.
+	"boolean": "bool",
+	"bool":    "bool",
+}
+
+// abiValueEncoding returns "scriptnum", "bool", or "data" (the default for
+// ByteString and every fixed-width byte type).
+func abiValueEncoding(typeName string) string {
+	if enc, ok := abiValueEncodings[typeName]; ok {
+		return enc
+	}
+	return "data"
+}
+
 func interpretScriptElement(opcode int, dataHex string, typeName string) interface{} {
-	switch typeName {
-	case "int", "bigint":
+	switch abiValueEncoding(typeName) {
+	case "scriptnum":
 		if opcode == 0x00 {
 			return int64(0)
 		}

@@ -70,9 +70,40 @@ def _decode_script_number(data_hex: str) -> int:
     return -result if negative else result
 
 
+# How a constructor-slot value of a given ABI type is encoded in the script.
+#
+# TABLE, not a hand-maintained ``if`` chain: the two spellings missing from the
+# old chain -- the ``bigint`` aliases ``RabinSig`` / ``RabinPubKey``, and the
+# CANONICAL ``boolean`` (only the ``bool`` alias was handled) -- each silently
+# turned a value into a hex string on the way back off chain. Mirrors
+# ``packages/runar-ir-schema/src/abi-type-encoding.ts``, the same table the
+# compiler stamps ``ConstructorSlot.valueEncoding`` from.
+_ABI_VALUE_ENCODINGS = {
+    'bigint': 'scriptnum',
+    'int': 'scriptnum',
+    # RabinSig / RabinPubKey are bigint aliases; ``verifyRabinSig`` lowers to
+    # OP_MOD, which reads its operand as a little-endian sign-magnitude Script
+    # number -- exactly what ``bigint`` gets.
+    'RabinSig': 'scriptnum',
+    'RabinPubKey': 'scriptnum',
+    # ``boolean`` is canonical; ``bool`` is the alias several frontends spell.
+    'boolean': 'bool',
+    'bool': 'bool',
+}
+
+
+def _abi_value_encoding(type_name: str) -> str:
+    """Classify an ABI type name: 'scriptnum', 'bool', or 'data'.
+
+    ByteString and every fixed-width byte type default to 'data' (a raw push).
+    """
+    return _ABI_VALUE_ENCODINGS.get(type_name, 'data')
+
+
 def _interpret_script_element(opcode: int, data_hex: str, field_type: str) -> object:
     """Interpret a script element based on the ABI parameter type."""
-    if field_type in ('int', 'bigint'):
+    encoding = _abi_value_encoding(field_type)
+    if encoding == 'scriptnum':
         if opcode == 0x00:
             return 0
         if 0x51 <= opcode <= 0x60:
@@ -80,7 +111,7 @@ def _interpret_script_element(opcode: int, data_hex: str, field_type: str) -> ob
         if opcode == 0x4F:
             return -1
         return _decode_script_number(data_hex)
-    elif field_type == 'bool':
+    elif encoding == 'bool':
         if opcode == 0x00:
             return False
         if opcode == 0x51:

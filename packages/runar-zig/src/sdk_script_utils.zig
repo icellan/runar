@@ -90,15 +90,48 @@ fn decodeScriptNumber(data_hex: []const u8) i64 {
 }
 
 /// Interpret a script element as a typed value.
+/// How a constructor-slot value of a given ABI type is encoded in the script.
+const AbiValueEncoding = enum { scriptnum, bool_, data };
+
+/// TABLE, not a hand-maintained `eql` chain: the two spellings missing from
+/// the old chain — the `bigint` aliases `RabinSig` / `RabinPubKey`, and the
+/// CANONICAL `boolean` (only the `bool` alias was compared) — each silently
+/// turned a value into a hex string on the way back off chain. Mirrors
+/// `packages/runar-ir-schema/src/abi-type-encoding.ts`, the same table the
+/// compiler stamps `ConstructorSlot.valueEncoding` from.
+const ABI_VALUE_ENCODINGS = [_]struct { name: []const u8, encoding: AbiValueEncoding }{
+    .{ .name = "bigint", .encoding = .scriptnum },
+    .{ .name = "int", .encoding = .scriptnum },
+    // RabinSig / RabinPubKey are bigint aliases; `verifyRabinSig` lowers to
+    // OP_MOD, which reads its operand as a little-endian sign-magnitude Script
+    // number — exactly what `bigint` gets.
+    .{ .name = "RabinSig", .encoding = .scriptnum },
+    .{ .name = "RabinPubKey", .encoding = .scriptnum },
+    // `boolean` is canonical; `bool` is the alias several frontends spell.
+    .{ .name = "boolean", .encoding = .bool_ },
+    .{ .name = "bool", .encoding = .bool_ },
+};
+
+/// Classify an ABI type name. ByteString and every fixed-width byte type fall
+/// through to `.data` (a raw push).
+fn abiValueEncoding(type_name: []const u8) AbiValueEncoding {
+    for (ABI_VALUE_ENCODINGS) |entry| {
+        if (std.mem.eql(u8, type_name, entry.name)) return entry.encoding;
+    }
+    return .data;
+}
+
 fn interpretScriptElement(allocator: std.mem.Allocator, opcode: u8, data_hex: []const u8, type_name: []const u8) !types.StateValue {
-    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "bigint")) {
+    const encoding = abiValueEncoding(type_name);
+
+    if (encoding == .scriptnum) {
         if (opcode == 0x00) return .{ .int = 0 };
         if (opcode >= 0x51 and opcode <= 0x60) return .{ .int = @as(i64, opcode) - 0x50 };
         if (opcode == 0x4f) return .{ .int = -1 };
         return .{ .int = decodeScriptNumber(data_hex) };
     }
 
-    if (std.mem.eql(u8, type_name, "bool")) {
+    if (encoding == .bool_) {
         if (opcode == 0x00) return .{ .boolean = false };
         if (opcode == 0x51) return .{ .boolean = true };
         return .{ .boolean = !std.mem.eql(u8, data_hex, "00") };
