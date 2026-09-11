@@ -842,6 +842,15 @@ const Parser = struct {
         return Statement{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     /// Parse Zig while loop: `while (cond) : (continue_expr) { body }`
     ///
     /// Supports common Runar patterns:
@@ -909,16 +918,40 @@ const Parser = struct {
         }
 
         // Continue expression: : (i += 1)
+        //
+        // N-061: this used to be parsed and discarded — only `var_name` and
+        // `bound` were kept, and the step came from the comparison direction —
+        // so `i += 2` compiled to bytes identical to `i += 1`. Record it as
+        // the equivalent `i = i + 1` assignment (the spelling the other six
+        // tiers' Zig frontends produce) so validate.zig can reject a step the
+        // unrolled loop model cannot represent.
+        var update: ?*const Statement = null;
         if (self.current.kind == .colon) {
             _ = self.bump();
             if (self.current.kind == .lparen) _ = self.bump();
-            // Parse and discard the continue expression (e.g. i += 1)
-            // We only need the var_name and bound which we already extracted
-            _ = self.parseExpression();
+            const lhs = self.parseExpression();
             // Handle compound assignment operator if present
             if (isCompoundAssignOp(self.current.kind)) {
+                const op: ?BinOperator = switch (self.current.kind) {
+                    .plus_eq => .add,
+                    .minus_eq => .sub,
+                    .star_eq => .mul,
+                    .slash_eq => .div,
+                    .percent_eq => .mod,
+                    else => null,
+                };
                 _ = self.bump(); // consume +=, -=, etc.
-                _ = self.parseExpression(); // consume RHS
+                const rhs = self.parseExpression(); // consume RHS
+                if (lhs != null and rhs != null and op != null and lhs.? == .identifier) {
+                    const bin = self.allocator.create(BinaryOp) catch null;
+                    if (bin) |ptr| {
+                        ptr.* = .{ .op = op.?, .left = lhs.?, .right = rhs.? };
+                        update = self.storeUpdateStmt(.{ .assign = .{
+                            .target = lhs.?.identifier,
+                            .value = .{ .binary_op = ptr },
+                        } });
+                    }
+                }
             }
             if (self.current.kind == .rparen) _ = self.bump();
         }
@@ -930,6 +963,7 @@ const Parser = struct {
             .var_name = var_name,
             .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
             .bound = bound,
+            .update = update,
             .body = body,
             .source_loc = loc,
         } };

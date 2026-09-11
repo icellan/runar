@@ -580,6 +580,14 @@ const TypeChecker = struct {
             .for_stmt => |for_s| {
                 env.pushScope() catch return;
                 env.define(for_s.var_name, .bigint);
+                // N-061 / R-065: the update clause used to be skipped entirely
+                // here (and discarded outright by the parsers), so
+                // `for (let i = 0n; i < 3n; undefinedFn())` compiled clean — a
+                // hole in the rule that only Rúnar builtins and contract
+                // methods are callable. validate.zig separately restricts the
+                // clause to a unit-step advance; this is the type-level half of
+                // the same guard.
+                if (for_s.update) |u| self.checkStatement(u.*, env);
                 self.checkStatements(for_s.body, env);
                 env.popScope();
             },

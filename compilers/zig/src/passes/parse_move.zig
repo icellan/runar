@@ -1373,7 +1373,13 @@ const Parser = struct {
 
         // Drop a trailing `var_name = var_name + K` so the for_stmt's implicit
         // iteration matches TypeScript's native `for (let i = 0n; i < N; i++)`.
+        //
+        // N-061: the trimmed statement used to vanish here, so `i = i + 2`
+        // produced bytes identical to `i = i + 1`. It is now carried as the
+        // loop's update clause for validate.zig to check — the trim itself is
+        // unchanged, so a unit step still lowers exactly as before.
         var trimmed_body = body;
+        var update: ?*const Statement = null;
         if (body.len > 0) {
             const last = body[body.len - 1];
             if (last == .assign) {
@@ -1385,13 +1391,14 @@ const Parser = struct {
                             std.mem.eql(u8, bop.left.identifier, var_name))
                         {
                             trimmed_body = body[0 .. body.len - 1];
+                            update = &body[body.len - 1];
                         }
                     }
                 }
             }
         }
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = 0, .bound = bound, .body = trimmed_body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = 0, .bound = bound, .update = update, .body = trimmed_body, .source_loc = loc } };
     }
 
     fn parseMoveLoop(self: *Parser) ?Statement {

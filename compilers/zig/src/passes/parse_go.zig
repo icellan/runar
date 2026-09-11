@@ -1336,6 +1336,15 @@ const Parser = struct {
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1346,6 +1355,7 @@ const Parser = struct {
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
+        var update: ?*const Statement = null;
 
         // Check if we have an initializer (look for :=)
         // Parse: varname := expr
@@ -1397,12 +1407,33 @@ const Parser = struct {
                 }
                 _ = self.expect(.semicolon);
 
-                // Parse update: i++, i += 1, etc.
+                // Parse update: i++, i += 1, etc. N-061: the clause used to
+                // be parsed and discarded, so anything the unrolled loop model
+                // cannot represent was silently coerced to a unit step. Record
+                // it for validate.zig.
                 if (self.current.kind != .lbrace) {
-                    _ = self.parseExpression();
+                    const operand = self.parseExpression();
                     // Consume postfix ++ / -- (Go: i++ is a statement, not part of expression)
                     if (self.current.kind == .plus_plus or self.current.kind == .minus_minus) {
+                        const is_inc = self.current.kind == .plus_plus;
                         _ = self.bump();
+                        if (operand) |o| {
+                            if (is_inc) {
+                                const inc = self.allocator.create(types.IncrementExpr) catch null;
+                                if (inc) |ptr| {
+                                    ptr.* = .{ .operand = o, .prefix = false };
+                                    update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .increment = ptr } } });
+                                }
+                            } else {
+                                const dec = self.allocator.create(types.DecrementExpr) catch null;
+                                if (dec) |ptr| {
+                                    ptr.* = .{ .operand = o, .prefix = false };
+                                    update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .decrement = ptr } } });
+                                }
+                            }
+                        }
+                    } else if (operand) |o| {
+                        update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = o } });
                     }
                 }
             } else {
@@ -1420,7 +1451,7 @@ const Parser = struct {
         }
 
         const body = self.parseBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

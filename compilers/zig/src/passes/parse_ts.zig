@@ -1172,6 +1172,15 @@ const Parser = struct {
         return &.{};
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1238,15 +1247,20 @@ const Parser = struct {
         }
         self.skipSemicolons();
 
-        // Update: i++ / i += 1, etc. — skip
+        // Update: `i++`, `i--`, … N-061: the clause used to be parsed and
+        // discarded, so a non-unit step, a call to an undefined function and a
+        // write to contract state all compiled to the same bytes as `i++`.
+        // Record it so validate.zig can reject what the unrolled loop model
+        // cannot represent.
+        var update: ?*const Statement = null;
         if (self.current.kind != .rparen) {
-            _ = self.parseExpression();
+            if (self.parseExpression()) |e| update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
         }
         if (self.expect(.rparen) == null) return null;
 
         const body = self.parseBlockOrStatement();
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

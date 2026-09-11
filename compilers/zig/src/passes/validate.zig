@@ -1046,6 +1046,79 @@ fn isAssertCall(expr: Expression) bool {
     };
 }
 
+/// The cross-tier loop-update diagnostic. Shared VERBATIM with the other six
+/// tiers — `compilers/rust/src/frontend/validator.rs` is the source of truth,
+/// and `compilers/go/frontend/validator.go`,
+/// `packages/runar-compiler/src/passes/02-validate.ts`,
+/// `compilers/python/runar_compiler/frontend/validator.py`,
+/// `compilers/ruby/lib/runar_compiler/frontend/validator.rb` and
+/// `compilers/java/src/main/java/runar/compiler/passes/Validate.java` carry the
+/// same string character for character. Per-tier diagnostic drift on the same
+/// rejection is a recurring defect in this repo, so do not reword it here.
+const loop_update_diagnostic = "For loop update must advance the loop variable by one (`i++`, `i--`, " ++
+    "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a " ++
+    "unit step, so any other update clause -- a function call, a state mutation, or a " ++
+    "non-unit step such as `i += 2` -- cannot be represented and would be discarded";
+
+/// True when `expr` names the identifier the update is allowed to advance. A
+/// property access, an index access or anything else is never accepted: those
+/// are the side effects that used to be dropped.
+fn isAllowedLoopVar(allowed: []const u8, expr: Expression) bool {
+    return switch (expr) {
+        .identifier => |name| std.mem.eql(u8, name, allowed),
+        else => false,
+    };
+}
+
+fn isLiteralOne(expr: Expression) bool {
+    return switch (expr) {
+        .literal_int => |v| v == 1,
+        else => false,
+    };
+}
+
+/// Whether the unrolled loop model can represent `update` (N-061 / R-065).
+///
+/// The ANF `loop` node carries exactly `{count, iterVar, start, step, body}`
+/// and synthesizes the iterator on unrolled iteration k as `start + k*step`.
+/// There is no slot for an arbitrary update statement, and this tier's parsers
+/// derive the step from the COMPARISON DIRECTION alone — so every other update
+/// clause was coerced to a unit step and discarded.
+///
+/// The accepted set is every shape the nine frontends actually synthesize:
+/// `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+/// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig, Move and Java
+/// parsers; and the effect-free no-op sentinel (a literal or a bare identifier)
+/// that the while-shaped parsers synthesize when the source has no continue
+/// expression at all.
+fn isRepresentableForUpdate(allowed: []const u8, update: Statement) bool {
+    return switch (update) {
+        .expr_stmt => |e| switch (e.expr) {
+            .increment => |inc| isAllowedLoopVar(allowed, inc.operand),
+            .decrement => |dec| isAllowedLoopVar(allowed, dec.operand),
+            // The no-op sentinel a while-shaped frontend synthesizes when the
+            // source carries no continue expression. Reading a literal or a
+            // bare identifier has no effect, so discarding it loses nothing.
+            .literal_int, .literal_bool, .identifier => true,
+            else => false,
+        },
+        // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+        .assign => |a| blk: {
+            if (a.target_is_property or !std.mem.eql(u8, a.target, allowed)) break :blk false;
+            break :blk switch (a.value) {
+                .binary_op => |bop| switch (bop.op) {
+                    .add => (isAllowedLoopVar(allowed, bop.left) and isLiteralOne(bop.right)) or
+                        (isLiteralOne(bop.left) and isAllowedLoopVar(allowed, bop.right)),
+                    .sub => isAllowedLoopVar(allowed, bop.left) and isLiteralOne(bop.right),
+                    else => false,
+                },
+                else => false,
+            };
+        },
+        else => false,
+    };
+}
+
 /// Validate individual statements (currently checks for-loop bounds).
 fn validateStatement(
     allocator: Allocator,
@@ -1067,6 +1140,19 @@ fn validateStatement(
                     .message = "For loop bound must be a compile-time constant (literal or const variable)",
                     .severity = .@"error",
                 });
+            }
+            // N-061 / R-065: reject any update clause the unrolled loop model
+            // cannot represent. `null` means the surface syntax carries no
+            // update at all (`for i in 0..N`, `range(N)`, a bare `while (c)`),
+            // which is always representable.
+            if (f.update) |u| {
+                if (!isRepresentableForUpdate(f.var_name, u.*)) {
+                    try errors.append(allocator, .{
+                        .message = loop_update_diagnostic,
+                        .severity = .@"error",
+                        .location = f.source_loc,
+                    });
+                }
             }
             for (f.body) |s| try validateStatement(allocator, s, errors);
         },

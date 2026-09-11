@@ -1076,6 +1076,15 @@ const Parser = struct {
         return &.{};
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1141,9 +1150,52 @@ const Parser = struct {
         }
         _ = self.expect(.semicolon);
 
-        // Update: consume until the matching `)` for the for-loop. Track nested
-        // parentheses so that `i = i.plus(Bigint.ONE)` does not terminate at
-        // the inner `)`.
+        // Update: `i = i.plus(Bigint.ONE)`, `i++`, … N-061: this clause was
+        // consumed as raw tokens and discarded, so `i = i.plus(Bigint.of(2))`
+        // compiled to bytes identical to the unit step. Try to parse the two
+        // shapes Java actually writes here and record the result for
+        // validate.zig; anything else falls through to the original
+        // token-skip, so no source that parsed before stops parsing now.
+        var update: ?*const Statement = null;
+        if (self.current.kind == .ident) {
+            const save2_pos = self.tokenizer.pos;
+            const save2_line = self.tokenizer.line;
+            const save2_col = self.tokenizer.col;
+            const save2_current = self.current;
+            const target_tok = self.bump();
+            if (self.current.kind == .assign) {
+                _ = self.bump();
+                if (self.parseExpression()) |v| {
+                    update = self.storeUpdateStmt(.{ .assign = .{ .target = target_tok.text, .value = v } });
+                }
+            } else if (self.current.kind == .plus_plus or self.current.kind == .minus_minus) {
+                const is_inc = self.current.kind == .plus_plus;
+                _ = self.bump();
+                if (is_inc) {
+                    const inc = self.allocator.create(types.IncrementExpr) catch null;
+                    if (inc) |ptr| {
+                        ptr.* = .{ .operand = .{ .identifier = target_tok.text }, .prefix = false };
+                        update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .increment = ptr } } });
+                    }
+                } else {
+                    const dec = self.allocator.create(types.DecrementExpr) catch null;
+                    if (dec) |ptr| {
+                        ptr.* = .{ .operand = .{ .identifier = target_tok.text }, .prefix = false };
+                        update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .decrement = ptr } } });
+                    }
+                }
+            }
+            if (update == null) {
+                self.tokenizer.pos = save2_pos;
+                self.tokenizer.line = save2_line;
+                self.tokenizer.col = save2_col;
+                self.current = save2_current;
+            }
+        }
+
+        // Consume whatever is left until the matching `)` for the for-loop.
+        // Track nested parentheses so that `i = i.plus(Bigint.ONE)` does not
+        // terminate at the inner `)`.
         var paren_depth: usize = 0;
         while (self.current.kind != .eof) {
             if (self.current.kind == .lparen) {
@@ -1157,7 +1209,7 @@ const Parser = struct {
         _ = self.expect(.rparen);
 
         const body = self.parseStmtOrBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

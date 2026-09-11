@@ -280,7 +280,19 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 // rejects the loop with a compile-time-constant diagnostic (matching the
 // reference TS compiler). Defaults to true so unrelated construction sites and
 // format parsers stay literal-bounded by default.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, source_loc: ?SourceLocation = null };
+/// A pre-digested loop shape: the surface parsers resolve the iterator, its
+/// start value, the bound and the direction, so there is no init/condition/
+/// update triple here the way the other six tiers carry one.
+///
+/// `update` is the exception (N-061 / R-065). Every parser used to parse the
+/// update clause and throw it away, so nothing downstream could see that the
+/// author wrote something the unrolled loop model cannot represent — a
+/// non-unit step, a call, or a state write — and it was silently coerced to a
+/// unit step. The parsers that have an update clause now record it verbatim so
+/// `passes/validate.zig` can reject what it cannot represent. `null` means the
+/// surface syntax carries no update clause at all (`for i in 0..N`,
+/// `range(N)`, a bare `while (c)`), which is always representable.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, update: ?*const Statement = null, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {
