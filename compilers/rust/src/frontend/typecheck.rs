@@ -1225,7 +1225,17 @@ terminal (no state mutation)",
                     Expression::BigIntLiteral { value } => value.to_i128(),
                     Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
                         if let Expression::BigIntLiteral { value } = operand.as_ref() {
-                            (-value).to_i128()
+                            // R-068: this arm exists ONLY to reach the
+                            // "must be >= 0" message below, so it must
+                            // surrender anything that is not actually
+                            // negative. `-0` negates to 0 and would sail
+                            // past that bound check, but ANF lowering
+                            // matches on a bare BigIntLiteral: on a
+                            // UnaryExpr it falls through to `load_const ""`
+                            // and the covenant the intrinsic was supposed
+                            // to install is silently absent. Report it as a
+                            // non-literal index instead.
+                            (-value).to_i128().filter(|v| *v < 0)
                         } else {
                             None
                         }
