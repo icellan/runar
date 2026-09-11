@@ -197,6 +197,11 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("extractOutputs", FuncSig { params: vec!["SigHashPreimage"], return_type: "Sha256" });
     m.insert("extractLocktime", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
     m.insert("extractSigHashType", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
+    // P2PKH change-output serializer. The stateful continuation epilogue emits
+    // this call itself (frontend/anf_lower.rs), and codegen/stack.rs has always
+    // lowered it — this row is what makes it callable BY NAME, which the ts /
+    // python / zig / ruby / java tiers have always allowed (N-055).
+    m.insert("buildChangeOutput", FuncSig { params: vec!["ByteString", "bigint"], return_type: "ByteString" });
 
     // Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
     // that compile down to standard primitives + auto-injected method params.

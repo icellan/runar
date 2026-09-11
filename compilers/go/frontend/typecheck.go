@@ -205,6 +205,11 @@ var builtinFunctions = map[string]funcSig{
 	"extractOutputs":       {params: []string{"SigHashPreimage"}, returnType: "Sha256"},
 	"extractLocktime":      {params: []string{"SigHashPreimage"}, returnType: "bigint"},
 	"extractSigHashType":   {params: []string{"SigHashPreimage"}, returnType: "bigint"},
+	// P2PKH change-output serializer. The stateful continuation epilogue emits
+	// this call itself (frontend/anf_lower.go), and codegen/stack.go has always
+	// lowered it — this row is what makes it callable BY NAME, which the ts /
+	// python / zig / ruby / java tiers have always allowed (N-055).
+	"buildChangeOutput":    {params: []string{"ByteString", "bigint"}, returnType: "ByteString"},
 	// Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
 	// that compile down to standard primitives + auto-injected method params.
 	// See docs/cross-covenant-pattern.md.
