@@ -106,129 +106,119 @@ module RunarCompiler
     # the Go approach: a single struct rather than an interface hierarchy, which
     # keeps JSON round-tripping straightforward.
     class ANFValue
-      attr_accessor :kind,
-                    # -- load_param, load_prop, update_prop -----------------
-                    :name,
-                    # -- load_const: raw JSON value (kept for lossless round-trip)
-                    :raw_value,
-                    # -- Decoded constant value (populated by decode_constants)
-                    :const_string,
-                    :const_big_int,   # Ruby Integer is arbitrary-precision
-                    :const_bool,
-                    :const_int,       # small integers from JSON numbers
-                    # -- bin_op ---------------------------------------------
-                    :op,
-                    :left,
-                    :right,
-                    :result_type,     # operand type hint: "bytes" for byte-typed equality
-                    # -- unary_op ------------------------------------------
-                    :operand,
-                    # -- call ----------------------------------------------
-                    :func,
-                    :args,
-                    # -- method_call ---------------------------------------
-                    :object,
-                    :method,
-                    # -- if ------------------------------------------------
-                    :cond,
-                    :then,
-                    :else_,
-                    # Ordered named result slots both arms leave (results[0]
-                    # deepest). Entries name a branch-merged local or an
-                    # arm-written contract property; stack lowering tells the
-                    # two apart from the contract's property list, so the wire
-                    # format stays a plain array of strings. nil (not []) when
-                    # the +if+ carries at most one result -- see the TypeScript
-                    # reference in packages/runar-compiler/src/ir/anf-ir.ts for
-                    # the full contract.
-                    :results,
-                    # -- loop ----------------------------------------------
-                    :count,
-                    :iter_var,
-                    :body,
-                    # Iterator start value (Integer) and step direction
-                    # (+1 / -1) for non-zero-start & countdown loops (#121).
-                    # On iteration +i+ the iterator holds +start + i*step+.
-                    # Zero-start counting-up loops carry start=0, step=1,
-                    # reproducing the historical i = 0..count-1 lowering.
-                    :start,
-                    :step,
-                    # -- assert, update_prop (value ref), check_preimage ---
-                    :value_ref,
-                    # -- check_preimage, deserialize_state -----------------
-                    :preimage,
-                    # -- check_preimage: BIP-143 sighash flag the on-chain
-                    #    OP_PUSH_TX binding appends to the derived signature
-                    #    (issue #123). nil = default ALL|FORKID (0x41),
-                    #    byte-identical to the pinned cross-tier binding blob.
-                    :sighash_flag,
-                    # -- add_output ----------------------------------------
-                    :satoshis,
-                    :state_values,
-                    # -- add_raw_output ------------------------------------
-                    :script_bytes,
-                    # -- array_literal -------------------------------------
-                    :elements,
-                    # -- raw_script: opaque opcode-byte span with declared
-                    #    stack arity (emitted by the asm() intrinsic).
-                    :bytes,
-                    :in_arity,
-                    :out_arity,
-                    # -- assert (auto-injected stateful-continuation marker) --
-                    # +true+ only on the compiler-emitted
-                    # +hash256(continuationOutputs) === extractOutputHash(txPreimage)+
-                    # assert. Off-chain SDK interpreters skip this assert via a
-                    # direct marker lookup instead of structural / taint
-                    # heuristics that misfire on developer covenant asserts.
-                    :is_auto_injected_state_check,
-                    # -- load_prop ------------------------------------------
-                    # Issue #109 (+@embedAlways+): when true, dead-binding DCE
-                    # must NOT remove this binding even though nothing
-                    # references it. Set only on the +load_prop+ that ANF
-                    # lowering injects for an +@embedAlways+ readonly field.
-                    # In-memory only -- the artifact serializer never writes
-                    # it, so the cross-tier ANF IR JSON stays byte-identical
-                    # (matches compilers/zig/src/ir/types.zig).
-                    :preserve
+      # Declared field list -- the SINGLE source of truth for what an ANFValue
+      # carries. It drives the accessors, the nil defaults, and (via
+      # +CLI::_anf_to_camel_dict+) the emitted ANF IR JSON, in that declaration
+      # order.
+      #
+      # N-094: the CLI used to keep its OWN copy of this list as an emit
+      # allowlist. +sighash_flag+ was added here and not there, so a
+      # +@sighash SINGLE|FORKID+ covenant silently emitted ANF with no flag and
+      # round-tripped back as ALL|FORKID -- one byte, same script length, wrong
+      # sighash mode. Add a field here and it is emitted; the guard in
+      # +test/test_n094_sighash_ir_wire_format.rb+ fails if it is neither
+      # emitted nor explicitly excluded.
+      FIELDS = [
+        :kind,
+        # -- load_param, load_prop, update_prop -----------------
+        :name,
+        # -- load_const: raw JSON value (kept for lossless round-trip)
+        :raw_value,
+        # -- Decoded constant value (populated by decode_constants)
+        :const_string,
+        # Ruby Integer is arbitrary-precision
+        :const_big_int,
+        :const_bool,
+        # small integers from JSON numbers
+        :const_int,
+        # -- bin_op ---------------------------------------------
+        :op,
+        :left,
+        :right,
+        # operand type hint: "bytes" for byte-typed equality
+        :result_type,
+        # -- unary_op ------------------------------------------
+        :operand,
+        # -- call ----------------------------------------------
+        :func,
+        :args,
+        # -- method_call ---------------------------------------
+        :object,
+        :method,
+        # -- if ------------------------------------------------
+        :cond,
+        :then,
+        :else_,
+        # Ordered named result slots both arms leave (results[0]
+        # deepest). Entries name a branch-merged local or an
+        # arm-written contract property; stack lowering tells the
+        # two apart from the contract's property list, so the wire
+        # format stays a plain array of strings. nil (not []) when
+        # the +if+ carries at most one result -- see the TypeScript
+        # reference in packages/runar-compiler/src/ir/anf-ir.ts for
+        # the full contract.
+        :results,
+        # -- loop ----------------------------------------------
+        :count,
+        :iter_var,
+        :body,
+        # Iterator start value (Integer) and step direction
+        # (+1 / -1) for non-zero-start & countdown loops (#121).
+        # On iteration +i+ the iterator holds +start + i*step+.
+        # Zero-start counting-up loops carry start=0, step=1,
+        # reproducing the historical i = 0..count-1 lowering.
+        :start,
+        :step,
+        # -- assert, update_prop (value ref), check_preimage ---
+        :value_ref,
+        # -- check_preimage, deserialize_state -----------------
+        :preimage,
+        # -- check_preimage: BIP-143 sighash flag the on-chain
+        #    OP_PUSH_TX binding appends to the derived signature
+        #    (issue #123). nil = default ALL|FORKID (0x41),
+        #    byte-identical to the pinned cross-tier binding blob.
+        :sighash_flag,
+        # -- add_output ----------------------------------------
+        :satoshis,
+        :state_values,
+        # -- add_raw_output ------------------------------------
+        :script_bytes,
+        # -- array_literal -------------------------------------
+        :elements,
+        # -- raw_script: opaque opcode-byte span with declared
+        #    stack arity (emitted by the asm() intrinsic).
+        :bytes,
+        :in_arity,
+        :out_arity,
+        # -- assert (auto-injected stateful-continuation marker) --
+        # +true+ only on the compiler-emitted
+        # +hash256(continuationOutputs) === extractOutputHash(txPreimage)+
+        # assert. Off-chain SDK interpreters skip this assert via a
+        # direct marker lookup instead of structural / taint
+        # heuristics that misfire on developer covenant asserts.
+        :is_auto_injected_state_check,
+        # -- load_prop ------------------------------------------
+        # Issue #109 (+@embedAlways+): when true, dead-binding DCE
+        # must NOT remove this binding even though nothing
+        # references it. Set only on the +load_prop+ that ANF
+        # lowering injects for an +@embedAlways+ readonly field.
+        # In-memory only -- the artifact serializer never writes
+        # it, so the cross-tier ANF IR JSON stays byte-identical
+        # (matches compilers/zig/src/ir/types.zig).
+        :preserve,
+      ].freeze
+
+      attr_accessor(*FIELDS)
+
+      # Fields default to nil; the two booleans default to false. Derived from
+      # FIELDS so a new field cannot be declared and left uninitialised.
+      BOOLEAN_FIELDS = %i[is_auto_injected_state_check preserve].freeze
 
       def initialize(kind: "", **_opts)
+        FIELDS.each do |f|
+          instance_variable_set(:"@#{f}", BOOLEAN_FIELDS.include?(f) ? false : nil)
+        end
         @kind = kind
-        @name = nil
-        @raw_value = nil
-        @const_string = nil
-        @const_big_int = nil
-        @const_bool = nil
-        @const_int = nil
-        @op = nil
-        @left = nil
-        @right = nil
-        @result_type = nil
-        @operand = nil
-        @func = nil
-        @args = nil
-        @object = nil
-        @method = nil
-        @cond = nil
-        @then = nil
-        @else_ = nil
-        @results = nil
-        @count = nil
-        @iter_var = nil
-        @body = nil
-        @start = nil
-        @step = nil
-        @value_ref = nil
-        @preimage = nil
-        @sighash_flag = nil
-        @satoshis = nil
-        @state_values = nil
-        @script_bytes = nil
-        @elements = nil
-        @bytes = nil
-        @in_arity = nil
-        @out_arity = nil
-        @is_auto_injected_state_check = false
-        @preserve = false
       end
     end
 

@@ -19,28 +19,46 @@ require_relative "compiler"
 
 module RunarCompiler
   module CLI
-    # Snake-case to camelCase mapping for ANF IR fields.
-    SNAKE_TO_CAMEL = {
-      "contract_name" => "contractName",
-      "is_public" => "isPublic",
-      "iter_var" => "iterVar",
-      "state_values" => "stateValues",
-      "initial_value" => "initialValue",
-      "script_bytes" => "scriptBytes",
+    # Wire names that are NOT the mechanical camelCase of the Ruby field name.
+    # Historical Go/TS IR-JSON spellings, frozen by the cross-tier goldens and
+    # by the +$defs+ in packages/runar-ir-schema/src/schemas/anf-ir.schema.json.
+    # +synthetic_array_chain+ is pinned here to keep this change byte-neutral,
+    # NOT because snake is the settled spelling: Go emits "syntheticArrayChain"
+    # on ANFProperty, Ruby has always emitted "synthetic_array_chain", and
+    # Python and Zig omit the field entirely. No conformance fixture exercises
+    # an expanded FixedArray property, so the suite has never seen the split.
+    # Picking a winner is a cross-tier decision, not part of N-094.
+    SNAKE_WIRE_FIELDS = Set.new(
+      %w[result_type in_arity out_arity synthetic_array_chain],
+    ).freeze
+
+    # Fields whose wire name is a rename rather than a spelling transform.
+    # +raw_value+ and +value_ref+ both land on "value" (they never coexist).
+    FIELD_ALIASES = {
       "else_" => "else",
-      "is_auto_injected_state_check" => "isAutoInjectedStateCheck",
-      # These stay as snake_case to match Go/TS IR format
-      "result_type" => "result_type",
-      # Both raw_value and value_ref map to "value" in Go JSON (they never coexist)
       "value_ref" => "value",
       "raw_value" => "value",
     }.freeze
 
-    # Fields that should be excluded from IR output (internal decoded fields).
-    IR_EXCLUDED_FIELDS = Set.new(%w[
-      const_string const_big_int const_bool const_int
-      source_loc
-      parent_class
+    # Fields deliberately kept OUT of the emitted ANF IR JSON. Everything a
+    # node type declares and does not list here is emitted -- see
+    # +_anf_to_camel_dict+ -- so this set is the only place an in-memory-only
+    # carrier may hide.
+    IR_EXCLUDED_FIELDS = Set.new([
+      # Decoded constant values; the wire carries the raw "value" instead.
+      "const_string", "const_big_int", "const_bool", "const_int",
+      # Debug-only source positions, not part of conformance.
+      "source_loc",
+      # In-memory carrier for the artifact's top-level parentClass field.
+      "parent_class",
+      # Issue #109 (@embedAlways): compiler-internal DCE opt-out on load_prop.
+      # The Zig reference keeps it out of the emitted IR too.
+      "preserve",
+      # N-094 / issue #123: in-memory carrier for the method's declared
+      # @sighash mode. The ANF wire format carries the mode on the
+      # check_preimage node's sighashFlag instead; the ANFMethod schema is
+      # additionalProperties:false, so emitting it fails validateANF.
+      "sighash_type",
     ]).freeze
 
     module_function
@@ -284,9 +302,23 @@ module RunarCompiler
       end
     end
 
-    # Convert a snake_case key to its camelCase equivalent using the mapping.
+    # Wire name for an ANF IR field.
+    #
+    # Derived from the field name instead of looked up in a hand-maintained
+    # table: camelCase is the wire default, so a field added to
+    # RunarCompiler::IR reaches the emitted ANF under the name the other six
+    # tiers already read. Only the irregulars above are enumerated.
+    #
+    # N-094: the old table, paired with the emit allowlist in
+    # +_anf_to_camel_dict+, dropped +sighash_flag+ entirely -- the Go loader
+    # ignores unknown keys, so a +@sighash SINGLE|FORKID+ covenant
+    # round-tripped through +--emit-ir+ as ALL|FORKID: one byte, same script
+    # length, wrong sighash mode.
     def _snake_key(k)
-      SNAKE_TO_CAMEL.fetch(k, k)
+      return FIELD_ALIASES[k] if FIELD_ALIASES.key?(k)
+      return k if SNAKE_WIRE_FIELDS.include?(k)
+
+      k.gsub(/_([a-z0-9])/) { Regexp.last_match(1).upcase }
     end
 
     # Convert an ANF dataclass tree to a dict matching Go/TS IR JSON format.
@@ -329,18 +361,12 @@ module RunarCompiler
         d = {}
         has_raw_value = false
 
-        # Get all instance variable names
-        ivars = %i[
-          kind name raw_value op left right result_type operand func args
-          object method cond then else_ results count iter_var body start step value_ref
-          preimage satoshis state_values script_bytes elements
-          bytes in_arity out_arity
-          is_auto_injected_state_check
-          const_string const_big_int const_bool const_int
-        ]
-
+        # The field list comes off the TYPE (ANFValue::FIELDS), not off a copy
+        # kept here. N-094: this used to be a hand-maintained allowlist; when
+        # sighash_flag was added to the type and not to the list, every
+        # @sighash covenant emitted ANF with the mode silently missing.
         kind_val = obj.kind
-        ivars.each do |ivar_name|
+        RunarCompiler::IR::ANFValue::FIELDS.each do |ivar_name|
           name_str = ivar_name.to_s
           next if IR_EXCLUDED_FIELDS.include?(name_str)
 

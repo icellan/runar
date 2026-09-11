@@ -1136,6 +1136,12 @@ module RunarCompiler
       d["satoshis"] = v.satoshis unless v.satoshis.nil?
       d["stateValues"] = v.state_values unless v.state_values.nil?
       d["scriptBytes"] = v.script_bytes unless v.script_bytes.nil?
+      # N-094 follow-on: array_literal's element refs. This serializer fills the
+      # +anf+ field every STATEFUL artifact carries to the SDK ANF interpreters,
+      # and it had no line for +elements+ -- so a stateful contract using
+      # checkMultiSig shipped {"kind":"array_literal"} with the array gone,
+      # where the Go reference emits {"kind":"array_literal","elements":[...]}.
+      d["elements"] = v.elements unless v.elements.nil?
       if v.kind == "raw_script"
         # Opaque opcode-byte span -- emit bytes + arities explicitly so
         # in_arity 0 / out_arity 0 survive the round-trip.

@@ -307,18 +307,15 @@ def main() -> None:
         print(output)
 
 
-_SNAKE_TO_CAMEL = {
-    "contract_name": "contractName",
-    "is_public": "isPublic",
-    "iter_var": "iterVar",
-    "state_values": "stateValues",
-    "initial_value": "initialValue",
-    "script_bytes": "scriptBytes",
+# Wire names that are NOT the mechanical camelCase of the Python field name.
+# Historical Go/TS IR-JSON spellings, frozen by the cross-tier goldens and by
+# the `$defs` in packages/runar-ir-schema/src/schemas/anf-ir.schema.json.
+_SNAKE_WIRE_FIELDS = frozenset({"result_type", "in_arity", "out_arity"})
+
+# Fields whose wire name is a rename rather than a spelling transform.
+# `raw_value` and `value_ref` both land on "value" (they never coexist).
+_FIELD_ALIASES = {
     "else_": "else",
-    "is_auto_injected_state_check": "isAutoInjectedStateCheck",
-    # These stay as snake_case to match Go/TS IR format
-    "result_type": "result_type",
-    # Both raw_value and value_ref map to "value" in Go JSON (they never coexist)
     "value_ref": "value",
     "raw_value": "value",
 }
@@ -337,11 +334,35 @@ _IR_EXCLUDED_FIELDS = frozenset({
     # load_prop. The Zig reference keeps it out of the emitted IR too, so
     # excluding it here keeps the cross-tier ANF bytes identical.
     "preserve",
+    # N-094 / issue #123: in-memory carrier for the method's declared @sighash
+    # mode. The ANF wire format carries the mode on the `check_preimage` node's
+    # `sighashFlag` instead; the ANFMethod schema is additionalProperties:false,
+    # so emitting it here makes the whole program fail validateANF.
+    "sighash_type",
 })
 
 
 def _snake_key(k: str) -> str:
-    return _SNAKE_TO_CAMEL.get(k, k)
+    """Wire name for an ANF IR field.
+
+    Derived from the field name instead of looked up in a hand-maintained
+    table: camelCase is the wire default, so a field added to
+    ``runar_compiler.ir.types`` reaches the emitted ANF under the name the
+    other six tiers already read. Only the irregulars above are enumerated.
+
+    N-094: the old table was an allowlist in disguise — ``sighash_flag`` had no
+    entry, so it passed through as snake_case, the Go loader ignored the
+    unknown key, and a ``@sighash SINGLE|FORKID`` covenant round-tripped
+    through ``--emit-ir`` as ALL|FORKID: one byte, same script length, wrong
+    sighash mode. ``tests/test_n094_sighash_ir_wire_format.py`` fails if any
+    declared field serializes to a name the cross-tier JSON Schema rejects.
+    """
+    if k in _FIELD_ALIASES:
+        return _FIELD_ALIASES[k]
+    if k in _SNAKE_WIRE_FIELDS:
+        return k
+    head, *rest = k.split("_")
+    return head + "".join(word[:1].upper() + word[1:] for word in rest)
 
 
 def _anf_to_camel_dict(obj: object) -> object:
