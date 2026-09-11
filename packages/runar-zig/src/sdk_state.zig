@@ -168,9 +168,15 @@ fn encodeStateValue(
         std.mem.eql(u8, field_type, "Addr") or
         std.mem.eql(u8, field_type, "Ripemd160") or
         std.mem.eql(u8, field_type, "Sha256") or
-        std.mem.eql(u8, field_type, "Point"))
+        std.mem.eql(u8, field_type, "Point") or
+        std.mem.eql(u8, field_type, "P256Point") or
+        std.mem.eql(u8, field_type, "P384Point"))
     {
-        // Fixed-size byte types: raw hex, no framing
+        // Fixed-size byte types: raw hex, no framing.
+        // P256Point (64) and P384Point (96) belong here because runar-lang's
+        // cast constructors hard-assert those widths and all seven compilers
+        // emit them as fixed raw slices; framing them instead deploys a state
+        // section 1-2 bytes long and the first spend fails.
         return switch (value) {
             .bytes => |b| allocator.dupe(u8, b),
             else => allocator.dupe(u8, ""),
@@ -499,8 +505,12 @@ fn decodeStateValue(
         const w: usize = 64;
         if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
         return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Point")) {
+    } else if (std.mem.eql(u8, field_type, "Point") or std.mem.eql(u8, field_type, "P256Point")) {
         const w: usize = 128;
+        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
+        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
+    } else if (std.mem.eql(u8, field_type, "P384Point")) {
+        const w: usize = 192;
         if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
         return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
     } else {

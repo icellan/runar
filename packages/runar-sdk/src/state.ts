@@ -335,14 +335,19 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
       // review flagged).
       return value ? '01' : '00';
     }
-    case 'PubKey':
-    case 'Addr':
-    case 'Ripemd160':
-    case 'Sha256':
-    case 'Point':
-      // Fixed-size byte types: raw hex, no framing needed.
-      return String(value);
     default: {
+      // Fixed-size byte types (PubKey 33, Addr/Ripemd160 20, Sha256 32,
+      // Point 64, P256Point 64, P384Point 96): raw hex, no framing needed.
+      //
+      // Table-driven off the SAME runar-ir-schema table `decodeStateValue`
+      // reads, so this writer and that reader cannot drift. It used to be a
+      // hand-maintained `case` list, and every type the compiler emitted raw
+      // but the list omitted deployed a framed state section the on-chain
+      // reader could not parse — the #115 `boolean` drift above, and then
+      // P256Point / P384Point, which locked funds on the first spend.
+      if (STATE_FIELD_WIDTHS[type]?.encoding === 'raw') {
+        return String(value);
+      }
       // Variable-length types (bytes, ByteString, etc.): use push-data
       // encoding so the decoder can determine the length.
       const hex = String(value);

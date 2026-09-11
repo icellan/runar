@@ -10,7 +10,15 @@
  *   - bool         : 1 raw byte (0x00 / 0x01)
  *   - PubKey       : 33 raw bytes          - Addr / Ripemd160 : 20 raw bytes
  *   - Sha256       : 32 raw bytes          - Point            : 64 raw bytes
+ *   - P256Point    : 64 raw bytes          - P384Point        : 96 raw bytes
  *   - anything else: push-data framed (variable length)
+ *
+ * The curve-point types are raw and fixed-width because `runar-lang`'s
+ * `P256Point` / `P384Point` cast constructors hard-assert 64 / 96 bytes, and
+ * all seven COMPILERS emit them as fixed raw slices in the state tail. An SDK
+ * that push-data frames them instead deploys a state section one (64 -> 0x40)
+ * or two (96 -> OP_PUSHDATA1) bytes longer than the script's own reader
+ * expects, and the first spend fails with the funds locked.
  *
  * Fields are concatenated in `StateField.index` order. FixedArray fields
  * serialize as their flattened leaves back-to-back.
@@ -41,6 +49,8 @@ export const STATE_FIELD_WIDTHS: Readonly<
   Ripemd160: { size: 20, encoding: 'raw' },
   Sha256: { size: 32, encoding: 'raw' },
   Point: { size: 64, encoding: 'raw' },
+  P256Point: { size: 64, encoding: 'raw' },
+  P384Point: { size: 96, encoding: 'raw' },
 };
 
 /** Return the innermost scalar type of a (possibly nested) FixedArray string. */

@@ -378,8 +378,12 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 			return "01"
 		}
 		return "00"
-	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point":
+	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point":
 		// Fixed-size byte types: raw hex, no framing needed.
+		// P256Point (64) and P384Point (96) belong here because runar-lang's
+		// cast constructors hard-assert those widths and all seven compilers
+		// emit them as fixed raw slices; framing them instead deploys a state
+		// section 1-2 bytes long and the first spend fails.
 		return fmt.Sprintf("%v", value)
 	default:
 		// Variable-length types (bytes, ByteString, etc.): use push-data
@@ -562,8 +566,10 @@ func decodeStateValue(hex string, offset int, fieldType string) (interface{}, in
 		return hex[offset : offset+40], 40 // 20 bytes
 	case "Sha256":
 		return hex[offset : offset+64], 64 // 32 bytes
-	case "Point":
+	case "Point", "P256Point":
 		return hex[offset : offset+128], 128 // 64 bytes
+	case "P384Point":
+		return hex[offset : offset+192], 192 // 96 bytes
 	default:
 		// For unknown types, fall back to push-data decoding
 		data, bytesRead := DecodePushData(hex, offset)

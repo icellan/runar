@@ -402,8 +402,12 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
                 "00".to_string()
             }
         }
-        "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" => {
+        "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" | "P256Point" | "P384Point" => {
             // Fixed-size byte types: raw hex, no framing needed.
+            // P256Point (64) and P384Point (96) belong here because runar-lang's
+            // cast constructors hard-assert those widths and all seven compilers
+            // emit them as fixed raw slices; framing them instead deploys a state
+            // section 1-2 bytes long and the first spend fails.
             value.as_bytes().to_string()
         }
         _ => {
@@ -644,8 +648,13 @@ fn decode_state_value(
             let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
             (SdkValue::Bytes(data.to_string()), w)
         }
-        "Point" => {
+        "Point" | "P256Point" => {
             let w = 128; // 64 bytes
+            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
+            (SdkValue::Bytes(data.to_string()), w)
+        }
+        "P384Point" => {
+            let w = 192; // 96 bytes
             let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
             (SdkValue::Bytes(data.to_string()), w)
         }

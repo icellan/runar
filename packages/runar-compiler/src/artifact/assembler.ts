@@ -703,7 +703,9 @@ function enrichConstructorSlots(
       const width = STATE_FIELD_WIDTHS[param.type];
       if (width && width.encoding === 'raw') {
         out.fixedValueByteLength = width.size;
-        out.fixedPushHeaderBytes = 1; // direct push: all fixed types are <= 75 bytes
+        // <= 75 bytes is a direct push (1 header byte); wider needs
+        // OP_PUSHDATA1 (2). P384Point is 96, so this cannot be hardcoded to 1.
+        out.fixedPushHeaderBytes = width.size <= 75 ? 1 : 2;
       }
     }
     return out;

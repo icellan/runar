@@ -100,7 +100,13 @@ public final class StateSerializer {
         return switch (fieldType) {
             case "int", "bigint" -> encodeNum2Bin(toBigInteger(value), 8, label);
             case "bool" -> Boolean.TRUE.equals(value) ? "01" : "00";
-            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point" -> String.valueOf(value);
+            // Fixed-size byte types: raw hex, no framing needed. P256Point (64)
+            // and P384Point (96) belong here because runar-lang's cast
+            // constructors hard-assert those widths and all seven compilers emit
+            // them as fixed raw slices; framing them instead deploys a state
+            // section 1-2 bytes long and the first spend fails.
+            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point" ->
+                    String.valueOf(value);
             default -> {
                 String hex = String.valueOf(value);
                 if (hex.isEmpty()) yield "00";
@@ -191,9 +197,14 @@ public final class StateSerializer {
                 offset[0] += 64;
                 yield s;
             }
-            case "Point" -> {
+            case "Point", "P256Point" -> {
                 String s = hex.substring(offset[0], offset[0] + 128);
                 offset[0] += 128;
+                yield s;
+            }
+            case "P384Point" -> {
+                String s = hex.substring(offset[0], offset[0] + 192);
+                offset[0] += 192;
                 yield s;
             }
             default -> {

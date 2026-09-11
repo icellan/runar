@@ -403,6 +403,11 @@ _TYPE_WIDTHS = {
     'Ripemd160': 20,
     'Sha256': 32,
     'Point': 64,
+    # runar-lang's P256Point / P384Point cast constructors hard-assert 64 / 96
+    # bytes and all seven compilers emit them as fixed raw slices; framing them
+    # instead deploys a state section 1-2 bytes long and the first spend fails.
+    'P256Point': 64,
+    'P384Point': 96,
 }
 
 
