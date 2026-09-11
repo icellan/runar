@@ -1784,7 +1784,15 @@ class TypeChecker {
         } else if (
           args[0]!.kind === 'unary_expr' &&
           (args[0] as { op: string }).op === '-' &&
-          (args[0] as { operand: { kind: string } }).operand.kind === 'bigint_literal'
+          (args[0] as { operand: { kind: string } }).operand.kind === 'bigint_literal' &&
+          // N-060: this arm exists ONLY to reach the "must be >= 0" message
+          // below, so it must surrender anything that is not actually
+          // negative. `-0n` negates to 0n and would sail past that bound
+          // check, but ANF lowering matches on a bare bigint_literal: on a
+          // unary_expr it falls through to `load_const ''` and the covenant
+          // the intrinsic was supposed to install is silently absent. Let it
+          // fall to the non-literal-index diagnostic instead.
+          -(args[0] as { operand: { value: bigint } }).operand.value < 0n
         ) {
           // Accept `-N` (UnaryExpr "-" over BigIntLiteral) so the bounds
           // check below produces a clear "must be >= 0" rather than the

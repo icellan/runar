@@ -1280,8 +1280,20 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 				if u, isUnary := args[0].(UnaryExpr); isUnary && u.Op == "-" {
 					if inner, innerOk := u.Operand.(BigIntLiteral); innerOk && inner.Value != nil {
 						neg := new(big.Int).Neg(inner.Value)
-						lit = BigIntLiteral{Value: neg}
-						ok = true
+						// N-060: this arm exists ONLY to reach the
+						// "must be >= 0" message below, so it must
+						// surrender anything that is not actually
+						// negative. `-0` negates to 0 and would sail
+						// past that bound check, but ANF lowering
+						// matches on a bare BigIntLiteral: on a
+						// UnaryExpr it falls through to `load_const ""`
+						// and the covenant the intrinsic was supposed
+						// to install is silently absent. Report it as a
+						// non-literal index instead.
+						if neg.Sign() < 0 {
+							lit = BigIntLiteral{Value: neg}
+							ok = true
+						}
 					}
 				}
 			}

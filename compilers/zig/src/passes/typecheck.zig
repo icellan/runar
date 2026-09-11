@@ -962,7 +962,21 @@ const TypeChecker = struct {
                     .unary_op => |u| {
                         if (u.op == .negate) {
                             switch (u.operand) {
-                                .literal_int => |v| idx_lit = -v,
+                                // N-060: this arm exists ONLY to reach the
+                                // "must be >= 0" message below, so it must
+                                // surrender anything that is not actually
+                                // negative (`v > 0` is `-v < 0`, and it also
+                                // dodges negating minInt). `-0` negates to 0
+                                // and would sail past that bound check, but
+                                // ANF lowering matches on a bare .literal_int:
+                                // on a .unary_op it falls through to
+                                // `load_const ""` and the covenant the
+                                // intrinsic was supposed to install is
+                                // silently absent. Leave idx_lit null so the
+                                // non-literal-index diagnostic fires instead.
+                                .literal_int => |v| {
+                                    if (v > 0) idx_lit = -v;
+                                },
                                 else => {},
                             }
                         }

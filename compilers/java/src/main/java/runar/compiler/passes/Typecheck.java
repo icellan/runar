@@ -1092,7 +1092,17 @@ public final class Typecheck {
                     } else if (idxArg instanceof UnaryExpr u
                         && u.op() == Expression.UnaryOp.NEG
                         && u.operand() instanceof BigIntLiteral inner
-                        && inner.value() != null) {
+                        && inner.value() != null
+                        // N-060: this arm exists ONLY to reach the
+                        // "must be >= 0" message below, so it must surrender
+                        // anything that is not actually negative. `-0`
+                        // negates to 0 and would sail past that bound check,
+                        // but AnfLower matches on a bare BigIntLiteral: on a
+                        // UnaryExpr it falls through to `load_const ""` and
+                        // the covenant the intrinsic was supposed to install
+                        // is silently absent. Let it fall to the
+                        // non-literal-index diagnostic instead.
+                        && inner.value().negate().signum() < 0) {
                         // Accept `-N` so the bounds check below produces a
                         // clear "must be >= 0" rather than the misleading
                         // "must be an integer literal" message.

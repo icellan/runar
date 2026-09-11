@@ -1145,7 +1145,16 @@ module RunarCompiler
             # misleading "must be an integer literal" message.
             elsif args[0].is_a?(UnaryExpr) && args[0].op == "-" &&
                   args[0].operand.is_a?(BigIntLiteral) &&
-                  !args[0].operand.value.nil?
+                  !args[0].operand.value.nil? &&
+                  # N-060: this arm exists ONLY to reach the "must be >= 0"
+                  # message below, so it must surrender anything that is not
+                  # actually negative. `-0` negates to 0 and would sail past
+                  # that bound check, but ANF lowering matches on a bare
+                  # BigIntLiteral: on a UnaryExpr it falls through to
+                  # `load_const ""` and the covenant the intrinsic was supposed
+                  # to install is silently absent. Let it fall to the
+                  # non-literal-index diagnostic instead.
+                  -args[0].operand.value < 0
               idx_lit = BigIntLiteral.new(value: -args[0].operand.value)
             end
             if idx_lit.nil?

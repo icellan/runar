@@ -907,6 +907,15 @@ class _TypeChecker:
                     isinstance(args[0], UnaryExpr)
                     and args[0].op == "-"
                     and isinstance(args[0].operand, BigIntLiteral)
+                    # N-060: this arm exists ONLY to reach the "must be >= 0"
+                    # message below, so it must surrender anything that is not
+                    # actually negative. ``-0`` negates to 0 and would sail
+                    # past that bound check, but ANF lowering matches on a bare
+                    # BigIntLiteral: on a UnaryExpr it falls through to
+                    # ``load_const ""`` and the covenant the intrinsic was
+                    # supposed to install is silently absent. Let it fall to
+                    # the non-literal-index diagnostic instead.
+                    and -args[0].operand.value < 0
                 ):
                     idx_lit = BigIntLiteral(value=-args[0].operand.value)
                 if idx_lit is None:
