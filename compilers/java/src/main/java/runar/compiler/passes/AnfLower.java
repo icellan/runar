@@ -98,6 +98,37 @@ public final class AnfLower {
         "Point", "P256Point", "P384Point"
     );
 
+    /**
+     * Preimage field extractors that return BYTES ({@code ByteString} /
+     * {@code Sha256}).
+     *
+     * <p>N-054: this list is a transcription of the return type the type
+     * checker already records for these builtins in {@code TypeCheck.java},
+     * and the stack lowerer agrees with it byte for byte: {@code lowerExtractor}
+     * ends the split sequence with OP_BIN2NUM for exactly the SIX extractors
+     * that are NOT listed here, and for none of the ones that are.
+     *
+     * <p>So an extractor listed here leaves a byte string on the stack and must
+     * be compared with OP_EQUAL and concatenated with OP_CAT; every other
+     * extractor leaves a minimally-encoded script NUMBER and must be compared
+     * with OP_NUMEQUAL and added with OP_ADD.
+     *
+     * <p>Getting it backwards is a correctness defect in both directions.
+     * OP_EQUAL on a number is over-strict — it rejects a witness that encodes
+     * the same value with different bytes ({@code 0400} for 4), i.e. it refuses
+     * a valid spend. OP_NUMEQUAL on a hash or a scriptCode is under-strict —
+     * trailing high-order zero bytes and negative zero compare equal to values
+     * they are not byte-equal to, i.e. a covenant bypass.
+     *
+     * <p>This replaces a {@code name.startsWith("extract")} prefix test that
+     * swept the six numeric extractors in with the byte ones.
+     */
+    private static final Set<String> BYTE_RETURNING_EXTRACTORS = Set.of(
+        "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
+        "extractScriptCode", "extractOutputHash", "extractOutputs",
+        "extractPrevOutputScript"
+    );
+
     private static final Set<String> BYTE_RETURNING_FUNCTIONS = Set.of(
         "sha256", "ripemd160", "hash160", "hash256",
         "cat", "substr", "num2bin", "reverseBytes", "left", "right",
@@ -2010,10 +2041,7 @@ public final class AnfLower {
                         return "ByteString".equals(ce.asmReturnType());
                     }
                     if (BYTE_RETURNING_FUNCTIONS.contains(cid.name())) return true;
-                    if (cid.name().length() >= 7
-                        && cid.name().substring(0, 7).equals("extract")) {
-                        return true;
-                    }
+                    if (BYTE_RETURNING_EXTRACTORS.contains(cid.name())) return true;
                 }
                 return false;
             }

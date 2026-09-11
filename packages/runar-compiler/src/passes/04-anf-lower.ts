@@ -2504,15 +2504,45 @@ const BYTE_TYPES = new Set([
   'P256Point', 'P384Point',
 ]);
 
+/**
+ * Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
+ *
+ * N-054: this list is the ONLY correct one, and it is not a judgement call —
+ * it is a transcription of the `returnType` the type checker already records
+ * for these builtins in `03-typecheck.ts`, and the stack lowerer agrees with
+ * it byte for byte: `lowerExtractor` ends the split sequence with OP_BIN2NUM
+ * for exactly the SIX extractors that are NOT in this set, and for none of
+ * the ones that are.
+ *
+ * So an extractor in this set leaves a byte string on the stack and must be
+ * compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+ * leaves a minimally-encoded script NUMBER and must be compared with
+ * OP_NUMEQUAL and added with OP_ADD.
+ *
+ * Getting it backwards is a correctness defect in both directions. OP_EQUAL
+ * on a number is over-strict — it rejects a witness that encodes the same
+ * value with different bytes (`0400` for 4), i.e. it refuses a valid spend.
+ * OP_NUMEQUAL on a hash or a scriptCode is under-strict — trailing high-order
+ * zero bytes and negative zero compare equal to values they are not
+ * byte-equal to, i.e. a covenant bypass.
+ *
+ * Do NOT re-derive this from a `name.startsWith('extract')` prefix test: five
+ * tiers did exactly that and swept the six numeric extractors in with it.
+ */
+const BYTE_RETURNING_EXTRACTORS = [
+  'extractHashPrevouts', 'extractHashSequence', 'extractOutpoint',
+  'extractScriptCode', 'extractOutputHash', 'extractOutputs',
+  'extractPrevOutputScript',
+] as const;
+
 /** Builtin functions that return byte-typed values. */
-const BYTE_RETURNING_FUNCTIONS = new Set([
+const BYTE_RETURNING_FUNCTIONS = new Set<string>([
   'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
   'reverseBytes', 'substr', 'left', 'right',
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
   'p256Add', 'p256Mul', 'p256MulGen', 'p256Negate', 'p256EncodeCompressed',
   'p384Add', 'p384Mul', 'p384MulGen', 'p384Negate', 'p384EncodeCompressed',
-  'extractOutpoint', 'extractHashPrevouts', 'extractHashSequence', 'extractOutputHash',
-  'extractVersion', 'extractLocktime', 'extractSigHashType',
+  ...BYTE_RETURNING_EXTRACTORS,
   'blake3Compress', 'blake3Hash',
 ]);
 

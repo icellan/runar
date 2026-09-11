@@ -110,6 +110,38 @@ _BYTE_TYPES: frozenset[str] = frozenset({
     "P384Point",
 })
 
+# Preimage field extractors that return BYTES (ByteString / Sha256).
+#
+# N-054: this list is a transcription of the return_type the type checker
+# already records for these builtins in typecheck.py, and the stack lowerer
+# agrees with it byte for byte: _lower_extractor ends the split sequence with
+# OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
+# none of the ones that are.
+#
+# So an extractor listed here leaves a byte string on the stack and must be
+# compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+# leaves a minimally-encoded script NUMBER and must be compared with
+# OP_NUMEQUAL and added with OP_ADD.
+#
+# Getting it backwards is a correctness defect in both directions. OP_EQUAL on
+# a number is over-strict -- it rejects a witness that encodes the same value
+# with different bytes (0400 for 4), i.e. it refuses a valid spend. OP_NUMEQUAL
+# on a hash or a scriptCode is under-strict -- trailing high-order zero bytes
+# and negative zero compare equal to values they are not byte-equal to, i.e. a
+# covenant bypass.
+#
+# This replaces a name[:7] == "extract" prefix test that swept the six numeric
+# extractors in with the byte ones.
+_BYTE_RETURNING_EXTRACTORS: frozenset[str] = frozenset({
+    "extractHashPrevouts",
+    "extractHashSequence",
+    "extractOutpoint",
+    "extractScriptCode",
+    "extractOutputHash",
+    "extractOutputs",
+    "extractPrevOutputScript",
+})
+
 _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
     "sha256",
     "ripemd160",
@@ -186,7 +218,7 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
                 return expr.asm_return_type == "ByteString"
             if expr.callee.name in _BYTE_RETURNING_FUNCTIONS:
                 return True
-            if len(expr.callee.name) >= 7 and expr.callee.name[:7] == "extract":
+            if expr.callee.name in _BYTE_RETURNING_EXTRACTORS:
                 return True
         return False
 

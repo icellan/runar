@@ -51,6 +51,38 @@ var byteTypes = map[string]bool{
 	"P384Point":       true,
 }
 
+// Preimage field extractors that return BYTES (ByteString / Sha256).
+//
+// N-054: this list is a transcription of the returnType the type checker
+// already records for these builtins in typecheck.go, and the stack lowerer
+// agrees with it byte for byte: lowerExtractor ends the split sequence with
+// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
+// none of the ones that are.
+//
+// So an extractor listed here leaves a byte string on the stack and must be
+// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+// leaves a minimally-encoded script NUMBER and must be compared with
+// OP_NUMEQUAL and added with OP_ADD.
+//
+// Getting it backwards is a correctness defect in both directions. OP_EQUAL
+// on a number is over-strict -- it rejects a witness that encodes the same
+// value with different bytes (0400 for 4), i.e. it refuses a valid spend.
+// OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing high-order
+// zero bytes and negative zero compare equal to values they are not
+// byte-equal to, i.e. a covenant bypass.
+//
+// This replaces a strings.HasPrefix(name, "extract") test that swept the six
+// numeric extractors in with the byte ones.
+var byteReturningExtractors = map[string]bool{
+	"extractHashPrevouts":     true,
+	"extractHashSequence":     true,
+	"extractOutpoint":         true,
+	"extractScriptCode":       true,
+	"extractOutputHash":       true,
+	"extractOutputs":          true,
+	"extractPrevOutputScript": true,
+}
+
 var byteReturningFunctions = map[string]bool{
 	"sha256":               true,
 	"ripemd160":            true,
@@ -127,7 +159,7 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 			if byteReturningFunctions[id.Name] {
 				return true
 			}
-			if len(id.Name) >= 7 && id.Name[:7] == "extract" {
+			if byteReturningExtractors[id.Name] {
 				return true
 			}
 		}
