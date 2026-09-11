@@ -853,7 +853,8 @@ def _bn254_build_jacobian_add_affine_standard(it: BN254Tracker) -> None:
     it.rename("jz")
 
 
-def _bn254_build_jacobian_add_affine_inline(e: Callable, t: BN254Tracker) -> None:
+def _bn254_build_jacobian_add_affine_inline(e: Callable, t: BN254Tracker,
+                                           strict: bool) -> None:
     """Build doubling-safe Jacobian mixed-add ops for use inside OP_IF.
 
     Uses an inner BN254Tracker to leverage the field arithmetic helpers.
@@ -880,14 +881,37 @@ def _bn254_build_jacobian_add_affine_inline(e: Callable, t: BN254Tracker) -> Non
     # against a fresh copy of jx. Consumes only the copies.
     it.copy_to_top("jz", "_jz_chk_in")
     _bn254_field_sqr(it, "_jz_chk_in", "_jz_chk_sq")
+    if strict:
+        # Z1sq is consumed by U2 below; keep a copy for Z1cu.
+        it.copy_to_top("_jz_chk_sq", "_jz_chk_sq_keep")
     it.copy_to_top("ax", "_ax_chk_copy")
     _bn254_field_mul(it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk")
     it.copy_to_top("jx", "_jx_chk_copy")
     it.raw_block(["_u2_chk", "_jx_chk_copy"], "_h_is_zero",
                  lambda e_: e_(_make_stack_op(op="opcode", code="OP_NUMEQUAL")))
 
-    # Move _h_is_zero to top so OP_IF can consume it.
-    it.to_top("_h_is_zero")
+    cond_name = "_h_is_zero"
+    if strict:
+        # R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two
+        # operands are the SAME point; H == 0 with R != 0 means they are
+        # negatives, whose sum is O -- and the standard mixed-add already
+        # answers that correctly, with Z3 = jz*H = 0 flowing through the
+        # Fermat inverse to the all-zero point.
+        it.copy_to_top("jz", "_jz_chk_for_cu")
+        _bn254_field_mul(it, "_jz_chk_for_cu", "_jz_chk_sq_keep", "_z1cu_chk")
+        it.copy_to_top("ay", "_ay_chk_copy")
+        _bn254_field_mul(it, "_ay_chk_copy", "_z1cu_chk", "_s2_chk")
+        it.copy_to_top("jy", "_jy_chk_copy")
+        it.raw_block(["_s2_chk", "_jy_chk_copy"], "_r_is_zero",
+                     lambda e_: e_(_make_stack_op(op="opcode", code="OP_NUMEQUAL")))
+        it.to_top("_h_is_zero")
+        it.to_top("_r_is_zero")
+        it.raw_block(["_h_is_zero", "_r_is_zero"], "_dbl_cond",
+                     lambda e_: e_(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+        cond_name = "_dbl_cond"
+
+    # Move the condition to top so OP_IF can consume it.
+    it.to_top(cond_name)
     it.nm.pop()  # consumed by IF
 
     # ------------------------------------------------------------------
@@ -1008,6 +1032,38 @@ def emit_bn254_g1_add(emit: Callable[["StackOp"], None]) -> None:
     t.pop_prime_cache()
 
 
+def _bn254_emit_scalar_reduce(t: BN254Tracker, k_name: str, result_name: str) -> None:
+    """Reduce a scalar to [0, r-1]: ((k mod r) + r) mod r.
+
+    OP_MOD takes the sign of the DIVIDEND, so `k mod r` alone lands in
+    (-r, r); the `+ r, mod r` normalises the negative half. One push of r
+    covers both reductions -- the same shape as _emit_scalar_reduce in ec.py,
+    whose numbers do NOT carry here (see emit_bn254_g1_scalar_mul for the
+    BN254 interval bounds).
+
+    Without it the ladder below is correct only while
+    2^255 <= k + 3r < 2^256. A scalar >= 2^256 - 3r (about 2.2902*r) sets bit
+    256, which the loop never reads, and one <= 2^255 - 3r drops k' under
+    2^255, invalidating the accumulator seed; either way the ladder returns a
+    DIFFERENT multiple of P rather than failing. In Groth16 the scalars are
+    the caller-supplied PUBLIC INPUTS of vk_x = IC[0] + sum(IC[i] * pub_i),
+    so the domain is attacker-chosen.
+    """
+    t.push_big_int("_r_red", BN254_R)
+
+    def _red(e_):
+        e_(_make_stack_op(op="opcode", code="OP_2DUP"))
+        e_(_make_stack_op(op="opcode", code="OP_MOD"))
+        e_(_make_stack_op(op="rot"))
+        e_(_make_stack_op(op="drop"))
+        e_(_make_stack_op(op="over"))
+        e_(_make_stack_op(op="opcode", code="OP_ADD"))
+        e_(_make_stack_op(op="swap"))
+        e_(_make_stack_op(op="opcode", code="OP_MOD"))
+
+    t.raw_block([k_name, "_r_red"], result_name, _red)
+
+
 def emit_bn254_g1_scalar_mul(emit: Callable[["StackOp"], None]) -> None:
     """Perform scalar multiplication P * k on BN254 G1.
 
@@ -1022,8 +1078,14 @@ def emit_bn254_g1_scalar_mul(emit: Callable[["StackOp"], None]) -> None:
     # Decompose to affine base point
     _bn254_decompose_point(t, "_pt", "ax", "ay")
 
+    # Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+    # the scalar is caller input.
+    t.to_top("_k")
+    _bn254_emit_scalar_reduce(t, "_k", "_kr")
+    t.rename("_k")
+
     # k' = k + 3r: guarantees bit 255 is set.
-    # k in [1, r-1], so k+3r in [3r+1, 4r-1]. Since 3r > 2^255, bit 255
+    # k in [0, r-1], so k+3r in [3r, 4r-1]. Since 3r >= 2^255, bit 255
     # is always 1. Adding 3r (= 0 mod r) preserves the EC point: k*G = (k+3r)*G.
     t.to_top("_k")
     t.push_big_int("_r1", BN254_R)
@@ -1070,7 +1132,10 @@ def emit_bn254_g1_scalar_mul(emit: Callable[["StackOp"], None]) -> None:
         t.nm.pop()  # _bit consumed by IF
         add_ops: list = []
         add_emit = lambda op: add_ops.append(op)
-        _bn254_build_jacobian_add_affine_inline(add_emit, t)
+        # Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+        # see _bn254_build_jacobian_add_affine_inline for why the strict
+        # H == 0 AND R == 0 test is paid there and nowhere else.
+        _bn254_build_jacobian_add_affine_inline(add_emit, t, bit == 0)
         emit(_make_stack_op(op="if", then=add_ops, else_=[]))
 
     # Convert Jacobian to affine

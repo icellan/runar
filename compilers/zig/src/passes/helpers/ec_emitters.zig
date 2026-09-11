@@ -7,6 +7,14 @@ pub const PushValue = union(enum) {
     bytes: []const u8,
     integer: i64,
     boolean: bool,
+    /// Decimal-string-encoded big integer, for constants that overflow `i64`
+    /// and must stay foldable. A `bytes` push encodes the same script number
+    /// but lowers to `push_data`, which the peephole treats as a HARD barrier
+    /// (`tryWindow4` bails on raw bytes) — so a chain such as the BN254
+    /// ladder's `+r +r +r` could never reassociate into `+3r` the way every
+    /// other tier's does. The payload is canonical decimal text and must
+    /// outlive the emitted op (a static constant, in practice).
+    big_int_decimal: []const u8,
 };
 
 pub const StackIf = struct {

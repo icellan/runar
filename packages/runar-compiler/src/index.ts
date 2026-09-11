@@ -55,6 +55,13 @@ export {
   // `decompressPubKey` shipped without a square-check on the recovered y.
   emitVerifyECDSA_P256, emitVerifyECDSA_P384,
 } from './passes/p256-p384-codegen.js';
+// BN254 G1 emitters, exported for the same reason as the EC ones above: the
+// `bn254G1ScalarMul` ladder is a contract-callable builtin in every tier, and
+// nothing outside the Go tier had ever EXECUTED its emitted script — which is
+// how the missing mod-r reduction on the scalar survived in five compilers.
+export {
+  emitBn254G1Add, emitBn254G1ScalarMul, emitBn254G1Negate, emitBn254G1OnCurve,
+} from './passes/bn254-codegen.js';
 export {
   emitCheckPreimageBinding,
   emitCheckPreimageBindingRaw,

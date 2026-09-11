@@ -71,6 +71,11 @@ fn bn254_p_minus_2_bit(i: usize) -> bool {
     (BN254_FIELD_P_MINUS_2_BE[byte_idx] >> bit) & 1 == 1
 }
 
+/// BN254 curve order r as a `BigInt`.
+fn bn254_curve_r() -> BigInt {
+    BigInt::from_bytes_le(num_bigint::Sign::Plus, &BN254_CURVE_R_SCRIPT_NUM)
+}
+
 /// Collect ops into a Vec via closure.
 fn collect_ops(f: impl FnOnce(&mut dyn FnMut(StackOp))) -> Vec<StackOp> {
     let mut ops = Vec::new();
@@ -135,8 +140,17 @@ impl<'a> BN254Tracker<'a> {
     }
 
     /// Push the BN254 curve order r as a script number.
+    ///
+    /// Emitted as `PushValue::Int`, NOT `push_bytes`. The two encode to the
+    /// identical 32 script-number bytes, but the Stack-IR tag is what the
+    /// peephole chain-folding rule keys on: `PUSH(a) ADD PUSH(b) ADD ->
+    /// PUSH(a+b) ADD` bails out on a raw-bytes push, so with `push_bytes` the
+    /// ladder's `+r +r +r` stayed three separate adds while Go / TS / Python /
+    /// Ruby (which all push r as an integer) folded it into a single `+3r`.
+    /// That was a 67-byte cross-tier divergence in every `bn254G1ScalarMul`.
     pub(crate) fn push_curve_r(&mut self, n: &str) {
-        self.push_bytes(n, BN254_CURVE_R_SCRIPT_NUM.to_vec());
+        (self.e)(StackOp::Push(PushValue::Int(bn254_curve_r())));
+        self.nm.push(n.to_string());
     }
 
     pub(crate) fn dup(&mut self, n: &str) {
@@ -949,7 +963,11 @@ fn bn254_build_jacobian_add_affine_standard(it: &mut BN254Tracker) {
 ///
 /// Stack layout: [..., ax, ay, _k, jx, jy, jz]
 /// After:        [..., ax, ay, _k, jx', jy', jz']
-fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254Tracker) {
+fn bn254_build_jacobian_add_affine_inline(
+    e: &mut dyn FnMut(StackOp),
+    t: &BN254Tracker,
+    strict: bool,
+) {
     // Create inner tracker with cloned stack state
     let cloned_nm: Vec<String> = t.nm.clone();
     let mut it = BN254Tracker::new_from_strings(&cloned_nm, e);
@@ -965,6 +983,10 @@ fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254T
     // compare against a fresh copy of jx. Consumes only the copies.
     it.copy_to_top("jz", "_jz_chk_in");
     bn254_field_sqr(&mut it, "_jz_chk_in", "_jz_chk_sq");
+    if strict {
+        // Z1sq is consumed by U2 below; keep a copy for Z1cu.
+        it.copy_to_top("_jz_chk_sq", "_jz_chk_sq_keep");
+    }
     it.copy_to_top("ax", "_ax_chk_copy");
     bn254_field_mul(&mut it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk");
     it.copy_to_top("jx", "_jx_chk_copy");
@@ -972,8 +994,31 @@ fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254T
         e(StackOp::Opcode("OP_NUMEQUAL".into()));
     });
 
-    // Move _h_is_zero to top so OP_IF can consume it.
-    it.to_top("_h_is_zero");
+    let mut cond_name = "_h_is_zero";
+    if strict {
+        // R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two
+        // operands are the SAME point; H == 0 with R != 0 means they are
+        // negatives, whose sum is O -- and the standard mixed-add already
+        // answers that correctly, with Z3 = jz*H = 0 flowing through the
+        // Fermat inverse to the all-zero point.
+        it.copy_to_top("jz", "_jz_chk_for_cu");
+        bn254_field_mul(&mut it, "_jz_chk_for_cu", "_jz_chk_sq_keep", "_z1cu_chk");
+        it.copy_to_top("ay", "_ay_chk_copy");
+        bn254_field_mul(&mut it, "_ay_chk_copy", "_z1cu_chk", "_s2_chk");
+        it.copy_to_top("jy", "_jy_chk_copy");
+        it.raw_block(&["_s2_chk", "_jy_chk_copy"], Some("_r_is_zero"), |e| {
+            e(StackOp::Opcode("OP_NUMEQUAL".into()));
+        });
+        it.to_top("_h_is_zero");
+        it.to_top("_r_is_zero");
+        it.raw_block(&["_h_is_zero", "_r_is_zero"], Some("_dbl_cond"), |e| {
+            e(StackOp::Opcode("OP_BOOLAND".into()));
+        });
+        cond_name = "_dbl_cond";
+    }
+
+    // Move the condition to top so OP_IF can consume it.
+    it.to_top(cond_name);
     it.nm.pop(); // consumed by IF
 
     // ------------------------------------------------------------------
@@ -1100,6 +1145,35 @@ pub fn emit_bn254_g1_add(emit: &mut dyn FnMut(StackOp)) {
     t.pop_prime_cache();
 }
 
+/// bn254_emit_scalar_reduce reduces a scalar to [0, r-1]: ((k mod r) + r) mod r.
+///
+/// OP_MOD takes the sign of the DIVIDEND, so `k mod r` alone lands in
+/// (-r, r); the `+ r, mod r` normalises the negative half. One push of r
+/// covers both reductions - the same shape as emit_scalar_reduce in ec.rs,
+/// whose numbers do NOT carry here (see emit_bn254_g1_scalar_mul for the
+/// BN254 interval bounds).
+///
+/// Without it the ladder below is correct only while 2^255 <= k + 3r < 2^256.
+/// A scalar >= 2^256 - 3r (about 2.2902*r) sets bit 256, which the loop never
+/// reads, and one <= 2^255 - 3r drops k' under 2^255, invalidating the
+/// accumulator seed; either way the ladder returns a DIFFERENT multiple of P
+/// rather than failing. In Groth16 the scalars are the caller-supplied PUBLIC
+/// INPUTS of vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is
+/// attacker-chosen.
+fn bn254_emit_scalar_reduce(t: &mut BN254Tracker, k_name: &str, result_name: &str) {
+    t.push_curve_r("_r_red");
+    t.raw_block(&[k_name, "_r_red"], Some(result_name), |e| {
+        e(StackOp::Opcode("OP_2DUP".into()));
+        e(StackOp::Opcode("OP_MOD".into()));
+        e(StackOp::Rot);
+        e(StackOp::Drop);
+        e(StackOp::Over);
+        e(StackOp::Opcode("OP_ADD".into()));
+        e(StackOp::Swap);
+        e(StackOp::Opcode("OP_MOD".into()));
+    });
+}
+
 /// emit_bn254_g1_scalar_mul: scalar multiplication P * k on BN254 G1.
 /// Stack in: [point, scalar] (scalar on top)
 /// Stack out: [result_point]
@@ -1111,6 +1185,12 @@ pub fn emit_bn254_g1_scalar_mul(emit: &mut dyn FnMut(StackOp)) {
     t.push_prime_cache();
     // Decompose to affine base point
     bn254_decompose_point(&mut t, "_pt", "ax", "ay");
+
+    // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+    // the scalar is caller input.
+    t.to_top("_k");
+    bn254_emit_scalar_reduce(&mut t, "_k", "_kr");
+    t.rename("_k");
 
     // k' = k + 3r: guarantees bit 255 is set.
     t.to_top("_k");
@@ -1163,8 +1243,11 @@ pub fn emit_bn254_g1_scalar_mul(emit: &mut dyn FnMut(StackOp)) {
         // because OP_IF consumes _bit and the add ops run with _bit already gone.
         t.to_top("_bit");
         t.nm.pop(); // _bit consumed by IF
+        // Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+        // see bn254_build_jacobian_add_affine_inline for why the strict
+        // H == 0 AND R == 0 test is paid there and nowhere else.
         let add_ops = collect_ops(|add_emit| {
-            bn254_build_jacobian_add_affine_inline(add_emit, &t);
+            bn254_build_jacobian_add_affine_inline(add_emit, &t, bit == 0);
         });
         (t.e)(StackOp::If {
             then_ops: add_ops,
@@ -1220,4 +1303,125 @@ pub fn emit_bn254_g1_on_curve(emit: &mut dyn FnMut(StackOp)) {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
     t.pop_prime_cache();
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::emit::emit_method;
+    use crate::codegen::stack::StackMethod;
+    use sha2::{Digest, Sha256};
+
+    /// SHA-256 of the hex string of the raw (pre-peephole) `bn254G1ScalarMul`
+    /// ladder, taken from the Go reference compiler
+    /// (`codegen.EmitBN254G1ScalarMul` -> `codegen.Emit`) and independently
+    /// reproduced by the TypeScript tier. 42 910 ops, 134 245 bytes.
+    ///
+    /// This pin is the whole cross-tier contract for the ladder. It moved when
+    /// the mod-r scalar reduce and the strict last-step `H == 0 AND R == 0`
+    /// test were ported here from Go; before that this tier emitted a ladder
+    /// that silently returned a different multiple of P for any scalar outside
+    /// (2^255 - 3r, 2^256 - 3r).
+    const BN254_SCALAR_MUL_SHA256: &str =
+        "0730fd206a234d76e6fe8079b3238cc58a10be6b487e76fa8193578ea0bc589f";
+
+    /// r, spelled out here rather than taken from the module so this test
+    /// module compiles unchanged against the pre-fix source when reproducing
+    /// the RED state.
+    fn curve_r() -> num_bigint::BigInt {
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617"
+            .parse()
+            .unwrap()
+    }
+
+    fn ladder_hex() -> String {
+        let ops = collect_ops(|e| emit_bn254_g1_scalar_mul(e));
+        let method = StackMethod {
+            name: "t".to_string(),
+            ops,
+            max_stack_depth: 0,
+            source_locs: Vec::new(),
+            uses_code_part: false,
+            needs_code_separator: false,
+        };
+        emit_method(&method).expect("emit").script_hex
+    }
+
+    #[test]
+    fn scalar_mul_matches_the_cross_tier_pin() {
+        let hex = ladder_hex();
+        let digest = hex::encode(Sha256::digest(hex.as_bytes()));
+        assert_eq!(
+            digest, BN254_SCALAR_MUL_SHA256,
+            "bn254G1ScalarMul diverged from the six-tier reference ladder \
+             ({} bytes emitted)",
+            hex.len() / 2
+        );
+    }
+
+    /// The scalar reduce is `PUSH(r) OP_2DUP OP_MOD OP_ROT OP_DROP OP_OVER
+    /// OP_ADD OP_SWAP OP_MOD`, emitted once, before the `+3r` offset. Pinned
+    /// separately from the digest so a failure says WHICH half broke.
+    #[test]
+    fn scalar_mul_reduces_the_scalar_mod_r_before_the_ladder() {
+        let ops = collect_ops(|e| emit_bn254_g1_scalar_mul(e));
+        let names: Vec<String> = ops
+            .iter()
+            .map(|op| match op {
+                StackOp::Opcode(c) => c.clone(),
+                StackOp::Rot => "OP_ROT".to_string(),
+                StackOp::Drop => "OP_DROP".to_string(),
+                StackOp::Over => "OP_OVER".to_string(),
+                StackOp::Swap => "OP_SWAP".to_string(),
+                StackOp::Push(PushValue::Int(v)) if *v == curve_r() => "PUSH_R".to_string(),
+                _ => "_".to_string(),
+            })
+            .collect();
+        let want = [
+            "PUSH_R", "OP_2DUP", "OP_MOD", "OP_ROT", "OP_DROP", "OP_OVER", "OP_ADD", "OP_SWAP",
+            "OP_MOD",
+        ];
+        let hits = names.windows(want.len()).filter(|w| w == &want).count();
+        assert_eq!(hits, 1, "expected exactly one mod-r scalar reduce");
+    }
+
+    /// `strict` is paid at the LAST ladder step only: the final conditional
+    /// add carries the extra `R == 0` test (two field multiplications plus an
+    /// OP_BOOLAND) that separates accumulator == -base from accumulator ==
+    /// +base. Every earlier step keeps the cheap H == 0 test.
+    #[test]
+    fn only_the_last_ladder_step_is_strict() {
+        let ops = collect_ops(|e| emit_bn254_g1_scalar_mul(e));
+        let branches: Vec<&Vec<StackOp>> = ops
+            .iter()
+            .filter_map(|op| match op {
+                StackOp::If { then_ops, .. } => Some(then_ops),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(branches.len(), 255, "expected 255 conditional additions");
+
+        let boolands = |b: &Vec<StackOp>| -> usize {
+            b.iter()
+                .filter(|op| matches!(op, StackOp::Opcode(c) if c == "OP_BOOLAND"))
+                .count()
+        };
+        // The last branch gains exactly one OP_BOOLAND over its predecessor.
+        assert_eq!(
+            boolands(branches[254]),
+            boolands(branches[253]) + 1,
+            "the final step must combine H == 0 with R == 0"
+        );
+        for (i, b) in branches.iter().enumerate().take(254) {
+            assert_eq!(
+                boolands(b),
+                boolands(branches[0]),
+                "step {i} must not pay the strict test"
+            );
+        }
+    }
 }

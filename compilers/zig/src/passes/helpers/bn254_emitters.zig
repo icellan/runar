@@ -39,6 +39,10 @@ const bn254_field_p_be = [_]u8{
 
 /// BN254 curve order r
 /// = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+/// BN254 curve order r in decimal, for `big_int_decimal` pushes.
+const bn254_curve_r_decimal =
+    "21888242871839275222246405745257275088548364400416034343698204186575808495617";
+
 const bn254_curve_r_be = [_]u8{
     0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29,
     0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
@@ -194,10 +198,16 @@ pub const BN254Tracker = struct {
     }
 
     /// Push the BN254 curve order r as script-num bytes.
+    /// Push the BN254 curve order r.
+    ///
+    /// Emitted as `big_int_decimal`, NOT as raw script-num bytes. The two
+    /// encode to the identical 32 push bytes, but `raw_bytes` is a HARD
+    /// peephole barrier (`tryWindow4` bails on it), so with a bytes push the
+    /// ladder's `+r +r +r` stayed three separate adds while Go / TS / Python /
+    /// Ruby folded it into a single `+3r` via rule 27. That was a 67-byte
+    /// cross-tier divergence in every `bn254G1ScalarMul`.
     pub fn pushCurveR(self: *BN254Tracker, name: ?[]const u8) !void {
-        const encoded = try beToUnsignedScriptNumAlloc(self.allocator, bn254_curve_r_be[0..]);
-        try self.owned_bytes.append(self.allocator, encoded);
-        try self.emitRaw(.{ .push = .{ .bytes = encoded } });
+        try self.emitRaw(.{ .push = .{ .big_int_decimal = bn254_curve_r_decimal } });
         try self.names.append(self.allocator, name);
     }
 
@@ -940,6 +950,7 @@ fn buildJacobianAddAffineInline(
     allocator: Allocator,
     base_names: []const ?[]const u8,
     parent_prime_cache_active: bool,
+    strict: bool,
 ) !EcOpBundle {
     var it = try BN254Tracker.init(allocator, base_names);
     errdefer it.deinit();
@@ -952,17 +963,46 @@ fn buildJacobianAddAffineInline(
     // ------------------------------------------------------------------
     try it.copyToTop("jz", "_jz_chk_in");
     try fieldSqr(&it, "_jz_chk_in", "_jz_chk_sq");
+    if (strict) {
+        // Z1sq is consumed by U2 below; keep a copy for Z1cu.
+        try it.copyToTop("_jz_chk_sq", "_jz_chk_sq_keep");
+    }
     try it.copyToTop("ax", "_ax_chk_copy");
     try fieldMul(&it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk");
     try it.copyToTop("jx", "_jx_chk_copy");
-    try it.toTop("_u2_chk");
-    // Stack top: [..., _jx_chk_copy, _u2_chk]; consume both via OP_NUMEQUAL
+    // Stack top: [..., _u2_chk, _jx_chk_copy]; consume both via OP_NUMEQUAL.
+    // No OP_SWAP first: OP_NUMEQUAL is commutative and the six other tiers
+    // compare in this order, so the swap was a byte of pure divergence on
+    // every one of the ladder's 255 steps.
     it.popNames(2);
     try it.emitOpcode("OP_NUMEQUAL");
     try it.names.append(it.allocator, "_h_is_zero");
 
-    // Move _h_is_zero to top and consume (OP_IF consumes it).
-    try it.toTop("_h_is_zero");
+    var cond_name: []const u8 = "_h_is_zero";
+    if (strict) {
+        // R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two
+        // operands are the SAME point; H == 0 with R != 0 means they are
+        // negatives, whose sum is O -- and the standard mixed-add already
+        // answers that correctly, with Z3 = jz*H = 0 flowing through the
+        // Fermat inverse to the all-zero point.
+        try it.copyToTop("jz", "_jz_chk_for_cu");
+        try fieldMul(&it, "_jz_chk_for_cu", "_jz_chk_sq_keep", "_z1cu_chk");
+        try it.copyToTop("ay", "_ay_chk_copy");
+        try fieldMul(&it, "_ay_chk_copy", "_z1cu_chk", "_s2_chk");
+        try it.copyToTop("jy", "_jy_chk_copy");
+        it.popNames(2);
+        try it.emitOpcode("OP_NUMEQUAL");
+        try it.names.append(it.allocator, "_r_is_zero");
+        try it.toTop("_h_is_zero");
+        try it.toTop("_r_is_zero");
+        it.popNames(2);
+        try it.emitOpcode("OP_BOOLAND");
+        try it.names.append(it.allocator, "_dbl_cond");
+        cond_name = "_dbl_cond";
+    }
+
+    // Move the condition to top and consume (OP_IF consumes it).
+    try it.toTop(cond_name);
     it.popNames(1);
 
     // ------------------------------------------------------------------
@@ -1077,8 +1117,36 @@ fn emitBN254G1ScalarMul(t: *BN254Tracker) !void {
     // Decompose base point to affine (ax, ay)
     try decomposePoint(t, "_pt", "ax", "ay");
 
+    // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+    // the scalar is caller input.
+    //
+    // ((k mod r) + r) mod r. OP_MOD takes the sign of the DIVIDEND, so
+    // `k mod r` alone lands in (-r, r); the `+ r, mod r` normalises the
+    // negative half. One push of r covers both reductions.
+    //
+    // Without it the ladder below is correct only while
+    // 2^255 <= k + 3r < 2^256. A scalar >= 2^256 - 3r (about 2.2902*r) sets
+    // bit 256, which the loop never reads, and one <= 2^255 - 3r drops k'
+    // under 2^255, invalidating the accumulator seed; either way the ladder
+    // returns a DIFFERENT multiple of P rather than failing. In Groth16 the
+    // scalars are the caller-supplied PUBLIC INPUTS of
+    // vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is attacker-chosen.
+    try t.toTop("_k");
+    try t.pushCurveR("_r_red");
+    t.popNames(2);
+    try t.emitOpcode("OP_2DUP");
+    try t.emitOpcode("OP_MOD");
+    try t.emitRaw(.{ .rot = {} });
+    try t.emitRaw(.{ .drop = {} });
+    try t.emitRaw(.{ .over = {} });
+    try t.emitOpcode("OP_ADD");
+    try t.emitRaw(.{ .swap = {} });
+    try t.emitOpcode("OP_MOD");
+    try t.names.append(t.allocator, "_kr");
+    t.renameTop("_k");
+
     // k' = k + 3*r  (guarantees bit 255 is set)
-    // k in [1, r-1], so k+3r in [3r+1, 4r-1]. 3r > 2^255, so bit 255 always 1.
+    // k in [0, r-1], so k+3r in [3r, 4r-1]. 3r >= 2^255, so bit 255 always 1.
     // Adding 3r (= 0 mod r) preserves the EC point: k*G = (k+3r)*G.
     try t.toTop("_k");
     try t.pushCurveR("_r1");
@@ -1129,7 +1197,10 @@ fn emitBN254G1ScalarMul(t: *BN254Tracker) !void {
         try t.toTop("_bit");
         t.popNames(1);
 
-        var add_bundle = try buildJacobianAddAffineInline(t.allocator, t.names.items, t.prime_cache_active);
+        // Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+        // see buildJacobianAddAffineInline for why the strict H == 0 AND
+        // R == 0 test is paid there and nowhere else.
+        var add_bundle = try buildJacobianAddAffineInline(t.allocator, t.names.items, t.prime_cache_active, bit == 0);
         errdefer add_bundle.deinit();
 
         // Transfer ownership of owned_bytes into the outer tracker so the
@@ -1295,4 +1366,117 @@ test "p-2 bit 253 is set (MSB of exponent)" {
     try std.testing.expectEqual(@as(u1, 1), bn254PMinus2Bit(2));
     // bit 0 of p-2 (= 0x45) is 1
     try std.testing.expectEqual(@as(u1, 1), bn254PMinus2Bit(0));
+}
+
+// ===========================================================================
+// Scalar-domain tests for bn254G1ScalarMul
+// ===========================================================================
+//
+// `bn254G1ScalarMul` is a contract-callable builtin in every tier (see
+// passes/typecheck.zig), and until these pins existed nothing outside the Go
+// tier had ever compared its emitted ladder against the reference. What the
+// comparison found: the scalar was never reduced mod r.
+//
+// The ladder builds k' = k + 3r, seeds the accumulator at bit 255 rather than
+// stepping it, and iterates bits 254..0. That is sound ONLY while
+// 2^255 <= k' < 2^256, i.e. while 2^255 - 3r <= k < 2^256 - 3r (about
+// -0.3549*r to 2.2902*r). Outside that window the ladder does not fail — it
+// applies the multiplier 2^255 + ((k + 3r) mod 2^255), which is not congruent
+// to k mod r. In Groth16 the scalars are the caller-supplied PUBLIC INPUTS of
+// vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is attacker-chosen.
+//
+// Reducing also makes k = 0 mod r reachable, and there the final ladder step
+// is handed accumulator == -base. The mixed-add's H == 0 test cannot tell
+// -base from +base, so the last step additionally needs R == 0 (`strict`) or
+// it returns -2P where the answer is the point at infinity.
+
+/// Name a bundle op for sequence matching. A push of r answers "PUSH_R" in
+/// EITHER representation (`big_int_decimal` or raw script-num `bytes`), so the
+/// shape assertion below is independent of the push-kind change that let the
+/// peephole fold `+r +r +r` into `+3r`.
+fn bn254TestOpName(op: StackOp, r_script_num: []const u8) []const u8 {
+    return switch (op) {
+        .opcode => |name| name,
+        .rot => "OP_ROT",
+        .drop => "OP_DROP",
+        .over => "OP_OVER",
+        .swap => "OP_SWAP",
+        .push => |v| switch (v) {
+            .big_int_decimal => |d| if (std.mem.eql(u8, d, bn254_curve_r_decimal)) "PUSH_R" else "_",
+            .bytes => |b| if (std.mem.eql(u8, b, r_script_num)) "PUSH_R" else "_",
+            else => "_",
+        },
+        else => "_",
+    };
+}
+
+test "bn254_g1_scalar_mul reduces the scalar mod r before the ladder" {
+    const allocator = std.testing.allocator;
+    var bundle = try buildBuiltinOps(allocator, .bn254_g1_scalar_mul);
+    defer bundle.deinit();
+
+    const r_script_num = try beToUnsignedScriptNumAlloc(allocator, bn254_curve_r_be[0..]);
+    defer allocator.free(r_script_num);
+
+    // ((k mod r) + r) mod r. OP_MOD takes the sign of the DIVIDEND, so
+    // `k mod r` alone lands in (-r, r); the `+ r, mod r` normalises the
+    // negative half.
+    const want = [_][]const u8{
+        "PUSH_R", "OP_2DUP", "OP_MOD",  "OP_ROT", "OP_DROP",
+        "OP_OVER", "OP_ADD", "OP_SWAP", "OP_MOD",
+    };
+
+    var hits: usize = 0;
+    var i: usize = 0;
+    while (i + want.len <= bundle.ops.len) : (i += 1) {
+        var all = true;
+        for (want, 0..) |w, j| {
+            if (!std.mem.eql(u8, bn254TestOpName(bundle.ops[i + j], r_script_num), w)) {
+                all = false;
+                break;
+            }
+        }
+        if (all) hits += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), hits);
+}
+
+test "bn254_g1_scalar_mul pays the strict R == 0 test at the last step only" {
+    const allocator = std.testing.allocator;
+    var bundle = try buildBuiltinOps(allocator, .bn254_g1_scalar_mul);
+    defer bundle.deinit();
+
+    // The 255 bit-iteration IFs, in emission order (bit 254 down to bit 0).
+    var branches: std.ArrayList([]StackOp) = .empty;
+    defer branches.deinit(allocator);
+    for (bundle.ops) |op| switch (op) {
+        .@"if" => |b| try branches.append(allocator, b.then),
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 255), branches.items.len);
+
+    const boolands = struct {
+        fn count(ops: []const StackOp) usize {
+            var n: usize = 0;
+            for (ops) |o| switch (o) {
+                .opcode => |name| {
+                    if (std.mem.eql(u8, name, "OP_BOOLAND")) n += 1;
+                },
+                else => {},
+            };
+            return n;
+        }
+    }.count;
+
+    const base = boolands(branches.items[0]);
+    // The final step gains exactly one OP_BOOLAND: it combines H == 0 with
+    // R == 0, which is what separates accumulator == -base (sum is O) from
+    // accumulator == +base (double it).
+    try std.testing.expectEqual(base + 1, boolands(branches.items[254]));
+    // Every earlier step keeps the cheap H == 0 test. Paying the strict test
+    // at all 255 steps would be ~5.8 KB re-deciding a branch that provably
+    // cannot fire before the last one.
+    for (branches.items[0..254]) |b| {
+        try std.testing.expectEqual(base, boolands(b));
+    }
 }

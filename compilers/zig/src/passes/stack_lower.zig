@@ -2122,6 +2122,7 @@ const LowerCtx = struct {
                 },
                 .integer => |n| try self.emitPushInt(n),
                 .boolean => |b| try self.emitPushBool(b),
+                .big_int_decimal => |d| try self.emitPushBigIntDecimal(d),
             },
             .dup => try self.emitOp(.op_dup),
             .swap => try self.emitOp(.op_swap),

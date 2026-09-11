@@ -969,6 +969,7 @@ function bn254BuildJacobianAddAffineStandard(it: BN254Tracker): void {
 function bn254BuildJacobianAddAffineInline(
   e: (op: StackOp) => void,
   t: BN254Tracker,
+  strict: boolean,
 ): void {
   // Create inner tracker with cloned stack state
   const it = new BN254Tracker([...t.nm], e);
@@ -984,6 +985,10 @@ function bn254BuildJacobianAddAffineInline(
   // against a fresh copy of jx. Consumes only the copies.
   it.copyToTop('jz', '_jz_chk_in');
   bn254FieldSqr(it, '_jz_chk_in', '_jz_chk_sq');
+  if (strict) {
+    // Z1sq is consumed by U2 below; keep a copy for Z1cu.
+    it.copyToTop('_jz_chk_sq', '_jz_chk_sq_keep');
+  }
   it.copyToTop('ax', '_ax_chk_copy');
   bn254FieldMul(it, '_ax_chk_copy', '_jz_chk_sq', '_u2_chk');
   it.copyToTop('jx', '_jx_chk_copy');
@@ -991,8 +996,31 @@ function bn254BuildJacobianAddAffineInline(
     emitInner({ op: 'opcode', code: 'OP_NUMEQUAL' });
   });
 
-  // Move _h_is_zero to top so OP_IF can consume it.
-  it.toTop('_h_is_zero');
+  let condName = '_h_is_zero';
+  if (strict) {
+    // R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two operands
+    // are the SAME point; H == 0 with R != 0 means they are negatives, whose
+    // sum is O - and the standard mixed-add already answers that correctly,
+    // with Z3 = jz*H = 0 flowing through the Fermat inverse to the all-zero
+    // point.
+    it.copyToTop('jz', '_jz_chk_for_cu');
+    bn254FieldMul(it, '_jz_chk_for_cu', '_jz_chk_sq_keep', '_z1cu_chk');
+    it.copyToTop('ay', '_ay_chk_copy');
+    bn254FieldMul(it, '_ay_chk_copy', '_z1cu_chk', '_s2_chk');
+    it.copyToTop('jy', '_jy_chk_copy');
+    it.rawBlock(['_s2_chk', '_jy_chk_copy'], '_r_is_zero', (emitInner) => {
+      emitInner({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    });
+    it.toTop('_h_is_zero');
+    it.toTop('_r_is_zero');
+    it.rawBlock(['_h_is_zero', '_r_is_zero'], '_dbl_cond', (emitInner) => {
+      emitInner({ op: 'opcode', code: 'OP_BOOLAND' });
+    });
+    condName = '_dbl_cond';
+  }
+
+  // Move the condition to top so OP_IF can consume it.
+  it.toTop(condName);
   it.nm.pop(); // consumed by IF
 
   // ------------------------------------------------------------------
@@ -1119,6 +1147,37 @@ export function emitBn254G1Add(emit: (op: StackOp) => void): void {
 }
 
 /**
+ * bn254EmitScalarReduce reduces a scalar to [0, r-1]: ((k mod r) + r) mod r.
+ *
+ * OP_MOD takes the sign of the DIVIDEND, so `k mod r` alone lands in (-r, r);
+ * the `+ r, mod r` normalises the negative half. One push of r covers both
+ * reductions - the same shape as emitScalarReduce in ec-codegen.ts, whose
+ * numbers do NOT carry here (see emitBn254G1ScalarMul for the BN254 interval
+ * bounds).
+ *
+ * Without it the ladder below is correct only while 2^255 <= k + 3r < 2^256.
+ * A scalar >= 2^256 - 3r (about 2.2902*r) sets bit 256, which the loop never
+ * reads, and one <= 2^255 - 3r drops k' under 2^255, invalidating the
+ * accumulator seed; either way the ladder returns a DIFFERENT multiple of P
+ * rather than failing. In Groth16 the scalars are the caller-supplied PUBLIC
+ * INPUTS of vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is
+ * attacker-chosen.
+ */
+function bn254EmitScalarReduce(t: BN254Tracker, kName: string, resultName: string): void {
+  t.pushBigInt('_r_red', BN254_R);
+  t.rawBlock([kName, '_r_red'], resultName, (e) => {
+    e({ op: 'opcode', code: 'OP_2DUP' });
+    e({ op: 'opcode', code: 'OP_MOD' });
+    e({ op: 'rot' });
+    e({ op: 'drop' });
+    e({ op: 'over' });
+    e({ op: 'opcode', code: 'OP_ADD' });
+    e({ op: 'swap' });
+    e({ op: 'opcode', code: 'OP_MOD' });
+  });
+}
+
+/**
  * emitBn254G1ScalarMul: scalar multiplication P * k on BN254 G1.
  * Stack in:  [point, scalar] (scalar on top)
  * Stack out: [result_point]
@@ -1132,8 +1191,14 @@ export function emitBn254G1ScalarMul(emit: (op: StackOp) => void): void {
   // Decompose to affine base point
   bn254DecomposePoint(t, '_pt', 'ax', 'ay');
 
+  // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+  // the scalar is caller input.
+  t.toTop('_k');
+  bn254EmitScalarReduce(t, '_k', '_kr');
+  t.rename('_k');
+
   // k' = k + 3r: guarantees bit 255 is set.
-  // k ∈ [1, r-1], so k+3r ∈ [3r+1, 4r-1]. Since 3r > 2^255, bit 255
+  // k ∈ [0, r-1], so k+3r ∈ [3r, 4r-1]. Since 3r >= 2^255, bit 255
   // is always 1. Adding 3r (≡ 0 mod r) preserves the EC point: k*G = (k+3r)*G.
   t.toTop('_k');
   t.pushBigInt('_r1', BN254_R);
@@ -1187,7 +1252,10 @@ export function emitBn254G1ScalarMul(emit: (op: StackOp) => void): void {
     t.nm.pop(); // _bit consumed by IF
     const addOps: StackOp[] = [];
     const addEmit = (op: StackOp) => addOps.push(op);
-    bn254BuildJacobianAddAffineInline(addEmit, t);
+    // Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+    // see bn254BuildJacobianAddAffineInline for why the strict H == 0 AND
+    // R == 0 test is paid there and nowhere else.
+    bn254BuildJacobianAddAffineInline(addEmit, t, bit === 0);
     emit({ op: 'if', then: addOps, else: [] });
   }
 
