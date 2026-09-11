@@ -2966,13 +2966,24 @@ module RunarCompiler::Codegen
       bring_to_top(args[0], is_last)
       @sm.pop
 
-      # Push OP_0 as empty accumulator
-      emit_op({ op: "push", value: 0 })
-      @sm.push(nil)
+      # From here to the closing OP_DROP the symbolic stack model is left
+      # ALONE: the accumulator and the shrinking remainder are transients that
+      # exist only inside the unrolled loop, and the sequence is net zero on
+      # the real stack (one ByteString in, one ByteString out). Modelling them
+      # -- pushing a placeholder and calling @sm.swap -- permuted the
+      # placeholder with the real name underneath it, and the OP_DROP's pop
+      # then discarded that name instead of the placeholder, which is how a
+      # live method parameter went missing (N-056). Every peer tier does the
+      # same nothing here: go/codegen/stack.go#lowerReverseBytes,
+      # 05-stack-lower.ts#lowerReverseBytes.
+
+      # Push OP_0 as empty accumulator. `emit_push_int` (not a bare
+      # `value: 0`): the peephole pass reads `value[:kind]`, so an unwrapped
+      # Integer raises `no implicit conversion of Symbol into Integer` there.
+      emit_push_int(0)
 
       # Swap so data is on top: stack = [result, data]
       emit_op({ op: "swap" })
-      @sm.swap
 
       # 520-iteration unrolled loop
       520.times do
@@ -2995,7 +3006,6 @@ module RunarCompiler::Codegen
 
       # DROP the empty remainder
       emit_op({ op: "drop" })
-      @sm.pop
 
       @sm.push(binding_name)
       _track_depth
