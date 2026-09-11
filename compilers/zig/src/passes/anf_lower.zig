@@ -523,10 +523,10 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             // (matches the pre-Phase-13 behaviour expected by callers that
             // do not own the returned ANFProgram's params slice).
             var params_out: []ParamNode = method.params;
-            if (method_ctx.auto_injected_params.items.len > 0) {
+            if (method_ctx.methodScope().auto_injected_params.items.len > 0) {
                 var nonpub_params: std.ArrayListUnmanaged(ParamNode) = .empty;
                 for (method.params) |p| try nonpub_params.append(allocator, p);
-                for (method_ctx.auto_injected_params.items) |p| {
+                for (method_ctx.methodScope().auto_injected_params.items) |p| {
                     try nonpub_params.append(allocator, p);
                 }
                 params_out = try nonpub_params.toOwnedSlice(allocator);
@@ -573,12 +573,12 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             // Phase 13). extractPrevOutputScript adds `_prevOutScript_<i>`
             // (one per distinct literal index referenced in the method);
             // requireOutputP2PKH adds a single `_serialisedOutputs`. Order
-            // follows insertion order via auto_injected_params. Appended
-            // AFTER txPreimage so unlocking scripts push them adjacent to
-            // the preimage (matches existing _changePKH / _changeAmount /
-            // _newAmount convention of trailing the user args before the
-            // preimage anchor).
-            for (method_ctx.auto_injected_params.items) |p| {
+            // follows insertion order via the method scope's
+            // auto_injected_params. Appended AFTER txPreimage so unlocking
+            // scripts push them adjacent to the preimage (matches existing
+            // _changePKH / _changeAmount / _newAmount convention of trailing
+            // the user args before the preimage anchor).
+            for (method_ctx.methodScope().auto_injected_params.items) |p| {
                 try aug_params.append(allocator, p);
             }
 
@@ -876,6 +876,60 @@ fn lowerStatefulPublicMethod(
 }
 
 // ============================================================================
+// MethodScope -- per-method bookkeeping SHARED with every sub-context
+// ============================================================================
+
+/// State that belongs to the METHOD BODY, not to the block currently lowering.
+/// `subContext()` builds each `if` arm / `for` body / ternary arm in a fresh
+/// `LowerCtx` and re-plumbs the parent's state field by field; the arm's own
+/// copies are then discarded when its bindings are moved to the parent. Any
+/// per-method fact an arm DISCOVERS therefore has to live behind a pointer the
+/// parent also holds, or it is lost.
+///
+/// R-072: the three fields below are exactly that — written by the intent
+/// intrinsics wherever they are called, read once at the end of the method.
+/// Kept together, and shared by pointer, so the next field of this kind has an
+/// obvious home instead of becoming a fourth hand-plumbed line in
+/// `subContext`. Mirrors Go's `methodScopeT`
+/// (compilers/go/frontend/anf_lower.go), which shares the same struct by
+/// pointer for the same reason.
+const MethodScope = struct {
+    /// Intent sub-covenant intrinsics (BSVM Phase 13). Auto-injected witness
+    /// params needed by extractPrevOutputScript (`_prevOutScript_<i>`) and
+    /// requireOutputP2PKH (`_serialisedOutputs`). Insertion-order list +
+    /// dedup set; appended to the method's ABI params list AFTER txPreimage.
+    auto_injected_params: std.ArrayListUnmanaged(ParamNode) = .empty,
+    auto_injected_set: std.StringHashMapUnmanaged(void) = .empty,
+    /// requireOutputP2PKH emits its hashOutputs(preimage) check at most once
+    /// per METHOD — flipped on the first call, wherever in the body it sits.
+    did_emit_hash_outputs_check: bool = false,
+
+    /// Record an intent-intrinsic-injected witness param. Idempotent — a
+    /// repeat call with the same name is a no-op. Insertion order is
+    /// preserved so the ABI augmentation appends them in source order.
+    fn recordAutoInjectedParam(
+        self: *MethodScope,
+        allocator: Allocator,
+        name: []const u8,
+        type_info: RunarType,
+        type_name: []const u8,
+    ) void {
+        if (self.auto_injected_set.contains(name)) return;
+        self.auto_injected_set.put(allocator, name, {}) catch return;
+        self.auto_injected_params.append(allocator, .{
+            .name = name,
+            .type_info = type_info,
+            .type_name = type_name,
+        }) catch {};
+    }
+
+    fn deinit(self: *MethodScope, allocator: Allocator) void {
+        self.auto_injected_params.deinit(allocator);
+        self.auto_injected_set.deinit(allocator);
+    }
+};
+
+// ============================================================================
 // LowerCtx -- manages temp variable generation and binding emission
 // ============================================================================
 
@@ -900,16 +954,18 @@ const LowerCtx = struct {
     param_alias_stack: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
     /// Current source location — set before lowering each statement, stamped on bindings.
     current_source_loc: ?types.SourceLocation = null,
-    /// Intent sub-covenant intrinsics (BSVM Phase 13). Auto-injected witness
-    /// params needed by extractPrevOutputScript (`_prevOutScript_<i>`) and
-    /// requireOutputP2PKH (`_serialisedOutputs`). Insertion-order list +
-    /// dedup set; appended to the method's ABI params list AFTER txPreimage.
-    /// Mirrors Go's methodScopeT (compilers/go/frontend/anf_lower.go).
-    auto_injected_params: std.ArrayListUnmanaged(ParamNode),
-    auto_injected_set: std.StringHashMapUnmanaged(void),
-    /// requireOutputP2PKH emits its hashOutputs(preimage) check at most once
-    /// per method — flipped on the first call.
-    did_emit_hash_outputs_check: bool = false,
+    /// The per-method intrinsic scope this context OWNS. Only ever read
+    /// through `methodScope()`, and only meaningful on the context a method
+    /// body is lowered into — a sub-context leaves its own copy empty and
+    /// borrows the owner's via `method_scope` below.
+    owned_method_scope: MethodScope = .{},
+    /// Non-null in every context produced by `subContext()`: a borrowed
+    /// pointer to the method context's `owned_method_scope`. R-072 — an
+    /// intrinsic called inside an `if` arm / `for` body / ternary arm must
+    /// register its witness param where the method's ABI augmentation will
+    /// see it, and must see the once-per-method hashOutputs guard the
+    /// statement-level call already flipped.
+    method_scope: ?*MethodScope = null,
     /// Issue #123: the declared non-default `@sighash` flag for the method
     /// being lowered, so a MANUAL checkPreimage(pre) call binds under the same
     /// mode as the method's declared sighash. Null = default ALL|FORKID,
@@ -940,9 +996,13 @@ const LowerCtx = struct {
             .add_output_refs = .empty,
             .add_data_output_refs = .empty,
             .param_alias_stack = .empty,
-            .auto_injected_params = .empty,
-            .auto_injected_set = .empty,
         };
+    }
+
+    /// The per-method intrinsic scope: the owner's own struct, or the pointer
+    /// a `subContext()` borrowed from it.
+    fn methodScope(self: *LowerCtx) *MethodScope {
+        return self.method_scope orelse &self.owned_method_scope;
     }
 
     fn freshTemp(self: *LowerCtx) ![]const u8 {
@@ -1059,6 +1119,12 @@ const LowerCtx = struct {
         sub.nested = true;
         // A refusal raised inside the branch must reach the same sink.
         sub.diagnostic = self.diagnostic;
+        // R-072: borrowed, not copied. A witness param an intrinsic registers
+        // inside this branch has to land on the list the METHOD's ABI
+        // augmentation reads, and the once-per-method hashOutputs guard has to
+        // stay flipped across the block boundary in both directions. Copying
+        // by value would lose the first and duplicate the second.
+        sub.method_scope = self.methodScope();
         // Copy local names
         var local_it = self.local_names.iterator();
         while (local_it.next()) |entry| {
@@ -1121,21 +1187,18 @@ const LowerCtx = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.param_alias_stack.deinit(self.allocator);
-        self.auto_injected_params.deinit(self.allocator);
-        self.auto_injected_set.deinit(self.allocator);
+        // Only the OWNER frees the scope. A sub-context's own
+        // `owned_method_scope` is always empty (it borrowed the owner's), and
+        // freeing the BORROWED one here would hand the method context a pair
+        // of already-freed maps to keep writing into.
+        if (self.method_scope == null) self.owned_method_scope.deinit(self.allocator);
     }
 
-    /// Record an intent-intrinsic-injected witness param. Idempotent — a
-    /// repeat call with the same name is a no-op. Insertion order is
-    /// preserved so the ABI augmentation appends them in source order.
+    /// Record an intent-intrinsic-injected witness param on the per-method
+    /// scope, so a call inside a nested block registers where the method's ABI
+    /// augmentation will read it.
     fn recordAutoInjectedParam(self: *LowerCtx, name: []const u8, type_info: RunarType, type_name: []const u8) void {
-        if (self.auto_injected_set.contains(name)) return;
-        self.auto_injected_set.put(self.allocator, name, {}) catch return;
-        self.auto_injected_params.append(self.allocator, .{
-            .name = name,
-            .type_info = type_info,
-            .type_name = type_name,
-        }) catch {};
+        self.methodScope().recordAutoInjectedParam(self.allocator, name, type_info, type_name);
     }
 
     /// Allocate a slice of string refs on the arena allocator.
@@ -2127,8 +2190,8 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         ctx.addParam("_serialisedOutputs");
 
         // Emit the hashOutputs(preimage) check exactly once per method.
-        if (!ctx.did_emit_hash_outputs_check) {
-            ctx.did_emit_hash_outputs_check = true;
+        if (!ctx.methodScope().did_emit_hash_outputs_check) {
+            ctx.methodScope().did_emit_hash_outputs_check = true;
             const serialised_ref0 = try ctx.emit(.{ .load_param = .{ .name = "_serialisedOutputs" } });
             const actual_out_hash_ref = try ctx.emit(.{ .call = .{
                 .func = "hash256",
