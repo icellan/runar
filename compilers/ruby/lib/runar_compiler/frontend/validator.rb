@@ -192,6 +192,32 @@ module RunarCompiler
           end
         end
 
+        # N-092: a FixedArray may not be a constructor PARAMETER.
+        #
+        # A property's deploy-time value reaches the script through a
+        # constructor SLOT, and expand_fixed_arrays is what turns a FixedArray
+        # PROPERTY into the scalar siblings those slots can address. A
+        # constructor PARAMETER has no such expansion, so the argument has
+        # nowhere to be spliced: before this check the tier compiled such a
+        # contract to a full stateful locking script with NO constructor slots
+        # at all -- deployable, with state its own ABI claims to take an
+        # argument for (it even names xs__0 / xs__1 / xs__2) and can never
+        # receive.
+        #
+        # The rule keys on the parameter's TYPE alone, not on the parent class:
+        # ts / go / rust / python / java all refuse it on stateless contracts
+        # too. Spelled to match the ts / rust / python / java wording verbatim,
+        # since the cross-tier rejection gate compares diagnostics.
+        ctor.params.each do |param|
+          if param.type.is_a?(FixedArrayType)
+            add_error(
+              "Constructor parameter '#{param.name}' cannot be a FixedArray. " \
+              "Use initialized properties or pass each element as a separate parameter.",
+              loc: ctor.source_location
+            )
+          end
+        end
+
         # Validate constructor body
         ctor.body.each { |stmt| validate_statement(stmt) }
 
@@ -500,9 +526,13 @@ module RunarCompiler
         # Gate asm({...}) calls on UnsafeSmartContract and check the structural args.
         validate_asm_usage(method)
 
-        # FixedArray is not allowed as a method parameter type.  The SDK
-        # accepts FixedArray constructor args and flattens them on behalf of
-        # the caller, but method params carry no expansion pass.
+        # FixedArray is not allowed as a method parameter type: method params
+        # carry no expansion pass.  Neither do CONSTRUCTOR params -- this
+        # comment used to claim the SDK flattens FixedArray constructor args on
+        # the caller's behalf, which the artifact refutes (such a contract
+        # compiled with an EMPTY constructorSlots list, so nothing could be
+        # spliced).  Constructor params are refused in validate_constructor
+        # above (N-092), matching the other six tiers.
         method.params.each do |param|
           if param.type.is_a?(FixedArrayType)
             add_error(

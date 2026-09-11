@@ -295,6 +295,34 @@ fn validateConstructor(
         }
     }
 
+    // N-092: a FixedArray may not be a constructor PARAMETER.
+    //
+    // A property's deploy-time value reaches the script through a constructor
+    // SLOT, and `expand_fixed_arrays.zig` is what turns a FixedArray PROPERTY
+    // into the scalar siblings those slots can address. A constructor
+    // PARAMETER has no such expansion, so the argument has nowhere to be
+    // spliced: before this check the tier compiled such a contract to a full
+    // stateful locking script with `constructorSlots: []` — deployable, with
+    // state its own ABI claims to take an argument for and can never receive.
+    //
+    // The rule keys on the parameter's TYPE alone, not on the parent class:
+    // ts / go / rust / python / java all refuse it on stateless contracts too.
+    // Spelled to match the ts / rust / python / java wording verbatim, since
+    // the cross-tier rejection gate compares diagnostics.
+    for (ctor.params) |param| {
+        if (param.type_info == .fixed_array) {
+            try errors.append(allocator, .{
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "Constructor parameter '{s}' cannot be a FixedArray. Use initialized properties or pass each element as a separate parameter.",
+                    .{param.name},
+                ),
+                .owned_message = true,
+                .severity = .@"error",
+            });
+        }
+    }
+
     try validateConstructorSlotBijection(allocator, contract, errors);
 }
 
