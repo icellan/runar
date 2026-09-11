@@ -116,9 +116,20 @@ fn safe_slice(hex: &str, start: usize, len: usize) -> String {
 }
 
 /// Decode a Bitcoin Script number from hex (little-endian sign-magnitude).
-fn decode_script_number(data_hex: &str) -> i64 {
+///
+/// N-074: a Script number is ARBITRARY PRECISION — Rúnar contracts routinely
+/// carry 256-bit EC scalars and 1024-bit+ Rabin moduli as plain `bigint`
+/// constructor args. Accumulating into an `i64` wrapped SILENTLY at 9 data
+/// bytes (`|v| >= 2^63`; `<<` traps only on an out-of-range shift AMOUNT, never
+/// on value overflow), so those values came back wrong and rebuilt a locking
+/// script that no longer matched chain. The encode side
+/// (`contract::encode_bigint_script_number`) was already arbitrary-precision;
+/// the asymmetry was the bug.
+fn decode_script_number(data_hex: &str) -> num_bigint::BigInt {
+    use num_bigint::{BigInt, Sign};
+
     if data_hex.is_empty() {
-        return 0;
+        return BigInt::from(0);
     }
     let mut bytes = Vec::new();
     let mut i = 0;
@@ -127,21 +138,30 @@ fn decode_script_number(data_hex: &str) -> i64 {
         i += 2;
     }
     if bytes.is_empty() {
-        return 0;
+        return BigInt::from(0);
     }
 
     let last = bytes.len() - 1;
     let negative = (bytes[last] & 0x80) != 0;
     bytes[last] &= 0x7f;
 
-    let mut result: i64 = 0;
-    for i in (0..bytes.len()).rev() {
-        result = (result << 8) | (bytes[i] as i64);
+    // Sign-magnitude, little-endian: the magnitude is the byte string itself.
+    let magnitude = BigInt::from_bytes_le(Sign::Plus, &bytes);
+    if magnitude.sign() == Sign::NoSign {
+        return BigInt::from(0);
     }
-    if result == 0 {
-        return 0;
+    if negative { -magnitude } else { magnitude }
+}
+
+/// Narrow a decoded Script number back to `SdkValue::Int` whenever it fits, so
+/// every existing caller that matches on `Int` keeps working; only values that
+/// genuinely cannot be represented surface as `SdkValue::BigInt` (which
+/// `contract::encode_arg` already handles).
+fn script_number_value(n: num_bigint::BigInt) -> SdkValue {
+    match i64::try_from(&n) {
+        Ok(small) => SdkValue::Int(small),
+        Err(_) => SdkValue::BigInt(n),
     }
-    if negative { -result } else { result }
 }
 
 /// Interpret a script element according to the expected ABI type.
@@ -194,7 +214,7 @@ fn interpret_script_element(opcode: u8, data_hex: &str, param_type: &str) -> Sdk
             if opcode == 0x4f {
                 return SdkValue::Int(-1);
             }
-            SdkValue::Int(decode_script_number(data_hex))
+            script_number_value(decode_script_number(data_hex))
         }
         AbiValueEncoding::Bool => {
             if opcode == 0x00 {
@@ -754,4 +774,136 @@ fn n070_control_other_types_unchanged() {
     .unwrap();
     assert_eq!(s1.get("blob"), Some(&SdkValue::Bytes("05".to_string())));
 }
+}
+
+// ---------------------------------------------------------------------------
+// N-074 — a Bitcoin Script number is ARBITRARY PRECISION.
+//
+// Rúnar contracts routinely carry 256-bit EC scalars and 1024-bit+ Rabin
+// moduli as plain `bigint` constructor args. `decode_script_number` returned
+// i64, so every value past 2^63 came back silently WRONG (`<<` on an i64 does
+// not trap on value overflow, only on an out-of-range shift AMOUNT) — and
+// feeding that wrong value back into a call rebuilds a locking script that no
+// longer matches what is on chain.
+//
+// This is type-INDEPENDENT: `bigint`, `int`, `RabinSig` and `RabinPubKey` all
+// bite identically. Nothing about it is Rabin-specific.
+//
+// The ENCODE direction was already arbitrary-precision
+// (`contract::encode_bigint_script_number`). The asymmetry WAS the bug, so
+// every case below is a real encode -> decode round trip.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod n074_script_number_width {
+    use super::*;
+    use crate::sdk::contract::{encode_bigint_script_number, encode_script_number};
+    use crate::sdk::types::{Abi, AbiConstructor, AbiParam, ConstructorSlot};
+    use num_bigint::BigInt;
+    use std::str::FromStr;
+
+    /// secp256k1 group order — a real 256-bit EC scalar.
+    const SECP_N: &str = "115792089237316195423570985008687907852837564279074904382605163141518161494337";
+    /// A deterministic 1024-bit odd modulus with the top bit set: the shape of
+    /// a real Rabin public key (128 bytes).
+    const RABIN_1024: &str = "99068719171432002146137311586819387646033673282442268174774782671999562801264502320230697368056122056037887996485526845789822730341467216601217971743412906058452632946239858722327898748234874221141359423697249054724716242045815478148675575955849558861539174810221469540865911313499616042524201320198581026695";
+
+    fn magnitudes() -> Vec<(&'static str, BigInt)> {
+        vec![
+            ("small", BigInt::from(1234567890123456789i64)),
+            ("2^63-1", BigInt::from_str("9223372036854775807").unwrap()),
+            ("2^63", BigInt::from_str("9223372036854775808").unwrap()),
+            ("2^64", BigInt::from_str("18446744073709551616").unwrap()),
+            ("secp256k1 N (256-bit)", BigInt::from_str(SECP_N).unwrap()),
+            ("Rabin modulus (1024-bit)", BigInt::from_str(RABIN_1024).unwrap()),
+        ]
+    }
+
+    /// Single-slot template: `<value@0> ac`
+    fn artifact(type_name: &str) -> RunarArtifact {
+        RunarArtifact {
+            version: "0.1.0".to_string(),
+            contract_name: "N074".to_string(),
+            parent_class: None,
+            abi: Abi {
+                constructor: AbiConstructor {
+                    params: vec![AbiParam {
+                        name: "value".to_string(),
+                        param_type: type_name.to_string(),
+                        fixed_array: None,
+                    }],
+                },
+                methods: vec![],
+            },
+            script: "00ac".to_string(),
+            asm: None,
+            state_fields: None,
+            constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
+            code_sep_index_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
+            anf: None,
+        }
+    }
+
+    /// Run the real encode -> extract path, normalising whatever concrete
+    /// `SdkValue` variant comes back into a `BigInt` for comparison.
+    fn round_trip(type_name: &str, v: &BigInt) -> BigInt {
+        let script = format!("{}ac", encode_bigint_script_number(v));
+        let args = extract_constructor_args(&artifact(type_name), &script).unwrap();
+        match args.get("value") {
+            Some(SdkValue::BigInt(n)) => n.clone(),
+            Some(SdkValue::Int(n)) => BigInt::from(*n),
+            other => panic!("{type_name}: value extracted as {other:?}, want a script number"),
+        }
+    }
+
+    #[test]
+    fn positive_round_trip_at_every_magnitude() {
+        for type_name in ["bigint", "int", "RabinPubKey", "RabinSig"] {
+            for (name, v) in magnitudes() {
+                assert_eq!(round_trip(type_name, &v), v, "{type_name} / {name}");
+            }
+        }
+    }
+
+    /// Bitcoin script numbers are SIGN-MAGNITUDE, not two's complement: the
+    /// sign lives in the high bit of the most-significant byte. This is where a
+    /// naive bignum port breaks.
+    #[test]
+    fn negative_round_trip_at_every_magnitude() {
+        for type_name in ["bigint", "RabinPubKey"] {
+            for (name, v) in magnitudes() {
+                let neg = -v;
+                assert_eq!(round_trip(type_name, &neg), neg, "{type_name} / -{name}");
+            }
+        }
+    }
+
+    /// CONTROL: small values stay byte-identical on the wire AND keep their
+    /// existing `SdkValue::Int` variant, so no caller that matches on it breaks.
+    #[test]
+    fn control_small_values_unchanged() {
+        let cases: &[(i64, &str)] = &[
+            (0, "00"),
+            (1, "51"),
+            (16, "60"),
+            (-1, "4f"),
+            (17, "0111"),
+            (127, "017f"),
+            (128, "028000"),
+            (-128, "028080"),
+            (1234567890123456789, "081581e97df4102211"),
+            (-1234567890123456789, "081581e97df4102291"),
+        ];
+        for (v, want) in cases {
+            assert_eq!(&encode_script_number(*v), want, "encode {v}");
+            assert_eq!(
+                &encode_bigint_script_number(&BigInt::from(*v)),
+                want,
+                "encode_bigint {v}"
+            );
+            let args = extract_constructor_args(&artifact("bigint"), &format!("{want}ac")).unwrap();
+            assert_eq!(args.get("value"), Some(&SdkValue::Int(*v)), "extract {v}");
+        }
+    }
 }

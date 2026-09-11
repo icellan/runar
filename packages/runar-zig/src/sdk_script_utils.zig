@@ -68,25 +68,91 @@ fn readScriptElement(hex: []const u8, offset: usize) ScriptElement {
 }
 
 /// Decode a Script number from hex data (sign-magnitude LE).
-fn decodeScriptNumber(data_hex: []const u8) i64 {
-    if (data_hex.len == 0) return 0;
+///
+/// N-074: a Script number is ARBITRARY PRECISION — Rúnar contracts routinely
+/// carry 256-bit EC scalars and 1024-bit+ Rabin moduli as plain `bigint`
+/// constructor args. This used to stage the bytes through a fixed `[8]u8`
+/// buffer and accumulate into an `i64`, so anything wider than 8 data bytes
+/// (`|v| >= 2^63`) indexed past the end of that buffer and PANICKED instead of
+/// decoding. The encode side (`sdk_state.encodeBigScriptNumber`) was already
+/// arbitrary-precision; the asymmetry was the bug.
+///
+/// Returns `.int` whenever the value fits an i64 — the overwhelmingly common
+/// case, and the variant every existing caller switches on — and the `.big_int`
+/// decimal string (owned by the caller, matching the convention `parseInitialValue`
+/// in `sdk_contract.zig` already uses) only when it genuinely cannot.
+fn decodeScriptNumberValue(allocator: std.mem.Allocator, data_hex: []const u8) !types.StateValue {
+    if (data_hex.len == 0) return .{ .int = 0 };
     const byte_count = data_hex.len / 2;
-    var buf: [8]u8 = [_]u8{0} ** 8;
-    for (0..byte_count) |i| {
-        buf[i] = hexByteAt(data_hex, i * 2) orelse 0;
-    }
-    const negative = (buf[byte_count - 1] & 0x80) != 0;
-    buf[byte_count - 1] &= 0x7f;
 
-    var result: i64 = 0;
-    var i: usize = byte_count;
+    var bytes = try allocator.alloc(u8, byte_count);
+    defer allocator.free(bytes);
+    for (0..byte_count) |i| {
+        bytes[i] = hexByteAt(data_hex, i * 2) orelse 0;
+    }
+    const negative = (bytes[byte_count - 1] & 0x80) != 0;
+    bytes[byte_count - 1] &= 0x7f;
+
+    // Fast path: after the sign bit is masked off, 8 magnitude bytes can hold
+    // at most 2^63-1, so this cannot overflow. Byte-identical to the old
+    // behaviour for every value that ever decoded correctly.
+    if (byte_count <= 8) {
+        var result: i64 = 0;
+        var i: usize = byte_count;
+        while (i > 0) {
+            i -= 1;
+            result = (result << 8) | @as(i64, bytes[i]);
+        }
+        return .{ .int = if (negative) -result else result };
+    }
+
+    const decimal = try magnitudeToDecimal(allocator, bytes, negative);
+    // A non-minimal encoding can be >8 bytes and still fit; keep `.int` then so
+    // the variant a value comes back as depends on the VALUE, not its padding.
+    if (std.fmt.parseInt(i64, decimal, 10)) |n| {
+        allocator.free(decimal);
+        return .{ .int = n };
+    } else |_| {}
+    return .{ .big_int = decimal };
+}
+
+/// Render a little-endian magnitude as a signed decimal string (caller owns it).
+///
+/// Repeated multiply-by-256-and-add over base-10 digits — the mirror of the
+/// repeated divide-by-256 that `sdk_state.encodeBigScriptNumber` uses to go the
+/// other way, and likewise needs no bignum dependency.
+fn magnitudeToDecimal(allocator: std.mem.Allocator, le_bytes: []const u8, negative: bool) ![]u8 {
+    var digits: std.ArrayListUnmanaged(u8) = .empty; // base-10, least significant first
+    defer digits.deinit(allocator);
+    try digits.append(allocator, 0);
+
+    var i: usize = le_bytes.len;
     while (i > 0) {
         i -= 1;
-        result = (result << 8) | @as(i64, buf[i]);
+        var carry: u32 = le_bytes[i];
+        for (digits.items) |*d| {
+            const v: u32 = @as(u32, d.*) * 256 + carry;
+            d.* = @intCast(v % 10);
+            carry = v / 10;
+        }
+        while (carry > 0) {
+            try digits.append(allocator, @intCast(carry % 10));
+            carry /= 10;
+        }
     }
 
-    if (negative) return -result;
-    return result;
+    // Trim leading zeros (keeping a single "0" for a zero magnitude).
+    var len = digits.items.len;
+    while (len > 1 and digits.items[len - 1] == 0) len -= 1;
+    const is_zero = len == 1 and digits.items[0] == 0;
+
+    const sign_len: usize = if (negative and !is_zero) 1 else 0;
+    var out = try allocator.alloc(u8, sign_len + len);
+    if (sign_len == 1) out[0] = '-';
+    for (0..len) |k| {
+        out[sign_len + k] = '0' + digits.items[len - 1 - k];
+    }
+    return out;
 }
 
 /// Interpret a script element as a typed value.
@@ -128,7 +194,7 @@ fn interpretScriptElement(allocator: std.mem.Allocator, opcode: u8, data_hex: []
         if (opcode == 0x00) return .{ .int = 0 };
         if (opcode >= 0x51 and opcode <= 0x60) return .{ .int = @as(i64, opcode) - 0x50 };
         if (opcode == 0x4f) return .{ .int = -1 };
-        return .{ .int = decodeScriptNumber(data_hex) };
+        return decodeScriptNumberValue(allocator, data_hex);
     }
 
     if (encoding == .bool_) {

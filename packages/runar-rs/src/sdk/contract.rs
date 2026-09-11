@@ -2527,7 +2527,7 @@ fn encode_arg(value: &SdkValue) -> String {
 }
 
 /// Encode an integer as a Bitcoin Script number opcode or push data.
-fn encode_script_number(n: i64) -> String {
+pub(crate) fn encode_script_number(n: i64) -> String {
     if n == 0 {
         return "00".to_string(); // OP_0
     }
@@ -2562,7 +2562,7 @@ fn encode_script_number(n: i64) -> String {
 /// Encode an arbitrary-precision BigInt as a Bitcoin Script number push.
 /// Uses LE sign-magnitude encoding, same as encode_script_number but for
 /// values that may exceed i64 range.
-fn encode_bigint_script_number(n: &num_bigint::BigInt) -> String {
+pub(crate) fn encode_bigint_script_number(n: &num_bigint::BigInt) -> String {
     use num_bigint::Sign;
 
     if n.sign() == Sign::NoSign {
