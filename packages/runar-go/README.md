@@ -1239,6 +1239,8 @@ Determine whether an on-chain script was produced from the given artifact (regar
 
 Merkle-root computation helpers — the SHA-256 forms accept a leaf, proof, index, and depth; the Poseidon2 KB forms work over 8-element field state. [runar.go](runar.go).
 
+`MerkleRootPoseidon2KBv` returns `*big.Int` (`runar.BigintBig`), not `runar.Bigint`. The `merkleRootPoseidon2KB` builtin leaves the base-2^32 packing of all eight KoalaBear root limbs on the stack (up to 256 bits), which `int64` cannot hold. Contracts in the `.runar.go` DSL must therefore type the field they compare against as `runar.BigintBig` and compare with `runar.BigintBigEqual` — this maps to the same `===` and emits identical Script. See `integration/go/contracts/BasefoldVerifier.runar.go`.
+
 #### `Min` / `Max` / `Within` / `Abs` / `AbsBig` / `Sign`
 
 [runar.go](runar.go).

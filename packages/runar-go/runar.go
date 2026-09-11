@@ -1680,11 +1680,53 @@ func poseidon2KBCompress(left, right [8]int64) [8]int64 {
 	return digest
 }
 
+// poseidon2RootPackBase is the radix the emitter packs the root in. It MUST
+// stay equal to codegen.poseidon2RootPackBase (compilers/go/codegen/
+// poseidon2_merkle.go) — that constant is unexported, so the two are kept in
+// step by execution instead: TestMerkleRootPoseidon2KBv_AgreesWithEmittedScript
+// runs the compiled script against this function's output.
+var poseidon2RootPackBase = new(big.Int).Lsh(big.NewInt(1), 32)
+
+// PackPoseidon2KBRoot folds an 8-element KoalaBear Poseidon2 digest into the
+// single arbitrary-precision integer that `merkleRootPoseidon2KB` returns:
+//
+//	packed = Σ root_i · (2^32)^i        (root_7 most significant)
+//
+// This mirrors codegen.EmitPoseidon2RootPack. Every limb is < p < 2^32, so the
+// packing is injective — equality on the packed value is equality on all eight
+// limbs.
+func PackPoseidon2KBRoot(root [8]int64) *big.Int {
+	acc := new(big.Int)
+	for i := 7; i >= 0; i-- {
+		acc.Mul(acc, poseidon2RootPackBase)
+		acc.Add(acc, big.NewInt(root[i]))
+	}
+	return acc
+}
+
 // MerkleRootPoseidon2KBv is a variadic wrapper for contract compatibility.
 // Takes individual int64 arguments: leaf[0..7], proof[0..depth*8-1], index, depth.
-// Returns the first element of the 8-element Poseidon2 digest (matching the
-// contract type system's single bigint return).
-func MerkleRootPoseidon2KBv(args ...int64) int64 {
+//
+// It returns the SAME value the compiled script leaves on the stack: the
+// base-2^32 packing of all eight root limbs (see PackPoseidon2KBRoot and
+// codegen.EmitPoseidon2RootPack).
+//
+// Why *big.Int and not runar.Bigint (N-090). The packed root occupies up to
+// 256 bits. `runar.Bigint` is int64 — it cannot hold the answer for any root
+// with a nonzero top limb, which is essentially all of them, so a Bigint
+// return is a guarantee of disagreement with the script rather than an
+// approximation of it. This function used to return result[0], one ~31-bit
+// limb of eight, and nothing caught it: BasefoldVerifier.runar.go, its only
+// caller, had a compile test and no execution test, and a compile test cannot
+// observe a value mismatch. The Rúnar-side type is arbitrary-precision
+// `bigint`, so the compiled script and the deployment SDK were always fine;
+// only this mock was narrow.
+//
+// Contracts written in the `.runar.go` DSL must therefore type the field they
+// compare against as `runar.BigintBig` and compare with
+// `runar.BigintBigEqual` — the same shape the BN254 `*Big` wrappers already
+// use for 254-bit field elements, and it compiles to the identical `===`.
+func MerkleRootPoseidon2KBv(args ...int64) *big.Int {
 	if len(args) < 10 {
 		panic("MerkleRootPoseidon2KBv: need at least 10 args (8 leaf + index + depth)")
 	}
@@ -1693,8 +1735,7 @@ func MerkleRootPoseidon2KBv(args ...int64) int64 {
 	var leaf [8]int64
 	copy(leaf[:], args[0:8])
 	proof := args[8 : len(args)-2]
-	result := MerkleRootPoseidon2KB(leaf, proof, index, depth)
-	return result[0]
+	return PackPoseidon2KBRoot(MerkleRootPoseidon2KB(leaf, proof, index, depth))
 }
 
 // MerkleRootPoseidon2KB computes a Poseidon2 KoalaBear Merkle root.
