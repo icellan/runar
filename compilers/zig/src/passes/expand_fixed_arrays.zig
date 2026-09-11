@@ -516,6 +516,14 @@ const Ctx = struct {
                     .target = name,
                     .value = new_val,
                     .source_loc = source_loc,
+                    // The synthesised leaf IS a contract property — this
+                    // statement only exists because the source wrote
+                    // `this.<arr>[..] = v`. Dropping the flag made the write
+                    // look like a local rebind to `methodMutatesState`, which
+                    // keys STRICTLY on it, so a state-writing method was
+                    // classified terminal and the deployed script carried no
+                    // continuation covenant at all (N-059).
+                    .target_is_property = true,
                 } });
                 return;
             },
@@ -553,6 +561,8 @@ const Ctx = struct {
                 .target = meta.slot_names[@intCast(lit)],
                 .value = new_val,
                 .source_loc = source_loc,
+                // See the nested-chain site above: the slot is a property.
+                .target_is_property = true,
             } });
             return;
         }
@@ -788,7 +798,7 @@ const Ctx = struct {
     fn makeTargetAssign(self: *Ctx, target: Expression, value: Expression) !Statement {
         switch (target) {
             .identifier => |name| return .{ .assign = .{ .target = name, .value = value } },
-            .property_access => |pa| return .{ .assign = .{ .target = pa.property, .value = value } },
+            .property_access => |pa| return .{ .assign = .{ .target = pa.property, .value = value, .target_is_property = true } },
             else => {
                 try self.pushError("unsupported assignment target in FixedArray rewrite");
                 return .{ .expr_stmt = .{ .expr = .{ .literal_int = 0 } } };
@@ -847,6 +857,10 @@ const Ctx = struct {
             const branch_assign = Statement{ .assign = .{
                 .target = slot,
                 .value = try self.cloneExpr(val_ref),
+                // Each dispatch arm writes a synthesised property slot, so it
+                // must carry the property flag for the same reason the
+                // literal-index sites above do (N-059).
+                .target_is_property = true,
             } };
             const then_body = try self.allocator.alloc(Statement, 1);
             then_body[0] = branch_assign;

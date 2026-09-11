@@ -950,11 +950,18 @@ const Parser = struct {
                     a.value = self.solResolveBarePropsExpr(a.value, properties, locals);
                     // `Assign` stores a bare target NAME plus this flag rather
                     // than a target expression, so the rewrite lands on the
-                    // flag. `index_target` is never populated on this surface
-                    // (`buildAssignment` has no index-access arm), so there is
-                    // no chain root to walk.
+                    // flag.
                     if (!a.target_is_property and solIsBareProp(a.target, properties, locals)) {
                         a.target_is_property = true;
+                    }
+                    // An element write (`grid[0][0] = v`) also carries the
+                    // whole LHS chain on `index_target`, and Solidity writes
+                    // it bare. `expand_fixed_arrays.zig` only resolves a chain
+                    // rooted at `this.<prop>`, so the root has to be rewritten
+                    // here too — `solResolveBarePropsExpr` mutates the
+                    // heap-allocated chain in place.
+                    if (a.index_target) |ia| {
+                        _ = self.solResolveBarePropsExpr(.{ .index_access = ia }, properties, locals);
                     }
                 },
                 .const_decl => |*d| {
@@ -1448,6 +1455,28 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value, .source_loc = loc, .target_is_property = is_prop } };
+            },
+            .index_access => |ia| {
+                // `this.arr[idx] = value` — carry the full index-access target
+                // on the Assign so `expand_fixed_arrays.zig` can rewrite it
+                // into leaf or dispatch form. `target` keeps the base property
+                // name so debug output stays meaningful. Without this arm the
+                // statement fell through to `else`, became
+                // `Assign{ target = "unknown", index_target = null }`, and the
+                // element write was silently dropped (N-059). Every other
+                // surface parser in this tier already carried it.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                    .source_loc = loc,
+                    .target_is_property = is_prop,
+                } };
             },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };

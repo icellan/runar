@@ -1473,6 +1473,28 @@ const Parser = struct {
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value, .source_loc = loc, .target_is_property = is_prop } };
             },
+            .index_access => |ia| {
+                // `this.arr[idx] = value` — carry the full index-access target
+                // on the Assign so `expand_fixed_arrays.zig` can rewrite it
+                // into leaf or dispatch form. `target` keeps the base property
+                // name so debug output stays meaningful. Without this arm the
+                // statement fell through to `else`, became
+                // `Assign{ target = "unknown", index_target = null }`, and the
+                // element write was silently dropped (N-059). Every other
+                // surface parser in this tier already carried it.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                    .source_loc = loc,
+                    .target_is_property = is_prop,
+                } };
+            },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };
             },

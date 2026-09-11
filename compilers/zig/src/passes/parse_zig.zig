@@ -1150,8 +1150,20 @@ const Parser = struct {
                     }
                 } else {
                     // Property access: obj.prop
+                    //
+                    // The receiver is normalised `self` -> `this`, matching
+                    // the eight peer surface parsers in this tier (see
+                    // `parse_rust.zig`, which spells the same rewrite out).
+                    // The canonical AST names the contract receiver `this`,
+                    // and `expand_fixed_arrays.zig`'s
+                    // `tryResolveLiteralIndexChain` only resolves a chain
+                    // rooted at it. Leaving `self` here meant a nested
+                    // element access `self.grid[0][0]` resolved only its
+                    // innermost level, so reads lowered to
+                    // `__array_access(load_prop grid__0, 0)` and stack
+                    // lowering then refused the contract outright (N-059).
                     const object_name = switch (expr) {
-                        .identifier => |id| id,
+                        .identifier => |id| if (std.mem.eql(u8, id, "self")) "this" else id,
                         .property_access => |pa| pa.property,
                         else => "unknown",
                     };
