@@ -342,26 +342,9 @@ func emitWitnessInverseVerifyFp12(t *BN254Tracker, fPrefix, fInvPrefix, resultPr
 //
 // Script checks: y*y mod p == (x*x*x + 3) mod p, aborts if false.
 func emitWAG1OnCurveCheck(t *BN254Tracker, xName, yName string) {
-	pfx := "_occhk_" + uniqueSuffixForOCC(xName, yName) + "_"
-
-	// lhs = y^2 mod p
-	t.copyToTop(yName, pfx+"y")
-	bn254FieldSqr(t, pfx+"y", pfx+"lhs")
-
-	// rhs = x^3 + 3 mod p
-	t.copyToTop(xName, pfx+"xc")
-	bn254FieldSqr(t, pfx+"xc", pfx+"x2")
-	t.copyToTop(xName, pfx+"xc2")
-	bn254FieldMul(t, pfx+"x2", pfx+"xc2", pfx+"x3")
-	t.pushInt(pfx+"three", 3)
-	bn254FieldAdd(t, pfx+"x3", pfx+"three", pfx+"rhs")
-
-	// Check lhs == rhs
-	t.toTop(pfx + "lhs")
-	t.toTop(pfx + "rhs")
-	t.rawBlock([]string{pfx + "lhs", pfx + "rhs"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	})
+	// Shared body lives in bn254_point_validation.go so the general-purpose
+	// pairing builtins emit the identical assertion (CL-BUG-103).
+	bn254AssertG1OnCurve(t, xName, yName, uniqueSuffixForOCC(xName, yName))
 }
 
 // uniqueSuffixForOCC returns a short suffix so emitWAG1OnCurveCheck can be
@@ -426,47 +409,9 @@ func init() {
 // Aborts the script via OP_EQUALVERIFY if the relation does not hold.
 // Cost: four Fp2 muls, one Fp2 add, two Fp2 equality checks — ~100 StackOps.
 func emitWAG2OnCurveCheck(t *BN254Tracker, x0, x1, y0, y1 string) {
-	pfx := "_g2occ_" + uniqueSuffixForOCC(x0, y1) + "_"
-
-	// lhs = y^2  in Fp2 (preserve y0, y1: copy inputs first)
-	t.copyToTop(y0, pfx+"y0")
-	t.copyToTop(y1, pfx+"y1")
-	bn254Fp2Sqr(t, pfx+"y0", pfx+"y1", pfx+"lhs_0", pfx+"lhs_1")
-
-	// x2 = x^2  in Fp2 (preserve x0, x1)
-	t.copyToTop(x0, pfx+"x0a")
-	t.copyToTop(x1, pfx+"x1a")
-	bn254Fp2Sqr(t, pfx+"x0a", pfx+"x1a", pfx+"x2_0", pfx+"x2_1")
-
-	// x3 = x2 * x  in Fp2 (preserve x0, x1)
-	t.copyToTop(x0, pfx+"x0b")
-	t.copyToTop(x1, pfx+"x1b")
-	bn254Fp2Mul(t, pfx+"x2_0", pfx+"x2_1", pfx+"x0b", pfx+"x1b", pfx+"x3_0", pfx+"x3_1")
-
-	// rhs = x^3 + b'  in Fp2
-	t.pushBigInt(pfx+"b0", bn254TwistB0)
-	t.pushBigInt(pfx+"b1", bn254TwistB1)
-	bn254Fp2Add(t, pfx+"x3_0", pfx+"x3_1", pfx+"b0", pfx+"b1", pfx+"rhs_0", pfx+"rhs_1")
-
-	// Reduce both sides mod p for canonical byte-level OP_EQUALVERIFY. The
-	// Fp2 arithmetic above may leave intermediates unreduced when the
-	// tracker is in qAtBottom/threshold>0 mode, so apply bn254FieldMod.
-	bn254FieldMod(t, pfx+"lhs_0", pfx+"lhs_0r")
-	bn254FieldMod(t, pfx+"lhs_1", pfx+"lhs_1r")
-	bn254FieldMod(t, pfx+"rhs_0", pfx+"rhs_0r")
-	bn254FieldMod(t, pfx+"rhs_1", pfx+"rhs_1r")
-
-	// Component-wise equality: abort if either fails.
-	t.toTop(pfx + "lhs_0r")
-	t.toTop(pfx + "rhs_0r")
-	t.rawBlock([]string{pfx + "lhs_0r", pfx + "rhs_0r"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	})
-	t.toTop(pfx + "lhs_1r")
-	t.toTop(pfx + "rhs_1r")
-	t.rawBlock([]string{pfx + "lhs_1r", pfx + "rhs_1r"}, "", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	})
+	// Shared body lives in bn254_point_validation.go so the general-purpose
+	// pairing builtins emit the identical assertion (CL-BUG-103).
+	bn254AssertG2OnCurve(t, x0, x1, y0, y1, uniqueSuffixForOCC(x0, y1))
 }
 
 // bn254SubgroupCheckScalar is the fixed scalar k = 6·x² for the BN254 twist
