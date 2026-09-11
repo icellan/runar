@@ -59,6 +59,8 @@ test {
     _ = @import("tests/sol_bare_property_write_continuation.zig");
     _ = @import("tests/n059_fixed_array_write_continuation.zig");
     _ = @import("tests/r073_fixed_array_element_type.zig");
+    _ = @import("tests/n086_expansion_field_preservation.zig");
+    _ = @import("tests/n086_cross_tier_sighash_fixed_array.zig");
     _ = @import("tests/branch_lift_then_arm.zig");
     _ = @import("tests/readonly_property_assignment.zig");
     _ = @import("tests/property_initializer_literal.zig");

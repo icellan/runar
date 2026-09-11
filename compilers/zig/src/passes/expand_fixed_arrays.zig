@@ -108,13 +108,10 @@ pub fn expand(allocator: Allocator, contract: ContractNode) ExpandError!Result {
         return .{ .contract = contract, .errors = try ctx.errors.toOwnedSlice(allocator) };
     }
 
-    const out = ContractNode{
-        .name = contract.name,
-        .parent_class = contract.parent_class,
-        .properties = new_props,
-        .constructor = new_ctor,
-        .methods = new_methods,
-    };
+    var out = contract;
+    out.properties = new_props;
+    out.constructor = new_ctor;
+    out.methods = new_methods;
     return .{ .contract = out, .errors = &.{} };
 }
 
@@ -344,29 +341,30 @@ const Ctx = struct {
         // constructor assignment targets because they're initializer-only.
         var new_assigns = try self.allocator.alloc(types.AssignmentNode, ctor.assignments.len);
         for (ctor.assignments, 0..) |a, i| {
-            new_assigns[i] = .{
-                .target = a.target,
-                .value = try self.rewriteExpressionSimple(a.value),
-            };
+            new_assigns[i] = a;
+            new_assigns[i].value = try self.rewriteExpressionSimple(a.value);
         }
         var new_super = try self.allocator.alloc(Expression, ctor.super_args.len);
         for (ctor.super_args, 0..) |sa, i| new_super[i] = try self.rewriteExpressionSimple(sa);
-        return .{
-            .params = ctor.params,
-            .super_args = new_super,
-            .assignments = new_assigns,
-        };
+        // N-086: copy-then-overwrite, never a field list. The named-field form
+        // dropped `body` (R-040's full constructor statement list), so an
+        // author's `assert(...)` in a constructor vanished from the ANF as soon
+        // as the contract also declared a FixedArray.
+        var out = ctor;
+        out.super_args = new_super;
+        out.assignments = new_assigns;
+        return out;
     }
 
     fn rewriteMethod(self: *Ctx, method: MethodNode) !MethodNode {
-        const new_body = try self.rewriteStatements(method.body);
-        return .{
-            .name = method.name,
-            .is_public = method.is_public,
-            .params = method.params,
-            .body = new_body,
-            .source_loc = method.source_loc,
-        };
+        // N-086: see `rewriteConstructor`. The named-field form dropped
+        // `sighash_type`, so a method declaring `@sighash SINGLE|FORKID` on a
+        // FixedArray contract silently reverted to the default ALL|FORKID —
+        // after `sighash_validate` had already reasoned about the declared
+        // mode. Copy-then-overwrite so a field added later cannot be lost.
+        var out = method;
+        out.body = try self.rewriteStatements(method.body);
+        return out;
     }
 
     fn rewriteStatements(self: *Ctx, stmts: []const Statement) ExpandError![]Statement {
@@ -384,12 +382,9 @@ const Ctx = struct {
                 var prelude: std.ArrayListUnmanaged(Statement) = .empty;
                 const new_val = try self.rewriteExpression(&prelude, d.value);
                 try out.appendSlice(self.allocator, prelude.items);
-                try out.append(self.allocator, .{ .const_decl = .{
-                    .name = d.name,
-                    .type_info = d.type_info,
-                    .value = new_val,
-                    .source_loc = d.source_loc,
-                } });
+                var new_d = d;
+                new_d.value = new_val;
+                try out.append(self.allocator, .{ .const_decl = new_d });
             },
             .let_decl => |d| {
                 if (d.value) |v| {
@@ -399,12 +394,9 @@ const Ctx = struct {
                     var prelude: std.ArrayListUnmanaged(Statement) = .empty;
                     const new_val = try self.rewriteExpression(&prelude, v);
                     try out.appendSlice(self.allocator, prelude.items);
-                    try out.append(self.allocator, .{ .let_decl = .{
-                        .name = d.name,
-                        .type_info = d.type_info,
-                        .value = new_val,
-                        .source_loc = d.source_loc,
-                    } });
+                    var new_d = d;
+                    new_d.value = new_val;
+                    try out.append(self.allocator, .{ .let_decl = new_d });
                 } else {
                     try out.append(self.allocator, stmt);
                 }
@@ -418,39 +410,38 @@ const Ctx = struct {
                 try out.appendSlice(self.allocator, prelude.items);
                 const new_then = try self.rewriteStatements(ifs.then_body);
                 const new_else: ?[]Statement = if (ifs.else_body) |eb| try self.rewriteStatements(eb) else null;
-                try out.append(self.allocator, .{ .if_stmt = .{
-                    .condition = new_cond,
-                    .then_body = new_then,
-                    .else_body = new_else,
-                    .source_loc = ifs.source_loc,
-                } });
+                var new_if = ifs;
+                new_if.condition = new_cond;
+                new_if.then_body = new_then;
+                new_if.else_body = new_else;
+                try out.append(self.allocator, .{ .if_stmt = new_if });
             },
             .for_stmt => |fs| {
-                const new_body = try self.rewriteStatements(fs.body);
-                try out.append(self.allocator, .{ .for_stmt = .{
-                    .var_name = fs.var_name,
-                    .init_value = fs.init_value,
-                    .bound = fs.bound,
-                    .descending = fs.descending,
-                    .body = new_body,
-                    .source_loc = fs.source_loc,
-                } });
+                // N-086: the named-field form supplied 6 of ForStmt's 9 fields,
+                // dropping `inclusive`, `bound_is_const` and `update`.
+                // `inclusive` is the byte-moving one: anf_lower computes
+                // count = |bound - start| (+1 when inclusive), so a
+                // `for (let i = 0n; i <= N; i++)` in a FixedArray contract
+                // unrolled one iteration short of what the author wrote.
+                var new_for = fs;
+                new_for.body = try self.rewriteStatements(fs.body);
+                try out.append(self.allocator, .{ .for_stmt = new_for });
             },
             .expr_stmt => |e| {
                 var prelude: std.ArrayListUnmanaged(Statement) = .empty;
                 const new_e = try self.rewriteExpression(&prelude, e.expr);
                 try out.appendSlice(self.allocator, prelude.items);
-                try out.append(self.allocator, .{ .expr_stmt = .{ .expr = new_e, .source_loc = e.source_loc } });
+                var new_e_stmt = e;
+                new_e_stmt.expr = new_e;
+                try out.append(self.allocator, .{ .expr_stmt = new_e_stmt });
             },
             .assert_stmt => |a| {
                 var prelude: std.ArrayListUnmanaged(Statement) = .empty;
                 const new_cond = try self.rewriteExpression(&prelude, a.condition);
                 try out.appendSlice(self.allocator, prelude.items);
-                try out.append(self.allocator, .{ .assert_stmt = .{
-                    .condition = new_cond,
-                    .message = a.message,
-                    .source_loc = a.source_loc,
-                } });
+                var new_assert = a;
+                new_assert.condition = new_cond;
+                try out.append(self.allocator, .{ .assert_stmt = new_assert });
             },
             .return_stmt => |maybe| {
                 if (maybe) |e| {
@@ -489,12 +480,14 @@ const Ctx = struct {
         var prelude: std.ArrayListUnmanaged(Statement) = .empty;
         const new_val = try self.rewriteExpression(&prelude, a.value);
         try out.appendSlice(self.allocator, prelude.items);
-        try out.append(self.allocator, .{ .assign = .{
-            .target = a.target,
-            .value = new_val,
-            .source_loc = a.source_loc,
-            .target_is_property = a.target_is_property,
-        } });
+        // N-086 copy-then-overwrite, with ONE deliberate reset: `index_target`
+        // must be null by the time ANF lowering runs, and this arm is only
+        // reached when the statement had none. Spelling it out keeps the reset
+        // intentional rather than an omission.
+        var new_assign = a;
+        new_assign.value = new_val;
+        new_assign.index_target = null;
+        try out.append(self.allocator, .{ .assign = new_assign });
     }
 
     fn rewriteIndexAssign(
@@ -603,42 +596,43 @@ const Ctx = struct {
                 // No — TS parser translates assignments to statement-level Assign.
                 // So we only need to recurse.
                 const new_bo = try self.allocator.create(BinaryOp);
-                new_bo.* = .{
-                    .op = bo.op,
-                    .left = try self.rewriteExpression(prelude, bo.left),
-                    .right = try self.rewriteExpression(prelude, bo.right),
-                };
+                new_bo.* = bo.*;
+                new_bo.left = try self.rewriteExpression(prelude, bo.left);
+                new_bo.right = try self.rewriteExpression(prelude, bo.right);
                 return .{ .binary_op = new_bo };
             },
             .unary_op => |uo| {
                 const new_uo = try self.allocator.create(UnaryOp);
-                new_uo.* = .{
-                    .op = uo.op,
-                    .operand = try self.rewriteExpression(prelude, uo.operand),
-                };
+                new_uo.* = uo.*;
+                new_uo.operand = try self.rewriteExpression(prelude, uo.operand);
                 return .{ .unary_op = new_uo };
             },
             .call => |ce| {
                 var new_args = try self.allocator.alloc(Expression, ce.args.len);
                 for (ce.args, 0..) |arg, i| new_args[i] = try self.rewriteExpression(prelude, arg);
                 const new_call = try self.allocator.create(CallExpr);
-                new_call.* = .{ .callee = ce.callee, .args = new_args };
+                // N-086: `.*` copy, not a field list. The field list dropped
+                // `asm_return_type`, which is what tells ANF lowering an
+                // `asm<ByteString>(...)` value is byte-typed — so `a + a`
+                // lowered to OP_ADD instead of OP_CAT.
+                new_call.* = ce.*;
+                new_call.args = new_args;
                 return .{ .call = new_call };
             },
             .method_call => |mc| {
                 var new_args = try self.allocator.alloc(Expression, mc.args.len);
                 for (mc.args, 0..) |arg, i| new_args[i] = try self.rewriteExpression(prelude, arg);
                 const new_mc = try self.allocator.create(MethodCall);
-                new_mc.* = .{ .object = mc.object, .method = mc.method, .args = new_args };
+                new_mc.* = mc.*;
+                new_mc.args = new_args;
                 return .{ .method_call = new_mc };
             },
             .ternary => |t| {
                 const new_t = try self.allocator.create(Ternary);
-                new_t.* = .{
-                    .condition = try self.rewriteExpression(prelude, t.condition),
-                    .then_expr = try self.rewriteExpression(prelude, t.then_expr),
-                    .else_expr = try self.rewriteExpression(prelude, t.else_expr),
-                };
+                new_t.* = t.*;
+                new_t.condition = try self.rewriteExpression(prelude, t.condition);
+                new_t.then_expr = try self.rewriteExpression(prelude, t.then_expr);
+                new_t.else_expr = try self.rewriteExpression(prelude, t.else_expr);
                 return .{ .ternary = new_t };
             },
             .array_literal => |elems| {
@@ -648,12 +642,14 @@ const Ctx = struct {
             },
             .increment => |iv| {
                 const new_iv = try self.allocator.create(IncrementExpr);
-                new_iv.* = .{ .operand = try self.rewriteExpression(prelude, iv.operand), .prefix = iv.prefix };
+                new_iv.* = iv.*;
+                new_iv.operand = try self.rewriteExpression(prelude, iv.operand);
                 return .{ .increment = new_iv };
             },
             .decrement => |dv| {
                 const new_dv = try self.allocator.create(DecrementExpr);
-                new_dv.* = .{ .operand = try self.rewriteExpression(prelude, dv.operand), .prefix = dv.prefix };
+                new_dv.* = dv.*;
+                new_dv.operand = try self.rewriteExpression(prelude, dv.operand);
                 return .{ .decrement = new_dv };
             },
             else => return expr,
@@ -683,7 +679,9 @@ const Ctx = struct {
             const new_obj = try self.rewriteExpression(prelude, ia.object);
             const new_idx = try self.rewriteExpression(prelude, ia.index);
             const new_ia = try self.allocator.create(IndexAccess);
-            new_ia.* = .{ .object = new_obj, .index = new_idx };
+            new_ia.* = ia;
+            new_ia.object = new_obj;
+            new_ia.index = new_idx;
             return .{ .index_access = new_ia };
         }
 
@@ -962,57 +960,62 @@ const Ctx = struct {
             .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier, .property_access => return expr,
             .binary_op => |bo| {
                 const new_bo = try self.allocator.create(BinaryOp);
-                new_bo.* = .{
-                    .op = bo.op,
-                    .left = try self.cloneExpr(bo.left),
-                    .right = try self.cloneExpr(bo.right),
-                };
+                new_bo.* = bo.*;
+                new_bo.left = try self.cloneExpr(bo.left);
+                new_bo.right = try self.cloneExpr(bo.right);
                 return .{ .binary_op = new_bo };
             },
             .unary_op => |uo| {
                 const new_uo = try self.allocator.create(UnaryOp);
-                new_uo.* = .{ .op = uo.op, .operand = try self.cloneExpr(uo.operand) };
+                new_uo.* = uo.*;
+                new_uo.operand = try self.cloneExpr(uo.operand);
                 return .{ .unary_op = new_uo };
             },
             .call => |ce| {
                 var new_args = try self.allocator.alloc(Expression, ce.args.len);
                 for (ce.args, 0..) |a, i| new_args[i] = try self.cloneExpr(a);
                 const new_call = try self.allocator.create(CallExpr);
-                new_call.* = .{ .callee = ce.callee, .args = new_args };
+                // N-086: `.*` copy, not a field list. The field list dropped
+                // `asm_return_type`, which is what tells ANF lowering an
+                // `asm<ByteString>(...)` value is byte-typed — so `a + a`
+                // lowered to OP_ADD instead of OP_CAT.
+                new_call.* = ce.*;
+                new_call.args = new_args;
                 return .{ .call = new_call };
             },
             .method_call => |mc| {
                 var new_args = try self.allocator.alloc(Expression, mc.args.len);
                 for (mc.args, 0..) |a, i| new_args[i] = try self.cloneExpr(a);
                 const new_mc = try self.allocator.create(MethodCall);
-                new_mc.* = .{ .object = mc.object, .method = mc.method, .args = new_args };
+                new_mc.* = mc.*;
+                new_mc.args = new_args;
                 return .{ .method_call = new_mc };
             },
             .ternary => |t| {
                 const new_t = try self.allocator.create(Ternary);
-                new_t.* = .{
-                    .condition = try self.cloneExpr(t.condition),
-                    .then_expr = try self.cloneExpr(t.then_expr),
-                    .else_expr = try self.cloneExpr(t.else_expr),
-                };
+                new_t.* = t.*;
+                new_t.condition = try self.cloneExpr(t.condition);
+                new_t.then_expr = try self.cloneExpr(t.then_expr);
+                new_t.else_expr = try self.cloneExpr(t.else_expr);
                 return .{ .ternary = new_t };
             },
             .index_access => |ia| {
                 const new_ia = try self.allocator.create(IndexAccess);
-                new_ia.* = .{
-                    .object = try self.cloneExpr(ia.object),
-                    .index = try self.cloneExpr(ia.index),
-                };
+                new_ia.* = ia.*;
+                new_ia.object = try self.cloneExpr(ia.object);
+                new_ia.index = try self.cloneExpr(ia.index);
                 return .{ .index_access = new_ia };
             },
             .increment => |iv| {
                 const new_iv = try self.allocator.create(IncrementExpr);
-                new_iv.* = .{ .operand = try self.cloneExpr(iv.operand), .prefix = iv.prefix };
+                new_iv.* = iv.*;
+                new_iv.operand = try self.cloneExpr(iv.operand);
                 return .{ .increment = new_iv };
             },
             .decrement => |dv| {
                 const new_dv = try self.allocator.create(DecrementExpr);
-                new_dv.* = .{ .operand = try self.cloneExpr(dv.operand), .prefix = dv.prefix };
+                new_dv.* = dv.*;
+                new_dv.operand = try self.cloneExpr(dv.operand);
                 return .{ .decrement = new_dv };
             },
             .array_literal => |elems| {
