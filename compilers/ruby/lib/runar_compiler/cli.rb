@@ -143,7 +143,7 @@ module RunarCompiler
           exit 1
         end
         begin
-          RunarCompiler.parse_and_validate_only(options[:source])
+          parse_warnings = RunarCompiler.parse_and_validate_only(options[:source])
         rescue RunarCompiler::CompilationError => e
           $stderr.puts "parse error: #{e.message}"
           exit 1
@@ -151,6 +151,10 @@ module RunarCompiler
           $stderr.puts "parse error: #{e.message}"
           exit 1
         end
+        # CL-BUG-104: warnings ride stderr here too, so both CLI paths agree
+        # about whether the compiler talks. Matches the Rust tier's
+        # --parse-only handler (compilers/rust/src/main.rs).
+        Array(parse_warnings).each { |w| $stderr.puts "warning: #{w}" }
         puts "parser ok"
         return
       end
@@ -203,9 +207,10 @@ module RunarCompiler
         File.write(options[:emit_ir_to], JSON.pretty_generate(_anf_to_camel_dict(program)) + "\n")
       end
 
+      warnings = []
       begin
         if options[:source]
-          artifact = RunarCompiler.compile_from_source(
+          artifact, warnings = RunarCompiler.compile_from_source_collecting_warnings(
             options[:source],
             disable_constant_folding: disable_cf
           )
@@ -222,6 +227,12 @@ module RunarCompiler
         $stderr.puts "Compilation error: #{e.message}"
         exit 1
       end
+
+      # CL-BUG-104: advisory validator diagnostics go to stderr, one per line,
+      # matching the Rust (`warning: {}`) and Zig (printDiagnostics) tiers.
+      # Advisory only: the exit code stays 0 and stdout still carries nothing
+      # but the artifact bytes.
+      warnings.each { |w| $stderr.puts "warning: #{w}" }
 
       # Determine output
       if options[:hex]

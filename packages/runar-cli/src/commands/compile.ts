@@ -258,6 +258,20 @@ export async function compileCommand(
       continue;
     }
 
+    // CL-BUG-104: advisory (warning-severity) diagnostics go to stderr, one
+    // per line, prefixed `warning: ` — matching the Rust
+    // (`eprintln!("warning: {}", w)`) and Zig (`printDiagnostics`) tiers.
+    // This runs before every output mode so --parse-only, --hex and the
+    // artifact-writing path all report them, and it runs on the success path
+    // too: the compiler used to go silent on exactly the compiles that
+    // succeeded. Advisory only — the exit code and the emitted bytes are
+    // untouched.
+    for (const d of compileResult.diagnostics ?? []) {
+      if (d.severity === 'warning' && typeof d.message === 'string' && d.message.length > 0) {
+        console.error(`warning: ${d.message}`);
+      }
+    }
+
     // --parse-only mode: success means parse + (early-exit) succeeded with
     // no error diagnostics. There is no artifact to write — emit the same
     // "parser ok" marker as the other 6 compilers' --parse-only mode so

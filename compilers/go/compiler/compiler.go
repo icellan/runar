@@ -435,31 +435,49 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 }
 
 // CompileFromSource compiles a .runar.ts source file through all passes to a Rúnar artifact.
+//
+// Warning-severity validator diagnostics are dropped on the floor: this
+// signature has nowhere to put them. A caller that wants to surface them —
+// the CLI does — must call CompileFromSourceCollectingWarnings instead.
 func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, error) {
+	artifact, _, err := CompileFromSourceCollectingWarnings(sourcePath, opts...)
+	return artifact, err
+}
+
+// CompileFromSourceCollectingWarnings is CompileFromSource, plus the
+// warning-severity validator diagnostics CompileFromSource has to discard.
+//
+// CL-BUG-104: `main.go` called CompileFromSource, so every warning the
+// validator produced died inside the compile call and the contract author got
+// silence. Error handling here is unchanged — same messages, same
+// stop-at-first-failure semantics — the only addition is the second return
+// value.
+func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptions) (*Artifact, []frontend.Diagnostic, error) {
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading source file: %w", err)
+		return nil, nil, fmt.Errorf("reading source file: %w", err)
 	}
 
 	// Pass 1: Parse
 	parseResult := frontend.ParseSource(source, sourcePath)
 	if len(parseResult.Errors) > 0 {
-		return nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
 	}
 	if parseResult.Contract == nil {
-		return nil, fmt.Errorf("no contract found in %s", sourcePath)
+		return nil, nil, fmt.Errorf("no contract found in %s", sourcePath)
 	}
 
 	// Pass 2: Validate
 	validResult := frontend.Validate(parseResult.Contract)
 	if len(validResult.Errors) > 0 {
-		return nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
 	}
+	warnings := validResult.Warnings
 
 	// Pass 3: Type check
 	tcResult := frontend.TypeCheck(parseResult.Contract)
 	if len(tcResult.Errors) > 0 {
-		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
 	// Pass 3b: Expand FixedArray properties into scalar siblings.
@@ -469,14 +487,14 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 	// ANF, stack, or emit.
 	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
 	if len(expandResult.Errors) > 0 {
-		return nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
+		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
 	expandedContract := expandResult.Contract
 
 	// Pass 4: ANF lowering (recover from panics)
 	program, err := lowerToANFRecovering(expandedContract)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Feed into existing compilation pipeline (passes 4.25+).
@@ -488,7 +506,11 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 	// what Validate just allowed. See sp1_fri_ir_guard.go (R-012).
 	o := mergeOptions(opts)
 	o.sp1FriAdjudicatedByFrontend = true
-	return CompileFromProgram(program, o)
+	artifact, err := CompileFromProgram(program, o)
+	if err != nil {
+		return nil, nil, err
+	}
+	return artifact, warnings, nil
 }
 
 // ParseAndValidateOnlyResult is the result of `ParseAndValidateOnly`. `Err`
@@ -496,6 +518,11 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 // diagnostics.
 type ParseAndValidateOnlyResult struct {
 	Err error
+
+	// Warnings holds the warning-severity validator diagnostics. CL-BUG-104:
+	// the CLI had no way to reach them, so `--parse-only` ran the validator
+	// and then threw away everything it had to say.
+	Warnings []frontend.Diagnostic
 }
 
 // ParseAndValidateOnly runs Pass 1 (parse, dispatched by file extension) and
@@ -520,7 +547,7 @@ func ParseAndValidateOnly(source []byte, sourcePath string) ParseAndValidateOnly
 			Err: fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  ")),
 		}
 	}
-	return ParseAndValidateOnlyResult{Err: nil}
+	return ParseAndValidateOnlyResult{Err: nil, Warnings: validResult.Warnings}
 }
 
 // diagStrings renders a diagnostic slice as a list of error messages for

@@ -219,8 +219,10 @@ module RunarCompiler
   # Public parse-only entry point used by the conformance runner's
   # +--parser-only+ universal-frontend coverage check. Reads the source
   # file, dispatches to the format parser, and runs +Validate+. Raises
-  # +CompilationError+ on parse / validate failures; returns +nil+ on
-  # success (the caller treats nil as "parser ok").
+  # +CompilationError+ on parse / validate failures; on success returns the
+  # validator's warning strings (CL-BUG-104 -- the CLI had no way to reach
+  # them, so +--parse-only+ ran the validator and discarded everything it had
+  # to say). An empty array means "parser ok, nothing to report".
   def self.parse_and_validate_only(source_path)
     source = File.read(source_path)
     parse_result = _parse_source(source, source_path)
@@ -234,7 +236,7 @@ module RunarCompiler
     if valid.errors && !valid.errors.empty?
       raise CompilationError, "validation errors:\n  " + valid.error_strings.join("\n  ")
     end
-    nil
+    valid.warning_strings
   end
 
   # Run type checking on a parsed ContractNode.
@@ -523,7 +525,29 @@ module RunarCompiler
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @param constructor_args [Hash, nil] constructor argument overrides
   # @return [Artifact]
+  #
+  # Warning-severity validator diagnostics are discarded: a single return
+  # value has nowhere to put them. A caller that wants to surface them --
+  # the CLI does -- must use .compile_from_source_collecting_warnings.
   def self.compile_from_source(source_path, disable_constant_folding: false, constructor_args: nil)
+    artifact, = compile_from_source_collecting_warnings(
+      source_path,
+      disable_constant_folding: disable_constant_folding,
+      constructor_args: constructor_args
+    )
+    artifact
+  end
+
+  # .compile_from_source plus the validator warnings it would discard.
+  #
+  # CL-BUG-104: cli.rb called .compile_from_source, so every warning the
+  # validator produced died inside the compile call and the contract author
+  # got silence. Error handling is unchanged -- same CompilationError
+  # messages, same stop-at-first-failure ordering.
+  #
+  # @return [Array(Artifact, Array<String>)]
+  def self.compile_from_source_collecting_warnings(source_path, disable_constant_folding: false,
+                                                   constructor_args: nil)
     source = _read_file(source_path)
 
     # Pass 1: Parse
@@ -540,6 +564,7 @@ module RunarCompiler
     if valid_result.errors.any?
       raise CompilationError, "validation errors:\n  #{valid_result.error_strings.join("\n  ")}"
     end
+    warnings = valid_result.warning_strings
 
     # Pass 3: Type check
     tc_result = _type_check(parse_result.contract)
@@ -561,7 +586,8 @@ module RunarCompiler
     _apply_constructor_args(program, constructor_args)
 
     # Feed into existing compilation pipeline (passes 4.25-6)
-    compile_from_program(program, disable_constant_folding: disable_constant_folding)
+    artifact = compile_from_program(program, disable_constant_folding: disable_constant_folding)
+    [artifact, warnings]
   end
 
   # Run passes 1-4 on a source file and return the ANF program.

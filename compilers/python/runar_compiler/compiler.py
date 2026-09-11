@@ -461,6 +461,30 @@ def compile_from_source(
 
     Supports .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs,
     and .runar.py extensions (dispatched by file extension).
+
+    Warning-severity validator diagnostics are discarded. A caller that wants
+    to surface them -- the CLI does -- must use
+    ``compile_from_source_collecting_warnings`` instead.
+    """
+    artifact, _warnings = compile_from_source_collecting_warnings(
+        source_path,
+        disable_constant_folding=disable_constant_folding,
+        constructor_args=constructor_args,
+    )
+    return artifact
+
+
+def compile_from_source_collecting_warnings(
+    source_path: str,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> tuple[Artifact, list[str]]:
+    """``compile_from_source`` plus the validator warnings it would discard.
+
+    CL-BUG-104: ``__main__`` called ``compile_from_source``, whose single
+    return value has no room for advisory diagnostics, so every validator
+    warning died inside the compile call. Error handling is unchanged -- same
+    ``CompilationError`` messages, same stop-at-first-failure ordering.
     """
     source = _read_file(source_path)
 
@@ -475,6 +499,7 @@ def compile_from_source(
     valid_result = _validate(parse_result.contract)
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
+    warnings = valid_result.warning_strings()
 
     # Pass 3: Type check
     tc_result = _type_check(parse_result.contract)
@@ -494,7 +519,8 @@ def compile_from_source(
     _apply_constructor_args(program, constructor_args)
 
     # Feed into existing compilation pipeline (passes 4.25-6)
-    return compile_from_program(program, disable_constant_folding=disable_constant_folding)
+    artifact = compile_from_program(program, disable_constant_folding=disable_constant_folding)
+    return artifact, warnings
 
 
 def compile_source_to_ir(

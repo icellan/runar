@@ -126,7 +126,15 @@ public final class Cli {
         }
 
         try {
-            Validate.run(contract);
+            // CL-BUG-104: Validate.run returns its warnings; this used to
+            // discard them, so every advisory diagnostic the validator
+            // produced died here. They ride stderr, one per line, prefixed
+            // "warning: " — matching the Rust (`eprintln!("warning: {}", w)`)
+            // and Zig (printDiagnostics) tiers. Advisory only: the exit code
+            // stays 0 and stdout still carries nothing but the artifact bytes.
+            for (String w : Validate.run(contract)) {
+                err.println("warning: " + w);
+            }
         } catch (Validate.ValidationException e) {
             for (String msg : e.errors()) {
                 err.println("runar-java: " + msg);

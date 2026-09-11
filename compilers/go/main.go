@@ -16,6 +16,7 @@ import (
 
 	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/compilers/go/compiler"
+	"github.com/icellan/runar/compilers/go/frontend"
 )
 
 // GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
@@ -144,6 +145,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "parse error: %s\n", parseRes.Err.Error())
 			os.Exit(1)
 		}
+		// CL-BUG-104: warnings ride stderr here too, so both CLI paths agree
+		// about whether the compiler talks. Matches the Rust tier's
+		// `--parse-only` handler (compilers/rust/src/main.rs).
+		for _, w := range parseRes.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w.FormatMessage())
+		}
 		fmt.Println("parser ok")
 		return
 	}
@@ -185,16 +192,25 @@ func main() {
 	}
 
 	var artifact *compiler.Artifact
+	var warnings []frontend.Diagnostic
 	var err error
 
 	if *sourceFile != "" {
-		artifact, err = compiler.CompileFromSource(*sourceFile, opts)
+		artifact, warnings, err = compiler.CompileFromSourceCollectingWarnings(*sourceFile, opts)
 	} else {
 		artifact, err = compiler.CompileFromIR(*irFile, opts)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// CL-BUG-104: advisory validator diagnostics go to stderr, one per line,
+	// matching the Rust (`warning: {}`) and Zig (`printDiagnostics`) tiers.
+	// They are advisory: the exit code stays 0 and stdout still carries only
+	// the artifact bytes.
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w.FormatMessage())
 	}
 
 	// --emit-source-map: write the artifact's SourceMap field as

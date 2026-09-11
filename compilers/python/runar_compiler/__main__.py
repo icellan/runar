@@ -21,7 +21,7 @@ from runar_compiler.compiler import (
     CompilationError,
     artifact_to_json,
     compile_from_ir,
-    compile_from_source,
+    compile_from_source_collecting_warnings,
     compile_source_to_ir,
 )
 
@@ -172,6 +172,11 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            # CL-BUG-104: warnings ride stderr here too, so both CLI paths
+            # agree about whether the compiler talks. Matches the Rust tier's
+            # --parse-only handler (compilers/rust/src/main.rs).
+            for w in valid.warning_strings():
+                print(f"warning: {w}", file=sys.stderr)
         except Exception as e:
             print(f"parse error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -231,9 +236,10 @@ def main() -> None:
             f.write(ir_json)
             f.write("\n")
 
+    warnings: list[str] = []
     try:
         if args.source:
-            artifact = compile_from_source(
+            artifact, warnings = compile_from_source_collecting_warnings(
                 args.source,
                 disable_constant_folding=args.disable_constant_folding,
             )
@@ -248,6 +254,13 @@ def main() -> None:
     except Exception as e:
         print(f"Compilation error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # CL-BUG-104: advisory validator diagnostics go to stderr, one per line,
+    # matching the Rust (`warning: {}`) and Zig (`printDiagnostics`) tiers.
+    # They are advisory only: the exit code stays 0 and stdout still carries
+    # nothing but the artifact bytes.
+    for w in warnings:
+        print(f"warning: {w}", file=sys.stderr)
 
     # Determine output
     if args.hex:
