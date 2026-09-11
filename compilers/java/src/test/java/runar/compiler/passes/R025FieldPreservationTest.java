@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import runar.compiler.ir.ast.CallExpr;
 import runar.compiler.ir.ast.ContractNode;
@@ -93,6 +95,72 @@ class R025FieldPreservationTest {
     void defaultModeStillPins0x41() throws Exception {
         String hex = PipelineTestSupport.hex(sighashSrc("", ARRAY_PROP), "Boardy.runar.ts");
         assertTrue(hex.contains("0141"));
+    }
+
+    // ------------------------------------------------------------------
+    // R-075 — the assertions that bind the on-chain commitment
+    // ------------------------------------------------------------------
+
+    /**
+     * R-075: {@code emittedFlagIsTheDeclaredMode} greps the final hex for
+     * {@code 0143}, which cannot tell the BIP-143 binding flag apart from any
+     * other two-byte push that happens to be 0x43. This pins the node that
+     * actually carries the commitment — the ANF {@code check_preimage}, which
+     * is what StackLower reads and what the SDK mirrors when it builds the
+     * preimage off-chain.
+     */
+    @Test
+    void anfCheckPreimageCarriesDeclaredFlagWithFixedArray() throws Exception {
+        String anf = PipelineTestSupport.anfJson(
+            sighashSrc("/** @sighash SINGLE|FORKID */", ARRAY_PROP), "Boardy.runar.ts");
+        assertTrue(anf.contains("\"sighashFlag\":" + SINGLE_FORKID),
+            "ANF check_preimage lost the declared 0x43 across FixedArray expansion: " + anf);
+    }
+
+    /** Control: no directive + FixedArray — the key is absent entirely. */
+    @Test
+    void anfDefaultOmitsSighashFlagWithFixedArray() throws Exception {
+        String anf = PipelineTestSupport.anfJson(sighashSrc("", ARRAY_PROP), "Boardy.runar.ts");
+        assertFalse(anf.contains("sighashFlag"),
+            "default must omit sighashFlag (byte-identical to the pinned mode): " + anf);
+    }
+
+    /** Control: the same directive with NO FixedArray never reaches the rewrite. */
+    @Test
+    void anfControlWithoutFixedArrayCarriesDeclaredFlag() throws Exception {
+        String anf = PipelineTestSupport.anfJson(
+            sighashSrc("/** @sighash SINGLE|FORKID */", ""), "Boardy.runar.ts");
+        assertTrue(anf.contains("\"sighashFlag\":" + SINGLE_FORKID), anf);
+    }
+
+    /**
+     * R-075, byte-exact: on a FixedArray contract the declared SINGLE|FORKID
+     * script must differ from the default-mode script at EXACTLY two offsets —
+     * the OP_PUSH_TX binding flag and the auto-injected preimage-type assert
+     * const — each 0x41 -&gt; 0x43. Under the drop the two scripts are
+     * byte-IDENTICAL, so a zero-difference result is the failure mode this
+     * guards. Stronger than a whole-script hash: it survives unrelated codegen
+     * churn but still fails the moment the mode stops reaching the emitter.
+     */
+    @Test
+    void fixedArraySingleDiffersFromDefaultAtExactlyTheTwoSighashBytes() throws Exception {
+        String single = PipelineTestSupport.hex(
+            sighashSrc("/** @sighash SINGLE|FORKID */", ARRAY_PROP), "Boardy.runar.ts");
+        String dflt = PipelineTestSupport.hex(sighashSrc("", ARRAY_PROP), "Boardy.runar.ts");
+        assertEquals(dflt.length(), single.length(), "sighash mode must not resize the script");
+
+        List<Integer> moved = new ArrayList<>();
+        for (int i = 0; i + 1 < single.length(); i += 2) {
+            String s = single.substring(i, i + 2);
+            String d = dflt.substring(i, i + 2);
+            if (!s.equals(d)) {
+                assertEquals("41", d, "unexpected byte change at " + (i / 2));
+                assertEquals("43", s, "unexpected byte change at " + (i / 2));
+                moved.add(i / 2);
+            }
+        }
+        assertEquals(List.of(394, 519), moved,
+            "expected exactly the two 0x41->0x43 sighash bytes; got " + moved);
     }
 
     // ------------------------------------------------------------------
