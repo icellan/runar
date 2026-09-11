@@ -1579,3 +1579,136 @@ describe('Cross-compiler: mutable Rabin state is a fixed 8-byte word in all 7 ti
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Terminal read of a fixed-size field with a variable-length SIBLING — 7 tiers
+// ---------------------------------------------------------------------------
+//
+// R-074. `lowerDeserializeState` picks its extraction strategy from a
+// CONTRACT-level fact — "does ANY mutable property carry a push-data length
+// prefix". When one does, the state section can only be located through the
+// `_codePart`-relative offset, so the whole deserialization is gated on
+// `_codePart` being on the stack; without it the pass drops the state section
+// and every `loadProp` resolves to the DEPLOY-TIME constructor placeholder
+// baked into the locking script.
+//
+// `computeUsesCodePart`, which decides whether `_codePart` is provisioned,
+// asked a strictly narrower METHOD-level question: "does THIS method read a
+// variable-length property". A terminal method reading only the `bigint`
+// sibling answered no, and read a value frozen at deploy time forever.
+//
+// All seven tiers agreed on the broken script, which is exactly why no parity
+// gate caught it — agreement is not correctness. So the assertion here is
+// STRUCTURAL, not merely mutual: every tier's probe must carry the BIP-143
+// scriptCode-varint-strip cascade `02fd009f63` (`<fd00> OP_LESSTHAN OP_IF`),
+// which `emitStripScriptCodeVarint` emits ONLY on the `_codePart`-relative
+// live-state path — never on the fixed-width path, never on the discard
+// shortcut. Its absence IS the finding.
+//
+// The matched control is the same contract with a `bigint` sibling: no
+// variable-length property, the fixed-width split path, correct all along, and
+// byte-identical across the seven both before and after.
+//
+// Executed companion (real @bsv/sdk Script VM, deploy → update → terminal
+// read): `packages/runar-testing/src/__tests__/stale-state-unrelated-varlen-vm.test.ts`.
+// ---------------------------------------------------------------------------
+
+/** Hex of `<fd00> OP_LESSTHAN OP_IF` — the live-state deserialization path. */
+const LIVE_STATE_MARKER_HEX = '02fd009f63';
+
+/**
+ * A single TERMINAL method reading only the fixed-size `count`. The contract
+ * carries no continuation builder, so the marker above appears if and only if
+ * this method reads live state.
+ */
+function staleStateProbeSource(siblingType: string): string {
+  const typeImport =
+    siblingType === 'ByteString' ? `import type { ByteString } from 'runar-lang';\n` : '';
+  return `import { StatefulSmartContract, assert } from 'runar-lang';
+${typeImport}class StaleStateProbe extends StatefulSmartContract {
+  count: bigint;
+  tag: ${siblingType};
+  constructor(count: bigint, tag: ${siblingType}) {
+    super(count, tag);
+    this.count = count;
+    this.tag = tag;
+  }
+  public check(expected: bigint): void { assert(this.count === expected); }
+}
+`;
+}
+
+const STALE_STATE_TIERS: { name: string; skip: boolean; run: (ir: string) => CompilerOutput }[] = [
+  { name: 'Go', skip: !hasGo, run: runGoCompiler },
+  { name: 'Rust', skip: !rustBinaryPath, run: runRustCompiler },
+  { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+  { name: 'Zig', skip: !zigBinaryPath, run: runZigCompiler },
+  { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+  { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+];
+
+describe('Cross-compiler: a terminal read sees live state despite a var-length sibling', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-stale-state-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. */
+  function lowerProbeToIr(source: string, name: string): { irPath: string; tsHex: string } {
+    const tsResult = compile(source);
+    if (!tsResult.success) {
+      throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+    }
+    const irPath = join(tempDir, `${name}.anf.json`);
+    writeFileSync(irPath, anfToJson(tsResult.anf!));
+    return { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+  }
+
+  it('every tier reads the live state section, not the deploy-time placeholder', () => {
+    const probe = lowerProbeToIr(staleStateProbeSource('ByteString'), 'StaleStateProbe-varlen');
+
+    expect(
+      probe.tsHex,
+      'TS: the terminal read of `count` skipped state deserialization entirely and ' +
+        'compiled to the deploy-time constructor placeholder',
+    ).toContain(LIVE_STATE_MARKER_HEX);
+
+    for (const tier of STALE_STATE_TIERS) {
+      if (tier.skip) continue;
+      const hex = requireHex(tier.run(probe.irPath), tier.name, 'StaleStateProbe-varlen')
+        .toLowerCase();
+      expect(
+        hex,
+        `${tier.name}: the terminal read of \`count\` skipped state deserialization ` +
+          'and compiled to the deploy-time constructor placeholder',
+      ).toContain(LIVE_STATE_MARKER_HEX);
+      expect(hex, `${tier.name} diverges from the TS reference`).toBe(probe.tsHex);
+    }
+  }, 180_000);
+
+  it('the control without a var-length sibling is byte-identical in all 7 tiers', () => {
+    const control = lowerProbeToIr(staleStateProbeSource('bigint'), 'StaleStateProbe-control');
+
+    // No variable-length property, so the fixed-width split path applies and
+    // `_codePart` is genuinely not needed. The marker must stay absent — the
+    // fix must not provision `_codePart` unconditionally.
+    expect(control.tsHex).not.toContain(LIVE_STATE_MARKER_HEX);
+
+    for (const tier of STALE_STATE_TIERS) {
+      if (tier.skip) continue;
+      const hex = requireHex(tier.run(control.irPath), tier.name, 'StaleStateProbe-control')
+        .toLowerCase();
+      expect(hex, `${tier.name} diverges from the TS reference`).toBe(control.tsHex);
+      expect(hex).not.toContain(LIVE_STATE_MARKER_HEX);
+    }
+  }, 180_000);
+});

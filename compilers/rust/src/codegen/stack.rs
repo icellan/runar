@@ -6089,23 +6089,39 @@ fn compute_uses_code_part(
     if !method_uses_check_preimage(&method.body, Some(private_methods)) {
         return false;
     }
-    // R-015 (CL-BUG-138): this set MUST classify exactly what
-    // `is_variable_length_state_type` classifies — the size table in
-    // `lower_deserialize_state` and `fixed_state_section_length` both treat
-    // `Sig` and `SigHashPreimage` as push-data-framed variable-length state
-    // (as does the SDK's deploy-time `encodeStateValue`), so filtering on
-    // `ByteString` alone here left `uses_code_part` false for a terminal
-    // method reading a mutable `Sig` field. `lower_deserialize_state` then hit
-    // its `!self.sm.has("_codePart")` shortcut, pushed NO mutable property, and
-    // every `load_prop` fell through to the DEPLOY-TIME constructor
-    // placeholder instead of the live on-chain value.
-    let var_len_props: HashSet<String> = properties
+    // This predicate MUST agree with the branch `lower_deserialize_state`
+    // actually takes, and that branch keys off a CONTRACT-level fact:
+    // `has_variable_length` — does ANY mutable property carry a push-data
+    // length prefix. When one does, the state section can only be located via
+    // the `_codePart`-relative offset, so the WHOLE deserialization is gated on
+    // `_codePart`; without it the pass hits its `!self.sm.has("_codePart")`
+    // shortcut, pushes NO mutable property, and every `load_prop` falls through
+    // to the DEPLOY-TIME constructor placeholder instead of the live on-chain
+    // value.
+    //
+    // Two narrower versions of this question have already been wrong here:
+    //   R-015 (CL-BUG-138) asked the wrong TYPE question — "is it literally
+    //   ByteString" rather than what `is_variable_length_state_type` says.
+    //   R-074 asked the wrong SCOPE question — "does this method read a
+    //   var-length property", when reading the fixed-size SIBLING of one is
+    //   just as gated. A terminal read of a `bigint` next to a `ByteString`
+    //   authorised against the deploy-time value forever.
+    // So ask the deserializer's own question: if the contract has var-length
+    // state, EVERY mutable-property read needs `_codePart`.
+    let has_var_len = properties
         .iter()
-        .filter(|p| !p.readonly && is_variable_length_state_type(&p.prop_type))
-        .map(|p| p.name.clone())
-        .collect();
+        .any(|p| !p.readonly && is_variable_length_state_type(&p.prop_type));
+    let reads_need_code_part: HashSet<String> = if has_var_len {
+        properties
+            .iter()
+            .filter(|p| !p.readonly)
+            .map(|p| p.name.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     method_uses_code_part(&method.body)
-        || method_reads_var_len_state(&method.body, &var_len_props, Some(private_methods))
+        || method_reads_var_len_state(&method.body, &reads_need_code_part, Some(private_methods))
 }
 
 fn lower_method_with_private_methods(

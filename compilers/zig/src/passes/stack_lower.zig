@@ -6127,11 +6127,29 @@ fn methodUsesCodePart(bindings: []const types.ANFBinding) bool {
     return false;
 }
 
-/// Whether a method READS a mutable variable-length (ByteString) state field's
-/// value (via load_prop). Issue #100: such a terminal method needs _codePart for
-/// the preimage-relative state offset. Narrowed to the live var-length read so
-/// methods that only read readonly fields (baked into the locking script) or
-/// fixed-size fields keep their original terminal codegen.
+/// Whether a method reads a mutable state field whose `load_prop` can only be
+/// answered from the `_codePart`-relative live-state path (issue #100).
+///
+/// The question is deliberately NOT "does this method read a var-length
+/// property". It MUST agree with the branch `lowerDeserializeState` actually
+/// takes, and that branch keys off a CONTRACT-level fact: `has_variable_length`
+/// — does ANY mutable property carry a push-data length prefix. When one does,
+/// the state section can only be located via the `_codePart`-relative offset, so
+/// the WHOLE deserialization is gated on `_codePart`; without it the pass hits
+/// its "no `_codePart`" shortcut, pushes NO mutable property, and every
+/// `load_prop` falls through to the DEPLOY-TIME constructor placeholder instead
+/// of the live on-chain value.
+///
+/// Two narrower versions of this question have already been wrong here:
+///   R-015 (CL-BUG-138) asked the wrong TYPE question — "is it literally
+///   `.byte_string`" rather than what `isVariableLengthStateType` says.
+///   R-074 asked the wrong SCOPE question — "does THIS method read a var-length
+///   property", when reading the fixed-size SIBLING of one is just as gated. A
+///   terminal read of a `bigint` next to a `ByteString` authorised against the
+///   deploy-time value forever.
+/// So ask the deserializer's own question: if the contract has var-length state,
+/// EVERY mutable-property read needs `_codePart`; otherwise none does, and
+/// readonly-only reads plus the fixed-width path stay byte-unchanged.
 ///
 /// C18: the read may live entirely inside a private helper reached via
 /// `method_call`. `lowerMethodCall` INLINES private methods into the caller's
@@ -6146,13 +6164,22 @@ fn methodReadsVarLenState(
     properties: []const types.ANFProperty,
     methods: []const types.ANFMethod,
 ) bool {
-    return methodReadsVarLenStateRec(bindings, properties, methods, 0);
+    var has_var_len = false;
+    for (properties) |prop| {
+        if (!prop.readonly and LowerCtx.isVariableLengthStateType(prop.type_info)) {
+            has_var_len = true;
+            break;
+        }
+    }
+    if (!has_var_len) return false;
+    return methodReadsVarLenStateRec(bindings, properties, methods, has_var_len, 0);
 }
 
 fn methodReadsVarLenStateRec(
     bindings: []const types.ANFBinding,
     properties: []const types.ANFProperty,
     methods: []const types.ANFMethod,
+    has_var_len: bool,
     depth: u32,
 ) bool {
     if (depth > MAX_PREIMAGE_RECURSION_DEPTH) return false;
@@ -6160,29 +6187,24 @@ fn methodReadsVarLenStateRec(
         switch (binding.value) {
             .load_prop => |lp| {
                 for (properties) |prop| {
-                    // R-015 (CL-BUG-138): this test MUST classify exactly what
-                    // `LowerCtx.isVariableLengthStateType` classifies. Matching
-                    // `.byte_string` alone left `usesCodePart` false for a
-                    // terminal method reading a mutable `Sig` field;
-                    // `lowerDeserializeState` then hit its "no _codePart"
-                    // shortcut, pushed NO mutable property, and every
-                    // `load_prop` fell through to the DEPLOY-TIME constructor
-                    // placeholder instead of the live on-chain value.
+                    // `has_var_len` is the contract-level fact the deserializer
+                    // itself branches on — see the doc comment above. A read of
+                    // ANY mutable property is gated once it is true.
                     if (!prop.readonly and
-                        LowerCtx.isVariableLengthStateType(prop.type_info) and
+                        has_var_len and
                         std.mem.eql(u8, prop.name, lp.name)) return true;
                 }
             },
             .@"if" => |ie| {
-                if (methodReadsVarLenStateRec(ie.then, properties, methods, depth) or
-                    methodReadsVarLenStateRec(ie.@"else", properties, methods, depth)) return true;
+                if (methodReadsVarLenStateRec(ie.then, properties, methods, has_var_len, depth) or
+                    methodReadsVarLenStateRec(ie.@"else", properties, methods, has_var_len, depth)) return true;
             },
             .loop => |loop| {
-                if (methodReadsVarLenStateRec(loop.body, properties, methods, depth)) return true;
+                if (methodReadsVarLenStateRec(loop.body, properties, methods, has_var_len, depth)) return true;
             },
             .method_call => |mc| {
                 if (findPrivateMethod(methods, mc.method)) |target| {
-                    if (methodReadsVarLenStateRec(methodBindings(target), properties, methods, depth + 1)) return true;
+                    if (methodReadsVarLenStateRec(methodBindings(target), properties, methods, has_var_len, depth + 1)) return true;
                 }
             },
             else => {},

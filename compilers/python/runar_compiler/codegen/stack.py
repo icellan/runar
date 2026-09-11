@@ -5072,11 +5072,15 @@ def _method_reads_var_len_state(
     private_methods: dict | None = None,
     seen: set[str] | None = None,
 ) -> bool:
-    """Whether a method READS a mutable variable-length (ByteString) state
-    field's value (via load_prop). Issue #100: such a terminal method needs
-    _codePart for the preimage-relative state offset. Narrowed to the live
-    var-length read so methods that only read readonly fields (baked into the
-    locking script) or fixed-size fields keep their original terminal codegen.
+    """Whether a method READS (via load_prop) any property in ``var_len_props``.
+
+    Issue #100: such a terminal method needs _codePart for the preimage-relative
+    state offset. The caller decides which properties qualify -- see
+    ``_compute_uses_code_part``, which passes EVERY mutable property once the
+    contract carries variable-length state (R-074), and the empty set otherwise
+    so that contracts with only fixed-size state, and methods that read only
+    readonly fields baked into the locking script, keep their original terminal
+    codegen.
 
     Deep-review finding C18: private methods are INLINED into the caller's
     stack context, so a read that happens inside a private helper is a read by
@@ -5281,21 +5285,33 @@ def _compute_uses_code_part(
     """
     if not _method_uses_check_preimage(method.body, private_methods):
         return False
-    # R-015 (CL-BUG-138): this set MUST classify exactly what
-    # ``is_variable_length_state_type`` classifies. Filtering on "ByteString"
-    # alone left ``uses_code_part`` False for a terminal method reading a
-    # mutable ``Sig`` field; ``_lower_deserialize_state`` then hit its "no
-    # _codePart" shortcut, pushed NO mutable property, and every ``load_prop``
-    # fell through to the DEPLOY-TIME constructor placeholder instead of the
-    # live on-chain value.
-    var_len_props = {
-        p.name
-        for p in properties
-        if not p.readonly and is_variable_length_state_type(p.type)
-    }
+    # This predicate MUST agree with the branch ``_lower_deserialize_state``
+    # actually takes, and that branch keys off a CONTRACT-level fact:
+    # ``has_variable_length`` -- does ANY mutable property carry a push-data
+    # length prefix. When one does, the state section can only be located via
+    # the ``_codePart``-relative offset, so the WHOLE deserialization is gated
+    # on ``_codePart``; without it the pass takes its ``OP_DROP`` shortcut,
+    # pushes NO mutable property, and every ``load_prop`` falls through to the
+    # DEPLOY-TIME constructor placeholder instead of the live on-chain value.
+    #
+    # Two narrower versions of this question have already been wrong here:
+    #   R-015 (CL-BUG-138) asked the wrong TYPE question -- "is it literally
+    #   ByteString" rather than what ``is_variable_length_state_type`` says.
+    #   R-074 asked the wrong SCOPE question -- "does this method read a
+    #   var-length property", when reading the fixed-size SIBLING of one is
+    #   just as gated. A terminal read of a `bigint` next to a `ByteString`
+    #   authorised against the deploy-time value forever.
+    # So ask the deserializer's own question: if the contract has var-length
+    # state, EVERY mutable-property read needs ``_codePart``.
+    mutable_props = [p for p in properties if not p.readonly]
+    reads_need_code_part = (
+        {p.name for p in mutable_props}
+        if any(is_variable_length_state_type(p.type) for p in mutable_props)
+        else set()
+    )
     return (
         _method_uses_code_part(method.body)
-        or _method_reads_var_len_state(method.body, var_len_props, private_methods)
+        or _method_reads_var_len_state(method.body, reads_need_code_part, private_methods)
     )
 
 

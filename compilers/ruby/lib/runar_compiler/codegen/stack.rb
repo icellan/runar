@@ -4649,17 +4649,33 @@ module RunarCompiler::Codegen
   def self._compute_uses_code_part(method, properties, private_methods)
     return false unless method_uses_check_preimage?(method.body, private_methods)
 
-    # R-015 (CL-BUG-138): this set MUST classify exactly what
-    # `variable_length_state_type?` classifies. Filtering on "ByteString" alone
-    # left `uses_code_part` false for a terminal method reading a mutable `Sig`
-    # field; the deserializer then hit its "no _codePart" shortcut, pushed NO
-    # mutable property, and every `load_prop` fell through to the DEPLOY-TIME
-    # constructor placeholder instead of the live on-chain value.
-    var_len_props = properties
-                    .select { |p| !p.readonly && RunarCompiler::Codegen.variable_length_state_type?(p.type) }
-                    .map(&:name)
+    # This predicate MUST agree with the branch the deserializer actually takes,
+    # and that branch keys off a CONTRACT-level fact: `has_variable_length` --
+    # does ANY mutable property carry a push-data length prefix. When one does,
+    # the state section can only be located via the `_codePart`-relative offset,
+    # so the WHOLE deserialization is gated on `_codePart`; without it the pass
+    # hits its "no _codePart" shortcut, pushes NO mutable property, and every
+    # `load_prop` falls through to the DEPLOY-TIME constructor placeholder
+    # instead of the live on-chain value.
+    #
+    # Two narrower versions of this question have already been wrong here:
+    #   R-015 (CL-BUG-138) asked the wrong TYPE question -- "is it literally
+    #   ByteString" rather than what `variable_length_state_type?` says.
+    #   R-074 asked the wrong SCOPE question -- "does this method read a
+    #   var-length property", when reading the fixed-size SIBLING of one is
+    #   just as gated. A terminal read of a `bigint` next to a `ByteString`
+    #   authorised against the deploy-time value forever.
+    # So ask the deserializer's own question: if the contract has var-length
+    # state, EVERY mutable-property read needs `_codePart`.
+    mutable_props = properties.reject(&:readonly)
+    reads_need_code_part =
+      if mutable_props.any? { |p| RunarCompiler::Codegen.variable_length_state_type?(p.type) }
+        mutable_props.map(&:name)
+      else
+        []
+      end
     method_uses_code_part?(method.body) ||
-      method_reads_var_len_state?(method.body, var_len_props, private_methods)
+      method_reads_var_len_state?(method.body, reads_need_code_part, private_methods)
   end
 
   def self._lower_method_with_private_methods(method, properties, private_methods,

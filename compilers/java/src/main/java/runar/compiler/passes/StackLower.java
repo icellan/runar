@@ -799,18 +799,39 @@ public final class StackLower {
         if (!methodUsesCheckPreimage(method.body(), privateMethods, new java.util.HashSet<>())) {
             return false;
         }
-        // R-015 (CL-BUG-138): this set MUST classify exactly what
-        // isVariableLengthStateType classifies. Filtering on "ByteString" alone
-        // left usesCodePart false for a terminal method reading a mutable Sig
-        // field; lowerDeserializeState then hit its "no _codePart" shortcut,
-        // pushed NO mutable property, and every load_prop fell through to the
+        // This predicate MUST agree with the branch lowerDeserializeState
+        // actually takes, and that branch keys off a CONTRACT-level fact:
+        // hasVariableLength — does ANY mutable property carry a push-data length
+        // prefix. When one does, the state section can only be located via the
+        // _codePart-relative offset, so the WHOLE deserialization is gated on
+        // _codePart; without it the pass hits its "no _codePart" shortcut,
+        // pushes NO mutable property, and every load_prop falls through to the
         // DEPLOY-TIME constructor placeholder instead of the live on-chain value.
-        java.util.Set<String> varLenProps = new java.util.HashSet<>();
+        //
+        // Two narrower versions of this question have already been wrong here:
+        //   R-015 (CL-BUG-138) asked the wrong TYPE question — "is it literally
+        //   ByteString" rather than what isVariableLengthStateType says.
+        //   R-074 asked the wrong SCOPE question — "does this method read a
+        //   var-length property", when reading the fixed-size SIBLING of one is
+        //   just as gated. A terminal read of a bigint next to a ByteString
+        //   authorised against the deploy-time value forever.
+        // So ask the deserializer's own question: if the contract has
+        // var-length state, EVERY mutable-property read needs _codePart.
+        boolean hasVarLen = false;
         for (AnfProperty p : properties) {
-            if (!p.readonly() && isVariableLengthStateType(p.type())) varLenProps.add(p.name());
+            if (!p.readonly() && isVariableLengthStateType(p.type())) {
+                hasVarLen = true;
+                break;
+            }
+        }
+        java.util.Set<String> readsNeedCodePart = new java.util.HashSet<>();
+        if (hasVarLen) {
+            for (AnfProperty p : properties) {
+                if (!p.readonly()) readsNeedCodePart.add(p.name());
+            }
         }
         return methodUsesCodePart(method.body())
-            || methodReadsVarLenState(method.body(), varLenProps, privateMethods, new java.util.HashSet<>());
+            || methodReadsVarLenState(method.body(), readsNeedCodePart, privateMethods, new java.util.HashSet<>());
     }
 
     /**

@@ -38,6 +38,7 @@ test {
     _ = @import("tests/r072_method_scope_branch_arm.zig");
     _ = @import("tests/private_varlen_state_read.zig");
     _ = @import("tests/sig_state_varlen.zig");
+    _ = @import("tests/stale_state_unrelated_varlen.zig");
     _ = @import("tests/vardecl_side_effect_descent.zig");
     _ = @import("tests/private_check_preimage_recursion.zig");
     _ = @import("tests/math_builtins.zig");
