@@ -317,9 +317,36 @@ Why the three ⚠️ rows differ:
 SP1 outer proof, so neither has a verifying key or a VK hash to corrupt.
 The PoC parameter set encodes exactly that — `SP1VKeyHashByteSize: 0`,
 at which `lowerVerifySP1FRI` drops the `sp1VKeyHash` argument and never
-absorbs it, and `sp1fri.Verify` takes no VK-hash parameter at all. No VK
-hash value can change any verifier decision until a real SP1-wrapped
-fixture and a `SP1VKeyHashByteSize == 32` parameter set land together.
+absorbs it, and `sp1fri.Verify` takes no VK-hash parameter at all.
+
+**R-057 — this used to be true at EVERY parameter set.** The Step 2b
+absorb in `emitTranscriptInit` read an `_obs_sp1_vk_hash` slot that
+`sp1FriPrePushedFieldNames` never allocated, so `SP1VKeyHashByteSize > 0`
+panicked the compiler rather than binding the key; and all five presets
+(`minimal-guest`, `evm-guest`, `production-{100,64,16}`) leave the field
+at 0. A verifier that ignores its VK hash accepts a proof produced for a
+different guest program — it proves "some SP1 program executed", not
+"THIS program executed", contradicting the claim at
+`integration/go/contracts/Sp1FriVerifierPoc.runar.go:48-50`.
+
+`SP1VKeyHashByteSize > 0` now absorbs the contract's readonly
+`Sp1VKeyHash` property at the head of the transcript, per §3 above. The
+value absorbed is the typed argument — a LOCKING-script constant spliced
+at deploy time via `artifact.ConstructorSlots` — not an unlocking-script
+push, so a spender cannot adapt the transcript to a key they do not
+control. `packages/runar-go/sp1fri.EncodeUnlockingScript` correspondingly
+does NOT push `sp1VKeyHash`.
+
+`compilers/go/compiler.TestSp1FriVerifier_VerifyingKeyBindsTheProgram` is
+the standing adversarial check: one compiled covenant, one unlocking
+script built from the canonical fixture, many spliced verifying keys —
+the same proof must be accepted under some keys and rejected under
+others. Both poles are asserted, so a covenant that rejected everything
+would fail it.
+
+A `bad_vk/` FIXTURE still cannot be produced: that needs a real
+SP1-wrapped proof, which neither guest fixture is. The binding is no
+longer the blocker; the fixture is.
 
 ### 6.1. On-chain coverage is narrower than off-chain — KNOWN GAP
 

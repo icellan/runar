@@ -157,7 +157,9 @@ func MinimalGuestParams() ParamSet {
 //     - proofBlob
 //     - publicValues  (re-pushed; the orchestrator's Step 1e discards this
 //     copy and uses the deeper `_obs_public_values` slot)
-//     - sp1VKeyHash   (only when params.SP1VKeyHashByteSize > 0)
+//     - sp1VKeyHash   — NOT pushed. It is the contract's readonly
+//     `Sp1VKeyHash` property, baked into the LOCKING script; see step 5
+//     of the emission below.
 //
 // Returns the raw Bitcoin Script bytes (uses OP_PUSHDATA*/OP_*/etc).
 // Caller wraps in transaction input UnlockingScript.
@@ -363,10 +365,25 @@ func EncodeUnlockingScript(
 	// sp1_fri.go::EmitFullSP1FriVerifierBody §1e for the rationale).
 	emitPushBytes(&buf, publicValues)
 
-	// 5. sp1VKeyHash typed arg — only when SP1VKeyHashByteSize > 0.
-	if params.SP1VKeyHashByteSize > 0 {
-		emitPushBytes(&buf, sp1VKeyHash)
-	}
+	// 5. sp1VKeyHash typed arg — NOT pushed here.
+	//
+	// R-057. This block used to push `sp1VKeyHash` whenever
+	// SP1VKeyHashByteSize > 0. It never fired, because every preset left the
+	// field at 0 and a non-zero tuple panicked the compiler outright; making
+	// the VK-bound tuple reachable turns it into a live misalignment bug, so
+	// it is removed.
+	//
+	// The verifying key is the contract's readonly `Sp1VKeyHash` property.
+	// Readonly properties are baked into the LOCKING script (spliced at the
+	// offsets in `artifact.ConstructorSlots`), and `lowerVerifySP1FRI`'s
+	// bringToTop loop lifts it from there into the third typed-arg position.
+	// Pushing it from the unlocking script too would leave one extra item
+	// under the transcript-input layer and misalign every tracker slot.
+	//
+	// That is also the whole point of the binding: the spender does not get
+	// to choose the verifying key. `sp1VKeyHash` stays in the signature so
+	// callers can assert the length they compiled against (validated above).
+	_ = sp1VKeyHash
 
 	return buf.Bytes(), nil
 }

@@ -440,12 +440,44 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 	emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 	emit(StackOp{Op: "drop"})
 
-	// 1f. Restore sp1VKeyHash from alt-stack only if it was parked. Same
-	// rationale as 1e: the deep field push is what the transcript uses,
-	// not this recovered copy. Discard for alt-stack balance.
+	// 1f. Restore sp1VKeyHash from alt-stack only if it was parked, and hand
+	// it to the transcript as the `_obs_sp1_vk_hash` slot.
+	//
+	// R-057. This block used to mirror 1e — FROMALTSTACK then drop, "the deep
+	// field push is what the transcript uses". That was wrong twice over:
+	//
+	//   a) There is no deep field push. `sp1FriPrePushedFieldNames` never
+	//      allocated an `_obs_sp1_vk_hash` slot, so `emitTranscriptInit`
+	//      Step 2b looked up a name that was never on the stack and any
+	//      SP1VKeyHashByteSize > 0 tuple panicked the compiler. The absorb
+	//      was unreachable dead code and every named preset
+	//      (minimal-guest / evm-guest / production-{100,64,16}) leaves the
+	//      field at 0, so NO configuration bound the verifying key.
+	//
+	//   b) Even if such a slot existed it would be the wrong value to absorb.
+	//      Deep field pushes come from the UNLOCKING script — attacker-chosen.
+	//      The typed arg recovered here is the contract's readonly
+	//      `Sp1VKeyHash` property, baked into the LOCKING script at deploy
+	//      time (Sp1FriVerifierPoc.runar.go:48-50: "Bound at compile time; a
+	//      malicious unlocking script cannot supply it"). Absorbing the typed
+	//      arg is what makes that sentence true: the spender cannot adapt the
+	//      transcript to a verifying key they do not control.
+	//
+	// Position: docs/sp1-fri-verifier.md §3 puts `H.absorb_chunked(vkHash)`
+	// at the head of the transcript, before degree_bits — the SP1 outer
+	// wrapper layer (SP1 v6.0.2 crates/stark/src/machine.rs) that wraps
+	// Plonky3's uni-stark verifier. `emitTranscriptInit` Step 2b already
+	// emits it there; this block just supplies the value.
+	//
+	// At SP1VKeyHashByteSize == 0 the typed arg was already dropped by the
+	// dispatch (lowerVerifySP1FRI) and there is nothing parked here. A
+	// zero-length VK field cannot be bound — that tuple is for the raw
+	// Plonky3 fixtures under tests/vectors/sp1/fri/, which carry no SP1
+	// outer wrapper and therefore no verifying key at all.
 	if params.SP1VKeyHashByteSize > 0 {
-		emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		emit(StackOp{Op: "drop"})
+		tracker.rawBlock(nil, "_obs_sp1_vk_hash", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+		})
 	}
 
 	// =====================================================================

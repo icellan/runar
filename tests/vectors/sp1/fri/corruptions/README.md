@@ -27,7 +27,7 @@ byte, mutated byte, decoded field path, and observed rejection message.
 | `bad_folding/` | change one FRI query opened evaluation (commit-phase sibling) | Colinearity check | ⚠️ FRI commit-phase MMCS opening |
 | `bad_final_poly/` | change the first final-poly Ext4 limb | Final-poly equality | ⚠️ input MMCS, via transcript divergence |
 | `wrong_public_values/` | flip one byte of `public_values.hex` | Transcript divergence | ✅ commit-phase PoW witness |
-| `bad_vk/` | VK hash from a different guest program | Transcript divergence | ❌ **not generated — impossible** |
+| `bad_vk/` | VK hash from a different guest program | Transcript divergence | ❌ **no fixture — needs an SP1-wrapped proof** |
 | `truncated/` | strip the last 100 bytes of `proof.postcard` | Push-and-hash binding | ⚠️ postcard EOF off-chain; ✅ push-and-hash on-chain |
 | `wrong_program/` | minimal-guest proof + a different program's public values | Transcript divergence | ✅ query-phase PoW witness |
 | `all_zeros/` | 200 KB of `0x00` as `proof.postcard` | bincode length / hash | ✅ postcard trailing-bytes check |
@@ -59,12 +59,30 @@ decoder hits EOF before the verifier runs. On-chain there is no decoder, so
 the documented push-and-hash binding really is the detection point; it is
 asserted directly against `EmitProofBlobBindingHash`.
 
-**`bad_vk` — cannot exist yet.** `minimal-guest` is a raw Plonky3 proof with
-no SP1 outer wrapper, so it has no verifying key and no VK hash to corrupt.
-The PoC parameter set encodes this (`SP1VKeyHashByteSize: 0`), at which the
-compiler drops the `sp1VKeyHash` argument and never absorbs it — no VK hash
-value can change any verifier decision. See `bad_vk/README.md`. The closest
-runnable coverage is `wrong_program/`.
+**`bad_vk` — no fixture, but the binding it would test now exists.**
+`minimal-guest` is a raw Plonky3 proof with no SP1 outer wrapper, so it has no
+verifying key and no VK hash to corrupt. The PoC parameter set encodes this
+(`SP1VKeyHashByteSize: 0`), at which the compiler drops the `sp1VKeyHash`
+argument and never absorbs it — at THAT tuple no VK hash value can change any
+verifier decision.
+
+That used to be true at every tuple, which was R-057: the absorb in
+`emitTranscriptInit` Step 2b read a `_obs_sp1_vk_hash` slot that
+`sp1FriPrePushedFieldNames` never allocated, so `SP1VKeyHashByteSize > 0`
+panicked the compiler instead of binding the key, and all five presets
+(minimal-guest / evm-guest / production-{100,64,16}) sit at 0. The covenant
+therefore proved "some SP1 program executed", not "THIS program executed",
+contradicting `Sp1FriVerifierPoc.runar.go:48-50`.
+
+`SP1VKeyHashByteSize > 0` now absorbs the contract's readonly `Sp1VKeyHash`
+property — a locking-script constant the spender cannot supply — at the head
+of the transcript.
+`compilers/go/compiler.TestSp1FriVerifier_VerifyingKeyBindsTheProgram` is the
+standing proof: one compiled covenant, one unlocking script, many spliced
+verifying keys, and the accept/reject decision tracks the key. What is still
+missing for a `bad_vk/` FIXTURE is only item 1 of `bad_vk/README.md` — a proof
+that is actually SP1-wrapped. See `bad_vk/README.md`. The closest
+fixture-based coverage remains `wrong_program/`.
 
 ## On-chain coverage is narrower than off-chain — KNOWN GAP
 
