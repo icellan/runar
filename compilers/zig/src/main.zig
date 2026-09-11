@@ -3,6 +3,7 @@ const types = @import("ir/types.zig");
 const json_parser = @import("ir/json.zig");
 const stack_lower = @import("passes/stack_lower.zig");
 const peephole = @import("passes/peephole.zig");
+const ec_optimizer = @import("passes/ec_optimizer.zig");
 const emit = @import("codegen/emit.zig");
 const compiler_api = @import("compiler_api.zig");
 
@@ -241,7 +242,28 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
         return;
     }
 
-    const stack_program = try stack_lower.lower(allocator, program);
+    // Pass 4.5: EC Optimize. The `--ir` path used to go straight from the
+    // parsed ANF to stack lowering, skipping the EC optimizer entirely — the
+    // ONLY tier that did. TS, Go, Rust, Python, Ruby and Java all re-run their
+    // EC optimizer over `--ir` input, so any ANF containing a rewritable EC
+    // shape compiled to a different script here than in the other six. Found by
+    // R-034: `ecAdd(x, ecNegate(x))` fed through `--ir` emitted 26141 bytes of
+    // ladder in Zig and 1808 bytes everywhere else. That is a 6-vs-1 hex
+    // divergence covering every rule in optimizer/ec-rules.json, not just the
+    // one R-034 was filed for.
+    //
+    // Byte-neutral for the conformance `--ir-parity` gate: no checked-in
+    // `expected-ir.json` contains a shape any EC rule rewrites (verified over
+    // all 5 fixtures whose IR mentions ecAdd/ecMul/ecMulGen/ecNegate), which is
+    // precisely why the divergence went unnoticed.
+    //
+    // Arena-scoped: the optimizer's output shares unmodified nodes with
+    // `program`, which outlives this scope via the `defer program.deinit` above.
+    var ec_arena = std.heap.ArenaAllocator.init(allocator);
+    defer ec_arena.deinit();
+    const optimized_program = try ec_optimizer.optimize(ec_arena.allocator(), program);
+
+    const stack_program = try stack_lower.lower(allocator, optimized_program);
     defer stack_program.deinit(allocator);
     const optimized_methods = try peephole.optimize(allocator, stack_program.methods);
     const optimized_stack_program = types.StackProgram{
@@ -256,13 +278,13 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
     if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(allocator, optimized_stack_program, program);
+        const artifact = try emit.emitArtifact(allocator, optimized_stack_program, optimized_program);
         defer allocator.free(artifact);
         try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 
-    const artifact = try emit.emitArtifact(allocator, optimized_stack_program, program);
+    const artifact = try emit.emitArtifact(allocator, optimized_stack_program, optimized_program);
     defer allocator.free(artifact);
     try writeStdoutLn(io, artifact);
 }

@@ -301,6 +301,25 @@ fn try_rewrite(
                 }
             }
 
+            // Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+            //
+            // The mirror of Rule 8. It has always been in optimizer/ec-rules.json
+            // and the Go tier — whose rule engine executes that file directly —
+            // performed it; the six hand-ported tiers implemented only the
+            // forward direction, so the same ANF compiled to a 1808-byte script
+            // in Go and a 26140-byte one everywhere else (R-034 / CL-BUG-028).
+            //
+            // Placed after Rule 8 and before Rules 10/11 to match the JSON's
+            // rule order, which is the order the Go engine tries them in.
+            // Name equality, not value equality, exactly as Rule 8 above.
+            if let Some(left_val) = value_map.get(left_arg.as_str()) {
+                if let Some(negate_args) = is_call_to(left_val, "ecNegate") {
+                    if negate_args.len() == 1 && negate_args[0] == *right_arg {
+                        return Some(make_load_const_hex(INFINITY_HEX));
+                    }
+                }
+            }
+
             // Rules 10 & 11 require looking up both sides
             let left_val = value_map.get(left_arg.as_str()).cloned();
             let right_val = value_map.get(right_arg.as_str()).cloned();
@@ -835,6 +854,60 @@ mod tests {
                 );
             }
             other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 8r (ec-add-negate-cancel-reversed): ecAdd(ecNegate(x), x) -> INFINITY
+    //
+    // The operand order rule 8 above does NOT cover. optimizer/ec-rules.json
+    // declares both directions with no "supported" tag; only the Go tier
+    // implemented this one (R-034 / CL-BUG-028).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule8r_add_negate_reversed() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            call_binding("t1", "ecNegate", vec!["t0"]),
+            call_binding("t2", "ecAdd", vec!["t1", "t0"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(
+                    value.as_str(),
+                    Some(INFINITY_HEX),
+                    "expected INFINITY, got {value}"
+                );
+            }
+            other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    /// CONTROL: distinct points must NOT cancel — folding this would be a
+    /// wrong answer, not a faster one.
+    #[test]
+    fn test_rule8r_control_distinct_points_do_not_fold() {
+        let bindings = vec![
+            load_const_hex("p", &some_point()),
+            load_const_hex("q", &g_hex()),
+            call_binding("neg", "ecNegate", vec!["q"]),
+            call_binding("t0", "ecAdd", vec!["neg", "p"]),
+            assert_binding("t1", "t0"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+        let t0 = find_binding(body, "t0").expect("expected binding t0");
+        match &t0.value {
+            ANFValue::Call { func, .. } => assert_eq!(func, "ecAdd"),
+            other => panic!("expected the ecAdd to survive, got {other:?}"),
         }
     }
 

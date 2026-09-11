@@ -154,6 +154,22 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
             if _same_binding(args[0], neg.args[0], vm):
                 return _make_const_hex(INFINITY_HEX)
 
+    # Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+    #
+    # The mirror of Rule 8. It has always been in optimizer/ec-rules.json and the
+    # Go tier -- whose rule engine executes that file directly -- performed it;
+    # the six hand-ported tiers implemented only the forward direction, so the
+    # same ANF compiled to a 1808-byte script in Go and a 26140-byte one
+    # everywhere else (R-034 / CL-BUG-028).
+    #
+    # Placed after Rule 8 and before Rules 9/10/11 to match the JSON's rule
+    # order, which is the order the Go engine tries them in.
+    if func == "ecAdd" and len(args) == 2:
+        neg = _resolve(args[0], vm)
+        if neg is not None and neg.kind == "call" and neg.func == "ecNegate" and neg.args and len(neg.args) == 1:
+            if _same_binding(args[1], neg.args[0], vm):
+                return _make_const_hex(INFINITY_HEX)
+
     # Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
     if func == "ecMul" and len(args) == 2:
         inner = _resolve(args[0], vm)

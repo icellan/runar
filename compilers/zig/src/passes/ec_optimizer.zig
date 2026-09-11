@@ -201,6 +201,23 @@ fn tryOptimize(
         }
     }
 
+    // Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+    //
+    // The mirror of Rule 8. It has always been in optimizer/ec-rules.json and the
+    // Go tier -- whose rule engine executes that file directly -- performed it;
+    // the six hand-ported tiers implemented only the forward direction, so the
+    // same ANF compiled to a 1808-byte script in Go and a 26140-byte one
+    // everywhere else (R-034 / CL-BUG-028).
+    //
+    // Placed after Rule 8 and before Rules 9/10/11 to match the JSON's rule
+    // order, which is the order the Go engine tries them in.
+    if (eql(func, "ecAdd") and args.len == 2) {
+        if (resolveCall(args[0], vm)) |nc| {
+            if (eql(nc.func, "ecNegate") and nc.args.len == 1 and sameBinding(args[1], nc.args[0], vm))
+                return makeConstHex(INFINITY_HEX);
+        }
+    }
+
     // Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
     if (eql(func, "ecMul") and args.len == 2) {
         if (getConstBig(allocator, args[1], vm)) |k2_loaded| {
@@ -633,6 +650,39 @@ test "rule 8: ecAdd(x, ecNegate(x)) -> INFINITY" {
     const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
     defer freeOptimizeResult(alloc, result);
     try expectConstStr(result.methods[0].body[2].value, INFINITY_HEX);
+}
+
+// --- Rule 8r (ec-add-negate-cancel-reversed): ecAdd(ecNegate(x), x) -> INFINITY ---
+// The operand order rule 8 above does NOT cover. optimizer/ec-rules.json declares
+// both directions with no "supported" tag; only the Go tier implemented this one
+// (R-034 / CL-BUG-028).
+test "rule 8r: ecAdd(ecNegate(x), x) -> INFINITY" {
+    const alloc = testing.allocator;
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_const = .{ .value = .{ .string = G_HEX } } }),
+        makeBinding("neg", .{ .call = .{ .func = "ecNegate", .args = &.{"p"} } }),
+        makeBinding("t0", .{ .call = .{ .func = "ecAdd", .args = &.{ "neg", "p" } } }),
+        makeBinding("t1", .{ .assert = .{ .value = "t0" } }),
+    };
+    const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
+    defer freeOptimizeResult(alloc, result);
+    try expectConstStr(result.methods[0].body[2].value, INFINITY_HEX);
+}
+
+// --- CONTROL: ecAdd(ecNegate(y), x) with x != y must NOT fold ---
+test "rule 8r control: ecAdd(ecNegate(y), x) over distinct points does not fold" {
+    const alloc = testing.allocator;
+    var body = [_]types.ANFBinding{
+        makeBinding("p", .{ .load_param = .{ .name = "p" } }),
+        makeBinding("q", .{ .load_param = .{ .name = "q" } }),
+        makeBinding("neg", .{ .call = .{ .func = "ecNegate", .args = &.{"q"} } }),
+        makeBinding("t0", .{ .call = .{ .func = "ecAdd", .args = &.{ "neg", "p" } } }),
+        makeBinding("t1", .{ .assert = .{ .value = "t0" } }),
+    };
+    const result = try optimize(alloc, testProgram(&.{testMethod(&body)}));
+    defer freeOptimizeResult(alloc, result);
+    try testing.expect(result.methods[0].body[3].value == .call);
+    try testing.expectEqualStrings("ecAdd", result.methods[0].body[3].value.call.func);
 }
 
 // --- Rule 12: ecMul(G, k) -> ecMulGen(k) ---

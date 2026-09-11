@@ -231,6 +231,24 @@ public final class AnfOptimize {
                 }
             }
         }
+        // Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+        //
+        // The mirror of Rule 8. It has always been in optimizer/ec-rules.json and
+        // the Go tier -- whose rule engine executes that file directly --
+        // performed it; the six hand-ported tiers implemented only the forward
+        // direction, so the same ANF compiled to a 1808-byte script in Go and a
+        // 26140-byte one everywhere else (R-034 / CL-BUG-028).
+        //
+        // Placed after Rule 8 and before Rules 9/10/11 to match the JSON's rule
+        // order, which is the order the Go engine tries them in.
+        if ("ecAdd".equals(func) && args.size() == 2) {
+            AnfValue neg = resolveValue(args.get(0), vm);
+            if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
+                if (sameBinding(args.get(1), nc.args().get(0), vm)) {
+                    return makeConstHex(INFINITY_HEX);
+                }
+            }
+        }
         // Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
         if ("ecMul".equals(func) && args.size() == 2) {
             AnfValue inner = resolveValue(args.get(0), vm);

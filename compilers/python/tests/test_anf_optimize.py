@@ -303,6 +303,53 @@ class TestRule8AddNegate:
 
 
 # ---------------------------------------------------------------------------
+# Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+#
+# R-034 / CL-BUG-028. optimizer/ec-rules.json declares BOTH operand orders with
+# no "supported" tag, so both are required in every tier. The Go engine is
+# data-driven off that JSON and performed both; the six hand-ported tiers --
+# Python among them -- implemented only the forward direction, so the same ANF
+# compiled to a 1808-byte script in Go and a 26140-byte one here.
+#
+# The rule is unreachable from SOURCE in every tier (pass 04 gives each
+# occurrence of a variable its own binding, so $x binds to two different names);
+# the divergence is reachable through the `--ir` path, which accepts arbitrary
+# ANF.
+# ---------------------------------------------------------------------------
+
+
+class TestRule8rAddNegateReversed:
+    def test_reversed_direction_cancels(self):
+        bindings = [
+            _load_const_hex("t0", "ab" * 64),
+            _call("t1", "ecNegate", ["t0"]),
+            _call("t2", "ecAdd", ["t1", "t0"]),
+            _assert_ref("t3", "t2"),
+        ]
+        result = optimize_ec(_make_program(bindings))
+        t2 = _find_binding(_get_method_body(result), "t2")
+        assert t2 is not None
+        assert t2.value.kind == "load_const", \
+            "ecAdd(ecNegate(x), x) must fold to the point at infinity"
+        assert t2.value.const_string == INFINITY_HEX
+
+    def test_distinct_points_do_not_cancel(self):
+        """CONTROL: folding this would be a wrong answer, not a faster one."""
+        bindings = [
+            _load_const_hex("p", "ab" * 64),
+            _load_const_hex("q", "cd" * 64),
+            _call("neg", "ecNegate", ["q"]),
+            _call("t0", "ecAdd", ["neg", "p"]),
+            _assert_ref("t1", "t0"),
+        ]
+        result = optimize_ec(_make_program(bindings))
+        t0 = _find_binding(_get_method_body(result), "t0")
+        assert t0 is not None
+        assert t0.value.kind == "call"
+        assert t0.value.func == "ecAdd"
+
+
+# ---------------------------------------------------------------------------
 # Rule 12: ecMul(G, k) -> ecMulGen(k)
 # ---------------------------------------------------------------------------
 
