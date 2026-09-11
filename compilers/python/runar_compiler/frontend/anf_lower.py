@@ -920,6 +920,17 @@ class _LowerCtx:
         sub._param_types = self._param_types
         sub._local_aliases = dict(self._local_aliases)
         sub._local_byte_vars = set(self._local_byte_vars)
+        # Deep-copy the inlined-param alias stack. ``_inline_private_method_call``
+        # pushes the caller's argument refs onto the CURRENT context before
+        # lowering the private body; without this, an if arm / loop body /
+        # ternary arm inside that body lowers with no aliases and falls through
+        # to ``load_param`` naming the PRIVATE's own parameter -- which resolves
+        # to the CALLER's same-named parameter instead of the argument that was
+        # passed in. ``spec/semantics.md`` 6.3 makes inlining substitution, so
+        # the helper form and the hand-inlined form must compile to the same
+        # script. Copied (not shared) because push/pop inside the nested block
+        # are balanced there and must not disturb the parent's frames.
+        sub._param_alias_stack = {k: list(v) for k, v in self._param_alias_stack.items()}
         # ``_lift_branch_update_props`` walks ``method.body`` and does NOT
         # recurse, so an ``if`` its recogniser accepts is only actually
         # REWRITTEN at method top level. ``lower_if_statement`` needs the same

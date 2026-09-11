@@ -778,6 +778,20 @@ public final class AnfLower {
             sub.paramNames.addAll(this.paramNames);
             sub.localAliases.putAll(this.localAliases);
             sub.localByteVars.addAll(this.localByteVars);
+            // Deep-copy the inlined-param alias stack. inlinePrivateMethodCall
+            // pushes the caller's argument refs onto the CURRENT context before
+            // lowering the private body; without this, an if arm / loop body /
+            // ternary arm inside that body lowers with no aliases and falls
+            // through to load_param naming the PRIVATE's own parameter — which
+            // resolves to the CALLER's same-named parameter instead of the
+            // argument that was passed in. spec/semantics.md §6.3 makes inlining
+            // substitution, so the helper form and the hand-inlined form must
+            // compile to the same script. Copied (not shared) because push/pop
+            // inside the nested block are balanced there and must not disturb
+            // the parent's frames.
+            for (Map.Entry<String, List<String>> e : this.paramAliasStack.entrySet()) {
+                sub.paramAliasStack.put(e.getKey(), new ArrayList<>(e.getValue()));
+            }
             // Share the methodScope so intent-covenant intrinsics emitted
             // inside if/else branches or ternaries register their
             // auto-injected witness params on the parent method's ABI.

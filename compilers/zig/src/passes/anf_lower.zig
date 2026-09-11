@@ -1145,6 +1145,22 @@ const LowerCtx = struct {
         while (byte_it.next()) |entry| {
             sub.local_byte_vars.put(self.allocator, entry.key_ptr.*, {}) catch {};
         }
+        // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
+        // pushes the caller's argument refs onto the CURRENT context before
+        // lowering the private body; without this, an `if` arm / `for` body /
+        // ternary arm inside that body lowers with no aliases and falls through
+        // to `load_param` naming the PRIVATE's own parameter — which resolves to
+        // the CALLER's same-named parameter instead of the argument that was
+        // passed in. `spec/semantics.md` §6.3 makes inlining substitution, so the
+        // helper form and the hand-inlined form must compile to the same script.
+        // Copied (not shared) because push/pop inside the nested block are
+        // balanced there and must not disturb the parent's frames.
+        var pa_it = self.param_alias_stack.iterator();
+        while (pa_it.next()) |entry| {
+            var copy: std.ArrayListUnmanaged([]const u8) = .empty;
+            copy.appendSlice(self.allocator, entry.value_ptr.items) catch {};
+            sub.param_alias_stack.put(self.allocator, entry.key_ptr.*, copy) catch {};
+        }
         return sub;
     }
 

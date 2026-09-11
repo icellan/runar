@@ -950,6 +950,20 @@ module RunarCompiler
         sub.instance_variable_set(:@param_types, @param_types.dup)
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
+        # Deep-copy the inlined-param alias stack. +_inline_private_method_call+
+        # pushes the caller's argument refs onto the CURRENT context before
+        # lowering the private body; without this, an if arm / loop body /
+        # ternary arm inside that body lowers with no aliases and falls through
+        # to +load_param+ naming the PRIVATE's own parameter -- which resolves to
+        # the CALLER's same-named parameter instead of the argument that was
+        # passed in. spec/semantics.md 6.3 makes inlining substitution, so the
+        # helper form and the hand-inlined form must compile to the same script.
+        # Copied (not shared) because push/pop inside the nested block are
+        # balanced there and must not disturb the parent's frames.
+        sub.instance_variable_set(
+          :@param_alias_stack,
+          @param_alias_stack.each_with_object({}) { |(k, v), h| h[k] = v.dup }
+        )
         # Share the per-method intent-intrinsic bookkeeping so witness-param
         # registrations and the once-per-method hashOutputs flag propagate up
         # from if/else branches. Mirrors Go subContext.methodScope sharing.

@@ -861,6 +861,17 @@ class LoweringContext {
     for (const l of this.localNames) sub.localNames.add(l);
     for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
+    // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
+    // pushes the caller's argument refs onto the CURRENT context before
+    // lowering the private body; without this, an if arm / loop body /
+    // ternary arm inside that body lowers with no aliases and falls through
+    // to `load_param` naming the PRIVATE's own parameter — which resolves to
+    // the CALLER's same-named parameter instead of the argument that was
+    // passed in. `spec/semantics.md` §6.3 makes inlining substitution, so the
+    // helper form and the hand-inlined form must compile to the same script.
+    // Copied (not shared) because push/pop inside the nested block are
+    // balanced there and must not disturb the parent's frames.
+    for (const [k, v] of this.paramAliasStack) sub.paramAliasStack.set(k, [...v]);
     // Share the method scope so auto-injection from intrinsics called
     // inside the nested block bubbles up to the parent's ABI list.
     sub.methodScope = this.methodScope;
