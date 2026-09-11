@@ -42,6 +42,14 @@ return is there so the intrinsic composes with the existing
   verifier absorbs it into the Fiat-Shamir transcript before any
   FRI commitment; any tampering shifts every derived challenge and
   causes downstream consistency checks to fail.
+  The unlocking script pushes this value **twice** — once as the deep
+  `_obs_public_values` transcript-input slot and once as this typed
+  argument (see §2.1). The transcript absorbs the deep slot; Step 1e
+  of `EmitFullSP1FriVerifierBody` `OP_EQUALVERIFY`s the typed argument
+  against it, so the two copies must be byte-identical. Until R-058
+  that check was missing and the typed argument was dropped unread,
+  which made the value advertised in the ABI spender-chosen and
+  independent of the value actually verified.
 - `sp1VKeyHash` — 32-byte keccak256 digest of the verifying key (see
   `docs/sp1-proof-format.md` §5). Must be bound in the covenant as a
   readonly field; a malicious unlocking script cannot supply it.

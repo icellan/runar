@@ -51,7 +51,7 @@ path with peephole — what gets deployed).
 |---------------------------------|-------------------------|--------------------------|-----------------------------------------------|------------|-----------------------|
 | Proof size (postcard)           | 326,909 B (~319 KB)     | n/a                      | 80-200 KB                                     | -          | over target, under any limit |
 | Compiled script (prelude+body)  | 1,609,627 B (~1.57 MB)  | n/a                      | < 2 MB                                        | 10 MB      | within target          |
-| Compiled locking script (deployed, peephole) | n/a        | 849,054 B (~829 KB)      | < 2 MB                                        | 10 MB      | within target          |
+| Compiled locking script (deployed, peephole) | n/a        | 849,055 B (~829 KB)      | < 2 MB                                        | 10 MB      | within target          |
 | Total emit ops                  | 848,377                 | n/a                      | -                                             | -          | (informational)        |
 | Unlocking-prelude ops           | 164                     | n/a                      | -                                             | -          | (informational)        |
 | Locking-body ops                | 848,213                 | n/a                      | -                                             | -          | (informational)        |
@@ -340,7 +340,7 @@ on 2026-04-25 (post-peephole, deployable artifact bytes):
 
 | Preset             | num_queries | FRI security (bits) | PoW grinding (bits) | Total bits | Locking-script size | vs. BSV default `maxscriptsizepolicy = 500 KB` |
 |--------------------|-------------|---------------------|---------------------|------------|---------------------|----------------------------------------------|
-| `evm-guest` / `production-100` | 100 | ~100 (`num_queries × log_blowup`) | 32 (16 commit + 16 query) | ~132 | 849,054 B (~829 KB) | 1.66× over |
+| `evm-guest` / `production-100` | 100 | ~100 (`num_queries × log_blowup`) | 32 (16 commit + 16 query) | ~132 | 849,055 B (~829 KB) | 1.66× over |
 | `production-64`    | 64          | ~64                 | 32                  | ~96        | 766,182 B (~748 KB) | 1.49× over |
 | `production-16`    | 16          | ~16                 | 32                  | ~48        | 641,916 B (~626 KB) | 1.25× over |
 | `minimal-guest` (PoC) | 2        | ~2                  | 2 (1 commit + 1 query) | ~4   | 248,560 B (~242 KB) | within default (informational only — PoC tuple) |

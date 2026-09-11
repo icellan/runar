@@ -155,8 +155,10 @@ func MinimalGuestParams() ParamSet {
 //
 //  4. Typed args (top, in declaration order):
 //     - proofBlob
-//     - publicValues  (re-pushed; the orchestrator's Step 1e discards this
-//     copy and uses the deeper `_obs_public_values` slot)
+//     - publicValues  (re-pushed; the transcript absorbs the deeper
+//     `_obs_public_values` slot, and the orchestrator's Step 1e
+//     OP_EQUALVERIFYs this typed copy against it — the two MUST be
+//     byte-identical or the spend aborts, R-058)
 //     - sp1VKeyHash   — NOT pushed. It is the contract's readonly
 //     `Sp1VKeyHash` property, baked into the LOCKING script; see step 5
 //     of the emission below.
@@ -360,9 +362,10 @@ func EncodeUnlockingScript(
 	// 3. proofBlob typed arg.
 	emitPushBytes(&buf, proofBlobRaw)
 
-	// 4. publicValues typed arg (re-pushed; the orchestrator discards this
-	// copy and uses the deeper _obs_public_values slot — see
-	// sp1_fri.go::EmitFullSP1FriVerifierBody §1e for the rationale).
+	// 4. publicValues typed arg (re-pushed; the transcript absorbs the
+	// deeper _obs_public_values slot and Step 1e OP_EQUALVERIFYs this typed
+	// copy against it, so the two must carry identical bytes — see
+	// sp1_fri.go::EmitFullSP1FriVerifierBody §1e, R-058).
 	emitPushBytes(&buf, publicValues)
 
 	// 5. sp1VKeyHash typed arg — NOT pushed here.

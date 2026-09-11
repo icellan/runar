@@ -324,8 +324,10 @@ func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numChunks, numRounds
 //  2. Step 1 — proof-blob SHA-256 binding via `EmitProofBlobBindingHash`.
 //  3. Drop the leftover proof-body chunks (full per-field decoding is a
 //     follow-up; for the PoC fixture the chunks are dummy and dropped).
-//  4. Restore publicValues from alt-stack and rename to `_obs_public_values`
-//     so `emitTranscriptInit` can pick it up by name.
+//  4. Restore the typed publicValues argument from the alt-stack and
+//     OP_EQUALVERIFY it against the deep `_obs_public_values` slot that
+//     `emitTranscriptInit` absorbs, so the value named in the ABI and the
+//     value actually verified cannot differ (R-058).
 //     (sp1VKeyHash is consumed in-line below if present.)
 //  5. Steps 2-5 — `emitTranscriptInit` (transcript init, instance metadata,
 //     trace digest absorb, publicValues absorb, alpha squeeze, quotient
@@ -409,12 +411,10 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 		emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 	}
 	// 1b. Park publicValues on alt-stack — keeps it out of the way of the
-	// Step 1 binding. We discard this typed-arg copy after Step 1 because
-	// the transcript absorbs use the deep `_obs_public_values` slot from
-	// the field-push layer (see sp1FriPrePushedFieldNames §3) rather than
-	// this typed-arg copy. Both pushes carry the same bytes; the duplication
-	// is intentional so the typed-arg ABI stays clean and the tracker-driven
-	// absorbs find the slot by name.
+	// Step 1 binding. The transcript absorbs the deep `_obs_public_values`
+	// slot from the field-push layer (see sp1FriPrePushedFieldNames §3), not
+	// this typed-arg copy; Step 1e below OP_EQUALVERIFYs the two so the
+	// duplication cannot diverge (R-058 — it could, and did).
 	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 
 	// 1c. proofBlob is now on top with the `numChunks` chunks immediately
@@ -434,11 +434,53 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 		emit(StackOp{Op: "drop"})
 	}
 
-	// 1e. Restore publicValues from alt-stack and discard. The transcript
-	// absorbs use the deep `_obs_public_values` slot from initNames, not
-	// this typed-arg copy. Discarding here keeps the alt-stack balanced.
-	emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-	emit(StackOp{Op: "drop"})
+	// 1e. Restore publicValues from alt-stack and BIND it to the deep
+	// `_obs_public_values` slot the transcript actually absorbs.
+	//
+	// R-058. This block used to be FROMALTSTACK then drop, "the transcript
+	// absorbs use the deep slot, discarding here keeps the alt-stack
+	// balanced". Balanced it was; sound it was not. The transcript absorbs
+	// `_obs_public_values`, which comes from the UNLOCKING script, while the
+	// typed argument named in the ABI — `VerifySP1FRI(proofBlob,
+	// publicValues)` — was read off the alt-stack and thrown away unread.
+	// The two pushes were assumed to carry the same bytes; nothing checked
+	// it. Inverting all 12 bytes of the typed argument and leaving the deep
+	// slot alone still ACCEPTED, so the argument the ABI advertises as the
+	// proven statement was decorative and the spender chose it freely.
+	//
+	// Anything that reads the spend's ABI arguments to learn what was proven
+	// — an indexer, an overlay, a second covenant spending on the strength
+	// of this one — was reading the attacker's choice rather than the
+	// verified value. One OP_EQUALVERIFY makes the ABI honest: the typed
+	// argument and the absorbed slot must be byte-identical or the spend
+	// aborts.
+	//
+	// The duplicate push itself stays. Deleting it would leave a single
+	// source of truth, which is the better shape, but it changes the
+	// unlocking-script layout and therefore the ABI — a deployment decision,
+	// not a codegen one.
+	//
+	// Net stack effect is zero, same as the drop it replaces: FROMALTSTACK
+	// and the copy each push one, OP_EQUALVERIFY consumes two. The deep slot
+	// is COPIED, never rolled, so every tracked position below is untouched.
+	{
+		pvDepth := tracker.findDepth("_obs_public_values")
+		tracker.rawBlock(nil, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+			// The typed arg now sits one above the tracked layer, so the
+			// deep slot is at pvDepth+1. It is the shallowest tracked slot
+			// today (sp1FriPrePushedFieldNames appends it last), i.e.
+			// pvDepth == 0 and this is a plain OP_OVER; the general form
+			// keeps the binding correct if that layout ever moves.
+			if d := pvDepth + 1; d == 1 {
+				e(StackOp{Op: "over"})
+			} else {
+				e(StackOp{Op: "push", Value: bigIntPush(int64(d))})
+				e(StackOp{Op: "pick", Depth: d})
+			}
+			e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+		})
+	}
 
 	// 1f. Restore sp1VKeyHash from alt-stack only if it was parked, and hand
 	// it to the transcript as the `_obs_sp1_vk_hash` slot.
