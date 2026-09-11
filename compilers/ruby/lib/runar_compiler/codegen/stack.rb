@@ -2852,64 +2852,6 @@ module RunarCompiler::Codegen
     end
 
     # -----------------------------------------------------------------
-    # get_state_script (used by method_call for getStateScript)
-    # -----------------------------------------------------------------
-
-    def _lower_get_state_script(binding_name)
-      state_props = @properties.select { |p| !p.readonly }
-
-      if state_props.empty?
-        emit_push_bytes("".b)
-        @sm.push(binding_name)
-        return
-      end
-
-      first = true
-      state_props.each do |prop|
-        if @sm.has?(prop.name)
-          bring_to_top(prop.name, true) # consume
-        elsif !prop.initial_value.nil?
-          _push_property_value(prop.initial_value)
-          @sm.push("")
-        else
-          emit_push_int(0)
-          @sm.push("")
-        end
-
-        # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
-        # The width MUST come from `numeric_state_type_width` -- the same table
-        # the reader splits on -- or this continuation cannot be re-read.
-        numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)
-        case prop.type
-        when *RunarCompiler::Codegen::NUMERIC_STATE_TYPES.to_a
-          emit_push_int(numeric_width)
-          @sm.push("")
-          emit_opcode("OP_NUM2BIN")
-          @sm.pop # pop the width
-        when *RunarCompiler::Codegen::VARIABLE_LENGTH_STATE_TYPES.to_a
-          # Prepend push-data length prefix (matching SDK format).
-          # MUST classify exactly what the deserializer decodes, or the
-          # continuation this method builds cannot be read by the next spend:
-          # the reader would take the value's own first byte (a DER 0x30, say)
-          # as a push length.
-          emit_push_data_encode
-        end
-
-        unless first
-          @sm.pop
-          @sm.pop
-          emit_opcode("OP_CAT")
-          @sm.push("")
-        end
-        first = false
-      end
-
-      @sm.pop
-      @sm.push(binding_name)
-      _track_depth
-    end
-
-    # -----------------------------------------------------------------
     # Specialized call lowering
     # -----------------------------------------------------------------
 
