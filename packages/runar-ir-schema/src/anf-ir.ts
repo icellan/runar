@@ -154,6 +154,14 @@ export interface GetStateScript {
 export interface CheckPreimage {
   kind: 'check_preimage';
   preimage: string; // reference to a temp name
+  /**
+   * Issue #123: BIP-143 sighash flag the on-chain OP_PUSH_TX binding appends to
+   * the derived signature (so the node re-derives the tx sighash under this
+   * flag). Absent = default `ALL|FORKID` (0x41), byte-identical to the pinned
+   * cross-tier binding blob. Only set for a method that declares a non-default
+   * `@sighash` mode, keeping golden ANF unchanged for every existing contract.
+   */
+  sighashFlag?: number;
 }
 
 export interface DeserializeState {

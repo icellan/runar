@@ -16,11 +16,11 @@
  * must therefore also be added to the JSON schema, or this test fails.
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
-import { validateArtifact, canonicalJsonStringify } from 'runar-ir-schema';
+import { validateANF, validateArtifact, canonicalJsonStringify } from 'runar-ir-schema';
 import { compile } from '../index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -123,5 +123,132 @@ describe('artifact schema — real compile output', () => {
       );
     }
     expect(result2.valid).toBe(true);
+  });
+  // -------------------------------------------------------------------------
+  // R-089 — a NON-DEFAULT `@sighash` mode must survive the schema gate.
+  //
+  // Two live defects (N-079b in the TS `subContext`, N-086 in Zig's FixedArray
+  // expansion) shipped a *dropped* sighash field because no fixture ever ran a
+  // `@sighash` artifact through `validateArtifact` / `validateANF` — and the
+  // schemas could not have processed one if it had, since `sighashFlag` and
+  // `sigHashType` were missing from `additionalProperties: false` objects.
+  //
+  // This case both closes that hole and asserts the fields are actually there,
+  // so a future tier that silently drops one fails here instead of on-chain.
+  // -------------------------------------------------------------------------
+  it('validates a stateful artifact compiled under a non-default @sighash mode', () => {
+    const source = `
+      class SighashCounter extends StatefulSmartContract {
+        n: bigint;
+
+        constructor(n: bigint) {
+          super(n);
+          this.n = n;
+        }
+
+        /** @sighash SINGLE|FORKID */
+        public bump(): void {
+          this.addOutput(1000n, this.n);
+        }
+      }
+    `;
+    const result = compile(source, { fileName: 'SighashCounter.runar.ts' });
+    expect(result.success).toBe(true);
+    expect(result.artifact).toBeDefined();
+
+    // The mode reached the ABI (0x43 = SINGLE|FORKID). Guards against a tier
+    // dropping it on the way out of the pipeline.
+    const bump = result.artifact!.abi.methods.find((m) => m.name === 'bump');
+    expect(bump).toBeDefined();
+    expect(bump!.sigHashType).toBe(0x43);
+
+    // …and into the embedded ANF's check_preimage node.
+    const plain = toPlainJson(result.artifact) as {
+      anf?: unknown;
+    };
+    const flags: unknown[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+      } else if (node && typeof node === 'object') {
+        const rec = node as Record<string, unknown>;
+        if (rec.kind === 'check_preimage') flags.push(rec.sighashFlag);
+        Object.values(rec).forEach(walk);
+      }
+    };
+    walk(plain.anf);
+    expect(flags).toContain(0x43);
+
+    // The schema gate itself — both the artifact and its embedded ANF.
+    const artifactResult = validateArtifact(plain);
+    if (!artifactResult.valid) {
+      throw new Error(
+        'validateArtifact rejected a fresh @sighash SINGLE|FORKID artifact:\n' +
+          artifactResult.errors
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(artifactResult.valid).toBe(true);
+
+    const anfResult = validateANF(plain.anf);
+    if (!anfResult.valid) {
+      throw new Error(
+        'validateANF rejected the ANF of a fresh @sighash SINGLE|FORKID artifact:\n' +
+          anfResult.errors
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(anfResult.valid).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-089 — the checked-in conformance goldens ARE the ANF wire format.
+//
+// The schemas are strict (`additionalProperties: false` on every object), so
+// any field the seven compilers agree on but the schema omits is a silent
+// rejection waiting to happen — which is exactly how `check_preimage`'s
+// `sighashFlag` and `add_output`'s empty-string `preimage` sentinel ended up
+// unrepresentable. Sweeping every golden closes that loop: a future wire-format
+// field that lands in the compilers without landing in the schema fails HERE.
+// ---------------------------------------------------------------------------
+
+describe('ANF schema — every checked-in conformance golden', () => {
+  const goldenDir = join(WORKTREE_ROOT, 'conformance', 'tests');
+  const fixtures = readdirSync(goldenDir).filter((name) => {
+    try {
+      readFileSync(join(goldenDir, name, 'expected-ir.json'), 'utf-8');
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  it('finds the golden ANF fixtures at all', () => {
+    // Guards against the sweep below silently passing on an empty list.
+    expect(fixtures.length).toBeGreaterThan(50);
+  });
+
+  it.each(fixtures)('validateANF accepts the %s golden ANF', (fixture) => {
+    const anf = JSON.parse(
+      readFileSync(join(goldenDir, fixture, 'expected-ir.json'), 'utf-8'),
+    );
+    const result = validateANF(anf);
+    if (!result.valid) {
+      // Report only the errors that name a real over-tight / missing
+      // constraint; `oneOf` sibling-branch noise is dropped.
+      const signal = result.errors.filter(
+        (e) => e.keyword !== 'oneOf' && e.keyword !== 'const' && e.keyword !== 'required',
+      );
+      throw new Error(
+        `validateANF rejected the checked-in ${fixture} golden ANF:\n` +
+          (signal.length ? signal : result.errors)
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(result.valid).toBe(true);
   });
 });
