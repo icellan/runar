@@ -345,6 +345,12 @@ const TypeChecker = struct {
     contract: ContractNode,
     errors: std.ArrayListUnmanaged([]const u8),
     prop_types: std.StringHashMapUnmanaged(RunarType),
+    /// Element type of each `FixedArray<T, N>` property, for the T that this
+    /// tier can actually name. Populated only when T is a scalar: a nested
+    /// `FixedArray<FixedArray<..>, N>` records `.fixed_array` as its element
+    /// and loses the leaf type at parse time, so it is deliberately absent
+    /// here rather than guessed. R-073 / CL-BUG-168.
+    prop_elem_types: std.StringHashMapUnmanaged(RunarType),
     method_sigs: std.StringHashMapUnmanaged(FuncSig),
     /// Origin keys of affine values consumed in the current scope.
     /// 2026-04-30 audit finding F6.
@@ -365,6 +371,7 @@ const TypeChecker = struct {
             .contract = contract,
             .errors = .empty,
             .prop_types = .empty,
+            .prop_elem_types = .empty,
             .method_sigs = .empty,
             .consumed_values = .empty,
             .affine_aliases = .empty,
@@ -376,6 +383,12 @@ const TypeChecker = struct {
         // origin keys for affine tracking.
         for (contract.properties) |prop| {
             try self.prop_types.put(allocator, prop.name, prop.type_info);
+            if (prop.type_info == .fixed_array and
+                prop.fixed_array_element != .unknown and
+                prop.fixed_array_element != .fixed_array)
+            {
+                try self.prop_elem_types.put(allocator, prop.name, prop.fixed_array_element);
+            }
             const key = try std.fmt.allocPrint(allocator, "prop:{s}", .{prop.name});
             try self.prop_origin_keys.put(allocator, prop.name, key);
         }
@@ -404,6 +417,7 @@ const TypeChecker = struct {
         }
         self.method_sigs.deinit(self.allocator);
         self.prop_types.deinit(self.allocator);
+        self.prop_elem_types.deinit(self.allocator);
         self.consumed_values.deinit(self.allocator);
         self.affine_aliases.deinit(self.allocator);
         var keys_it = self.prop_origin_keys.iterator();
@@ -546,18 +560,50 @@ const TypeChecker = struct {
                 }
             },
             .assign => |assign| {
-                // Index-target writes (e.g. `this.board[i] = v`) are typed
-                // permissively — the FixedArray element type is resolved later
-                // by the expand_fixed_arrays pass. We still type-check the
-                // value + index sub-expressions.
+                // R-073 / CL-BUG-168: an index-target write (`this.cells[0] = v`)
+                // used to return from here with the VALUE unchecked against the
+                // array's element type, so `this.cells[0] = <ByteString>` on a
+                // `FixedArray<bigint, 3>` emitted a full locking script in this
+                // tier while all six peer tiers rejected it. The old comment
+                // blamed `expand_fixed_arrays`, but that pass runs after
+                // typecheck and carries no type environment: nothing downstream
+                // ever performed the check.
+                //
+                // The element type cannot come from `inferExprType` — its
+                // `.index_access` arm returns `.unknown` unconditionally and must
+                // keep doing so (see the N-019 tripwire at the bottom of this
+                // file) — so it is read off the declared property instead.
                 if (assign.index_target != null) {
                     _ = self.inferExprType(assign.index_target.?.index, env);
-                    _ = self.inferExprType(assign.value, env);
+                    const elem_value_type = self.inferExprType(assign.value, env);
+                    // Only a direct `this.<prop>[i] = v` is checkable here.
+                    // `target_is_property` is what separates it from a write to
+                    // a local that merely shares the name — every one of this
+                    // tier's nine surface parsers sets the flag on its
+                    // index-access arm. A nested chain (`this.grid[i][j] = v`)
+                    // parses with `target = "unknown"` and has no recorded leaf
+                    // type, so it falls through to the pre-existing permissive
+                    // behaviour.
+                    if (assign.target_is_property or env.lookup(assign.target) == null) {
+                        if (self.prop_elem_types.get(assign.target)) |elem_type| {
+                            if (!isSubtype(elem_value_type, elem_type)) {
+                                self.addError("type '{s}' is not assignable to type '{s}'", .{
+                                    types.runarTypeToString(elem_value_type),
+                                    types.runarTypeToString(elem_type),
+                                });
+                            }
+                        }
+                    }
                     return;
                 }
                 const target_type = if (self.prop_types.get(assign.target)) |t| t else (env.lookup(assign.target) orelse .unknown);
-                // Skip subtype check when the target is a FixedArray — the
-                // expand pass will split it into scalar siblings.
+                // Whole-array reassignment (`this.cells = other`) is not a legal
+                // Rúnar program at all: `expand_fixed_arrays` refuses it outright
+                // ("cannot reassign entire FixedArray property"). Comparing a
+                // scalar value type against `.fixed_array` here would only add a
+                // second, less specific diagnostic for a program already refused,
+                // so the subtype check is skipped and the later pass owns the
+                // rejection.
                 if (target_type == .fixed_array) {
                     _ = self.inferExprType(assign.value, env);
                     return;
