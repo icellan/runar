@@ -872,6 +872,18 @@ class LoweringContext {
     // Copied (not shared) because push/pop inside the nested block are
     // balanced there and must not disturb the parent's frames.
     for (const [k, v] of this.paramAliasStack) sub.paramAliasStack.set(k, [...v]);
+    // Issue #123 / R-082: carry the method's declared @sighash mode. A manual
+    // `checkPreimage(pre)` inside an if arm, a loop body or a ternary arm is
+    // still a call in THIS method, so it must bind under THIS method's mode.
+    // Without this the nested call lowered with `sighashFlag: undefined` and
+    // `lowerCheckPreimage` appended the default ALL|FORKID flag byte to the
+    // OP_PUSH_TX binding blob — while `abi.methods[].sigHashType`, which reads
+    // `method.sighashType` directly, still advertised the declared mode. One
+    // compile produced an artifact that contradicted itself: the SDK signs the
+    // preimage under the ABI's mode, the script derives its sighash under the
+    // blob's, OP_CHECKSIGVERIFY aborts, and the branch is unspendable.
+    // Go's subContext already carried it; this matches it.
+    sub.sighashFlag = this.sighashFlag;
     // Share the method scope so auto-injection from intrinsics called
     // inside the nested block bubbles up to the parent's ABI list.
     sub.methodScope = this.methodScope;
