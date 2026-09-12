@@ -970,6 +970,25 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 			if isSubtype(consType, altType) {
 				return altType
 			}
+			// N-099: arms related in NEITHER direction used to fall through to
+			// `return consType`, silently retyping the alternate. A ByteString
+			// and a bigint do not share a stack representation — one is a byte
+			// string, the other a script number — so the retyped arm leaves the
+			// wrong kind of value on the stack and everything downstream reads a
+			// type the author never wrote. `ts`, `rust` and `java` already
+			// refused this; `go`, `python`, `zig` and `ruby` accepted it.
+			//
+			// Ported from the TypeScript reference (Rust carries it verbatim),
+			// wording included — hence the capital T, which differs from the
+			// lowercase house style of the condition message above. That casing
+			// divergence is pre-existing and left alone; the new message matches
+			// TS so the seven tiers agree on it.
+			//
+			// `<unknown>` never reaches here: isSubtype treats it as top of the
+			// lattice, so a private helper's return type is related to
+			// everything, exactly as in TS.
+			tc.addError(fmt.Sprintf(
+				"Ternary branches have incompatible types: '%s' and '%s'", consType, altType))
 		}
 		return consType
 

@@ -355,7 +355,7 @@ describe('cross-tier rejection parity', () => {
   });
 
   it('the corpus is non-empty (a silently empty gate proves nothing)', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(16);
+    expect(fixtures.length).toBeGreaterThanOrEqual(17);
     expect(existsSync(POSITIVE_CONTROL)).toBe(true);
   });
 
