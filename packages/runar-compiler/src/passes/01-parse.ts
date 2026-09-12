@@ -518,10 +518,24 @@ const PRIMITIVE_TYPES = new Set<string>([
 
 /**
  * Type-name aliases recognised by the TS parser. `Sha256Digest` is the
- * cross-language spelling exposed by runar-lang (`packages/runar-lang/src/types.ts`);
- * Go, Rust, Python, Zig, and Ruby parsers already map it to the canonical
- * `Sha256` primitive — the TS parser has to do the same so contracts can use
- * the alias in field/param annotations.
+ * cross-language spelling exposed by runar-lang (`packages/runar-lang/src/types.ts`),
+ * and the parser has to map it to the canonical `Sha256` primitive so
+ * contracts can use the alias in field/param annotations.
+ *
+ * N-104: this comment used to claim "Go, Rust, Python, Zig, and Ruby parsers
+ * already map it". That was true of those tiers' OTHER surface parsers and
+ * false of the two that matter here. Go's `.runar.ts` frontend
+ * (`compilers/go/frontend/parser.go`) resolved type identifiers through
+ * `IsPrimitiveType` with no alias table, and Rust's went through
+ * `PrimitiveTypeName::from_str`, which had no `Sha256Digest` arm — so on a
+ * `.runar.ts` source both tiers carried the alias through as an opaque custom
+ * type and refused `readonly digest: Sha256Digest` at the VALIDATOR, while
+ * TypeScript, Zig, Python, Ruby and Java compiled it. Both now resolve it;
+ * `conformance/subtype-parity/Sha256DigestAlias.runar.ts` is the gate.
+ *
+ * The lesson worth keeping: a cross-tier claim in a comment is not evidence.
+ * This one had been true of five surfaces and was written as if it were true
+ * of all of them.
  */
 const TYPE_ALIASES: Record<string, PrimitiveTypeName> = {
   Sha256Digest: 'Sha256',

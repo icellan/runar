@@ -542,6 +542,33 @@ fn parse_param_pat(
 // Type nodes
 // ---------------------------------------------------------------------------
 
+/// Type-name aliases recognised by the `.runar.ts` parser.
+///
+/// `Sha256Digest` is the cross-language spelling runar-lang exposes
+/// (`packages/runar-lang/src/types.ts` declares
+/// `export type Sha256Digest = Sha256`), so contracts use it in field and
+/// parameter annotations.
+///
+/// N-104: this crate resolved TypeScript type identifiers through
+/// `PrimitiveTypeName::from_str`, which had no `Sha256Digest` arm, so the name
+/// reached validate as an unsupported custom type and
+/// `readonly digest: Sha256Digest` was refused — while TypeScript, Zig,
+/// Python, Ruby and Java compiled it. Go's `.runar.ts` frontend had the
+/// identical hole.
+///
+/// Deliberately scoped to THIS parser rather than to `from_str`. The reference
+/// tier scopes it the same way: `TYPE_ALIASES` lives in
+/// `packages/runar-compiler/src/passes/01-parse.ts` and is not applied by
+/// `01-parse-sol.ts` or `01-parse-move.ts`, which refuse the alias. Putting it
+/// in `from_str` would have widened the sol / move / rust-macro surfaces too,
+/// where the reference rejects it — trading one divergence for another.
+fn resolve_type_alias(name: &str) -> &str {
+    match name {
+        "Sha256Digest" => "Sha256",
+        other => other,
+    }
+}
+
 fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<Diagnostic>) -> TypeNode {
     match ts_type {
         // Keyword types
@@ -603,8 +630,9 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<Diagnostic>) -
                 }
             }
 
-            // Check for primitive types referenced by name
-            if let Some(prim) = PrimitiveTypeName::from_str(&type_name) {
+            // Check for primitive types referenced by name, after resolving
+            // alternative spellings.
+            if let Some(prim) = PrimitiveTypeName::from_str(resolve_type_alias(&type_name)) {
                 return TypeNode::Primitive(prim);
             }
 

@@ -652,9 +652,11 @@ func (p *parseContext) parseTypeExpr(node *sitter.Node) TypeNode {
 	case "type_identifier":
 		fallthrough
 	default:
-		// Try text match for primitive types
-		if IsPrimitiveType(text) {
-			return PrimitiveType{Name: text}
+		// Try text match for primitive types, after resolving alternative
+		// spellings (N-104: `Sha256Digest` is runar-lang's name for `Sha256`,
+		// and every other surface parser in this package already maps it).
+		if canonical := ResolveTypeAlias(text); IsPrimitiveType(canonical) {
+			return PrimitiveType{Name: canonical}
 		}
 		return CustomType{Name: text}
 	}
