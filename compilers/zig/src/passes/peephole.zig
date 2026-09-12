@@ -176,14 +176,19 @@ pub fn optimize(allocator: Allocator, methods: []const types.StackMethod) ![]typ
     return result;
 }
 
-const OptOut = struct {
+pub const OptOut = struct {
     insts: []Inst,
     locs: []?types.SourceLocation,
 };
 
 /// Run the iterative peephole pass while keeping a parallel
 /// source-location array aligned with the instruction stream.
-fn optimizeOpsAndLocs(
+///
+/// Public because stack lowering optimizes each branch arm separately (N-100),
+/// and an arm's instructions are spliced into the enclosing method WITH their
+/// locations -- dropping them there is what desynchronised the two arrays and
+/// mis-attributed every opcode after the first conditional.
+pub fn optimizeOpsAndLocs(
     allocator: Allocator,
     ops: []const Inst,
     src_locs: []const ?types.SourceLocation,

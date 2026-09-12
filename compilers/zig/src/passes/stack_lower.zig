@@ -24,6 +24,10 @@ const koalabear_emitters = @import("helpers/koalabear_emitters.zig");
 const bn254_emitters = @import("helpers/bn254_emitters.zig");
 const poseidon2_merkle = @import("helpers/poseidon2_merkle.zig");
 const merkle_emitters = @import("helpers/merkle_emitters.zig");
+// N-100: the branch arms are peepholed HERE, while each arm is still a separate
+// instruction stream, because whether an `else` CLAUSE exists at all is decided
+// from the arm's post-optimization body. See `lowerIfExprImpl`.
+const peephole = @import("peephole.zig");
 const Allocator = std.mem.Allocator;
 const Opcode = types.Opcode;
 
@@ -422,8 +426,57 @@ const LowerCtx = struct {
         try self.stack.push(self.allocator, next);
     }
 
-    fn appendInstructions(self: *LowerCtx, insts: []const types.StackInstruction) !void {
+    /// Splice a branch arm's instruction stream into this context.
+    ///
+    /// The arm's source locations come with it. `emit` maintains
+    /// `instructions` and `instruction_source_locs` as two arrays of equal
+    /// length read by index, and this is the only other writer: appending the
+    /// instructions alone left the arrays desynchronised from the first
+    /// conditional onward, so `emitArtifact` zipped each later opcode against
+    /// some earlier opcode's location. `IfElse.runar.ts` mapped its then-arm's
+    /// `OP_DUP OP_NIP` (line 14) to line 18.
+    fn appendInstructions(
+        self: *LowerCtx,
+        insts: []const types.StackInstruction,
+        locs: []const ?types.SourceLocation,
+    ) !void {
+        std.debug.assert(insts.len == locs.len);
         try self.instructions.appendSlice(self.allocator, insts);
+        try self.instruction_source_locs.appendSlice(self.allocator, locs);
+    }
+
+    /// N-100: run the peephole over ONE branch arm, while the arm is still a
+    /// separate instruction stream. See the call site in `lowerIfExprImpl` for
+    /// why the `else` clause's existence has to be decided on the optimized
+    /// body.
+    ///
+    /// `peephole.optimizeOpsAndLocs` carries the arbitrary-precision constant
+    /// folder's
+    /// error set, which is wider than `LowerError`. Only `OutOfMemory` is
+    /// reachable from here — the folder's `InvalidBase` comes from a `setString`
+    /// call this module always makes in base 10 — so the rest is funnelled into
+    /// `UnsupportedOperation` rather than widening `LowerError`, and logged so
+    /// it cannot vanish silently.
+    fn optimizeArm(
+        allocator: Allocator,
+        ctx: *const LowerCtx,
+        arm_label: []const u8,
+        bind_name: []const u8,
+    ) LowerError!peephole.OptOut {
+        return peephole.optimizeOpsAndLocs(
+            allocator,
+            ctx.instructions.items,
+            ctx.instruction_source_locs.items,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => {
+                std.log.warn(
+                    "stack lowering: peephole failed on the {s}-arm of conditional '{s}': {s}",
+                    .{ arm_label, bind_name, @errorName(err) },
+                );
+                return LowerError.UnsupportedOperation;
+            },
+        };
     }
 
     fn cloneVoidMap(
@@ -4984,11 +5037,56 @@ const LowerCtx = struct {
             return LowerError.BranchStackMismatch;
         }
 
+        // N-100: an `else` CLAUSE exists only if the else arm still has a body
+        // once the peephole has run over it.
+        //
+        // The other six tiers keep a branch STRUCTURED all the way to the
+        // emitter (`StackOp{Op:"if", Then, Else}`); their optimizer recurses
+        // into each arm (`compilers/go/codegen/optimizer.go`:
+        // `optimizedElse = OptimizeStackOps(op.Else)`) and their emitter asks
+        // the question afterwards (`compilers/go/codegen/emit.go#emitIf`:
+        // `if len(elseOps) > 0`). Zig flattens the branch into a linear
+        // instruction stream right here, so asking `else_ctx.instructions.len`
+        // asked it BEFORE the peephole — and the peephole runs later, over the
+        // already-flattened stream, where it can delete the arm's body but not
+        // the `OP_ELSE` this function had already committed to.
+        //
+        // A trivial private helper is the commonest producer: the `@this`
+        // receiver marker lowers to `push 0` and `lowerMethodCall` drops it
+        // again, leaving `push_int 0, OP_DROP` — peephole rule 1 — as the arm's
+        // entire body. `assert((f ? this.a : this.hx(x)) === this.a)` then came
+        // out `7c 63 00 77 67 68 00 9c` against the six-tier
+        // `7c 63 00 77 68 00 9c`. It is not about calls, though: `p + 0n`
+        // (rule 6) and `p - 0n` (rule 7) erase the same way.
+        //
+        // Optimizing here is byte-neutral for every other program. No peephole
+        // rule names `op_if` / `op_else` / `op_endif` in any window position, so
+        // no rewrite can ever span an arm boundary — the arm-local pass and the
+        // later whole-method pass reach the same fixed point on the same
+        // subsequence. The arms must be REPLACED by their optimized form, not
+        // just measured: dropping the `OP_ELSE` while appending the unoptimized
+        // body would splice that body onto the end of the THEN arm.
+        //
+        // Both `OptOut`s are freed once `appendInstructions` has COPIED their
+        // elements into `self.instructions`; the compile path runs on an arena,
+        // but `lowerIfExpr` is also exercised directly under the leak-checking
+        // test allocator.
+        const then_arm = try optimizeArm(self.allocator, &then_ctx, "then", bind_name);
+        defer {
+            self.allocator.free(then_arm.insts);
+            self.allocator.free(then_arm.locs);
+        }
+        const else_arm = try optimizeArm(self.allocator, &else_ctx, "else", bind_name);
+        defer {
+            self.allocator.free(else_arm.insts);
+            self.allocator.free(else_arm.locs);
+        }
+
         try self.emitOp(.op_if);
-        try self.appendInstructions(then_ctx.instructions.items);
-        if (else_ctx.instructions.items.len > 0) {
+        try self.appendInstructions(then_arm.insts, then_arm.locs);
+        if (else_arm.insts.len > 0) {
             try self.emitOp(.op_else);
-            try self.appendInstructions(else_ctx.instructions.items);
+            try self.appendInstructions(else_arm.insts, else_arm.locs);
         }
         try self.emitOp(.op_endif);
 
