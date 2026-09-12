@@ -26,8 +26,25 @@ CI runs the same command in three jobs (`ci.yml`). Running the cross-tier
 matrix additionally requires each non-TS compiler to be BUILT, not just
 installed — the runner locates `compilers/go/runar-go`,
 `compilers/rust/target/release/runar-compiler-rust`,
-`compilers/zig/zig-out/bin/runar-zig` and `compilers/java/build/libs/*.jar`, and
-silently drops a tier it cannot find unless `CI=true`.
+`compilers/zig/zig-out/bin/runar-zig` and `compilers/java/build/libs/*.jar`.
+
+A tier whose binary cannot be located is **dropped, not failed**, unless
+`CI=true` — local devs rarely have all seven toolchains installed. A dropped
+tier is never silent, though (R-103):
+
+- the runner prints an `INCOMPLETE COVERAGE` banner to stderr before the first
+  fixture, naming every binary it could not find;
+- the end-of-run summary repeats it (`This PASS covers 6 tiers, not 7`), so a
+  local PASS cannot be mistaken for full cross-tier coverage;
+- `RUNAR_CONFORMANCE_STRICT=1` (or `=true`) makes a missing toolchain a
+  **non-zero exit locally**, exactly as `CI=true` does. Use it before claiming
+  a change is cross-tier clean.
+
+A run that evaluated **zero fixtures** is also a failure now (exit 2, the
+harness-fault code), in the golden, `--multi-format`, `--parser-only` and
+`--ir-parity` modes alike. A wrong `--tests-dir`, a wrong cwd or a mistyped
+`--filter` used to print `Summary: 0 passed, 0 failed, 0 skipped (0 total)` and
+exit 0.
 
 ## Purpose
 

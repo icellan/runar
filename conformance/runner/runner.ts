@@ -2005,20 +2005,59 @@ export function printIrParityReport(report: IrParityReport): void {
 }
 
 // ---------------------------------------------------------------------------
-// CI strict-mode: fail loudly if any compiler binary is missing in CI.
+// Strict-mode: fail loudly if any compiler binary is missing.
 // ---------------------------------------------------------------------------
 //
 // The runner historically treated a missing compiler binary as `undefined`
 // and silently skipped it. That's the right default for local devs (who
 // rarely have all 7 toolchains installed) but it's a footgun in CI: the job
 // happily reports "PASS — all 7 compilers tested" even when one of them
-// never ran. We now gate that skip behind `!process.env.CI` and bail out
-// early if any binary is missing in CI.
+// never ran.
+//
+// Three outcomes (R-103):
+//   'fail' — CI, or a local run that asked for strictness via
+//            RUNAR_CONFORMANCE_STRICT. Exits non-zero.
+//   'warn' — permissive local run. Prints an unmissable banner naming the
+//            tiers that will NOT be exercised, so a local "PASS" can never
+//            be read as full coverage.
+//   'ok'   — every binary located.
+export type MissingCompilerAction = 'ok' | 'fail' | 'warn';
+
+export function decideMissingCompilerAction(
+  missing: string[],
+  env: { CI?: string; RUNAR_CONFORMANCE_STRICT?: string },
+): MissingCompilerAction {
+  if (missing.length === 0) return 'ok';
+  if (env.CI === 'true') return 'fail';
+  const strict = env.RUNAR_CONFORMANCE_STRICT;
+  if (strict === '1' || strict === 'true') return 'fail';
+  return 'warn';
+}
+
+// A run that evaluated ZERO fixtures is not a pass — it is a run that never
+// measured anything. Every mode's fixture set is discovered by walking
+// `conformance/tests`, so a path-resolution mistake (or a mistyped --filter)
+// used to print "Summary: 0 passed, 0 failed, 0 skipped (0 total)" and exit 0
+// (R-103). Returns the operator-facing message, or null when the set is fine.
+export function emptyFixtureSetError(
+  count: number,
+  ctx: { mode: string; testsDir: string; filter?: string },
+): string | null {
+  if (count > 0) return null;
+  const why = ctx.filter
+    ? `no fixture matched --filter ${ctx.filter}`
+    : 'the directory contains no fixture subdirectories (wrong path? wrong cwd?)';
+  return (
+    `[conformance/runner] ${ctx.mode} run evaluated 0 fixtures — ${why}.\n` +
+    `  searched: ${ctx.testsDir}\n` +
+    `  A zero-fixture run measures nothing and must never be reported as a pass.`
+  );
+}
+
 let strictModeChecked = false;
 function assertAllCompilersAvailableInCi(): void {
   if (strictModeChecked) return;
   strictModeChecked = true;
-  if (process.env.CI !== 'true') return;
 
   const probes: Array<{ name: string; path: string | null }> = [
     { name: 'go',     path: findGoBinary() },
@@ -2029,10 +2068,27 @@ function assertAllCompilersAvailableInCi(): void {
     { name: 'java',   path: findJavaBinary() },
   ];
   const missing = probes.filter(p => p.path === null).map(p => p.name);
-  if (missing.length > 0) {
+  const action = decideMissingCompilerAction(missing, process.env);
+  if (action === 'ok') return;
+
+  if (action === 'warn') {
+    console.error('');
+    console.error(
+      `[conformance/runner] INCOMPLETE COVERAGE: ${missing.length} compiler ` +
+      (missing.length === 1 ? 'binary was' : 'binaries were') +
+      ` not located and will NOT be exercised: ${missing.join(', ')}.\n` +
+      `  A PASS from this run does NOT mean all seven tiers agree.\n` +
+      `  Set RUNAR_CONFORMANCE_STRICT=1 to make a missing toolchain a non-zero exit locally.`,
+    );
+    console.error('');
+    return;
+  }
+
+  {
     const cwd = process.cwd();
+    const reason = process.env.CI === 'true' ? 'CI=true' : 'RUNAR_CONFORMANCE_STRICT set';
     const msg =
-      `[conformance/runner] CI=true but ${missing.length} compiler binary` +
+      `[conformance/runner] ${reason} but ${missing.length} compiler binary` +
       (missing.length === 1 ? '' : ' binaries') +
       ` could not be located: ${missing.join(', ')}.\n` +
       `  cwd: ${cwd}\n` +

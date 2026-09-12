@@ -19,7 +19,7 @@ import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, readdirSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
-import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults } from './runner.js';
+import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError } from './runner.js';
 import {
   generateReport,
   formatReportAsJSON,
@@ -266,6 +266,14 @@ async function main(): Promise<void> {
     const elapsedMs = Date.now() - startedAt;
     console.log(`\nCompleted ${report.entries.length} (fixture × format) parse checks in ${(elapsedMs / 1000).toFixed(1)}s.`);
     printParserCoverageReport(report);
+    const emptyParser = emptyFixtureSetError(report.entries.length, {
+      mode: 'parser-only', testsDir: opts.testsDir, filter: opts.filter,
+    });
+    if (emptyParser) {
+      console.error(emptyParser);
+      await shutdownJavaDaemon();
+      process.exit(EXIT_HARNESS_FAILURE);
+    }
     maybePrintSpawnStats();
     await shutdownJavaDaemon();
     const tainted = reportHarnessFaults();
@@ -293,6 +301,14 @@ async function main(): Promise<void> {
     const elapsedMs = Date.now() - startedAt;
     console.log(`\nCompleted ${report.results.length} fixture parity checks in ${(elapsedMs / 1000).toFixed(1)}s.`);
     printIrParityReport(report);
+    const emptyParity = emptyFixtureSetError(report.results.length, {
+      mode: 'ir-parity', testsDir: opts.testsDir, filter: opts.filter,
+    });
+    if (emptyParity) {
+      console.error(emptyParity);
+      await shutdownJavaDaemon();
+      process.exit(EXIT_HARNESS_FAILURE);
+    }
     maybePrintSpawnStats();
     await shutdownJavaDaemon();
     const tainted = reportHarnessFaults();
@@ -395,6 +411,17 @@ async function main(): Promise<void> {
   // the grounds that a run whose subprocesses died did not measure parity.
   const tainted = reportHarnessFaults();
   if (tainted) {
+    process.exit(EXIT_HARNESS_FAILURE);
+  }
+  // A run that evaluated no fixtures never measured parity (R-103) — same
+  // category as a harness fault, and reported with the same exit code.
+  const empty = emptyFixtureSetError(report.totalTests, {
+    mode: opts.multiFormat ? 'multi-format' : 'golden',
+    testsDir: opts.testsDir,
+    filter: opts.filter,
+  });
+  if (empty) {
+    console.error(empty);
     process.exit(EXIT_HARNESS_FAILURE);
   }
   // Exit with failure code if any tests failed
