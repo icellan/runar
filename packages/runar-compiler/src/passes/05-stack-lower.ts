@@ -2152,6 +2152,43 @@ class LoweringContext {
     // branch reconciliation in lowerIf.
     const shadowed: { paramName: string; shadowedName: string; depth: number }[] = [];
 
+    // N-111: arity is checked HERE, for the same reason `lowerCheckMultiSig`
+    // checks its own — "checking in the lowerer rather than the typechecker
+    // also covers the `--ir` input path, which never runs a typecheck".
+    //
+    // The binding loop below is `if (i < method.params.length)` with no `else`,
+    // so every argument past the last parameter was silently dropped. Dropped
+    // is not the same as ignored: a surplus argument is never passed to
+    // `operandConsume`/`bringToTop`, so a ref that would otherwise have been
+    // CONSUMED at this call site stays live on the stack and every later depth
+    // shifts under it. The emitted script changes, with no diagnostic.
+    //
+    // Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+    // takes two parameters. Appending one surplus copy of an existing ref:
+    //
+    //   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+    //   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+    //
+    // All seven tiers agreed on BOTH of those, which is why no parity gate saw
+    // it: the tiers were identical and identically wrong. A surplus ref naming
+    // a binding that does not exist at all (`tZZZ`) was likewise accepted
+    // without complaint.
+    //
+    // Only the surplus side is checked. Too FEW arguments already fails, with a
+    // diagnostic that names the unbound parameter ("method parameter 'b' is not
+    // on the stack at a post-consumption reference") — that path works and is
+    // pinned by existing tests, so widening this to an equality check would
+    // replace a more informative message with a less informative one.
+    if (args.length > method.params.length) {
+      throw new Error(
+        `method_call to '${method.name}' passes ${args.length} arguments but ` +
+        `'${method.name}' declares ${method.params.length} parameter` +
+        `${method.params.length === 1 ? '' : 's'}: surplus arguments are not ` +
+        `bound to any parameter, and leaving them unconsumed on the stack ` +
+        `silently changes the emitted script`,
+      );
+    }
+
     // Bind call arguments to private method params.
     for (let i = 0; i < args.length; i++) {
       if (i < method.params.length) {

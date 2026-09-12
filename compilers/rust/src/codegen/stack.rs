@@ -2034,6 +2034,47 @@ impl LoweringContext {
         // branch reconciliation in lower_if.
         let mut shadowed: Vec<(String, String)> = Vec::new();
 
+        // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
+        // checks its own -- checking in the lowerer rather than the typechecker also
+        // covers the `--ir` input path, which never runs a typecheck.
+        //
+        // The binding loop below skips every argument past the last parameter. Skipped
+        // is not the same as ignored: a surplus argument never reaches
+        // operandConsume/bringToTop, so a ref that would otherwise have been CONSUMED
+        // at this call site stays live on the stack and every later depth shifts under
+        // it. The emitted script changes, with no diagnostic.
+        //
+        // Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+        // takes two parameters:
+        //
+        //   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+        //   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+        //
+        // All seven tiers agreed on BOTH, which is why no parity gate saw it -- the
+        // tiers were identical and identically wrong. A surplus ref naming a binding
+        // that does not exist at all (`tZZZ`) was likewise accepted silently.
+        //
+        // Only the surplus side is checked. Too FEW arguments already fails, naming
+        // the unbound parameter ("method parameter 'b' is not on the stack at a
+        // post-consumption reference"); that path works and is pinned by existing
+        // tests.
+        if args.len() > method.params.len() {
+            // `panic!` is this lowerer's idiom for an invariant violation --
+            // the same one `lower_check_multi_sig` uses a few hundred lines
+            // down; `inline_method_call` returns `()`, and the CLI turns the
+            // panic into `Compilation error: stack lowering: ...`.
+            panic!(
+                "method_call to '{}' passes {} arguments but '{}' declares {} parameter{}: \
+                 surplus arguments are not bound to any parameter, and leaving them \
+                 unconsumed on the stack silently changes the emitted script",
+                method.name,
+                args.len(),
+                method.name,
+                method.params.len(),
+                if method.params.len() == 1 { "" } else { "s" }
+            );
+        }
+
         // Bind call arguments to private method params.
         for (i, arg) in args.iter().enumerate() {
             if i < method.params.len() {

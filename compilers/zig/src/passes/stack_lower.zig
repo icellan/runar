@@ -241,6 +241,16 @@ const LowerError = error{
     /// whole 2026-08 branch/loop miscompile family. Silent until the UTXO is
     /// already locked, so we fail loudly at compile time instead.
     BranchResultDepthMismatch,
+    /// N-111: a `method_call` passing MORE arguments than the callee declares.
+    /// Surplus args were skipped by the binding loop, which is not the same as
+    /// ignoring them: an unbound ref is never consumed, so it stays live on the
+    /// stack and shifts every later depth. Measured on the `multi-method`
+    /// golden, one surplus arg rewrote the locking script from
+    /// 76009c637552958b5aa06900ac67519d00ac68 to
+    /// 76009c637552787c958b5aa0697c00ac7767519d00ac68, silently, in all seven
+    /// tiers at once. Zig's lowerer is an error-enum channel, so the name is
+    /// the diagnostic.
+    MethodCallArityMismatch,
     /// R-054: `checkMultiSig` with a degenerate threshold. An empty signature
     /// array lowers to a 0-of-N check, which OP_CHECKMULTISIG accepts
     /// unconditionally — an anyone-can-spend output produced from source that
@@ -1259,6 +1269,32 @@ const LowerCtx = struct {
             }
             shadowed.deinit(self.allocator);
         }
+
+        // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
+        // checks its own -- checking in the lowerer rather than the typechecker also
+        // covers the `--ir` input path, which never runs a typecheck.
+        //
+        // The binding loop below skips every argument past the last parameter. Skipped
+        // is not the same as ignored: a surplus argument never reaches
+        // operandConsume/bringToTop, so a ref that would otherwise have been CONSUMED
+        // at this call site stays live on the stack and every later depth shifts under
+        // it. The emitted script changes, with no diagnostic.
+        //
+        // Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+        // takes two parameters:
+        //
+        //   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+        //   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+        //
+        // All seven tiers agreed on BOTH, which is why no parity gate saw it -- the
+        // tiers were identical and identically wrong. A surplus ref naming a binding
+        // that does not exist at all (`tZZZ`) was likewise accepted silently.
+        //
+        // Only the surplus side is checked. Too FEW arguments already fails, naming
+        // the unbound parameter ("method parameter 'b' is not on the stack at a
+        // post-consumption reference"); that path works and is pinned by existing
+        // tests.
+        if (args.len > method.params.len) return LowerError.MethodCallArityMismatch;
 
         for (args, 0..) |arg, idx| {
             if (idx >= method.params.len) break;

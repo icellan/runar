@@ -112,10 +112,20 @@ const POSITIVE_CONTROL = join(REPO, 'conformance/tests/asm-raw-script/expected-i
  */
 const LOOP_POSITIVE_CONTROL = join(REPO, 'conformance/tests/bounded-loop/expected-ir.json');
 
+/**
+ * The third control. `I08` (N-111) is about a `method_call`'s argument list,
+ * and neither golden above contains one. `multi-method` does — a two-argument
+ * call to the private helper `computeThreshold` — carries no `compilers`
+ * allowlist, and all six IR tiers emit
+ * `76009c637552958b5aa06900ac67519d00ac68` for it.
+ */
+const METHOD_CALL_POSITIVE_CONTROL = join(REPO, 'conformance/tests/multi-method/expected-ir.json');
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],
   ['bounded-loop', LOOP_POSITIVE_CONTROL],
+  ['multi-method', METHOD_CALL_POSITIVE_CONTROL],
 ];
 
 const fixtures = readdirSync(DIR)
