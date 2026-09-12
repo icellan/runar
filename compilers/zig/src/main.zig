@@ -229,15 +229,38 @@ fn writeStdoutLn(io: std.Io, data: []const u8) !void {
 
 /// Compile from ANF IR JSON (passes 5-6 only)
 fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(10 * 1024 * 1024));
-    defer allocator.free(source);
+    // N-119: run the whole IR pipeline in one arena, exactly as
+    // `compileFromSource` below already does.
+    //
+    // This path used to allocate from the process allocator and hand the graph
+    // back via `ANFProgram.deinit`. That does not work, and cannot be made to
+    // work cheaply: `deinit`/`freeBindings` (ir/types.zig) free the `if` and
+    // `loop` heap nodes and recurse into their bodies, and nothing else — not
+    // the binding ARRAYS, and none of the 43 `allocator.dupe` sites in
+    // ir/json.zig. On the 3.2 KB `bounded-loop` golden a successful run printed
+    // 55 DebugAllocator leak reports / 1145 lines to stderr.
+    //
+    // Exit status and bytes were always correct, so this was hygiene — but the
+    // noise shares a channel with real diagnostics and buries a one-line result
+    // under a kilo-line of trace, which is how a `tail -1` measurement gets
+    // read off the wrong stream.
+    //
+    // Completing `deinit` was the alternative and is the wrong trade: the
+    // parser mixes owned dupes with borrowed slices of the still-live
+    // `std.json` document across a ~25-variant union, so a uniform free turns
+    // stderr noise into a double-free. The arena sidesteps ownership entirely,
+    // which is why the source path chose it first; `compileFromIR` was the one
+    // caller that had not.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const work_allocator = arena.allocator();
 
-    const program = try json_parser.parseANFProgram(allocator, source);
-    defer program.deinit(allocator);
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(10 * 1024 * 1024));
+
+    const program = try json_parser.parseANFProgram(work_allocator, source);
 
     if (opts.emit_ir) {
-        const canonical = try json_parser.serializeCanonicalJSON(allocator, program);
-        defer allocator.free(canonical);
+        const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
         try writeStdout(io, canonical);
         return;
     }
@@ -257,15 +280,14 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // all 5 fixtures whose IR mentions ecAdd/ecMul/ecMulGen/ecNegate), which is
     // precisely why the divergence went unnoticed.
     //
-    // Arena-scoped: the optimizer's output shares unmodified nodes with
-    // `program`, which outlives this scope via the `defer program.deinit` above.
-    var ec_arena = std.heap.ArenaAllocator.init(allocator);
-    defer ec_arena.deinit();
-    const optimized_program = try ec_optimizer.optimize(ec_arena.allocator(), program);
+    // The optimizer's output shares unmodified nodes with `program`. Both now
+    // live in the function-wide arena (N-119), so the sharing needs no separate
+    // lifetime argument — previously this call had its own nested arena and
+    // relied on `program` outliving it via a `defer program.deinit`.
+    const optimized_program = try ec_optimizer.optimize(work_allocator, program);
 
-    const stack_program = try stack_lower.lower(allocator, optimized_program);
-    defer stack_program.deinit(allocator);
-    const optimized_methods = try peephole.optimize(allocator, stack_program.methods);
+    const stack_program = try stack_lower.lower(work_allocator, optimized_program);
+    const optimized_methods = try peephole.optimize(work_allocator, stack_program.methods);
     const optimized_stack_program = types.StackProgram{
         .methods = optimized_methods,
         .contract_name = stack_program.contract_name,
@@ -278,14 +300,12 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
     if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(allocator, optimized_stack_program, optimized_program);
-        defer allocator.free(artifact);
+        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
         try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 
-    const artifact = try emit.emitArtifact(allocator, optimized_stack_program, optimized_program);
-    defer allocator.free(artifact);
+    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
     try writeStdoutLn(io, artifact);
 }
 
