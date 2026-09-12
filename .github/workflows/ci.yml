@@ -892,6 +892,18 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: cd conformance && npx vitest run closed-findings/
+      - name: OP_PUSH_TX binding blob is byte-identical in all seven tiers
+        # R-105. Forged-preimage rejection — the BUG-100 exploit — is proven by
+        # packages/runar-testing oppushtx-binding.test.ts against the TypeScript
+        # tier's CHECK_PREIMAGE_BINDING_HEX, over a 60-context sighash sweep. The
+        # other six tiers emit their own copy of that blob and nothing asserted
+        # the copies matched, so six tiers' covenant binding rested on
+        # resemblance. This requires every tier's compiled stateful contract to
+        # contain that exact 428-byte blob verbatim, exactly once, which
+        # transfers the execution proof by construction.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: cd conformance && npx vitest run preimage-binding/
       - name: Run multi-format source conformance (all 7 compilers, all 9 formats)
         # Adds the TypeScript compiler to the central conformance job (it was
         # previously absent) and exercises every compiler's frontend against
