@@ -572,7 +572,16 @@ docs/                 # Documentation + format guides
 ```bash
 git clone https://github.com/icellan/runar.git && cd runar
 pnpm install && pnpm build
+cd conformance && npm ci && cd ..   # second npm root — see below
 ```
+
+`conformance/` is **not** a pnpm workspace member. It has its own
+`package.json` and `package-lock.json` (`tsx`, `typescript`, `fast-check`), so
+`pnpm install` does not install it and every conformance script fails to resolve
+`tsx` until you run `npm ci` there. CI does the same thing in three jobs. The
+non-TS tiers additionally need their own toolchains built (`cd compilers/go && go
+build`, `cargo build --release`, `zig build`, `./gradlew build`) before the
+cross-tier runner can find them.
 
 Three layered local-test entry points — pick the one matching your loop:
 

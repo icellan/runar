@@ -8,6 +8,27 @@ Most fixtures run on every tier. A small number opt out of one or more tiers —
 
 ---
 
+
+## Installing this directory
+
+`conformance/` is a **separate npm root**. It is not listed in
+`pnpm-workspace.yaml`, and it has its own `package.json` and
+`package-lock.json` (`tsx`, `typescript`, `fast-check`). The repo-level
+`pnpm install` does not install it:
+
+```bash
+cd conformance && npm ci
+```
+
+Every script in this directory resolves `tsx` from `conformance/node_modules`,
+so without that step they fail on startup instead of reporting a test result.
+CI runs the same command in three jobs (`ci.yml`). Running the cross-tier
+matrix additionally requires each non-TS compiler to be BUILT, not just
+installed — the runner locates `compilers/go/runar-go`,
+`compilers/rust/target/release/runar-compiler-rust`,
+`compilers/zig/zig-out/bin/runar-zig` and `compilers/java/build/libs/*.jar`, and
+silently drops a tier it cannot find unless `CI=true`.
+
 ## Purpose
 
 Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.

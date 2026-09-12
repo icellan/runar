@@ -58,6 +58,17 @@ pnpm build
 
 This installs the pnpm workspace packages and builds the JavaScript/TypeScript workspace packages such as `runar-lang`, `runar-compiler`, `runar-cli`, `runar-sdk`, `runar-testing`, and `runar-ir-schema`.
 
+**If you intend to run the conformance suite**, it needs a second install.
+`conformance/` is not a pnpm workspace member — it carries its own
+`package.json` and `package-lock.json` — so:
+
+```bash
+cd conformance && npm ci && cd ..
+```
+
+Without it the conformance scripts cannot resolve `tsx` and fail on startup
+rather than reporting a test result.
+
 If you also want the Zig tooling, build and test it from source:
 
 ```bash
