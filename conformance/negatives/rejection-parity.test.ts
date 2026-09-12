@@ -81,20 +81,26 @@ import {
  * cannot see WHICH PASS refused. That distinction turned out to matter:
  *
  *   N07-undeclared-var is rejected by six tiers in the TYPECHECKER. The Java
- *   tier's frontend ACCEPTS it — `ParserDispatch.parse -> Validate.run ->
- *   ExpandFixedArrays.run -> Typecheck.run` all pass, because the Java
- *   frontend resolves the undeclared `neverDeclared` as if it were a method
- *   parameter. The only thing that stops it is a defensive guard in stack
- *   lowering ("Refusing to emit a silent OP_0 placeholder"), which exits 70
- *   (EX_SOFTWARE) where every other negative exits 65 (EX_DATAERR).
+ *   tier's frontend USED TO ACCEPT it — `ParserDispatch.parse -> Validate.run
+ *   -> ExpandFixedArrays.run -> Typecheck.run` all passed, and the only thing
+ *   that stopped it was a defensive guard in stack lowering ("Refusing to emit
+ *   a silent OP_0 placeholder"), exiting 70 (EX_SOFTWARE) where every other
+ *   negative exits 65 (EX_DATAERR). That made `runar.lang.sdk.CompileCheck` —
+ *   the frontend-only API a Java contract author calls to ask "is this valid
+ *   Rúnar?" — green-light N07.
  *
- *   That guard exists, so the CLI row below is honestly green. But
- *   `runar.lang.sdk.CompileCheck` — the API a Java contract author calls to
- *   ask "is this valid Rúnar?" — runs the frontend ONLY, and therefore
- *   green-lights N07. Fixing that belongs in the Java typechecker, not here;
- *   extending this gate to the frontend layer needs a per-tier frontend
- *   driver, which the CLIs do not currently expose (`--parse-only` stops
- *   before typecheck).
+ *   R-092 fixed it at the root: `neverDeclared` infers as `<unknown>`, and the
+ *   Java typechecker carried an `&& !"<unknown>".equals(t)` escape at eight
+ *   operand checks that its six peers do not have. Deleting those escapes moved
+ *   the rejection into the typechecker ("left operand of '>' must be bigint,
+ *   got '<unknown>'") and the exit code to 65. N15 below is the fixture for the
+ *   operand shape itself.
+ *
+ *   The structural limit still stands: this gate measures the CLI, so it cannot
+ *   SEE which pass refused. Proving the frontend is the one that refuses needs
+ *   a per-tier frontend driver the CLIs do not expose (`--parse-only` stops
+ *   before typecheck); for the Java tier that assertion lives in
+ *   `compilers/java/.../R092UnknownOperandRejectionTest`.
  */
 
 const REPO = resolve(__dirname, '../..');
@@ -349,7 +355,7 @@ describe('cross-tier rejection parity', () => {
   });
 
   it('the corpus is non-empty (a silently empty gate proves nothing)', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(14);
+    expect(fixtures.length).toBeGreaterThanOrEqual(15);
     expect(existsSync(POSITIVE_CONTROL)).toBe(true);
   });
 

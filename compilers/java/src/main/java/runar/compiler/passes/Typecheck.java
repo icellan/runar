@@ -153,6 +153,25 @@ public final class Typecheck {
         return false;
     }
 
+    /**
+     * R-092: there is deliberately NO {@code <unknown>} escape here, and none at
+     * any callsite. {@code isSubtype} treats {@code <unknown>} as top-of-lattice
+     * (compatible with everything), which is what {@code ===} and argument
+     * passing want. The operand positions that demand a NUMBER — arithmetic,
+     * relational, shift, bitwise, unary {@code -}, unary {@code ~},
+     * {@code ++}/{@code --} and array index — go through this predicate instead,
+     * and they want the opposite: an operand whose type the frontend could not
+     * pin down must not silently become a script number.
+     *
+     * <p>This tier used to carry {@code && !"<unknown>".equals(t)} at all eight,
+     * so Java alone accepted programs the other six tiers reject — including
+     * {@code helperReturningPubKey() > x}, which pushes 33 bytes into
+     * OP_GREATERTHAN. Post-Genesis that succeeds and computes a meaningless
+     * comparison, so the guard the author wrote is not the guard that reaches
+     * the chain. `conformance/negatives/N15-unknown-operand-type.runar.ts` is
+     * the cross-tier gate; {@code R092UnknownOperandRejectionTest} is the unit
+     * gate.
+     */
     private static boolean isBigintFamily(String t) {
         return BIGINT_SUBTYPES.contains(t);
     }
@@ -776,7 +795,7 @@ public final class Typecheck {
             if (e instanceof IndexAccessExpr ia) {
                 String objType = inferExpr(ia.object(), env);
                 String indexType = inferExpr(ia.index(), env);
-                if (!isBigintFamily(indexType) && !"<unknown>".equals(indexType)) {
+                if (!isBigintFamily(indexType)) {
                     error("array index must be bigint, got '" + indexType + "'");
                 }
                 if (objType.endsWith("[]")) {
@@ -787,14 +806,14 @@ public final class Typecheck {
 
             if (e instanceof IncrementExpr ie) {
                 String t = inferExpr(ie.operand(), env);
-                if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                if (!isBigintFamily(t)) {
                     error("++ operator requires bigint, got '" + t + "'");
                 }
                 return "bigint";
             }
             if (e instanceof DecrementExpr de) {
                 String t = inferExpr(de.operand(), env);
-                if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                if (!isBigintFamily(t)) {
                     error("-- operator requires bigint, got '" + t + "'");
                 }
                 return "bigint";
@@ -830,19 +849,19 @@ public final class Typecheck {
 
             switch (op) {
                 case ADD, SUB, MUL, DIV, MOD -> {
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
                     }
                     return "bigint";
                 }
                 case LT, LE, GT, GE -> {
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
                     }
                     return "boolean";
@@ -868,23 +887,23 @@ public final class Typecheck {
                     return "boolean";
                 }
                 case SHL, SHR -> {
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
                     }
                     return "bigint";
                 }
                 case BIT_AND, BIT_OR, BIT_XOR -> {
                     if (isByteFamily(lt) && isByteFamily(rt)) return "ByteString";
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error(
                             "left operand of '" + op.canonical()
                                 + "' must be bigint or ByteString, got '" + lt + "'"
                         );
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error(
                             "right operand of '" + op.canonical()
                                 + "' must be bigint or ByteString, got '" + rt + "'"
@@ -906,14 +925,14 @@ public final class Typecheck {
                     return "boolean";
                 }
                 case NEG -> {
-                    if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                    if (!isBigintFamily(t)) {
                         error("operand of unary '-' must be bigint, got '" + t + "'");
                     }
                     return "bigint";
                 }
                 case BIT_NOT -> {
                     if (isByteFamily(t)) return "ByteString";
-                    if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                    if (!isBigintFamily(t)) {
                         error("operand of '~' must be bigint or ByteString, got '" + t + "'");
                     }
                     return "bigint";
