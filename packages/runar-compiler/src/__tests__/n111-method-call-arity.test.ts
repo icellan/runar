@@ -66,7 +66,14 @@ export class Helper extends SmartContract {
 
 /** The program's ANF with `addTwo`'s call-site argument list replaced. */
 function anfWithArgs(args: string[]): ANFProgram {
-  const program = lowerToANF(parse(SOURCE, 'Helper.runar.ts').contract) as ANFProgram;
+  const parsed = parse(SOURCE, 'Helper.runar.ts');
+  if (parsed.contract === null) {
+    throw new Error(
+      `the fixture source must parse; it did not:\n` +
+        parsed.errors.map((e) => `  ${e.message}`).join('\n'),
+    );
+  }
+  const program = lowerToANF(parsed.contract) as ANFProgram;
   let patched = 0;
   const walk = (bindings: any[]): void => {
     for (const b of bindings) {
