@@ -152,6 +152,23 @@ func validateBindings(bindings []ANFBinding, methodName string) error {
 		}
 		if kind == "raw_script" {
 			body := binding.Value.Bytes
+			// R-079: an empty span is a claim the emitter cannot honour.
+			// Stack lowering models a raw_script purely from its declared
+			// arities (codegen.lowerRawScript pops in_arity, pushes
+			// out_arity) because the bytes are opaque to it, while emission
+			// writes nothing at all for a zero-length span
+			// (codegen.emitRawBytes returns early). The stack model and the
+			// script then disagree, and every later PICK/ROLL depth derived
+			// from that model addresses the wrong slot — the span silently
+			// degrades to the identity function and a different witness
+			// spends the output than the IR declared.
+			//
+			// The source path already rejects this ("asm() body must be a
+			// non-empty hex string literal", frontend/validator.go); --ir is
+			// the same rule at the external-input trust boundary.
+			if len(body) == 0 {
+				return fmt.Errorf("IR validation: method %s binding %s raw_script has an empty bytes body but declares in_arity %d / out_arity %d; a span that emits no bytes cannot have a stack effect", methodName, binding.Name, binding.Value.InArity, binding.Value.OutArity)
+			}
 			if len(body)%2 != 0 {
 				return fmt.Errorf("IR validation: method %s binding %s raw_script bytes have odd hex length %d", methodName, binding.Name, len(body))
 			}
