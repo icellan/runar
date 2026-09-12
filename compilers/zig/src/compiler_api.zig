@@ -66,7 +66,30 @@ fn detectFormat(path: []const u8) FileFormat {
     return .unknown;
 }
 
-fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
+/// Validate `contract` with the validator its surface calls for: the `.runar.zig`
+/// surface relaxes the `super()` constructor requirement, every other surface
+/// does not. Extracted from `runPipeline` in R-093 so the SDK's frontend check
+/// selects the validator the same way the CLI does instead of hard-wiring one.
+pub fn validateForFile(
+    work: std.mem.Allocator,
+    contract: types.ContractNode,
+    file_name: []const u8,
+) !validate_pass.ValidationResult {
+    return if (detectFormat(file_name) == .runar_zig)
+        validate_pass.validateZig(work, contract)
+    else
+        validate_pass.validate(work, contract);
+}
+
+/// Parse `source` by the format its `file_name` extension names, behind the
+/// two guards that apply to EVERY frontend entry: the caller's size check (see
+/// `runPipeline`'s pass 0) and the fail-closed directive guard below.
+///
+/// `pub` since R-093: the Zig SDK's `compileCheckSource` called `parseZig`
+/// directly and so ran neither guard, which made the SDK's "is this valid
+/// Runar?" answer disagree with the compiler's on the same input. There is one
+/// guarded parse entry now, and both callers use it.
+pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
     const format = detectFormat(file_name);
 
     // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment
@@ -239,11 +262,7 @@ pub fn runPipeline(
     const contract = parse_result.contract orelse return error.ParseFailed;
 
     // Pass 2: Validate (Zig mode for .runar.zig — relaxes super() constructor requirement)
-    const format = detectFormat(file_name);
-    const val_result = if (format == .runar_zig)
-        validate_pass.validateZig(work, contract) catch return error.ValidationFailed
-    else
-        validate_pass.validate(work, contract) catch return error.ValidationFailed;
+    const val_result = validateForFile(work, contract, file_name) catch return error.ValidationFailed;
     for (val_result.errors) |d| diag.addLocatedError(work, "  validation error: ", d);
     if (val_result.errors.len > 0) return error.ValidationFailed;
     for (val_result.warnings) |d| diag.addWarning(work, d.message);
