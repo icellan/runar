@@ -675,6 +675,43 @@ module RunarCompiler
 
       private
 
+      # The three output intrinsics, which share one argument contract.
+      OUTPUT_INTRINSIC_NAMES = %w[addOutput addRawOutput addDataOutput].freeze
+
+      # Type-check the arguments of the three output intrinsics --
+      # `this.addOutput` / `this.addRawOutput` / `this.addDataOutput` -- and
+      # return their result type.
+      #
+      # N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+      # used to accept any type there. That is not a missing lint.
+      # `lower_add_output` prepends the operand as `OP_8 OP_NUM2BIN`, so a
+      # ByteString in that slot is reinterpreted as a script number with no
+      # conversion and becomes the amount the covenant commits to:
+      # `blob: ByteString` and `blob: bigint` compiled to the SAME script, byte
+      # for byte. On the real @bsv/sdk Spend engine with `blob = 0x2a` only a
+      # 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+      # OP_NUM2BIN, making the UTXO unspendable.
+      #
+      # Ported from the TypeScript reference, wording included. Deliberately the
+      # FIRST argument only: TS also checks arity, the state-value types and the
+      # scriptBytes argument, and none of those are this finding.
+      #
+      # `<unknown>` is escaped exactly as TS escapes it -- a private helper's
+      # declared return type is discarded at parse time in every tier, so
+      # `this.sats()` infers as `<unknown>` and must keep compiling.
+      def check_output_intrinsic_args(name, args, env)
+        args.each_with_index do |arg, i|
+          arg_type = infer_expr_type(arg, env)
+          next unless i.zero?
+          next if Frontend.bigint_family?(arg_type) || arg_type == "<unknown>"
+
+          add_error(
+            "#{name}() first argument (satoshis) must be bigint, got '#{arg_type}'"
+          )
+        end
+        "void"
+      end
+
       def add_error(msg)
         loc = @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
@@ -1050,17 +1087,8 @@ module RunarCompiler
           if prop == "getStateScript"
             return "ByteString"
           end
-          if prop == "addOutput"
-            expr.args.each { |arg| infer_expr_type(arg, env) }
-            return "void"
-          end
-          if prop == "addRawOutput"
-            expr.args.each { |arg| infer_expr_type(arg, env) }
-            return "void"
-          end
-          if prop == "addDataOutput"
-            expr.args.each { |arg| infer_expr_type(arg, env) }
-            return "void"
+          if OUTPUT_INTRINSIC_NAMES.include?(prop)
+            return check_output_intrinsic_args(prop, expr.args, env)
           end
           if @method_sigs.key?(prop)
             return check_call_args(prop, @method_sigs[prop], expr.args, env)
@@ -1082,17 +1110,8 @@ module RunarCompiler
             if expr.callee.property == "getStateScript"
               return "ByteString"
             end
-            if expr.callee.property == "addOutput"
-              expr.args.each { |arg| infer_expr_type(arg, env) }
-              return "void"
-            end
-            if expr.callee.property == "addRawOutput"
-              expr.args.each { |arg| infer_expr_type(arg, env) }
-              return "void"
-            end
-            if expr.callee.property == "addDataOutput"
-              expr.args.each { |arg| infer_expr_type(arg, env) }
-              return "void"
+            if OUTPUT_INTRINSIC_NAMES.include?(expr.callee.property)
+              return check_output_intrinsic_args(expr.callee.property, expr.args, env)
             end
             if @method_sigs.key?(expr.callee.property)
               return check_call_args(

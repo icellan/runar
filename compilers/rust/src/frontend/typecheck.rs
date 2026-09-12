@@ -986,6 +986,45 @@ terminal (no state mutation)",
         }
     }
 
+    /// Type-check the arguments of the three output intrinsics —
+    /// `this.addOutput` / `this.addRawOutput` / `this.addDataOutput` — and
+    /// return their result type.
+    ///
+    /// N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+    /// used to accept any type there. That is not a missing lint.
+    /// `lower_add_output` prepends the operand as `OP_8 OP_NUM2BIN`, so a
+    /// ByteString in that slot is reinterpreted as a script number with no
+    /// conversion and becomes the amount the covenant commits to:
+    /// `blob: ByteString` and `blob: bigint` compiled to the SAME script, byte
+    /// for byte. On the real `@bsv/sdk` Spend engine with `blob = 0x2a` only a
+    /// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+    /// `OP_NUM2BIN`, making the UTXO unspendable.
+    ///
+    /// Ported from the TypeScript reference, wording included. Deliberately the
+    /// FIRST argument only: TS also checks arity, the state-value types and the
+    /// `scriptBytes` argument, and none of those are this finding.
+    ///
+    /// `<unknown>` is escaped exactly as TS escapes it — a private helper's
+    /// declared return type is discarded at parse time in every tier, so
+    /// `this.sats()` infers as `<unknown>` and must keep compiling.
+    fn check_output_intrinsic_args(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        env: &mut TypeEnv,
+    ) -> TType {
+        for (i, arg) in args.iter().enumerate() {
+            let arg_type = self.infer_expr_type(arg, env);
+            if i == 0 && !is_bigint_family(&arg_type) && arg_type != "<unknown>" {
+                self.add_error(format!(
+                    "{}() first argument (satoshis) must be bigint, got '{}'",
+                    name, arg_type
+                ));
+            }
+        }
+        VOID.to_string()
+    }
+
     fn check_call_expr(
         &mut self,
         callee: &Expression,
@@ -1063,10 +1102,7 @@ terminal (no state mutation)",
             }
 
             if property == "addOutput" || property == "addRawOutput" || property == "addDataOutput" {
-                for arg in args {
-                    self.infer_expr_type(arg, env);
-                }
-                return VOID.to_string();
+                return self.check_output_intrinsic_args(property, args, env);
             }
 
             // Check contract method signatures
@@ -1102,10 +1138,7 @@ terminal (no state mutation)",
                 }
 
                 if property == "addOutput" || property == "addRawOutput" || property == "addDataOutput" {
-                    for arg in args {
-                        self.infer_expr_type(arg, env);
-                    }
-                    return VOID.to_string();
+                    return self.check_output_intrinsic_args(property, args, env);
                 }
 
                 if let Some((params, return_type)) = self.method_sigs.get(property).cloned() {

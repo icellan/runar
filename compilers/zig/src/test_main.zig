@@ -64,6 +64,7 @@ test {
     _ = @import("tests/n092_fixed_array_ctor_param.zig");
     _ = @import("tests/n095_synthetic_array_chain.zig");
     _ = @import("tests/n097_fixed_array_element_read.zig");
+    _ = @import("tests/n098_bytestring_satoshis.zig");
     _ = @import("tests/n100_empty_else_arm.zig");
     _ = @import("tests/branch_lift_then_arm.zig");
     _ = @import("tests/readonly_property_assignment.zig");

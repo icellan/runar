@@ -776,18 +776,8 @@ class _TypeChecker:
             prop = e.callee.property
             if prop == "getStateScript":
                 return "ByteString"
-            if prop == "addOutput":
-                for arg in e.args:
-                    self._infer_expr_type(arg, env)
-                return "void"
-            if prop == "addRawOutput":
-                for arg in e.args:
-                    self._infer_expr_type(arg, env)
-                return "void"
-            if prop == "addDataOutput":
-                for arg in e.args:
-                    self._infer_expr_type(arg, env)
-                return "void"
+            if prop in ("addOutput", "addRawOutput", "addDataOutput"):
+                return self._check_output_intrinsic_args(prop, e.args, env)
             if prop in self.method_sigs:
                 return self._check_call_args(prop, self.method_sigs[prop], e.args, env)
             self._add_error(
@@ -807,18 +797,10 @@ class _TypeChecker:
             if is_this:
                 if e.callee.property == "getStateScript":
                     return "ByteString"
-                if e.callee.property == "addOutput":
-                    for arg in e.args:
-                        self._infer_expr_type(arg, env)
-                    return "void"
-                if e.callee.property == "addRawOutput":
-                    for arg in e.args:
-                        self._infer_expr_type(arg, env)
-                    return "void"
-                if e.callee.property == "addDataOutput":
-                    for arg in e.args:
-                        self._infer_expr_type(arg, env)
-                    return "void"
+                if e.callee.property in ("addOutput", "addRawOutput", "addDataOutput"):
+                    return self._check_output_intrinsic_args(
+                        e.callee.property, e.args, env
+                    )
                 if e.callee.property in self.method_sigs:
                     return self._check_call_args(
                         e.callee.property,
@@ -851,6 +833,43 @@ class _TypeChecker:
     # -------------------------------------------------------------------
     # Argument checking
     # -------------------------------------------------------------------
+
+    def _check_output_intrinsic_args(
+        self,
+        name: str,
+        args: list[Expression],
+        env: _TypeEnv,
+    ) -> str:
+        """Type-check the arguments of the three output intrinsics --
+        ``this.addOutput`` / ``this.addRawOutput`` / ``this.addDataOutput`` --
+        and return their result type.
+
+        N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+        used to accept any type there. That is not a missing lint.
+        ``_lower_add_output`` prepends the operand as ``OP_8 OP_NUM2BIN``, so a
+        ByteString in that slot is reinterpreted as a script number with no
+        conversion and becomes the amount the covenant commits to:
+        ``blob: ByteString`` and ``blob: bigint`` compiled to the SAME script,
+        byte for byte. On the real ``@bsv/sdk`` Spend engine with
+        ``blob = 0x2a`` only a 42-satoshi continuation validates, and blobs
+        wider than 8 bytes abort at ``OP_NUM2BIN``, making the UTXO unspendable.
+
+        Ported from the TypeScript reference, wording included. Deliberately the
+        FIRST argument only: TS also checks arity, the state-value types and the
+        ``scriptBytes`` argument, and none of those are this finding.
+
+        ``<unknown>`` is escaped exactly as TS escapes it -- a private helper's
+        declared return type is discarded at parse time in every tier, so
+        ``this.sats()`` infers as ``<unknown>`` and must keep compiling.
+        """
+        for i, arg in enumerate(args):
+            arg_type = self._infer_expr_type(arg, env)
+            if i == 0 and not is_bigint_family(arg_type) and arg_type != "<unknown>":
+                self._add_error(
+                    f"{name}() first argument (satoshis) must be bigint, "
+                    f"got '{arg_type}'"
+                )
+        return "void"
 
     def _check_call_args(
         self,

@@ -1114,6 +1114,39 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 	return "<unknown>"
 }
 
+// checkOutputIntrinsicArgs type-checks the arguments of the three output
+// intrinsics — this.addOutput / this.addRawOutput / this.addDataOutput — and
+// returns their result type.
+//
+// N-098: the first argument is the output's SATOSHI AMOUNT, and this tier used
+// to accept any type there. That is not a missing lint. lowerAddOutput prepends
+// the operand as `OP_8 OP_NUM2BIN`, so a ByteString in that slot is reinterpreted
+// as a script number with no conversion and becomes the amount the covenant
+// commits to: `blob: ByteString` and `blob: bigint` compiled to the SAME script,
+// byte for byte. On the real @bsv/sdk Spend engine with `blob = 0x2a` only a
+// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+// OP_NUM2BIN, making the UTXO unspendable.
+//
+// Ported from the TypeScript reference (checkCallExpr's addOutput /
+// addRawOutput / addDataOutput arms in
+// packages/runar-compiler/src/passes/03-typecheck.ts), wording included.
+// Deliberately the FIRST argument only: TS also checks arity, the state-value
+// types and the scriptBytes argument, and none of those are this finding.
+//
+// `<unknown>` is escaped exactly as TS escapes it — a private helper's declared
+// return type is discarded at parse time in every tier, so `this.sats()` infers
+// as `<unknown>` and must keep compiling.
+func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, env *typeEnv) string {
+	for i, arg := range args {
+		argType := tc.inferExprType(arg, env)
+		if i == 0 && !isBigintFamily(argType) && argType != "<unknown>" {
+			tc.addError(fmt.Sprintf(
+				"%s() first argument (satoshis) must be bigint, got '%s'", name, argType))
+		}
+	}
+	return "void"
+}
+
 func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 	// super() call
 	if id, ok := e.Callee.(Identifier); ok && id.Name == "super" {
@@ -1180,10 +1213,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			return "ByteString"
 		}
 		if pa.Property == "addOutput" || pa.Property == "addRawOutput" || pa.Property == "addDataOutput" {
-			for _, arg := range e.Args {
-				tc.inferExprType(arg, env)
-			}
-			return "void"
+			return tc.checkOutputIntrinsicArgs(pa.Property, e.Args, env)
 		}
 		if sig, ok := tc.methodSigs[pa.Property]; ok {
 			return tc.checkCallArgs(pa.Property, sig, e.Args, env)
@@ -1207,10 +1237,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 				return "ByteString"
 			}
 			if me.Property == "addOutput" || me.Property == "addRawOutput" || me.Property == "addDataOutput" {
-				for _, arg := range e.Args {
-					tc.inferExprType(arg, env)
-				}
-				return "void"
+				return tc.checkOutputIntrinsicArgs(me.Property, e.Args, env)
 			}
 			if sig, ok := tc.methodSigs[me.Property]; ok {
 				return tc.checkCallArgs(me.Property, sig, e.Args, env)

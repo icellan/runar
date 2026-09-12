@@ -964,6 +964,45 @@ const TypeChecker = struct {
     // Method call expression type checking (this.method() etc.)
     // ------------------------------------------------------------------
 
+    /// Type-check the arguments of the three output intrinsics --
+    /// `this.addOutput` / `this.addRawOutput` / `this.addDataOutput` -- and
+    /// return their result type.
+    ///
+    /// N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+    /// used to accept any type there. That is not a missing lint.
+    /// `lowerAddOutput` prepends the operand as `OP_8 OP_NUM2BIN`, so a
+    /// ByteString in that slot is reinterpreted as a script number with no
+    /// conversion and becomes the amount the covenant commits to:
+    /// `blob: ByteString` and `blob: bigint` compiled to the SAME script, byte
+    /// for byte. On the real @bsv/sdk Spend engine with `blob = 0x2a` only a
+    /// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+    /// OP_NUM2BIN, making the UTXO unspendable.
+    ///
+    /// Ported from the TypeScript reference, wording included. Deliberately the
+    /// FIRST argument only: TS also checks arity, the state-value types and the
+    /// scriptBytes argument, and none of those are this finding.
+    ///
+    /// `unknown` is escaped exactly as TS escapes `<unknown>` -- a private
+    /// helper's declared return type is discarded at parse time in every tier,
+    /// so `this.sats()` infers as `unknown` and must keep compiling.
+    fn checkOutputIntrinsicArgs(
+        self: *TypeChecker,
+        name: []const u8,
+        args: []const types.Expression,
+        env: *TypeEnv,
+    ) RunarType {
+        for (args, 0..) |arg, i| {
+            const arg_type = self.inferExprType(arg, env);
+            if (i == 0 and !isBigintFamily(arg_type) and arg_type != .unknown) {
+                self.addError(
+                    "{s}() first argument (satoshis) must be bigint, got '{s}'",
+                    .{ name, types.runarTypeToString(arg_type) },
+                );
+            }
+        }
+        return .void;
+    }
+
     fn checkMethodCallExpr(self: *TypeChecker, mc: *const types.MethodCall, env: *TypeEnv) RunarType {
         const is_this = std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self");
         const is_stateful_ctx = self.stateful_ctx_params.get(mc.object) != null;
@@ -974,22 +1013,19 @@ const TypeChecker = struct {
                 if (self.contract.parent_class != .stateful_smart_contract) {
                     self.addError("addOutput() is only available in StatefulSmartContract, not SmartContract", .{});
                 }
-                for (mc.args) |arg| _ = self.inferExprType(arg, env);
-                return .void;
+                return self.checkOutputIntrinsicArgs("addOutput", mc.args, env);
             }
             if (std.mem.eql(u8, mc.method, "addRawOutput")) {
                 if (self.contract.parent_class != .stateful_smart_contract) {
                     self.addError("addRawOutput() is only available in StatefulSmartContract, not SmartContract", .{});
                 }
-                for (mc.args) |arg| _ = self.inferExprType(arg, env);
-                return .void;
+                return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, env);
             }
             if (std.mem.eql(u8, mc.method, "addDataOutput")) {
                 if (self.contract.parent_class != .stateful_smart_contract) {
                     self.addError("addDataOutput() is only available in StatefulSmartContract, not SmartContract", .{});
                 }
-                for (mc.args) |arg| _ = self.inferExprType(arg, env);
-                return .void;
+                return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, env);
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {
                 return self.checkCallArgs(mc.method, method_sig, mc.args, env);

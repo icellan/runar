@@ -1042,6 +1042,38 @@ public final class Typecheck {
             return "<unknown>";
         }
 
+        /**
+         * Type-check the FIRST argument of an output intrinsic — the output's
+         * SATOSHI AMOUNT.
+         *
+         * <p>N-098: this tier used to accept any type there. That is not a
+         * missing lint. {@code lowerAddOutput} prepends the operand as
+         * {@code OP_8 OP_NUM2BIN}, so a ByteString in that slot is
+         * reinterpreted as a script number with no conversion and becomes the
+         * amount the covenant commits to: {@code blob: ByteString} and
+         * {@code blob: bigint} compiled to the SAME script, byte for byte. On
+         * the real {@code @bsv/sdk} Spend engine with {@code blob = 0x2a} only
+         * a 42-satoshi continuation validates, and blobs wider than 8 bytes
+         * abort at {@code OP_NUM2BIN}, making the UTXO unspendable.
+         *
+         * <p>Ported from the TypeScript reference, wording included.
+         * Deliberately the first argument only: TS also checks arity, the
+         * state-value types and the {@code scriptBytes} argument, and none of
+         * those are this finding.
+         *
+         * <p>{@code <unknown>} is escaped exactly as TS escapes it — a private
+         * helper's declared return type is discarded at parse time in every
+         * tier, so {@code this.sats()} infers as {@code <unknown>} and must
+         * keep compiling. This is the one escape R-092 did NOT delete, because
+         * the reference tier has it too.
+         */
+        private void checkSatoshisArg(String prop, Expression arg, Env env) {
+            String t = inferExpr(arg, env);
+            if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                error(prop + "() first argument (satoshis) must be bigint, got '" + t + "'");
+            }
+        }
+
         private String checkBuiltinThisCall(String prop, List<Expression> args, Env env) {
             if ("getStateScript".equals(prop)) {
                 return "ByteString";
@@ -1054,13 +1086,20 @@ public final class Typecheck {
                 // individually instead of triggering ArrayLiteralExpr's
                 // homogeneous-element rule (state values intentionally have
                 // heterogeneous types — owner: PubKey, balance: bigint, ...).
+                // The satoshis argument is args.get(0) in BOTH forms.
                 if ("addOutput".equals(prop)
                         && args.size() == 2
                         && args.get(1) instanceof ArrayLiteralExpr al) {
-                    inferExpr(args.get(0), env);
+                    checkSatoshisArg(prop, args.get(0), env);
                     for (Expression el : al.elements()) inferExpr(el, env);
                 } else {
-                    for (Expression a : args) inferExpr(a, env);
+                    for (int i = 0; i < args.size(); i++) {
+                        if (i == 0) {
+                            checkSatoshisArg(prop, args.get(0), env);
+                        } else {
+                            inferExpr(args.get(i), env);
+                        }
+                    }
                 }
                 return "void";
             }

@@ -66,6 +66,15 @@ class AnfLoaderTest {
         }
         """;
 
+    /**
+     * N-098: the satoshis argument used to read {@code this.addOutput(preimage,
+     * this.count)}. That is not valid Rúnar and never was — the TypeScript
+     * reference refuses it with "addOutput() first argument (satoshis) must be
+     * bigint, got 'SigHashPreimage'", and so do Go, Rust, Python, Zig and Ruby.
+     * It only compiled here because this tier had no check on that argument at
+     * all, which is the finding itself. Corrected to a literal amount, matching
+     * every checked-in Java example ({@code examples/java/.../RawOutputTest}).
+     */
     private static final String COUNTER_SRC = """
         package runar.examples.counter;
 
@@ -82,7 +91,7 @@ class AnfLoaderTest {
             @Public
             public void increment(SigHashPreimage preimage) {
                 this.count = this.count + 1;
-                this.addOutput(preimage, this.count);
+                this.addOutput(0L, this.count);
             }
         }
         """;
