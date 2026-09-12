@@ -228,19 +228,14 @@ class TestN094SighashIRWireFormat < Minitest::Test
   # moment the type gains a field the serializer does not handle.
   # -------------------------------------------------------------------------
 
-  # Fields this tier emits under a name the ANF JSON Schema does not list,
-  # deliberately left alone because the tiers already disagree and Ruby is on
-  # the side of the Go reference. Breaking the tie is a separate decision, not
-  # N-094's.
+  # Fields this tier emits under a name the ANF JSON Schema does not list.
   #
-  #   synthetic_array_chain — on ANFProperty. Go emits it as
-  #   `syntheticArrayChain`, Ruby as `synthetic_array_chain`, and Python and
-  #   Zig omit it entirely; `$defs.ANFProperty` is additionalProperties:false,
-  #   so both spellings fail validateANF. No conformance fixture exercises an
-  #   expanded FixedArray property, so the suite never sees the split.
-  #   Verified on examples/ts/fixed-array-nested/Grid2x2.v2.runar.ts and
-  #   examples/ts/tic-tac-toe/TicTacToe.v2.runar.ts.
-  SCHEMA_DIVERGENCES = %w[synthetic_array_chain].freeze
+  # EMPTY, and it must stay that way: an entry here is a field whose bytes no
+  # other tier can read. N-095 emptied it by settling `synthetic_array_chain`
+  # on the Go spelling (`syntheticArrayChain`) and declaring it in
+  # `$defs.ANFProperty`, so this guard -- not a comment -- is now what stops
+  # the spelling from splitting three ways again.
+  SCHEMA_DIVERGENCES = [].freeze
 
   # Wire keys the ANF JSON Schema accepts anywhere in the document.
   def schema_wire_keys

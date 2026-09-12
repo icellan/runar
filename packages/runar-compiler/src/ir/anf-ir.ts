@@ -16,11 +16,33 @@ export interface ANFProgram {
   methods: ANFMethod[];
 }
 
+/**
+ * One FixedArray nesting level on a synthetic scalar leaf. Outermost level
+ * first. `base` is the property name one level up (`grid`, then `grid__0`),
+ * `index` this leaf's position at that level, `length` that level's arity.
+ */
+export interface ANFSyntheticArrayLevel {
+  base: string;
+  index: number;
+  length: number;
+}
+
 export interface ANFProperty {
   name: string;
   type: string;
   readonly: boolean;
   initialValue?: string | bigint | boolean;
+  /**
+   * N-095: present only on a scalar leaf minted by the expand-fixed-arrays
+   * pass. The artifact assembler consumes one level per pass to regroup the
+   * synthetic siblings back into a single FixedArray state/ABI entry, so this
+   * is load-bearing wire data: an ANF that drops it still compiles to the same
+   * script bytes but degrades the SDK's `state.grid` accessor into N raw
+   * scalars. The TS frontend reads the chain off the AST
+   * (`PropertyNode.__syntheticArrayChain`) instead and has no ANF-input mode,
+   * so it is the one tier that need not emit it.
+   */
+  syntheticArrayChain?: ANFSyntheticArrayLevel[];
 }
 
 export interface ANFMethod {

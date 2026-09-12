@@ -265,9 +265,16 @@ def _sentinel(name: str, kind: str) -> object:
         return kind
     if name in {
         "then", "else_", "body", "args", "results", "state_values", "elements",
-        "params", "properties", "methods", "synthetic_array_chain",
+        "params", "properties", "methods",
     }:
         return []
+    # N-095: this one must be NON-empty. The emitter skips an empty chain (as
+    # Go's `omitempty` and Rust's `skip_serializing_if` do), so an `[]`
+    # sentinel would make the "field reaches the wire" half of this guard
+    # vacuous — exactly the blind spot that let three tiers spell the key three
+    # different ways.
+    if name == "synthetic_array_chain":
+        return [{"base": "grid", "index": 0, "length": 2}]
     if name in {"count", "start", "step", "in_arity", "out_arity", "sighash_flag",
                 "sighash_type", "line", "column"}:
         return 1

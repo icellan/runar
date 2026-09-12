@@ -422,7 +422,12 @@ module RunarCompiler
         name: d.fetch("name", ""),
         type: d.fetch("type", ""),
         readonly: d.fetch("readonly", false),
-        initial_value: d["initialValue"]
+        initial_value: d["initialValue"],
+        # N-095: this key is what the artifact assembler regroups expanded
+        # FixedArray leaves by. Dropping it here made Ruby unable to read back
+        # an ANF it had just written: same script bytes, but the SDK saw four
+        # raw +grid__i__j+ scalars instead of +state.grid+.
+        synthetic_array_chain: d["syntheticArrayChain"]
       )
     end
     private_class_method :_anf_property_from_hash

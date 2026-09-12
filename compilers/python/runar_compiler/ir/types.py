@@ -427,7 +427,11 @@ def _anf_property_from_dict(d: dict[str, Any]) -> ANFProperty:
         type=d.get("type", ""),
         readonly=d.get("readonly", False),
         initial_value=d.get("initialValue"),
-        synthetic_array_chain=list(d.get("__syntheticArrayChain", [])),
+        # N-095: the wire spelling is `syntheticArrayChain` (Go's, and the one
+        # `$defs.ANFProperty` declares). Reading only `__syntheticArrayChain`
+        # meant this loader could regroup Rust's ANF and nobody else's — not
+        # even its own.
+        synthetic_array_chain=list(d.get("syntheticArrayChain", [])),
     )
 
 

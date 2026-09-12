@@ -46,6 +46,7 @@ export type {
 export type {
   ANFProgram,
   ANFProperty,
+  ANFSyntheticArrayLevel,
   ANFMethod,
   ANFParam,
   ANFBinding,

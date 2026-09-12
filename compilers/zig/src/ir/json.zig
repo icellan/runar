@@ -181,12 +181,37 @@ fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]typ
             .number_string => |s| @as(?types.ConstValue, try constFromNumberString(allocator, s)),
             else => return ParseError.InvalidConstValue,
         } else null;
+        // N-095: recover the synthetic-array chain so an ANF produced by ANY
+        // tier still regroups into one FixedArray state field here. Dropping it
+        // was invisible in the script hex and only showed up as four raw
+        // `grid__i__j` entries where the SDK expects `state.grid`.
+        const chain: ?[]const types.SyntheticArrayLevel = if (prop_obj.get("syntheticArrayChain")) |raw| blk: {
+            const levels_json = switch (raw) {
+                .array => |a| a,
+                else => return ParseError.UnexpectedValueType,
+            };
+            const levels = try allocator.alloc(types.SyntheticArrayLevel, levels_json.items.len);
+            for (levels_json.items, 0..) |level_val, li| {
+                const level_obj = switch (level_val) {
+                    .object => |o| o,
+                    else => return ParseError.UnexpectedValueType,
+                };
+                levels[li] = .{
+                    .base = try allocator.dupe(u8, try getString(level_obj, "base")),
+                    .index = try getU32(level_obj, "index"),
+                    .length = try getU32(level_obj, "length"),
+                };
+            }
+            break :blk levels;
+        } else null;
+
         result[i] = .{
             .name = try allocator.dupe(u8, try getString(prop_obj, "name")),
             .type_name = try allocator.dupe(u8, type_str),
             .type_info = types.parseRunarType(type_str),
             .readonly = try getBool(prop_obj, "readonly"),
             .initial_value = initial_value,
+            .synthetic_array_chain = chain,
         };
     }
     return result;
@@ -653,6 +678,17 @@ fn getOptionalI32(obj: std.json.ObjectMap, key: []const u8) i32 {
     };
 }
 
+/// Read a required non-negative integer field. N-095 (`syntheticArrayChain`
+/// levels) is the only caller; `index` and `length` are `u32` in
+/// `types.SyntheticArrayLevel`.
+fn getU32(obj: std.json.ObjectMap, key: []const u8) !u32 {
+    const val = obj.get(key) orelse return ParseError.MissingField;
+    return switch (val) {
+        .integer => |i| if (i < 0) ParseError.UnexpectedValueType else @intCast(i),
+        else => ParseError.UnexpectedValueType,
+    };
+}
+
 fn getBool(obj: std.json.ObjectMap, key: []const u8) !bool {
     const val = obj.get(key) orelse return ParseError.MissingField;
     return switch (val) {
@@ -826,6 +862,40 @@ fn writePropertiesArray(writer: anytype, properties: []const types.ANFProperty, 
             try writer.writeAll("false");
         }
         try writer.writeAll(",\n");
+
+        // N-095: the synthetic-array chain is what `regroupStateFields` in
+        // codegen/emit.zig collapses the expanded FixedArray leaves by. It was
+        // threaded correctly through the AST and ANF but never written here, so
+        // `--emit-ir` dropped it and no `compile-ir` run -- this tier's own
+        // included -- could recover the regrouping. Omitted when null, matching
+        // Go's `omitempty` and Rust's `skip_serializing_if`, so a
+        // FixedArray-free contract's ANF bytes do not move.
+        if (prop.synthetic_array_chain) |chain| {
+            try writeIndent(writer, depth + 2);
+            try writeJsonString(writer, "syntheticArrayChain");
+            try writer.writeAll(": [\n");
+            for (chain, 0..) |level, li| {
+                try writeIndent(writer, depth + 3);
+                try writer.writeAll("{\n");
+                try writeIndent(writer, depth + 4);
+                try writeJsonString(writer, "base");
+                try writer.writeAll(": ");
+                try writeJsonString(writer, level.base);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, depth + 4);
+                try writeJsonString(writer, "index");
+                try writer.print(": {d},\n", .{level.index});
+                try writeIndent(writer, depth + 4);
+                try writeJsonString(writer, "length");
+                try writer.print(": {d}\n", .{level.length});
+                try writeIndent(writer, depth + 3);
+                try writer.writeByte('}');
+                if (li + 1 < chain.len) try writer.writeByte(',');
+                try writer.writeByte('\n');
+            }
+            try writeIndent(writer, depth + 2);
+            try writer.writeAll("],\n");
+        }
 
         try writeIndent(writer, depth + 2);
         try writeJsonString(writer, "type");

@@ -324,9 +324,6 @@ _FIELD_ALIASES = {
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
     "source_loc",  # debug-only, not part of conformance
-    # Python-only metadata used internally by expand_fixed_arrays.
-    # Other compilers don't emit this field in --emit-ir output.
-    "synthetic_array_chain",
     # In-memory carrier for the artifact's top-level parentClass field.
     # Excluded from --emit-ir so it never affects cross-tier ANF parity.
     "parent_class",
@@ -396,6 +393,13 @@ def _anf_to_camel_dict(obj: object) -> object:
             if f.name == "is_auto_injected_state_check":
                 if not v or kind_val != "assert":
                     continue
+            # N-095: the synthetic-array chain rides on every ANFProperty but
+            # is non-empty only on a leaf minted by expand-fixed-arrays. Skip
+            # the empty case, as Go (`omitempty`) and Rust
+            # (`skip_serializing_if`) do, so the ANF of a FixedArray-free
+            # contract keeps the bytes the goldens were stamped with.
+            if f.name == "synthetic_array_chain" and not v:
+                continue
             key = _snake_key(f.name)
             d[key] = _anf_to_camel_dict(v)
         return d

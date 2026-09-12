@@ -90,7 +90,33 @@ public final class AnfLoader {
         ConstValue initial = null;
         Object iv = obj.get("initialValue");
         if (iv != null) initial = toConst(iv);
-        return new AnfProperty(name, type, readonly, initial);
+        return new AnfProperty(name, type, readonly, initial, toSyntheticChain(obj.get("syntheticArrayChain")));
+    }
+
+    /**
+     * N-095: recover the expand-fixed-arrays chain. Absent (the normal case)
+     * yields null, which {@code Jcs} omits again on re-emit, so
+     * {@code --emit-ir → --ir → --emit-ir} is a fixed point.
+     */
+    private static List<AnfProperty.SyntheticArrayLevel> toSyntheticChain(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof List<?> lst)) {
+            throw new RuntimeException("syntheticArrayChain is not an array");
+        }
+        List<AnfProperty.SyntheticArrayLevel> out = new ArrayList<>(lst.size());
+        for (Object o : lst) {
+            Map<?, ?> level = asObject(o);
+            out.add(new AnfProperty.SyntheticArrayLevel(
+                asString(level.get("base")),
+                asInt(level.get("index"), "syntheticArrayChain.index"),
+                asInt(level.get("length"), "syntheticArrayChain.length")));
+        }
+        return out;
+    }
+
+    private static int asInt(Object v, String what) {
+        if (v instanceof Number n) return n.intValue();
+        throw new RuntimeException(what + " is not a number");
     }
 
     private static AnfMethod toMethod(Map<?, ?> obj) {

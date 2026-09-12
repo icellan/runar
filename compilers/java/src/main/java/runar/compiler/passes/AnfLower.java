@@ -234,9 +234,27 @@ public final class AnfLower {
             ConstValue init = p.initializer() != null && !ctorAssigned.contains(p.name())
                 ? extractLiteralValue(p.initializer())
                 : null;
-            AnfProperty prop = new AnfProperty(p.name(), typeToString(p.type()), p.readonly(), init);
+            AnfProperty prop = new AnfProperty(
+                p.name(), typeToString(p.type()), p.readonly(), init, syntheticChain(p));
             if (init != null) checkStateBigintMagnitude(prop);
             out.add(prop);
+        }
+        return out;
+    }
+
+    /**
+     * N-095: carry the expand-fixed-arrays chain from the AST onto the ANF
+     * property, so {@code --emit-ir} publishes it and every other tier can
+     * regroup the expanded leaves back into one {@code FixedArray} entry.
+     * Null for a property the pass did not mint, which keeps the field off the
+     * wire for every FixedArray-free contract.
+     */
+    private static List<AnfProperty.SyntheticArrayLevel> syntheticChain(PropertyNode p) {
+        List<PropertyNode.SyntheticArrayChainEntry> chain = p.syntheticArrayChain();
+        if (chain == null || chain.isEmpty()) return null;
+        List<AnfProperty.SyntheticArrayLevel> out = new ArrayList<>(chain.size());
+        for (PropertyNode.SyntheticArrayChainEntry e : chain) {
+            out.add(new AnfProperty.SyntheticArrayLevel(e.base(), e.index(), e.length()));
         }
         return out;
     }

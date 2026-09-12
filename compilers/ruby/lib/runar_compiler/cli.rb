@@ -22,14 +22,14 @@ module RunarCompiler
     # Wire names that are NOT the mechanical camelCase of the Ruby field name.
     # Historical Go/TS IR-JSON spellings, frozen by the cross-tier goldens and
     # by the +$defs+ in packages/runar-ir-schema/src/schemas/anf-ir.schema.json.
-    # +synthetic_array_chain+ is pinned here to keep this change byte-neutral,
-    # NOT because snake is the settled spelling: Go emits "syntheticArrayChain"
-    # on ANFProperty, Ruby has always emitted "synthetic_array_chain", and
-    # Python and Zig omit the field entirely. No conformance fixture exercises
-    # an expanded FixedArray property, so the suite has never seen the split.
-    # Picking a winner is a cross-tier decision, not part of N-094.
+    # N-095 settled the +synthetic_array_chain+ tie N-094 left open: the wire
+    # spelling is Go's +syntheticArrayChain+, i.e. the mechanical camelCase
+    # transform, so it is deliberately NOT listed here. The three names below
+    # all live on BinOp / UnaryOp / RawScript; +ANFProperty+'s only other
+    # optional field is +initialValue+, and the regrouped artifact field is
+    # already +fixedArray.syntheticNames+.
     SNAKE_WIRE_FIELDS = Set.new(
-      %w[result_type in_arity out_arity synthetic_array_chain],
+      %w[result_type in_arity out_arity],
     ).freeze
 
     # Fields whose wire name is a rename rather than a spelling transform.

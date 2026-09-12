@@ -62,6 +62,7 @@ test {
     _ = @import("tests/n086_expansion_field_preservation.zig");
     _ = @import("tests/n086_cross_tier_sighash_fixed_array.zig");
     _ = @import("tests/n092_fixed_array_ctor_param.zig");
+    _ = @import("tests/n095_synthetic_array_chain.zig");
     _ = @import("tests/n097_fixed_array_element_read.zig");
     _ = @import("tests/n100_empty_else_arm.zig");
     _ = @import("tests/branch_lift_then_arm.zig");

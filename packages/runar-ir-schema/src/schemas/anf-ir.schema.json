@@ -35,7 +35,23 @@
             { "type": "integer" },
             { "type": "boolean" }
           ]
+        },
+        "syntheticArrayChain": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Present only on a scalar leaf minted by the expand-fixed-arrays pass. One entry per FixedArray nesting level, outermost first. The artifact assembler consumes one level per pass to regroup the synthetic siblings back into a single FixedArray state/ABI entry, so dropping this field silently degrades the SDK's accessor into N raw scalars.",
+          "items": { "$ref": "#/$defs/ANFSyntheticArrayLevel" }
         }
+      }
+    },
+    "ANFSyntheticArrayLevel": {
+      "type": "object",
+      "required": ["base", "index", "length"],
+      "additionalProperties": false,
+      "properties": {
+        "base": { "type": "string", "minLength": 1 },
+        "index": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 1 }
       }
     },
     "ANFMethod": {
