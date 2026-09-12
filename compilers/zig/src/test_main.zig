@@ -70,6 +70,7 @@ test {
     _ = @import("tests/n099_ternary_branch_types.zig");
     _ = @import("tests/n100_empty_else_arm.zig");
     _ = @import("tests/n109_unknown_property_type.zig");
+    _ = @import("tests/n114_read_dispatch_property_target.zig");
     _ = @import("tests/branch_lift_then_arm.zig");
     _ = @import("tests/readonly_property_assignment.zig");
     _ = @import("tests/property_initializer_literal.zig");

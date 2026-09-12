@@ -476,7 +476,27 @@ const Ctx = struct {
             return;
         }
 
-        // Case 3: plain property or local assignment. Rewrite RHS and keep.
+        // Case 3: the whole RHS is a runtime-index element read — take the
+        // STATEMENT form, as the other six tiers do. Go's `rewriteAssignmentStmt`
+        // runs this for both an `Identifier` and a `PropertyAccessExpr` target
+        // (`compilers/go/frontend/expand_fixed_arrays.go`); this tier ran it for
+        // neither, because `rewriteAssign` never called the helper at all — only
+        // the `const` / `let` declaration arms did. So `v = this.cells[i]` and
+        // `this.out = this.cells[i]` both fell through to `rewriteExpression`'s
+        // ternary and came out 8 bytes short of every peer (N-114).
+        //
+        // `Assign.target` is a bare name for both shapes; `target_is_property`
+        // is the only thing that distinguishes `this.out = ..` from a local
+        // `out = ..`, so it is what selects the target expression here.
+        const read_target: Expression = if (a.target_is_property)
+            .{ .property_access = .{ .object = "this", .property = a.target } }
+        else
+            .{ .identifier = a.target };
+        if (try self.tryRewriteReadAsStatements(out, a.value, read_target, false, null)) {
+            return;
+        }
+
+        // Case 4: plain property or local assignment. Rewrite RHS and keep.
         var prelude: std.ArrayListUnmanaged(Statement) = .empty;
         const new_val = try self.rewriteExpression(&prelude, a.value);
         try out.appendSlice(self.allocator, prelude.items);
@@ -754,9 +774,20 @@ const Ctx = struct {
                 }
             },
             .property_access => {
-                // property-target statement-form is not representable as a
-                // Zig Assign (which is name-only). Fall back to expression form.
-                return false;
+                // N-114: this arm used to `return false` on the claim that a
+                // property target "is not representable as a Zig Assign (which
+                // is name-only)". That was stale. `types.Assign` carries
+                // `target_is_property`, and `makeTargetAssign` — the helper
+                // twelve lines below, already used for every dispatch-arm
+                // assignment in this same function — builds exactly that
+                // shape. Bailing out sent `this.out = this.cells[i]` down the
+                // ternary while every peer tier took the statement form, and
+                // the resulting script was 8 bytes shorter than all six.
+                //
+                // `is_decl` is unreachable here: a declaration's target is
+                // always an identifier (see the two `.const_decl` / `.let_decl`
+                // call sites), so there is no `let this.x = ...` shape to build.
+                try out.append(self.allocator, try self.makeTargetAssign(target, fallback));
             },
             else => return false,
         }
