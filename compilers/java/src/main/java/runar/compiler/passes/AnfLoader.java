@@ -173,6 +173,36 @@ public final class AnfLoader {
         return b.intValue();
     }
 
+    /**
+     * N-115 — the unroll ceiling, at the external-input trust boundary.
+     *
+     * <p>{@link Loop#MAX_LOOP_COUNT} (10000) has existed in this tier all
+     * along, but the only thing that read it was {@code AnfLower} — so it
+     * bounded a loop written in SOURCE and not one arriving as IR.
+     * {@code asInt} keeps the count inside 32-bit signed range (R-086), which
+     * is a different and much weaker claim: 10001 is a perfectly good
+     * {@code int}. This tier accepted it and emitted a 199734-hexchar (~97 KB)
+     * locking script.
+     *
+     * <p>Cross-tier hex parity could not have caught it. Rust, Zig and Java all
+     * accepted the same over-cap IR and all three emitted the SAME bytes
+     * (sha256 {@code e2c1be39...}); only Go, Python and Ruby refused. Three
+     * agreeing tiers look exactly like three correct ones to a comparison that
+     * only diffs output.
+     *
+     * <p>The sentence is Go's, word for word ({@code compilers/go/ir/loader.go}),
+     * minus the method / binding names this loader does not have in scope here.
+     */
+    private static int loopCount(Object v) {
+        int count = asInt(v, "loop count");
+        if (count > Loop.MAX_LOOP_COUNT) {
+            throw new RuntimeException(
+                "has loop count " + count + " exceeding maximum " + Loop.MAX_LOOP_COUNT
+            );
+        }
+        return count;
+    }
+
     private static AnfMethod toMethod(Map<?, ?> obj) {
         String name = asString(obj.get("name"));
         boolean isPublic = Boolean.TRUE.equals(obj.get("isPublic"));
@@ -240,7 +270,7 @@ public final class AnfLoader {
                 obj.containsKey("results") ? toStringList(obj.get("results")) : null
             );
             case "loop" -> new Loop(
-                asInt(obj.get("count"), "loop count"),
+                loopCount(obj.get("count")),
                 toBindingList(obj.get("body")),
                 asString(obj.get("iterVar")),
                 // Iterator start / step (issue #121). Older payloads without

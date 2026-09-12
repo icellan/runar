@@ -127,9 +127,33 @@ class R086IrIntegerRangeTest {
         assertEquals(Integer.MIN_VALUE,
             ((CheckPreimage) p.methods().get(0).body().get(0).value()).sighashFlag());
 
-        Loop loop = (Loop) AnfLoader.parse(LOOP_IR.formatted("2147483647", "1"))
+        AnfProgram q = parseShell(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"check_preimage\",\"preimage\":\"p\","
+                + "\"sighashFlag\":2147483647}}");
+        assertEquals(Integer.MAX_VALUE,
+            ((CheckPreimage) q.methods().get(0).body().get(0).value()).sighashFlag());
+    }
+
+    /**
+     * N-115 moved this boundary. R-086's control originally asserted that a
+     * {@code loop.count} of {@code Integer.MAX_VALUE} decodes, on the reasoning
+     * that the int boundaries must not be swept up by {@code asInt}'s range
+     * check. That reasoning holds for every OTHER int field — {@code
+     * sighashFlag} above still carries it — but not for {@code loop.count}:
+     * that field has a semantic bound far below the machine one, and 2147483647
+     * is 214748 times the largest unroll any emitter can honour.
+     *
+     * <p>So the claim R-086 was making about {@code loop.count} is now made at
+     * that field's real ceiling. Both halves of R-086 survive intact: a count
+     * above int range is still refused by the range guard
+     * ({@link #rejectsLoopCountAboveIntRange}), and a count at MAX_LOOP_COUNT
+     * still decodes without being swept up by anything.
+     */
+    @Test
+    void controlLoopCountAtItsOwnCeilingStillDecodes() {
+        Loop loop = (Loop) AnfLoader.parse(LOOP_IR.formatted("10000", "1"))
             .methods().get(0).body().get(2).value();
-        assertEquals(Integer.MAX_VALUE, loop.count());
+        assertEquals(Loop.MAX_LOOP_COUNT, loop.count());
     }
 
     // ------------------------------------------------------------------

@@ -235,7 +235,35 @@ fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), S
                 validate_bindings(then, method_name)?;
                 validate_bindings(else_branch, method_name)?;
             }
-            ANFValue::Loop { body, .. } => {
+            ANFValue::Loop { count, body, .. } => {
+                // N-115: the unroll ceiling, at the external-input trust
+                // boundary.
+                //
+                // MAX_LOOP_COUNT is declared in THIS module and, until now, was
+                // read only by frontend/anf_lower.rs — so it bounded loops
+                // written in source and not one loop arriving as IR, in the
+                // module that owns the constant. `count` is a `usize`, so a
+                // ten-thousand-fold unroll is a perfectly well-typed value and
+                // nothing downstream objects: the Rust tier accepted
+                // count=10001 and emitted a 199734-hexchar (~97 KB) script.
+                //
+                // Cross-tier hex parity could not have caught this. Rust, Zig
+                // and Java all accepted the same over-cap IR and all three
+                // emitted the SAME bytes (sha256 e2c1be39...), so every parity
+                // comparison among them passed; only Go, Python and Ruby
+                // refused. The diagnostic below is Go's, word for word
+                // (compilers/go/ir/loader.go), because the cheapest way to keep
+                // six loaders answering alike is to say the same sentence.
+                //
+                // Negative counts need no check here: `usize` rules them out at
+                // the type level, which is why Go's companion "negative loop
+                // count" guard has no analogue in this arm.
+                if *count > MAX_LOOP_COUNT as usize {
+                    return Err(format!(
+                        "IR validation: method {} binding {} has loop count {} exceeding maximum {}",
+                        method_name, binding.name, count, MAX_LOOP_COUNT
+                    ));
+                }
                 validate_bindings(body, method_name)?;
             }
             ANFValue::RawScript {
@@ -695,6 +723,72 @@ mod tests {
         let loaded = load_ir_from_str(&json).expect("round-trip load should succeed");
 
         assert_eq!(loaded.properties[0].initial_value, Some(serde_json::json!(100)));
+    }
+
+    /// N-115 — the unroll ceiling on the `--ir` path.
+    ///
+    /// `MAX_LOOP_COUNT` is declared in this module but, before the fix, was
+    /// read only by `frontend/anf_lower.rs` — the SOURCE path. A loop arriving
+    /// as IR was bounded by nothing: `count` is a `usize`, so 10001 is a
+    /// perfectly well-typed value, and this tier emitted a 199734-hexchar
+    /// (~97 KB) script for it.
+    ///
+    /// Measured against the checked-in `bounded-loop` golden: Go, Python and
+    /// Ruby rejected count=10001; Rust, Zig and Java accepted it and all three
+    /// emitted the SAME bytes, which is exactly why cross-tier hex parity was
+    /// blind to it. `conformance/negatives/ir/I07-loop-count-over-max.ir.json`
+    /// is that golden with this one field changed.
+    ///
+    /// The control is deliberate: a probe whose control also fails proves
+    /// nothing, so the at-the-limit case must be observed LOADING before the
+    /// over-the-limit case's refusal means anything.
+    fn loop_count_program(count: usize) -> String {
+        let program = ANFProgram {
+            contract_name: "Bounded".to_string(),
+            parent_class: String::new(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "unlock".to_string(),
+                params: vec![],
+                body: vec![ANFBinding {
+                    name: "_loop".to_string(),
+                    value: ANFValue::Loop {
+                        count,
+                        body: vec![ANFBinding {
+                            name: "_lb".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::json!(0),
+                            },
+                            source_loc: None,
+                        }],
+                        iter_var: "i".to_string(),
+                        start: serde_json::json!(0),
+                        step: 1,
+                    },
+                    source_loc: None,
+                }],
+                is_public: true,
+                sighash_type: None,
+            }],
+        };
+        serde_json::to_string(&program).expect("serialization should succeed")
+    }
+
+    #[test]
+    fn control_loop_count_at_the_limit_still_loads() {
+        let loaded = load_ir_from_str(&loop_count_program(MAX_LOOP_COUNT as usize))
+            .expect("a loop count exactly at MAX_LOOP_COUNT is legal and must still load");
+        assert_eq!(loaded.contract_name, "Bounded");
+    }
+
+    #[test]
+    fn rejects_loop_count_over_max() {
+        let err = load_ir_from_str(&loop_count_program(MAX_LOOP_COUNT as usize + 1))
+            .expect_err("a loop count above MAX_LOOP_COUNT must be refused on the --ir path");
+        assert!(
+            err.contains("loop count 10001 exceeding maximum 10000"),
+            "diagnostic must name the count and the limit, as Go's does: {err}"
+        );
     }
 
     #[test]

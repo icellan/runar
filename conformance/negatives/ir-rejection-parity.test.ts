@@ -75,11 +75,12 @@ import {
  * `--ir` mode is broken, missing, or mis-driven fails that test first, so a
  * lane that rejects everything cannot post a perfect score.
  *
- * The control is not a hand-written approximation of valid IR — it is the
- * checked-in golden `conformance/tests/asm-raw-script/expected-ir.json`, used
- * in place, and every negative fixture here is that same file with ONE field
- * changed. A probe whose control also fails proves nothing; deriving both from
- * the same golden is what keeps them honest.
+ * The controls are not hand-written approximations of valid IR — they are
+ * checked-in goldens (`asm-raw-script`, and `bounded-loop` for the fixtures
+ * that need a `loop` binding), used in place, and every negative fixture here
+ * is one of those files with ONE field changed. A probe whose control also
+ * fails proves nothing; deriving the probe and its control from the same
+ * golden is what keeps them honest.
  */
 
 const DIR = join(__dirname, 'ir');
@@ -92,6 +93,30 @@ const DIR = join(__dirname, 'ir');
  * about — with a well-formed body.
  */
 const POSITIVE_CONTROL = join(REPO, 'conformance/tests/asm-raw-script/expected-ir.json');
+
+/**
+ * The second control, for the fixtures that cannot be derived from the first.
+ *
+ * N-115 is about a `loop` binding's `count`, and `asm-raw-script` contains no
+ * loop — so `I07` is "the checked-in golden with ONE field changed" against
+ * `bounded-loop` instead. The rule that makes these fixtures mean anything is
+ * that their control is a real golden every tier accepts, not which golden it
+ * is, so a fixture derived from a second golden needs that second golden
+ * observed being accepted. `bounded-loop` qualifies on the same terms as
+ * `asm-raw-script`: it is checked in, it carries no `compilers` allowlist, and
+ * all six IR tiers emit identical bytes for it
+ * (000052797b7c937c935152...547b7b7c937c93009c).
+ *
+ * Without this row, N-115's negative would have been graded against a control
+ * that never exercised the code path it probes.
+ */
+const LOOP_POSITIVE_CONTROL = join(REPO, 'conformance/tests/bounded-loop/expected-ir.json');
+
+/** Every golden a fixture in this lane is derived from. */
+const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
+  ['asm-raw-script', POSITIVE_CONTROL],
+  ['bounded-loop', LOOP_POSITIVE_CONTROL],
+];
 
 const fixtures = readdirSync(DIR)
   .filter((f) => /^I\d{2}-.*\.ir\.json$/.test(f))
@@ -107,9 +132,11 @@ describe('cross-tier rejection parity (--ir path)', () => {
     expect([...TIERS.map((t) => t.id)].sort()).toEqual([...IR_TIER_IDS].sort());
   });
 
-  it('the corpus is non-empty and the control is the checked-in golden', () => {
+  it('the corpus is non-empty and every control is a checked-in golden', () => {
     expect(fixtures.length).toBeGreaterThanOrEqual(4);
-    expect(existsSync(POSITIVE_CONTROL)).toBe(true);
+    for (const [name, path] of POSITIVE_CONTROLS) {
+      expect(existsSync(path), `${name} golden is missing`).toBe(true);
+    }
   });
 
   it('the missing-tier predicate actually detects a missing tier', () => {
@@ -142,14 +169,16 @@ describe('cross-tier rejection parity (--ir path)', () => {
   // mis-driven CLI refuses everything it is handed.
 
   for (const tier of available) {
-    it(`${tier.id} ACCEPTS the positive control IR (else its rejections are vacuous)`, () => {
-      expect(
-        verdict(tier, POSITIVE_CONTROL),
-        `${tier.id} did not accept valid IR its own peers emit. Every ` +
-          `"rejects" row for this tier below is therefore meaningless — the ` +
-          `tier's --ir mode is either mis-invoked or broken.`,
-      ).toBe('accepted');
-    });
+    for (const [name, path] of POSITIVE_CONTROLS) {
+      it(`${tier.id} ACCEPTS the ${name} control IR (else its rejections are vacuous)`, () => {
+        expect(
+          verdict(tier, path),
+          `${tier.id} did not accept valid IR its own peers emit. Every ` +
+            `"rejects" row for this tier below is therefore meaningless — the ` +
+            `tier's --ir mode is either mis-invoked or broken.`,
+        ).toBe('accepted');
+      });
+    }
   }
 
   // -- the gate itself ------------------------------------------------------

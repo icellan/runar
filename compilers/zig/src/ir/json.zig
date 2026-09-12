@@ -26,6 +26,12 @@ const ParseError = error{
     // N-113 / R-081: no public method => no spending entry point => an empty,
     // anyone-can-spend locking script.
     NoPublicMethods,
+    // N-115: a `loop` count above types.MAX_LOOP_COUNT. Distinct from
+    // UnexpectedValueType because the value's TYPE is fine — an integer count
+    // is exactly what the field takes; it is the MAGNITUDE that no emitter can
+    // honour. Zig's IR loader carries no message payload, so the error name is
+    // the whole diagnostic and has to say which rule fired.
+    LoopCountExceedsMaximum,
 };
 
 const max_parse_depth: u32 = 256;
@@ -601,11 +607,37 @@ fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) Bi
 
 fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
     const count_val = obj.get("count") orelse return ParseError.MissingField;
-    const count: u32 = switch (count_val) {
-        .integer => |i| @intCast(i),
+
+    // N-115: the unroll ceiling, checked BEFORE the narrowing cast.
+    //
+    // Two defects share this line and one guard closes both.
+    //
+    // 1. The ceiling itself. types.MAX_LOOP_COUNT (10000) existed and was
+    //    applied on the SOURCE path only; nothing bounded a count arriving as
+    //    IR. This tier accepted count=10001 and emitted a 199734-hexchar
+    //    (~97 KB) script. Rust and Java accepted the same input and emitted the
+    //    SAME bytes (sha256 e2c1be39...), which is why cross-tier hex parity
+    //    never saw it — the three offenders agreed with each other.
+    //
+    // 2. The cast. `@intCast` to `u32` is a safety-checked PANIC in
+    //    Debug/ReleaseSafe and undefined behaviour in ReleaseFast — the exact
+    //    failure the doc comment on types.MAX_LOOP_COUNT predicts. Measured on
+    //    count=2^33 before this guard: `thread N panic: integer does not fit in
+    //    destination type`. A panic is not a rejection: the process dies on a
+    //    signal, so it renders no verdict at all and any caller reading only
+    //    the exit status learns nothing.
+    //
+    // Comparing the raw i64 first is what makes the cast total: everything that
+    // reaches @intCast is now in [0, 10000].
+    const raw_count: i64 = switch (count_val) {
+        .integer => |i| i,
         .float => |f| @intFromFloat(f),
         else => return ParseError.UnexpectedValueType,
     };
+    if (raw_count > types.MAX_LOOP_COUNT or raw_count < 0) {
+        return ParseError.LoopCountExceedsMaximum;
+    }
+    const count: u32 = @intCast(raw_count);
     const iter_var = try getString(obj, "iterVar");
     const body_val = obj.get("body") orelse return ParseError.MissingField;
     const body_bindings = try parseBindings(allocator, body_val.array, depth + 1);
