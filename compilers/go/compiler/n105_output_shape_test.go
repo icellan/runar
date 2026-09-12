@@ -32,10 +32,11 @@ package compiler
 // packages/runar-compiler/src/passes/03-typecheck.ts), wording included.
 //
 // The ACCEPT block is where the risk is. In particular a ByteString-typed value
-// in a PubKey-typed state slot must stay ACCEPTED: TS's isSubtype treats the
-// ByteString family as bidirectionally compatible, and this tier's general
-// isSubtype does not, so the state-value check uses TS's rule rather than this
-// tier's. See outputStateValueMatches.
+// in a PubKey-typed state slot must stay ACCEPTED: isSubtype treats the
+// ByteString family as bidirectionally compatible. N-104: it did not always —
+// this tier carried a private outputStateValueMatches so the state-value check
+// alone got the reference tier's rule while every other check got a narrower
+// one. isSubtype is the reference's now, and the helper is gone.
 
 import (
 	"testing"

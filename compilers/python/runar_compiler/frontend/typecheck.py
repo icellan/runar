@@ -247,7 +247,29 @@ _BIGINT_SUBTYPES: frozenset[str] = frozenset({
 
 
 def is_subtype(actual: str, expected: str) -> bool:
-    """Return True if *actual* is a subtype of *expected*."""
+    """Return True if a value of type *actual* may be used where *expected* is
+    required.
+
+    The port of ``isSubtype`` in
+    ``packages/runar-compiler/src/passes/03-typecheck.ts``; it must stay
+    clause-for-clause identical to it.
+
+    N-104: this tier used to carry only the ``subtype -> base`` direction of
+    each family, so assignment inside a family worked one way and not the
+    other -- ``const b: ByteString = pkh`` compiled and ``const h: Sha256 =
+    pkh`` did not, while the reference tier accepted both. Measured as a full
+    bidirectional matrix over every ordered pair of family members in all seven
+    tiers, 85 of 196 cells disagreed. The asymmetry was already known to be
+    wrong at the callsites that tripped over it -- this module used to carry a
+    private ``_output_state_value_matches`` that re-added the missing clauses
+    just for ``addOutput``'s state values, and four tiers had independently
+    grown the same patch. The general predicate carries them now, and the
+    patches are gone.
+
+    Cross-family moves (a ByteString into a bigint slot or the reverse) are
+    still refused, in every tier; that is what ``conformance/negatives``
+    N02/N16/N17/N19/N21 pin.
+    """
     if actual == expected:
         return True
     # <inferred> and <unknown> are compatible with anything
@@ -255,39 +277,23 @@ def is_subtype(actual: str, expected: str) -> bool:
         return True
     if expected in ("<inferred>", "<unknown>"):
         return True
+    # ByteString subtypes. BIDIRECTIONAL, and both-in-family -- an Addr value
+    # satisfies a Ripemd160 slot and vice versa.
     if expected == "ByteString" and actual in _BYTESTRING_SUBTYPES:
         return True
-    if expected == "bigint" and actual in _BIGINT_SUBTYPES:
-        return True
-    if expected.endswith("[]") and actual.endswith("[]"):
-        return is_subtype(actual[:-2], expected[:-2])
-    return False
-
-
-def _output_state_value_matches(actual: str, expected: str) -> bool:
-    """The subtype rule TS applies to addOutput's STATE VALUES:
-    ``packages/runar-compiler/src/passes/03-typecheck.ts``'s ``isSubtype``.
-
-    It is deliberately not this module's :func:`is_subtype`. TS's version treats
-    the ByteString and bigint families as BIDIRECTIONALLY compatible (a
-    ByteString value satisfies a PubKey slot, an Addr value satisfies a
-    Ripemd160 slot); this tier's only widens TOWARDS ByteString / bigint.
-    Measured before this check existed, ``addOutput(1000n, this.count, b)`` with
-    ``b: ByteString`` and ``owner: PubKey`` compiled identically in all seven
-    tiers, so using the narrower predicate here would have REJECTED working code
-    that the reference tier accepts.
-
-    That asymmetry between this tier's ``is_subtype`` and the reference's is
-    pre-existing, reaches every other argument and assignment check, and is not
-    touched here -- it is flagged, not fixed, because widening it would change
-    diagnostics far outside the output intrinsics.
-    """
-    if is_subtype(actual, expected):
+    if actual == "ByteString" and expected in _BYTESTRING_SUBTYPES:
         return True
     if actual in _BYTESTRING_SUBTYPES and expected in _BYTESTRING_SUBTYPES:
         return True
+    # bigint subtypes -- same shape.
+    if expected == "bigint" and actual in _BIGINT_SUBTYPES:
+        return True
+    if actual == "bigint" and expected in _BIGINT_SUBTYPES:
+        return True
     if actual in _BIGINT_SUBTYPES and expected in _BIGINT_SUBTYPES:
         return True
+    if expected.endswith("[]") and actual.endswith("[]"):
+        return is_subtype(actual[:-2], expected[:-2])
     return False
 
 
@@ -692,11 +698,14 @@ class _TypeChecker:
             return "boolean"
 
         if e.op in ("===", "!=="):
-            compatible = (
-                is_subtype(left_type, right_type)
-                or is_subtype(right_type, left_type)
-                or (left_type in _BYTESTRING_SUBTYPES and right_type in _BYTESTRING_SUBTYPES)
-                or (left_type in _BIGINT_SUBTYPES and right_type in _BIGINT_SUBTYPES)
+            # Exactly the reference tier's rule: each side is tried as a
+            # subtype of the other, and nothing else. The both-in-family
+            # clauses that used to sit here were this tier's local patch for an
+            # is_subtype that lacked them (N-104); is_subtype carries them now,
+            # so repeating them here would be a second copy of the lattice to
+            # drift out of sync.
+            compatible = is_subtype(left_type, right_type) or is_subtype(
+                right_type, left_type
             )
             if not compatible:
                 if left_type != "<unknown>" and right_type != "<unknown>":
@@ -986,10 +995,7 @@ class _TypeChecker:
                 while i < len(mutable_props) and i + 1 < len(normalized):
                     arg_type = self._infer_expr_type(normalized[i + 1], env)
                     prop_type = _type_node_to_string(mutable_props[i].type)
-                    if (
-                        not _output_state_value_matches(arg_type, prop_type)
-                        and arg_type != "<unknown>"
-                    ):
+                    if not is_subtype(arg_type, prop_type) and arg_type != "<unknown>":
                         self._add_error(
                             f"addOutput() argument {i + 2} ({mutable_props[i].name}) "
                             f"must be '{prop_type}', got '{arg_type}'"

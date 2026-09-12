@@ -174,12 +174,13 @@ class N105OutputShapeTest {
         + "  }\n");
 
     /**
-     * A ByteString value in a PubKey state slot. TS's {@code isSubtype} treats
-     * the ByteString family as bidirectionally compatible, so TS ACCEPTS this
-     * and every tier must keep accepting it — measured before this change, all
-     * seven tiers compiled it to the same script. This tier's own
-     * {@code isSubtype} does NOT, which is why the state-value check goes
-     * through {@code outputStateValueMatches} instead.
+     * A ByteString value in a PubKey state slot. {@code isSubtype} treats the
+     * ByteString family as bidirectionally compatible, so TS ACCEPTS this and
+     * every tier must keep accepting it — measured before this change, all
+     * seven tiers compiled it to the same script. N-104: this tier's own
+     * {@code isSubtype} did not always agree, which is why the state-value
+     * check used to go through a private {@code outputStateValueMatches}. The
+     * general predicate is the reference's now, and the helper is gone.
      */
     private static final String SHAPE_FAMILY_WIDENING = stateful(
         "  public m(n: bigint, b: ByteString) {\n"

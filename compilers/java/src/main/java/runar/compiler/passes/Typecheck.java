@@ -138,12 +138,44 @@ public final class Typecheck {
         "checkPreimage", new int[]{0}
     );
 
+    /**
+     * Whether a value of type {@code actual} may be used where {@code expected}
+     * is required. The port of {@code isSubtype} in
+     * {@code packages/runar-compiler/src/passes/03-typecheck.ts}; it must stay
+     * clause-for-clause identical to it.
+     *
+     * <p>N-104: this tier used to carry only the {@code subtype -> base}
+     * direction of each family, so assignment inside a family worked one way
+     * and not the other — {@code const b: ByteString = pkh} compiled and
+     * {@code const h: Sha256 = pkh} did not, while the reference tier accepted
+     * both. Measured as a full bidirectional matrix over every ordered pair of
+     * family members in all seven tiers, 85 of 196 cells disagreed. The
+     * asymmetry was already known to be wrong at the callsites that tripped
+     * over it — this class used to carry a private
+     * {@code outputStateValueMatches} that re-added the missing clauses just
+     * for {@code addOutput}'s state values, and four tiers had independently
+     * grown the same patch. The general predicate carries them now, and the
+     * patches are gone.
+     *
+     * <p>Cross-family moves (a ByteString into a bigint slot or the reverse)
+     * are still refused, in every tier; that is what
+     * {@code conformance/negatives} N02/N16/N17/N19/N21 pin.
+     */
     private static boolean isSubtype(String actual, String expected) {
         if (actual.equals(expected)) return true;
         if ("<unknown>".equals(actual) || "<inferred>".equals(actual)) return true;
         if ("<unknown>".equals(expected) || "<inferred>".equals(expected)) return true;
+        // ByteString subtypes. BIDIRECTIONAL, and both-in-family — an Addr
+        // value satisfies a Ripemd160 slot and vice versa.
         if ("ByteString".equals(expected) && BYTESTRING_SUBTYPES.contains(actual)) return true;
+        if ("ByteString".equals(actual) && BYTESTRING_SUBTYPES.contains(expected)) return true;
+        if (BYTESTRING_SUBTYPES.contains(actual) && BYTESTRING_SUBTYPES.contains(expected)) {
+            return true;
+        }
+        // bigint subtypes — same shape.
         if ("bigint".equals(expected) && BIGINT_SUBTYPES.contains(actual)) return true;
+        if ("bigint".equals(actual) && BIGINT_SUBTYPES.contains(expected)) return true;
+        if (BIGINT_SUBTYPES.contains(actual) && BIGINT_SUBTYPES.contains(expected)) return true;
         if (actual.endsWith("[]") && expected.endsWith("[]")) {
             return isSubtype(
                 actual.substring(0, actual.length() - 2),
@@ -885,11 +917,13 @@ public final class Typecheck {
                     return "boolean";
                 }
                 case EQ, NEQ -> {
-                    boolean compatible =
-                        isSubtype(lt, rt)
-                            || isSubtype(rt, lt)
-                            || (BYTESTRING_SUBTYPES.contains(lt) && BYTESTRING_SUBTYPES.contains(rt))
-                            || (BIGINT_SUBTYPES.contains(lt) && BIGINT_SUBTYPES.contains(rt));
+                    // Exactly the reference tier's rule: each side is tried as
+                    // a subtype of the other, and nothing else. The
+                    // both-in-family clauses that used to sit here were this
+                    // tier's local patch for an isSubtype that lacked them
+                    // (N-104); isSubtype carries them now, so repeating them
+                    // here would be a second copy of the lattice to drift.
+                    boolean compatible = isSubtype(lt, rt) || isSubtype(rt, lt);
                     if (!compatible && !"<unknown>".equals(lt) && !"<unknown>".equals(rt)) {
                         error("cannot compare '" + lt + "' and '" + rt + "' with '" + op.canonical() + "'");
                     }
@@ -1032,11 +1066,10 @@ public final class Typecheck {
                         error(".equals() takes exactly 1 argument, got " + e.args().size());
                     } else {
                         String argType = inferExpr(e.args().get(0), env);
+                        // Same rule as `===` above, for the same reason: the
+                        // both-in-family clauses are `isSubtype`'s job (N-104).
                         boolean compatible =
-                            isSubtype(argType, objType)
-                                || isSubtype(objType, argType)
-                                || (isByteFamily(objType) && isByteFamily(argType))
-                                || (isBigintFamily(objType) && isBigintFamily(argType));
+                            isSubtype(argType, objType) || isSubtype(objType, argType);
                         if (!compatible && !"<unknown>".equals(objType) && !"<unknown>".equals(argType)) {
                             error(
                                 ".equals(): cannot compare '" + objType + "' with '" + argType + "'"
@@ -1119,35 +1152,6 @@ public final class Typecheck {
         }
 
         /**
-         * The subtype rule TS applies to addOutput's STATE VALUES:
-         * {@code packages/runar-compiler/src/passes/03-typecheck.ts}'s
-         * {@code isSubtype}.
-         *
-         * <p>It is deliberately not this class's {@link #isSubtype}. TS's
-         * version treats the ByteString and bigint families as BIDIRECTIONALLY
-         * compatible (a ByteString value satisfies a PubKey slot, an Addr value
-         * satisfies a Ripemd160 slot); this tier's only widens TOWARDS
-         * ByteString / bigint. Measured before this check existed,
-         * {@code addOutput(1000n, this.count, b)} with {@code b: ByteString}
-         * and {@code owner: PubKey} compiled identically in all seven tiers, so
-         * the narrower predicate would have REJECTED working code the reference
-         * tier accepts.
-         *
-         * <p>That asymmetry is pre-existing, reaches every other argument and
-         * assignment check, and is flagged rather than fixed here.
-         */
-        private static boolean outputStateValueMatches(String actual, String expected) {
-            if (isSubtype(actual, expected)) return true;
-            if (BYTESTRING_SUBTYPES.contains(actual) && BYTESTRING_SUBTYPES.contains(expected)) {
-                return true;
-            }
-            if (BIGINT_SUBTYPES.contains(actual) && BIGINT_SUBTYPES.contains(expected)) {
-                return true;
-            }
-            return false;
-        }
-
-        /**
          * N-105 (2/2): addOutput's arity and state-value types, and the
          * StatefulSmartContract gate shared by all three intrinsics.
          *
@@ -1219,7 +1223,7 @@ public final class Typecheck {
                 if ("<unknown>".equals(argType)) continue;
                 PropertyNode p = mutableProps.get(i - 1);
                 String propType = typeToString(p.type());
-                if (!outputStateValueMatches(argType, propType)) {
+                if (!isSubtype(argType, propType)) {
                     error("addOutput() argument " + (i + 1) + " (" + p.name() + ") must be '"
                         + propType + "', got '" + argType + "'");
                 }

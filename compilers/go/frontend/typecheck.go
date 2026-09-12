@@ -251,6 +251,25 @@ var bigintSubtypes = map[string]bool{
 	"RabinPubKey": true,
 }
 
+// isSubtype reports whether a value of type `actual` may be used where
+// `expected` is required. It is the port of `isSubtype` in
+// packages/runar-compiler/src/passes/03-typecheck.ts and must stay
+// clause-for-clause identical to it.
+//
+// N-104: this tier used to carry only the `subtype -> base` direction of each
+// family, so assignment inside a family worked one way and not the other:
+// `const b: ByteString = pkh` compiled and `const h: Sha256 = pkh` did not,
+// while the reference tier accepted both. Measured as a full bidirectional
+// matrix over every ordered pair of family members in all seven tiers, 85 of
+// 196 cells disagreed. The asymmetry was already known to be wrong at the
+// callsites that tripped over it — this file used to carry a private
+// `outputStateValueMatches` that re-added the missing clauses just for
+// addOutput's state values — and four tiers had independently grown the same
+// patch. The general predicate now carries them, and the patches are gone.
+//
+// Cross-family moves (a ByteString into a bigint slot or the reverse) are
+// still refused here, in every tier; that is what conformance/negatives
+// N02/N16/N17/N19/N21 pin.
 func isSubtype(actual, expected string) bool {
 	if actual == expected {
 		return true
@@ -262,10 +281,26 @@ func isSubtype(actual, expected string) bool {
 	if expected == "<inferred>" || expected == "<unknown>" {
 		return true
 	}
+	// ByteString subtypes. BIDIRECTIONAL, and both-in-family — an Addr value
+	// satisfies a Ripemd160 slot and vice versa. Mirrors isSubtype in
+	// packages/runar-compiler/src/passes/03-typecheck.ts.
 	if expected == "ByteString" && byteStringSubtypes[actual] {
 		return true
 	}
+	if actual == "ByteString" && byteStringSubtypes[expected] {
+		return true
+	}
+	if byteStringSubtypes[actual] && byteStringSubtypes[expected] {
+		return true
+	}
+	// bigint subtypes — same shape.
 	if expected == "bigint" && bigintSubtypes[actual] {
+		return true
+	}
+	if actual == "bigint" && bigintSubtypes[expected] {
+		return true
+	}
+	if bigintSubtypes[actual] && bigintSubtypes[expected] {
 		return true
 	}
 	if strings.HasSuffix(expected, "[]") && strings.HasSuffix(actual, "[]") {
@@ -1059,10 +1094,13 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 		return "boolean"
 
 	case "===", "!==":
-		// Allow comparison between compatible types (both ByteString family or both bigint family)
-		compatible := isSubtype(leftType, rightType) || isSubtype(rightType, leftType) ||
-			(byteStringSubtypes[leftType] && byteStringSubtypes[rightType]) ||
-			(bigintSubtypes[leftType] && bigintSubtypes[rightType])
+		// Allow comparison between compatible types. Exactly the reference
+		// tier's rule: each side is tried as a subtype of the other, and
+		// nothing else. The both-in-family clauses that used to sit here were
+		// this tier's local patch for an isSubtype that lacked them (N-104);
+		// isSubtype carries them now, so repeating them here would be a second
+		// copy of the lattice to drift out of sync.
+		compatible := isSubtype(leftType, rightType) || isSubtype(rightType, leftType)
 		if !compatible {
 			if leftType != "<unknown>" && rightType != "<unknown>" {
 				tc.addError(fmt.Sprintf("cannot compare '%s' and '%s' with '%s'", leftType, rightType, e.Op))
@@ -1231,7 +1269,7 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		for i := 0; shapeCheckable && i < len(mutableProps) && i+1 < len(normalized); i++ {
 			argType := tc.inferExprType(normalized[i+1], env)
 			propType := typeNodeToString(mutableProps[i].Type)
-			if !outputStateValueMatches(argType, propType) && argType != "<unknown>" {
+			if !isSubtype(argType, propType) && argType != "<unknown>" {
 				tc.addError(fmt.Sprintf(
 					"addOutput() argument %d (%s) must be '%s', got '%s'",
 					i+2, mutableProps[i].Name, propType, argType))
@@ -1275,35 +1313,6 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		}
 	}
 	return "void"
-}
-
-// outputStateValueMatches is the subtype rule TS applies to addOutput's STATE
-// VALUES: packages/runar-compiler/src/passes/03-typecheck.ts's isSubtype.
-//
-// It is deliberately not this package's isSubtype. TS's version treats the
-// ByteString and bigint families as BIDIRECTIONALLY compatible (a ByteString
-// value satisfies a PubKey slot, and an Addr value satisfies a Ripemd160 slot);
-// this tier's isSubtype only widens TOWARDS ByteString / bigint. Measured
-// before this check existed, `addOutput(1000n, this.count, b)` with
-// `b: ByteString` and `owner: PubKey` compiled identically in all seven tiers,
-// so using the narrower predicate here would have REJECTED working code that
-// the reference tier accepts.
-//
-// That asymmetry between this tier's isSubtype and the reference's is
-// pre-existing, reaches every other argument and assignment check, and is not
-// touched here — it is flagged, not fixed, because widening it would change
-// diagnostics far outside the output intrinsics.
-func outputStateValueMatches(actual, expected string) bool {
-	if isSubtype(actual, expected) {
-		return true
-	}
-	if isByteFamily(actual) && isByteFamily(expected) {
-		return true
-	}
-	if isBigintFamily(actual) && isBigintFamily(expected) {
-		return true
-	}
-	return false
 }
 
 func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {

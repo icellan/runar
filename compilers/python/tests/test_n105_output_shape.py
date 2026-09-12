@@ -25,9 +25,11 @@ covenant that commits to the wrong thing.
 Ported from the TypeScript reference, wording included.
 
 The ACCEPT block is where the risk is. A ByteString-typed value in a
-PubKey-typed state slot must stay ACCEPTED: TS's ``isSubtype`` treats the
-ByteString family as bidirectionally compatible and this tier's does not, so the
-state-value check uses TS's rule. See ``_output_state_value_matches``.
+PubKey-typed state slot must stay ACCEPTED: ``is_subtype`` treats the ByteString
+family as bidirectionally compatible. N-104: it did not always -- this module
+carried a private ``_output_state_value_matches`` so the state-value check alone
+got the reference tier's rule while every other check got a narrower one.
+``is_subtype`` is the reference's now, and the helper is gone.
 """
 
 from __future__ import annotations

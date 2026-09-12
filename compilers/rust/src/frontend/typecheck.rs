@@ -296,29 +296,6 @@ fn is_subtype(actual: &str, expected: &str) -> bool {
     false
 }
 
-/// The subtype rule TS applies to addOutput's STATE VALUES:
-/// `packages/runar-compiler/src/passes/03-typecheck.ts`'s `isSubtype`.
-///
-/// This crate's `is_subtype` already matches it, so the two extra clauses below
-/// are unreachable here — they are written out because four of the seven tiers'
-/// `isSubtype` only widens TOWARDS ByteString / bigint, and the rule the six
-/// ports must agree on is the reference's. Measured before this check existed,
-/// `addOutput(1000n, this.count, b)` with `b: ByteString` and `owner: PubKey`
-/// compiled identically in all seven tiers, so a narrower predicate here would
-/// have REJECTED working code the reference tier accepts.
-fn output_state_value_matches(actual: &str, expected: &str) -> bool {
-    if is_subtype(actual, expected) {
-        return true;
-    }
-    if is_bytestring_subtype(actual) && is_bytestring_subtype(expected) {
-        return true;
-    }
-    if is_bigint_family(actual) && is_bigint_family(expected) {
-        return true;
-    }
-    false
-}
-
 fn is_bigint_family(t: &str) -> bool {
     is_bigint_subtype(t)
 }
@@ -1118,9 +1095,7 @@ terminal (no state mutation)",
                 while i < mutable_props.len() && i + 1 < normalized.len() {
                     let arg_type = self.infer_expr_type(&normalized[i + 1], env);
                     let prop_type = type_node_to_ttype(&mutable_props[i].prop_type);
-                    if !output_state_value_matches(&arg_type, &prop_type)
-                        && arg_type != "<unknown>"
-                    {
+                    if !is_subtype(&arg_type, &prop_type) && arg_type != "<unknown>" {
                         self.add_error(format!(
                             "addOutput() argument {} ({}) must be '{}', got '{}'",
                             i + 2,

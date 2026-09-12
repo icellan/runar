@@ -860,10 +860,15 @@ const TypeChecker = struct {
             },
             // Equality
             .eq, .neq => {
+                // Exactly the reference tier's rule: each side is tried as a
+                // subtype of the other, and nothing else. The both-in-family
+                // clauses that used to sit here were a copy of what
+                // `isSubtype` already does (N-104) — four of the seven tiers
+                // needed the copy because their `isSubtype` lacked the
+                // clauses; none of them do now, and a second copy of the
+                // lattice is a second thing to drift.
                 const compatible = isSubtype(left_type, right_type) or
-                    isSubtype(right_type, left_type) or
-                    (isByteFamily(left_type) and isByteFamily(right_type)) or
-                    (isBigintFamily(left_type) and isBigintFamily(right_type));
+                    isSubtype(right_type, left_type);
                 if (!compatible and left_type != .unknown and right_type != .unknown) {
                     self.addError("cannot compare '{s}' and '{s}' with '{s}'", .{
                         types.runarTypeToString(left_type),
@@ -1104,7 +1109,7 @@ const TypeChecker = struct {
                 if (prop_cursor >= self.contract.properties.len) continue;
                 const prop = self.contract.properties[prop_cursor];
                 prop_cursor += 1;
-                if (!outputStateValueMatches(arg_type, prop.type_info) and arg_type != .unknown) {
+                if (!isSubtype(arg_type, prop.type_info) and arg_type != .unknown) {
                     self.addError(
                         "addOutput() argument {d} ({s}) must be '{s}', got '{s}'",
                         .{
@@ -1147,23 +1152,6 @@ const TypeChecker = struct {
             }
         }
         return .void;
-    }
-
-    /// The subtype rule TS applies to addOutput's STATE VALUES:
-    /// `packages/runar-compiler/src/passes/03-typecheck.ts`'s `isSubtype`.
-    ///
-    /// This tier's `isSubtype` already matches it, so the two extra clauses
-    /// below are unreachable here — they are written out because four of the
-    /// seven tiers' `isSubtype` only widens TOWARDS ByteString / bigint, and the
-    /// rule the six ports must agree on is the reference's. Measured before this
-    /// check existed, `addOutput(1000n, this.count, b)` with `b: ByteString` and
-    /// `owner: PubKey` compiled identically in all seven tiers, so a narrower
-    /// predicate here would have REJECTED working code the reference accepts.
-    fn outputStateValueMatches(actual: RunarType, expected: RunarType) bool {
-        if (isSubtype(actual, expected)) return true;
-        if (isByteFamily(actual) and isByteFamily(expected)) return true;
-        if (isBigintFamily(actual) and isBigintFamily(expected)) return true;
-        return false;
     }
 
     fn checkMethodCallExpr(self: *TypeChecker, mc: *const types.MethodCall, env: *TypeEnv) RunarType {

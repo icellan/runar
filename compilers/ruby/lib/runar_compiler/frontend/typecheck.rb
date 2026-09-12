@@ -182,7 +182,26 @@ module RunarCompiler
       bigint RabinSig RabinPubKey
     ].to_set.freeze
 
-    # Return true if +actual+ is a subtype of +expected+.
+    # Return true if a value of type +actual+ may be used where +expected+ is
+    # required. The port of +isSubtype+ in
+    # +packages/runar-compiler/src/passes/03-typecheck.ts+; it must stay
+    # clause-for-clause identical to it.
+    #
+    # N-104: this tier used to carry only the +subtype -> base+ direction of
+    # each family, so assignment inside a family worked one way and not the
+    # other -- `const b: ByteString = pkh` compiled and `const h: Sha256 = pkh`
+    # did not, while the reference tier accepted both. Measured as a full
+    # bidirectional matrix over every ordered pair of family members in all
+    # seven tiers, 85 of 196 cells disagreed. The asymmetry was already known
+    # to be wrong at the callsites that tripped over it -- this file used to
+    # carry a private +output_state_value_matches?+ that re-added the missing
+    # clauses just for +addOutput+'s state values, and four tiers had
+    # independently grown the same patch. The general predicate carries them
+    # now, and the patches are gone.
+    #
+    # Cross-family moves (a ByteString into a bigint slot or the reverse) are
+    # still refused, in every tier; that is what conformance/negatives
+    # N02/N16/N17/N19/N21 pin.
     def self.subtype?(actual, expected)
       return true if actual == expected
 
@@ -190,8 +209,16 @@ module RunarCompiler
       return true if actual == "<inferred>" || actual == "<unknown>"
       return true if expected == "<inferred>" || expected == "<unknown>"
 
+      # ByteString subtypes. BIDIRECTIONAL, and both-in-family -- an Addr value
+      # satisfies a Ripemd160 slot and vice versa.
       return true if expected == "ByteString" && BYTESTRING_SUBTYPES.include?(actual)
+      return true if actual == "ByteString" && BYTESTRING_SUBTYPES.include?(expected)
+      return true if BYTESTRING_SUBTYPES.include?(actual) && BYTESTRING_SUBTYPES.include?(expected)
+
+      # bigint subtypes -- same shape.
       return true if expected == "bigint" && BIGINT_SUBTYPES.include?(actual)
+      return true if actual == "bigint" && BIGINT_SUBTYPES.include?(expected)
+      return true if BIGINT_SUBTYPES.include?(actual) && BIGINT_SUBTYPES.include?(expected)
 
       if expected.end_with?("[]") && actual.end_with?("[]")
         return subtype?(actual[0..-3], expected[0..-3])
@@ -804,35 +831,13 @@ module RunarCompiler
           next if prop.nil? || arg_type == "<unknown>"
 
           prop_type = type_node_to_string(prop.type)
-          next if output_state_value_matches?(arg_type, prop_type)
+          next if Frontend.subtype?(arg_type, prop_type)
 
           add_error(
             "addOutput() argument #{i + 2} (#{prop.name}) must be '#{prop_type}', got '#{arg_type}'"
           )
         end
         "void"
-      end
-
-      # The subtype rule TS applies to addOutput's STATE VALUES:
-      # `packages/runar-compiler/src/passes/03-typecheck.ts`'s `isSubtype`.
-      #
-      # It is deliberately not `Frontend.subtype?`. TS's version treats the
-      # ByteString and bigint families as BIDIRECTIONALLY compatible (a
-      # ByteString value satisfies a PubKey slot, an Addr value satisfies a
-      # Ripemd160 slot); this tier's only widens TOWARDS ByteString / bigint.
-      # Measured before this check existed, `addOutput(1000n, this.count, b)`
-      # with `b: ByteString` and `owner: PubKey` compiled identically in all
-      # seven tiers, so the narrower predicate would have REJECTED working code
-      # the reference tier accepts.
-      #
-      # That asymmetry is pre-existing, reaches every other argument and
-      # assignment check, and is flagged rather than fixed here.
-      def output_state_value_matches?(actual, expected)
-        return true if Frontend.subtype?(actual, expected)
-        return true if Frontend.byte_family?(actual) && Frontend.byte_family?(expected)
-        return true if Frontend.bigint_family?(actual) && Frontend.bigint_family?(expected)
-
-        false
       end
 
       def add_error(msg)
@@ -1096,11 +1101,14 @@ module RunarCompiler
         end
 
         if expr.op == "===" || expr.op == "!=="
+          # Exactly the reference tier's rule: each side is tried as a subtype
+          # of the other, and nothing else. The both-in-family clauses that
+          # used to sit here were this tier's local patch for a `subtype?` that
+          # lacked them (N-104); `subtype?` carries them now, so repeating them
+          # here would be a second copy of the lattice to drift out of sync.
           compatible =
             Frontend.subtype?(left_type, right_type) ||
-            Frontend.subtype?(right_type, left_type) ||
-            (BYTESTRING_SUBTYPES.include?(left_type) && BYTESTRING_SUBTYPES.include?(right_type)) ||
-            (BIGINT_SUBTYPES.include?(left_type) && BIGINT_SUBTYPES.include?(right_type))
+            Frontend.subtype?(right_type, left_type)
           unless compatible
             if left_type != "<unknown>" && right_type != "<unknown>"
               add_error("cannot compare '#{left_type}' and '#{right_type}' with '#{expr.op}'")
