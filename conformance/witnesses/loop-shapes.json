@@ -1,0 +1,37 @@
+{
+  "fixture": "loop-shapes",
+  "_note": "R-102. Before this fixture the repository contained two `for` loops, both zero-start and incrementing, so the ANF loop node's `start` field — which every tier implements and carries explicitly — was exercised by nothing. Two wrong-value miscompiles were living behind that: Go's constant folder dropped Start and Step (N-128), and Zig's .runar.go / .runar.java parsers dropped the init value (N-129). Both produced a script computing a DIFFERENT NUMBER than the source, and both were invisible to a corpus of zero-start loops.",
+  "goldenHashes": {
+    "expected-script.hex": "f333f739f4cd44dba75a9b39343a1dc976cf393fe351df69d84cf85fa31c8dac",
+    "expected-ir.json": "5065769243d3aa503b080dba6daa48e5ce45a24f9078af9097948f09c3e07f11"
+  },
+  "constructorArgs": {
+    "target": "18n"
+  },
+  "spends": [
+    {
+      "method": "verify",
+      "args": [
+        "0n"
+      ],
+      "expect": "accept",
+      "note": "seed 0 + (3+4+5+6) = 18 — the non-zero START is what makes this 18 and not 6 (Go folded it to 0+1+2+3) or 21 (Zig unrolled 0..6)"
+    },
+    {
+      "method": "verify",
+      "args": [
+        "1n"
+      ],
+      "expect": "reject",
+      "note": "seed 1 gives 19; the assert must fail. A loop that summed a different range would land on a different total and this pair pins which."
+    },
+    {
+      "method": "verify",
+      "args": [
+        "-3n"
+      ],
+      "expect": "reject",
+      "note": "15 != 18"
+    }
+  ]
+}

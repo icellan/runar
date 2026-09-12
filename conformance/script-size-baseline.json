@@ -40,6 +40,7 @@
     "intent-output-p2pkh": 511,
     "intent-prev-output-script": 689,
     "loop-if-merged-locals": 1505,
+    "loop-shapes": 5,
     "math-demo": 13114,
     "merge-locals-prop-updates": 754,
     "merge-locals-shapes": 2271,
