@@ -63,6 +63,28 @@ import {
 const MAX_STACK_DEPTH = 800;
 
 /**
+ * Value of one hex digit, or -1 if `code` is not `[0-9a-fA-F]`.
+ *
+ * R-087: `parseInt(pair, 16)` is not a validator. It decodes a valid PREFIX
+ * and discards the rest, skips leading whitespace, and honours a sign — so
+ * `'0g'` -> 0, `'a!'` -> 10, `' f'` -> 15, `'+f'` -> 15. Only a pair whose
+ * FIRST character is invalid yields NaN, and `new Uint8Array([NaN])[0]` is 0,
+ * so that case decoded to the byte 0x00 rather than failing. Both decoders
+ * below feed the `--ir` surface, which runs no typecheck, so malformed
+ * external IR became a silently different locking script.
+ *
+ * Digit-at-a-time so a blob the size of an SLH-DSA script costs one compare
+ * chain per nibble and allocates nothing. Go's `encoding/hex.DecodeString`,
+ * which the reference tier uses on both paths, accepts exactly this set.
+ */
+function hexNibble(code: number): number {
+  if (code >= 0x30 && code <= 0x39) return code - 0x30; // '0'-'9'
+  if (code >= 0x61 && code <= 0x66) return code - 0x57; // 'a'-'f'
+  if (code >= 0x41 && code <= 0x46) return code - 0x37; // 'A'-'F'
+  return -1;
+}
+
+/**
  * Local hex-to-Uint8Array helper. Avoids a runar-testing dependency
  * (runar-testing depends on runar-compiler, so the reverse direction
  * would create a cycle).
@@ -73,11 +95,12 @@ function decodeHexBytes(hex: string): Uint8Array {
   }
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    const b = parseInt(hex.substr(i * 2, 2), 16);
-    if (Number.isNaN(b)) {
+    const hi = hexNibble(hex.charCodeAt(i * 2));
+    const lo = hexNibble(hex.charCodeAt(i * 2 + 1));
+    if (hi < 0 || lo < 0) {
       throw new Error(`raw_script bytes contain non-hex character near offset ${i * 2}`);
     }
-    out[i] = b;
+    out[i] = (hi << 4) | lo;
   }
   return out;
 }
@@ -5938,7 +5961,18 @@ function hexToBytes(hex: string): Uint8Array {
   }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    // R-087: see `hexNibble`. This path had NO validation at all — a
+    // `load_const` string arriving from `--ir` was decoded with `parseInt`,
+    // which turned 'gg' into NaN (stored as 0x00) and '0g' into 0x00, so a
+    // malformed constant became a valid-looking push of the wrong bytes.
+    const hi = hexNibble(hex.charCodeAt(i));
+    const lo = hexNibble(hex.charCodeAt(i + 1));
+    if (hi < 0 || lo < 0) {
+      throw new Error(
+        `Invalid hex string: non-hex character at offset ${i} in '${hex.slice(0, 32)}'`,
+      );
+    }
+    bytes[i / 2] = (hi << 4) | lo;
   }
   return bytes;
 }
