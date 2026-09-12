@@ -77,6 +77,8 @@ is expected.
 | `Addr`     | 20          | Bitcoin address (= RIPEMD-160 of SHA-256 of pubkey) |
 | `SigHashPreimage` | variable | Serialized sighash preimage for OP_PUSH_TX |
 | `Point`    | 64          | secp256k1 elliptic curve point (affine coordinates) |
+| `P256Point`| 64          | NIST P-256 curve point (same affine layout as `Point`) |
+| `P384Point`| 96          | NIST P-384 curve point (x[48] \|\| y[48], big-endian) |
 
 #### Point Encoding
 

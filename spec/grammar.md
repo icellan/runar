@@ -68,13 +68,21 @@ ContractDeclaration
 BaseClass
     = 'SmartContract'
     | 'StatefulSmartContract'
+    | 'UnsafeSmartContract'
     ;
 ```
 
 ### Rules
 
 - Exactly one class per file.
-- The class MUST extend `SmartContract` (stateless) or `StatefulSmartContract` (stateful).
+- The class MUST extend `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `UnsafeSmartContract` (stateless, plus the raw `asm()` escape hatch — see the note below).
+- `UnsafeSmartContract` is `SmartContract` plus one additional builtin:
+  `asm({ body, in_arity, out_arity })`, which splices verbatim opcode bytes into the emitted script.
+  `body` is a hex string (or an array form built from opcode helpers). The compiler does not interpret those
+  bytes — it lowers them to a `raw_script` ANF node (see `spec/ir-format.md` section 4.19), which is
+  opaque to every analysis: dead-code elimination must not remove it, the stack model cannot verify
+  the declared arity, and no type information crosses it. Use of this base class moves the burden of
+  stack-shape correctness entirely onto the contract author.
 - `StatefulSmartContract` automatically handles preimage verification and state continuation for public methods. Specifically, the ANF lowerer implicitly injects a `txPreimage: SigHashPreimage` parameter, a `checkPreimage(txPreimage)` assertion at method entry, and state continuation code (via `addOutput`) at method exit. Developers do not need to write these explicitly.
 - Decorators are **disallowed**.
 - Generic type parameters on the class are **disallowed**.

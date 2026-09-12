@@ -213,6 +213,9 @@ Types are encoded as strings in the ABI:
 | `Ripemd160` | `"Ripemd160"` | 20 bytes |
 | `Addr` | `"Addr"` | 20 bytes |
 | `SigHashPreimage` | `"SigHashPreimage"` | Variable-length bytes |
+| `Point` | `"Point"` | 64 bytes (x[32] || y[32], big-endian, no prefix) |
+| `P256Point` | `"P256Point"` | 64 bytes (NIST P-256, same layout as `Point`) |
+| `P384Point` | `"P384Point"` | 96 bytes (NIST P-384, x[48] || y[48], big-endian) |
 | `RabinSig` | `"RabinSig"` | Script number |
 | `RabinPubKey` | `"RabinPubKey"` | Script number |
 | `FixedArray<T, N>` | `"FixedArray<T, N>"` | N consecutive push data items |
@@ -255,7 +258,7 @@ Byte data is pushed using the standard push data opcodes:
 | 256-65535 bytes | `OP_PUSHDATA2 <2-byte-length-LE> <data>` |
 | 65536+ bytes | `OP_PUSHDATA4 <4-byte-length-LE> <data>` |
 
-Domain types (PubKey, Sig, Sha256, Ripemd160, Addr, SigHashPreimage) use the same encoding -- they are just byte vectors with expected sizes.
+Domain types (PubKey, Sig, Sha256, Ripemd160, Addr, SigHashPreimage, Point, P256Point, P384Point) use the same encoding -- they are just byte vectors with expected sizes. The sizes are documentation, not a checked constraint: no tier emits a length check for a domain-typed argument (see `spec/type-system.md` section 6.1, "Declared sizes are not checked").
 
 ### 5.5 FixedArray Encoding
 
