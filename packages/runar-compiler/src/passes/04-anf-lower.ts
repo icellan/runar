@@ -78,6 +78,21 @@ function lowerProperties(contract: ContractNode): ANFProperty[] {
       readonly: prop.readonly,
     };
 
+    // N-103: carry the expand-fixed-arrays marker into the ANF. The assembler
+    // regroups the synthetic leaves back into one FixedArray state/ABI entry
+    // from this chain, and the other six tiers all write it (N-095), so an ANF
+    // without it is both a 1-vs-6 divergence against `expected-ir.json` and an
+    // artifact whose `state.grid` accessor degrades into N raw scalars. Omitted
+    // — not emitted empty — on ordinary properties, which is what keeps every
+    // non-FixedArray contract's ANF bytes unchanged.
+    if (prop.__syntheticArrayChain && prop.__syntheticArrayChain.length > 0) {
+      anfProp.syntheticArrayChain = prop.__syntheticArrayChain.map(level => ({
+        base: level.base,
+        index: level.index,
+        length: level.length,
+      }));
+    }
+
     // Extract literal value from property initializer. A property the
     // constructor assigns a PARAMETER to carries no compile-time value: the
     // constructor argument wins and the initializer degrades to a default.
