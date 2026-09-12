@@ -796,14 +796,23 @@ const TypeChecker = struct {
                 return .unknown;
             },
             .increment => |inc| {
-                const operand_type = self.inferExprType(inc.operand, env);
+                // N-019: `inferOperandType`, not `inferExprType` — a FixedArray
+                // element read resolves to the array's declared element type
+                // here, the same way `checkBinaryExpr` resolves its operands.
+                // Safe now, and only now: `expand_fixed_arrays.zig` desugars a
+                // statement-position `this.arr[i]++` into the assignment form
+                // and REFUSES the expression form, so an increment that types
+                // here also writes back. Before that port landed this arm had
+                // to refuse, because typing it would have produced an increment
+                // of a temporary with no state continuation.
+                const operand_type = self.inferOperandType(inc.operand, env);
                 if (!isBigintFamily(operand_type)) {
                     self.addError("++ operator requires bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .bigint;
             },
             .decrement => |dec| {
-                const operand_type = self.inferExprType(dec.operand, env);
+                const operand_type = self.inferOperandType(dec.operand, env);
                 if (!isBigintFamily(operand_type)) {
                     self.addError("-- operator requires bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
@@ -2685,35 +2694,42 @@ test "isBigintFamily: comprehensive" {
 }
 
 // ---------------------------------------------------------------------------
-// N-019 tripwire: FixedArray element reads are untypeable in this tier.
+// N-019: FixedArray element increments, and where they are made safe.
 // ---------------------------------------------------------------------------
 
 // `inferExprType`'s `.index_access` arm returns `.unknown` unconditionally — it
-// never resolves a FixedArray property base to its element type, and it must
-// keep not doing so.
+// never resolves a FixedArray property base to its element type. Element types
+// are resolved at the sites that can act on them, off the DECLARED property:
+// `inferOperandType` (the R-073 shape).
 //
-// N-097 UPDATE: arithmetic and relational OPERANDS no longer depend on that
-// arm. `checkBinaryExpr` routes its two operands through `inferOperandType`,
-// which reads the element type off the declared property (the R-073 shape), so
-// `assert(this.xs[0] >= 0n)` and the `arr[i] = arr[i] + 1` shape now compile
-// here and are byte-identical to the other six tiers. What did NOT move, and
-// what this tripwire still guards, is the `.increment` / `.decrement` arms:
-// they call `inferExprType` directly, still see `.unknown`, and still refuse.
-// Runtime-index WRITES (`this.board[i] = v`) were always unaffected.
+// N-097 added the first two of those sites: `checkBinaryExpr`'s two operands,
+// so `assert(this.xs[0] >= 0n)` and `arr[i] = arr[i] + 1` compile here and are
+// byte-identical to the other six tiers. Runtime-index WRITES
+// (`this.board[i] = v`) were always unaffected.
 //
-// This is a loud refusal, not a silent miscompile: unlike the six tiers where
-// `this.board[i]++` emitted NO state continuation at all (leaving the spending
-// path unconstrained — the N-019 fund-loss bug), Zig rejects the contract
-// outright. The N-019 pass-3b desugar is therefore NOT ported here: it would be
-// dead code behind this type error.
+// N-019's history is why the `.increment` / `.decrement` arms came last. In six
+// tiers `this.board[i]++` emitted NO state continuation at all — pass 3b
+// rewrote the increment's operand into a read ternary and the write was
+// dropped, leaving the spending path unconstrained (the fund-loss bug, fixed by
+// `4c062371`). This tier refused the construct instead, which was safe and was
+// also the reason the pass-3b desugar could not be ported: it would have been
+// dead code behind a type error.
 //
-// WHEN THIS TEST STARTS FAILING, the `.increment` arm has learned to type array
-// element reads — and `this.board[i]++` will begin compiling in this tier with
-// the N-019 defect intact. Port the pass-3b desugar from
-// `passes/expand_fixed_arrays.zig`'s peers (Go / TS / Python / Ruby / Java /
-// Rust) BEFORE relaxing this. Widening `inferOperandType` is NOT a substitute:
-// it is reached only from `checkBinaryExpr`, which is exactly why it is safe.
-// See `src/tests/n097_fixed_array_element_read.zig`.
+// N-124 UPDATE: the prerequisite was met, and the refusal is gone.
+// `expand_fixed_arrays.zig` now desugars a statement-position
+// `this.board[i]++` into `this.board[idx] = this.board[idx] + 1` through the
+// existing `rewriteIndexAssign` path — the same rewrite the other six tiers
+// carry since `4c062371` — and REFUSES the expression form, which cannot be
+// desugared. With the write-back guaranteed, the `.increment` / `.decrement`
+// arms route through `inferOperandType` like every other operand.
+//
+// The invariant that replaced the refusal, and the thing to protect: an
+// increment that TYPES here must also WRITE BACK. `src/tests/n124_fixed_array_increment.zig`
+// pins it three ways — both index forms byte-identical to the Go tier,
+// `arr[i]++` byte-identical to `arr[i] = arr[i] + 1n`, and a no-mutation
+// control whose script is strictly shorter (that difference is the state
+// continuation whose absence WAS the N-019 fund loss).
+// See also `src/tests/n097_fixed_array_element_read.zig`.
 fn n019ArrayElementIncrementContract(alloc: Allocator) !ContractNode {
     const board_read = try alloc.create(types.IndexAccess);
     board_read.* = .{
@@ -2750,7 +2766,24 @@ fn n019ArrayElementIncrementContract(alloc: Allocator) !ContractNode {
     };
 }
 
-test "N-019: `this.board[i]++` is rejected, not silently miscompiled" {
+test "N-019: `this.board[i]++` types, because pass 3b now writes it back" {
+    // WAS: "is rejected, not silently miscompiled". The refusal was never the
+    // goal — it was the safe answer available while the pass-3b increment
+    // desugar was unported, and the tripwire above said so in as many words:
+    // "Port the pass-3b desugar BEFORE relaxing this."
+    //
+    // N-124 ported it. `expand_fixed_arrays.zig` turns a statement-position
+    // `this.board[i]++` into `this.board[idx] = this.board[idx] + 1` through
+    // the existing `rewriteIndexAssign` path, so the increment that types here
+    // also writes back and also carries a state continuation — byte-identical
+    // to the Go tier. Expression position stays refused, in that pass rather
+    // than in this one.
+    //
+    // What still must not happen is this arm typing an element read it cannot
+    // write back. That is covered where it belongs now:
+    // `src/tests/n124_fixed_array_increment.zig` pins both forms against the
+    // Go tier's bytes, pins `arr[i]++` equal to `arr[i] = arr[i] + 1n`, and
+    // pins the expression form as an error.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -2758,13 +2791,5 @@ test "N-019: `this.board[i]++` is rejected, not silently miscompiled" {
     const contract = try n019ArrayElementIncrementContract(alloc);
     const result = try typeCheck(alloc, contract);
 
-    // Assert the SPECIFIC refusal, not merely "some error": a generic error
-    // would let the tripwire pass for an unrelated reason and stop guarding.
-    var saw_increment_refusal = false;
-    for (result.errors) |msg| {
-        if (std.mem.indexOf(u8, msg, "++ operator requires bigint") != null) {
-            saw_increment_refusal = true;
-        }
-    }
-    try std.testing.expect(saw_increment_refusal);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
 }

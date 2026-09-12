@@ -428,6 +428,29 @@ const Ctx = struct {
                 try out.append(self.allocator, .{ .for_stmt = new_for });
             },
             .expr_stmt => |e| {
+                // N-019 port (the tripwire in passes/typecheck.zig asked for
+                // exactly this): `this.arr[idx]++` / `--` in STATEMENT position.
+                //
+                // The generic expression rewrite below turns `this.arr[idx]`
+                // into a read-dispatch ternary, and both ANF lowering and the
+                // mutates-state summary recognise an increment as a state
+                // mutation ONLY when its operand is a bare property access.
+                // Left alone, the new value is computed and DISCARDED: no
+                // update_prop, `methodMutatesState` stays false, the method is
+                // classified terminal, and the deployed script carries no
+                // continuation covenant for a method that does mutate state.
+                // That is the N-019 fund-loss defect, fixed in the other six
+                // tiers by `4c062371`.
+                //
+                // Desugar to the assignment form, which already routes through
+                // `rewriteIndexAssign`. Statement position discards the
+                // expression's value, so prefix and postfix are equivalent here.
+                if (incrementOnIndexAccess(e.expr)) |inc| {
+                    if (self.tryResolveArrayBase(inc.ia.object) != null) {
+                        try self.desugarIndexIncrement(out, inc.ia, inc.op, e.source_loc);
+                        return;
+                    }
+                }
                 var prelude: std.ArrayListUnmanaged(Statement) = .empty;
                 const new_e = try self.rewriteExpression(&prelude, e.expr);
                 try out.appendSlice(self.allocator, prelude.items);
@@ -454,6 +477,64 @@ const Ctx = struct {
                 }
             },
         }
+    }
+
+    /// An `++` / `--` whose operand is an index access, with the operator
+    /// folded to the equivalent binary op. Null for every other expression.
+    fn incrementOnIndexAccess(expr: Expression) ?struct { ia: IndexAccess, op: types.BinOperator } {
+        return switch (expr) {
+            .increment => |inc| switch (inc.operand) {
+                .index_access => |ia| .{ .ia = ia.*, .op = .add },
+                else => null,
+            },
+            .decrement => |dec| switch (dec.operand) {
+                .index_access => |ia| .{ .ia = ia.*, .op = .sub },
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// `this.arr[idx] <op>= 1` written as the assignment the rest of this pass
+    /// already knows how to expand.
+    ///
+    /// The index is named ONCE, up front: the desugar mentions the element
+    /// twice (read and write), and an impure index evaluated twice could pick
+    /// two different slots. `rewriteIndexAssign` hoists its own copy too, but
+    /// that copy happens after the value expression has been rewritten
+    /// separately, so the stabilisation has to be here.
+    fn desugarIndexIncrement(
+        self: *Ctx,
+        out: *std.ArrayListUnmanaged(Statement),
+        ia: IndexAccess,
+        op: types.BinOperator,
+        source_loc: ?types.SourceLocation,
+    ) ExpandError!void {
+        var prelude: std.ArrayListUnmanaged(Statement) = .empty;
+        // Rewrite BEFORE hoisting, as Go's `stabilizeIndexChain` does: an index
+        // that is itself a FixedArray read has to become its dispatch form
+        // before it is bound, or the binding would carry a read the rest of the
+        // pipeline no longer knows how to lower. After this the index is always
+        // pure, so `rewriteIndexAssign`'s own hoist is a no-op rather than a
+        // second, different temporary.
+        const rewritten_idx = try self.rewriteExpression(&prelude, ia.index);
+        const stable_idx = try self.hoistIfImpure(&prelude, rewritten_idx, "idx");
+        try out.appendSlice(self.allocator, prelude.items);
+
+        var stable_ia = ia;
+        stable_ia.index = stable_idx;
+
+        const read = try self.allocator.create(IndexAccess);
+        read.* = stable_ia;
+
+        const one = try self.allocator.create(BinaryOp);
+        one.* = .{
+            .op = op,
+            .left = .{ .index_access = read },
+            .right = .{ .literal_int = 1 },
+        };
+
+        try self.rewriteIndexAssign(out, stable_ia, .{ .binary_op = one }, source_loc);
     }
 
     fn rewriteAssign(
@@ -661,12 +742,14 @@ const Ctx = struct {
                 return .{ .array_literal = new_elems };
             },
             .increment => |iv| {
+                try self.rejectArrayElementMutationInExpression(iv.operand, "++");
                 const new_iv = try self.allocator.create(IncrementExpr);
                 new_iv.* = iv.*;
                 new_iv.operand = try self.rewriteExpression(prelude, iv.operand);
                 return .{ .increment = new_iv };
             },
             .decrement => |dv| {
+                try self.rejectArrayElementMutationInExpression(dv.operand, "--");
                 const new_dv = try self.allocator.create(DecrementExpr);
                 new_dv.* = dv.*;
                 new_dv.operand = try self.rewriteExpression(prelude, dv.operand);
@@ -674,6 +757,38 @@ const Ctx = struct {
             },
             else => return expr,
         }
+    }
+
+    /// Reject `this.arr[idx]++` used for its VALUE rather than as a statement.
+    ///
+    /// Statement position is desugared to an assignment by
+    /// `desugarIndexIncrement`; expression position cannot be, because the
+    /// increment lowering has no way to write back through a read-dispatch
+    /// chain. Silently dropping the write is the dangerous outcome — that is
+    /// N-019 — so this refuses instead. Mirrors Go's
+    /// `rejectArrayElementMutationInExpression`.
+    fn rejectArrayElementMutationInExpression(
+        self: *Ctx,
+        operand: Expression,
+        comptime op: []const u8,
+    ) ExpandError!void {
+        var base = operand;
+        var saw_index = false;
+        while (true) {
+            switch (base) {
+                .index_access => |ia| {
+                    saw_index = true;
+                    base = ia.object;
+                },
+                else => break,
+            }
+        }
+        if (!saw_index) return;
+        if (self.tryResolveArrayBase(base) == null) return;
+        try self.pushError(
+            "`" ++ op ++ "` on a FixedArray element is only supported as a statement; " ++
+                "assign the result explicitly instead",
+        );
     }
 
     /// Rewrite `this.<arr>[idx]` as a read. If the object is not a known array

@@ -67,6 +67,7 @@ test {
     _ = @import("tests/n092_fixed_array_ctor_param.zig");
     _ = @import("tests/n095_synthetic_array_chain.zig");
     _ = @import("tests/n097_fixed_array_element_read.zig");
+    _ = @import("tests/n124_fixed_array_increment.zig");
     _ = @import("tests/n098_bytestring_satoshis.zig");
     _ = @import("tests/n105_scriptbytes.zig");
     _ = @import("tests/n105_output_shape.zig");

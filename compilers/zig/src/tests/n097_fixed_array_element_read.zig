@@ -52,6 +52,15 @@
 //!     `arr[i]++`                   accept                    REJECT       REJECT (N-019)
 //!
 //! Only the arithmetic/relational operand row moved. That is the whole fix.
+//!
+//! N-124 UPDATE: the last row moved too, one commit later and for the reason
+//! this file's own header gives — the pass-3b increment desugar was ported, so
+//! `arr[i]++` is rewritten to `arr[i] = arr[i] + 1` and the write-back the
+//! refusal was standing in for is now real. The three tests below that pinned
+//! the refusal are rewritten to pin the acceptance; the bytes are pinned
+//! against the Go tier in `n124_fixed_array_increment.zig`, and the expression
+//! form (`const y = arr[i]++`) is refused there, in `expand_fixed_arrays.zig`
+//! rather than in the typechecker.
 
 const std = @import("std");
 const parse_ts = @import("../passes/parse_ts.zig");
@@ -79,8 +88,9 @@ const REPRO =
     \\}
 ;
 
-/// The N-019 shape: a RUNTIME-index increment. Must stay refused in this tier
-/// until the pass-3b increment desugar is ported.
+/// The N-019 shape: a RUNTIME-index increment. Refused until N-124 ported the
+/// pass-3b increment desugar; accepted, and byte-identical to the Go tier,
+/// since.
 const N019_RUNTIME_INCR =
     \\import { StatefulSmartContract, assert } from 'runar-lang';
     \\class BumpDyn extends StatefulSmartContract {
@@ -96,11 +106,10 @@ const N019_RUNTIME_INCR =
     \\}
 ;
 
-/// The literal-index increment. `expand_fixed_arrays` would lower it to a plain
-/// `this.xs__0++` property increment, which IS safe — but typing it needs the
-/// `.increment` arm, and that arm is what the N-019 tripwire guards. Left
-/// refused deliberately: closing it means proving the increment arm can tell a
-/// literal index from a runtime one, which is a wider change than N-097.
+/// The literal-index increment. `expand_fixed_arrays` lowers it to a plain
+/// `this.xs__0 = this.xs__0 + 1` property write. Was refused alongside the
+/// runtime form because both go through the `.increment` arm; N-124 closed
+/// both, since the desugar covers either index shape.
 const LITERAL_INCR =
     \\import { StatefulSmartContract, assert } from 'runar-lang';
     \\class BumpLit extends StatefulSmartContract {
@@ -274,32 +283,31 @@ test "N-097: the element type is the declared one, not a blanket bigint" {
 // N-019 must stay shut
 // ---------------------------------------------------------------------------
 
-test "N-019 stays shut: `this.xs[i]++` is still refused" {
+test "N-019 is closed by the desugar, not by the refusal: `this.xs[i]++` compiles" {
+    // WAS "N-019 stays shut: still refused". N-124 ported the pass-3b increment
+    // desugar this file's header names as the prerequisite, so the refusal is
+    // gone and the write-back is real. The bytes are pinned against the Go tier
+    // in `n124_fixed_array_increment.zig`; what is asserted here is only that
+    // the old refusal is no longer produced.
     const a = std.testing.allocator;
-    try std.testing.expect(try typecheckHasError(
+    try std.testing.expect(!try typecheckHasError(
         a,
         N019_RUNTIME_INCR,
-        "++ operator requires bigint, got 'unknown'",
+        "++ operator requires bigint",
     ));
+    try std.testing.expectEqual(@as(usize, 0), try typecheckErrorCount(a, N019_RUNTIME_INCR));
 }
 
-test "N-019 stays shut: the whole compile refuses the runtime-index increment" {
+test "N-019 is closed: the whole compile accepts the runtime-index increment" {
     const a = std.testing.allocator;
-    try std.testing.expectError(
-        error.TypeCheckFailed,
-        compiler_api.compileSource(a, N019_RUNTIME_INCR, "BumpDyn.runar.ts"),
-    );
+    const hex = try compileHex(a, N019_RUNTIME_INCR, "BumpDyn.runar.ts");
+    defer a.free(hex);
+    try std.testing.expect(hex.len > 0);
 }
 
-test "N-097 residual gap: the literal-index increment is still refused" {
-    // Deliberate. Pinned so that whoever ports the pass-3b increment desugar
-    // gets a signal here instead of discovering the gap from a user report.
+test "N-097 residual gap CLOSED: the literal-index increment compiles" {
     const a = std.testing.allocator;
-    try std.testing.expect(try typecheckHasError(
-        a,
-        LITERAL_INCR,
-        "++ operator requires bigint, got 'unknown'",
-    ));
+    try std.testing.expectEqual(@as(usize, 0), try typecheckErrorCount(a, LITERAL_INCR));
 }
 
 // ---------------------------------------------------------------------------
