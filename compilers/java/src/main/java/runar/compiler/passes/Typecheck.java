@@ -676,7 +676,18 @@ public final class Typecheck {
                 }
             } else if (s instanceof IfStatement i) {
                 String cond = inferExpr(i.condition(), env);
-                if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
+                // N-101: no <unknown> escape here, and none on the for-loop or
+                // ternary condition below. TS, Go, Rust, Python, Zig and Ruby all
+                // leave these three strict; this tier alone carried
+                // `&& !"<unknown>".equals(cond)` and alone ACCEPTED
+                // `if (this.hp())` for a private helper whose return type no tier
+                // derives. That lowered a 33-byte PubKey into a branch condition,
+                // where post-Genesis it is simply truthy. Ninth instance of the
+                // class R-092 (bca3bb4f) closed eight of, and the one it filed.
+                //
+                // assert()'s escape is NOT part of this: all seven tiers carry it
+                // and all seven compile `assert(this.hp())` to the same bytes.
+                if (!"boolean".equals(cond)) {
                     error("if condition must be boolean, got '" + cond + "'");
                 }
                 env.push();
@@ -693,7 +704,13 @@ public final class Typecheck {
                     checkStatement(f.init(), env);
                 }
                 String cond = inferExpr(f.condition(), env);
-                if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
+                // N-101 (see the `if` above). Deleted as DEAD CODE rather than as
+                // a behaviour change: Validate refuses a for-loop condition that
+                // is not a comparison against a compile-time constant, three
+                // passes before this runs, so no source reaches here with an
+                // <unknown> condition. Characterised in
+                // N101UnknownBooleanConditionTest#forConditionNeverReachesTheTypechecker.
+                if (!"boolean".equals(cond)) {
                     error("for-loop condition must be boolean, got '" + cond + "'");
                 }
                 // R-065: the update clause used to be skipped entirely, so
@@ -775,7 +792,8 @@ public final class Typecheck {
 
             if (e instanceof TernaryExpr te) {
                 String cond = inferExpr(te.condition(), env);
-                if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
+                // N-101 (see the `if` above). Six tiers leave this strict.
+                if (!"boolean".equals(cond)) {
                     error("ternary condition must be boolean, got '" + cond + "'");
                 }
                 String cons = inferExpr(te.consequent(), env);
