@@ -520,14 +520,21 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		}
 
 	case "loop":
+		// N-128: COPY the node, then replace the body. The previous form built a
+		// fresh ANFValue from three hand-picked fields and silently dropped
+		// StartRaw, Start and Step — so a loop that did not begin at 0, or that
+		// counted down, came out of the folder as a zero-start step-1 loop and
+		// the unroller computed a different number. Folding is ON by default, so
+		// that was the user-facing path; `--disable-constant-folding` agreed with
+		// every other tier, which is exactly why the fold-OFF goldens never saw
+		// it. The reference tier has always used a spread here
+		// (`{ ...value, body: foldedBody }`), which is the same thing this now
+		// does: every field survives by construction, including any added later.
 		bodyEnv := env.clone()
 		foldedBody := foldBindings(value.Body, bodyEnv)
-		return &ir.ANFValue{
-			Kind:    "loop",
-			Count:   value.Count,
-			IterVar: value.IterVar,
-			Body:    foldedBody,
-		}
+		folded := *value
+		folded.Body = foldedBody
+		return &folded
 
 	case "assert", "update_prop", "get_state_script",
 		"check_preimage", "deserialize_state",
