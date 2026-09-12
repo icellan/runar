@@ -114,9 +114,37 @@ public final class AnfLoader {
         return out;
     }
 
+    /**
+     * R-086: decode an integer-typed ANF field, REFUSING anything the field
+     * cannot represent instead of keeping its low 32 bits.
+     *
+     * <p>{@code Long.intValue()} / {@code BigInteger.intValue()} truncate
+     * silently, and this runs on the {@code --ir} path — externally supplied
+     * IR. A {@code loop} count of 2^32+5 used to compile to exactly the bytes
+     * count=5 compiles to, and a {@code loop} step of 2^32+1 used to compile to
+     * a DIFFERENT locking script than the Go tier emitted from the same input
+     * bytes. Both tiers accepted; only the scripts disagreed.
+     *
+     * <p>{@code Double} is refused outright: a JSON float is not an integer
+     * (Go's {@code encoding/json} refuses it too), and {@code Number.intValue()}
+     * would have clamped it.
+     */
     private static int asInt(Object v, String what) {
-        if (v instanceof Number n) return n.intValue();
-        throw new RuntimeException(what + " is not a number");
+        BigInteger b;
+        if (v instanceof Long l) {
+            b = BigInteger.valueOf(l);
+        } else if (v instanceof Integer i) {
+            b = BigInteger.valueOf(i);
+        } else if (v instanceof BigInteger bi) {
+            b = bi;
+        } else {
+            throw new RuntimeException(what + " is not an integer: "
+                + (v == null ? "null" : v.getClass().getSimpleName()));
+        }
+        if (b.bitLength() > 31) {
+            throw new RuntimeException(what + " is out of 32-bit signed range: " + b);
+        }
+        return b.intValue();
     }
 
     private static AnfMethod toMethod(Map<?, ?> obj) {
@@ -148,8 +176,8 @@ public final class AnfLoader {
         Object locRaw = obj.get("sourceLoc");
         if (locRaw instanceof Map<?, ?> locObj) {
             String file = asString(locObj.get("file"));
-            int line = asInt(locObj.get("line"));
-            int col = asInt(locObj.get("column"));
+            int line = asInt(locObj.get("line"), "sourceLoc line");
+            int col = asInt(locObj.get("column"), "sourceLoc column");
             loc = new runar.compiler.ir.ast.SourceLocation(file, line, col);
         }
         return new AnfBinding(name, v, loc);
@@ -186,13 +214,13 @@ public final class AnfLoader {
                 obj.containsKey("results") ? toStringList(obj.get("results")) : null
             );
             case "loop" -> new Loop(
-                asInt(obj.get("count")),
+                asInt(obj.get("count"), "loop count"),
                 toBindingList(obj.get("body")),
                 asString(obj.get("iterVar")),
                 // Iterator start / step (issue #121). Older payloads without
                 // these describe zero-start counting-up loops.
                 obj.containsKey("start") ? asBigInt(obj.get("start")) : BigInteger.ZERO,
-                obj.containsKey("step") ? asInt(obj.get("step")) : 1
+                obj.containsKey("step") ? asInt(obj.get("step"), "loop step") : 1
             );
             case "assert" -> new Assert(
                 asString(obj.get("value")),
@@ -204,7 +232,7 @@ public final class AnfLoader {
             case "check_preimage" -> new CheckPreimage(
                 asString(obj.get("preimage")),
                 obj.containsKey("sighashFlag") && obj.get("sighashFlag") != null
-                    ? asInt(obj.get("sighashFlag")) : null
+                    ? asInt(obj.get("sighashFlag"), "check_preimage sighashFlag") : null
             );
             case "deserialize_state" -> new DeserializeState(asString(obj.get("preimage")));
             case "add_output" -> {
@@ -245,8 +273,8 @@ public final class AnfLoader {
                 "raw_script bytes contain non-hex characters"
             );
         }
-        int inArity = asInt(obj.get("in_arity"));
-        int outArity = asInt(obj.get("out_arity"));
+        int inArity = asInt(obj.get("in_arity"), "raw_script in_arity");
+        int outArity = asInt(obj.get("out_arity"), "raw_script out_arity");
         if (inArity < 0) {
             throw new RuntimeException(
                 "raw_script has negative in_arity " + inArity
@@ -349,13 +377,6 @@ public final class AnfLoader {
     private static String asOptString(Object v) {
         if (v == null) return null;
         return asString(v);
-    }
-
-    private static int asInt(Object v) {
-        if (v instanceof Long l) return l.intValue();
-        if (v instanceof Integer i) return i;
-        if (v instanceof BigInteger bi) return bi.intValue();
-        throw new RuntimeException("expected int, got " + (v == null ? "null" : v.getClass()));
     }
 
     private static BigInteger asBigInt(Object v) {
