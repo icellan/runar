@@ -28,7 +28,7 @@
  * of the blob is.
  */
 import { describe, it, expect } from 'vitest';
-import { CHECK_PREIMAGE_BINDING_HEX } from 'runar-compiler';
+import { CHECK_PREIMAGE_BINDING_HEX } from '../../packages/runar-compiler/src/index.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
