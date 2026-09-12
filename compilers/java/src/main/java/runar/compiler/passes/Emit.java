@@ -523,7 +523,13 @@ public final class Emit {
          */
         void emitPlaceholder(int paramIndex) {
             constructorSlots.add(new ConstructorSlot(paramIndex, byteLength));
+            // R-084: the placeholder is ONE opcode in the emitted script, so it
+            // records a mapping and consumes an opcode index like any other —
+            // exactly as TS/Go/Rust/Python/Zig/Ruby emitPlaceholder do. Skipping
+            // the bump left every later mapping pointing one opcode short.
+            recordSourceMapping();
             appendHex("00");
+            opcodeIndex++;
         }
 
         /**
@@ -537,7 +543,13 @@ public final class Emit {
                 byteLength,
                 codeSeparatorIndex < 0 ? 0 : codeSeparatorIndex
             ));
+            // R-084: same as emitPlaceholder — one opcode, one index. The Go
+            // tier's push_codesep_index case (codegen/emit.go:621) calls
+            // recordSourceMapping() and nextOpcodeIndex() around the same
+            // appendHex("00"); this one called neither.
+            recordSourceMapping();
             appendHex("00");
+            opcodeIndex++;
         }
 
         void emitPush(PushValue value) {
