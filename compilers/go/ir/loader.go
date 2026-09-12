@@ -91,6 +91,30 @@ func ValidateIR(program *ANFProgram) error {
 		}
 	}
 
+	// R-081: a contract with no public method has no spending entry point and
+	// emits an EMPTY locking script — which is anyone-can-spend, not merely
+	// useless. On the real @bsv/sdk `Spend` engine under full consensus rules,
+	// an empty locking script with the one-byte push-only witness OP_1 (0x51)
+	// validates. Before this guard the --ir path exited 0 and handed the SDKs
+	// a well-formed artifact whose "script" was "".
+	//
+	// The source pipeline already rejects the same shape in
+	// frontend/validator.go; ValidateIR is reached only from LoadIRFromBytes,
+	// so this closes the rule's gap on externally supplied IR.
+	//
+	// Checked LAST so the structural diagnostics above keep priority — a
+	// malformed binding is the more actionable error when both are present.
+	hasPublic := false
+	for _, method := range program.Methods {
+		if method.IsPublic {
+			hasPublic = true
+			break
+		}
+	}
+	if !hasPublic {
+		return fmt.Errorf("IR validation: contract %s has no public methods — no spending entry points; an empty locking script is anyone-can-spend", program.ContractName)
+	}
+
 	return nil
 }
 
