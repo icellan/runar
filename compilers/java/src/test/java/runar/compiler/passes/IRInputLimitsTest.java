@@ -46,11 +46,22 @@ class IRInputLimitsTest {
         assertEquals(IRInputLimits.MAX_IR_NESTING, ex.limit());
     }
 
+    /**
+     * N-113: both fixtures below used to carry {@code "methods":[]}, which
+     * R-081 established is not a valid program at all — it is the
+     * anyone-can-spend shape (no public method =&gt; empty locking script =&gt;
+     * spendable with OP_1). These tests' subject is the DoS caps, not the
+     * schema, so the fixtures are made valid rather than the assertions
+     * weakened.
+     */
+    private static final String MINIMAL_VALID_METHODS =
+        "\"methods\":[{\"name\":\"unlock\",\"params\":[],\"isPublic\":true,\"body\":[]}]";
+
     @Test
     void depthWalkIgnoresBracesInsideStrings() {
         // 1000 `{` inside a JSON string MUST NOT count toward depth.
         String openBraces = repeat('{', 1000);
-        String bad = "{\"contractName\":\"X\",\"properties\":[],\"methods\":[],"
+        String bad = "{\"contractName\":\"X\",\"properties\":[]," + MINIMAL_VALID_METHODS + ","
                 + "\"_note\":\"" + openBraces + "\"}";
         // Should parse successfully; downstream loader returns a program.
         AnfProgram p = AnfLoader.parse(bad);
@@ -59,7 +70,8 @@ class IRInputLimitsTest {
 
     @Test
     void loaderAcceptsMinimalProgram() {
-        String minimal = "{\"contractName\":\"X\",\"properties\":[],\"methods\":[]}";
+        String minimal =
+            "{\"contractName\":\"X\",\"properties\":[]," + MINIMAL_VALID_METHODS + "}";
         AnfProgram p = AnfLoader.parse(minimal);
         assertNotNull(p);
     }

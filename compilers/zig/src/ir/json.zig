@@ -18,6 +18,14 @@ const ParseError = error{
     MaxRecursionDepthExceeded,
     // BUG-008 follow-up: typed DoS-bound rejection of oversized IR JSON.
     IRSizeExceeded,
+    // N-113 / R-079: a raw_script span with an empty body but a declared stack
+    // effect. Distinct from InvalidConstValue so the diagnostic names the
+    // shape — Zig's IR loader is an error-enum channel with no message
+    // payload, so the error NAME is the whole diagnostic.
+    EmptyRawScriptBody,
+    // N-113 / R-081: no public method => no spending entry point => an empty,
+    // anyone-can-spend locking script.
+    NoPublicMethods,
 };
 
 const max_parse_depth: u32 = 256;
@@ -142,6 +150,29 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         const method = try parseMethod(allocator, method_val.object);
         try method_list.append(allocator, method);
     }
+
+    // N-113 / R-081: a contract with no public method has no spending entry
+    // point and emits an EMPTY locking script — which is anyone-can-spend, not
+    // merely useless. On the real @bsv/sdk `Spend` engine under full consensus
+    // rules, an empty locking script with the one-byte push-only witness OP_1
+    // (0x51) validates. Before this guard the --ir path exited 0 and handed the
+    // SDKs a well-formed artifact whose "script" was "".
+    //
+    // The source pipeline already rejects the same shape in
+    // passes/validate.zig; this parser is reached only from the IR loader, so
+    // this closes the rule's gap on externally supplied IR.
+    //
+    // Checked LAST so the structural diagnostics above keep priority — a
+    // malformed binding is the more actionable error when both are present.
+    // Mirrors compilers/go/ir/loader.go, including the ordering.
+    var has_public = false;
+    for (method_list.items) |m| {
+        if (m.is_public) {
+            has_public = true;
+            break;
+        }
+    }
+    if (!has_public) return ParseError.NoPublicMethods;
 
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
@@ -352,6 +383,22 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
 /// `bytes` field (even length, hex-only) and rejects negative arities.
 fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
     const bytes_str = try getString(obj, "bytes");
+    // N-113 / R-079: an empty span is a claim the emitter cannot honour. Stack
+    // lowering models a raw_script purely from its declared arities (it pops
+    // in_arity and pushes out_arity) because the bytes are opaque to it, while
+    // emission writes nothing at all for a zero-length span. The stack model
+    // and the script then disagree, and every later PICK/ROLL depth derived
+    // from that model addresses the wrong slot — the span silently degrades to
+    // the identity function and a different witness spends the output than the
+    // IR declared.
+    //
+    // The source path already rejects this ("asm() body must be a non-empty
+    // hex string literal", passes/validate.zig); --ir is the same rule at the
+    // external-input trust boundary. All empty bodies are rejected, including
+    // the degenerate in=0/out=0 case, because mirroring the source validator
+    // exactly is worth more than an arity-conditional rule that would differ
+    // from the rule one pass earlier.
+    if (bytes_str.len == 0) return ParseError.EmptyRawScriptBody;
     if (bytes_str.len % 2 != 0) return ParseError.InvalidConstValue;
     for (bytes_str) |c| {
         const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');

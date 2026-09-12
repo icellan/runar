@@ -50,7 +50,15 @@ def test_depth_walk_ignores_braces_inside_strings() -> None:
 
 
 def test_load_ir_accepts_minimal_program() -> None:
-    minimal = '{"contractName":"X","properties":[],"methods":[]}'
+    # N-113: this fixture used to be `"methods":[]`, which R-081 established is
+    # not a minimal VALID program at all — it is the anyone-can-spend shape (no
+    # public method => empty locking script => spendable with OP_1). The test's
+    # subject is the DoS caps, not the schema, so the fix is a fixture that is
+    # genuinely minimal AND valid rather than a weaker assertion.
+    minimal = (
+        '{"contractName":"X","properties":[],'
+        '"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]}'
+    )
     program = load_ir(minimal)
     assert program is not None
 

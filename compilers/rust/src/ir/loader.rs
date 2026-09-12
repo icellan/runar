@@ -186,6 +186,27 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
         validate_bindings(&method.body, &method.name)?;
     }
 
+    // N-113 / R-081: a contract with no public method has no spending entry
+    // point and emits an EMPTY locking script — which is anyone-can-spend, not
+    // merely useless. On the real @bsv/sdk `Spend` engine under full consensus
+    // rules, an empty locking script with the one-byte push-only witness OP_1
+    // (0x51) validates. Before this guard the --ir path exited 0 and handed the
+    // SDKs a well-formed artifact whose "script" was "".
+    //
+    // The source pipeline already rejects the same shape in
+    // frontend/validator.rs; validate_ir is reached only from the IR loader, so
+    // this closes the rule's gap on externally supplied IR.
+    //
+    // Checked LAST so the structural diagnostics above keep priority — a
+    // malformed binding is the more actionable error when both are present.
+    // Mirrors compilers/go/ir/loader.go, including the ordering.
+    if !program.methods.iter().any(|m| m.is_public) {
+        return Err(format!(
+            "IR validation: contract {} has no public methods — no spending entry points; an empty locking script is anyone-can-spend",
+            program.contract_name
+        ));
+    }
+
     Ok(())
 }
 
@@ -217,7 +238,34 @@ fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), S
             ANFValue::Loop { body, .. } => {
                 validate_bindings(body, method_name)?;
             }
-            ANFValue::RawScript { bytes, .. } => {
+            ANFValue::RawScript {
+                bytes,
+                in_arity,
+                out_arity,
+            } => {
+                // N-113 / R-079: an empty span is a claim the emitter cannot
+                // honour. Stack lowering models a raw_script purely from its
+                // declared arities (it pops in_arity and pushes out_arity)
+                // because the bytes are opaque to it, while emission writes
+                // nothing at all for a zero-length span. The stack model and
+                // the script then disagree, and every later PICK/ROLL depth
+                // derived from that model addresses the wrong slot — the span
+                // silently degrades to the identity function and a different
+                // witness spends the output than the IR declared.
+                //
+                // The source path already rejects this ("asm() body must be a
+                // non-empty hex string literal", frontend/validator.rs); --ir
+                // is the same rule at the external-input trust boundary. All
+                // empty bodies are rejected, including the degenerate
+                // in=0/out=0 case, because mirroring the source validator
+                // exactly is worth more than an arity-conditional rule that
+                // would differ from the rule one pass earlier.
+                if bytes.is_empty() {
+                    return Err(format!(
+                        "IR validation: method {} binding {} raw_script has an empty bytes body but declares in_arity {} / out_arity {}; a span that emits no bytes cannot have a stack effect",
+                        method_name, binding.name, in_arity, out_arity
+                    ));
+                }
                 // Opaque opcode-byte span — the bytes must be a well-formed
                 // even-length hex string. in_arity / out_arity are usize, so
                 // non-negativity is enforced at the type level.
@@ -767,6 +815,145 @@ mod tests {
         assert!(
             err.contains("empty type") || err.contains("type") || err.contains("param"),
             "error should mention empty type or param; got: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // N-113 — the two shapes the Go tier rejected alone (R-079 / R-081)
+    //
+    // Both are `--ir`-only: the source path refuses each shape in
+    // frontend/validator.rs, and validate_ir is reachable only from the IR
+    // loader. Go grew these guards first (compilers/go/ir/loader.go) and was
+    // deliberately, transiently stricter than its six peers until N-113;
+    // conformance/negatives/ir-rejection-parity.test.ts is the gate that now
+    // compares the six.
+    // -----------------------------------------------------------------------
+
+    /// A one-method contract, parameterised on the two fields under test, so
+    /// every case below differs from the VALID control in exactly one way.
+    fn ir_with(is_public: bool, raw_bytes: &str) -> String {
+        format!(
+            r#"{{
+                "contractName": "Anyone",
+                "properties": [],
+                "methods": [
+                    {{
+                        "name": "unlock",
+                        "params": [],
+                        "isPublic": {},
+                        "body": [
+                            {{ "name": "t0", "value": {{
+                                "kind": "raw_script",
+                                "bytes": "{}",
+                                "in_arity": 0,
+                                "out_arity": 1
+                            }} }}
+                        ]
+                    }}
+                ]
+            }}"#,
+            is_public, raw_bytes
+        )
+    }
+
+    #[test]
+    fn test_control_valid_ir_is_accepted() {
+        // The control both cases below are derived from. A probe whose control
+        // also fails proves nothing.
+        assert!(
+            load_ir_from_str(&ir_with(true, "51")).is_ok(),
+            "the control must load, or neither rejection below means anything"
+        );
+    }
+
+    #[test]
+    fn test_rejects_empty_raw_script_body() {
+        // R-079: lowering pops in_arity and pushes out_arity on the stack model
+        // while emission writes nothing for a zero-length span. The span
+        // degrades to the identity function and a DIFFERENT WITNESS spends the
+        // output. Measured on @bsv/sdk's Spend: `8f01859c` accepts x=5 and
+        // rejects x=-5; with the body erased, `01859c` does the opposite.
+        let err = load_ir_from_str(&ir_with(true, ""))
+            .expect_err("an empty raw_script body must be rejected");
+        assert!(
+            err.contains("empty bytes body"),
+            "error should name the empty body; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_rejects_empty_raw_script_body_even_at_zero_arity() {
+        // The degenerate in=0/out=0 case is harmless on its own, and is
+        // rejected anyway: mirroring the source validator exactly beats a
+        // narrower arity-conditional rule that would differ from the rule one
+        // pass earlier. Same judgment call as the Go tier's.
+        let json = r#"{
+            "contractName": "Anyone",
+            "properties": [],
+            "methods": [
+                {
+                    "name": "unlock",
+                    "params": [],
+                    "isPublic": true,
+                    "body": [
+                        { "name": "t0", "value": {
+                            "kind": "raw_script", "bytes": "", "in_arity": 0, "out_arity": 0
+                        } }
+                    ]
+                }
+            ]
+        }"#;
+        assert!(load_ir_from_str(json).is_err());
+    }
+
+    #[test]
+    fn test_rejects_no_public_methods() {
+        // R-081: emission succeeds with an EMPTY locking script, which is
+        // anyone-can-spend. On @bsv/sdk's Spend under full consensus wrappers,
+        // lock="" with unlock=OP_1 (0x51) validates.
+        let err = load_ir_from_str(&ir_with(false, "51"))
+            .expect_err("a contract with no public method must be rejected");
+        assert!(
+            err.contains("no public methods"),
+            "error should name the missing entry point; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_rejects_empty_method_list() {
+        let json = r#"{ "contractName": "Empty", "properties": [], "methods": [] }"#;
+        let err = load_ir_from_str(json).expect_err("no methods at all must be rejected");
+        assert!(err.contains("no public methods"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_structural_errors_keep_priority_over_the_entry_point_error() {
+        // Ordering matters and is asserted, not assumed: when a binding is ALSO
+        // malformed, the malformed binding is the more actionable diagnostic.
+        // Same ordering as compilers/go/ir/loader.go.
+        let json = r#"{
+            "contractName": "Anyone",
+            "properties": [],
+            "methods": [
+                {
+                    "name": "unlock",
+                    "params": [],
+                    "isPublic": false,
+                    "body": [
+                        { "name": "t0", "value": {
+                            "kind": "raw_script", "bytes": "515", "in_arity": 0, "out_arity": 1
+                        } }
+                    ]
+                }
+            ]
+        }"#;
+        let err = load_ir_from_str(json).expect_err("must be rejected");
+        assert!(
+            err.contains("odd hex length"),
+            "the structural error should win; got: {}",
             err
         );
     }

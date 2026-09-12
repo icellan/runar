@@ -80,6 +80,32 @@ public final class AnfLoader {
         if (ml instanceof List<?> lst) {
             for (Object m : lst) methods.add(toMethod(asObject(m)));
         }
+        // N-113 / R-081: a contract with no public method has no spending
+        // entry point and emits an EMPTY locking script — which is
+        // anyone-can-spend, not merely useless. On the real @bsv/sdk `Spend`
+        // engine under full consensus rules, an empty locking script with the
+        // one-byte push-only witness OP_1 (0x51) validates. Before this guard
+        // the --ir path exited 0 and handed the SDKs a well-formed artifact
+        // whose "script" was "".
+        //
+        // The source pipeline already rejects the same shape in Validate.java;
+        // this loader is reached only from the --ir path, so this closes the
+        // rule's gap on externally supplied IR.
+        //
+        // Checked LAST so the structural diagnostics from toMethod above keep
+        // priority — a malformed binding is the more actionable error when
+        // both are present. Mirrors compilers/go/ir/loader.go, ordering
+        // included.
+        boolean hasPublic = false;
+        for (AnfMethod m : methods) {
+            if (m.isPublic()) { hasPublic = true; break; }
+        }
+        if (!hasPublic) {
+            throw new RuntimeException(
+                "contract " + name + " has no public methods — no spending entry points;"
+                + " an empty locking script is anyone-can-spend"
+            );
+        }
         return new AnfProgram(name, props, methods);
     }
 
@@ -263,6 +289,29 @@ public final class AnfLoader {
     private static RawScript toRawScript(Map<?, ?> obj) {
         String bytes = asString(obj.get("bytes"));
         if (bytes == null) bytes = "";
+        // N-113 / R-079: an empty span is a claim the emitter cannot honour.
+        // Stack lowering models a raw_script purely from its declared arities
+        // (it pops in_arity and pushes out_arity) because the bytes are opaque
+        // to it, while emission writes nothing at all for a zero-length span.
+        // The stack model and the script then disagree, and every later
+        // PICK/ROLL depth derived from that model addresses the wrong slot —
+        // the span silently degrades to the identity function and a different
+        // witness spends the output than the IR declared.
+        //
+        // The source path already rejects this ("asm() body must be a
+        // non-empty hex string literal", Validate.java); --ir is the same rule
+        // at the external-input trust boundary. All empty bodies are rejected,
+        // including the degenerate in=0/out=0 case, because mirroring the
+        // source validator exactly is worth more than an arity-conditional
+        // rule that would differ from the rule one pass earlier.
+        if (bytes.isEmpty()) {
+            throw new RuntimeException(
+                "raw_script has an empty bytes body but declares in_arity "
+                + asInt(obj.get("in_arity"), "raw_script in_arity") + " / out_arity "
+                + asInt(obj.get("out_arity"), "raw_script out_arity")
+                + "; a span that emits no bytes cannot have a stack effect"
+            );
+        }
         if ((bytes.length() & 1) != 0) {
             throw new RuntimeException(
                 "raw_script bytes have odd hex length " + bytes.length()
