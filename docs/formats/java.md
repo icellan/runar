@@ -154,7 +154,7 @@ Special identifiers:
 | `OpCodeType` | `OpCodeType` |
 | `@Readonly` | Marks property `readonly: true` |
 
-### `FixedArray` is not currently expressible on the Java surface
+### `FixedArray` is not supported on the Java surface
 
 The other eight surfaces spell a fixed-size array with the length carried in
 the type — `FixedArray<bigint, 9>` (TypeScript), `FixedArray[Bigint, 9]`
@@ -188,14 +188,32 @@ type-argument position — a tree javac's parser can never produce — so that
 branch is unreachable, and the arity check above it is the only path a
 `FixedArray` type ever takes.
 
-**This is an open design decision, not a scheduled fix.** Resolving it means
-either introducing length-marker types (`FixedArray<Bigint, N9>`) and teaching
-all seven Java-surface parsers to resolve them, or declaring `FixedArray`
-permanently unsupported on the Java surface and recording the exclusion.
-`runar.lang.types.FixedArray` still ships in `packages/runar-java` pending that
-decision. Until it is made, port array-shaped contracts to Java by declaring the
-elements as individual scalar properties — which is what `expand_fixed_arrays`
-produces anyway, so the emitted script is byte-identical. See
+**The decision is made: `FixedArray` is unsupported on the Java surface**, and the
+exclusion is recorded here the way the Go-only crypto families are recorded in
+the root `CLAUDE.md`. The alternative — introducing length-marker types
+(`FixedArray<Bigint, N9>`) and teaching all seven Java-surface parsers to resolve
+them — would widen the language for a feature that has never once worked. Nothing
+can depend on it: every spelling was rejected by all seven compilers from the day
+the Java surface landed.
+
+What that removed:
+
+- `runar.lang.types.FixedArray` no longer ships in `packages/runar-java`. The
+  artifact-side `RunarArtifact.FixedArrayMeta` and `StateSerializer`'s
+  `parseFixedArrayDims` / `unwrapFixedArrayLeaf` stay — the Java **SDK** still
+  deploys and drives artifacts compiled from the other eight surfaces, which do
+  have `FixedArray` state slots.
+- `examples/.../tic-tac-toe-v2/TicTacToe.v2.runar.java` and
+  `examples/.../fixed-array-nested/Grid2x2.v2.runar.java` are deleted. Neither
+  ever compiled; their JUnit tests exercised the classes as ordinary Java objects
+  and never called `CompileCheck`, which is why two permanently-broken contracts
+  sat in a green suite. `packages/runar-compiler/src/__tests__/java-parser-examples.test.ts`
+  now runs every `examples/java` contract through parse → validate → typecheck, so
+  a `.runar.java` file no compiler accepts fails the build.
+
+Port array-shaped contracts to Java by declaring the elements as individual scalar
+properties — which is what `expand_fixed_arrays` produces anyway, so the emitted
+script is byte-identical. See
 `examples/java/src/main/java/runar/examples/tic-tac-toe/TicTacToe.runar.java`,
 whose nine `c0`–`c8` properties compile to the same script as the
 `FixedArray`-backed versions on the other eight surfaces.
@@ -405,7 +423,7 @@ The `runar-java` package (`packages/runar-java/`) provides:
 
 - **Base classes:** `SmartContract`, `StatefulSmartContract`
 - **Annotations:** `@Public`, `@Readonly`, `@Stateful` (all in `runar.lang.annotations`)
-- **Types:** `Addr`, `Sig`, `PubKey`, `ByteString`, `Point`, `P256Point`, `P384Point`, `Sha256Digest`, `SigHashPreimage`, `RabinSig`, `RabinPubKey`, `Ripemd160`, `OpCodeType` — all in `runar.lang.types`. (`FixedArray<T>` also ships there but is **not usable from contract source** — see [`FixedArray` is not currently expressible on the Java surface](#fixedarray-is-not-currently-expressible-on-the-java-surface).)
+- **Types:** `Addr`, `Sig`, `PubKey`, `ByteString`, `Point`, `P256Point`, `P384Point`, `Sha256Digest`, `SigHashPreimage`, `RabinSig`, `RabinPubKey`, `Ripemd160`, `OpCodeType` — all in `runar.lang.types`. `FixedArray` is **not** among them: it is unsupported on this surface — see [`FixedArray` is not supported on the Java surface](#fixedarray-is-not-supported-on-the-java-surface).
 - **Builtins:** `Builtins.assertThat`, `Builtins.hash160`, `Builtins.checkSig`, and peers (static methods)
 - **Off-chain simulator:** `runar.lang.runtime` (milestone 11)
 - **SDK:** `RunarContract`, `Provider`, `Signer`, transaction builders, `PreparedCall` (milestones 8–10)
@@ -420,5 +438,5 @@ Requires JDK 17 as the compile target (JDK 21 LTS works for local development). 
 - **Cross-compiler parity via milestone 7.** Today only the Java compiler can parse `.runar.java`. The TypeScript, Go, Rust, Python, Zig, and Ruby compilers gain hand-written `.runar.java` parsers in milestone 7 of the tier plan, at which point the format joins the shared conformance matrix.
 - **Package-private contracts only.** The compound `.runar.java` filename forces contract classes to be package-private. Cross-package consumption depends on the typed-wrapper codegen (milestone 10).
 - **No string literals in contract source.** Use `ByteString.fromHex("...")` for raw bytes.
-- **`FixedArray` cannot be declared at all.** Not a "length must be a literal" restriction — an integer literal in a Java type-argument list is a javac *syntax* error, so no spelling works. The design decision is open; see [`FixedArray` is not currently expressible on the Java surface](#fixedarray-is-not-currently-expressible-on-the-java-surface). Use individual scalar properties, which emit byte-identical script.
+- **`FixedArray` cannot be declared at all.** Not a "length must be a literal" restriction — an integer literal in a Java type-argument list is a javac *syntax* error, so no spelling works. It is unsupported on this surface by decision; see [`FixedArray` is not supported on the Java surface](#fixedarray-is-not-supported-on-the-java-surface). Use individual scalar properties, which emit byte-identical script.
 - **No nested blocks, try/catch, lambdas, switch expressions, or non-Rúnar annotations.** The parser rejects anything outside the frozen Rúnar subset.

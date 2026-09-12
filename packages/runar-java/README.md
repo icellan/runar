@@ -358,7 +358,15 @@ is the surface; nothing else compiles.
 | `P256Point` / `P384Point` | `ByteString`             | NIST P-256 / P-384 points.                         |
 | `RabinSig` / `RabinPubKey` | `BigInteger`            | Rabin-Williams signature primitives.               |
 | `OpCodeType`        | enum                            | Opcode constants used by intrinsic call sites.     |
-| `FixedArray<T, N>`  | typed alias                    | Compile-time fixed-length sequence.                |
+
+`FixedArray` is **not** available on the Java surface. An integer literal in a
+Java type-argument list is a javac syntax error, so `FixedArray<T, N>` has no
+spelling the toolchain accepts, and the type has been withdrawn rather than left
+as a trap. Declare the elements as individual scalar properties — that is what
+the compiler's `expand_fixed_arrays` pass produces on the other eight surfaces
+anyway, so the emitted script is byte-identical. See `docs/formats/java.md`.
+`RunarArtifact.FixedArrayMeta` is unaffected: the SDK still deploys and drives
+artifacts whose state slots came from a `FixedArray` on another surface.
 
 ### Example: a P2PKH unlock
 
@@ -1641,7 +1649,7 @@ public String toHex();
 Subclasses each add a `fromHex(String)` static factory and inherit
 `toByteArray()` / `length()` / `toHex()` / `equals` / `hashCode`.
 
-### `runar.lang.types.{Addr, FixedArray, OpCodeType, P256Point, P384Point, Point, PubKey, RabinPubKey, RabinSig, Ripemd160, Sha256, Sha256Digest, Sig, SigHashPreimage}`
+### `runar.lang.types.{Addr, OpCodeType, P256Point, P384Point, Point, PubKey, RabinPubKey, RabinSig, Ripemd160, Sha256, Sha256Digest, Sig, SigHashPreimage}`
 
 Branded `ByteString` (or `BigInteger`) sub-types. Each has:
 
