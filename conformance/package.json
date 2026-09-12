@@ -35,6 +35,7 @@
     "sdk-vertical:check": "tsx sdk-vertical/generate.ts --check",
     "differential-witness": "vitest run witnesses/differential.test.ts",
     "go-only-parity": "vitest run go-only-parity/",
+    "closed-findings": "vitest run closed-findings/",
     "mutation:score": "tsx mutation/run-mutation.ts",
     "sdk-output:check-inputs": "tsx sdk-output/generate-inputs.ts --check"
   },

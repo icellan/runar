@@ -885,6 +885,13 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: cd conformance && npx vitest run go-only-parity/
+      - name: Regression pins for previously-closed findings
+        # Seven reviewer findings were fixed without their `testable_assertion`
+        # ever being encoded anywhere. Each case here passed at the commit that
+        # added it; the point is that none of the seven can silently reopen.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: cd conformance && npx vitest run closed-findings/
       - name: Run multi-format source conformance (all 7 compilers, all 9 formats)
         # Adds the TypeScript compiler to the central conformance job (it was
         # previously absent) and exercises every compiler's frontend against
