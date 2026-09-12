@@ -44,6 +44,16 @@ and especially valued:
   (secp256k1 / NIST P-256 / P-384), WOTS+, SLH-DSA, BLAKE3, or related
   primitives that weakens or breaks the on-chain check.
 
+**Out of scope: anything behind `asm()`.** A contract extending
+`UnsafeSmartContract` may call `asm({ body, in_arity, out_arity })` to splice
+verbatim opcode bytes into its script. The compiler does not interpret those
+bytes: it emits them as written and trusts the declared stack effect. A wrong
+`in_arity` / `out_arity`, or a byte sequence that misbehaves, is an author
+defect, not a compiler defect — there is no analysis that could have caught it.
+A miscompile of the surrounding contract, or of the splice mechanism itself, IS
+in scope. See `docs/language-reference.md` for the construct and
+`spec/ir-format.md` §4.19 for the IR node.
+
 ## A Note on the Chronicle Opcode Policy
 
 Compiled contracts depend on the **Chronicle** opcode policy (SV Node v1.2.0),

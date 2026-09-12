@@ -6,7 +6,7 @@ Rúnar is a strict subset of TypeScript designed for compilation to Bitcoin SV S
 
 ## Contract Structure
 
-A Rúnar source file contains exactly one contract class that extends `SmartContract` (stateless) or `StatefulSmartContract` (stateful):
+A Rúnar source file contains exactly one contract class. It extends `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `UnsafeSmartContract` (stateless, plus the raw `asm()` escape hatch — see [Raw script: `UnsafeSmartContract` and `asm()`](#raw-script-unsafesmartcontract-and-asm)):
 
 **Stateless contract** — all properties are `readonly`:
 
@@ -50,9 +50,47 @@ class Counter extends StatefulSmartContract {
 
 `StatefulSmartContract` automatically handles the OP_PUSH_TX pattern: preimage verification at method entry and state continuation at exit for any method that modifies state. Access preimage fields via `this.txPreimage`.
 
+### Raw script: `UnsafeSmartContract` and `asm()`
+
+`UnsafeSmartContract` is `SmartContract` plus one extra builtin, `asm()`, which
+splices verbatim opcode bytes into the emitted script:
+
+```typescript
+import { UnsafeSmartContract, asm } from 'runar-lang';
+
+class Anyone extends UnsafeSmartContract {
+  constructor() {
+    super();
+  }
+
+  public unlock() {
+    asm({ body: '51', in_arity: 0, out_arity: 1 });   // OP_1
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `body` | The opcode bytes, as a hex string (an array form built from opcode helpers is also accepted) |
+| `in_arity` | How many stack elements the span consumes |
+| `out_arity` | How many it produces |
+
+**The compiler does not interpret `body`.** It lowers to a `raw_script` IR node
+(`spec/ir-format.md` §4.19) that is opaque to every analysis:
+
+- dead-code elimination must not remove it, so it is always emitted;
+- the stack model cannot verify `in_arity` / `out_arity` — it trusts them, and a
+  wrong number silently corrupts the stack shape of everything after it;
+- no type information crosses it.
+
+This is the one place where the compiler's guarantees stop and the burden of
+stack-shape correctness moves entirely to the contract author. Use it when you
+need an opcode sequence the language does not express, and check the result with
+`runar debug` or a ScriptVM test rather than by inspection.
+
 ### Rules
 
-- One class per file, extending `SmartContract` or `StatefulSmartContract`.
+- One class per file, extending `SmartContract`, `StatefulSmartContract` or `UnsafeSmartContract`.
 - No decorators, no generics on the class.
 - Imports are restricted to `runar-lang` (or `runar` / `runar/builtins`).
 

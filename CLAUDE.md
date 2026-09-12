@@ -163,7 +163,8 @@ Cross-tier interop tests live in `conformance/sdk-envelope/` (a single TS-signed
 - `StatefulSmartContract` — compiler auto-injects `checkPreimage` at method entry and state continuation at exit
 - `this.addOutput(satoshis, ...values)` — multi-output intrinsic; values are positional matching mutable properties in declaration order
 - `this.addRawOutput(satoshis, scriptBytes)` — raw output intrinsic; creates an output with caller-specified script bytes instead of the contract's own codePart
-- `parentClass` field on `ContractNode` discriminates between the two base classes
+- `UnsafeSmartContract` — stateless, plus the `asm({ body, in_arity, out_arity })` escape hatch, which splices verbatim opcode bytes and lowers to a `raw_script` node the compiler does NOT interpret. DCE must not remove it, the stack model cannot verify its declared arity, and no type information crosses it. Exercised by the `asm-raw-script` example in all nine formats; see `docs/language-reference.md` and `spec/grammar.md`
+- `parentClass` field on `ContractNode` discriminates between the three base classes
 - Only Rúnar built-in functions and contract methods are allowed — the type checker rejects calls to unknown functions like `Math.floor()` or `console.log()`
 - **Property initializers**: Properties can have `= value` defaults (literal values only: BigIntLiteral, BoolLiteral, ByteStringLiteral). Initialized properties are excluded from auto-generated constructors. Go/Rust DSL formats use a private `init()` method pattern instead of inline syntax. The AST `PropertyNode` has an optional `initializer` field; ANF `initialValue` is populated from it.
 
