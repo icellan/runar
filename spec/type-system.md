@@ -61,7 +61,12 @@ RabinSig RabinPubKey
 
 ### 2.2 Domain Types
 
-Domain types are **subtypes of `ByteString`** with additional compile-time size constraints. A value of a domain type can be used anywhere a `ByteString` is expected, but not vice versa.
+Domain types are members of the `ByteString` family, distinguished by the size each
+one documents. The sizes below describe intent for a human reader: **they are not
+checked** by any tier, at compile time or at runtime (see §6.1, "Declared sizes are
+not checked"). Assignment inside the family is permitted in both directions — a
+domain type where a `ByteString` is expected, and a `ByteString` where a domain type
+is expected.
 
 | Type       | Size (bytes) | Description                                  |
 |------------|-------------|----------------------------------------------|
@@ -345,9 +350,34 @@ The `OP_RETURN` terminates script execution so the state fields are never execut
 A value of type `S` is assignable to a target of type `T` if:
 
 1. `S` and `T` are the same type, OR
-2. `S <: T` (subtype relationship), OR
-3. `S` is a domain type and `T` is `ByteString` (widening), OR
-4. `S` is `RabinSig` or `RabinPubKey` and `T` is `bigint` (widening).
+2. `S` and `T` are both in the `ByteString` family (`ByteString` itself and every
+   domain type in §2.2), in either direction, OR
+3. `S` and `T` are both in the `bigint` family (`bigint`, `RabinSig`,
+   `RabinPubKey`), in either direction.
+
+Rules 2 and 3 are **mutual**, not the one-way widening the subtyping arrows in
+§2.2 suggest: `ByteString` is assignable to `Addr`, `Ripemd160` is assignable to
+`Sha256`, and `bigint` is assignable to `RabinSig`. Cross-FAMILY assignment stays
+a compile-time error — `bigint` never reaches a `ByteString` slot and vice versa.
+
+#### Declared sizes are not checked
+
+Neither rule consults the byte lengths in §2.2. A 1-byte value annotated `Sha256`
+is assignable to a `PubKey`, and no tier verifies at compile time or at runtime
+that either value has its documented size. This is deliberate, and it follows from
+what Script can represent: every domain type is the same stack item as a
+`ByteString` holding the same bytes, so a narrowing rule could only reject source
+— it could never make an emitted script safer. The lengths that reach domain-typed
+slots also come mostly from `split()` halves, `OP_CAT` results, preimage extractors
+and hash builtins, where the length is not statically knowable at all.
+
+A contract that needs a length guarantee states it in code, where it survives to
+the chain: `assert(len(pk) === 33n)` emits `OP_SIZE` and fails the script; the
+annotation emits nothing.
+
+`conformance/subtype-parity/FamilyWidening.runar.ts` gates the lattice and
+`conformance/subtype-parity/DomainTypeLength.runar.ts` gates the size property —
+both require all seven tiers to accept and to emit byte-identical script.
 
 ### 6.2 Equality Compatibility
 
