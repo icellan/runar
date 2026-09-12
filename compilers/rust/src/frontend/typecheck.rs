@@ -296,6 +296,29 @@ fn is_subtype(actual: &str, expected: &str) -> bool {
     false
 }
 
+/// The subtype rule TS applies to addOutput's STATE VALUES:
+/// `packages/runar-compiler/src/passes/03-typecheck.ts`'s `isSubtype`.
+///
+/// This crate's `is_subtype` already matches it, so the two extra clauses below
+/// are unreachable here — they are written out because four of the seven tiers'
+/// `isSubtype` only widens TOWARDS ByteString / bigint, and the rule the six
+/// ports must agree on is the reference's. Measured before this check existed,
+/// `addOutput(1000n, this.count, b)` with `b: ByteString` and `owner: PubKey`
+/// compiled identically in all seven tiers, so a narrower predicate here would
+/// have REJECTED working code the reference tier accepts.
+fn output_state_value_matches(actual: &str, expected: &str) -> bool {
+    if is_subtype(actual, expected) {
+        return true;
+    }
+    if is_bytestring_subtype(actual) && is_bytestring_subtype(expected) {
+        return true;
+    }
+    if is_bigint_family(actual) && is_bigint_family(expected) {
+        return true;
+    }
+    false
+}
+
 fn is_bigint_family(t: &str) -> bool {
     is_bigint_subtype(t)
 }
@@ -1000,9 +1023,17 @@ terminal (no state mutation)",
     /// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
     /// `OP_NUM2BIN`, making the UTXO unspendable.
     ///
-    /// Ported from the TypeScript reference, wording included. Deliberately the
-    /// FIRST argument only: TS also checks arity, the state-value types and the
-    /// `scriptBytes` argument, and none of those are this finding.
+    /// N-105 (2/2): the remaining three checks TS performs and this tier did
+    /// not — the StatefulSmartContract gate, the arity of all three intrinsics,
+    /// and the types of addOutput's state values. Each had an executed
+    /// consequence: `addOutput(1000n)` dropped the state value from the
+    /// continuation entirely, a surplus value was appended to a state
+    /// serialization the next spend deserializes by fixed offsets, a ByteString
+    /// state value was serialized where an 8-byte LE number belongs, and
+    /// addRawOutput in a stateless SmartContract emitted a "continuation" for a
+    /// contract with no state.
+    ///
+    /// Ported from the TypeScript reference, wording included.
     ///
     /// N-105: the SECOND argument of addRawOutput / addDataOutput is the
     /// created output's LOCKING SCRIPT, and this tier used to accept any type
@@ -1026,27 +1057,120 @@ terminal (no state mutation)",
         args: &[Expression],
         env: &mut TypeEnv,
     ) -> TType {
-        for (i, arg) in args.iter().enumerate() {
-            let arg_type = self.infer_expr_type(arg, env);
-            if i == 0 && !is_bigint_family(&arg_type) && arg_type != "<unknown>" {
+        // N-105: all three intrinsics build an OUTPUT, and an output only
+        // exists in a stateful contract. TS refuses the call outright and
+        // checks nothing else, so the early return is part of the ported
+        // behaviour.
+        if self.contract.parent_class != "StatefulSmartContract" {
+            self.add_error(format!(
+                "{}() is only available in StatefulSmartContract",
+                name
+            ));
+            return VOID.to_string();
+        }
+
+        if name == "addOutput" {
+            // The surface form `this.addOutput(satoshis, .{ v1, v2, ... })`
+            // that Zig and Move tuple syntax produce carries the state values
+            // in a trailing array literal. anf_lower unwraps it with this same
+            // helper, so the arity checked here is the arity codegen will see.
+            let normalized = super::anf_lower::flatten_add_output_args(args);
+
+            let mutable_props: Vec<&PropertyNode> =
+                self.contract.properties.iter().filter(|p| !p.readonly).collect();
+            // N-105: the arity and state-value rules count the DECLARED mutable
+            // properties, but expand_fixed_arrays — which runs AFTER this pass —
+            // splits a FixedArray state property into one scalar sibling per
+            // element. For such a contract the only form that lowers is the
+            // expanded one (`addOutput(sats, board[0], board[1], board[2], n)`),
+            // and the reference tier's own rule REJECTS it: TypeScript answers
+            // "addOutput() expects 3 argument(s) ... got 5" for the Boardy
+            // contract in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
+            // which is checked into this repo and compiled by all six non-TS
+            // tiers. Porting a rule that is wrong for that shape would delete
+            // working code, so both checks are scoped out of it and the
+            // reference-tier defect is reported rather than replicated. The
+            // satoshis check is unaffected and still runs.
+            let shape_checkable = !mutable_props
+                .iter()
+                .any(|p| matches!(p.prop_type, TypeNode::FixedArray { .. }));
+            let expected = 1 + mutable_props.len();
+            if shape_checkable && normalized.len() != expected {
                 self.add_error(format!(
-                    "{}() first argument (satoshis) must be bigint, got '{}'",
-                    name, arg_type
+                    "addOutput() expects {} argument(s): satoshis + {} state value(s), got {}",
+                    expected,
+                    mutable_props.len(),
+                    normalized.len()
                 ));
             }
-            // addOutput's trailing arguments are STATE VALUES, checked against
-            // the mutable properties; only the raw/data intrinsics carry
-            // scriptBytes here. TS uses is_subtype against ByteString, not
-            // equality, so every ByteString subtype (PubKey, Ripemd160, Sig,
-            // ...) stays accepted.
-            if i == 1
-                && name != "addOutput"
-                && !is_subtype(&arg_type, "ByteString")
-                && arg_type != "<unknown>"
-            {
+            if !normalized.is_empty() {
+                let sat_type = self.infer_expr_type(&normalized[0], env);
+                if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
+                    self.add_error(format!(
+                        "addOutput() first argument (satoshis) must be bigint, got '{}'",
+                        sat_type
+                    ));
+                }
+            }
+            if shape_checkable {
+                let mut i = 0;
+                while i < mutable_props.len() && i + 1 < normalized.len() {
+                    let arg_type = self.infer_expr_type(&normalized[i + 1], env);
+                    let prop_type = type_node_to_ttype(&mutable_props[i].prop_type);
+                    if !output_state_value_matches(&arg_type, &prop_type)
+                        && arg_type != "<unknown>"
+                    {
+                        self.add_error(format!(
+                            "addOutput() argument {} ({}) must be '{}', got '{}'",
+                            i + 2,
+                            mutable_props[i].name,
+                            prop_type,
+                            arg_type
+                        ));
+                    }
+                    i += 1;
+                }
+                // Surplus arguments are still inferred, so a type error inside
+                // one is not swallowed by the arity diagnostic. Mirrors TS.
+                for extra in normalized.iter().skip(expected) {
+                    self.infer_expr_type(extra, env);
+                }
+            } else {
+                // Still infer every state value so a type error inside one is
+                // not lost along with the scoped-out checks.
+                for extra in normalized.iter().skip(1) {
+                    self.infer_expr_type(extra, env);
+                }
+            }
+            return VOID.to_string();
+        }
+
+        // addRawOutput / addDataOutput — (satoshis, scriptBytes).
+        if args.len() != 2 {
+            self.add_error(format!(
+                "{}() expects 2 arguments (satoshis, scriptBytes), got {}",
+                name,
+                args.len()
+            ));
+        }
+        if !args.is_empty() {
+            let sat_type = self.infer_expr_type(&args[0], env);
+            if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
+                self.add_error(format!(
+                    "{}() first argument (satoshis) must be bigint, got '{}'",
+                    name, sat_type
+                ));
+            }
+        }
+        if args.len() >= 2 {
+            // TS uses is_subtype against ByteString, not equality, so every
+            // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+            let script_type = self.infer_expr_type(&args[1], env);
+            if !is_subtype(&script_type, "ByteString") && script_type != "<unknown>" {
                 self.add_error(format!(
                     "{}() second argument (scriptBytes) must be ByteString, got '{}'",
-                    name, arg_type
+                    name, script_type
                 ));
             }
         }

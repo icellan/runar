@@ -270,7 +270,7 @@ pub(crate) const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// `this.addOutput` is called as `this.addOutput(satoshis, .{ v1, v2, ... })`
 /// (the surface form Zig / Move tuple syntax produce), unwrap the trailing
 /// array literal so each element becomes an individual state value.
-fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
+pub(crate) fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
     if args.len() == 2 {
         if let Expression::ArrayLiteral { elements } = &args[1] {
             let mut out = Vec::with_capacity(1 + elements.len());

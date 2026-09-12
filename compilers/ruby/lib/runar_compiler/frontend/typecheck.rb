@@ -705,36 +705,134 @@ module RunarCompiler
       # while n=1000 gives 0xe8 0x03, an invalid opcode, and the output is
       # unspendable.
       #
+      # N-105 (2/2): the remaining three checks TS performs and this tier did
+      # not -- the StatefulSmartContract gate, the arity of all three
+      # intrinsics, and the types of addOutput's state values. Each had an
+      # executed consequence: `addOutput(1000n)` dropped the state value from
+      # the continuation entirely, a surplus value was appended to a state
+      # serialization the next spend deserializes by fixed offsets, a ByteString
+      # state value was serialized where an 8-byte LE number belongs, and
+      # addRawOutput in a stateless SmartContract emitted a "continuation" for a
+      # contract with no state.
+      #
       # Ported from the TypeScript reference, wording included.
       #
       # `<unknown>` is escaped exactly as TS escapes it -- a private helper's
       # declared return type is discarded at parse time in every tier, so
       # `this.sats()` infers as `<unknown>` and must keep compiling.
       def check_output_intrinsic_args(name, args, env)
-        args.each_with_index do |arg, i|
-          arg_type = infer_expr_type(arg, env)
-          next if arg_type == "<unknown>"
+        # N-105: all three intrinsics build an OUTPUT, and an output only exists
+        # in a stateful contract. TS refuses the call outright and checks
+        # nothing else, so the early return is part of the ported behaviour.
+        if @contract.nil? || @contract.parent_class != "StatefulSmartContract"
+          add_error("#{name}() is only available in StatefulSmartContract")
+          return "void"
+        end
 
-          if i.zero?
-            next if Frontend.bigint_family?(arg_type)
+        return check_add_output_args(args, env) if name == "addOutput"
 
+        # addRawOutput / addDataOutput -- (satoshis, scriptBytes).
+        if args.length != 2
+          add_error("#{name}() expects 2 arguments (satoshis, scriptBytes), got #{args.length}")
+        end
+        if args.length >= 1
+          sat_type = infer_expr_type(args[0], env)
+          unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
+            add_error("#{name}() first argument (satoshis) must be bigint, got '#{sat_type}'")
+          end
+        end
+        if args.length >= 2
+          # TS uses subtype? against ByteString, not equality, so every
+          # ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+          script_type = infer_expr_type(args[1], env)
+          unless Frontend.subtype?(script_type, "ByteString") || script_type == "<unknown>"
             add_error(
-              "#{name}() first argument (satoshis) must be bigint, got '#{arg_type}'"
-            )
-          elsif i == 1 && name != "addOutput"
-            # addOutput's trailing arguments are STATE VALUES, checked against
-            # the mutable properties; only the raw/data intrinsics carry
-            # scriptBytes here. TS uses subtype? against ByteString, not
-            # equality, so every ByteString subtype (PubKey, Ripemd160, Sig,
-            # ...) stays accepted.
-            next if Frontend.subtype?(arg_type, "ByteString")
-
-            add_error(
-              "#{name}() second argument (scriptBytes) must be ByteString, got '#{arg_type}'"
+              "#{name}() second argument (scriptBytes) must be ByteString, got '#{script_type}'"
             )
           end
         end
         "void"
+      end
+
+      # addOutput(satoshis, ...state values) -- arity against the contract's
+      # mutable properties, and one type check per state value.
+      def check_add_output_args(args, env)
+        # The surface form `this.addOutput(satoshis, .{ v1, v2, ... })` that Zig
+        # and Move tuple syntax produce carries the state values in a trailing
+        # array literal. anf_lower unwraps it the same way, so the arity checked
+        # here is the arity codegen will see.
+        normalized =
+          if args.length == 2 && args[1].is_a?(ArrayLiteralExpr)
+            [args[0], *args[1].elements]
+          else
+            args
+          end
+        mutable_props = @contract.properties.reject(&:readonly)
+        # N-105: the arity and state-value rules count the DECLARED mutable
+        # properties, but expand_fixed_arrays -- which runs AFTER this pass --
+        # splits a FixedArray state property into one scalar sibling per
+        # element. For such a contract the only form that lowers is the expanded
+        # one (`addOutput(sats, board[0], board[1], board[2], n)`), and the
+        # reference tier's own rule REJECTS it: TypeScript answers "addOutput()
+        # expects 3 argument(s) ... got 5" for the Boardy contract in
+        # compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
+        # which is checked into this repo and compiled by all six non-TS tiers.
+        # Porting a rule that is wrong for that shape would delete working code,
+        # so both checks are scoped out of it and the reference-tier defect is
+        # reported rather than replicated. The satoshis check is unaffected.
+        shape_checkable = mutable_props.none? { |p| p.type.is_a?(FixedArrayType) }
+        expected = 1 + mutable_props.length
+        if shape_checkable && normalized.length != expected
+          add_error(
+            "addOutput() expects #{expected} argument(s): satoshis + " \
+            "#{mutable_props.length} state value(s), got #{normalized.length}"
+          )
+        end
+        if normalized.length >= 1
+          sat_type = infer_expr_type(normalized[0], env)
+          unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
+            add_error("addOutput() first argument (satoshis) must be bigint, got '#{sat_type}'")
+          end
+        end
+        # Every state value is inferred, surplus ones included, so a type error
+        # inside one is not swallowed by the arity diagnostic.
+        normalized[1..].to_a.each_with_index do |arg, i|
+          arg_type = infer_expr_type(arg, env)
+          next unless shape_checkable
+
+          prop = mutable_props[i]
+          next if prop.nil? || arg_type == "<unknown>"
+
+          prop_type = type_node_to_string(prop.type)
+          next if output_state_value_matches?(arg_type, prop_type)
+
+          add_error(
+            "addOutput() argument #{i + 2} (#{prop.name}) must be '#{prop_type}', got '#{arg_type}'"
+          )
+        end
+        "void"
+      end
+
+      # The subtype rule TS applies to addOutput's STATE VALUES:
+      # `packages/runar-compiler/src/passes/03-typecheck.ts`'s `isSubtype`.
+      #
+      # It is deliberately not `Frontend.subtype?`. TS's version treats the
+      # ByteString and bigint families as BIDIRECTIONALLY compatible (a
+      # ByteString value satisfies a PubKey slot, an Addr value satisfies a
+      # Ripemd160 slot); this tier's only widens TOWARDS ByteString / bigint.
+      # Measured before this check existed, `addOutput(1000n, this.count, b)`
+      # with `b: ByteString` and `owner: PubKey` compiled identically in all
+      # seven tiers, so the narrower predicate would have REJECTED working code
+      # the reference tier accepts.
+      #
+      # That asymmetry is pre-existing, reaches every other argument and
+      # assignment check, and is flagged rather than fixed here.
+      def output_state_value_matches?(actual, expected)
+        return true if Frontend.subtype?(actual, expected)
+        return true if Frontend.byte_family?(actual) && Frontend.byte_family?(expected)
+        return true if Frontend.bigint_family?(actual) && Frontend.bigint_family?(expected)
+
+        false
       end
 
       def add_error(msg)

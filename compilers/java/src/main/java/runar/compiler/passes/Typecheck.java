@@ -1118,38 +1118,144 @@ public final class Typecheck {
             }
         }
 
+        /**
+         * The subtype rule TS applies to addOutput's STATE VALUES:
+         * {@code packages/runar-compiler/src/passes/03-typecheck.ts}'s
+         * {@code isSubtype}.
+         *
+         * <p>It is deliberately not this class's {@link #isSubtype}. TS's
+         * version treats the ByteString and bigint families as BIDIRECTIONALLY
+         * compatible (a ByteString value satisfies a PubKey slot, an Addr value
+         * satisfies a Ripemd160 slot); this tier's only widens TOWARDS
+         * ByteString / bigint. Measured before this check existed,
+         * {@code addOutput(1000n, this.count, b)} with {@code b: ByteString}
+         * and {@code owner: PubKey} compiled identically in all seven tiers, so
+         * the narrower predicate would have REJECTED working code the reference
+         * tier accepts.
+         *
+         * <p>That asymmetry is pre-existing, reaches every other argument and
+         * assignment check, and is flagged rather than fixed here.
+         */
+        private static boolean outputStateValueMatches(String actual, String expected) {
+            if (isSubtype(actual, expected)) return true;
+            if (BYTESTRING_SUBTYPES.contains(actual) && BYTESTRING_SUBTYPES.contains(expected)) {
+                return true;
+            }
+            if (BIGINT_SUBTYPES.contains(actual) && BIGINT_SUBTYPES.contains(expected)) {
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * N-105 (2/2): addOutput's arity and state-value types, and the
+         * StatefulSmartContract gate shared by all three intrinsics.
+         *
+         * <p>Each was a hole with an executed consequence:
+         * {@code addOutput(1000n)} dropped the state value from the
+         * continuation entirely, a surplus value was appended to a state
+         * serialization the next spend deserializes by fixed offsets, a
+         * ByteString state value was serialized where an 8-byte LE number
+         * belongs, and addRawOutput in a stateless SmartContract emitted a
+         * "continuation" for a contract with no state.
+         *
+         * <p>Ported from the TypeScript reference, wording included.
+         */
+        private String checkAddOutputArgs(List<Expression> args, Env env) {
+            // Mirror flattenAddOutputArgs in AnfLower: when addOutput is called
+            // as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface form
+            // Zig / Move tuple syntax produce), unwrap the trailing array
+            // literal so each element is type-checked individually instead of
+            // triggering ArrayLiteralExpr's homogeneous-element rule (state
+            // values intentionally have heterogeneous types — owner: PubKey,
+            // balance: bigint, ...). The satoshis argument is args.get(0) in
+            // BOTH forms.
+            List<Expression> normalized = args;
+            if (args.size() == 2 && args.get(1) instanceof ArrayLiteralExpr al) {
+                normalized = new ArrayList<>(1 + al.elements().size());
+                normalized.add(args.get(0));
+                normalized.addAll(al.elements());
+            }
+
+            List<PropertyNode> mutableProps = new ArrayList<>();
+            boolean hasFixedArrayState = false;
+            for (PropertyNode p : contract.properties()) {
+                if (!p.readonly()) {
+                    mutableProps.add(p);
+                    if (p.type() instanceof FixedArrayType) hasFixedArrayState = true;
+                }
+            }
+            // N-105: the arity and state-value rules count the DECLARED mutable
+            // properties, but the fixed-array expansion splits a FixedArray
+            // state property into one scalar sibling per element. For such a
+            // contract the only form that lowers is the expanded one
+            // (`addOutput(sats, board[0], board[1], board[2], n)`), and the
+            // reference tier's own rule REJECTS it ("expects 3 argument(s) ...
+            // got 5" for the Boardy contract in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
+            // which all six non-TS tiers compile). Porting a rule that is wrong
+            // for that shape would delete working code, so both checks are
+            // scoped out of it.
+            //
+            // In THIS tier the guard never fires: ExpandFixedArrays runs BEFORE
+            // Typecheck here and AFTER it in the other six, so the properties
+            // reaching this method are already scalar. It is written out anyway
+            // so the six ports read identically and so the check stays correct
+            // if that pass order is ever aligned.
+            boolean shapeCheckable = !hasFixedArrayState;
+            int expected = 1 + mutableProps.size();
+            if (shapeCheckable && normalized.size() != expected) {
+                error("addOutput() expects " + expected + " argument(s): satoshis + "
+                    + mutableProps.size() + " state value(s), got " + normalized.size());
+            }
+            if (!normalized.isEmpty()) {
+                checkSatoshisArg("addOutput", normalized.get(0), env);
+            }
+            // Every state value is inferred, surplus ones included, so a type
+            // error inside one is not swallowed by the arity diagnostic.
+            for (int i = 1; i < normalized.size(); i++) {
+                String argType = inferExpr(normalized.get(i), env);
+                if (!shapeCheckable || i - 1 >= mutableProps.size()) continue;
+                if ("<unknown>".equals(argType)) continue;
+                PropertyNode p = mutableProps.get(i - 1);
+                String propType = typeToString(p.type());
+                if (!outputStateValueMatches(argType, propType)) {
+                    error("addOutput() argument " + (i + 1) + " (" + p.name() + ") must be '"
+                        + propType + "', got '" + argType + "'");
+                }
+            }
+            return "void";
+        }
+
         private String checkBuiltinThisCall(String prop, List<Expression> args, Env env) {
             if ("getStateScript".equals(prop)) {
                 return "ByteString";
             }
             if ("addOutput".equals(prop) || "addRawOutput".equals(prop) || "addDataOutput".equals(prop)) {
-                // Mirror flattenAddOutputArgs in AnfLower: when addOutput is
-                // called as `this.addOutput(satoshis, .{ v1, v2, ... })`
-                // (the surface form Zig / Move tuple syntax produce), unwrap
-                // the trailing array literal so each element is type-checked
-                // individually instead of triggering ArrayLiteralExpr's
-                // homogeneous-element rule (state values intentionally have
-                // heterogeneous types — owner: PubKey, balance: bigint, ...).
-                // The satoshis argument is args.get(0) in BOTH forms.
-                if ("addOutput".equals(prop)
-                        && args.size() == 2
-                        && args.get(1) instanceof ArrayLiteralExpr al) {
-                    checkSatoshisArg(prop, args.get(0), env);
-                    for (Expression el : al.elements()) inferExpr(el, env);
-                } else {
-                    for (int i = 0; i < args.size(); i++) {
-                        if (i == 0) {
-                            checkSatoshisArg(prop, args.get(0), env);
-                        } else if (i == 1 && !"addOutput".equals(prop)) {
-                            // addOutput's trailing arguments are STATE VALUES,
-                            // checked against the mutable properties; only the
-                            // raw/data intrinsics carry scriptBytes here.
-                            checkScriptBytesArg(prop, args.get(i), env);
-                        } else {
-                            inferExpr(args.get(i), env);
-                        }
-                    }
+                // N-105: all three intrinsics build an OUTPUT, and an output
+                // only exists in a stateful contract. TS refuses the call
+                // outright and checks nothing else, so the early return is part
+                // of the ported behaviour.
+                if (contract == null
+                        || contract.parentClass() != ParentClass.STATEFUL_SMART_CONTRACT) {
+                    error(prop + "() is only available in StatefulSmartContract");
+                    return "void";
                 }
+                if ("addOutput".equals(prop)) {
+                    return checkAddOutputArgs(args, env);
+                }
+                // addRawOutput / addDataOutput — (satoshis, scriptBytes).
+                if (args.size() != 2) {
+                    error(prop + "() expects 2 arguments (satoshis, scriptBytes), got "
+                        + args.size());
+                }
+                if (!args.isEmpty()) {
+                    checkSatoshisArg(prop, args.get(0), env);
+                }
+                if (args.size() >= 2) {
+                    checkScriptBytesArg(prop, args.get(1), env);
+                }
+                for (int i = 2; i < args.size(); i++) inferExpr(args.get(i), env);
                 return "void";
             }
             if (methodSigs.containsKey(prop)) {

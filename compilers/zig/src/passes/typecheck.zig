@@ -1027,29 +1027,143 @@ const TypeChecker = struct {
         args: []const types.Expression,
         env: *TypeEnv,
     ) RunarType {
-        for (args, 0..) |arg, i| {
-            const arg_type = self.inferExprType(arg, env);
-            if (i == 0 and !isBigintFamily(arg_type) and arg_type != .unknown) {
+        // N-105: all three intrinsics build an OUTPUT, and an output only
+        // exists in a stateful contract. TS refuses the call outright and
+        // checks nothing else, so the early return is part of the ported
+        // behaviour. This tier used to report its own wording here and then
+        // carry on checking; it now matches the reference on both counts.
+        if (self.contract.parent_class != .stateful_smart_contract) {
+            self.addError("{s}() is only available in StatefulSmartContract", .{name});
+            return .void;
+        }
+
+        if (std.mem.eql(u8, name, "addOutput")) {
+            // The surface form `this.addOutput(satoshis, .{ v1, v2, ... })` that
+            // Zig and Move tuple syntax produce carries the state values in a
+            // trailing array literal. lowerAddOutputArgs unwraps it the same
+            // way, so the arity checked here is the arity codegen will see.
+            const state_args: []const Expression = blk: {
+                if (args.len == 2) switch (args[1]) {
+                    .array_literal => |elems| break :blk elems,
+                    else => {},
+                };
+                break :blk if (args.len > 1) args[1..] else &.{};
+            };
+
+            var mutable_count: usize = 0;
+            var has_fixed_array_state = false;
+            for (self.contract.properties) |p| {
+                if (!p.readonly) {
+                    mutable_count += 1;
+                    if (p.type_info == .fixed_array) has_fixed_array_state = true;
+                }
+            }
+            // N-105: the arity and state-value rules count the DECLARED mutable
+            // properties, but expand_fixed_arrays — which runs AFTER this pass
+            // — splits a FixedArray state property into one scalar sibling per
+            // element. For such a contract the only form that lowers is the
+            // expanded one (`addOutput(sats, board[0], board[1], board[2], n)`),
+            // and the reference tier's own rule REJECTS it: TypeScript answers
+            // "addOutput() expects 3 argument(s) ... got 5" for the Boardy
+            // contract in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
+            // which is checked into this repo and compiled by all six non-TS
+            // tiers. Porting a rule that is wrong for that shape would delete
+            // working code, so both checks are scoped out of it and the
+            // reference-tier defect is reported rather than replicated. The
+            // satoshis check is unaffected and still runs.
+            const shape_checkable = !has_fixed_array_state;
+            const expected = 1 + mutable_count;
+            const got = if (args.len == 0) @as(usize, 0) else 1 + state_args.len;
+            if (shape_checkable and got != expected) {
                 self.addError(
-                    "{s}() first argument (satoshis) must be bigint, got '{s}'",
-                    .{ name, types.runarTypeToString(arg_type) },
+                    "addOutput() expects {d} argument(s): satoshis + {d} state value(s), got {d}",
+                    .{ expected, mutable_count, got },
                 );
             }
-            // addOutput's trailing arguments are STATE VALUES, checked against
-            // the mutable properties; only the raw/data intrinsics carry
-            // scriptBytes here. TS uses isSubtype against ByteString, not
-            // equality, so every ByteString subtype (PubKey, Ripemd160, Sig,
-            // ...) stays accepted.
-            if (i == 1 and !std.mem.eql(u8, name, "addOutput") and
-                !isSubtype(arg_type, .byte_string) and arg_type != .unknown)
-            {
+            if (args.len >= 1) {
+                const sat_type = self.inferExprType(args[0], env);
+                if (!isBigintFamily(sat_type) and sat_type != .unknown) {
+                    self.addError(
+                        "addOutput() first argument (satoshis) must be bigint, got '{s}'",
+                        .{types.runarTypeToString(sat_type)},
+                    );
+                }
+            }
+            // Walk the mutable properties in declaration order alongside the
+            // state values. Every state value is inferred, surplus ones
+            // included, so a type error inside one is not swallowed by the
+            // arity diagnostic.
+            var prop_cursor: usize = 0;
+            for (state_args, 0..) |arg, i| {
+                const arg_type = self.inferExprType(arg, env);
+                if (!shape_checkable) continue;
+                while (prop_cursor < self.contract.properties.len and
+                    self.contract.properties[prop_cursor].readonly) : (prop_cursor += 1)
+                {}
+                if (prop_cursor >= self.contract.properties.len) continue;
+                const prop = self.contract.properties[prop_cursor];
+                prop_cursor += 1;
+                if (!outputStateValueMatches(arg_type, prop.type_info) and arg_type != .unknown) {
+                    self.addError(
+                        "addOutput() argument {d} ({s}) must be '{s}', got '{s}'",
+                        .{
+                            i + 2,
+                            prop.name,
+                            types.runarTypeToString(prop.type_info),
+                            types.runarTypeToString(arg_type),
+                        },
+                    );
+                }
+            }
+            return .void;
+        }
+
+        // addRawOutput / addDataOutput — (satoshis, scriptBytes).
+        if (args.len != 2) {
+            self.addError(
+                "{s}() expects 2 arguments (satoshis, scriptBytes), got {d}",
+                .{ name, args.len },
+            );
+        }
+        if (args.len >= 1) {
+            const sat_type = self.inferExprType(args[0], env);
+            if (!isBigintFamily(sat_type) and sat_type != .unknown) {
+                self.addError(
+                    "{s}() first argument (satoshis) must be bigint, got '{s}'",
+                    .{ name, types.runarTypeToString(sat_type) },
+                );
+            }
+        }
+        if (args.len >= 2) {
+            // TS uses isSubtype against ByteString, not equality, so every
+            // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+            const script_type = self.inferExprType(args[1], env);
+            if (!isSubtype(script_type, .byte_string) and script_type != .unknown) {
                 self.addError(
                     "{s}() second argument (scriptBytes) must be ByteString, got '{s}'",
-                    .{ name, types.runarTypeToString(arg_type) },
+                    .{ name, types.runarTypeToString(script_type) },
                 );
             }
         }
         return .void;
+    }
+
+    /// The subtype rule TS applies to addOutput's STATE VALUES:
+    /// `packages/runar-compiler/src/passes/03-typecheck.ts`'s `isSubtype`.
+    ///
+    /// This tier's `isSubtype` already matches it, so the two extra clauses
+    /// below are unreachable here — they are written out because four of the
+    /// seven tiers' `isSubtype` only widens TOWARDS ByteString / bigint, and the
+    /// rule the six ports must agree on is the reference's. Measured before this
+    /// check existed, `addOutput(1000n, this.count, b)` with `b: ByteString` and
+    /// `owner: PubKey` compiled identically in all seven tiers, so a narrower
+    /// predicate here would have REJECTED working code the reference accepts.
+    fn outputStateValueMatches(actual: RunarType, expected: RunarType) bool {
+        if (isSubtype(actual, expected)) return true;
+        if (isByteFamily(actual) and isByteFamily(expected)) return true;
+        if (isBigintFamily(actual) and isBigintFamily(expected)) return true;
+        return false;
     }
 
     fn checkMethodCallExpr(self: *TypeChecker, mc: *const types.MethodCall, env: *TypeEnv) RunarType {
@@ -1059,21 +1173,12 @@ const TypeChecker = struct {
         if (is_this or is_stateful_ctx) {
             if (std.mem.eql(u8, mc.method, "getStateScript")) return .byte_string;
             if (std.mem.eql(u8, mc.method, "addOutput")) {
-                if (self.contract.parent_class != .stateful_smart_contract) {
-                    self.addError("addOutput() is only available in StatefulSmartContract, not SmartContract", .{});
-                }
                 return self.checkOutputIntrinsicArgs("addOutput", mc.args, env);
             }
             if (std.mem.eql(u8, mc.method, "addRawOutput")) {
-                if (self.contract.parent_class != .stateful_smart_contract) {
-                    self.addError("addRawOutput() is only available in StatefulSmartContract, not SmartContract", .{});
-                }
                 return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, env);
             }
             if (std.mem.eql(u8, mc.method, "addDataOutput")) {
-                if (self.contract.parent_class != .stateful_smart_contract) {
-                    self.addError("addDataOutput() is only available in StatefulSmartContract, not SmartContract", .{});
-                }
                 return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, env);
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {

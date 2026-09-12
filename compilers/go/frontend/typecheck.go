@@ -1158,6 +1158,16 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 // all three anyone-can-spend — while n=1000 gives 0xe8 0x03, an invalid
 // opcode, and the output is unspendable.
 //
+// N-105 (2/2): the remaining three checks TS performs and this tier did not —
+// the StatefulSmartContract gate, the arity of all three intrinsics, and the
+// types of addOutput's state values. Each had an executed consequence:
+// `addOutput(1000n)` dropped the state value from the continuation entirely
+// (1352 hexchars where the correct call emits 1362), a surplus value was
+// appended to a state serialization the next spend deserializes by fixed
+// offsets, a ByteString state value was serialized where an 8-byte LE number
+// belongs, and addRawOutput in a stateless SmartContract emitted a
+// "continuation" for a contract with no state.
+//
 // Ported from the TypeScript reference (checkCallExpr's addOutput /
 // addRawOutput / addDataOutput arms in
 // packages/runar-compiler/src/passes/03-typecheck.ts), wording included.
@@ -1166,23 +1176,134 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 // return type is discarded at parse time in every tier, so `this.sats()` infers
 // as `<unknown>` and must keep compiling.
 func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, env *typeEnv) string {
-	for i, arg := range args {
-		argType := tc.inferExprType(arg, env)
-		if i == 0 && !isBigintFamily(argType) && argType != "<unknown>" {
-			tc.addError(fmt.Sprintf(
-				"%s() first argument (satoshis) must be bigint, got '%s'", name, argType))
+	// N-105: all three intrinsics build an OUTPUT, and an output only exists
+	// in a stateful contract. TS refuses the call outright and checks nothing
+	// else, so the early return is part of the ported behaviour.
+	if tc.contract == nil || tc.contract.ParentClass != "StatefulSmartContract" {
+		tc.addError(fmt.Sprintf("%s() is only available in StatefulSmartContract", name))
+		return "void"
+	}
+
+	if name == "addOutput" {
+		// The surface form `this.addOutput(satoshis, .{ v1, v2, ... })` that Zig
+		// and Move tuple syntax produce carries the state values in a trailing
+		// array literal. anf_lower.go unwraps it with this same helper, so the
+		// arity the check counts is the arity codegen will see.
+		normalized := flattenAddOutputArgs(args)
+
+		var mutableProps []PropertyNode
+		hasFixedArrayState := false
+		for _, p := range tc.contract.Properties {
+			if !p.Readonly {
+				mutableProps = append(mutableProps, p)
+				if _, isArray := p.Type.(FixedArrayType); isArray {
+					hasFixedArrayState = true
+				}
+			}
 		}
-		// addOutput's trailing arguments are STATE VALUES, checked against the
-		// mutable properties; only the raw/data intrinsics carry scriptBytes
-		// here. TS uses isSubtype against ByteString, not equality, so every
-		// ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
-		if i == 1 && name != "addOutput" &&
-			!isSubtype(argType, "ByteString") && argType != "<unknown>" {
+		// N-105: the arity and state-value rules count the DECLARED mutable
+		// properties, but ExpandFixedArrays — which runs AFTER this pass —
+		// splits a FixedArray state property into one scalar sibling per
+		// element. For such a contract the only form that lowers is the
+		// expanded one (`addOutput(sats, board[0], board[1], board[2], n)`),
+		// and the reference tier's own rule REJECTS it: TypeScript answers
+		// "addOutput() expects 3 argument(s) ... got 5" for
+		// compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py's
+		// Boardy, a contract checked into this repo that all six non-TS tiers
+		// compile. Porting a rule that is wrong for that shape would delete
+		// working code, so both checks are scoped out of it and the
+		// reference-tier defect is reported rather than replicated. The
+		// satoshis check is unaffected and still runs.
+		shapeCheckable := !hasFixedArrayState
+		expected := 1 + len(mutableProps)
+		if shapeCheckable && len(normalized) != expected {
 			tc.addError(fmt.Sprintf(
-				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, argType))
+				"addOutput() expects %d argument(s): satoshis + %d state value(s), got %d",
+				expected, len(mutableProps), len(normalized)))
+		}
+		if len(normalized) >= 1 {
+			satType := tc.inferExprType(normalized[0], env)
+			if !isBigintFamily(satType) && satType != "<unknown>" {
+				tc.addError(fmt.Sprintf(
+					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType))
+			}
+		}
+		for i := 0; shapeCheckable && i < len(mutableProps) && i+1 < len(normalized); i++ {
+			argType := tc.inferExprType(normalized[i+1], env)
+			propType := typeNodeToString(mutableProps[i].Type)
+			if !outputStateValueMatches(argType, propType) && argType != "<unknown>" {
+				tc.addError(fmt.Sprintf(
+					"addOutput() argument %d (%s) must be '%s', got '%s'",
+					i+2, mutableProps[i].Name, propType, argType))
+			}
+		}
+		if shapeCheckable {
+			// Surplus arguments are still inferred, so a type error inside one
+			// is not swallowed by the arity diagnostic. Mirrors TS.
+			for i := expected; i < len(normalized); i++ {
+				tc.inferExprType(normalized[i], env)
+			}
+		} else {
+			// Still infer every state value so a type error inside one is not
+			// lost along with the scoped-out checks.
+			for i := 1; i < len(normalized); i++ {
+				tc.inferExprType(normalized[i], env)
+			}
+		}
+		return "void"
+	}
+
+	// addRawOutput / addDataOutput — (satoshis, scriptBytes).
+	if len(args) != 2 {
+		tc.addError(fmt.Sprintf(
+			"%s() expects 2 arguments (satoshis, scriptBytes), got %d", name, len(args)))
+	}
+	if len(args) >= 1 {
+		satType := tc.inferExprType(args[0], env)
+		if !isBigintFamily(satType) && satType != "<unknown>" {
+			tc.addError(fmt.Sprintf(
+				"%s() first argument (satoshis) must be bigint, got '%s'", name, satType))
+		}
+	}
+	if len(args) >= 2 {
+		// TS uses isSubtype against ByteString, not equality, so every
+		// ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+		scriptType := tc.inferExprType(args[1], env)
+		if !isSubtype(scriptType, "ByteString") && scriptType != "<unknown>" {
+			tc.addError(fmt.Sprintf(
+				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, scriptType))
 		}
 	}
 	return "void"
+}
+
+// outputStateValueMatches is the subtype rule TS applies to addOutput's STATE
+// VALUES: packages/runar-compiler/src/passes/03-typecheck.ts's isSubtype.
+//
+// It is deliberately not this package's isSubtype. TS's version treats the
+// ByteString and bigint families as BIDIRECTIONALLY compatible (a ByteString
+// value satisfies a PubKey slot, and an Addr value satisfies a Ripemd160 slot);
+// this tier's isSubtype only widens TOWARDS ByteString / bigint. Measured
+// before this check existed, `addOutput(1000n, this.count, b)` with
+// `b: ByteString` and `owner: PubKey` compiled identically in all seven tiers,
+// so using the narrower predicate here would have REJECTED working code that
+// the reference tier accepts.
+//
+// That asymmetry between this tier's isSubtype and the reference's is
+// pre-existing, reaches every other argument and assignment check, and is not
+// touched here — it is flagged, not fixed, because widening it would change
+// diagnostics far outside the output intrinsics.
+func outputStateValueMatches(actual, expected string) bool {
+	if isSubtype(actual, expected) {
+		return true
+	}
+	if isByteFamily(actual) && isByteFamily(expected) {
+		return true
+	}
+	if isBigintFamily(actual) && isBigintFamily(expected) {
+		return true
+	}
+	return false
 }
 
 func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
