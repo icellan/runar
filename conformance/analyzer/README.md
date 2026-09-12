@@ -1,6 +1,6 @@
 # `conformance/analyzer/` — Bitcoin Script Analyzer Conformance Subsuite
 
-This is a sibling subsuite to the main Stack-IR / hex conformance flow.
+This is a sibling subsuite to the main ANF-IR / hex conformance flow.
 It verifies that every Rúnar tier's Bitcoin Script static analyzer
 produces byte-identical output for the same input hex script.
 

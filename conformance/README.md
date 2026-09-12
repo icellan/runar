@@ -112,7 +112,7 @@ The parser layer is tier-agnostic: the conformance runner's `discoverFormats()` 
 
 #### Per-tier universal parser coverage
 
-The runner's `--parser-only` mode (CI step "Run all-tier parser-only coverage") **runs every available compiler's `--parse-only` entry point against every fixture × every declared format**, ignoring the per-fixture `compilers` allowlist. The allowlist scopes Stack-IR / hex parity ONLY — the parser layer is universal, so all 7 tiers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) MUST accept all 9 formats for every fixture. Each compiler exposes `--parse-only` (Java additionally accepts `parseOnly: true` in its JSON-RPC daemon) which runs Pass 1 (parse) + Pass 2 (validate) and exits zero with `parser ok` on success or non-zero with diagnostics on failure. A non-zero exit fails the CI job.
+The runner's `--parser-only` mode (CI step "Run all-tier parser-only coverage") **runs every available compiler's `--parse-only` entry point against every fixture × every declared format**, ignoring the per-fixture `compilers` allowlist. The allowlist scopes ANF-IR / hex parity ONLY — the parser layer is universal, so all 7 tiers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) MUST accept all 9 formats for every fixture. Each compiler exposes `--parse-only` (Java additionally accepts `parseOnly: true` in its JSON-RPC daemon) which runs Pass 1 (parse) + Pass 2 (validate) and exits zero with `parser ok` on success or non-zero with diagnostics on failure. A non-zero exit fails the CI job.
 
 Run locally:
 
