@@ -1394,14 +1394,28 @@ const Parser = struct {
                 var_name = goToCamelCase(self.allocator, name_tok.text);
                 _ = self.bump(); // consume ':='
 
-                // Parse init expression -- try to extract int literal
-                if (self.current.kind == .ident and std.mem.eql(u8, self.current.text, "runar")) {
-                    // runar.Int(0) type conversion
-                    _ = self.parseExpression();
-                } else if (self.current.kind == .number) {
+                // Parse init expression -- try to extract int literal.
+                //
+                // N-129: the `runar.Int(N)` arm used to DISCARD the parsed
+                // expression, leaving init_value at 0. `for i := runar.Int(3)`
+                // — the idiomatic Go-DSL spelling, and the one every checked-in
+                // example would use for a non-zero start — therefore became a
+                // loop starting at 0, and since the count is derived from the
+                // bound, `i := runar.Int(3); i < 7` unrolled as 0..6 instead of
+                // 3..6. Seven iterations of the wrong values: the contract
+                // compiled to a script computing a DIFFERENT NUMBER than the
+                // source says, in this tier only.
+                //
+                // `parseExpression` already folds `runar.Int(<literal>)` to a
+                // literal, so the fix is to look at what it returned instead of
+                // throwing it away.
+                if (self.current.kind == .number) {
                     init_value = std.fmt.parseInt(i64, self.bump().text, 0) catch 0;
                 } else {
-                    _ = self.parseExpression();
+                    const init_expr = self.parseExpression();
+                    if (init_expr) |e| {
+                        if (e == .literal_int) init_value = e.literal_int;
+                    }
                 }
 
                 _ = self.expect(.semicolon);

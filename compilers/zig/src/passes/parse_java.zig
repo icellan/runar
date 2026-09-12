@@ -1126,10 +1126,19 @@ const Parser = struct {
                     var_name = self.bump().text;
                 }
                 if (self.match(.assign)) {
+                    // N-129: the non-`number` arm used to DISCARD the parsed
+                    // expression, so `for (Bigint i = Bigint.of(3); ...)` — the
+                    // only way to write a non-zero start on this surface, since
+                    // the loop variable is a Bigint — started at 0 and unrolled
+                    // the wrong iterations. `parseExpression` already folds
+                    // `Bigint.of(<literal>)` to a literal; use what it returns.
                     if (self.current.kind == .number) {
                         init_value = parseNumberLiteral(self.bump().text);
                     } else {
-                        _ = self.parseExpression();
+                        const init_expr = self.parseExpression();
+                        if (init_expr) |e| {
+                            if (e == .literal_int) init_value = e.literal_int;
+                        }
                     }
                 }
             } else {
