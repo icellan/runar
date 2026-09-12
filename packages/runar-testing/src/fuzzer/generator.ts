@@ -1680,13 +1680,80 @@ function arbGeneratedStatefulContractOf(
           maxLength: DEFAULT_CONFIG.maxMethods,
         },
       )
-      .map((methods): GeneratedContract => ({
-        name,
-        parentClass: 'StatefulSmartContract',
-        properties,
-        methods: dedupeMethodNames(methods),
-      }));
+      .map((methods): GeneratedContract => {
+        const named = dedupeMethodNames(methods);
+        ensureEveryMutablePropertyIsWritten(properties, named);
+        return {
+          name,
+          parentClass: 'StatefulSmartContract',
+          properties,
+          methods: named,
+        };
+      });
   });
+}
+
+/**
+ * Every property marked mutable must actually be written by some method.
+ *
+ * R-111. `readonly` is drawn by coin flip, independently of which properties the
+ * method bodies go on to assign, so the generator could emit a property that is
+ * mutable BY DECLARATION and written by nothing. On the `.runar.ts` surface that
+ * is expressible — mutability is declared — and the property joins the
+ * serialized state. On the `.runar.zig` surface it is NOT: that frontend INFERS
+ * readonly for a stateful field with no default that no method assigns, so the
+ * same logical contract renders to a Zig source with fewer state slots, and
+ * `addOutput(sats, ...values)` then fails Zig's arity check with
+ * "expects 2 argument(s): satoshis + 1 state value(s), got 4".
+ *
+ * That is the fuzzer artifact the READONLY PARITY note in `renderers.ts`
+ * describes, in the direction that note does not cover — it handles
+ * `readonly: true` reaching every renderer's marker, and this is
+ * `readonly: false` failing to survive a surface that infers.
+ *
+ * It is also why the stateful IR gate excluded Zig. Rather than teach one
+ * surface to express something another infers, the generator stops producing
+ * the shape: an identity write (`this.p = this.p`) is appended for any mutable
+ * property no method assigns. An identity write is a real `update_prop` — DCE
+ * must keep it, since property writes are side-effecting in every tier — so the
+ * property is mutable on every surface, by inference or by declaration.
+ *
+ * Inserted BEFORE any `add_output` in the chosen method: the intrinsic's
+ * operands are the post-mutation values, which is the shape every checked-in
+ * example uses and the one the renderers assume.
+ */
+function ensureEveryMutablePropertyIsWritten(
+  properties: GeneratedProperty[],
+  methods: GeneratedMethod[],
+): void {
+  if (methods.length === 0) return;
+
+  const written = new Set<string>();
+  const walk = (stmts: Stmt[]): void => {
+    for (const st of stmts) {
+      if (st.kind === 'assign' && st.isProperty) written.add(st.target);
+      else if (st.kind === 'if') {
+        walk(st.then);
+        if (st.else_) walk(st.else_);
+      } else if (st.kind === 'for') walk(st.body);
+    }
+  };
+  for (const m of methods) walk(m.body);
+
+  const unwritten = properties.filter((p) => !p.readonly && !written.has(p.name));
+  if (unwritten.length === 0) return;
+
+  const target = methods[0]!;
+  const insertAt = target.body.findIndex((st) => st.kind === 'add_output');
+  const identityWrites: Stmt[] = unwritten.map((p) => ({
+    kind: 'assign',
+    target: p.name,
+    value: { kind: 'property_ref', name: p.name },
+    isProperty: true,
+  }));
+  if (insertAt < 0) target.body.push(...identityWrites);
+  else target.body.splice(insertAt, 0, ...identityWrites);
+  target.mutatesState = true;
 }
 
 /**

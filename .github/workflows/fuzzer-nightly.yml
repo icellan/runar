@@ -265,17 +265,28 @@ jobs:
       # ----- exact shapes behind the 2026-08 fund-safety miscompile) and, since
       # ----- 2026-08-06, the `this.addOutput(...)` multi-output intrinsic.
       # -----
-      # ----- ZIG IS EXCLUDED, and only here. The Zig tier's `.runar.zig`
-      # ----- frontend never detects `self.x = ...` as a mutation, so readonly
-      # ----- INFERENCE marks every un-initialised stateful property readonly:
-      # ----- it emits "StatefulSmartContract has no mutable properties" and a
-      # ----- script with no state continuation, while the same file compiled by
-      # ----- any other tier is correct. Every checked-in `.runar.zig` stateful
-      # ----- example happens to give its mutable properties an INITIALISER
-      # ----- (`count: i64 = 0`), which takes a different branch of the readonly
-      # ----- rule, so no fixture had ever exercised the inference path. Zig is
-      # ----- still gated on the stateless corpus by the step above; restore it
-      # ----- here once the frontend is fixed.
+      # ----- ZIG WAS EXCLUDED HERE until R-111. Two separate things were going
+      # ----- on, and only one of them was a compiler defect:
+      # -----
+      # ----- 1. The defect this comment used to describe — the `.runar.zig`
+      # -----    frontend not seeing `self.x = ...` as a mutation — is fixed
+      # -----    (`readonly_inference.zig`). Measured: an un-initialised stateful
+      # -----    property written with `+=` or with a plain `=` compiles
+      # -----    byte-identically in all seven tiers.
+      # ----- 2. What still failed was a FUZZER artifact. `readonly` was drawn by
+      # -----    coin flip independently of which properties the generated
+      # -----    methods went on to write, so the generator could emit a property
+      # -----    that is mutable BY DECLARATION and written by nothing. The
+      # -----    `.runar.ts` surface expresses that; the `.runar.zig` surface
+      # -----    INFERS readonly from use and cannot, so the same logical
+      # -----    contract rendered to fewer Zig state slots and `addOutput` then
+      # -----    failed Zig's arity check. Fixed in the generator
+      # -----    (`ensureEveryMutablePropertyIsWritten`), not by weakening a
+      # -----    check: a mutable property now always has a write.
+      # -----
+      # ----- `tests/fuzz-gate-tiers.test.ts` pins all seven tiers in this list
+      # ----- and in `fuzz:ir:gate:stateful`, so dropping one again is a visible
+      # ----- edit rather than a quiet argument change.
       # ----- Cost: one more run of the same size as the step above — 12.4s idle
       # ----- / ~35s under load ~30, on the same interleaved measurement.
       - name: Fuzz (PR gate — stateful contract-level IR -> hex, fixed seed)
@@ -289,7 +300,7 @@ jobs:
             --stateful \
             --seed 424242 \
             --num 40 \
-            --compilers ts,go,rust,python,ruby,java \
+            --compilers ts,go,rust,python,zig,ruby,java \
             --render native \
             --output /tmp/ir-fuzz-pr-stateful.json
 
@@ -435,7 +446,7 @@ jobs:
             --stateful \
             --num 200 \
             --seed "$SEED" \
-            --compilers ts,go,rust,python,ruby,java \
+            --compilers ts,go,rust,python,zig,ruby,java \
             --render native \
             --output /tmp/ir-fuzz-nightly-stateful.json
 
