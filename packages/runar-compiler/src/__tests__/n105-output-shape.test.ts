@@ -25,9 +25,9 @@
  * the same wording and the same ACCEPT set, which is what makes it a parity
  * gate rather than six independent opinions.
  *
- * It also pins the ONE place where the reference rule is known to be wrong —
- * see `the arity rule and FixedArray state` below. That case is asserted as it
- * behaves today, not as it should behave, so the defect cannot be lost.
+ * It also pins the interaction with FixedArray state — see `the arity rule and
+ * FixedArray state` below, which used to record a reference-tier DEFECT and now
+ * records the fix (N-107).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -242,6 +242,18 @@ class Boardy extends StatefulSmartContract {
 }
 `;
 
+/** The expanded form one value short: four slots exist, three were supplied. */
+const FIXED_ARRAY_STATE_TOO_FEW = `import { StatefulSmartContract, assert } from 'runar-lang';
+import type { FixedArray } from 'runar-lang';
+
+class Boardy extends StatefulSmartContract {
+  board: FixedArray<bigint, 3> = [0n, 0n, 0n];
+  n: bigint;
+  constructor(n: bigint) { super(n); this.n = n; }
+  public bump(): void { this.addOutput(1000n, this.board[0], this.board[1], this.n); }
+}
+`;
+
 describe('N-105: output-intrinsic arity', () => {
   it('addOutput wants satoshis + one value per mutable property', () => {
     expect(errorsOf(ARITY_TOO_FEW)).toContain(
@@ -311,32 +323,51 @@ describe('N-105: output shapes that must stay ACCEPTED', () => {
 });
 
 /**
- * A KNOWN DEFECT in the reference rule, pinned so it cannot be lost.
+ * N-107 — the arity rule counts EMITTED state slots, not declared properties.
  *
- * `typecheck` runs BEFORE `expandFixedArrays` (see `compile` in
- * `packages/runar-compiler/src/index.ts`), so the arity rule counts the
- * DECLARED mutable properties — `board` and `n`, two of them — while the pass
- * that follows splits `board` into three scalar siblings. The only call shape
- * that reaches a working script is therefore the EXPANDED one, and this rule
- * rejects it; the form the rule wants instead type-checks and then dies in
- * stack lowering, so there is no accepted way to use addOutput in a contract
- * with FixedArray state.
+ * `typecheck` runs before `expandFixedArrays` (see `compile` in
+ * `packages/runar-compiler/src/index.ts`), and the rule used to read the
+ * property list as it stood at that moment: `board` and `n`, two values. The
+ * pass that runs immediately after splits `board: FixedArray<bigint, 3>` into
+ * `board__0 .. board__2`, so the continuation carries FOUR. The consequences
+ * were symmetric and both wrong:
  *
- * The six ports of this rule are scoped out of contracts with FixedArray state
- * for exactly this reason — porting it verbatim would have deleted a contract
- * this repo checks in. Fixing it here means moving the property count to the
- * post-expansion view (or moving the pass), which is a separate change.
+ *   - the EXPANDED call — the only shape that lowers — was rejected with
+ *     "expects 3 argument(s) ... got 5";
+ *   - the shape the rule demanded instead (`addOutput(sats, board, n)`)
+ *     type-checked and then died in stack lowering, because `board` has no
+ *     stack slot of its own after expansion.
+ *
+ * There was therefore no accepted way to call addOutput from a contract with
+ * FixedArray state, which is why five of the six ports scoped the rule out of
+ * such contracts entirely — and silently ACCEPTED wrong-arity calls as a
+ * result, emitting a continuation that disagreed with the contract's own state.
+ *
+ * `expandedStateSlots` in `03-typecheck.ts` now flattens the mutable properties
+ * the way `03b-expand-fixed-arrays.ts` will, so the rule asks the right
+ * question in all seven tiers. Cross-tier gates:
+ * `conformance/subtype-parity/FixedArrayOutputShape.runar.ts` (accept, byte
+ * identical) and `conformance/negatives/N26` / `N27` (reject).
  */
-describe('N-105: the arity rule and FixedArray state (KNOWN DEFECT)', () => {
-  it('rejects the expanded form, which is the only form that lowers', () => {
-    expect(errorsOf(FIXED_ARRAY_STATE)).toContain(
-      'addOutput() expects 3 argument(s): satoshis + 2 state value(s), got 5',
+describe('N-107: the arity rule counts post-expansion state slots', () => {
+  it('accepts the expanded form, which is the form that lowers', () => {
+    expect(errorsOf(FIXED_ARRAY_STATE)).toEqual([]);
+    expect(hexOf(FIXED_ARRAY_STATE).length).toBeGreaterThan(0);
+  });
+
+  it('counts a FixedArray property as one slot per element', () => {
+    // 3 board slots + n = 4; the diagnostic must say so, not "2".
+    expect(errorsOf(FIXED_ARRAY_STATE_TOO_FEW)).toContain(
+      'addOutput() expects 5 argument(s): satoshis + 4 state value(s), got 4',
     );
   });
 
-  it('and the form it asks for instead dies in stack lowering', () => {
-    const errs = errorsOf(FIXED_ARRAY_STATE_WHOLE);
-    expect(errs.join('\n')).toContain('Stack lowering');
-    expect(errs.join('\n')).toContain("property 'board'");
+  it('rejects the whole-array form in the frontend, not in stack lowering', () => {
+    // Previously this reached pass 5 and complained that `board` "is neither on
+    // the stack, initialized, nor a constructor parameter" — the right verdict
+    // from the wrong pass, naming the wrong thing.
+    expect(errorsOf(FIXED_ARRAY_STATE_WHOLE)).toContain(
+      'addOutput() expects 5 argument(s): satoshis + 4 state value(s), got 3',
+    );
   });
 });

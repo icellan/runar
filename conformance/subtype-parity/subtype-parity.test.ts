@@ -13,7 +13,9 @@ import {
 } from '../runner/runner.js';
 
 /**
- * Cross-tier ACCEPTANCE parity for the subtype lattice (N-104).
+ * Cross-tier ACCEPTANCE parity. Started as the subtype-lattice gate (N-104) and
+ * is now the repo's general corpus for "every tier must accept this, and agree
+ * on the bytes" — the directory name is narrower than its contents.
  *
  * `conformance/negatives/rejection-parity.test.ts` gates what the seven tiers
  * must REFUSE. This file is its mirror: a small corpus that every tier must
@@ -43,6 +45,13 @@ import {
  * lands on axis 1 alone (3-vs-4), `const h: Sha256Digest = pkh` needs both
  * axes permissive (2-vs-5). A cell-by-cell matrix was the only thing that
  * separated them, and this corpus is the regression gate for the result.
+ *
+ * Beyond the lattice, the corpus now also holds FixedArrayOutputShape.runar.ts
+ * (N-106 / N-107): the `addOutput` arity rule must count the state slots that
+ * exist AFTER `expandFixedArrays`, not the declared properties. That was an
+ * acceptance divergence of exactly the shape this file was built for — the
+ * reference tier alone refused a contract the other six compiled — and
+ * `conformance/negatives/N26` and `N27` are its two rejection halves.
  *
  * Vacuity: every tier must be OBSERVED accepting each fixture. The failure
  * this guards against is a tier silently dropping out of the matrix — the same
@@ -262,7 +271,7 @@ const fixtures = readdirSync(DIR)
 
 const available = TIERS.filter((t) => t.cmd !== null);
 
-describe('cross-tier subtype acceptance parity', () => {
+describe('cross-tier acceptance parity', () => {
   it('the matrix names all seven tiers (a silently dropped tier fails here)', () => {
     expect([...TIERS.map((t) => t.id)].sort()).toEqual([...ALL_TIER_IDS]);
   });

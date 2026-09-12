@@ -33,8 +33,10 @@ import runar.compiler.ir.ast.ContractNode;
  * place Java's FRONTEND accepted it and only stack lowering refused, exiting 70
  * where every other tier exits 65 — which meant {@code runar.lang.sdk.CompileCheck},
  * a frontend-only API, green-lit invalid Rúnar. The chain exercised below
- * ({@code ParserDispatch.parse -> Validate.run -> ExpandFixedArrays.run ->
- * Typecheck.run}) is exactly what {@code CompileCheck} runs.
+ * ({@code ParserDispatch.parse -> Validate.run -> Typecheck.run ->
+ * ExpandFixedArrays.run}) is exactly what {@code CompileCheck} runs. That order
+ * is N-106's: this tier used to expand BEFORE type-checking, and the two passes
+ * were swapped to match the other six.
  */
 class R092UnknownOperandRejectionTest {
 
@@ -42,7 +44,9 @@ class R092UnknownOperandRejectionTest {
     private static List<String> frontendErrors(String src, String file) throws Exception {
         ContractNode c = ParserDispatch.parse(src, file);
         Validate.run(c); // throws ValidationException on a validate-level error
-        c = ExpandFixedArrays.run(c);
+        // N-106: typecheck the UN-expanded tree, as Cli.compileSource and
+        // CompileCheck now do. The expansion runs after, and is not needed to
+        // decide any of the diagnostics this file asserts.
         return Typecheck.collect(c);
     }
 
@@ -173,9 +177,11 @@ class R092UnknownOperandRejectionTest {
 
     @Test
     void arrayIndexOfUnknownTypeIsRejectedOnceTypecheckCanSeeTheIndex() throws Exception {
-        // Typecheck WITHOUT the FixedArray expansion, which is the only state in
-        // which an IndexAccessExpr still exists in the Java tree. This is the
-        // direct gate on the removed guard at the IndexAccessExpr arm.
+        // The direct gate on the removed guard at the IndexAccessExpr arm,
+        // driving Typecheck by hand rather than through frontendErrors so the
+        // arm is exercised even if the surrounding chain changes again. An
+        // IndexAccessExpr only exists BEFORE ExpandFixedArrays rewrites it into
+        // a ternary dispatch, which since N-106 is also the production order.
         ContractNode c = ParserDispatch.parse(IDX, "G.runar.ts");
         Validate.run(c);
         List<String> errs = Typecheck.collect(c);
@@ -186,30 +192,25 @@ class R092UnknownOperandRejectionTest {
     }
 
     /**
-     * RESIDUAL DIVERGENCE, recorded rather than asserted away.
+     * N-106 — the pass-ORDERING divergence, now fixed and asserted strictly.
      *
-     * <p>Removing the guard does NOT make Java reject this source through the
-     * frontend chain, because Java runs {@code ExpandFixedArrays} BEFORE
-     * {@code Typecheck} (Cli.java: Validate -> ExpandFixedArrays -> Typecheck).
-     * A runtime index is rewritten into a ternary dispatch by the expansion, so
-     * by the time the typechecker runs there is no IndexAccessExpr left to
-     * check. The TypeScript reference typechecks BOTH before and after the
-     * expansion (`index.ts`: parse -> validate -> typecheck -> expandFixedArrays
-     * -> typecheck), which is why the other six tiers catch it.
+     * <p>This test used to assert the opposite: that the full frontend chain
+     * ACCEPTED {@code IDX}, because Java ran {@code ExpandFixedArrays} BEFORE
+     * {@code Typecheck}. The expansion rewrites a runtime index into a ternary
+     * dispatch over the scalar siblings, so no {@code IndexAccessExpr} survived
+     * to reach the index-type guard and the error was unreachable in this tier
+     * while the other six reported it. Six tiers typecheck the UN-expanded tree
+     * (TS {@code index.ts}: parse -> validate -> typecheck -> expandFixedArrays;
+     * Go, Rust, Python, Zig and Ruby the same), and Java now does too.
      *
-     * <p>That is a pass-ORDERING defect, not a guard defect, and fixing it means
-     * teaching Java's typechecker to run over un-expanded FixedArray types —
-     * deliberately out of scope here. This test pins the current behaviour so
-     * the divergence cannot be forgotten: when the ordering is fixed, this test
-     * fails and must be deleted in favour of the strict assertion.
+     * <p>The reorder was only safe alongside N-107: {@code Typecheck}'s
+     * addOutput arity rule needs the POST-expansion state slot count, which
+     * this tier used to get for free from the wrong pass order. It computes it
+     * directly now ({@code expandedStateSlots}).
      */
     @Test
-    void arrayIndexOfUnknownTypeIsStillAcceptedByTheFullFrontend_passOrdering() throws Exception {
-        assertTrue(
-            frontendErrors(IDX, "G.runar.ts").isEmpty(),
-            "Java's frontend now rejects the unknown array index — the pass-ordering "
-                + "divergence is fixed, so replace this test with assertRejected(IDX, ...)."
-        );
+    void arrayIndexOfUnknownTypeIsRejectedByTheFullFrontend() throws Exception {
+        assertRejected(IDX, "G.runar.ts", "array index must be bigint");
     }
 
     @Test

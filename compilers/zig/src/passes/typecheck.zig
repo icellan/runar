@@ -427,6 +427,60 @@ const TypeChecker = struct {
         // Note: self.errors ownership transfers to caller via toOwnedSlice
     }
 
+    /// One emitted state value: what the state continuation actually carries.
+    /// `type_info` is `.unknown` for the leaf of a nested FixedArray, whose
+    /// scalar type this tier's AST does not record.
+    const StateSlot = struct { name: []const u8, type_info: RunarType };
+
+    /// The mutable state as `addOutput` sees it — one slot per value the
+    /// continuation carries, NOT one per declared property.
+    ///
+    /// N-107: `expand_fixed_arrays` (pass 3b) runs after this one and splits a
+    /// FixedArray property into one scalar sibling per element, so the DECLARED
+    /// property list is not the emitted state. The naming mirrors that pass
+    /// (`<root>__<i>`, `<root>__<i>__<j>` for a nested array) so a diagnostic
+    /// names the synthetic property the next pass will create.
+    ///
+    /// Names for expanded slots are allocated and appended to `owned`; the
+    /// caller frees them. A zero length is already a parse/validate error, so
+    /// the property is kept whole in that case and this rule never fires on a
+    /// contract that is going to be rejected for a better reason.
+    fn collectStateSlots(
+        self: *TypeChecker,
+        out: *std.ArrayListUnmanaged(StateSlot),
+        owned: *std.ArrayListUnmanaged([]u8),
+    ) void {
+        for (self.contract.properties) |p| {
+            if (p.readonly) continue;
+            if (p.type_info != .fixed_array or p.fixed_array_length == 0) {
+                out.append(self.allocator, .{ .name = p.name, .type_info = p.type_info }) catch return;
+                continue;
+            }
+            const nested = p.fixed_array_element == .fixed_array and p.fixed_array_nested_length > 0;
+            var i: u32 = 0;
+            while (i < p.fixed_array_length) : (i += 1) {
+                if (nested) {
+                    var j: u32 = 0;
+                    while (j < p.fixed_array_nested_length) : (j += 1) {
+                        const nm = std.fmt.allocPrint(self.allocator, "{s}__{d}__{d}", .{ p.name, i, j }) catch return;
+                        owned.append(self.allocator, nm) catch {
+                            self.allocator.free(nm);
+                            return;
+                        };
+                        out.append(self.allocator, .{ .name = nm, .type_info = .unknown }) catch return;
+                    }
+                    continue;
+                }
+                const nm = std.fmt.allocPrint(self.allocator, "{s}__{d}", .{ p.name, i }) catch return;
+                owned.append(self.allocator, nm) catch {
+                    self.allocator.free(nm);
+                    return;
+                };
+                out.append(self.allocator, .{ .name = nm, .type_info = p.fixed_array_element }) catch return;
+            }
+        }
+    }
+
     fn addError(self: *TypeChecker, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         self.errors.append(self.allocator, msg) catch {
@@ -1055,32 +1109,35 @@ const TypeChecker = struct {
                 break :blk if (args.len > 1) args[1..] else &.{};
             };
 
-            var mutable_count: usize = 0;
-            var has_fixed_array_state = false;
-            for (self.contract.properties) |p| {
-                if (!p.readonly) {
-                    mutable_count += 1;
-                    if (p.type_info == .fixed_array) has_fixed_array_state = true;
-                }
+            // N-107: count the state slots the continuation will actually
+            // carry, not the DECLARED mutable properties. expand_fixed_arrays
+            // runs right after this pass and splits `board: FixedArray<bigint,
+            // 3>` into `board__0 .. board__2`, so a contract declaring `board`
+            // and `n` emits FOUR state values. addOutput is positional against
+            // the emitted values, which is why the declared count answers the
+            // wrong question.
+            //
+            // This used to be `const shape_checkable = !has_fixed_array_state`:
+            // the rule was scoped OUT of every contract with FixedArray state,
+            // because porting it verbatim would have rejected Boardy (in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+            // the way the reference tier did. The cost of that opt-out was
+            // silent: a wrong-arity addOutput on a FixedArray contract was
+            // ACCEPTED here and emitted a state continuation that disagreed
+            // with the contract's own state. Gate:
+            // conformance/negatives/N26-addoutput-arity-fixedarray.
+            var slots: std.ArrayListUnmanaged(StateSlot) = .empty;
+            var slot_names: std.ArrayListUnmanaged([]u8) = .empty;
+            defer {
+                for (slot_names.items) |n| self.allocator.free(n);
+                slot_names.deinit(self.allocator);
+                slots.deinit(self.allocator);
             }
-            // N-105: the arity and state-value rules count the DECLARED mutable
-            // properties, but expand_fixed_arrays — which runs AFTER this pass
-            // — splits a FixedArray state property into one scalar sibling per
-            // element. For such a contract the only form that lowers is the
-            // expanded one (`addOutput(sats, board[0], board[1], board[2], n)`),
-            // and the reference tier's own rule REJECTS it: TypeScript answers
-            // "addOutput() expects 3 argument(s) ... got 5" for the Boardy
-            // contract in
-            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
-            // which is checked into this repo and compiled by all six non-TS
-            // tiers. Porting a rule that is wrong for that shape would delete
-            // working code, so both checks are scoped out of it and the
-            // reference-tier defect is reported rather than replicated. The
-            // satoshis check is unaffected and still runs.
-            const shape_checkable = !has_fixed_array_state;
+            self.collectStateSlots(&slots, &slot_names);
+            const mutable_count = slots.items.len;
             const expected = 1 + mutable_count;
             const got = if (args.len == 0) @as(usize, 0) else 1 + state_args.len;
-            if (shape_checkable and got != expected) {
+            if (got != expected) {
                 self.addError(
                     "addOutput() expects {d} argument(s): satoshis + {d} state value(s), got {d}",
                     .{ expected, mutable_count, got },
@@ -1095,27 +1152,30 @@ const TypeChecker = struct {
                     );
                 }
             }
-            // Walk the mutable properties in declaration order alongside the
+            // Walk the emitted state slots in declaration order alongside the
             // state values. Every state value is inferred, surplus ones
             // included, so a type error inside one is not swallowed by the
             // arity diagnostic.
-            var prop_cursor: usize = 0;
             for (state_args, 0..) |arg, i| {
                 const arg_type = self.inferExprType(arg, env);
-                if (!shape_checkable) continue;
-                while (prop_cursor < self.contract.properties.len and
-                    self.contract.properties[prop_cursor].readonly) : (prop_cursor += 1)
-                {}
-                if (prop_cursor >= self.contract.properties.len) continue;
-                const prop = self.contract.properties[prop_cursor];
-                prop_cursor += 1;
-                if (!isSubtype(arg_type, prop.type_info) and arg_type != .unknown) {
+                if (i >= slots.items.len) continue;
+                const slot = slots.items[i];
+                // `.unknown` marks a leaf of a NESTED FixedArray, whose scalar
+                // type this tier's AST does not record (see `prop_elem_types`
+                // above: `FixedArray<FixedArray<..>, N>` stores `.fixed_array`
+                // as its element and loses the leaf type at parse time). The
+                // ARITY is still checked for those slots — that is the part
+                // that decides how many values the continuation commits to —
+                // and only the per-slot type check is skipped, deliberately,
+                // rather than guessed.
+                if (slot.type_info == .unknown) continue;
+                if (!isSubtype(arg_type, slot.type_info) and arg_type != .unknown) {
                     self.addError(
                         "addOutput() argument {d} ({s}) must be '{s}', got '{s}'",
                         .{
                             i + 2,
-                            prop.name,
-                            types.runarTypeToString(prop.type_info),
+                            slot.name,
+                            types.runarTypeToString(slot.type_info),
                             types.runarTypeToString(arg_type),
                         },
                     );

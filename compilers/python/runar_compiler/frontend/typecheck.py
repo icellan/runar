@@ -297,6 +297,35 @@ def is_subtype(actual: str, expected: str) -> bool:
     return False
 
 
+def _expanded_state_slots(properties) -> list[tuple[str, object]]:
+    """The mutable state as ``addOutput`` sees it: one ``(name, type)`` entry per
+    value the state continuation carries.
+
+    N-107: ``expand_fixed_arrays`` (pass 3b) runs after the typechecker and
+    splits a FixedArray property into one scalar sibling per element, so the
+    DECLARED property list is not the emitted state. The flattening mirrors that
+    pass's own naming (``<root>__<i>``, recursing through nested arrays) so a
+    diagnostic names the synthetic property the next pass will create.
+
+    A non-positive length is already a parse/validate error; the property is
+    kept whole in that case so this rule never fires on a contract that is going
+    to be rejected for a better reason.
+    """
+    slots: list[tuple[str, object]] = []
+
+    def push(name: str, t) -> None:
+        if isinstance(t, FixedArrayType) and t.length > 0:
+            for i in range(t.length):
+                push(f"{name}__{i}", t.element)
+            return
+        slots.append((name, t))
+
+    for p in properties:
+        if not p.readonly:
+            push(p.name, p.type)
+    return slots
+
+
 def is_bigint_family(t: str) -> bool:
     """Return True if *t* belongs to the bigint type family."""
     return t in _BIGINT_SUBTYPES
@@ -959,26 +988,26 @@ class _TypeChecker:
             from runar_compiler.frontend.anf_lower import _flatten_add_output_args
 
             normalized = _flatten_add_output_args(args)
-            mutable_props = [p for p in self.contract.properties if not p.readonly]
-            # N-105: the arity and state-value rules count the DECLARED mutable
-            # properties, but expand_fixed_arrays -- which runs AFTER this pass
-            # -- splits a FixedArray state property into one scalar sibling per
-            # element. For such a contract the only form that lowers is the
-            # expanded one (``addOutput(sats, board[0], board[1], board[2],
-            # n)``), and the reference tier's own rule REJECTS it: TypeScript
-            # answers "addOutput() expects 3 argument(s) ... got 5" for the
-            # Boardy contract in
-            # tests/test_r025_expand_fixed_arrays_field_preservation.py, which
-            # is checked into this repo and compiled by all six non-TS tiers.
-            # Porting a rule that is wrong for that shape would delete working
-            # code, so both checks are scoped out of it and the reference-tier
-            # defect is reported rather than replicated. The satoshis check is
-            # unaffected and still runs.
-            shape_checkable = not any(
-                isinstance(p.type, FixedArrayType) for p in mutable_props
-            )
+            # N-107: count the state slots the continuation will actually
+            # carry, not the DECLARED mutable properties. expand_fixed_arrays
+            # runs right after this pass and splits ``board: FixedArray<bigint,
+            # 3>`` into ``board__0 .. board__2``, so a contract declaring
+            # ``board`` and ``n`` emits FOUR state values. addOutput is
+            # positional against the emitted values, which is why the declared
+            # count answers the wrong question.
+            #
+            # This used to be a ``shape_checkable`` flag that scoped the rule
+            # OUT of every contract with FixedArray state, because porting it
+            # verbatim would have rejected Boardy (in
+            # tests/test_r025_expand_fixed_arrays_field_preservation.py) the way
+            # the reference tier did. The cost of that opt-out was silent: a
+            # wrong-arity addOutput on a FixedArray contract was ACCEPTED here
+            # and emitted a state continuation one slot short of the contract's
+            # own state. Gate:
+            # conformance/negatives/N26-addoutput-arity-fixedarray.
+            mutable_props = _expanded_state_slots(self.contract.properties)
             expected = 1 + len(mutable_props)
-            if shape_checkable and len(normalized) != expected:
+            if len(normalized) != expected:
                 self._add_error(
                     f"addOutput() expects {expected} argument(s): satoshis + "
                     f"{len(mutable_props)} state value(s), got {len(normalized)}"
@@ -990,26 +1019,20 @@ class _TypeChecker:
                         "addOutput() first argument (satoshis) must be bigint, "
                         f"got '{sat_type}'"
                     )
-            if shape_checkable:
-                i = 0
-                while i < len(mutable_props) and i + 1 < len(normalized):
-                    arg_type = self._infer_expr_type(normalized[i + 1], env)
-                    prop_type = _type_node_to_string(mutable_props[i].type)
-                    if not is_subtype(arg_type, prop_type) and arg_type != "<unknown>":
-                        self._add_error(
-                            f"addOutput() argument {i + 2} ({mutable_props[i].name}) "
-                            f"must be '{prop_type}', got '{arg_type}'"
-                        )
-                    i += 1
-                # Surplus arguments are still inferred, so a type error inside
-                # one is not swallowed by the arity diagnostic. Mirrors TS.
-                for extra in normalized[expected:]:
-                    self._infer_expr_type(extra, env)
-            else:
-                # Still infer every state value so a type error inside one is
-                # not lost along with the scoped-out checks.
-                for extra in normalized[1:]:
-                    self._infer_expr_type(extra, env)
+            i = 0
+            while i < len(mutable_props) and i + 1 < len(normalized):
+                arg_type = self._infer_expr_type(normalized[i + 1], env)
+                prop_type = _type_node_to_string(mutable_props[i][1])
+                if not is_subtype(arg_type, prop_type) and arg_type != "<unknown>":
+                    self._add_error(
+                        f"addOutput() argument {i + 2} ({mutable_props[i][0]}) "
+                        f"must be '{prop_type}', got '{arg_type}'"
+                    )
+                i += 1
+            # Surplus arguments are still inferred, so a type error inside one
+            # is not swallowed by the arity diagnostic. Mirrors TS.
+            for extra in normalized[expected:]:
+                self._infer_expr_type(extra, env)
             return "void"
 
         # addRawOutput / addDataOutput -- (satoshis, scriptBytes).

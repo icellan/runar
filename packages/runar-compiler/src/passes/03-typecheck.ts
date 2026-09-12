@@ -9,6 +9,7 @@
 import type {
   ContractNode,
   MethodNode,
+  PropertyNode,
   Statement,
   Expression,
   TypeNode,
@@ -311,6 +312,55 @@ function isByteFamily(t: TType): boolean {
 
 function isStatefulContextType(t: TType): boolean {
   return t === STATEFUL_CONTEXT;
+}
+
+/** One emitted state slot: what the continuation actually carries. */
+interface StateSlot {
+  name: string;
+  type: TypeNode;
+}
+
+/**
+ * The mutable state as `addOutput` sees it: one slot per value the state
+ * continuation carries, which is NOT one per declared property.
+ *
+ * N-107. `expandFixedArrays` (pass 3b) runs immediately after this one and
+ * splits `board: FixedArray<bigint, 3>` into `board__0 .. board__2`, so a
+ * contract declaring `board` and `n` emits FOUR state values, not two.
+ * `addOutput(satoshis, ...values)` is positional against the EMITTED values,
+ * so counting declared properties answers the wrong question: the reference
+ * rule refused `addOutput(1000n, board[0], board[1], board[2], n)` — the only
+ * shape that lowers — with "expects 3 argument(s) ... got 5", and demanded
+ * `addOutput(1000n, board, n)` instead, which type-checked and then died in
+ * stack lowering because `board` has no stack slot of its own. There was no
+ * accepted way to call addOutput from a contract with FixedArray state.
+ *
+ * Five of the six ports dodged this by scoping the rule out of FixedArray
+ * contracts entirely, which meant they ACCEPTED a wrong-arity call and emitted
+ * a continuation that disagreed with the contract's own state. Java got the
+ * count right only because it ran the expansion BEFORE the typechecker
+ * (N-106) — the same root cause, seen from the other side.
+ *
+ * The flattening mirrors `03b-expand-fixed-arrays.ts`'s `buildArrayMeta`
+ * exactly, nesting and `__<i>` naming included, so the slot names in a
+ * diagnostic are the synthetic property names the next pass will create.
+ */
+function expandedStateSlots(properties: PropertyNode[]): StateSlot[] {
+  const slots: StateSlot[] = [];
+  const push = (name: string, type: TypeNode): void => {
+    // `length <= 0` is already a parse/validate error; keeping the property
+    // whole here means the arity diagnostic never fires on a contract that is
+    // going to be rejected anyway for a better reason.
+    if (type.kind === 'fixed_array_type' && type.length > 0) {
+      for (let i = 0; i < type.length; i++) push(`${name}__${i}`, type.element);
+      return;
+    }
+    slots.push({ name, type });
+  };
+  for (const p of properties) {
+    if (!p.readonly) push(p.name, p.type);
+  }
+  return slots;
 }
 
 function flattenAddOutputArgs(args: Expression[]): Expression[] {
@@ -1313,7 +1363,7 @@ class TypeChecker {
           ));
           return VOID;
         }
-        const mutableProps = this.contract.properties.filter(p => !p.readonly);
+        const mutableProps = expandedStateSlots(this.contract.properties);
         const expectedArgCount = 1 + mutableProps.length;
         if (normalizedArgs.length !== expectedArgCount) {
           this.errors.push(makeDiagnostic(
@@ -1473,7 +1523,7 @@ class TypeChecker {
             ));
             return VOID;
           }
-          const mutableProps = this.contract.properties.filter(p => !p.readonly);
+          const mutableProps = expandedStateSlots(this.contract.properties);
           const expectedArgCount = 1 + mutableProps.length;
           if (normalizedArgs.length !== expectedArgCount) {
             this.errors.push(makeDiagnostic(
@@ -1597,7 +1647,7 @@ class TypeChecker {
             ));
             return VOID;
           }
-          const mutableProps = this.contract.properties.filter(p => !p.readonly);
+          const mutableProps = expandedStateSlots(this.contract.properties);
           const expectedArgCount = 1 + mutableProps.length;
           if (normalizedArgs.length !== expectedArgCount) {
             this.errors.push(makeDiagnostic(

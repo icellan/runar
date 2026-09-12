@@ -149,9 +149,25 @@ public final class Cli {
             return 0;
         }
 
+        // N-106: Typecheck BEFORE ExpandFixedArrays, as the other six tiers do
+        // (TS `index.ts`: parse -> validate -> typecheck -> expandFixedArrays;
+        // Go `compiler.go`, Rust `lib.rs`, Python `compiler.py`, Zig
+        // `compiler_api.zig`, Ruby `compiler.rb` all the same). This tier ran
+        // the expansion first, which made a whole class of type errors
+        // unreachable: the expansion rewrites `this.cells[expr]` into a ternary
+        // dispatch over the scalar siblings, so no `IndexAccessExpr` survived to
+        // reach the index-type guard, and Java alone ACCEPTED
+        // `this.cells[this.helperReturningPubKey()]` — a `<unknown>` array index
+        // the other six refuse with "array index must be bigint".
+        //
+        // Moving it is only safe together with N-107: Typecheck's addOutput
+        // arity rule needs the POST-expansion state slot count, which this tier
+        // used to get for free from the wrong pass order. Typecheck now computes
+        // it (`expandedStateSlots`), so the order can be corrected without the
+        // count regressing. The two findings are one root cause.
         try {
-            contract = ExpandFixedArrays.run(contract);
-        } catch (ExpandFixedArrays.ExpandException e) {
+            Typecheck.run(contract);
+        } catch (Typecheck.TypeCheckException e) {
             for (String msg : e.errors()) {
                 err.println("runar-java: " + msg);
             }
@@ -159,8 +175,8 @@ public final class Cli {
         }
 
         try {
-            Typecheck.run(contract);
-        } catch (Typecheck.TypeCheckException e) {
+            contract = ExpandFixedArrays.run(contract);
+        } catch (ExpandFixedArrays.ExpandException e) {
             for (String msg : e.errors()) {
                 err.println("runar-java: " + msg);
             }
@@ -691,8 +707,12 @@ public final class Cli {
                 b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true}");
                 return b.toString();
             }
-            contract = ExpandFixedArrays.run(contract);
+            // N-106: same order as compileSource above — Typecheck first, then
+            // the expansion. The daemon is a second entry point into the same
+            // pipeline, and a daemon that type-checks a different tree from the
+            // CLI is its own divergence.
             Typecheck.run(contract);
+            contract = ExpandFixedArrays.run(contract);
             AnfProgram anf = AnfLower.run(contract);
             anf = optimizeAnf(anf, req.disableConstantFolding);
 

@@ -1181,34 +1181,28 @@ public final class Typecheck {
                 normalized.addAll(al.elements());
             }
 
-            List<PropertyNode> mutableProps = new ArrayList<>();
-            boolean hasFixedArrayState = false;
-            for (PropertyNode p : contract.properties()) {
-                if (!p.readonly()) {
-                    mutableProps.add(p);
-                    if (p.type() instanceof FixedArrayType) hasFixedArrayState = true;
-                }
-            }
-            // N-105: the arity and state-value rules count the DECLARED mutable
-            // properties, but the fixed-array expansion splits a FixedArray
-            // state property into one scalar sibling per element. For such a
-            // contract the only form that lowers is the expanded one
-            // (`addOutput(sats, board[0], board[1], board[2], n)`), and the
-            // reference tier's own rule REJECTS it ("expects 3 argument(s) ...
-            // got 5" for the Boardy contract in
-            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
-            // which all six non-TS tiers compile). Porting a rule that is wrong
-            // for that shape would delete working code, so both checks are
-            // scoped out of it.
+            // N-107: count the state slots the continuation will actually
+            // carry, not the DECLARED mutable properties. ExpandFixedArrays
+            // splits `board: FixedArray<bigint, 3>` into `board__0 .. board__2`,
+            // so a contract declaring `board` and `n` emits FOUR state values.
+            // addOutput is positional against the emitted values, which is why
+            // the declared count answers the wrong question.
             //
-            // In THIS tier the guard never fires: ExpandFixedArrays runs BEFORE
-            // Typecheck here and AFTER it in the other six, so the properties
-            // reaching this method are already scalar. It is written out anyway
-            // so the six ports read identically and so the check stays correct
-            // if that pass order is ever aligned.
-            boolean shapeCheckable = !hasFixedArrayState;
+            // Until N-106 this tier got the right number for the wrong reason:
+            // ExpandFixedArrays ran BEFORE Typecheck here and AFTER it in the
+            // other six, so the properties reaching this method were already
+            // scalar and the ported `shapeCheckable` opt-out never fired. That
+            // pass order is now aligned with the six, so the count has to be
+            // computed here — the two findings are one root cause, and fixing
+            // the ordering without this would have made Java start rejecting
+            // Boardy (in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py),
+            // which every tier compiles. Gate:
+            // conformance/negatives/N26-addoutput-arity-fixedarray and
+            // conformance/subtype-parity/FixedArrayOutputShape.
+            List<StateSlot> mutableProps = expandedStateSlots(contract.properties());
             int expected = 1 + mutableProps.size();
-            if (shapeCheckable && normalized.size() != expected) {
+            if (normalized.size() != expected) {
                 error("addOutput() expects " + expected + " argument(s): satoshis + "
                     + mutableProps.size() + " state value(s), got " + normalized.size());
             }
@@ -1219,16 +1213,51 @@ public final class Typecheck {
             // error inside one is not swallowed by the arity diagnostic.
             for (int i = 1; i < normalized.size(); i++) {
                 String argType = inferExpr(normalized.get(i), env);
-                if (!shapeCheckable || i - 1 >= mutableProps.size()) continue;
+                if (i - 1 >= mutableProps.size()) continue;
                 if ("<unknown>".equals(argType)) continue;
-                PropertyNode p = mutableProps.get(i - 1);
-                String propType = typeToString(p.type());
+                StateSlot slot = mutableProps.get(i - 1);
+                String propType = typeToString(slot.type());
                 if (!isSubtype(argType, propType)) {
-                    error("addOutput() argument " + (i + 1) + " (" + p.name() + ") must be '"
+                    error("addOutput() argument " + (i + 1) + " (" + slot.name() + ") must be '"
                         + propType + "', got '" + argType + "'");
                 }
             }
             return "void";
+        }
+
+        /** One emitted state value: what the state continuation actually carries. */
+        private record StateSlot(String name, TypeNode type) {}
+
+        /**
+         * The mutable state as {@code addOutput} sees it — one slot per value
+         * the continuation carries, NOT one per declared property.
+         *
+         * <p>N-107: {@code ExpandFixedArrays} splits a FixedArray property into
+         * one scalar sibling per element, so the DECLARED property list is not
+         * the emitted state. The flattening mirrors that pass's own naming
+         * ({@code <root>__<i>}, recursing through nested arrays) so a diagnostic
+         * names the synthetic property the expansion will create.
+         *
+         * <p>A non-positive length is already a parse/validate error; the
+         * property is kept whole in that case so this rule never fires on a
+         * contract that is going to be rejected for a better reason.
+         */
+        private static List<StateSlot> expandedStateSlots(List<PropertyNode> properties) {
+            List<StateSlot> slots = new ArrayList<>();
+            for (PropertyNode p : properties) {
+                if (!p.readonly()) pushStateSlot(p.name(), p.type(), slots);
+            }
+            return slots;
+        }
+
+        private static void pushStateSlot(String name, TypeNode type, List<StateSlot> out) {
+            if (type instanceof FixedArrayType fa && fa.length() > 0) {
+                for (int i = 0; i < fa.length(); i++) {
+                    pushStateSlot(name + "__" + i, fa.element(), out);
+                }
+                return;
+            }
+            out.add(new StateSlot(name, type));
         }
 
         private String checkBuiltinThisCall(String prop, List<Expression> args, Env env) {

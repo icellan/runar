@@ -794,22 +794,24 @@ module RunarCompiler
           else
             args
           end
-        mutable_props = @contract.properties.reject(&:readonly)
-        # N-105: the arity and state-value rules count the DECLARED mutable
-        # properties, but expand_fixed_arrays -- which runs AFTER this pass --
-        # splits a FixedArray state property into one scalar sibling per
-        # element. For such a contract the only form that lowers is the expanded
-        # one (`addOutput(sats, board[0], board[1], board[2], n)`), and the
-        # reference tier's own rule REJECTS it: TypeScript answers "addOutput()
-        # expects 3 argument(s) ... got 5" for the Boardy contract in
-        # compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py,
-        # which is checked into this repo and compiled by all six non-TS tiers.
-        # Porting a rule that is wrong for that shape would delete working code,
-        # so both checks are scoped out of it and the reference-tier defect is
-        # reported rather than replicated. The satoshis check is unaffected.
-        shape_checkable = mutable_props.none? { |p| p.type.is_a?(FixedArrayType) }
+        # N-107: count the state slots the continuation will actually carry,
+        # not the DECLARED mutable properties. expand_fixed_arrays runs right
+        # after this pass and splits `board: FixedArray<bigint, 3>` into
+        # `board__0 .. board__2`, so a contract declaring `board` and `n` emits
+        # FOUR state values. addOutput is positional against the emitted values,
+        # which is why the declared count answers the wrong question.
+        #
+        # This used to be a `shape_checkable` flag that scoped the rule OUT of
+        # every contract with FixedArray state, because porting it verbatim
+        # would have rejected Boardy (in
+        # compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+        # the way the reference tier did. The cost of that opt-out was silent: a
+        # wrong-arity addOutput on a FixedArray contract was ACCEPTED here and
+        # emitted a state continuation that disagreed with the contract's own
+        # state. Gate: conformance/negatives/N26-addoutput-arity-fixedarray.
+        mutable_props = expanded_state_slots(@contract.properties)
         expected = 1 + mutable_props.length
-        if shape_checkable && normalized.length != expected
+        if normalized.length != expected
           add_error(
             "addOutput() expects #{expected} argument(s): satoshis + " \
             "#{mutable_props.length} state value(s), got #{normalized.length}"
@@ -825,19 +827,42 @@ module RunarCompiler
         # inside one is not swallowed by the arity diagnostic.
         normalized[1..].to_a.each_with_index do |arg, i|
           arg_type = infer_expr_type(arg, env)
-          next unless shape_checkable
+          slot = mutable_props[i]
+          next if slot.nil? || arg_type == "<unknown>"
 
-          prop = mutable_props[i]
-          next if prop.nil? || arg_type == "<unknown>"
-
-          prop_type = type_node_to_string(prop.type)
+          prop_type = type_node_to_string(slot[1])
           next if Frontend.subtype?(arg_type, prop_type)
 
           add_error(
-            "addOutput() argument #{i + 2} (#{prop.name}) must be '#{prop_type}', got '#{arg_type}'"
+            "addOutput() argument #{i + 2} (#{slot[0]}) must be '#{prop_type}', got '#{arg_type}'"
           )
         end
         "void"
+      end
+
+      # The mutable state as +addOutput+ sees it: one [name, type] pair per
+      # value the state continuation carries.
+      #
+      # N-107: +expand_fixed_arrays+ (pass 3b) runs after the typechecker and
+      # splits a FixedArray property into one scalar sibling per element, so the
+      # DECLARED property list is not the emitted state. The flattening mirrors
+      # that pass's own naming (+<root>__<i>+, recursing through nested arrays)
+      # so a diagnostic names the synthetic property the next pass will create.
+      #
+      # A non-positive length is already a parse/validate error; the property is
+      # kept whole in that case so this rule never fires on a contract that is
+      # going to be rejected for a better reason.
+      def expanded_state_slots(properties)
+        slots = []
+        push = lambda do |name, type|
+          if type.is_a?(FixedArrayType) && type.length.to_i.positive?
+            type.length.times { |i| push.call("#{name}__#{i}", type.element) }
+            next
+          end
+          slots << [name, type]
+        end
+        properties.reject(&:readonly).each { |p| push.call(p.name, p.type) }
+        slots
       end
 
       def add_error(msg)

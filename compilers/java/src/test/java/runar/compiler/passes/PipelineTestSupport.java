@@ -31,8 +31,8 @@ final class PipelineTestSupport {
     /** Full compile → Bitcoin Script hex, choosing the constant-folding mode. */
     static String hex(String src, String file, boolean disableConstantFolding) throws Exception {
         ContractNode contract = parseValidated(src, file);
-        contract = ExpandFixedArrays.run(contract);
         Typecheck.run(contract);
+        contract = ExpandFixedArrays.run(contract);
         AnfProgram anf = AnfLower.run(contract);
         anf = Cli.optimizeAnf(anf, disableConstantFolding); // DCE + EC rewrite always ON
         StackProgram stack = StackLower.run(anf);
@@ -43,8 +43,8 @@ final class PipelineTestSupport {
     /** Fold-OFF compile → the constructor-slot parameter indexes, in emitted order. */
     static java.util.List<Integer> slotParamIndexes(String src, String file) throws Exception {
         ContractNode contract = parseValidated(src, file);
-        contract = ExpandFixedArrays.run(contract);
         Typecheck.run(contract);
+        contract = ExpandFixedArrays.run(contract);
         AnfProgram anf = AnfLower.run(contract);
         anf = Cli.optimizeAnf(anf, /* disableConstantFolding */ true);
         StackProgram stack = StackLower.run(anf);
@@ -57,8 +57,8 @@ final class PipelineTestSupport {
     /** Fold-OFF optimized ANF as canonical JSON. */
     static String anfJson(String src, String file) throws Exception {
         ContractNode contract = parseValidated(src, file);
-        contract = ExpandFixedArrays.run(contract);
         Typecheck.run(contract);
+        contract = ExpandFixedArrays.run(contract);
         AnfProgram anf = AnfLower.run(contract);
         anf = Cli.optimizeAnf(anf, true);
         return Jcs.stringify(anf);

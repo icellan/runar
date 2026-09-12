@@ -309,6 +309,44 @@ func isSubtype(actual, expected string) bool {
 	return false
 }
 
+// stateSlot is one emitted state value: what the continuation actually carries.
+type stateSlot struct {
+	Name string
+	Type TypeNode
+}
+
+// expandedStateSlots returns the mutable state as addOutput sees it — one entry
+// per value the state continuation carries.
+//
+// N-107: ExpandFixedArrays (pass 3b) runs after the typechecker and splits a
+// FixedArray property into one scalar sibling per element, so the DECLARED
+// property list is not the emitted state. The flattening mirrors
+// ExpandFixedArrays' own naming (`<root>__<i>`, recursing through nested
+// arrays) so a diagnostic names the synthetic property the next pass creates.
+//
+// A non-positive length is already a parse/validate error; the property is kept
+// whole in that case so this rule never fires on a contract that is going to be
+// rejected for a better reason.
+func expandedStateSlots(properties []PropertyNode) []stateSlot {
+	var slots []stateSlot
+	var push func(name string, t TypeNode)
+	push = func(name string, t TypeNode) {
+		if arr, ok := t.(FixedArrayType); ok && arr.Length > 0 {
+			for i := 0; i < arr.Length; i++ {
+				push(fmt.Sprintf("%s__%d", name, i), arr.Element)
+			}
+			return
+		}
+		slots = append(slots, stateSlot{Name: name, Type: t})
+	}
+	for _, p := range properties {
+		if !p.Readonly {
+			push(p.Name, p.Type)
+		}
+	}
+	return slots
+}
+
 func isBigintFamily(t string) bool {
 	return bigintSubtypes[t]
 }
@@ -1229,32 +1267,24 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 		// arity the check counts is the arity codegen will see.
 		normalized := flattenAddOutputArgs(args)
 
-		var mutableProps []PropertyNode
-		hasFixedArrayState := false
-		for _, p := range tc.contract.Properties {
-			if !p.Readonly {
-				mutableProps = append(mutableProps, p)
-				if _, isArray := p.Type.(FixedArrayType); isArray {
-					hasFixedArrayState = true
-				}
-			}
-		}
-		// N-105: the arity and state-value rules count the DECLARED mutable
-		// properties, but ExpandFixedArrays — which runs AFTER this pass —
-		// splits a FixedArray state property into one scalar sibling per
-		// element. For such a contract the only form that lowers is the
-		// expanded one (`addOutput(sats, board[0], board[1], board[2], n)`),
-		// and the reference tier's own rule REJECTS it: TypeScript answers
-		// "addOutput() expects 3 argument(s) ... got 5" for
-		// compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py's
-		// Boardy, a contract checked into this repo that all six non-TS tiers
-		// compile. Porting a rule that is wrong for that shape would delete
-		// working code, so both checks are scoped out of it and the
-		// reference-tier defect is reported rather than replicated. The
-		// satoshis check is unaffected and still runs.
-		shapeCheckable := !hasFixedArrayState
+		// N-107: count the state slots the continuation will actually carry,
+		// not the DECLARED mutable properties. ExpandFixedArrays runs right
+		// after this pass and splits `board: FixedArray<bigint, 3>` into
+		// `board__0 .. board__2`, so a contract declaring `board` and `n`
+		// emits FOUR state values. addOutput is positional against the emitted
+		// values, which is why the declared count is the wrong question.
+		//
+		// This used to be `shapeCheckable := !hasFixedArrayState`: the rule was
+		// scoped OUT of every contract with FixedArray state, because porting
+		// it verbatim would have rejected Boardy (in
+		// compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+		// the way the reference tier did. The cost of that opt-out was silent:
+		// a wrong-arity addOutput on a FixedArray contract was ACCEPTED here
+		// and emitted a state continuation one slot short of the contract's own
+		// state. Gate: conformance/negatives/N26-addoutput-arity-fixedarray.
+		mutableProps := expandedStateSlots(tc.contract.Properties)
 		expected := 1 + len(mutableProps)
-		if shapeCheckable && len(normalized) != expected {
+		if len(normalized) != expected {
 			tc.addError(fmt.Sprintf(
 				"addOutput() expects %d argument(s): satoshis + %d state value(s), got %d",
 				expected, len(mutableProps), len(normalized)))
@@ -1266,7 +1296,7 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType))
 			}
 		}
-		for i := 0; shapeCheckable && i < len(mutableProps) && i+1 < len(normalized); i++ {
+		for i := 0; i < len(mutableProps) && i+1 < len(normalized); i++ {
 			argType := tc.inferExprType(normalized[i+1], env)
 			propType := typeNodeToString(mutableProps[i].Type)
 			if !isSubtype(argType, propType) && argType != "<unknown>" {
@@ -1275,18 +1305,10 @@ func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, 
 					i+2, mutableProps[i].Name, propType, argType))
 			}
 		}
-		if shapeCheckable {
-			// Surplus arguments are still inferred, so a type error inside one
-			// is not swallowed by the arity diagnostic. Mirrors TS.
-			for i := expected; i < len(normalized); i++ {
-				tc.inferExprType(normalized[i], env)
-			}
-		} else {
-			// Still infer every state value so a type error inside one is not
-			// lost along with the scoped-out checks.
-			for i := 1; i < len(normalized); i++ {
-				tc.inferExprType(normalized[i], env)
-			}
+		// Surplus arguments are still inferred, so a type error inside one
+		// is not swallowed by the arity diagnostic. Mirrors TS.
+		for i := expected; i < len(normalized); i++ {
+			tc.inferExprType(normalized[i], env)
 		}
 		return "void"
 	}
