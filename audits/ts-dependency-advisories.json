@@ -1,0 +1,288 @@
+{
+  "_comment": "Known-and-accepted HIGH/CRITICAL advisories for the TypeScript/JS dependency graph, as reported by `pnpm audit --json`. The dependency-audit workflow FAILS on any HIGH/CRITICAL advisory that is NOT listed here, so a newly published advisory blocks a merge on the day it lands. Entries are not permanent: each names the direct dependent that pulls the package in and the surface it is reachable from, so the fix is always \"upgrade that dependent\", never \"extend this file\".",
+  "_policy": "HIGH/CRITICAL -> fail unless listed; MEDIUM/LOW -> reported, not enforced. Mirrors the six non-TS tiers in the same workflow.",
+  "_baselined": "2026-09-12",
+  "_surfaces": {
+    "test-tooling": "Reachable only from the test runner. Not published, not reachable from a compiled contract.",
+    "release-tooling": "Reachable only while cutting a release, on repo-authored input.",
+    "compiler-runtime": "A dependency of a PUBLISHED package that runs in the compiler process. Not on-chain surface, but it does run on a user machine over the user’s own source.",
+    "mixed": "More than one of the above."
+  },
+  "advisories": [
+    {
+      "module": "brace-expansion",
+      "advisory": "GHSA-3jxr-9vmj-r5cp",
+      "severity": "high",
+      "title": "brace-expansion: DoS via exponential-time expansion of consecutive non-expanding {} groups",
+      "pulled_in_by": [
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-testing",
+        "ts-morph"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ts-morph via runar-compiler/runar-testing/runar-decompiler. Compile-time glob expansion over the author’s own paths."
+    },
+    {
+      "module": "brace-expansion",
+      "advisory": "GHSA-mh99-v99m-4gvg",
+      "severity": "high",
+      "title": "brace-expansion: DoS via unbounded expansion length causing an out-of-memory process crash",
+      "pulled_in_by": [
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-testing",
+        "ts-morph"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ts-morph via runar-compiler/runar-testing/runar-decompiler. Compile-time glob expansion over the author’s own paths."
+    },
+    {
+      "module": "brace-expansion",
+      "advisory": "GHSA-rgw5-rvv9-x895",
+      "severity": "high",
+      "title": "brace-expansion: DoS via unbounded intermediate arrays, bypassing the CVE-2026-14257 mitigation",
+      "pulled_in_by": [
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-testing",
+        "ts-morph"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ts-morph via runar-compiler/runar-testing/runar-decompiler. Compile-time glob expansion over the author’s own paths."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-4c8g-83qw-93j6",
+      "severity": "high",
+      "title": "fast-uri vulnerable to host confusion via failed IDN canonicalization",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-7p8r-x3mc-p8w7",
+      "severity": "high",
+      "title": "fast-uri vulnerable to host confusion via backslash authority introducer",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-f65p-4m7j-42xc",
+      "severity": "high",
+      "title": "fast-uri vulnerable to server-side request forgery via malformed IPv6 normalization",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-jqff-g426-hqxp",
+      "severity": "high",
+      "title": "fast-uri vulnerable to host confusion via percent-encoded scheme normalization",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-q3j6-qgpj-74h6",
+      "severity": "high",
+      "title": "fast-uri vulnerable to path traversal via percent-encoded dot segments",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-v2hh-gcrm-f6hx",
+      "severity": "high",
+      "title": "fast-uri vulnerable to host confusion via literal backslash authority delimiter",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "fast-uri",
+      "advisory": "GHSA-v39h-62p7-jpjc",
+      "severity": "high",
+      "title": "fast-uri vulnerable to host confusion via percent-encoded authority delimiters",
+      "pulled_in_by": [
+        "ajv",
+        "runar-compiler",
+        "runar-decompiler",
+        "runar-ir-schema",
+        "runar-sdk",
+        "runar-testing"
+      ],
+      "surface": "compiler-runtime",
+      "why_deferred": "Pulled in by ajv via runar-ir-schema/runar-compiler. Used to resolve $ref URIs in the repo’s own JSON schemas, not in third-party input."
+    },
+    {
+      "module": "js-yaml",
+      "advisory": "GHSA-2883-xcg3-v3hh",
+      "severity": "high",
+      "title": "js-yaml: maxTotalMergeKeys does not limit CPU use for empty merge sources",
+      "pulled_in_by": [
+        "@changesets/cli@2.30.0"
+      ],
+      "surface": "release-tooling",
+      "why_deferred": "Pulled in by @changesets/cli. Runs only during a release, on repo-authored changeset files."
+    },
+    {
+      "module": "js-yaml",
+      "advisory": "GHSA-52cp-r559-cp3m",
+      "severity": "high",
+      "title": "js-yaml: YAML merge-key chains can force quadratic CPU consumption",
+      "pulled_in_by": [
+        "@changesets/cli@2.30.0"
+      ],
+      "surface": "release-tooling",
+      "why_deferred": "Pulled in by @changesets/cli. Runs only during a release, on repo-authored changeset files."
+    },
+    {
+      "module": "js-yaml",
+      "advisory": "GHSA-5p4m-2wfm-xmqj",
+      "severity": "high",
+      "title": "JS-YAML: Quadratic CPU consumption in !!omap resolution (3.x and 4.x) — CVE-2026-59870 fix not backported",
+      "pulled_in_by": [
+        "@changesets/cli@2.30.0"
+      ],
+      "surface": "release-tooling",
+      "why_deferred": "Pulled in by @changesets/cli. Runs only during a release, on repo-authored changeset files."
+    },
+    {
+      "module": "nanoid",
+      "advisory": "GHSA-28wg-ghj8-5hjv",
+      "severity": "high",
+      "title": "nanoid: non-secure generators can loop indefinitely with negative size",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Pulled in by vitest for temp identifiers."
+    },
+    {
+      "module": "nanoid",
+      "advisory": "GHSA-2v37-7h3g-55p8",
+      "severity": "high",
+      "title": "nanoid: custom generators can loop indefinitely when size is zero",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Pulled in by vitest for temp identifiers."
+    },
+    {
+      "module": "nanoid",
+      "advisory": "GHSA-xwg4-73v4-xw9w",
+      "severity": "high",
+      "title": "nanoid: Integer Overflow or Wraparound",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Pulled in by vitest for temp identifiers."
+    },
+    {
+      "module": "picomatch",
+      "advisory": "GHSA-c2c7-rcm5-vvqj",
+      "severity": "high",
+      "title": "Picomatch has a ReDoS vulnerability via extglob quantifiers",
+      "pulled_in_by": [
+        "@changesets/cli@2.30.0"
+      ],
+      "surface": "mixed",
+      "why_deferred": "Pulled in by @changesets/cli (release-only) AND by ts-morph via runar-compiler. The ts-morph path is a compile-time glob over the author’s own source tree, so the ReDoS input is not attacker-controlled."
+    },
+    {
+      "module": "postcss",
+      "advisory": "GHSA-6g55-p6wh-862q",
+      "severity": "high",
+      "title": "PostCSS: Arbitrary file read and information disclosure via attacker-controlled sourceMappingURL in CSS comments",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Pulled in by vitest. CSS pipeline; this repo ships no CSS."
+    },
+    {
+      "module": "postcss",
+      "advisory": "GHSA-r28c-9q8g-f849",
+      "severity": "high",
+      "title": "PostCSS: Path Traversal in Previous Source Map Auto-Loading (sourceMappingURL) leads to Arbitrary .map File Disclosure",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Pulled in by vitest. CSS pipeline; this repo ships no CSS."
+    },
+    {
+      "module": "vite",
+      "advisory": "GHSA-fx2h-pf6j-xcff",
+      "severity": "high",
+      "title": "vite: `server.fs.deny` bypass on Windows alternate paths",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Pulled in by vitest. Dev server / bundler, never run in CI beyond the test process."
+    },
+    {
+      "module": "vitest",
+      "advisory": "GHSA-5xrq-8626-4rwp",
+      "severity": "critical",
+      "title": "When Vitest UI server is listening, arbitrary file can be read and executed",
+      "pulled_in_by": [
+        "vitest"
+      ],
+      "surface": "test-tooling",
+      "why_deferred": "Test runner. Not shipped in any published package and not reachable from a compiled contract."
+    }
+  ]
+}

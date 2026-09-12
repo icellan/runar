@@ -1,8 +1,11 @@
 name: Dependency Audit
 
-# Per-tier dependency vulnerability scanning. TS is already covered by
-# `pnpm audit` in the repo's main lifecycle; this workflow adds equivalent
-# coverage for the 6 non-TS tiers (Go, Rust, Python, Java, Ruby, Zig).
+# Per-tier dependency vulnerability scanning, all seven tiers.
+#
+# R-108: this header used to say TypeScript was "already covered by `pnpm audit`
+# in the repo's main lifecycle". That command existed nowhere in the repository,
+# so the tier with the largest third-party surface had no scanning at all. The
+# `ts-audit` job below closes that.
 #
 # Policy (matches audits/remediation-plan §6):
 #   * HIGH / CRITICAL severity advisories  -> fail the job (block merge).
@@ -223,3 +226,33 @@ jobs:
           echo "replace this job with a real scanner invocation."
           # Intentional success exit - the gap is the point of the job.
           exit 0
+
+  # ---------------------------------------------------------------------------
+  # TypeScript / JS - pnpm audit, gated by a reviewed baseline (R-108).
+  #
+  # `pnpm audit` alone is not usable as a merge gate here: 21 distinct
+  # HIGH/CRITICAL advisories were already present when this job was written, all
+  # of them in test, release or compile-time tooling (vitest, @changesets/cli,
+  # ts-morph, ajv). Failing on the total would have blocked every merge on day
+  # one without making anything safer.
+  #
+  # So the gate is differential. `audits/ts-dependency-advisories.json` lists
+  # exactly those 21, each with the direct dependent that pulls it in and the
+  # surface it is reachable from; advisory number 22 fails the build. A listed
+  # advisory that is no longer reported ALSO fails, so the list cannot quietly
+  # stop describing reality.
+  # ---------------------------------------------------------------------------
+  ts-audit:
+    name: TypeScript - pnpm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+      - name: Audit TS/JS dependencies against the reviewed baseline
+        run: node scripts/check-ts-advisories.mjs
