@@ -670,7 +670,16 @@ const Parser = struct {
         if (std.mem.eql(u8, name, "Sig")) return .sig;
         if (std.mem.eql(u8, name, "Addr")) return .addr;
         if (std.mem.eql(u8, name, "ByteString")) return .byte_string;
-        if (std.mem.eql(u8, name, "Sha256") or std.mem.eql(u8, name, "Sha256Digest")) return .sha256;
+        // N-108: `Sha256Digest` is NOT spelled on the Solidity-like surface.
+        // It is a runar-lang TypeScript alias (`export type Sha256Digest =
+        // Sha256`), resolved per SURFACE rather than per tier. The reference
+        // tier keeps `TYPE_ALIASES` in `01-parse.ts` and neither `01-parse-sol.ts`
+        // nor `01-parse-move.ts` applies it, so TypeScript, Go, Rust, Python,
+        // Ruby and Java all answer "unsupported type 'Sha256Digest' in property
+        // declaration" here. Zig alone accepted it, which made a contract using
+        // the name compile in exactly one tier and emit a locking script no peer
+        // would reproduce. Gate: conformance/negatives/N24-sha256digest-alias-sol.
+        if (std.mem.eql(u8, name, "Sha256")) return .sha256;
         if (std.mem.eql(u8, name, "Ripemd160")) return .ripemd160;
         if (std.mem.eql(u8, name, "SigHashPreimage")) return .sig_hash_preimage;
         if (std.mem.eql(u8, name, "RabinSig")) return .rabin_sig;

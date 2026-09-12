@@ -375,6 +375,18 @@ public final class JavaParser {
             if ("Ripemd160".equals(name) || "Hash160".equals(name)) {
                 return new PrimitiveType(PrimitiveTypeName.RIPEMD_160);
             }
+            // N-108: `docs/formats/java.md` publishes `Sha256Digest -> Sha256`
+            // in the Java surface type table and ships
+            // `runar.lang.types.Sha256Digest` as an importable type, so
+            // contracts written against the documentation spell it. This tier
+            // resolved the alias in its OTHER six surface parsers (TsParser,
+            // GoParser, RustParser, PyParser, RbParser, ZigParser) and refused
+            // it on its own -- a compiler rejecting the name its own format
+            // guide documents. Gate:
+            // conformance/subtype-parity/Sha256DigestAliasJava.runar.java.
+            if ("Sha256Digest".equals(name)) {
+                return new PrimitiveType(PrimitiveTypeName.SHA_256);
+            }
             return new CustomType(name);
         }
     }

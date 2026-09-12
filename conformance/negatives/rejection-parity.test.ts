@@ -340,9 +340,18 @@ function verdict(tier: Tier, src: string): Verdict {
 
 const POSITIVE_CONTROL = join(DIR, 'positive-control.runar.ts');
 
-/** Negative fixtures are `N<nn>-*.runar.ts`; the positive control is not. */
+/**
+ * Negative fixtures are `N<nn>-*.runar.<ext>`; the positive control is not.
+ *
+ * Every one of the nine frontend surfaces is eligible, not just `.runar.ts`.
+ * N-108 is the reason: `Sha256Digest` is a name the reference tier resolves on
+ * seven surfaces and refuses on `.runar.sol` / `.runar.move`, so the rule it
+ * breaks is only expressible in a fixture written in those languages. A corpus
+ * that could only hold TypeScript could not gate a per-surface rule at all —
+ * which is how a one-tier acceptance survived on `.sol` unnoticed.
+ */
 const fixtures = readdirSync(DIR)
-  .filter((f) => /^N\d{2}-.*\.runar\.ts$/.test(f))
+  .filter((f) => /^N\d{2}-.*\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
   .sort();
 
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -355,7 +364,7 @@ describe('cross-tier rejection parity', () => {
   });
 
   it('the corpus is non-empty (a silently empty gate proves nothing)', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(23);
+    expect(fixtures.length).toBeGreaterThanOrEqual(25);
     expect(existsSync(POSITIVE_CONTROL)).toBe(true);
   });
 

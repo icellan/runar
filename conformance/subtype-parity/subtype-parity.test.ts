@@ -246,9 +246,18 @@ function verdict(tier: Tier, src: string): Verdict {
   return { ok: false, diag };
 }
 
-/** Every `*.runar.ts` beside this test is a fixture every tier must accept. */
+/**
+ * Every `*.runar.<ext>` beside this test is a fixture every tier must accept.
+ *
+ * All nine surfaces are eligible, not only `.runar.ts`. N-108 is why: type-name
+ * resolution is a per-SURFACE rule implemented in sixty-three separate parser
+ * tables (nine surfaces x seven tiers), so a corpus of TypeScript fixtures can
+ * only ever gate one column of it. Three of those tables were missing the
+ * `Sha256Digest` arm on `.runar.rs` and two on `.runar.java`, and no `.runar.ts`
+ * fixture could have seen either.
+ */
 const fixtures = readdirSync(DIR)
-  .filter((f) => f.endsWith('.runar.ts'))
+  .filter((f) => /\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
   .sort();
 
 const available = TIERS.filter((t) => t.cmd !== null);

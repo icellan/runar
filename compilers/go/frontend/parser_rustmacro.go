@@ -734,6 +734,16 @@ func rustMapType(name string) string {
 		return "ByteString"
 	case "String":
 		return "ByteString"
+	case "Sha256Digest":
+		// N-108: runar-lang's cross-language spelling of `Sha256` (types.ts:
+		// `export type Sha256Digest = Sha256`). Resolved per SURFACE, and the
+		// Rust DSL surface spells it -- the reference tier maps it in
+		// 01-parse-rust.ts, as do Python, Ruby and Java. Go, Rust and Zig did
+		// not, so `current_hash: Sha256Digest` reached the validator as an
+		// opaque custom type and was refused in three tiers out of seven.
+		// parser_gocontract.go, parser_java.go, parser_python.go, parser_ruby.go
+		// and parser_zig.go all already carry this arm; this was the gap.
+		return "Sha256"
 	}
 	// Pass through Rúnar primitives: PubKey, Sig, Addr, Sha256, Ripemd160, etc.
 	return name

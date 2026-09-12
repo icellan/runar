@@ -530,7 +530,10 @@ fn mapMoveType(name: []const u8) RunarType {
         .{ "Sig", .sig },
         .{ "Addr", .addr },
         .{ "Sha256", .sha256 },
-        .{ "Sha256Digest", .sha256 },
+        // N-108: no `Sha256Digest` arm. The alias is not part of the Move-style
+        // surface vocabulary in the reference tier (`01-parse-move.ts` does not
+        // apply `TYPE_ALIASES`), and six tiers refuse the name here. Zig was the
+        // lone acceptor. Gate: conformance/negatives/N25-sha256digest-alias-move.
         .{ "Ripemd160", .ripemd160 },
         .{ "SigHashPreimage", .sig_hash_preimage },
         .{ "RabinSig", .rabin_sig },

@@ -1136,10 +1136,22 @@ fn snake_to_camel(name: &str) -> String {
     result
 }
 
+/// Map a Rust DSL type name to its Rúnar spelling.
+///
+/// N-108: `Sha256Digest` is runar-lang's cross-language name for `Sha256`
+/// (`packages/runar-lang/src/types.ts`: `export type Sha256Digest = Sha256`)
+/// and the Rust DSL surface uses it. Alias resolution is a per-SURFACE rule,
+/// so `parser.rs`'s `resolve_type_alias` (the `.runar.ts` surface, N-104b) does
+/// not reach this parser. TypeScript, Python, Ruby and Java resolved it here;
+/// Go, Rust and Zig did not, and the name reached the validator as an opaque
+/// custom type. Every other surface parser in this tier already has the arm
+/// (parser_gocontract.rs, parser_java.rs, parser_python.rs, parser_ruby.rs,
+/// parser_zig.rs) -- the Rust DSL was the omission.
 fn map_rust_type(name: &str) -> String {
     match name {
         "Bigint" | "Int" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
         "Bool" | "bool" => "boolean".to_string(),
+        "Sha256Digest" => "Sha256".to_string(),
         _ => name.to_string(),
     }
 }

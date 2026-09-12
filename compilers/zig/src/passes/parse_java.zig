@@ -346,6 +346,14 @@ fn resolveJavaType(name: []const u8) TypeNode {
     if (std.mem.eql(u8, name, "Ripemd160") or std.mem.eql(u8, name, "Hash160")) {
         return .{ .primitive_type = .ripemd160 };
     }
+    // N-108: `docs/formats/java.md` publishes `Sha256Digest -> Sha256` in the
+    // Java surface type table, and `runar.lang.types.Sha256Digest` is a real
+    // importable type, so contracts spell it. Five tiers resolved it; Zig and
+    // the Java tier itself did not, which made the Java compiler refuse the
+    // exact name its own format guide documents.
+    if (std.mem.eql(u8, name, "Sha256Digest")) {
+        return .{ .primitive_type = .sha256 };
+    }
     if (PrimitiveTypeName.fromTsString(name)) |ptn| return .{ .primitive_type = ptn };
     return .{ .custom_type = name };
 }

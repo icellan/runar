@@ -436,6 +436,16 @@ fn mapRustType(name: []const u8) []const u8 {
         .{ "ByteString", "ByteString" },
         .{ "Vec", "ByteString" },
         .{ "String", "ByteString" },
+        // N-108: `Sha256Digest` is runar-lang's cross-language spelling of
+        // `Sha256` and the Rust DSL surface uses it (`current_hash:
+        // Sha256Digest`). The reference tier resolves it here
+        // (`01-parse-rust.ts`), as do Python, Ruby and Java; Go, Rust and Zig
+        // did not, so the name fell through as a custom type. In Zig that was
+        // the loudest failure of the three: there is no validator arm for an
+        // unknown property type, so it survived validation and surfaced as
+        // `stack lowering error: UnsupportedOperation` — an internal error, not
+        // a diagnostic. Gate: conformance/subtype-parity/Sha256DigestAliasRust.
+        .{ "Sha256Digest", "Sha256" },
     });
     if (tmap.get(name)) |mapped| return mapped;
     // Pass through Runar primitives: PubKey, Sig, Addr, Sha256, Ripemd160, etc.
