@@ -1,0 +1,16 @@
+{
+  "fixture": "fixed-array-index",
+  "_note": "R-094. FixedArray had a dedicated pass in all seven tiers, nine-format examples, and ZERO conformance fixtures — and four independent FixedArray defects coexisted behind that gap. Grid2x2 covers array literals and LITERAL-index access; this fixture covers the runtime-index READ, which is what expand-fixed-arrays lowers into a chain of index comparisons. Stateless on purpose: the differential execution oracle has no stateful lane, so a stateful fixture could not carry a witness at all.",
+  "goldenHashes": {
+    "expected-script.hex": "7bd572d63671569db0824a03d46ba8ab944e723e02829d18963fe73ca5404f75",
+    "expected-ir.json": "1a11079d9fe65d57308a0788377cb12d7ec7af1e27417d6ec86c966d3ffb450d"
+  },
+  "constructorArgs": {},
+  "spends": [
+    { "method": "lookup", "args": ["0n", "10n"], "expect": "accept", "note": "first slot" },
+    { "method": "lookup", "args": ["3n", "40n"], "expect": "accept", "note": "last slot — the end of the comparison chain" },
+    { "method": "lookup", "args": ["2n", "30n"], "expect": "accept", "note": "interior slot" },
+    { "method": "lookup", "args": ["1n", "30n"], "expect": "reject", "note": "right index, wrong value: table[1] is 20" },
+    { "method": "lookup", "args": ["4n", "10n"], "expect": "reject", "note": "index past the end — the out-of-range read must not fall through to a neighbour" }
+  ]
+}

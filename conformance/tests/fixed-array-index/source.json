@@ -1,0 +1,14 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/fixed-array-index/ArrayIndex.runar.ts",
+    ".runar.sol": "../../../examples/sol/fixed-array-index/ArrayIndex.runar.sol",
+    ".runar.move": "../../../examples/move/fixed-array-index/ArrayIndex.runar.move",
+    ".runar.go": "../../../examples/go/fixed-array-index/ArrayIndex.runar.go",
+    ".runar.rs": "../../../examples/rust/fixed-array-index/ArrayIndex.runar.rs",
+    ".runar.py": "../../../examples/python/fixed-array-index/ArrayIndex.runar.py",
+    ".runar.zig": "../../../examples/zig/fixed-array-index/ArrayIndex.runar.zig",
+    ".runar.rb": "../../../examples/ruby/fixed-array-index/ArrayIndex.runar.rb"
+  },
+  "parserSkip": [".runar.java"],
+  "parserSkipReason": "FixedArray is unsupported on the Java surface: an integer literal in a Java type-argument list is a javac PARSE error, so no spelling of FixedArray<T, N> survives javax.tools.JavaCompiler. Recorded as a decision in docs/formats/java.md (see 'FixedArray is not supported on the Java surface'); runar.lang.types.FixedArray was withdrawn under N-122. The Java COMPILER is still a full parity target for this fixture's other eight surfaces and appears in the hex matrix below."
+}
