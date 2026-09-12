@@ -28,6 +28,8 @@
     "ec-primitives": 1332782,
     "ec-unit": 479716,
     "escrow": 19,
+    "fixed-array-index": 30,
+    "fixed-array-write": 851,
     "function-patterns": 2826,
     "go-dsl-bytestring-literal": 8,
     "if-else": 20,
