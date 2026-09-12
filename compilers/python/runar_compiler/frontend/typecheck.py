@@ -876,9 +876,20 @@ class _TypeChecker:
         ``blob = 0x2a`` only a 42-satoshi continuation validates, and blobs
         wider than 8 bytes abort at ``OP_NUM2BIN``, making the UTXO unspendable.
 
-        Ported from the TypeScript reference, wording included. Deliberately the
-        FIRST argument only: TS also checks arity, the state-value types and the
-        ``scriptBytes`` argument, and none of those are this finding.
+        N-105: the SECOND argument of addRawOutput / addDataOutput is the
+        created output's LOCKING SCRIPT, and this tier used to accept any type
+        there too. ``_lower_add_raw_output`` takes OP_SIZE of the operand,
+        varint-prefixes it and concatenates it after the amount -- no
+        conversion -- so ``n: bigint`` and ``n: ByteString`` compiled to the
+        SAME script, byte for byte. A script number on the stack is its minimal
+        little-endian encoding, so the covenant commits to an output whose
+        locking script IS those bytes. Executed on the real ``@bsv/sdk`` Spend
+        engine against the exact opcode window this tier emits: n=0 gives an
+        EMPTY locking script, n=81 gives OP_1 and n=118 gives OP_DUP -- all
+        three anyone-can-spend -- while n=1000 gives 0xe8 0x03, an invalid
+        opcode, and the output is unspendable.
+
+        Ported from the TypeScript reference, wording included.
 
         ``<unknown>`` is escaped exactly as TS escapes it -- a private helper's
         declared return type is discarded at parse time in every tier, so
@@ -889,6 +900,21 @@ class _TypeChecker:
             if i == 0 and not is_bigint_family(arg_type) and arg_type != "<unknown>":
                 self._add_error(
                     f"{name}() first argument (satoshis) must be bigint, "
+                    f"got '{arg_type}'"
+                )
+            # addOutput's trailing arguments are STATE VALUES, checked against
+            # the mutable properties; only the raw/data intrinsics carry
+            # scriptBytes here. TS uses is_subtype against ByteString, not
+            # equality, so every ByteString subtype (PubKey, Ripemd160, Sig,
+            # ...) stays accepted.
+            if (
+                i == 1
+                and name != "addOutput"
+                and not is_subtype(arg_type, "ByteString")
+                and arg_type != "<unknown>"
+            ):
+                self._add_error(
+                    f"{name}() second argument (scriptBytes) must be ByteString, "
                     f"got '{arg_type}'"
                 )
         return "void"

@@ -1004,6 +1004,19 @@ terminal (no state mutation)",
     /// FIRST argument only: TS also checks arity, the state-value types and the
     /// `scriptBytes` argument, and none of those are this finding.
     ///
+    /// N-105: the SECOND argument of addRawOutput / addDataOutput is the
+    /// created output's LOCKING SCRIPT, and this tier used to accept any type
+    /// there too. `lower_add_raw_output` takes OP_SIZE of the operand,
+    /// varint-prefixes it and concatenates it after the amount — no conversion
+    /// — so `n: bigint` and `n: ByteString` compiled to the SAME script, byte
+    /// for byte. A script number on the stack is its minimal little-endian
+    /// encoding, so the covenant commits to an output whose locking script IS
+    /// those bytes. Executed on the real `@bsv/sdk` Spend engine against the
+    /// exact opcode window this tier emits: n=0 gives an EMPTY locking script,
+    /// n=81 gives OP_1 and n=118 gives OP_DUP — all three anyone-can-spend —
+    /// while n=1000 gives 0xe8 0x03, an invalid opcode, and the output is
+    /// unspendable.
+    ///
     /// `<unknown>` is escaped exactly as TS escapes it — a private helper's
     /// declared return type is discarded at parse time in every tier, so
     /// `this.sats()` infers as `<unknown>` and must keep compiling.
@@ -1018,6 +1031,21 @@ terminal (no state mutation)",
             if i == 0 && !is_bigint_family(&arg_type) && arg_type != "<unknown>" {
                 self.add_error(format!(
                     "{}() first argument (satoshis) must be bigint, got '{}'",
+                    name, arg_type
+                ));
+            }
+            // addOutput's trailing arguments are STATE VALUES, checked against
+            // the mutable properties; only the raw/data intrinsics carry
+            // scriptBytes here. TS uses is_subtype against ByteString, not
+            // equality, so every ByteString subtype (PubKey, Ripemd160, Sig,
+            // ...) stays accepted.
+            if i == 1
+                && name != "addOutput"
+                && !is_subtype(&arg_type, "ByteString")
+                && arg_type != "<unknown>"
+            {
+                self.add_error(format!(
+                    "{}() second argument (scriptBytes) must be ByteString, got '{}'",
                     name, arg_type
                 ));
             }

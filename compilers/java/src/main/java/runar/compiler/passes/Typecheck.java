@@ -1075,9 +1075,6 @@ public final class Typecheck {
          * abort at {@code OP_NUM2BIN}, making the UTXO unspendable.
          *
          * <p>Ported from the TypeScript reference, wording included.
-         * Deliberately the first argument only: TS also checks arity, the
-         * state-value types and the {@code scriptBytes} argument, and none of
-         * those are this finding.
          *
          * <p>{@code <unknown>} is escaped exactly as TS escapes it — a private
          * helper's declared return type is discarded at parse time in every
@@ -1089,6 +1086,35 @@ public final class Typecheck {
             String t = inferExpr(arg, env);
             if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
                 error(prop + "() first argument (satoshis) must be bigint, got '" + t + "'");
+            }
+        }
+
+        /**
+         * Type-check the SECOND argument of addRawOutput / addDataOutput — the
+         * created output's LOCKING SCRIPT.
+         *
+         * <p>N-105: this tier used to accept any type there too.
+         * {@code lowerAddRawOutput} takes {@code OP_SIZE} of the operand,
+         * varint-prefixes it and concatenates it after the amount — no
+         * conversion — so {@code n: bigint} and {@code n: ByteString} compiled
+         * to the SAME script, byte for byte. A script number on the stack is
+         * its minimal little-endian encoding, so the covenant commits to an
+         * output whose locking script IS those bytes. Executed on the real
+         * {@code @bsv/sdk} Spend engine against the exact opcode window this
+         * tier emits: n=0 gives an EMPTY locking script, n=81 gives
+         * {@code OP_1} and n=118 gives {@code OP_DUP} — all three
+         * anyone-can-spend — while n=1000 gives {@code 0xe8 0x03}, an invalid
+         * opcode, and the output is unspendable.
+         *
+         * <p>Ported from the TypeScript reference, wording included. TS uses
+         * {@code isSubtype} against ByteString, not equality, so every
+         * ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted, and
+         * {@code <unknown>} is escaped exactly as TS escapes it.
+         */
+        private void checkScriptBytesArg(String prop, Expression arg, Env env) {
+            String t = inferExpr(arg, env);
+            if (!isSubtype(t, "ByteString") && !"<unknown>".equals(t)) {
+                error(prop + "() second argument (scriptBytes) must be ByteString, got '" + t + "'");
             }
         }
 
@@ -1114,6 +1140,11 @@ public final class Typecheck {
                     for (int i = 0; i < args.size(); i++) {
                         if (i == 0) {
                             checkSatoshisArg(prop, args.get(0), env);
+                        } else if (i == 1 && !"addOutput".equals(prop)) {
+                            // addOutput's trailing arguments are STATE VALUES,
+                            // checked against the mutable properties; only the
+                            // raw/data intrinsics carry scriptBytes here.
+                            checkScriptBytesArg(prop, args.get(i), env);
                         } else {
                             inferExpr(args.get(i), env);
                         }

@@ -65,6 +65,7 @@ test {
     _ = @import("tests/n095_synthetic_array_chain.zig");
     _ = @import("tests/n097_fixed_array_element_read.zig");
     _ = @import("tests/n098_bytestring_satoshis.zig");
+    _ = @import("tests/n105_scriptbytes.zig");
     _ = @import("tests/n099_ternary_branch_types.zig");
     _ = @import("tests/n100_empty_else_arm.zig");
     _ = @import("tests/branch_lift_then_arm.zig");

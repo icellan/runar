@@ -692,9 +692,20 @@ module RunarCompiler
       # 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
       # OP_NUM2BIN, making the UTXO unspendable.
       #
-      # Ported from the TypeScript reference, wording included. Deliberately the
-      # FIRST argument only: TS also checks arity, the state-value types and the
-      # scriptBytes argument, and none of those are this finding.
+      # N-105: the SECOND argument of addRawOutput / addDataOutput is the
+      # created output's LOCKING SCRIPT, and this tier used to accept any type
+      # there too. `lower_add_raw_output` takes OP_SIZE of the operand,
+      # varint-prefixes it and concatenates it after the amount -- no conversion
+      # -- so `n: bigint` and `n: ByteString` compiled to the SAME script, byte
+      # for byte. A script number on the stack is its minimal little-endian
+      # encoding, so the covenant commits to an output whose locking script IS
+      # those bytes. Executed on the real @bsv/sdk Spend engine against the
+      # exact opcode window this tier emits: n=0 gives an EMPTY locking script,
+      # n=81 gives OP_1 and n=118 gives OP_DUP -- all three anyone-can-spend --
+      # while n=1000 gives 0xe8 0x03, an invalid opcode, and the output is
+      # unspendable.
+      #
+      # Ported from the TypeScript reference, wording included.
       #
       # `<unknown>` is escaped exactly as TS escapes it -- a private helper's
       # declared return type is discarded at parse time in every tier, so
@@ -702,12 +713,26 @@ module RunarCompiler
       def check_output_intrinsic_args(name, args, env)
         args.each_with_index do |arg, i|
           arg_type = infer_expr_type(arg, env)
-          next unless i.zero?
-          next if Frontend.bigint_family?(arg_type) || arg_type == "<unknown>"
+          next if arg_type == "<unknown>"
 
-          add_error(
-            "#{name}() first argument (satoshis) must be bigint, got '#{arg_type}'"
-          )
+          if i.zero?
+            next if Frontend.bigint_family?(arg_type)
+
+            add_error(
+              "#{name}() first argument (satoshis) must be bigint, got '#{arg_type}'"
+            )
+          elsif i == 1 && name != "addOutput"
+            # addOutput's trailing arguments are STATE VALUES, checked against
+            # the mutable properties; only the raw/data intrinsics carry
+            # scriptBytes here. TS uses subtype? against ByteString, not
+            # equality, so every ByteString subtype (PubKey, Ripemd160, Sig,
+            # ...) stays accepted.
+            next if Frontend.subtype?(arg_type, "ByteString")
+
+            add_error(
+              "#{name}() second argument (scriptBytes) must be ByteString, got '#{arg_type}'"
+            )
+          end
         end
         "void"
       end
