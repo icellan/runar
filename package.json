@@ -7,7 +7,8 @@
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
-    "test:all": "pnpm run test && pnpm run conformance:all && pnpm run examples:all && pnpm run e2e:all && pnpm run wallet-client:all",
+    "test:root": "npx vitest run tests/",
+    "test:all": "pnpm run test && pnpm run test:root && pnpm run conformance:all && pnpm run examples:all && pnpm run e2e:all && pnpm run wallet-client:all",
     "test:ci": "pnpm run lint:silent-skips && pnpm run typecheck && pnpm run test:all && RUNAR_INTEGRATION_STRICT=1 pnpm run integration:all && pnpm run lean:verify",
     "lint": "turbo run lint",
     "lint:silent-skips": "bash scripts/lint-no-silent-skips.sh",

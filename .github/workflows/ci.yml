@@ -474,8 +474,6 @@ jobs:
         # emitter can produce — the liveness half reads the OPCODES table out of
         # packages/runar-compiler/src/passes/06-emit.ts, so adding a Chronicle
         # opcode without documenting it fails HERE, in the job that owns that file.
-        # Named explicitly because the repo-root tests/ directory is not covered by
-        # any glob in this workflow.
         run: npx vitest run tests/chronicle-opcode-disclosure.test.ts
       - name: Release-script composition gate
         # scripts/release.sh commits, tags, pushes and publishes. Two defects:
@@ -489,9 +487,21 @@ jobs:
         # commit and v-tag stay delegated to bump-version.sh, and no
         # side-effecting command bypasses the dry-run guard. Executes nothing —
         # no build, no commit, no tag, no push, no publish.
-        # Named explicitly because the repo-root tests/ directory is not covered
-        # by any glob in this workflow.
         run: npx vitest run tests/release-script.test.ts
+      - name: Repo-root tests/ (whole directory)
+        # R-110: root `tests/` is not a pnpm workspace member, so `turbo run
+        # test` never reaches it, and every other `npx vitest run` in this
+        # workflow is path-scoped. Seven of its nine files — the Rúnar-vs-Plonky3
+        # BabyBear / BabyBear-ext4 / Merkle / FRI-colinearity vectors that are the
+        # provenance for the Go-only STARK codegen, plus the version-consistency
+        # and script-size gates — were executed by nothing at all. They pass; the
+        # problem was that nobody would have been told if they stopped.
+        #
+        # Run the DIRECTORY, not a list of files: naming the two above is what let
+        # the other seven rot, and a vector file added tomorrow must be gated the
+        # day it lands. `tests/ci-covers-root-tests.test.ts` fails if this step is
+        # ever narrowed back to a file list.
+        run: npx vitest run tests/
       - run: pnpm run typecheck
 
   go-compiler:
