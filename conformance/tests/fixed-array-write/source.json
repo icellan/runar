@@ -1,0 +1,14 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/fixed-array-write/ArrayWrite.runar.ts",
+    ".runar.sol": "../../../examples/sol/fixed-array-write/ArrayWrite.runar.sol",
+    ".runar.move": "../../../examples/move/fixed-array-write/ArrayWrite.runar.move",
+    ".runar.go": "../../../examples/go/fixed-array-write/ArrayWrite.runar.go",
+    ".runar.rs": "../../../examples/rust/fixed-array-write/ArrayWrite.runar.rs",
+    ".runar.py": "../../../examples/python/fixed-array-write/ArrayWrite.runar.py",
+    ".runar.zig": "../../../examples/zig/fixed-array-write/ArrayWrite.runar.zig",
+    ".runar.rb": "../../../examples/ruby/fixed-array-write/ArrayWrite.runar.rb"
+  },
+  "parserSkip": [".runar.java"],
+  "parserSkipReason": "FixedArray is unsupported on the Java surface: an integer literal in a Java type-argument list is a javac PARSE error, so no spelling of FixedArray<T, N> survives javax.tools.JavaCompiler. Recorded as a decision in docs/formats/java.md; runar.lang.types.FixedArray was withdrawn under N-122. The Java COMPILER remains a full parity target for this fixture's other eight surfaces."
+}
