@@ -916,6 +916,10 @@ const Parser = struct {
                 .name = field_name,
                 .type_info = parsed_type.type_info,
                 .readonly = readonly,
+                // N-109: spelled type name + field-name token, for the
+                // validator's unsupported-type diagnostic. Diagnostics only.
+                .type_name = parsed_type.type_name,
+                .source_loc = self.tokenSourceLoc(field_name_tok),
                 .fixed_array_length = parsed_type.fixed_array_length,
                 .fixed_array_element = parsed_type.fixed_array_element,
                 .fixed_array_nested_length = parsed_type.fixed_array_nested_length,
@@ -958,6 +962,9 @@ const Parser = struct {
 
     const ParsedGoType = struct {
         type_info: RunarType,
+        /// The type name as the author spelled it (`runar.PubKey` spells as
+        /// `PubKey`, `[N]T` as `FixedArray`). Diagnostics only — N-109.
+        type_name: []const u8 = "",
         fixed_array_length: u32 = 0,
         fixed_array_element: RunarType = .unknown,
         fixed_array_nested_length: u32 = 0,
@@ -1004,22 +1011,35 @@ const Parser = struct {
             }
             return .{
                 .type_info = .fixed_array,
+                .type_name = "FixedArray",
                 .fixed_array_length = size,
                 .fixed_array_element = inner.type_info,
                 .fixed_array_nested_length = nested,
             };
         }
 
-        return .{ .type_info = self.parseGoType() };
+        var spelled: []const u8 = "";
+        const info = self.parseGoTypeNamed(&spelled);
+        return .{ .type_info = info, .type_name = spelled };
     }
 
     fn parseGoType(self: *Parser) RunarType {
+        var discard: []const u8 = "";
+        return self.parseGoTypeNamed(&discard);
+    }
+
+    /// `parseGoType`, additionally reporting the type name as the author
+    /// spelled it. `parseGoType` collapses every unrecognised name to
+    /// `.unknown`, so the name is the only thing a diagnostic can quote back
+    /// (N-109). Left empty on the shapes that have no single spelled name.
+    fn parseGoTypeNamed(self: *Parser, out_name: *[]const u8) RunarType {
         // runar.TypeName
         if (self.checkIdent("runar") and self.tokenizer.peek() == '.') {
             _ = self.bump(); // consume 'runar'
             _ = self.expect(.dot); // consume '.'
             if (self.current.kind == .ident) {
                 const type_name = self.bump().text;
+                out_name.* = type_name;
                 return mapGoType(type_name);
             }
             return .unknown;
@@ -1046,6 +1066,7 @@ const Parser = struct {
         // Plain type name: int64, bool, etc.
         if (self.current.kind == .ident) {
             const type_name = self.bump().text;
+            out_name.* = type_name;
             if (std.mem.eql(u8, type_name, "int64") or std.mem.eql(u8, type_name, "int")) return .bigint;
             if (std.mem.eql(u8, type_name, "bool")) return .boolean;
             return mapGoType(type_name);
@@ -1054,7 +1075,7 @@ const Parser = struct {
         // Star pointer: *Type (skip the star, parse the type)
         if (self.current.kind == .star) {
             _ = self.bump();
-            return self.parseGoType();
+            return self.parseGoTypeNamed(out_name);
         }
 
         return .unknown;

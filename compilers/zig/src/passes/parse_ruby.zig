@@ -1015,6 +1015,8 @@ const Parser = struct {
     /// Rúnar type or a (possibly nested) FixedArray shape.
     const RbType = struct {
         info: RunarType,
+        /// The type name as the author spelled it. Diagnostics only — N-109.
+        name: []const u8 = "",
         /// Outer length when `info == .fixed_array`. Zero otherwise.
         length: u32 = 0,
         /// Element type when `info == .fixed_array`. `.unknown` otherwise.
@@ -1052,13 +1054,14 @@ const Parser = struct {
             const element_info = if (inner.info == .fixed_array) RunarType.fixed_array else inner.info;
             return .{
                 .info = .fixed_array,
+                .name = "FixedArray",
                 .length = size,
                 .element = element_info,
                 .nested_length = if (inner.info == .fixed_array) inner.length else 0,
             };
         }
 
-        return .{ .info = info };
+        return .{ .info = info, .name = tok.text };
     }
 
     fn parseProp(self: *Parser, parent_class: ParentClass) ?PropertyNode {
@@ -1071,7 +1074,8 @@ const Parser = struct {
             return null;
         }
 
-        const raw_name = self.bump().text; // symbol value (without colon)
+        const raw_name_tok = self.bump(); // symbol value (without colon)
+        const raw_name = raw_name_tok.text;
         if (self.expect(.comma) == null) return null;
 
         // Parse type (supports FixedArray[T, N] and nested forms).
@@ -1117,6 +1121,10 @@ const Parser = struct {
             .type_info = rb_type.info,
             .readonly = is_readonly,
             .initializer = initializer,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = rb_type.name,
+            .source_loc = self.tokenSourceLoc(raw_name_tok),
             .fixed_array_length = rb_type.length,
             .fixed_array_element = rb_type.element,
             .fixed_array_nested_length = rb_type.nested_length,

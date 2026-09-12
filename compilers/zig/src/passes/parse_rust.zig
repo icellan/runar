@@ -629,6 +629,11 @@ const Parser = struct {
                                     .name = camel_name,
                                     .type_info = type_info,
                                     .readonly = readonly,
+                                    // N-109: spelled type name + field-name
+                                    // token, for the validator's
+                                    // unsupported-type diagnostic.
+                                    .type_name = types.typeNodeName(field_type),
+                                    .source_loc = self.tokenSourceLoc(field_name_tok),
                                     .fixed_array_length = fa_len,
                                     .fixed_array_element = fa_elem,
                                     .fixed_array_nested_length = fa_nested_len,

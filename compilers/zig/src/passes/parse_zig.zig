@@ -521,6 +521,10 @@ const Parser = struct {
             .type_info = typeNodeToRunarType(parsed_type.type_node),
             .readonly = false,
             .initializer = expr_val,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = types.typeNodeName(parsed_type.type_node),
+            .source_loc = .{ .file = self.file_name, .line = name_tok.line, .column = name_tok.col },
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,

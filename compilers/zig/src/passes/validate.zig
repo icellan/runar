@@ -138,7 +138,43 @@ fn validateProperties(
                 .message = "property type 'void' is not valid",
                 .severity = .@"error",
             });
-        } else if (!isValidPropertyType(prop.type_info) and prop.type_info != .unknown) {
+        } else if (prop.type_info == .unknown) {
+            // N-109: an unrecognised type name. `typeNodeToRunarType` collapses
+            // every `custom_type` to `.unknown`, so this arm used to be guarded
+            // OFF with `and prop.type_info != .unknown` and could never fire on
+            // the case it was written for. The contract then ran all the way to
+            // stack lowering, which refused it with `UnsupportedOperation` — no
+            // type name, no source location, and three passes after the six
+            // peer tiers refuse it in the validator.
+            //
+            // Message text matches the Go / Python / Ruby peers byte for byte;
+            // `location` carries the field-name token so the CLI can print the
+            // same `file:line:col:` prefix those tiers print.
+            const loc = prop.source_loc;
+            const spelled = if (prop.type_name.len > 0) prop.type_name else "<unknown>";
+            if (loc) |l| {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "unsupported type '{s}' in property declaration at {s}:{d}",
+                        .{ spelled, l.file, l.line },
+                    ),
+                    .location = l,
+                    .severity = .@"error",
+                    .owned_message = true,
+                });
+            } else {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "unsupported type '{s}' in property declaration",
+                        .{spelled},
+                    ),
+                    .severity = .@"error",
+                    .owned_message = true,
+                });
+            }
+        } else if (!isValidPropertyType(prop.type_info)) {
             try errors.append(allocator, .{
                 .message = "unsupported type in property declaration",
                 .severity = .@"error",

@@ -765,6 +765,10 @@ const Parser = struct {
                 .fixed_array_element = fa_elem,
                 .fixed_array_nested_length = fa_nested_len,
                 .embed_always = embed_always,
+                // N-109: the spelled type name + the field-name token, for the
+                // validator's unsupported-type diagnostic. Diagnostics only.
+                .type_name = types.typeNodeName(type_node),
+                .source_loc = self.tokenSourceLoc(name_tok),
             } };
         }
 

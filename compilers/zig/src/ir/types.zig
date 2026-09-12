@@ -112,6 +112,20 @@ pub fn typeNodeToRunarType(tn: TypeNode) RunarType {
     };
 }
 
+/// The type name as the author SPELLED it, for diagnostics.
+///
+/// `typeNodeToRunarType` collapses every unrecognised name to `.unknown`, so a
+/// `RunarType` alone cannot tell an author WHICH name was rejected — which is
+/// why `validateProperties`'s unsupported-type arm had nothing to say
+/// (N-109). Kept next to the lowering so the two stay in step.
+pub fn typeNodeName(tn: TypeNode) []const u8 {
+    return switch (tn) {
+        .primitive_type => |ptn| ptn.toTsString(),
+        .fixed_array_type => "FixedArray",
+        .custom_type => |name| name,
+    };
+}
+
 pub const ParentClass = enum {
     smart_contract, stateful_smart_contract, unsafe_smart_contract,
 
@@ -165,6 +179,16 @@ pub const PropertyNode = struct {
     fixed_array_element: RunarType = .unknown,
     /// Nested element length for `FixedArray<FixedArray<T, M>, N>`. Zero for flat arrays.
     fixed_array_nested_length: u32 = 0,
+    /// The type name as the author spelled it (`typeNodeName` of the parsed
+    /// `TypeNode`). Diagnostics only — no pass branches on it. Populated by
+    /// every surface parser; empty on synthesized properties (the FixedArray
+    /// expansion's scalar leaves) and on `--ir` inputs, which never reach the
+    /// validator's unsupported-type arm.
+    type_name: []const u8 = "",
+    /// The property declaration's source location, at the field NAME token, in
+    /// the AST-wide 1-based line / 1-based column convention. Populated by
+    /// every surface parser. Null on synthesized properties.
+    source_loc: ?SourceLocation = null,
     /// Synthetic-array chain attached by expand_fixed_arrays pass. Populated on
     /// scalar leaves of an expanded FixedArray property. Null on non-expanded
     /// properties. The chain is outermost-first.

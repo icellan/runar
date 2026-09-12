@@ -750,6 +750,10 @@ const Parser = struct {
             .type_info = type_info,
             .readonly = is_readonly,
             .initializer = initializer,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = types.typeNodeName(type_node),
+            .source_loc = self.tokenSourceLoc(name_tok),
             .fixed_array_length = fixed_length,
             .fixed_array_element = fixed_element,
         }) catch {};

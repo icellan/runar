@@ -170,6 +170,33 @@ pub const Diagnostics = struct {
     fn addWarning(self: *Diagnostics, allocator: std.mem.Allocator, message: []const u8) void {
         add(&self.warnings, allocator, "  warning: ", message);
     }
+
+    /// Like `addError`, but renders a `file:line:col: ` prefix when the
+    /// diagnostic carries a location — the shape the Go / Python / Ruby tiers
+    /// print (N-109). Column is converted 1-based -> 0-based here, the same
+    /// conversion `codegen/emit.zig` performs for source maps, so the printed
+    /// coordinates match those tiers byte for byte.
+    ///
+    /// Additive: a diagnostic with no location prints exactly as before, which
+    /// is every validation diagnostic that predates N-109.
+    fn addLocatedError(
+        self: *Diagnostics,
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        d: types.CompilerDiagnostic,
+    ) void {
+        const loc = d.location orelse {
+            add(&self.errors, allocator, prefix, d.message);
+            return;
+        };
+        const col = if (loc.column > 0) loc.column - 1 else 0;
+        const located = std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}:{d}: {s}",
+            .{ loc.file, loc.line, col, d.message },
+        ) catch return add(&self.errors, allocator, prefix, d.message);
+        add(&self.errors, allocator, prefix, located);
+    }
 };
 
 /// Everything a caller can want out of a compile. Fields past the requested
@@ -217,7 +244,7 @@ pub fn runPipeline(
         validate_pass.validateZig(work, contract) catch return error.ValidationFailed
     else
         validate_pass.validate(work, contract) catch return error.ValidationFailed;
-    for (val_result.errors) |d| diag.addError(work, "  validation error: ", d.message);
+    for (val_result.errors) |d| diag.addLocatedError(work, "  validation error: ", d);
     if (val_result.errors.len > 0) return error.ValidationFailed;
     for (val_result.warnings) |d| diag.addWarning(work, d.message);
 
