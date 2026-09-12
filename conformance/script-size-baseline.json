@@ -72,6 +72,7 @@
     "sphincs-wallet": 188594,
     "state-bigint-edges": 700,
     "state-covenant": 949,
+    "state-covenant-mechanics": 842,
     "state-ripemd160": 679,
     "stateful": 1368,
     "stateful-bytestring": 1271,
