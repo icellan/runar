@@ -11,7 +11,12 @@ package runar.compiler.ir.anf;
  * direct lookup instead of structural / taint heuristics that misfire on
  * developer covenant asserts whose IR shape is identical.
  */
-public record Assert(String value, boolean isAutoInjectedStateCheck) implements AnfValue {
+public record Assert(
+    String value,
+    // R-270: the omit-when-false rule lives on the declaration, not in a name
+    // comparison inside Jcs. Rename this component and the rule follows it.
+    @runar.compiler.canonical.JsonOmitWhenFalse boolean isAutoInjectedStateCheck
+) implements AnfValue {
     public Assert(String value) {
         this(value, false);
     }

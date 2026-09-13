@@ -300,13 +300,17 @@ public final class Jcs {
             // continuation-hash assert carries the marker). The TS
             // reference's `isAutoInjectedStateCheck?: boolean` field follows
             // the same omit-when-false convention.
-            if (val instanceof Boolean bv && !bv && "isAutoInjectedStateCheck".equals(rc.getName())) {
-                continue;
-            }
-            // Same omit-when-false convention, opted into declaratively by the
-            // component itself (e.g. StackMethod.needsCodeSeparator, a
-            // compiler-internal marker with no Stack-IR schema counterpart).
-            if (val instanceof Boolean bv2 && !bv2 && rc.getAnnotation(JsonOmitWhenFalse.class) != null) {
+            // Omit-when-false, opted into declaratively by the component
+            // itself: Assert.isAutoInjectedStateCheck and
+            // StackMethod.needsCodeSeparator. This used to be TWO branches —
+            // the first compared rc.getName() to the literal
+            // "isAutoInjectedStateCheck" (R-270). Both spellings produced the
+            // same bytes, which is why it survived; what a name comparison
+            // cannot do is travel with the field, so renaming the component or
+            // porting the record would have silently grown an
+            // `"isAutoInjectedStateCheck": false` key that no other tier emits,
+            // in a form compared across all seven.
+            if (val instanceof Boolean bv && !bv && rc.getAnnotation(JsonOmitWhenFalse.class) != null) {
                 continue;
             }
             // Compiler-internal component: never written, whatever its value.
