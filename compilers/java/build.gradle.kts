@@ -48,6 +48,14 @@ tasks.named<Jar>("jar") {
             "Main-Class" to "runar.compiler.Cli",
             "Implementation-Title" to "Rúnar Java Compiler",
             "Implementation-Version" to project.version,
+            // R-276: the jar travelled with no license metadata, while every
+            // other ecosystem in this repo declares MIT in its own manifest
+            // (package.json, Cargo.toml, the gemspec, pyproject). A jar without
+            // it is the one artifact a consumer's license scanner cannot
+            // classify. Bundle-License is the OSGi spelling scanners read;
+            // Implementation-License is the plain one a human reads.
+            "Implementation-License" to "MIT",
+            "Bundle-License" to "https://opensource.org/licenses/MIT",
         )
     }
 }
