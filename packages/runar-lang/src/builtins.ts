@@ -424,7 +424,7 @@ export function verifyRabinSig(
  * key.
  *
  * Signature size: 2,144 bytes (67 chains x 32 bytes).
- * Public key size: 32 bytes.
+ * Public key size: 64 bytes — `pubSeed(32) || pkRoot(32)`.
  * Estimated script size: ~12 KB.
  *
  * One-time use: each keypair can securely sign only one message.
@@ -433,7 +433,13 @@ export function verifyRabinSig(
  *
  * @param msg    - The message to verify.
  * @param sig    - WOTS+ signature (2,144 bytes).
- * @param pubkey - WOTS+ public key (32 bytes).
+ * @param pubkey - WOTS+ public key (64 bytes: `pubSeed(32) || pkRoot(32)`).
+ *                 R-248: this said 32 bytes. The codegen splits the argument
+ *                 into two 32-byte halves (`wots-codegen.ts`: "Split 64-byte
+ *                 pubkey into pubSeed(32) and pkRoot(32)") and the interpreter
+ *                 rejects a 32-byte key outright — see the "rejects
+ *                 wrong-length public key (32 bytes)" case in
+ *                 `runar-testing/src/crypto/__tests__/wots.test.ts`.
  */
 export function verifyWOTS(
   _msg: ByteString,
