@@ -28,6 +28,21 @@ var ecGenX *big.Int
 // secp256k1 generator y-coordinate
 var ecGenY *big.Int
 
+// secp256k1 domain parameters.
+//
+// Source: SEC 2: Recommended Elliptic Curve Domain Parameters, Version 2.0,
+// section 2.4.1 (Certicom Research, 2010) —
+// https://www.secg.org/sec2-v2.pdf
+//
+// p  = 2^256 - 2^32 - 977, the field prime
+// Gx, Gy — the standard generator, uncompressed
+//
+// R-239: these were bare literals, while the Poseidon2 round constants in this
+// same package cite Plonky3 and the SLH-DSA parameters cite FIPS 205. A wrong
+// digit here does not fail a vector — it produces an EC implementation that
+// agrees with itself, passes every self-consistency check, and is not the curve
+// anyone else is on. Checking the digits against the standard is the only
+// defence, and that needs the standard named.
 func init() {
 	ecFieldP, _ = new(big.Int).SetString("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16)
 	ecFieldPMinus2 = new(big.Int).Sub(ecFieldP, big.NewInt(2))
