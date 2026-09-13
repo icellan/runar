@@ -289,6 +289,37 @@ class TestWalletProviderConstructor:
         assert provider.get_network() == 'testnet'
         assert provider.get_fee_rate() == 50
 
+    def test_r179_testnet_without_arc_url_is_refused(self):
+        """R-179: arc_url and network were defaulted independently, so a
+        testnet provider reported get_network() == 'testnet' and broadcast to
+        the MAINNET ARC. There is no canonical testnet ARC endpoint to default
+        to, so a non-mainnet provider must name its own."""
+        wallet = MockWalletClient()
+        signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+
+        with pytest.raises(ValueError) as excinfo:
+            WalletProvider(wallet, signer, basket='app', network='testnet')
+        assert 'testnet' in str(excinfo.value)
+        assert 'arc.gorillapool.io' in str(excinfo.value)
+
+    def test_r179_testnet_with_an_explicit_arc_url_is_accepted(self):
+        wallet = MockWalletClient()
+        signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+        provider = WalletProvider(
+            wallet, signer, basket='app',
+            network='testnet', arc_url='https://arc.testnet.example',
+        )
+        assert provider.get_network() == 'testnet'
+        assert provider.arc_url == 'https://arc.testnet.example'
+
+    def test_r179_mainnet_default_is_unchanged(self):
+        wallet = MockWalletClient()
+        signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+        for kwargs in ({}, {'network': 'mainnet'}):
+            provider = WalletProvider(wallet, signer, basket='app', **kwargs)
+            assert provider.get_network() == 'mainnet'
+            assert provider.arc_url == 'https://arc.gorillapool.io'
+
 
 # ---------------------------------------------------------------------------
 # WalletProvider.get_utxos

@@ -76,8 +76,25 @@ RSpec.describe Runar::SDK::WalletProvider do
   end
 
   it 'returns the configured network override' do
-    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b', network: 'testnet')
+    # R-179: this used to omit arc_url, which built a testnet provider pointing
+    # at the MAINNET ARC. A non-mainnet provider now names its own endpoint.
+    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b',
+                             network: 'testnet', arc_url: 'https://arc.testnet.example')
     expect(wp.get_network).to eq('testnet')
+  end
+
+  it 'refuses a non-mainnet provider that names no ARC endpoint (R-179)' do
+    expect do
+      described_class.new(wallet: wallet, signer: signer, basket: 'b', network: 'testnet')
+    end.to raise_error(ArgumentError, /testnet.*arc\.gorillapool\.io|arc\.gorillapool\.io.*testnet/m)
+  end
+
+  it 'keeps the mainnet default endpoint exactly as it was (R-179)' do
+    [{}, { network: 'mainnet' }].each do |extra|
+      wp = described_class.new(wallet: wallet, signer: signer, basket: 'b', **extra)
+      expect(wp.get_network).to eq('mainnet')
+      expect(wp.instance_variable_get(:@arc_url)).to eq('https://arc.gorillapool.io')
+    end
   end
 
   it 'returns the configured fee rate (default 100)' do

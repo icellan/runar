@@ -21,6 +21,12 @@ import {
 // Options
 // ---------------------------------------------------------------------------
 
+/**
+ * The default ARC broadcaster. This is a MAINNET endpoint — see R-179 for why
+ * that matters at construction time.
+ */
+const MAINNET_ARC_URL = 'https://arc.gorillapool.io';
+
 export interface WalletProviderOptions {
   /** BRC-100 WalletClient instance. */
   wallet: WalletClient;
@@ -30,7 +36,11 @@ export interface WalletProviderOptions {
   basket: string;
   /** Tag for funding UTXOs within the basket (default: 'funding'). */
   fundingTag?: string;
-  /** ARC broadcast endpoint (default: 'https://arc.gorillapool.io'). */
+  /**
+   * ARC broadcast endpoint. Defaults to the MAINNET endpoint
+   * ('https://arc.gorillapool.io') and is therefore REQUIRED when `network` is
+   * anything other than 'mainnet' — see R-179.
+   */
   arcUrl?: string;
   /** Overlay service URL for tx submission and raw tx lookups (optional). */
   overlayUrl?: string;
@@ -73,10 +83,26 @@ export class WalletProvider implements Provider {
     this.signer = options.signer;
     this.basket = options.basket;
     this.fundingTag = options.fundingTag ?? 'funding';
-    this.arcUrl = options.arcUrl ?? 'https://arc.gorillapool.io';
+    this._network = options.network ?? 'mainnet';
+    // R-179: arcUrl and network used to be defaulted independently, so a
+    // provider configured for testnet reported getNetwork() === 'testnet' and
+    // broadcast every transaction to the MAINNET ARC, with nothing to say so.
+    // There is no canonical testnet ARC endpoint in this repo to default to,
+    // so a testnet provider has to name its own rather than inherit one that
+    // points at real money. The sibling GorillaPoolProvider derives its base
+    // URL from the network for the same reason.
+    if (options.arcUrl) {
+      this.arcUrl = options.arcUrl;
+    } else if (this._network === 'mainnet') {
+      this.arcUrl = MAINNET_ARC_URL;
+    } else {
+      throw new Error(
+        `WalletProvider: no default ARC endpoint for network '${this._network}' — ` +
+          `${MAINNET_ARC_URL} is a MAINNET broadcaster. Pass arcUrl explicitly.`,
+      );
+    }
     this.overlayUrl = options.overlayUrl;
     this.overlayTopics = options.overlayTopics;
-    this._network = options.network ?? 'mainnet';
     this._feeRate = options.feeRate ?? 100;
     this.broadcaster = options.broadcaster;
   }

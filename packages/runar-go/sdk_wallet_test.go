@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // ---------------------------------------------------------------------------
@@ -664,5 +666,60 @@ func TestWalletProvider_Defaults(t *testing.T) {
 	}
 	if wp.feeRate != 100 {
 		t.Errorf("expected default feeRate 100, got %f", wp.feeRate)
+	}
+}
+
+// R-179 (CL-BUG-072): ArcUrl and Network were defaulted independently, so a
+// provider configured for testnet reported GetNetwork() == "testnet" and
+// broadcast every transaction to the MAINNET ARC, with nothing to say so.
+//
+// NewWalletProvider cannot return an error without breaking its signature, so
+// a non-mainnet provider that named no endpoint is left with an empty arcUrl
+// and Broadcast refuses — the tier refuses as early as its constructor allows.
+func TestR179_TestnetWithoutArcURLRefusesToBroadcast(t *testing.T) {
+	wp := NewWalletProvider(WalletProviderOptions{
+		Wallet:  newMockWalletClient(""),
+		Network: "testnet",
+	})
+	if wp.arcUrl != "" {
+		t.Fatalf("a testnet provider must not inherit the mainnet ARC endpoint, got %q", wp.arcUrl)
+	}
+
+	_, err := wp.Broadcast(transaction.NewTransaction())
+	if err == nil {
+		t.Fatal("Broadcast must refuse when no ARC endpoint matches the network")
+	}
+	if !strings.Contains(err.Error(), "testnet") ||
+		!strings.Contains(err.Error(), "arc.gorillapool.io") {
+		t.Errorf("the refusal must name the network and the mainnet endpoint it declined to use; got: %v", err)
+	}
+}
+
+func TestR179_TestnetWithAnExplicitArcURLIsAccepted(t *testing.T) {
+	wp := NewWalletProvider(WalletProviderOptions{
+		Wallet:  newMockWalletClient(""),
+		Network: "testnet",
+		ArcUrl:  "https://arc.testnet.example",
+	})
+	if wp.arcUrl != "https://arc.testnet.example" {
+		t.Errorf("explicit ArcUrl was not honoured, got %q", wp.arcUrl)
+	}
+	if wp.GetNetwork() != "testnet" {
+		t.Errorf("expected testnet, got %q", wp.GetNetwork())
+	}
+}
+
+func TestR179_MainnetDefaultIsUnchanged(t *testing.T) {
+	for _, network := range []string{"", "mainnet"} {
+		wp := NewWalletProvider(WalletProviderOptions{
+			Wallet:  newMockWalletClient(""),
+			Network: network,
+		})
+		if wp.GetNetwork() != "mainnet" {
+			t.Errorf("network %q: expected mainnet, got %q", network, wp.GetNetwork())
+		}
+		if wp.arcUrl != "https://arc.gorillapool.io" {
+			t.Errorf("network %q: expected the mainnet ARC default, got %q", network, wp.arcUrl)
+		}
 	}
 }

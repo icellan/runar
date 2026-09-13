@@ -106,6 +106,9 @@ pub trait WalletClient {
 // ---------------------------------------------------------------------------
 // WalletProvider options
 // ---------------------------------------------------------------------------
+/// The default ARC broadcaster. This is a MAINNET endpoint — see R-179.
+pub const MAINNET_ARC_URL: &str = "https://arc.gorillapool.io";
+
 
 /// Options for constructing a WalletProvider.
 pub struct WalletProviderOptions<W: WalletClient> {
@@ -194,15 +197,26 @@ impl<W: WalletClient> WalletProvider<W> {
         network: Option<String>,
         fee_rate: Option<i64>,
     ) -> Self {
+        let resolved_network = network.unwrap_or_else(|| "mainnet".to_string());
         WalletProvider {
             wallet,
             protocol_id,
             key_id,
             basket,
             funding_tag: funding_tag.unwrap_or_else(|| "funding".to_string()),
-            arc_url: arc_url.unwrap_or_else(|| "https://arc.gorillapool.io".to_string()),
+            // R-179: only mainnet has a default ARC endpoint, because the
+            // default IS a mainnet endpoint. A non-mainnet provider that names
+            // none is left with an empty arc_url and refuses in `broadcast`
+            // rather than sending a testnet-configured spend to real money.
+            arc_url: arc_url.unwrap_or_else(|| {
+                if resolved_network == "mainnet" {
+                    MAINNET_ARC_URL.to_string()
+                } else {
+                    String::new()
+                }
+            }),
             overlay_url,
-            network: network.unwrap_or_else(|| "mainnet".to_string()),
+            network: resolved_network.clone(),
             fee_rate: fee_rate.unwrap_or(100),
             tx_cache: HashMap::new(),
             cached_pub_key: None,
@@ -332,6 +346,15 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
     }
 
     fn broadcast(&mut self, tx: &BsvTransaction) -> Result<String, String> {
+        // R-179: see `new` — an empty arc_url means a non-mainnet provider was
+        // built without naming its own endpoint.
+        if self.arc_url.is_empty() {
+            return Err(format!(
+                "WalletProvider broadcast: no ARC endpoint for network '{}' — {} is a \
+                 MAINNET broadcaster; pass arc_url explicitly",
+                self.network, MAINNET_ARC_URL
+            ));
+        }
         let raw_hex = tx.to_hex().map_err(|e| format!("WalletProvider broadcast: to_hex failed: {}", e))?;
 
         // Issue #107: when a broadcaster is injected, delegate to it so the SDK
@@ -1088,6 +1111,70 @@ mod tests {
             None, None, None, None, None,
         );
         assert_eq!(provider.get_network(), "mainnet");
+    }
+
+    // R-179 (CL-BUG-072): arc_url and network were defaulted independently, so
+    // a provider configured for testnet reported get_network() == "testnet" and
+    // broadcast every transaction to the MAINNET ARC. `new` returns Self and
+    // cannot refuse, so a non-mainnet provider that names no endpoint is left
+    // with an empty arc_url and `broadcast` refuses.
+    #[test]
+    fn r179_testnet_without_arc_url_does_not_inherit_the_mainnet_endpoint() {
+        let wallet = MockWalletClient::new();
+        let provider = WalletProvider::new(
+            wallet,
+            (2, "test".to_string()),
+            "1".to_string(),
+            "my-basket".to_string(),
+            None,
+            None,
+            None,
+            Some("testnet".to_string()),
+            None,
+        );
+        assert_eq!(provider.get_network(), "testnet");
+        assert_eq!(
+            provider.arc_url, "",
+            "a testnet provider must not inherit the mainnet ARC endpoint"
+        );
+    }
+
+    #[test]
+    fn r179_testnet_with_an_explicit_arc_url_is_accepted() {
+        let wallet = MockWalletClient::new();
+        let provider = WalletProvider::new(
+            wallet,
+            (2, "test".to_string()),
+            "1".to_string(),
+            "my-basket".to_string(),
+            None,
+            Some("https://arc.testnet.example".to_string()),
+            None,
+            Some("testnet".to_string()),
+            None,
+        );
+        assert_eq!(provider.arc_url, "https://arc.testnet.example");
+        assert_eq!(provider.get_network(), "testnet");
+    }
+
+    #[test]
+    fn r179_mainnet_default_is_unchanged() {
+        for network in [None, Some("mainnet".to_string())] {
+            let wallet = MockWalletClient::new();
+            let provider = WalletProvider::new(
+                wallet,
+                (2, "test".to_string()),
+                "1".to_string(),
+                "my-basket".to_string(),
+                None,
+                None,
+                None,
+                network,
+                None,
+            );
+            assert_eq!(provider.get_network(), "mainnet");
+            assert_eq!(provider.arc_url, MAINNET_ARC_URL);
+        }
     }
 
     #[test]

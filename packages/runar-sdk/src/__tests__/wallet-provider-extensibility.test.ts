@@ -116,17 +116,23 @@ describe('WalletProvider extensibility', () => {
   });
 
   it('exposes protected configuration to subclasses', () => {
+    // R-179: this case used to omit arcUrl and assert that a TESTNET provider
+    // described itself as broadcasting via https://arc.gorillapool.io — the
+    // mainnet endpoint. The assertion was pinning the defect, not the feature
+    // under test, which is that a subclass can read the protected fields. A
+    // testnet provider now has to name its own endpoint, so it does.
     const provider = new ExtendedProvider({
       wallet: stubWallet,
       signer: stubSigner,
       basket: 'test-basket',
       fundingTag: 'fees',
       network: 'testnet',
+      arcUrl: 'https://arc.testnet.example',
       feeRate: 1000,
     });
 
     expect(provider.describeConfig()).toBe(
-      'test-basket/fees via https://arc.gorillapool.io (testnet, 1000 sats/KB, overlay: none)',
+      'test-basket/fees via https://arc.testnet.example (testnet, 1000 sats/KB, overlay: none)',
     );
   });
 
