@@ -335,6 +335,11 @@ const MUST_COMPILE = [
     finding: 'N-138',
     what: 'a for-loop starting at a NEGATIVE literal — the Zig tier unrolled from 0 on all nine surfaces',
   },
+  {
+    file: 'BytesInit.runar.ts',
+    finding: 'R-204',
+    what: 'a ByteString-literal property initializer — the one documented initializer type the property-initializers fixture never covered',
+  },
 ] as const;
 
 /** Contracts every tier must REFUSE, with a real located diagnostic. */
