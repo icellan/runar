@@ -115,3 +115,79 @@ fn unknown_anf_kind_error_panic_payload_round_trip() {
         "panic msg should reference the developer recipe, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R-177 (CL-BUG-010): the loader's own "unknown ANF kind" check was dead code,
+// and its absence showed in the diagnostic.
+//
+// `validate_bindings` asked `!KNOWN_KINDS.contains(kind_name(&binding.value))`.
+// That could not fire for two independent reasons: `kind_name` maps an
+// ALREADY-DESERIALISED `ANFValue` to its name, so it only ever returns a known
+// kind; and serde rejects an unrecognised `kind` tag before validation runs at
+// all. The file's own test asserted the serde message, confirming the branch
+// never ran.
+//
+// The consequence was not the dead branch itself but the text: six tiers say
+// "unknown ANF kind", this one said "invalid IR JSON: unknown variant".
+//
+//   go    IR validation: method unlock binding t1 has unknown kind "not_a_real_kind"
+//   java  unknown ANF kind 'not_a_real_kind' encountered in anf-loader.parseValue
+//   rust  invalid IR JSON: unknown variant `not_a_real_kind`, expected one of ...
+//
+// serde's message is the most informative of the three — it lists the kinds
+// that ARE known — so it is kept, and the shared wording is put in front of it.
+// ---------------------------------------------------------------------------
+
+use runar_compiler_rust::ir::loader::load_ir_from_str;
+
+const BAD_KIND_IR: &str = r#"{
+  "contractName": "P",
+  "parentClass": "SmartContract",
+  "properties": [],
+  "methods": [
+    {
+      "name": "unlock",
+      "isPublic": true,
+      "params": [],
+      "body": [
+        { "name": "t0", "value": { "kind": "not_a_real_kind" } }
+      ]
+    }
+  ]
+}"#;
+
+#[test]
+fn r177_unknown_kind_is_reported_in_the_shared_wording() {
+    let err = load_ir_from_str(BAD_KIND_IR)
+        .expect_err("an unrecognised ANF kind must be rejected");
+
+    assert!(
+        err.contains("unknown ANF kind"),
+        "the diagnostic must use the wording the other six tiers use; got: {}",
+        err
+    );
+    assert!(
+        err.contains("not_a_real_kind"),
+        "the diagnostic must quote the offending kind; got: {}",
+        err
+    );
+    // serde's detail is what makes this tier's message the most useful of the
+    // seven; losing it would be a regression in the other direction.
+    assert!(
+        err.contains("expected one of"),
+        "the list of known kinds must survive; got: {}",
+        err
+    );
+}
+
+#[test]
+fn r177_a_valid_kind_still_loads() {
+    let good = BAD_KIND_IR.replace(
+        r#"{ "kind": "not_a_real_kind" }"#,
+        r#"{ "kind": "load_const", "value": 1 }"#,
+    );
+    assert!(
+        load_ir_from_str(&good).is_ok(),
+        "the control program must still load"
+    );
+}

@@ -34,7 +34,7 @@ pub fn load_ir_from_str(json_str: &str) -> Result<ANFProgram, String> {
         return Err(e.to_string());
     }
     let program: ANFProgram = serde_json::from_str(json_str)
-        .map_err(|e| format!("invalid IR JSON: {}", e))?;
+        .map_err(|e| describe_ir_parse_error(&e))?;
     validate_ir(&program)?;
     Ok(program)
 }
@@ -53,7 +53,7 @@ pub fn load_ir_from_str_typed(
         return Err(IRLoaderError::Nesting(e));
     }
     serde_json::from_str::<ANFProgram>(json_str)
-        .map_err(|e| IRLoaderError::Other(format!("invalid IR JSON: {}", e)))
+        .map_err(|e| IRLoaderError::Other(describe_ir_parse_error(&e)))
         .and_then(|p| {
             validate_ir(&p).map_err(IRLoaderError::Other)?;
             Ok(p)
@@ -81,6 +81,34 @@ impl std::fmt::Display for IRLoaderError {
 
 impl std::error::Error for IRLoaderError {}
 
+
+/// Turn serde's "unknown variant" into the shape the peer tiers use (R-177).
+///
+/// `ANFValue` is `#[serde(tag = "kind")]` with no catch-all, so an unrecognised
+/// kind is rejected inside `serde_json::from_str` — before any of this module's
+/// own validation runs. That is correct and it is not going to change: serde's
+/// message is the most informative of the seven tiers, because it also lists
+/// the kinds that ARE known.
+///
+/// What it lacked is the words every other tier says. Go answers
+/// `IR validation: method unlock binding t1 has unknown kind "not_a_real_kind"`
+/// and Java `unknown ANF kind 'not_a_real_kind' ...`; this tier answered
+/// `invalid IR JSON: unknown variant ...`, so a caller grepping the diagnostic
+/// for "unknown ANF kind" found it in six tiers and not the seventh.
+fn describe_ir_parse_error(e: &serde_json::Error) -> String {
+    let text = e.to_string();
+    if let Some(rest) = text.strip_prefix("unknown variant `") {
+        if let Some(end) = rest.find('`') {
+            return format!(
+                "IR validation: unknown ANF kind {:?} — {}",
+                &rest[..end],
+                text
+            );
+        }
+    }
+    format!("invalid IR JSON: {}", text)
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -95,29 +123,18 @@ impl std::error::Error for IRLoaderError {}
 /// CL-BUG-088.
 pub const MAX_LOOP_COUNT: u32 = 10_000;
 
-/// Known ANF value kinds.
-const KNOWN_KINDS: &[&str] = &[
-    "load_param",
-    "load_prop",
-    "load_const",
-    "bin_op",
-    "unary_op",
-    "call",
-    "method_call",
-    "if",
-    "loop",
-    "assert",
-    "update_prop",
-    "get_state_script",
-    "check_preimage",
-    "deserialize_state",
-    "add_output",
-    "add_raw_output",
-    "add_data_output",
-    "array_literal",
-    "raw_script",
-];
 
+/// Every `ANFValue` variant's JSON `kind`.
+///
+/// R-177: nothing CALLS this any more — the `KNOWN_KINDS` list it fed was a
+/// second, hand-maintained copy of the variant names, and the check that
+/// compared them could not fire (see validate_bindings). It is kept, and
+/// deliberately not deleted with the rest, because an exhaustive match over the
+/// closed enum is this tier's build-time guard against a new ANF kind slipping
+/// through unwired: adding a variant fails to compile here. That role is
+/// documented in tests/unknown_anf_kind_tests.rs, which names this function as
+/// one of the dispatchers that must list every variant.
+#[allow(dead_code)]
 fn kind_name(value: &ANFValue) -> &'static str {
     match value {
         ANFValue::LoadParam { .. } => "load_param",
@@ -227,13 +244,12 @@ fn validate_bindings(
             ));
         }
 
-        let kind = kind_name(&binding.value);
-        if !KNOWN_KINDS.contains(&kind) {
-            return Err(format!(
-                "IR validation: method {} binding {} has unknown kind {:?}",
-                method_name, binding.name, kind
-            ));
-        }
+        // R-177: a `!KNOWN_KINDS.contains(kind_name(&binding.value))` check
+        // used to sit here. It could not fire for two independent reasons:
+        // `kind_name` maps an ALREADY-DESERIALISED ANFValue to its name, so it
+        // only ever returns a known kind, and serde rejects an unrecognised
+        // `kind` before this function is called at all. The rejection now
+        // happens where it really happens — see describe_ir_parse_error.
 
         // R-128 / R-165: builtin call arity. The source pipeline type-checks
         // every call; `--ir` runs no frontend, so a wrong-arity call used to
@@ -691,10 +707,22 @@ mod tests {
             ]
         }"#;
         let err = load_ir_from_str(json).unwrap_err();
-        // serde rejects unrecognized "kind" tags at the deserialization level
+        // serde rejects unrecognized "kind" tags at the deserialization level.
+        //
+        // R-177: this used to assert `err.contains("invalid IR JSON")`, and
+        // that assertion was the evidence the finding cited that the loader's
+        // own KNOWN_KINDS branch never fired. The rejection still happens in
+        // serde — that part was never wrong — but the message now leads with
+        // the wording the other six tiers use, so a caller can grep one string
+        // across all seven.
         assert!(
-            err.contains("invalid IR JSON"),
-            "expected deserialization error for unknown kind, got: {}",
+            err.contains("unknown ANF kind"),
+            "expected the shared wording for an unknown kind, got: {}",
+            err
+        );
+        assert!(
+            err.contains("unknown_kind_xyz"),
+            "expected the offending kind to be quoted, got: {}",
             err
         );
     }
