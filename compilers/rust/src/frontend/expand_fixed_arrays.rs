@@ -177,6 +177,14 @@ struct ExpandContext<'a> {
     /// synthetic name (e.g. `Grid__0`).
     synthetic_arrays: HashMap<String, ArrayMeta>,
     temp_counter: usize,
+    /// Location of the statement currently being rewritten (R-137).
+    ///
+    /// `rewrite_index_access` and the increment-as-value refusal take no
+    /// `SourceLocation` — they are reached from expression rewriting, which
+    /// carries none — so their diagnostics were built with `None` while every
+    /// sibling check in this file passes `Some(loc)`. The enclosing STATEMENT
+    /// always has one, and `rewrite_statement` sets it here before dispatching.
+    current_stmt_loc: Option<SourceLocation>,
 }
 
 impl<'a> ExpandContext<'a> {
@@ -187,6 +195,7 @@ impl<'a> ExpandContext<'a> {
             array_map: HashMap::new(),
             synthetic_arrays: HashMap::new(),
             temp_counter: 0,
+            current_stmt_loc: None,
         }
     }
 
@@ -467,6 +476,11 @@ impl<'a> ExpandContext<'a> {
     }
 
     fn rewrite_statement(&mut self, stmt: &Statement) -> Vec<Statement> {
+        // R-137: remember where we are, so a refusal raised from inside
+        // expression rewriting still reports a file:line:column.
+        if let Some(loc) = statement_location(stmt) {
+            self.current_stmt_loc = Some(loc);
+        }
         match stmt {
             Statement::VariableDecl { .. } => self.rewrite_variable_decl(stmt),
             Statement::Assignment { .. } => self.rewrite_assignment(stmt),
@@ -815,7 +829,7 @@ impl<'a> ExpandContext<'a> {
                      assign the result explicitly instead",
                     op
                 ),
-                None,
+                self.current_stmt_loc.clone(),
             ));
         }
     }
@@ -1001,7 +1015,7 @@ impl<'a> ExpandContext<'a> {
                         "Index {} is out of range for FixedArray of length {}",
                         literal, meta.length
                     ),
-                    None,
+                    self.current_stmt_loc.clone(),
                 ));
                 return Expression::BigIntLiteral { value: BigInt::from(0) };
             }
@@ -1017,7 +1031,7 @@ impl<'a> ExpandContext<'a> {
         if meta.slot_is_array {
             self.errors.push(Diagnostic::error(
                 "Runtime index access on a nested FixedArray is not supported",
-                None,
+                self.current_stmt_loc.clone(),
             ));
             return Expression::BigIntLiteral { value: BigInt::from(0) };
         }
@@ -1278,7 +1292,7 @@ impl<'a> ExpandContext<'a> {
                         "Index {} is out of range for FixedArray of length {}",
                         idx, meta.length
                     ),
-                    None,
+                    self.current_stmt_loc.clone(),
                 ));
                 return ChainResolve::Error;
             }
@@ -1753,4 +1767,17 @@ class Cube extends StatefulSmartContract {
         assert_eq!(chain[2].index, 1);
         assert_eq!(chain[2].length, 2);
     }
+}
+
+/// The `source_location` every `Statement` variant carries (R-137).
+fn statement_location(stmt: &Statement) -> Option<SourceLocation> {
+    let loc = match stmt {
+        Statement::VariableDecl { source_location, .. }
+        | Statement::Assignment { source_location, .. }
+        | Statement::IfStatement { source_location, .. }
+        | Statement::ForStatement { source_location, .. }
+        | Statement::ReturnStatement { source_location, .. }
+        | Statement::ExpressionStatement { source_location, .. } => source_location,
+    };
+    Some(loc.clone())
 }
