@@ -866,6 +866,13 @@ class _TypeChecker:
         if isinstance(e.callee, PropertyAccessExpr):
             prop = e.callee.property
             if prop == "getStateScript":
+            # R-173: the builtin takes none -- it returns the contract's own
+            # state script, a property of the contract rather than of
+            # anything a caller could pass. Five tiers used to accept
+            # arguments and DISCARD them, emitting hex byte-identical to the
+            # zero-argument spelling. Message is the reference tier's.
+                if e.args:
+                    self._add_error("getStateScript() takes no arguments")
                 return "ByteString"
             if prop in ("addOutput", "addRawOutput", "addDataOutput"):
                 return self._check_output_intrinsic_args(prop, e.args, env)
@@ -887,6 +894,9 @@ class _TypeChecker:
             )
             if is_this:
                 if e.callee.property == "getStateScript":
+                    # R-173: see the property_access branch above.
+                    if e.args:
+                        self._add_error("getStateScript() takes no arguments")
                     return "ByteString"
                 if e.callee.property in ("addOutput", "addRawOutput", "addDataOutput"):
                     return self._check_output_intrinsic_args(

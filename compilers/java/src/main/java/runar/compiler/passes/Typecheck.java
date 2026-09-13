@@ -1265,6 +1265,16 @@ public final class Typecheck {
 
         private String checkBuiltinThisCall(String prop, List<Expression> args, Env env) {
             if ("getStateScript".equals(prop)) {
+                // R-173: the builtin takes none — it returns the contract's own
+                // state script, a property of the contract rather than of
+                // anything a caller could pass. Five tiers used to accept
+                // arguments and DISCARD them, emitting hex byte-identical to
+                // the zero-argument spelling, so an author who believed the
+                // arguments meant something got a script that ignored them with
+                // no diagnostic. Message is the reference tier's.
+                if (args != null && !args.isEmpty()) {
+                    error("getStateScript() takes no arguments");
+                }
                 return "ByteString";
             }
             if ("addOutput".equals(prop) || "addRawOutput".equals(prop) || "addDataOutput".equals(prop)) {

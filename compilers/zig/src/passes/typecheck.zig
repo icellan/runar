@@ -1231,7 +1231,19 @@ const TypeChecker = struct {
         const is_stateful_ctx = self.stateful_ctx_params.get(mc.object) != null;
 
         if (is_this or is_stateful_ctx) {
-            if (std.mem.eql(u8, mc.method, "getStateScript")) return .byte_string;
+            if (std.mem.eql(u8, mc.method, "getStateScript")) {
+                // R-173: the builtin takes none — it returns the contract's own
+                // state script, a property of the contract rather than of
+                // anything a caller could pass. Five tiers used to accept
+                // arguments and DISCARD them, emitting hex byte-identical to
+                // the zero-argument spelling, so an author who believed the
+                // arguments meant something got a script that ignored them with
+                // no diagnostic. Message is the reference tier's.
+                if (mc.args.len != 0) {
+                    self.addError("getStateScript() takes no arguments", .{});
+                }
+                return .byte_string;
+            }
             if (std.mem.eql(u8, mc.method, "addOutput")) {
                 return self.checkOutputIntrinsicArgs("addOutput", mc.args, env);
             }

@@ -1400,6 +1400,15 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 	// this.method() via PropertyAccessExpr
 	if pa, ok := e.Callee.(PropertyAccessExpr); ok {
 		if pa.Property == "getStateScript" {
+		// R-173: the builtin takes none — it returns the contract's own state
+		// script, which is a property of the contract, not of anything a caller
+		// could pass. Five tiers used to accept arguments and DISCARD them: the
+		// emitted hex was byte-identical to the zero-argument spelling, so an
+		// author who believed the arguments meant something got a script that
+		// ignored them, with no diagnostic. Message is the reference tier's.
+			if len(e.Args) != 0 {
+				tc.addError("getStateScript() takes no arguments")
+			}
 			return "ByteString"
 		}
 		if pa.Property == "addOutput" || pa.Property == "addRawOutput" || pa.Property == "addDataOutput" {
@@ -1424,6 +1433,10 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			return ok && id.Name == "this"
 		})() {
 			if me.Property == "getStateScript" {
+				// R-173: see the property_access branch above.
+				if len(e.Args) != 0 {
+					tc.addError("getStateScript() takes no arguments")
+				}
 				return "ByteString"
 			}
 			if me.Property == "addOutput" || me.Property == "addRawOutput" || me.Property == "addDataOutput" {

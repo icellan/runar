@@ -1269,6 +1269,12 @@ module RunarCompiler
         if expr.callee.is_a?(PropertyAccessExpr)
           prop = expr.callee.property
           if prop == "getStateScript"
+            # R-173: the builtin takes none -- it returns the contract's own
+            # state script, a property of the contract rather than of anything a
+            # caller could pass. Five tiers used to accept arguments and DISCARD
+            # them, emitting hex byte-identical to the zero-argument spelling.
+            # Message is the reference tier's.
+            add_error("getStateScript() takes no arguments") unless expr.args.nil? || expr.args.empty?
             return "ByteString"
           end
           if OUTPUT_INTRINSIC_NAMES.include?(prop)
@@ -1292,6 +1298,8 @@ module RunarCompiler
             (expr.callee.object.is_a?(Identifier) && expr.callee.object.name == "this")
           if is_this
             if expr.callee.property == "getStateScript"
+              # R-173: see the property_access branch above.
+              add_error("getStateScript() takes no arguments") unless expr.args.nil? || expr.args.empty?
               return "ByteString"
             end
             if OUTPUT_INTRINSIC_NAMES.include?(expr.callee.property)
