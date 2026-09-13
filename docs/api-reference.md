@@ -155,6 +155,98 @@ Each artifact produces a `<ContractName>Contract.ts` file in the output director
 
 ---
 
+### `runar debug`
+
+Interactive step-through Bitcoin Script debugger. Runs the compiled script one opcode at a time against the `ScriptVM`, mapping each step back to the source line through the artifact's `sourceMap` — so the artifact must have been compiled with source-map emission for the mapping to be available.
+
+```bash
+runar debug <artifact> [options]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<artifact>` | Path to a compiled artifact JSON (with `sourceMap`) |
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-m, --method <name>` | — | Public method to invoke |
+| `-a, --args <json>` | — | Method arguments as a JSON object |
+| `-u, --unlock <hex>` | — | Raw unlocking script hex (alternative to `--method`) |
+| `-b, --break <loc>` | — | Initial breakpoint (opcode number, or `file:line`) |
+
+**Examples:**
+
+```bash
+runar debug build/P2PKH.json --method unlock --args '{"sig":"30...","pubKey":"02..."}'
+
+# Break at a source line, then step
+runar debug build/Counter.json --method increment --break Counter.runar.ts:14
+```
+
+### `runar analyze`
+
+Analyze compiled Bitcoin Script for potential issues. Takes the script rather than the source, so it also works on bytes this compiler did not produce.
+
+```bash
+runar analyze <input> [options]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<input>` | Hex script, a `.hex` file, or an artifact JSON |
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | off | Output findings as JSON |
+| `--verbose` | off | Include detailed path analysis |
+| `--severity <level>` | `info` | Minimum severity to report (`error`, `warning`, `info`) |
+
+**Examples:**
+
+```bash
+runar analyze build/P2PKH.json
+runar analyze script.hex --severity warning
+runar analyze 76a914...88ac --json
+```
+
+### `runar decompile`
+
+Recover Rúnar TypeScript source from a Bitcoin Script byte stream. See `docs/decompiler.md` for the recovery strategy and its limits.
+
+```bash
+runar decompile <input> [options]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<input>` | Hex script, a `.hex` file, an artifact JSON, or `-` for stdin |
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --out-file <path>` | stdout | Write recovered source to a file |
+| `-q, --quiet` | off | Suppress the round-trip status message on stderr |
+| `--raw` | off | Force the `raw_script` path: skip templates and wrap the entire input in an `asm({...})` call. Honest output for arbitrary byte streams, and a byte-identical round-trip. |
+
+**Examples:**
+
+```bash
+runar decompile build/P2PKH.json
+cat script.hex | runar decompile - --quiet
+runar decompile stas-faucet.hex --raw -o Recovered.runar.ts
+```
+
 ## SDK Classes
 
 The SDK is provided by the `runar-sdk` package. It gives you programmatic control over contract deployment, method invocation, and state management.
