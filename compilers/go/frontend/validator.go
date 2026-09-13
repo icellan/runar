@@ -724,51 +724,57 @@ func endsWithTerminalAsm(body []Statement) bool {
 // that runs even when the parser shape is well-formed and is the only layer
 // that knows about the contract's parentClass.
 func (ctx *validationContext) validateAsmUsage(method MethodNode) {
-	walkExpressionsInBody(method.Body, func(expr Expression) {
+	// R-136 / R-233: all nine diagnostics below used the locationless
+	// ctx.addError while every other validator diagnostic in this file carries
+	// a SourceLocation — including the "must end with an assert() call or a
+	// terminal asm({...})" one a few dozen lines up, which uses
+	// addErrorWithLoc. An asm() mistake is a hand-written opcode string, which
+	// is exactly the diagnostic a reader most needs a line number for.
+	walkExpressionsInBodyWithLoc(method.Body, func(expr Expression, loc *SourceLocation) {
 		if !isAsmCall(expr) {
 			return
 		}
 		call := expr.(CallExpr)
 
 		if ctx.contract.ParentClass != "UnsafeSmartContract" {
-			ctx.addError(fmt.Sprintf("'asm' is only available in contracts extending UnsafeSmartContract; got %s. Move the call into a class that extends UnsafeSmartContract (and import { UnsafeSmartContract } from 'runar-lang').", ctx.contract.ParentClass))
+			ctx.addErrorWithLoc(fmt.Sprintf("'asm' is only available in contracts extending UnsafeSmartContract; got %s. Move the call into a class that extends UnsafeSmartContract (and import { UnsafeSmartContract } from 'runar-lang').", ctx.contract.ParentClass), loc)
 			return
 		}
 
 		if len(call.Args) != 3 {
-			ctx.addError("asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }")
+			ctx.addErrorWithLoc("asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }", loc)
 			return
 		}
 
 		bodyArg, bodyOk := call.Args[0].(ByteStringLiteral)
 		if !bodyOk {
-			ctx.addError("asm() body must be a hex string literal")
+			ctx.addErrorWithLoc("asm() body must be a hex string literal", loc)
 			return
 		}
 		body := bodyArg.Value
 		if len(body) == 0 {
-			ctx.addError("asm() body must be a non-empty hex string literal")
+			ctx.addErrorWithLoc("asm() body must be a non-empty hex string literal", loc)
 		} else if len(body)%2 != 0 {
-			ctx.addError(fmt.Sprintf("asm() body has odd hex length (%d); each opcode byte requires two hex characters", len(body)))
+			ctx.addErrorWithLoc(fmt.Sprintf("asm() body has odd hex length (%d); each opcode byte requires two hex characters", len(body)), loc)
 		} else if !isHexString(body) {
-			ctx.addError("asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed")
+			ctx.addErrorWithLoc("asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed", loc)
 		}
 
 		inArity, inOk := call.Args[1].(BigIntLiteral)
 		if !inOk || inArity.Value == nil || inArity.Value.Sign() < 0 {
-			ctx.addError("asm() in_arity must be a non-negative integer literal")
+			ctx.addErrorWithLoc("asm() in_arity must be a non-negative integer literal", loc)
 		}
 
 		outArity, outOk := call.Args[2].(BigIntLiteral)
 		if !outOk || outArity.Value == nil || outArity.Value.Sign() < 0 {
-			ctx.addError("asm() out_arity must be a non-negative integer literal")
+			ctx.addErrorWithLoc("asm() out_arity must be a non-negative integer literal", loc)
 		}
 
 		// Expression-form asm<T>({...}) returns a value that flows into a
 		// let-binding — exactly ONE stack value, so out_arity must be 1.
 		if call.AsmReturnType != "" && outOk && outArity.Value != nil &&
 			outArity.Value.Cmp(big.NewInt(1)) != 0 {
-			ctx.addError(fmt.Sprintf("Expression-form asm<%s>() must have out_arity 1 (got %s); only a single stack value can be bound to the result variable.", call.AsmReturnType, outArity.Value.String()))
+			ctx.addErrorWithLoc(fmt.Sprintf("Expression-form asm<%s>() must have out_arity 1 (got %s); only a single stack value can be bound to the result variable.", call.AsmReturnType, outArity.Value.String()), loc)
 		}
 	})
 }
@@ -1439,6 +1445,52 @@ func walkExpressionsInBody(stmts []Statement, visitor func(Expression)) {
 	for _, stmt := range stmts {
 		walkExpressionsInStatement(stmt, visitor)
 	}
+}
+
+// walkExpressionsInBodyWithLoc is walkExpressionsInBody plus the location of the
+// STATEMENT each expression came from (R-136 / R-233).
+//
+// Expressions in this AST carry no SourceLocation of their own — CallExpr has
+// Callee, Args and AsmReturnType and nothing else — so a diagnostic about an
+// expression has nowhere to point unless the walker hands down the enclosing
+// statement's position. Statements all carry one.
+func walkExpressionsInBodyWithLoc(stmts []Statement, visitor func(Expression, *SourceLocation)) {
+	for _, stmt := range stmts {
+		walkExpressionsInStatementWithLoc(stmt, visitor)
+	}
+}
+
+func walkExpressionsInStatementWithLoc(stmt Statement, visitor func(Expression, *SourceLocation)) {
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Expr, &loc, visitor)
+	case VariableDeclStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Init, &loc, visitor)
+	case AssignmentStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Target, &loc, visitor)
+		walkExprWithLoc(s.Value, &loc, visitor)
+	case IfStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Condition, &loc, visitor)
+		walkExpressionsInBodyWithLoc(s.Then, visitor)
+		walkExpressionsInBodyWithLoc(s.Else, visitor)
+	case ForStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Condition, &loc, visitor)
+		walkExpressionsInBodyWithLoc(s.Body, visitor)
+	case ReturnStmt:
+		if s.Value != nil {
+			loc := s.SourceLocation
+			walkExprWithLoc(s.Value, &loc, visitor)
+		}
+	}
+}
+
+func walkExprWithLoc(expr Expression, loc *SourceLocation, visitor func(Expression, *SourceLocation)) {
+	walkExpr(expr, func(e Expression) { visitor(e, loc) })
 }
 
 func walkExpressionsInStatement(stmt Statement, visitor func(Expression)) {

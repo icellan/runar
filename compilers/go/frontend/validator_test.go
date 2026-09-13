@@ -1864,3 +1864,71 @@ class TimeLock extends StatefulSmartContract {
 		t.Errorf("expected a locktime warning when the read is in a private helper and no guard exists, got: %v", result.WarningStrings())
 	}
 }
+
+// R-136 / R-233 (CL-BUG-005, CL-DOC-031): all nine asm() diagnostics used the
+// locationless ctx.addError while nearly every other validator diagnostic in
+// this file carries a SourceLocation — including the "public method must end
+// with an assert() call or a terminal asm({...})" one a few dozen lines above
+// them, which uses addErrorWithLoc.
+//
+// It is the wrong diagnostic to leave unlocated. An asm() mistake is in a
+// hand-written opcode string, and the author needs the line.
+//
+// Expressions in this AST carry no location of their own (CallExpr has Callee,
+// Args and AsmReturnType, full stop), so the walker hands down the enclosing
+// STATEMENT's position — the same shape as R-143 in the TS typechecker.
+func TestR136_AsmDiagnosticsCarryALocation(t *testing.T) {
+	cases := []struct {
+		name string
+		asm  string
+		want string
+	}{
+		{"odd hex length", `asm({ body: "zzz", in_arity: 0, out_arity: 0 });`, "odd hex length"},
+		{"non-hex characters", `asm({ body: "zzzz", in_arity: 0, out_arity: 0 });`, "non-hex characters"},
+		{"empty body", `asm({ body: "", in_arity: 0, out_arity: 0 });`, "non-empty hex string literal"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { UnsafeSmartContract, assert, asm } from 'runar-lang';
+
+export class BadAsm extends UnsafeSmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public unlock(x: bigint): void {
+    ` + c.asm + `
+    assert(x < this.limit);
+  }
+}
+`
+			parsed := ParseSource([]byte(source), "BadAsm.runar.ts")
+			if parsed.Contract == nil {
+				t.Fatalf("parse produced no contract: %v", parsed.ErrorStrings())
+			}
+			res := Validate(parsed.Contract)
+
+			var found *Diagnostic
+			for i := range res.Errors {
+				if strings.Contains(res.Errors[i].Message, c.want) {
+					found = &res.Errors[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("no diagnostic matching %q; got %v", c.want, res.ErrorStrings())
+			}
+			if found.Loc == nil {
+				t.Fatalf("asm diagnostic has no location: %s", found.Message)
+			}
+			if found.Loc.Line <= 0 {
+				t.Errorf("asm diagnostic location has no line: %+v", *found.Loc)
+			}
+		})
+	}
+}
