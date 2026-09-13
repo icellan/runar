@@ -148,11 +148,32 @@ public final class AnfOptimize {
         return false;
     }
 
+    /**
+     * Iteration bound for the EC rewrite fixed point (R-264). Exhausting it is
+     * a refusal, not a quiet stop — see optimizeEcMethod.
+     */
+    private static final int EC_FIXED_POINT_LIMIT = 64;
+
     private static AnfMethod optimizeEcMethod(AnfMethod method) {
         // Fixed-point: each pass may unblock further optimizations (e.g. one
         // rule produces an aliased value that matches another rule).
+        // R-264: the seven tiers do not agree on how many times to iterate.
+        // The TypeScript reference makes ONE pass (optimizeMethodEC has no
+        // outer loop at all); Go, Zig and Ruby loop to a fixed point with no
+        // bound; this tier stops at 64. Cross-tier byte-identity survives that
+        // only because one pass already reaches the fixed point for everything
+        // in the corpus — if a second pass ever changed a program, TS would
+        // diverge from Go/Zig/Ruby immediately, with or without this cap.
+        //
+        // The cap itself is not the hazard; stopping QUIETLY is. A program that
+        // reached iteration 64 here would be emitted partially optimised while
+        // the unbounded tiers kept going, and the two would disagree on bytes
+        // with nothing said. So the bound is kept (an unbounded loop on a
+        // non-converging rule set is its own failure) and exhausting it is now
+        // a refusal.
         List<AnfBinding> body = new ArrayList<>(method.body());
-        for (int iter = 0; iter < 64; iter++) {
+        boolean converged = false;
+        for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
             // value_map maps binding name → its current ANFValue. We rebuild
             // the body in order, allowing each subsequent binding to see the
             // optimized form of earlier ones.
@@ -170,7 +191,19 @@ public final class AnfOptimize {
                 next.add(rebound);
             }
             body = next;
-            if (!changed) break;
+            if (!changed) {
+                converged = true;
+                break;
+            }
+        }
+        if (!converged) {
+            throw new IllegalStateException(
+                "EC optimiser did not reach a fixed point for method '" + method.name()
+                    + "' within " + EC_FIXED_POINT_LIMIT + " iterations. The Go, Zig and "
+                    + "Ruby tiers iterate without a bound and would keep going, so "
+                    + "emitting this program here would diverge from them. Either the "
+                    + "rule set does not converge for this input, or the limit is too "
+                    + "low.");
         }
         // Dead-binding elimination after fixed-point.
         body = eliminateDead(body);
