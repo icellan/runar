@@ -48,6 +48,8 @@ pub const OpPushTxError = error{
     InvalidTransaction,
     SigningFailed,
     InvalidEncoding,
+    /// R-178: the code-separator offset is past the end of the subscript.
+    InvalidCodeSeparatorIndex,
     OutOfMemory,
 };
 
@@ -116,10 +118,13 @@ pub fn computeOpPushTxWithSigHash(
     // If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
     var script_code_hex = subscript_hex;
     if (code_separator_index >= 0) {
+        // R-178: an out-of-range index used to leave the subscript UNTRIMMED
+        // and sign it — a wrong scriptCode, silently, from a fund-moving
+        // primitive. There is no correct signature for a separator offset that
+        // is not in the script.
         const hex_offset: usize = @intCast((@as(usize, @intCast(code_separator_index)) + 1) * 2);
-        if (hex_offset <= subscript_hex.len) {
-            script_code_hex = subscript_hex[hex_offset..];
-        }
+        if (hex_offset > subscript_hex.len) return OpPushTxError.InvalidCodeSeparatorIndex;
+        script_code_hex = subscript_hex[hex_offset..];
     }
 
     // Decode the script code bytes
@@ -230,4 +235,57 @@ test "computeOpPushTx with code separator" {
 
     try std.testing.expect(result.sig_hex.len > 0);
     try std.testing.expect(result.preimage_hex.len > 0);
+}
+
+// R-178 (CL-BUG-071): an out-of-range code_separator_index used to leave the
+// subscript UNTRIMMED and sign it — a wrong scriptCode, with no error, from a
+// fund-moving primitive. All seven SDKs mishandled this in four different ways;
+// every tier now refuses and names the input.
+test "R-178: an out-of-range code separator index is refused" {
+    const allocator = std.testing.allocator;
+
+    const tx_hex = "01000000" ++
+        "01" ++
+        "1111111111111111111111111111111111111111111111111111111111111111" ++
+        "00000000" ++
+        "00" ++
+        "ffffffff" ++
+        "01" ++
+        "e803000000000000" ++
+        "01" ++ "51" ++
+        "00000000";
+
+    // Two bytes: OP_CODESEPARATOR then OP_1. Offset 1 is the last valid index.
+    const subscript_hex = "ab51";
+
+    for ([_]i32{ 2, 3, 99 }) |idx| {
+        const out = computeOpPushTx(allocator, tx_hex, 0, subscript_hex, 1000, idx);
+        try std.testing.expectError(OpPushTxError.InvalidCodeSeparatorIndex, out);
+    }
+}
+
+test "R-178: an in-range code separator index still trims" {
+    const allocator = std.testing.allocator;
+
+    const tx_hex = "01000000" ++
+        "01" ++
+        "1111111111111111111111111111111111111111111111111111111111111111" ++
+        "00000000" ++
+        "00" ++
+        "ffffffff" ++
+        "01" ++
+        "e803000000000000" ++
+        "01" ++ "51" ++
+        "00000000";
+
+    const subscript_hex = "ab51";
+
+    var trimmed = try computeOpPushTx(allocator, tx_hex, 0, subscript_hex, 1000, 0);
+    defer trimmed.deinit(allocator);
+    var untrimmed = try computeOpPushTx(allocator, tx_hex, 0, subscript_hex, 1000, -1);
+    defer untrimmed.deinit(allocator);
+
+    // Trimming the subscript must change the preimage, which is what makes the
+    // old silent fallthrough a wrong answer rather than a harmless one.
+    try std.testing.expect(!std.mem.eql(u8, trimmed.preimage_hex, untrimmed.preimage_hex));
 }

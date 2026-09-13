@@ -191,3 +191,28 @@ describe('computeOpPushTx', () => {
     });
   });
 });
+
+describe('R-178: an out-of-range codeSeparatorIndex is refused', () => {
+  // String.slice() past the end returns '', so this used to sign an EMPTY
+  // scriptCode — silently, from a fund-moving primitive. (Peer tiers got it
+  // wrong differently: rust/python/ruby/zig signed the UNTRIMMED subscript, go
+  // panicked on the slice, java threw StringIndexOutOfBounds.)
+  it('throws instead of signing an empty scriptCode', () => {
+    const tx = makeTx();
+    const oneByte = '51'; // OP_1
+    for (const idx of [1, 2, 99]) {
+      expect(
+        () => computeOpPushTx(tx, 0, oneByte, 10000, idx),
+        `codeSeparatorIndex ${idx}`,
+      ).toThrow(/codeSeparatorIndex/);
+    }
+  });
+
+  it('still trims for an in-range index, and trimming changes the preimage', () => {
+    const tx = makeTx();
+    const twoBytes = 'ab51'; // OP_CODESEPARATOR, OP_1
+    const trimmed = computeOpPushTx(tx, 0, twoBytes, 10000, 0);
+    const untrimmed = computeOpPushTx(tx, 0, twoBytes, 10000);
+    expect(trimmed.preimageHex).not.toBe(untrimmed.preimageHex);
+  });
+});

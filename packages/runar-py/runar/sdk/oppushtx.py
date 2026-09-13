@@ -48,9 +48,17 @@ def compute_op_push_tx(
     # If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
     effective_subscript = subscript
     if code_separator_index >= 0:
+        # R-178: an out-of-range index used to leave the subscript UNTRIMMED
+        # and sign it — a wrong scriptCode, silently, from a fund-moving
+        # primitive. There is no correct signature for a separator offset that
+        # is not in the script.
         trim_pos = (code_separator_index + 1) * 2
-        if trim_pos <= len(subscript):
-            effective_subscript = subscript[trim_pos:]
+        if trim_pos > len(subscript):
+            raise ValueError(
+                f"compute_op_push_tx: code_separator_index {code_separator_index} is "
+                f"past the end of the subscript ({len(subscript) // 2} bytes)"
+            )
+        effective_subscript = subscript[trim_pos:]
     tx_bytes = bytes.fromhex(tx_hex)
     tx = _parse_raw_tx(tx_bytes)
     subscript_bytes = bytes.fromhex(effective_subscript)

@@ -795,7 +795,7 @@ public final class RunarContract {
         int codeSepIdx = getCodeSepIndex(methodIndex);
         String fullScriptHex = currentUtxo.scriptHex();
         String sighashSubscript = codeSepIdx >= 0
-            ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+            ? subscriptAfterCodeSep(fullScriptHex, codeSepIdx)
             : fullScriptHex;
 
         // The BIP-143 preimage placeholder MUST be the length the real preimage
@@ -866,7 +866,7 @@ public final class RunarContract {
         List<String> extraSubscripts = new ArrayList<>();
         for (UTXO u : extraContractUtxos) {
             extraSubscripts.add(codeSepIdx >= 0
-                ? u.scriptHex().substring((codeSepIdx + 1) * 2)
+                ? subscriptAfterCodeSep(u.scriptHex(), codeSepIdx)
                 : u.scriptHex());
         }
 
@@ -1245,7 +1245,7 @@ public final class RunarContract {
             int codeSepIdx = getCodeSepIndex(methodIndex);
             String fullScriptHex = currentUtxo.scriptHex();
             String sighashSubscript = codeSepIdx >= 0
-                ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+                ? subscriptAfterCodeSep(fullScriptHex, codeSepIdx)
                 : fullScriptHex;
 
             // Pass 1: placeholder unlock so we can compute the preimage
@@ -2124,7 +2124,7 @@ public final class RunarContract {
             int codeSepIdx = getCodeSepIndex(methodIndex);
             String fullScriptHex = currentUtxo.scriptHex();
             String sighashSubscript = codeSepIdx >= 0
-                ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+                ? subscriptAfterCodeSep(fullScriptHex, codeSepIdx)
                 : fullScriptHex;
 
             String placeholderUnlock = buildPushTxUnlock(
@@ -2335,4 +2335,28 @@ public final class RunarContract {
         return parsed.sighashBIP143(inputIndex, currentUtxo.scriptHex(), currentUtxo.satoshis(),
             sigHashType);
     }
+
+    /**
+     * The subscript that follows the OP_CODESEPARATOR at {@code codeSepIdx}.
+     *
+     * <p>R-178: the three call sites each wrote
+     * {@code scriptHex.substring((codeSepIdx + 1) * 2)}, which throws
+     * StringIndexOutOfBoundsException when the offset is past the end — a
+     * fund-moving signature path reporting a bad input as a JVM internal error.
+     * There is no correct scriptCode for a separator offset that is not in the
+     * script, so this refuses, and says which input was wrong.
+     */
+    // Package-private rather than private so the R-178 rejection can be tested
+    // directly; the three call sites are inside signing flows that need a
+    // provider, a signer and a funded artifact to reach.
+    static String subscriptAfterCodeSep(String scriptHex, int codeSepIdx) {
+        int trimPos = (codeSepIdx + 1) * 2;
+        if (trimPos > scriptHex.length()) {
+            throw new IllegalArgumentException(
+                "codeSeparatorIndex " + codeSepIdx + " is past the end of the subscript ("
+                    + (scriptHex.length() / 2) + " bytes)");
+        }
+        return scriptHex.substring(trimPos);
+    }
+
 }

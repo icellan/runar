@@ -63,12 +63,22 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
     code_separator_index: i64,
     sig_hash_type: u32,
 ) -> Result<(String, String), String> {
+    // R-178: an out-of-range code_separator_index used to leave the subscript
+    // UNTRIMMED and sign it anyway — a wrong scriptCode, with no error, from a
+    // fund-moving primitive. Reject it instead: there is no correct signature
+    // for a separator offset that is not in the script.
     let mut effective_subscript = subscript.to_string();
     if code_separator_index >= 0 {
         let trim_pos = ((code_separator_index as usize) + 1) * 2;
-        if trim_pos <= subscript.len() {
-            effective_subscript = subscript[trim_pos..].to_string();
+        if trim_pos > subscript.len() {
+            return Err(format!(
+                "compute_op_push_tx: code_separator_index {} is past the end of the \
+                 subscript ({} bytes)",
+                code_separator_index,
+                subscript.len() / 2
+            ));
         }
+        effective_subscript = subscript[trim_pos..].to_string();
     }
 
     let tx_bytes = hex_to_bytes(tx_hex)?;
@@ -383,6 +393,53 @@ mod tests {
     /// A trivial locking script hex (OP_1 = 0x51).
     fn minimal_subscript() -> &'static str {
         "51"
+    }
+
+    /// R-178 (CL-BUG-071): an out-of-range code_separator_index used to leave
+    /// the subscript UNTRIMMED and sign it — a wrong scriptCode, silently, from
+    /// a fund-moving primitive.
+    #[test]
+    fn r178_out_of_range_code_separator_index_is_refused() {
+        let tx_hex = minimal_tx_hex();
+        let sub = minimal_subscript(); // "51" — one byte
+
+        for idx in [1i64, 2, 99] {
+            let out = compute_op_push_tx_with_code_sep(&tx_hex, 0, sub, 1000, idx);
+            let err = match out {
+                Ok((sig, _preimage)) => panic!(
+                    "code_separator_index {} past the end of a {}-byte subscript was \
+                     accepted and signed ({}...)",
+                    idx,
+                    sub.len() / 2,
+                    &sig[..8.min(sig.len())]
+                ),
+                Err(e) => e,
+            };
+            assert!(
+                err.contains("code_separator_index"),
+                "the refusal must name the offending input; got: {}",
+                err
+            );
+        }
+    }
+
+    /// Control: an IN-range separator still trims and signs, and the signature
+    /// differs from the untrimmed one — which is what makes the silent
+    /// fallthrough a wrong answer rather than a harmless one.
+    #[test]
+    fn r178_in_range_code_separator_index_still_trims() {
+        let tx_hex = minimal_tx_hex();
+        // Two bytes: OP_CODESEPARATOR (0xab) then OP_1 (0x51).
+        let sub = "ab51";
+
+        let trimmed = compute_op_push_tx_with_code_sep(&tx_hex, 0, sub, 1000, 0)
+            .expect("an in-range separator must still work");
+        let untrimmed = compute_op_push_tx_with_code_sep(&tx_hex, 0, sub, 1000, -1)
+            .expect("no separator must still work");
+        assert_ne!(
+            trimmed.1, untrimmed.1,
+            "trimming the subscript must change the preimage"
+        );
     }
 
     #[test]

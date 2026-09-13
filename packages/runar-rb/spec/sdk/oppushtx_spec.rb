@@ -136,9 +136,14 @@ RSpec.describe 'Runar::SDK OP_PUSH_TX helpers' do
       expect(result).to eq('')
     end
 
-    it 'returns the full script when code_separator_index exceeds script length' do
-      result = Runar::SDK.get_subscript(SUBSCRIPT_HEX, 999)
-      expect(result).to eq(SUBSCRIPT_HEX)
+    # R-178: this used to assert that an out-of-range index returns the FULL
+    # script — i.e. it pinned the silent wrong answer as intended behaviour. A
+    # separator offset that is not in the script has no correct subscript, and
+    # signing the untrimmed one produces a wrong scriptCode with no error.
+    it 'raises when code_separator_index exceeds script length' do
+      expect do
+        Runar::SDK.get_subscript(SUBSCRIPT_HEX, 999)
+      end.to raise_error(ArgumentError, /code_separator_index/)
     end
   end
 
