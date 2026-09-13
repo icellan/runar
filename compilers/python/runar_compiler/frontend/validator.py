@@ -119,9 +119,24 @@ class _ValidationContext:
     contract: ContractNode
     errors: list[Diagnostic] = field(default_factory=list)
     warnings: list[Diagnostic] = field(default_factory=list)
+    #: Location of the statement currently being validated (R-149).
+    #:
+    #: ``typecheck.py`` auto-attaches a location to every error it raises, so
+    #: the same contract produced located TYPE errors and unlocated VALIDATION
+    #: errors. Eleven ``_add_error`` calls here passed none -- the whole
+    #: ``asm()``-usage family among them -- because they are reached from
+    #: EXPRESSION validation, and Python's ``Expression`` nodes carry no
+    #: ``SourceLocation`` at all (``ast_nodes.py``). The enclosing statement
+    #: does, so ``_validate_statement`` publishes it here and ``_add_error``
+    #: falls back to it. Statement granularity is the difference between
+    #: "somewhere in your contract" and "line 14"; expression granularity needs
+    #: the AST change R-142 made on the TypeScript side.
+    current_stmt_loc: SourceLocation | None = None
 
     def _add_error(self, msg: str, loc: SourceLocation | None = None) -> None:
-        self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
+        self.errors.append(
+            Diagnostic(message=msg, severity=Severity.ERROR, loc=loc or self.current_stmt_loc)
+        )
 
     # -------------------------------------------------------------------
     # Property validation
@@ -392,9 +407,15 @@ class _ValidationContext:
         # compiles to an empty script -- never what the author meant (usually a
         # missing `public` modifier; methods default to private).
         if not any(m.visibility == "public" for m in self.contract.methods):
+            # R-149: a class-level complaint, so anchor it at the constructor's
+            # declaration rather than letting it fall back to wherever
+            # validation happened to be — which would be the constructor's LAST
+            # statement, a line that has nothing to do with the problem.
+            # `ContractNode` carries no location of its own in this tier.
             self._add_error(
                 f"Contract '{self.contract.name}' has no public methods "
-                "— no spending entry points; add 'public' to at least one method"
+                "— no spending entry points; add 'public' to at least one method",
+                self.contract.constructor.source_location,
             )
 
         for method in self.contract.methods:
@@ -656,13 +677,26 @@ class _ValidationContext:
                     f"value can be bound to the result variable."
                 )
 
-        _walk_expressions_in_body(method.body, visitor)
+        # R-149: walk one statement at a time so `current_stmt_loc` is the
+        # statement the asm() call sits in. This pass runs BEFORE the statement
+        # loop in `_validate_method`, so without this the fallback would be
+        # stale (the previous method's last statement) or absent entirely.
+        for stmt in method.body:
+            loc = getattr(stmt, "source_location", None)
+            if loc is not None and getattr(loc, "line", 0):
+                self.current_stmt_loc = loc
+            _walk_expressions_in_body([stmt], visitor)
 
     # -------------------------------------------------------------------
     # Statement validation
     # -------------------------------------------------------------------
 
     def _validate_statement(self, stmt: Statement) -> None:
+        # R-149: publish where we are, so a diagnostic raised from inside
+        # expression validation still reports a line.
+        loc = getattr(stmt, "source_location", None)
+        if loc is not None and getattr(loc, "line", 0):
+            self.current_stmt_loc = loc
         if isinstance(stmt, VariableDeclStmt):
             if isinstance(stmt.type, FixedArrayType):
                 self._add_error(
