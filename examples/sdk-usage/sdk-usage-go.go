@@ -1,6 +1,11 @@
 //go:build ignore
 
-// sdk-usage-go.go -- Go SDK usage examples for all 8 Rúnar contracts.
+// sdk-usage-go.go -- Go SDK usage examples for eight representative Rúnar
+// contracts.
+//
+// R-243: this used to say "all 8 Rúnar contracts". Eight is the right count for
+// this file; "all" was wrong about the world — the catalogue is roughly eighty
+// contract directories per tree across nine surfaces. See examples/README.md.
 //
 // Demonstrates how to use the Rúnar Go compiler and the official BSV go-sdk to:
 //   1. Compile .runar.ts contract source files to Bitcoin Script artifacts

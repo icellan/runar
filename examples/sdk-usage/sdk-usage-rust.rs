@@ -1,6 +1,12 @@
 //! Rúnar Rust SDK Usage Examples
 //!
-//! Comprehensive examples for compiling, deploying, and spending all 8 Rúnar
+//! R-243: this used to say "all 8 Rúnar" contracts. Eight is the right count
+//! for the contract examples here; "all" was wrong about the world — the
+//! catalogue is roughly eighty contract directories per tree across nine
+//! surfaces. See examples/README.md.
+//!
+//! Comprehensive examples for compiling, deploying, and spending eight
+//! representative Rúnar
 //! example contracts using the Rust compiler as a library.
 //!
 //! Contracts: P2PKH, Escrow, Counter, FungibleToken, NFT, Auction,
