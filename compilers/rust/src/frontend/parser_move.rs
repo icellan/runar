@@ -134,10 +134,13 @@ fn map_builtin_name(name: &str) -> String {
 
 /// Map Move type names to Rúnar type names.
 fn map_type_name(name: &str) -> &str {
+    // R-183: the seven tiers' Move type tables had drifted. This one accepted
+    // `Bytes` but not `Bigint`, and spelled the vector case `vector<u8>` where
+    // the peers match a bare `vector`.
     match name {
-        "Int" | "u64" | "u128" | "u256" => "bigint",
+        "Int" | "Bigint" | "u64" | "u128" | "u256" => "bigint",
         "Bool" | "bool" => "boolean",
-        "vector<u8>" | "Bytes" => "ByteString",
+        "vector" | "vector<u8>" | "Bytes" => "ByteString",
         "address" => "Addr",
         _ => name,
     }

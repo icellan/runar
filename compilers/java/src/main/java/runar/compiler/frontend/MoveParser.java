@@ -433,8 +433,13 @@ public final class MoveParser {
         if (name.equals("bool") || name.equals("Bool")) {
             return new PrimitiveType(PrimitiveTypeName.BOOLEAN);
         }
-        if (name.equals("vector")) {
+        // R-183: `Bytes` and `address` are accepted here for parity with the
+        // other six tiers' Move type tables.
+        if (name.equals("vector") || name.equals("Bytes")) {
             return new PrimitiveType(PrimitiveTypeName.BYTE_STRING);
+        }
+        if (name.equals("address")) {
+            return new PrimitiveType(PrimitiveTypeName.ADDR);
         }
         String camel = snakeToCamel(name);
         try {

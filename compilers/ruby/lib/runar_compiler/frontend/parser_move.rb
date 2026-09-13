@@ -76,6 +76,7 @@ module RunarCompiler
       "bool"    => "boolean",
       "Bool"    => "boolean",
       "vector"  => "ByteString",
+      "Bytes"   => "ByteString",   # R-183: parity with the other six tiers
       "address" => "Addr",
     }.freeze
 

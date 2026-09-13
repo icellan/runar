@@ -210,3 +210,38 @@ func TestParseMove_NestedFixedArray(t *testing.T) {
 		t.Errorf("expected innermost element bigint, got %#v", inner.Element)
 	}
 }
+
+// R-183 (CL-BUG-063): the seven tiers' Move type tables had drifted.
+//
+// Measured before the fix, across all seven Move frontends:
+//
+//	Bigint  -> bigint      accepted by 3 of 7 (python, ruby, java)
+//	Bytes   -> ByteString  accepted by 2 of 7 (go, rust)
+//	address -> Addr        accepted by 4 of 7 (ts, go, rust, ruby)
+//
+// The same .runar.move source therefore parsed in some tiers and silently
+// degraded to a custom type in others — a frontend-parity break in the one
+// surface property the project states without exception. This tier was missing
+// `Bigint`.
+func TestR183_MoveTypeAliasParity(t *testing.T) {
+	cases := []struct {
+		alias string
+		want  string
+	}{
+		{"Int", "bigint"}, {"Bigint", "bigint"}, {"u64", "bigint"},
+		{"Bool", "boolean"}, {"bool", "boolean"},
+		{"vector", "ByteString"}, {"Bytes", "ByteString"},
+		{"address", "Addr"},
+	}
+	for _, c := range cases {
+		got := moveMapType(c.alias)
+		prim, ok := got.(PrimitiveType)
+		if !ok {
+			t.Errorf("%s mapped to %T, not a primitive — it would become a custom type", c.alias, got)
+			continue
+		}
+		if prim.Name != c.want {
+			t.Errorf("%s mapped to %q, want %q", c.alias, prim.Name, c.want)
+		}
+	}
+}

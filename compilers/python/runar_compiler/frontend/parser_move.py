@@ -184,12 +184,16 @@ def _move_map_builtin(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _move_map_type(name: str) -> TypeNode:
+    # R-183: the seven tiers' Move type tables had drifted. This one accepted
+    # `Bigint` but not `Bytes` or `address`.
     if name in ("u64", "u128", "u256", "Int", "Bigint"):
         return PrimitiveType(name="bigint")
     if name in ("bool", "Bool"):
         return PrimitiveType(name="boolean")
-    if name == "vector":
+    if name in ("vector", "Bytes"):
         return PrimitiveType(name="ByteString")
+    if name == "address":
+        return PrimitiveType(name="Addr")
     camel = _snake_to_camel(name)
     if is_primitive_type(camel):
         return PrimitiveType(name=camel)

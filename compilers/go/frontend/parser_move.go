@@ -555,7 +555,8 @@ func moveMapBuiltin(name string) string {
 // moveMapType maps Move-style type names to Rúnar types.
 func moveMapType(name string) TypeNode {
 	switch name {
-	case "u64", "u128", "u256", "Int":
+	// R-183: `Bigint` is accepted here for parity with the other six tiers.
+	case "u64", "u128", "u256", "Int", "Bigint":
 		return PrimitiveType{Name: "bigint"}
 	case "bool", "Bool":
 		return PrimitiveType{Name: "boolean"}

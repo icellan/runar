@@ -159,10 +159,14 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 // ---------------------------------------------------------------------------
 
 function mapMoveType(name: string): string {
+  // R-183: the seven tiers' Move type tables had drifted — `Bigint` was
+  // accepted by 3 of 7, `Bytes` by 2 of 7 and `address` by 4 of 7, so the same
+  // .runar.move source parsed in some tiers and not others. They are all
+  // spellings of the same Rúnar type; every tier now accepts the same set.
   const map: Record<string, string> = {
-    Int: 'bigint', u64: 'bigint', u128: 'bigint', u256: 'bigint',
+    Int: 'bigint', Bigint: 'bigint', u64: 'bigint', u128: 'bigint', u256: 'bigint',
     Bool: 'boolean', bool: 'boolean',
-    vector: 'ByteString',
+    vector: 'ByteString', Bytes: 'ByteString',
     address: 'Addr',
   };
   return map[name] || name;
