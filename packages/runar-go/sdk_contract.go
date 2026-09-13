@@ -372,6 +372,16 @@ func (c *RunarContract) Deploy(
 		return "", nil, guardErr
 	}
 
+	// R-062: and refuse to fund a script reaching a builtin the compiler does
+	// not claim is sound unless the caller says so here, in the same breath as
+	// the money.
+	if guardErr := assertUnsoundPrimitivesAcknowledged(
+		c.Artifact, options.AcknowledgeUnsound,
+		fmt.Sprintf("%s.Deploy", c.Artifact.ContractName),
+	); guardErr != nil {
+		return "", nil, guardErr
+	}
+
 	// Fetch fee rate and funding UTXOs
 	feeRate, err := provider.GetFeeRate()
 	if err != nil {

@@ -10,6 +10,7 @@ from runar.sdk.types import (
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.errors import assert_script_hex_under_limit, WitnessValueMissingError
+from .unsound_primitives import assert_unsound_primitives_acknowledged
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
     build_deploy_transaction, select_utxos, build_p2pkh_script,
@@ -301,6 +302,14 @@ class RunarContract:
         # DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         assert_script_hex_under_limit(
             locking_script, MAX_SCRIPT_BYTES,
+            f"{self.artifact.contract_name}.deploy",
+        )
+
+        # R-062: and refuse to fund a script reaching a builtin the compiler
+        # does not claim is sound unless the caller says so here, in the same
+        # breath as the money.
+        assert_unsound_primitives_acknowledged(
+            self.artifact, opts.acknowledge_unsound,
             f"{self.artifact.contract_name}.deploy",
         )
 

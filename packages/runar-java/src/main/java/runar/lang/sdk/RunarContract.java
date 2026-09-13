@@ -296,6 +296,10 @@ public final class RunarContract {
             lockingScript, InputLimits.MAX_SCRIPT_BYTES,
             artifact.contractName() + ".deploy"
         );
+        // R-062: this overload carries no options, so it can acknowledge
+        // nothing — an unsound artifact must go through
+        // deploy(provider, signer, DeployOptions).
+        UnsoundPrimitives.assertAcknowledged(artifact, null, artifact.contractName() + ".deploy");
         TransactionBuilder.DeployResult r = TransactionBuilder.buildDeployWithLockingScript(
             lockingScript, provider, signer, satoshis, changeAddress
         );
@@ -328,6 +332,14 @@ public final class RunarContract {
         // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         ScriptSizeExceededError.assertScriptHexUnderLimit(
             lockingScript, InputLimits.MAX_SCRIPT_BYTES,
+            artifact.contractName() + ".deploy"
+        );
+        // R-062: and refuse to fund a script reaching a builtin the compiler
+        // does not claim is sound unless the caller says so here, in the same
+        // breath as the money.
+        UnsoundPrimitives.assertAcknowledged(
+            artifact,
+            options == null ? null : options.acknowledgeUnsound,
             artifact.contractName() + ".deploy"
         );
         TransactionBuilder.DeployResult r = TransactionBuilder.buildDeployWithLockingScript(

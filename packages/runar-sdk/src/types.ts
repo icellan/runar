@@ -52,6 +52,12 @@ export interface DeployOptions {
    * connected signer (zero behaviour change).
    */
   fundingSigner?: Signer;
+  /**
+   * Builtins the caller accepts despite the compiler not claiming they are
+   * sound (R-062). Required — naming each one — when the artifact declares
+   * `unsoundPrimitives`; ignored otherwise. See `unsound-primitives.ts`.
+   */
+  acknowledgeUnsound?: string[];
 }
 
 /**

@@ -304,6 +304,15 @@ pub const RunarContract = struct {
             var ctx_buf: [256]u8 = undefined;
             const ctx = std.fmt.bufPrint(&ctx_buf, "{s}.deploy", .{self.artifact.contract_name}) catch "RunarContract.deploy";
             try errors_mod.assertScriptHexUnderLimit(locking_script, errors_mod.MAX_SCRIPT_BYTES, ctx);
+
+            // R-062: and refuse to fund a script reaching a builtin the
+            // compiler does not claim is sound unless the caller says so here,
+            // in the same breath as the money.
+            try errors_mod.assertUnsoundPrimitivesAcknowledged(
+                self.artifact.unsound_primitives,
+                options.acknowledge_unsound,
+                ctx,
+            );
         }
 
         // Fetch fee rate and funding UTXOs

@@ -46,6 +46,7 @@ fn trivial_artifact() -> RunarArtifact {
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -90,6 +91,7 @@ fn deploy_tx(funding_signer: Option<FundingSigner>) -> (String, String, String) 
             satoshis: 1_000,
             change_address: None,
             funding_signer,
+            acknowledge_unsound: vec![],
         })
         .unwrap();
     let tx = provider.get_broadcasted_txs()[0].clone();

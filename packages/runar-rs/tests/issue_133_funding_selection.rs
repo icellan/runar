@@ -54,6 +54,7 @@ fn counter_artifact() -> RunarArtifact {
         code_separator_index: Some(0),
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -83,7 +84,7 @@ fn deploy_with_wallet(
         script: format!("76a914{}88ac", "00".repeat(20)),
     });
     contract
-        .deploy(&mut deploy_provider, &signer, &DeployOptions { satoshis: deploy_sats, change_address: None, funding_signer: None })
+        .deploy(&mut deploy_provider, &signer, &DeployOptions { satoshis: deploy_sats, change_address: None, funding_signer: None, acknowledge_unsound: vec![] })
         .unwrap();
 
     let mut call_provider = MockProvider::always_ack("testnet");

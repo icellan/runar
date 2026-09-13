@@ -74,6 +74,10 @@ pub const DeployOptions = struct {
     /// the funding inputs are signed by their real owner. Defaults to the
     /// connected signer (zero behaviour change).
     funding_signer: ?@import("sdk_signer.zig").Signer = null,
+    /// Builtins the caller accepts despite the compiler not claiming they are
+    /// sound (R-062). Required — naming each one — when the artifact declares
+    /// `unsound_primitives`; ignored otherwise.
+    acknowledge_unsound: []const []const u8 = &.{},
 };
 
 /// CallOptions specifies options for calling a contract method.
@@ -214,6 +218,9 @@ pub const RunarArtifact = struct {
     code_separator_index: ?i32 = null,
     code_separator_indices: []i32 = &.{},
     anf_json: ?[]const u8 = null, // raw JSON of the ANF IR (for SDK auto-state computation)
+    /// Builtins this script reaches that the compiler does not claim are sound
+    /// (R-062). Empty for every ordinary contract; see sdk_errors.zig.
+    unsound_primitives: [][]const u8 = &.{},
 
     pub fn isStateful(self: *const RunarArtifact) bool {
         return self.state_fields.len > 0;
@@ -246,6 +253,9 @@ pub const RunarArtifact = struct {
         if (self.code_sep_index_slots.len > 0) a.free(self.code_sep_index_slots);
         if (self.code_separator_indices.len > 0) a.free(self.code_separator_indices);
         if (self.anf_json) |aj| a.free(aj);
+        // R-062: the marker's names are duped out of the parsed JSON.
+        for (self.unsound_primitives) |name| a.free(name);
+        if (self.unsound_primitives.len > 0) a.free(self.unsound_primitives);
         self.* = .{ .allocator = a };
     }
 
@@ -310,6 +320,22 @@ pub const RunarArtifact = struct {
                     fields[i] = try StateField.fromJsonValue(allocator, item.object);
                 }
                 artifact.state_fields = fields;
+            }
+        }
+
+        // R-062: the unsound-primitive marker. Absent on every ordinary artifact.
+        if (root.get("unsoundPrimitives")) |up_val| {
+            if (up_val == .array) {
+                const items = up_val.array.items;
+                var names = try allocator.alloc([]const u8, items.len);
+                var n: usize = 0;
+                for (items) |item| {
+                    if (item == .string) {
+                        names[n] = try allocator.dupe(u8, item.string);
+                        n += 1;
+                    }
+                }
+                artifact.unsound_primitives = names[0..n];
             }
         }
 

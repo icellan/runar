@@ -89,6 +89,10 @@ pub struct DeployOptions {
     /// so the funding inputs are signed by their real owner. `None` → the
     /// connected signer (zero behaviour change).
     pub funding_signer: Option<FundingSigner>,
+    /// Builtins the caller accepts despite the compiler not claiming they are
+    /// sound (R-062). Required — naming each one — when the artifact declares
+    /// `unsound_primitives`; ignored otherwise.
+    pub acknowledge_unsound: Vec<String>,
 }
 
 /// Options for calling a contract method.
@@ -229,6 +233,11 @@ pub struct RunarArtifact {
     pub code_separator_indices: Option<Vec<usize>>,
     #[serde(default)]
     pub anf: Option<ANFProgram>,
+    /// Builtins this script reaches that the compiler does not claim are sound
+    /// (R-062). Absent on every ordinary artifact; see
+    /// `sdk/unsound_primitives.rs`.
+    #[serde(default)]
+    pub unsound_primitives: Option<Vec<String>>,
 }
 
 /// The ABI (Application Binary Interface) of a contract.
@@ -645,6 +654,7 @@ mod tests {
             satoshis: 1000,
             change_address: Some("maddr".to_string()),
             funding_signer: None,
+            acknowledge_unsound: vec![],
         };
         assert_eq!(opts.satoshis, 1000);
         assert_eq!(opts.change_address.as_deref(), Some("maddr"));

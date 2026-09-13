@@ -34,10 +34,18 @@ public record RunarArtifact(
     List<CodeSepIndexSlot> codeSepIndexSlots,
     Integer codeSeparatorIndex,
     List<Integer> codeSeparatorIndices,
-    Map<String, Object> anf
+    Map<String, Object> anf,
+    /**
+     * Builtins this script reaches that the compiler does not claim are sound
+     * (R-062). Empty for every ordinary contract; see
+     * {@link UnsoundPrimitives}.
+     */
+    List<String> unsoundPrimitives
 ) {
 
     public RunarArtifact {
+        unsoundPrimitives = unsoundPrimitives == null
+            ? List.of() : Collections.unmodifiableList(unsoundPrimitives);
         stateFields = stateFields == null ? List.of() : Collections.unmodifiableList(stateFields);
         constructorSlots = constructorSlots == null ? List.of() : Collections.unmodifiableList(constructorSlots);
         codeSepIndexSlots = codeSepIndexSlots == null ? List.of() : Collections.unmodifiableList(codeSepIndexSlots);
@@ -65,7 +73,7 @@ public record RunarArtifact(
         this(
             version, compilerVersion, contractName, null, abi, scriptHex, asm, buildTimestamp,
             stateFields, constructorSlots, codeSepIndexSlots,
-            codeSeparatorIndex, codeSeparatorIndices, null
+            codeSeparatorIndex, codeSeparatorIndices, null, null
         );
     }
 
@@ -88,7 +96,35 @@ public record RunarArtifact(
         this(
             version, compilerVersion, contractName, null, abi, scriptHex, asm, buildTimestamp,
             stateFields, constructorSlots, codeSepIndexSlots,
-            codeSeparatorIndex, codeSeparatorIndices, anf
+            codeSeparatorIndex, codeSeparatorIndices, anf, null
+        );
+    }
+
+    /**
+     * Backwards-compatible constructor without {@code unsoundPrimitives}
+     * (R-062). Every pre-marker caller keeps compiling; the marker defaults to
+     * empty, which is what an ordinary artifact carries anyway.
+     */
+    public RunarArtifact(
+        String version,
+        String compilerVersion,
+        String contractName,
+        String parentClass,
+        ABI abi,
+        String scriptHex,
+        String asm,
+        String buildTimestamp,
+        List<StateField> stateFields,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        Integer codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices,
+        Map<String, Object> anf
+    ) {
+        this(
+            version, compilerVersion, contractName, parentClass, abi, scriptHex, asm,
+            buildTimestamp, stateFields, constructorSlots, codeSepIndexSlots,
+            codeSeparatorIndex, codeSeparatorIndices, anf, null
         );
     }
 
@@ -166,6 +202,12 @@ public record RunarArtifact(
             anfMap = Json.asObject(rawAnf);
         }
 
+        // R-062: the unsound-primitive marker. Absent on every ordinary artifact.
+        List<String> unsound = new ArrayList<>();
+        if (m.get("unsoundPrimitives") instanceof List<?> upl) {
+            for (Object o : upl) unsound.add(Json.asString(o));
+        }
+
         return new RunarArtifact(
             version,
             compilerVersion,
@@ -180,7 +222,8 @@ public record RunarArtifact(
             cssi,
             codeSep,
             codeSepIndices,
-            anfMap
+            anfMap,
+            unsound
         );
     }
 

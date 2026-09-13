@@ -18,6 +18,7 @@ use super::script_utils::extract_constructor_args;
 use super::provider::Provider;
 use super::signer::Signer;
 use super::errors::{assert_script_hex_under_limit, WitnessValueMissingError, MAX_SCRIPT_BYTES};
+use super::unsound_primitives::assert_unsound_primitives_acknowledged;
 use super::anf_interpreter;
 use super::ordinals::{Inscription, build_inscription_envelope, parse_inscription_envelope};
 use crate::prelude::hash160 as compute_hash160;
@@ -446,6 +447,15 @@ impl RunarContract {
         // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         assert_script_hex_under_limit(
             &locking_script, MAX_SCRIPT_BYTES,
+            &format!("{}.deploy", self.artifact.contract_name),
+        )?;
+
+        // R-062: and refuse to fund a script reaching a builtin the compiler
+        // does not claim is sound unless the caller says so here, in the same
+        // breath as the money.
+        assert_unsound_primitives_acknowledged(
+            &self.artifact,
+            &options.acknowledge_unsound,
             &format!("{}.deploy", self.artifact.contract_name),
         )?;
 
@@ -2750,6 +2760,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         }
     }
 
@@ -2842,6 +2853,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         RunarContract::new(artifact, vec![]);
     }
@@ -2882,6 +2894,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(
@@ -2922,6 +2935,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(
@@ -2958,6 +2972,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let pub_key_hash = "ab".repeat(20);
@@ -2995,6 +3010,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
@@ -3024,6 +3040,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(42)]);
@@ -3238,6 +3255,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         assert_eq!(txid.len(), 64);
@@ -3271,6 +3289,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         // Call should succeed (not throw "not deployed")
@@ -3335,6 +3354,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let broadcast_count_after_deploy = provider.get_broadcasted_txs().len();
@@ -3367,6 +3387,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no UTXOs"));
@@ -3403,6 +3424,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         });
 
         // The caller gets a VALUE back, so this line is reached at all.
@@ -3474,6 +3496,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let result = contract.call("nonexistent", &[], &mut provider, &signer, None);
@@ -3511,6 +3534,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let result = contract.call(
@@ -3573,6 +3597,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::from_txid(artifact, &fake_txid, 0, &provider).unwrap();
@@ -3652,6 +3677,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
@@ -3696,6 +3722,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(
@@ -3767,6 +3794,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let payout_script = format!("76a914{}88ac", "bb".repeat(20));
@@ -3803,6 +3831,7 @@ mod tests {
             satoshis: 10_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         contract.call("spend", &[], &mut provider, &signer, Some(&CallOptions {
@@ -3840,6 +3869,7 @@ mod tests {
             satoshis: 20_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let (txid, _) = contract.call("settle", &[], &mut provider, &signer, Some(&CallOptions {
@@ -3875,6 +3905,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         contract.call("cancel", &[], &mut provider, &signer, Some(&CallOptions {
@@ -3923,6 +3954,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -3952,6 +3984,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -3981,6 +4014,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -4010,6 +4044,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -4064,6 +4099,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         }
     }
 
@@ -4194,6 +4230,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         // Deployed script bakes tag = 42 at the slot (push 1 byte 0x2a).
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4394,6 +4431,7 @@ mod tests {
             code_separator_index: Some(1),
             code_separator_indices: Some(vec![1, 3]),
             anf: None,
+            unsound_primitives: None,
         };
 
         let mut real = RunarContract::new(artifact.clone(), vec![SdkValue::Int(500)]);

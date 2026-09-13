@@ -130,6 +130,7 @@ fn ctor_bytestring_artifact() -> RunarArtifact {
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 

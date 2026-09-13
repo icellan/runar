@@ -121,3 +121,74 @@ pub fn raiseWitnessValueMissing(
     last_witness_error = rec;
     return error.WitnessValueMissing;
 }
+
+// ---------------------------------------------------------------------------
+// R-062 / CL-BUG-105 — deploy-time gate on unsound builtins
+// ---------------------------------------------------------------------------
+//
+// The compiler refuses to emit a script reaching `verifySP1FRI` unless the
+// author wrote `@acknowledgeUnsoundSP1FriVerifier` or the invoker passed
+// `--acknowledge-unsound-sp1-fri` (R-012). That acknowledgement stopped at
+// whoever ran the compiler: the artifact handed on afterwards looked like any
+// other, carried no marker of the gap, and every SDK funded it in silence.
+//
+// The compiler now stamps `unsoundPrimitives` into the artifact; this is the
+// SDK half. Deploy only, deliberately — spending an already-deployed contract
+// is how funds are RECOVERED from one.
+
+/// Distinct typed error for an unacknowledged unsound primitive.
+pub const UnsoundPrimitiveError = error{UnsoundPrimitiveNotAcknowledged};
+
+/// Last-recorded unacknowledged primitive, for the same reason as
+/// `last_error` above: Zig errors carry no payload.
+pub var last_unsound: ?LastUnsound = null;
+
+pub const LastUnsound = struct {
+    primitive_buf: [64]u8,
+    primitive_len: usize,
+    context_buf: [256]u8,
+    context_len: usize,
+
+    pub fn primitiveSlice(self: *const LastUnsound) []const u8 {
+        return self.primitive_buf[0..self.primitive_len];
+    }
+    pub fn contextSlice(self: *const LastUnsound) []const u8 {
+        return self.context_buf[0..self.context_len];
+    }
+};
+
+/// Return `error.UnsoundPrimitiveNotAcknowledged` unless every primitive in
+/// `declared` appears in `acknowledged`. Records the FIRST unacknowledged one
+/// plus the call-site context into `last_unsound`.
+pub fn assertUnsoundPrimitivesAcknowledged(
+    declared: []const []const u8,
+    acknowledged: []const []const u8,
+    context: []const u8,
+) UnsoundPrimitiveError!void {
+    const std = @import("std");
+    for (declared) |p| {
+        var found = false;
+        for (acknowledged) |a| {
+            if (std.mem.eql(u8, a, p)) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+
+        var rec = LastUnsound{
+            .primitive_buf = undefined,
+            .primitive_len = 0,
+            .context_buf = undefined,
+            .context_len = 0,
+        };
+        const plen = @min(p.len, rec.primitive_buf.len);
+        @memcpy(rec.primitive_buf[0..plen], p[0..plen]);
+        rec.primitive_len = plen;
+        const clen = @min(context.len, rec.context_buf.len);
+        @memcpy(rec.context_buf[0..clen], context[0..clen]);
+        rec.context_len = clen;
+        last_unsound = rec;
+        return error.UnsoundPrimitiveNotAcknowledged;
+    }
+}

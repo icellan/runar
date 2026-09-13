@@ -288,7 +288,7 @@ fn pin_runar_stateful_covenant_input_is_unvalidatable_by_bsv_sdk() {
         .deploy(
             &mut deploy_provider,
             &signer,
-            &DeployOptions { satoshis: 1, change_address: None, funding_signer: None },
+            &DeployOptions { satoshis: 1, change_address: None, funding_signer: None, acknowledge_unsound: vec![] },
         )
         .expect("deploy should succeed");
 
@@ -439,7 +439,7 @@ fn broadcast_accepts_real_deploy_with_a_spendable_funding_coin() {
         .deploy(
             &mut provider,
             &signer,
-            &DeployOptions { satoshis: 50_000, change_address: None, funding_signer: None },
+            &DeployOptions { satoshis: 50_000, change_address: None, funding_signer: None, acknowledge_unsound: vec![] },
         )
         .expect("deploy REJECTED by the validating MockProvider");
 

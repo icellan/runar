@@ -1,6 +1,7 @@
 //! Rúnar deployment SDK — deploy and interact with compiled contracts on BSV.
 
 pub mod errors;
+pub mod unsound_primitives;
 pub mod types;
 pub mod state;
 pub mod deployment;

@@ -261,6 +261,7 @@ test {
     _ = @import("sdk_envelope_sign.zig");
     _ = @import("sdk_envelope_interop_test.zig");
     _ = @import("sdk_bip143_interop_test.zig");
+    _ = @import("sdk_unsound_primitives_test.zig");
     _ = @import("sdk_sighash_emptysig_test.zig");
     _ = @import("sdk_rpc_provider.zig");
     _ = @import("sdk_token_wallet.zig");

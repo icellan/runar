@@ -76,6 +76,7 @@ fn deploy() -> (RunarContract, MockProvider, LocalSigner) {
             satoshis: 1, // default dust value; continuation must NOT inherit this
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         })
         .expect("deploy should succeed");
 

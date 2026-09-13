@@ -411,6 +411,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         }
     }
 
@@ -467,6 +468,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         let result = extract_constructor_args(&artifact, "51").unwrap();
         assert!(result.is_empty());
@@ -617,6 +619,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         assert!(matches_artifact(&artifact, "5151"));
         assert!(!matches_artifact(&artifact, "5152"));
@@ -661,6 +664,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         // Script with code + OP_RETURN + state data
         assert!(matches_artifact(&artifact, "51516a0000000000000000"));
@@ -842,6 +846,7 @@ mod n074_script_number_width {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         }
     }
 

@@ -1114,6 +1114,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         let result = extract_state_from_script(&artifact, "76a988ac");
         assert!(result.is_none());
@@ -1137,6 +1138,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         let result = extract_state_from_script(&artifact, "51");
         assert!(result.is_none());
@@ -1161,6 +1163,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         // Script with no 0x6a anywhere
         let result = extract_state_from_script(&artifact, "5193885187");
@@ -1194,6 +1197,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script);
@@ -1233,6 +1237,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).unwrap();
@@ -1265,6 +1270,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).unwrap();

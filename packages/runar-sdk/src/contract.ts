@@ -21,6 +21,7 @@ import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/e
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript, Spend } from '@bsv/sdk';
 import { WalletProvider } from './providers/wallet-provider.js';
 import { detachUnlockingScript } from './spend-safety.js';
+import { assertUnsoundPrimitivesAcknowledged } from './unsound-primitives.js';
 
 /**
  * Deep-review finding C8: opt-out for `finalizeCall`'s pre-broadcast local
@@ -528,6 +529,16 @@ export class RunarContract {
     assertScriptHexUnderLimit(
       lockingScript,
       InputLimits.MAX_SCRIPT_BYTES,
+      `${this.artifact.contractName}.deploy`,
+    );
+
+    // R-062: and refuse to fund a script reaching a builtin the compiler does
+    // not claim is sound unless the caller says so here, in the same breath as
+    // the money. Same position as the guard above — before any signing or
+    // broadcast.
+    assertUnsoundPrimitivesAcknowledged(
+      this.artifact,
+      options.acknowledgeUnsound,
       `${this.artifact.contractName}.deploy`,
     );
 

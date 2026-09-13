@@ -179,6 +179,14 @@ module Runar
           "#{@artifact.contract_name}.deploy"
         )
 
+        # R-062: and refuse to fund a script reaching a builtin the compiler
+        # does not claim is sound unless the caller says so here, in the same
+        # breath as the money.
+        SDK.assert_unsound_primitives_acknowledged(
+          @artifact, opts.acknowledge_unsound,
+          "#{@artifact.contract_name}.deploy"
+        )
+
         fee_rate  = provider.get_fee_rate
         all_utxos = provider.get_utxos(address)
 

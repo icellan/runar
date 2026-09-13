@@ -151,6 +151,22 @@ type Artifact struct {
 	// `runarc groth16-wa` backend. Nil for normal Rúnar contract
 	// compilations. See Groth16WAMeta for field semantics.
 	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
+
+	// UnsoundPrimitives names every builtin in this script that the project
+	// itself does not claim is sound (R-062 / CL-BUG-105). Today that is
+	// exactly `verifySP1FRI`, whose codegen is a documented PoC with stubbed
+	// protocol algebra.
+	//
+	// R-012 made the compiler REFUSE such a program unless the author or the
+	// invoker acknowledged the gap — but that acknowledgement stopped at the
+	// person running the compiler. Whoever is handed the artifact afterwards
+	// (a deployer, a reviewer, another tier's SDK) saw an ordinary contract.
+	// The fact travels with the artifact now, and every SDK's deploy path
+	// refuses to fund it unless the caller acknowledges the same list.
+	//
+	// `omitempty`: an artifact that reaches no unsound primitive is unchanged,
+	// byte for byte, from before this field existed.
+	UnsoundPrimitives []string `json:"unsoundPrimitives,omitempty"`
 }
 
 const (
@@ -410,6 +426,14 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
 		BuildTimestamp:       buildTimestamp(),
+	}
+
+	// R-062: record the unsound primitives this script reaches. Same observable
+	// the --ir soundness guard keys on (a `call` binding naming the builtin, at
+	// any nesting depth), so the marker and the refusal can never disagree
+	// about whether a program reaches the verifier.
+	if programCallsSP1FriVerifier(program) {
+		artifact.UnsoundPrimitives = []string{"verifySP1FRI"}
 	}
 
 	// Always include ANF IR for stateful contracts — the SDK uses it

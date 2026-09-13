@@ -79,6 +79,7 @@ fn or_checksig_artifact(pk_a_hex: &str, pk_b_hex: &str) -> RunarArtifact {
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -105,6 +106,7 @@ fn deploy() -> (RunarContract, MockProvider, LocalSigner, String) {
             satoshis: CONTRACT_SATS,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         })
         .unwrap();
     let deploy_tx = provider.get_broadcasted_txs()[0].clone();
