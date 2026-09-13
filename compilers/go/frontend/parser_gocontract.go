@@ -898,22 +898,18 @@ func goFieldToCamel(name string) string {
 	if !unicode.IsUpper(r[0]) {
 		return name
 	}
-	// Find the prefix of uppercase runes
-	i := 0
-	for i < len(r) && unicode.IsUpper(r[i]) {
-		i++
-	}
-	if i == 0 {
-		return name
-	}
-	if i == 1 {
-		// Simple case: just lowercase the first letter
-		r[0] = unicode.ToLower(r[0])
-		return string(r)
-	}
-	// Multiple uppercase: lowercase all but the last one
-	// e.g., "HTTPServer" -> "httpServer", "PubKeyHash" -> stays as-is since P is single
-	// Actually for Go exported names, just lowercase the first letter
+	// R-254: what used to be here scanned the leading run of uppercase runes and
+	// then branched on its length — but every branch did the same thing, and the
+	// comment above the last one ("lowercase all but the last one",
+	// "PubKeyHash -> stays as-is") described neither the code below it nor the
+	// behaviour this function's own doc comment promises. The `i == 0` branch
+	// was unreachable too: r[0] is known uppercase here, so the scan always
+	// advances at least once.
+	//
+	// Go exported names are converted by lowercasing the first letter. That is
+	// what the code did; it is now also what it says. "HTTPServer" becomes
+	// "hTTPServer" — not "httpServer" — and no caller wants otherwise, because
+	// the Rúnar side of this mapping is a field name the author wrote.
 	r[0] = unicode.ToLower(r[0])
 	return string(r)
 }
