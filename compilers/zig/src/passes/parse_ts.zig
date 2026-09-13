@@ -1022,6 +1022,15 @@ const Parser = struct {
             }
         }
 
+        // `number` is not a Runar type (R-301). resolveTsTypeName maps it onto
+        // bigint, which is the right lowering but the wrong silence: a contract
+        // declaring `x: number` compiled to the same script as `x: bigint` with
+        // nothing said. The go and rust tiers have always refused it here. The
+        // mapping stays so the rest of the parse continues on a sane node.
+        if (std.mem.eql(u8, name, "number")) {
+            self.addError("'number' type is not allowed in Runar contracts; use 'bigint' instead");
+        }
+
         return resolveTsTypeName(name);
     }
 

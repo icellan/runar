@@ -11,7 +11,6 @@ import type {
   Statement,
   Expression,
   TypeNode,
-  PrimitiveTypeName,
   SourceLocation,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
@@ -490,7 +489,6 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
 
     // No 'number' type
     if (param.type.kind === 'primitive_type') {
-      checkNoNumberType(param.type.name, method.sourceLocation, ctx);
     }
 
     // FixedArray not allowed as method parameter
@@ -842,7 +840,6 @@ function validateVariableDecl(
 ): void {
   // Check for disallowed 'number' type
   if (stmt.type && stmt.type.kind === 'primitive_type') {
-    checkNoNumberType(stmt.type.name, stmt.sourceLocation, ctx);
   }
   if (stmt.type && stmt.type.kind === 'fixed_array_type') {
     ctx.errors.push(makeDiagnostic(
@@ -1516,16 +1513,6 @@ function hasCycle(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function checkNoNumberType(
-  _typeName: PrimitiveTypeName,
-  _loc: SourceLocation,
-  _ctx: ValidationContext,
-): void {
-  // 'number' would not be a PrimitiveTypeName in Rúnar (it's excluded from
-  // the type union), so this is mainly a sanity check. If we ever see it
-  // via custom_type, we'd catch it elsewhere.
-}
 
 // ---------------------------------------------------------------------------
 // StatefulSmartContract: warn on manual preimage boilerplate

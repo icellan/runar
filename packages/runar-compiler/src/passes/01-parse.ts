@@ -560,6 +560,26 @@ function parseTypeNode(
     return { kind: 'primitive_type', name: 'void' };
   }
 
+  // `number` is not a Rúnar type (R-301). It used to fall through to the
+  // "Unsupported type" WARNING at the bottom of this function and compile as an
+  // opaque custom type, which downstream treated as bigint — so a contract
+  // declaring `x: number` emitted the same script as one declaring `x: bigint`,
+  // with a warning nobody had to read. The go and rust tiers have always
+  // refused it here; ts, python, ruby, zig and java did not.
+  //
+  // The check has to live in the parser: by the time the validator sees a type
+  // it is a `PrimitiveTypeName`, and `number` is excluded from that union, so
+  // the validator's `checkNoNumberType` stub could never fire. That stub is
+  // gone; this is the check it was meant to be.
+  if (nodeKind === SyntaxKind.NumberKeyword || text === 'number') {
+    errors.push(makeDiagnostic(
+      "'number' type is not allowed in Rúnar contracts; use 'bigint' instead",
+      'error',
+      locFromNode(typeNode, file),
+    ));
+    return { kind: 'primitive_type', name: 'bigint' };
+  }
+
   // Check for primitive types by text (covers TypeReference nodes like Sha256, PubKey, etc.)
   if (PRIMITIVE_TYPES.has(text)) {
     return { kind: 'primitive_type', name: text as PrimitiveTypeName };
