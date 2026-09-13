@@ -630,6 +630,7 @@ public final class Cli {
         stream.println("Options:");
         stream.println("  --source <path>              source file (.runar.{ts,sol,move,py,go,rs,zig,rb,java})");
         stream.println("  --ir <path>                  pre-generated ANF JSON");
+        stream.println("  --parse-only                 run passes 1-2 only and print \"parser ok\"");
         stream.println("  --emit-ir                    emit canonical ANF JSON on stdout");
         stream.println("  --emit-ir-to <path>          write canonical ANF JSON to <path> and keep compiling");
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
