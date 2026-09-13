@@ -87,7 +87,13 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		if msg := unsupportedDirectiveError(source, "Solidity"); msg != "" {
 			return directiveGuardResult(msg)
 		}
-		return ParseSolidity(source, fileName)
+		// R-147: stamped like every other surface. Two branches used to return
+		// without it, so `@acknowledgeUnsoundSP1FriVerifier` could never be
+		// honoured on .runar.sol or .runar.rs — the SP1-FRI refusal was
+		// unbypassable there and bypassable on the other seven. Safe, but a
+		// per-surface difference in a security gate, and frontend parity is
+		// this project's first invariant whichever way the odd ones lean.
+		return stampSP1FriAck(ParseSolidity(source, fileName), source)
 	case strings.HasSuffix(lower, ".runar.move"):
 		if msg := unsupportedDirectiveError(source, "Move"); msg != "" {
 			return directiveGuardResult(msg)
@@ -107,7 +113,8 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		if msg := unsupportedDirectiveError(source, "Rust"); msg != "" {
 			return directiveGuardResult(msg)
 		}
-		return ParseRustMacro(source, fileName)
+		// R-147: see the .runar.sol branch above.
+		return stampSP1FriAck(ParseRustMacro(source, fileName), source)
 	case strings.HasSuffix(lower, ".runar.rb"):
 		if msg := unsupportedDirectiveError(source, "Ruby"); msg != "" {
 			return directiveGuardResult(msg)
