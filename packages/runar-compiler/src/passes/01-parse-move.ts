@@ -18,6 +18,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
+import { snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 
@@ -167,7 +168,7 @@ function mapMoveType(name: string): string {
 }
 
 function snakeToCamel(name: string): string {
-  return name.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+  return snakeToCamelCore(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -907,6 +908,23 @@ class MoveParser {
     }
     if (t.type === 'ident') {
       this.advance();
+      // R-113: consult the builtin table on the RAW name first, mirroring the
+      // Go tier (`moveMapBuiltin`). Several Rúnar builtin names legitimately
+      // contain an underscore — `verifyECDSA_P256`, `verifySLHDSA_SHA2_128s` —
+      // and the old TS regex preserved them only by accident, because it
+      // refused to uppercase after `_` unless the next character was
+      // lower-case. Now that the normalisation matches the other six tiers,
+      // those names have to be anchored explicitly, which is what Go does.
+      const preserved: Record<string, string> = {
+        verifyECDSA_P256: 'verifyECDSA_P256',
+        verifyECDSA_P384: 'verifyECDSA_P384',
+        verify_ecdsa_p256: 'verifyECDSA_P256',
+        verify_ecdsa_p384: 'verifyECDSA_P384',
+      };
+      const anchored = preserved[t.value];
+      if (anchored !== undefined) {
+        return { kind: 'identifier', name: anchored };
+      }
       const name = snakeToCamel(t.value);
       // Map Move builtins to Rúnar builtins.
       // After snakeToCamel, most names already match (e.g. check_sig → checkSig).

@@ -30,6 +30,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
+import { snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 
@@ -400,7 +401,7 @@ function snakeToCamel(name: string): string {
     n = n.slice(1);
   }
 
-  return n.replace(/_([a-z0-9])/g, (_, ch: string) => ch.toUpperCase());
+  return snakeToCamelCore(n);
 }
 
 /** Map Python built-in function names to AST callee names. */

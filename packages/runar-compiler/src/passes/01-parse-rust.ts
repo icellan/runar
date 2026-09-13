@@ -31,6 +31,7 @@ import type {
   SourceLocation,
 } from '../ir/index.js';
 import type { ParseResult } from './01-parse.js';
+import { snakeToCamelCore } from './snake-to-camel.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
@@ -213,7 +214,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): R
 // ---------------------------------------------------------------------------
 
 function snakeToCamel(name: string): string {
-  return name.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+  return snakeToCamelCore(name);
 }
 
 // ---------------------------------------------------------------------------
