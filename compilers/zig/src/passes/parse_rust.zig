@@ -1138,6 +1138,8 @@ const Parser = struct {
 
         // Parse range: start..end
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
 
         // Parse start value
@@ -1146,7 +1148,11 @@ const Parser = struct {
             init_value = parseNumberLiteral(start_tok.text);
         } else if (self.parseExpression()) |e| {
             // N-138: keep a negated literal instead of discarding it.
-            if (loopStartLiteral(e)) |v| init_value = v;
+            if (loopStartLiteral(e)) |v| init_value = v else {
+                init_is_const = false;
+            }
+        } else {
+            init_is_const = false;
         }
 
         // Consume '..'
@@ -1175,7 +1181,7 @@ const Parser = struct {
 
         // Body
         if (self.expect(.lbrace) == null) {
-            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .body = &.{}, .source_loc = loc } };
+            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .body = &.{}, .source_loc = loc } };
         }
         var body: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
@@ -1183,7 +1189,7 @@ const Parser = struct {
         }
         _ = self.expect(.rbrace);
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .body = body.items, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .body = body.items, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

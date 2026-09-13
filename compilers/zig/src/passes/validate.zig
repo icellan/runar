@@ -1311,6 +1311,16 @@ fn findOutputIntrinsicInExpr(
     return null;
 }
 
+/// The cross-tier loop-START diagnostic (N-137). Shared VERBATIM with the
+/// other six tiers, which raise it from ANF lowering:
+/// `extractLoopShape` in packages/runar-compiler/src/passes/04-anf-lower.ts,
+/// `extractLoopShape` in compilers/go/frontend/anf_lower.go, and the Rust,
+/// Python, Ruby and Java peers. This tier raises it earlier, in validation,
+/// because its parsers discard the start expression rather than carrying it to
+/// ANF; the user-visible sentence is identical either way.
+const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
+    "For-loop iterators must start at an integer literal.";
+
 /// The cross-tier loop-update diagnostic. Shared VERBATIM with the other six
 /// tiers — `compilers/rust/src/frontend/validator.rs` is the source of truth,
 /// and `compilers/go/frontend/validator.go`,
@@ -1405,6 +1415,22 @@ fn validateStatement(
                 try errors.append(allocator, .{
                     .message = "For loop bound must be a compile-time constant (literal or const variable)",
                     .severity = .@"error",
+                });
+            }
+            // N-137: the START, same rule and the same reason. The unrolled
+            // loop model synthesises iteration k as `start + k*step`, so a
+            // runtime start cannot be represented — and every surface parser
+            // here silently left `init_value` at its `0` default instead, so
+            // `for (let i = start; i < 3n; i++)` compiled to byte-identical
+            // output to `for (let i = 0n; …)`: a covenant over a sum the
+            // source never computes, in this tier alone. The other six tiers
+            // refuse it from anf-lowering; the message below is theirs, word
+            // for word, so a user switching tiers reads the same sentence.
+            if (!f.init_is_const) {
+                try errors.append(allocator, .{
+                    .message = loop_start_diagnostic,
+                    .severity = .@"error",
+                    .location = f.source_loc,
                 });
             }
             // N-061 / R-065: reject any update clause the unrolled loop model

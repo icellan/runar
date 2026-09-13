@@ -1543,9 +1543,13 @@ const Parser = struct {
 
         // Extract integer values for the ForStmt (which uses init_value and bound)
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         // N-138: `.literal_int` alone missed a negated literal, so
         // `for i in -1...5` started at 0.
-        if (loopStartLiteral(start_expr)) |v| init_value = v;
+        if (loopStartLiteral(start_expr)) |v| init_value = v else {
+            init_is_const = false;
+        }
 
         var bound: i64 = 0;
         switch (end_expr) {
@@ -1559,7 +1563,7 @@ const Parser = struct {
             else => {},
         }
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStatement(self: *Parser) ?Statement {

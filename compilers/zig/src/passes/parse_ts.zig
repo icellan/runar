@@ -1184,6 +1184,8 @@ const Parser = struct {
         // Extract: var_name, init_value, bound
         var var_name: []const u8 = "_i";
         var init_value: i64 = 0;
+        // N-137: the START's counterpart to `bound_is_const` below.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
@@ -1216,11 +1218,13 @@ const Parser = struct {
                             init_value = -(std.fmt.parseInt(i64, self.bump().text, 10) catch 0);
                         } else {
                             _ = self.parseExpression();
+                            init_is_const = false;
                         }
                     } else if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 10) catch 0;
                     } else {
                         _ = self.parseExpression();
+                        init_is_const = false;
                     }
                 }
             }
@@ -1268,7 +1272,7 @@ const Parser = struct {
 
         const body = self.parseBlockOrStatement();
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .init_is_const = init_is_const, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

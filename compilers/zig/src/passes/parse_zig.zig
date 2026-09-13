@@ -771,10 +771,20 @@ const Parser = struct {
                         const ld = last.let_decl;
                         if (std.mem.eql(u8, ld.name, s.for_stmt.var_name)) {
                             // N-138: a negated literal is a literal.
-                            const init_val: i64 = if (ld.value) |v| (loopStartLiteral(v) orelse 0) else 0;
+                            // N-137: a declaration whose value is not a literal
+                            // at all leaves the start unknown, which the
+                            // unrolled loop model cannot represent.
+                            var init_val: i64 = 0;
+                            var init_const = true;
+                            if (ld.value) |v| {
+                                if (loopStartLiteral(v)) |n| init_val = n else {
+                                    init_const = false;
+                                }
+                            }
                             stmts.items.len -= 1; // pop the let_decl
                             var merged = s.for_stmt;
                             merged.init_value = init_val;
+                            merged.init_is_const = init_const;
                             stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
                             continue;
                         }

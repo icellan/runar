@@ -316,7 +316,16 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// `passes/validate.zig` can reject what it cannot represent. `null` means the
 /// surface syntax carries no update clause at all (`for i in 0..N`,
 /// `range(N)`, a bare `while (c)`), which is always representable.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, update: ?*const Statement = null, source_loc: ?SourceLocation = null };
+/// `init_is_const` is the START's counterpart to `bound_is_const` (N-137).
+/// The unrolled loop model synthesises iteration k as `start + k*step`, so a
+/// start that is not a compile-time literal cannot be represented. The bound
+/// had a flag; the start did not, and every surface parser's initializer
+/// branch fell through to "parse the expression and throw it away", leaving
+/// `init_value` at its `0` default. A contract written `for (let i = start; …)`
+/// therefore compiled — in this tier alone — to byte-identical output to
+/// `for (let i = 0n; …)`, committing to a sum the source never computes. The
+/// other six tiers refuse the shape; `validate.zig` now does too.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, update: ?*const Statement = null, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {

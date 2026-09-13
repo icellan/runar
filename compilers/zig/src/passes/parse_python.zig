@@ -1382,6 +1382,8 @@ const Parser = struct {
         // range(n) or range(a, b)
         const first = self.parseExpression() orelse return null;
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
 
         if (self.match(.comma)) {
@@ -1389,7 +1391,9 @@ const Parser = struct {
             const second = self.parseExpression() orelse return null;
             // N-138: `.literal_int` alone missed a negated literal, so
             // `range(-1, 5)` started at 0.
-            if (loopStartLiteral(first)) |v| init_value = v;
+            if (loopStartLiteral(first)) |v| init_value = v else {
+                init_is_const = false;
+            }
             switch (second) {
                 .literal_int => |v| {
                     bound = v;
@@ -1414,6 +1418,7 @@ const Parser = struct {
         return .{ .for_stmt = .{
             .var_name = var_name,
             .init_value = init_value,
+            .init_is_const = init_is_const,
             .bound = bound,
             .body = body,
             .source_loc = loc,
