@@ -69,6 +69,8 @@ test {
     _ = @import("tests/n097_fixed_array_element_read.zig");
     _ = @import("tests/n124_fixed_array_increment.zig");
     _ = @import("tests/n129_loop_start_surfaces.zig");
+    _ = @import("tests/n134_oversize_hex_literal.zig");
+    _ = @import("passes/int_literal.zig");
     _ = @import("tests/n098_bytestring_satoshis.zig");
     _ = @import("tests/n105_scriptbytes.zig");
     _ = @import("tests/n105_output_shape.zig");

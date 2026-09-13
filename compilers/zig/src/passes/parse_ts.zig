@@ -18,6 +18,7 @@
 //!   - Types: `PubKey`, `Sig`, `Addr`, `ByteString`, `bigint`, `boolean`, `void`
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
@@ -69,17 +70,6 @@ pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) 
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9). Used to identify
-/// decimal integer literals that overflow `i64` (e.g. the secp256k1 group
-/// order) so the parser can route them to a `literal_bigint` AST node
-/// instead of truncating to `i64`.
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -1682,8 +1672,11 @@ const Parser = struct {
                     // intact; the Zig codegen tier widens this to a
                     // decimal-string-backed push during emit, matching
                     // TS / Go / Python byte-for-byte.
-                    if (isAllAsciiDigits(stripped)) {
-                        const decimal = self.allocator.dupe(u8, stripped) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});

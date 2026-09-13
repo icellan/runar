@@ -16,6 +16,7 @@
 //!   - Types: `runar.Bigint`, `runar.PubKey`, `runar.Sig`, `runar.Addr`, `runar.ByteString`, `i64`, `bool`, `void`
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const readonly_inference = @import("../frontend/readonly_inference.zig");
 
@@ -66,14 +67,6 @@ pub fn parseZig(allocator: Allocator, source: []const u8, file_name: []const u8)
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -1260,8 +1253,11 @@ const Parser = struct {
                     break :blk Expression{ .literal_int = val };
                 } else |_| {
                     // Oversize decimal literal — carry as `literal_bigint`.
-                    if (isAllAsciiDigits(tok.text)) {
-                        const decimal = self.allocator.dupe(u8, tok.text) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, tok.text)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});

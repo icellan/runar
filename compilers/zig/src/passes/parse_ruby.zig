@@ -25,6 +25,7 @@
 //!   - `Runar.check_sig(sig, pk)` -> `checkSig(sig, pk)` (Runar. prefix builtins)
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -75,14 +76,6 @@ pub fn parseRuby(allocator: Allocator, source: []const u8, file_name: []const u8
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -2231,8 +2224,11 @@ const Parser = struct {
             return Expression{ .literal_int = val };
         } else |_| {
             // Oversize decimal literal — carry as `literal_bigint`.
-            if (isAllAsciiDigits(stripped)) {
-                const decimal = self.allocator.dupe(u8, stripped) catch return Expression{ .literal_int = 0 };
+            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+            // ordinary way to write secp256k1's group order, and accepted by the
+            // other six tiers -- used to fall into the `invalid integer` arm
+            // below, because this fallback only recognised decimal digits.
+            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                 return Expression{ .literal_bigint = decimal };
             }
             self.addErrorFmt("invalid integer: '{s}'", .{text});

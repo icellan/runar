@@ -20,6 +20,8 @@
  *   R-080  addRawOutput() with no arguments   located diagnostic in every tier
  *   R-083  `i += 2n` loop update              refused before ANF lowering
  *   R-085  undeclared identifier (Java)       located diagnostic, not acceptance
+ *   N-134  256-bit hex literal                 7 tiers identical; hex spelling ==
+ *                                              decimal spelling, in every tier
  *
  * R-076 deserves a note: it is only TESTABLE at all since N-124 taught the Zig
  * tier to compile `this.arr[i]++`. Before that, the probe could not reach the
@@ -305,6 +307,16 @@ const MUST_COMPILE = [
     finding: 'R-077 / R-078',
     what: 'a method whose only mutation is through a local binding',
   },
+  {
+    file: 'HexBigLiteral.runar.ts',
+    finding: 'N-134',
+    what: "a 256-bit integer literal written in hex — the Zig tier's parsers refused it",
+  },
+  {
+    file: 'DecBigLiteral.runar.ts',
+    finding: 'N-134',
+    what: 'the same number in decimal — the spelling that always worked',
+  },
 ] as const;
 
 /** Contracts every tier must REFUSE, with a real located diagnostic. */
@@ -388,6 +400,24 @@ describe('regression pins for previously-closed findings', () => {
       });
     });
   }
+
+  // N-134's assertion is not "each spelling is self-consistent across tiers" —
+  // that would pass if every tier compiled the hex form to something wrong in
+  // the same way. It is that the two SPELLINGS are one number.
+  it('N-134 — the hex and decimal spellings of one number compile to one script', () => {
+    const hexSrc = join(__dirname, 'HexBigLiteral.runar.ts');
+    const decSrc = join(__dirname, 'DecBigLiteral.runar.ts');
+    for (const tier of available) {
+      const h = verdict(tier, hexSrc);
+      const d = verdict(tier, decSrc);
+      expect(h.ok, `${tier.id} refused the hex spelling`).toBe(true);
+      expect(d.ok, `${tier.id} refused the decimal spelling`).toBe(true);
+      expect(
+        (h as { ok: true; hex: string }).hex,
+        `${tier.id} compiles 0xFFFF…41n and its decimal equal to DIFFERENT scripts`,
+      ).toBe((d as { ok: true; hex: string }).hex);
+    }
+  });
 
   // R-076's assertion is not just "they agree" — it is that the DECLARED sighash
   // flag survives FixedArray expansion. Agreement on a wrong flag would pass the

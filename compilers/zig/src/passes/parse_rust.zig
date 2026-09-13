@@ -22,6 +22,7 @@
 //!   - Type mappings: i128/Bigint/Int → bigint, bool/Bool → boolean, ByteString/Vec<u8> → ByteString
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -1644,8 +1645,11 @@ const Parser = struct {
             return Expression{ .literal_int = val };
         } else |_| {
             // Oversize decimal literal — carry as `literal_bigint`.
-            if (isAllAsciiDigitsRust(stripped)) {
-                const decimal = self.allocator.dupe(u8, stripped) catch return null;
+            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+            // ordinary way to write secp256k1's group order, and accepted by the
+            // other six tiers -- used to fall into the `invalid integer` arm
+            // below, because this fallback only recognised decimal digits.
+            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                 return Expression{ .literal_bigint = decimal };
             }
             self.addErrorFmt("invalid integer: '{s}'", .{text});
@@ -1669,16 +1673,6 @@ const Parser = struct {
     }
 };
 
-/// True if every byte in `s` is an ASCII digit (0-9). Used to identify
-/// decimal integer literals that overflow `i64` and need to be routed to
-/// the `literal_bigint` AST node instead.
-fn isAllAsciiDigitsRust(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 /// Parse a number literal, stripping underscores and type suffixes.
 fn parseNumberLiteral(text: []const u8) i64 {
