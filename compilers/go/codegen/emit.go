@@ -493,7 +493,21 @@ func encodePushValue(value PushValue) (hexStr string, asmStr string) {
 		return h, fmt.Sprintf("<%s>", hex.EncodeToString(value.Bytes))
 
 	default:
-		return "00", "OP_0"
+		// R-174: this used to return ("00", "OP_0") — a ZERO. An unrecognised
+		// or unset Kind was emitted as false/empty with no error, producing
+		// valid script that computes something else, which is the one failure
+		// mode nothing downstream can notice.
+		//
+		// Fails closed now, like the sibling switch in emitStackOp
+		// ("unknown stack op: %s") and like HasSideEffect / collectValueRefs in
+		// frontend/, whose comments give the same reason: a silent
+		// fall-through lets a newly-added variant change the emitted program
+		// without anyone seeing it.
+		//
+		// Unreachable from today's code — every in-repo PushValue sets a Kind
+		// — which is exactly the state in which a fail-open default survives
+		// review. It is one zero-valued struct away from being live.
+		panic(fmt.Sprintf("unknown push kind %q: refusing to emit a silent OP_0 for it", value.Kind))
 	}
 }
 
