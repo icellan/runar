@@ -393,8 +393,11 @@ module RunarCompiler
       # selected as +b + cond*(a - b)+, which needs no branch and keeps the
       # emitted op sequence identical on both paths.
       #
-      # NOT handled: P == -Q, whose true result is the point at infinity, which
-      # affine coordinates cannot represent.
+      # P == -Q IS handled, below: px == qx with py != qy returns the ALL-ZERO
+      # blob this codegen uses for the point at infinity, which the on-curve
+      # gate then rejects. See "THE THIRD CASE, P == -Q" above c_affine_add.
+      # (R-250: this used to say "NOT handled", left over from before that fix
+      # and contradicted a few dozen lines later in the same file.)
       # GAP-301: coordinate canonicity, leaving "_canon" on the tracker.
       #
       # `c_decompose_point` BIN2NUMs each coordinate as an unsigned value that

@@ -389,8 +389,12 @@ public final class P256P384 {
      * <p>selected as {@code b + cond*(a - b)}, which needs no branch and keeps the
      * emitted op sequence identical on both paths.
      *
-     * <p>NOT handled: P == -Q, whose true result is the point at infinity, which affine
-     * coordinates cannot represent.
+     * <p>P == -Q IS handled, below: {@code px == qx} with {@code py != qy}
+     * returns the ALL-ZERO blob this codegen uses for the point at infinity,
+     * which the on-curve gate then rejects. See "THE THIRD CASE, P == -Q"
+     * above {@code cAffineAdd}. (R-250: this used to say "NOT handled", left
+     * over from before that fix and contradicted a few dozen lines later in
+     * the same file.)
      */
     /**
      * GAP-301: coordinate canonicity, leaving {@code _canon} on the tracker.
