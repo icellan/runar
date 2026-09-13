@@ -1680,13 +1680,4 @@ public final class Typecheck {
         }
     }
 
-    // Unused, retained to keep the import surface stable. The fields
-    // below intentionally reference ArrayList / Set / Deque so static
-    // analyzers don't flag them as dead.
-    @SuppressWarnings("unused")
-    private static final Object _anchor = new Object() {
-        final ArrayList<String> _a = new ArrayList<>();
-        final HashSet<String> _b = new HashSet<>();
-        final ArrayDeque<String> _c = new ArrayDeque<>();
-    };
 }
