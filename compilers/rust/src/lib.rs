@@ -584,7 +584,8 @@ pub fn compile_from_source_str_with_result(
     let mut anf_program = match frontend::anf_lower::try_lower_to_anf(contract) {
         Ok(program) => program,
         Err(e) => {
-            result.diagnostics.push(Diagnostic::error(e, None));
+            // R-138: the refusal carries the statement it died on.
+            result.diagnostics.push(Diagnostic::error(e.message.clone(), e.loc.clone()));
             return result;
         }
     };
@@ -644,10 +645,12 @@ pub fn compile_from_source_str_with_result(
     let mut stack_methods = match stack_result {
         Ok(Ok(methods)) => methods,
         Ok(Err(e)) => {
-            result.diagnostics.push(Diagnostic::error(
-                format!("stack lowering: {}", e),
-                None,
-            ));
+            // R-138: the refusal carries the ANF binding's source location.
+            // The message already begins "stack lowering: " — `catch_refusal`
+            // adds the prefix — so do NOT add it again here; that double prefix
+            // is what the old `format!` produced.
+            let loc = e.loc.clone();
+            result.diagnostics.push(Diagnostic::error(e.message.clone(), loc));
             return result;
         }
         Err(panic_val) => {

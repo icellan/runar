@@ -1315,6 +1315,19 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
+        // R-138: publish where we are, so a refusal raised anywhere below —
+        // there are 34 panic sites in this file — reports the contract line it
+        // died on rather than nothing at all.
+        // `ir::SourceLocation` and `ast::SourceLocation` are the same three
+        // fields declared twice (the AST/IR split this repo carries); the
+        // diagnostic channel speaks the AST one.
+        crate::refusal::set_refusal_location(binding.source_loc.as_ref().map(|l| {
+            crate::frontend::ast::SourceLocation {
+                file: l.file.clone(),
+                line: l.line,
+                column: l.column,
+            }
+        }));
         let name = &binding.name;
         match &binding.value {
             ANFValue::LoadParam {
@@ -5812,13 +5825,23 @@ impl LoweringContext {
 /// Lower an ANF program to Stack IR.
 /// Private methods are inlined at call sites rather than compiled separately.
 /// The constructor is skipped since it's not emitted to Bitcoin Script.
-pub fn lower_to_stack(program: &ANFProgram) -> Result<Vec<StackMethod>, String> {
+pub fn lower_to_stack(program: &ANFProgram) -> Result<Vec<StackMethod>, crate::refusal::Refusal> {
     // Convert any panic (stack underflow, unknown operator, type mismatch, or a
     // deliberate refusal) into an error return instead of crashing the process
     // — and without the default panic hook printing a crash report first. See
     // `crate::refusal`.
-    crate::refusal::catch_refusal("stack lowering", || lower_to_stack_inner(program))
-        .and_then(|inner| inner)
+    //
+    // R-138: the error carries the location `lower_binding` published for the
+    // binding it died on, so the caller can build a located Diagnostic instead
+    // of passing `None`.
+    crate::refusal::catch_refusal("stack lowering", || lower_to_stack_inner(program)).and_then(
+        |inner| {
+            inner.map_err(|message| crate::refusal::Refusal {
+                message,
+                loc: None,
+            })
+        },
+    )
 }
 
 fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String> {

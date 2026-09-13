@@ -65,7 +65,9 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
 /// two or more locals, which used to compile to an unspendable script). This
 /// is the same wrapper the backend uses for pass 5 — see
 /// `codegen::stack::lower_to_stack` around `lower_to_stack_inner`.
-pub fn try_lower_to_anf(contract: &ContractNode) -> Result<ANFProgram, String> {
+pub fn try_lower_to_anf(
+    contract: &ContractNode,
+) -> Result<ANFProgram, crate::refusal::Refusal> {
     crate::refusal::catch_refusal("anf lowering", || lower_to_anf(contract))
 }
 
@@ -1274,6 +1276,10 @@ fn lower_statement_with_reads(
         line: ast_loc.line,
         column: ast_loc.column,
     });
+    // R-138: and to the refusal channel, so a panic from any of this pass's ten
+    // refusal sites reports the statement it died on. Same position, two
+    // consumers; see `crate::refusal`.
+    crate::refusal::set_refusal_location(Some(ast_loc.clone()));
 
     match stmt {
         Statement::VariableDecl {
