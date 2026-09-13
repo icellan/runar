@@ -564,8 +564,11 @@ docs/                 # Documentation + format guides
 - **Node.js** >= 20, **pnpm** 9.15+
 - **Go** 1.26+ (for Go compiler and Go contract tests)
 - **Rust** 1.75+ (for Rust compiler and Rust contract tests)
-- **Ruby** 3.0+ (optional, for Ruby contract tests)
-- **Python** 3.10+ (for Python compiler and Python contract tests)
+- **Ruby** 3.0+ (for the Ruby compiler and Ruby contract tests)
+- **Python** 3.10+ (for the Python compiler and Python contract tests)
+- **Zig** 0.16 (for the Zig compiler and Zig contract tests)
+- **Java** 17+ (for the Java compiler and Java contract tests; the Gradle
+  wrapper is pinned at 8.5 and downloads itself on first run)
 
 ### Build & Test
 
