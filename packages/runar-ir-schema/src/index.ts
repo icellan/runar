@@ -64,6 +64,13 @@ export type {
   GetStateScript,
   CheckPreimage,
   AddOutput,
+  // R-251: members of the ANFValue union that the barrel did not re-export, so
+  // a consumer could import ANFValue and not name the member to narrow it to.
+  AddRawOutput,
+  AddDataOutput,
+  DeserializeState,
+  ArrayLiteral,
+  RawScript,
   ANFValue,
 } from './anf-ir.js';
 
@@ -87,6 +94,10 @@ export type {
   RotOp,
   TuckOp,
   PlaceholderOp,
+  // R-251: members of the StackOp union, same omission.
+  PushCodeSepIndexOp,
+  VerifyCodePartLenOp,
+  RawBytesOp,
   StackOp,
 } from './stack-ir.js';
 

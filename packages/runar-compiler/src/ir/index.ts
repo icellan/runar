@@ -59,6 +59,13 @@ export type {
   CheckPreimage,
   AddOutput,
   AddRawOutput,
+  // R-251: these four are members of the ANFValue union and were missing here,
+  // so a consumer importing from the package barrel could hold an ANFValue and
+  // not name the member to narrow it to.
+  DeserializeState,
+  AddDataOutput,
+  ArrayLiteral,
+  RawScript,
 } from './anf-ir.js';
 
 export { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from './anf-ir.js';
@@ -81,6 +88,10 @@ export type {
   RotOp,
   TuckOp,
   PlaceholderOp,
+  // R-251: members of the StackOp union, same omission.
+  PushCodeSepIndexOp,
+  VerifyCodePartLenOp,
+  RawBytesOp,
 } from './stack-ir.js';
 
 // Artifact types
