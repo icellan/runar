@@ -7,13 +7,40 @@ name: Dependency Audit
 # so the tier with the largest third-party surface had no scanning at all. The
 # `ts-audit` job below closes that.
 #
-# Policy (matches audits/remediation-plan §6):
-#   * HIGH / CRITICAL severity advisories  -> fail the job (block merge).
-#   * MEDIUM / LOW severity advisories     -> annotate / warn, do not fail.
-#   * Zig has no canonical dependency vuln scanner today (no equivalent of
-#     govulncheck / cargo-audit / pip-audit / bundler-audit). We still ship a
-#     visible job that lists declared deps from every build.zig.zon so this
-#     gap stays surfaced for future Zig tooling to replace.
+# Policy, as ENFORCED (R-241).
+#
+# This section used to say "HIGH / CRITICAL -> fail the job; MEDIUM / LOW ->
+# annotate / warn, do not fail", matching audits/remediation-plan §6. No job
+# here has ever filtered by severity, and each one's own comment says so
+# ("we accept the default exit policy", "exits non-zero on any finding by
+# default"). A reader of the old text learned a rule the repository does not
+# follow, and would file a bug the first time a MEDIUM advisory blocked a merge.
+#
+# What every scanner job actually does is FAIL ON ANY ADVISORY it reports.
+# That is stricter than the old text, not looser, and it is deliberate per
+# ecosystem:
+#
+#   * go-audit      govulncheck reports only vulnerabilities REACHABLE from the
+#                   code it analyses, so a report is already a call to act.
+#   * rust-audit    cargo-audit's RustSec DB carries advisories triaged at
+#                   warning level or above upstream.
+#   * python-audit  pip-audit exits non-zero on any finding; the manifests here
+#                   are intentionally minimal, with no dev-only deps that
+#                   routinely carry low-severity advisories.
+#   * ruby-audit    bundler-audit's ruby-advisory-db ships HIGH-or-worse
+#                   criticality for the gems depended on here.
+#   * ts-audit      pnpm audit, with the standing-advisory list documented at
+#                   that job: a listed advisory that is no longer reported ALSO
+#                   fails, so the list cannot quietly rot.
+#   * java-audit    dependency locking, not an advisory scanner — see the job.
+#   * zig-audit     Zig has no canonical dependency vuln scanner today (no
+#                   equivalent of govulncheck / cargo-audit / pip-audit /
+#                   bundler-audit). The job lists declared deps from every
+#                   build.zig.zon so the gap stays visible for future tooling.
+#
+# If a low-severity advisory ever does block a merge unreasonably, the fix is to
+# add severity filtering to THAT job and update this list — not to leave the two
+# describing different repositories.
 #
 # Triggers: PRs into main / release branches, pushes to main, and a weekly
 # cron so newly-published advisories against unchanged deps still fail CI
