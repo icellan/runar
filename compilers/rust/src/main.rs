@@ -223,10 +223,27 @@ fn main() {
     }
 
     let artifact = if let Some(ref source_path) = args.source {
-        match runar_compiler_rust::compile_from_source_with_options(source_path, &opts) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("Compilation error: {}", e);
+        // R-237: go through the result-bearing API so advisory diagnostics reach
+        // the operator. `compile_from_source_with_options` returns
+        // Result<RunarArtifact, String> — one value, with nowhere to put a
+        // warning — so the issue-#109 notice for a readonly field DCE drops was
+        // computed by this tier and then thrown away at the CLI boundary. Four
+        // tiers printed it and this one did not. Same shape as R-162 in the Go
+        // tier.
+        let result = runar_compiler_rust::compile_from_source_with_result(source_path, &opts);
+        for d in &result.diagnostics {
+            if d.severity == runar_compiler_rust::frontend::diagnostic::Severity::Warning {
+                eprintln!("warning: {}", d);
+            }
+        }
+        match result.artifact {
+            Some(a) if result.success => a,
+            _ => {
+                for d in &result.diagnostics {
+                    if d.severity == runar_compiler_rust::frontend::diagnostic::Severity::Error {
+                        eprintln!("Compilation error: {}", d);
+                    }
+                }
                 process::exit(1);
             }
         }

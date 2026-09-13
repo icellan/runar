@@ -11,6 +11,7 @@ require "set"
 
 require_relative "ir/types"
 require_relative "frontend/sighash_directive"
+require_relative "frontend/embed_always_dce"
 
 module RunarCompiler
   # -------------------------------------------------------------------------
@@ -584,6 +585,12 @@ module RunarCompiler
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
+
+    # R-237: the issue-#109 notice for a readonly field DCE drops. Four tiers
+    # already emitted it and this one did not, so an author whose field
+    # silently vanished from the locking script heard about it from ts, go,
+    # zig and java and not from here.
+    warnings += Frontend::EmbedAlwaysDCE.collect_warnings(expanded_contract, program)
 
     # Feed into existing compilation pipeline (passes 4.25-6)
     artifact = compile_from_program(program, disable_constant_folding: disable_constant_folding)

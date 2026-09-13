@@ -532,7 +532,41 @@ def compile_from_source_collecting_warnings(
 
     # Feed into existing compilation pipeline (passes 4.25-6)
     artifact = compile_from_program(program, disable_constant_folding=disable_constant_folding)
+
+    # R-237: the issue-#109 notice for a readonly field DCE drops. This tier
+    # HAS the check — `_warn_dropped_readonly_fields`, called from
+    # `_compile_from_source_str_with_result` — but this entry point returned
+    # only the VALIDATOR's warnings, so the CLI (which calls this one) never
+    # showed it. Exactly the shape R-162 fixed in the Go tier, where
+    # CollectEmbedAlwaysDCEWarnings ran only in the *WithResult path.
+    warnings = list(warnings) + _dropped_readonly_field_warnings(expanded_contract, program)
+
     return artifact, warnings
+
+
+def _dropped_readonly_field_warnings(contract: Any, program: ANFProgram) -> list[str]:
+    """Warning strings for readonly fields DCE eliminated (R-237).
+
+    Shares its reference set with `_collect_referenced_props`, which runs
+    dead-binding elimination on a deep-copied probe and skips the constructor —
+    so a field read only into a never-used local does not count as referenced.
+    """
+    if contract is None or program is None:
+        return []
+
+    referenced = _collect_referenced_props(program)
+    return [
+        (
+            f"readonly field '{prop.name}' is not referenced in any method body "
+            f"and was eliminated by DCE; annotate it /** @embedAlways */ to "
+            f"preserve it in the on-chain script"
+        )
+        for prop in contract.properties
+        if prop.readonly
+        and not getattr(prop, "embed_always", False)
+        and prop.initializer is None
+        and prop.name not in referenced
+    ]
 
 
 def compile_source_to_ir(
