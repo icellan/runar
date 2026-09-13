@@ -819,7 +819,22 @@ class TypeChecker {
     }
   }
 
+  /**
+   * Location of the statement currently being checked (R-143).
+   *
+   * Expression nodes do not carry a `sourceLocation` in this tier — the
+   * parsers never set one on `call_expr` / `binary_expr` / `member_expr` and
+   * friends, which is R-142 — so a diagnostic raised from inside an expression
+   * has nothing of its own to report. The enclosing STATEMENT does have one,
+   * and statement granularity is the difference between "somewhere in your
+   * contract" and "line 14". Closing R-142 sharpens these to the exact operand
+   * without any change here, because every site reads
+   * `<expr>.sourceLocation ?? this.currentStmtLoc`.
+   */
+  private currentStmtLoc: SourceLocation | undefined;
+
   private checkStatement(stmt: Statement, env: TypeEnv): void {
+    this.currentStmtLoc = stmt.sourceLocation ?? this.currentStmtLoc;
     switch (stmt.kind) {
       case 'variable_decl': {
         const initType = this.inferExprType(stmt.init, env);
@@ -1001,7 +1016,14 @@ class TypeChecker {
           return '<unknown>';
         }
 
-        if (isStatefulContextType(objType)) {
+        // R-143: every diagnostic in this branch passes a location. They are the
+      // `ctx: runar.StatefulContext` calling convention — the shape the
+      // `.runar.zig` surface uses — and all thirteen of them used to omit it,
+      // while the sibling `this.<intrinsic>` branch a hundred lines below
+      // passed it for the identical checks. Same mistake, reported as
+      // `Counter.runar.ts:14:4: addOutput() expects …` on one surface and as a
+      // bare sentence with no file, line or column on the other.
+      if (isStatefulContextType(objType)) {
           if (expr.property === 'txPreimage') return 'SigHashPreimage';
           if (expr.property === 'getStateScript' || expr.property === 'addOutput' || expr.property === 'addRawOutput' || expr.property === 'addDataOutput') {
             return '<method>';
@@ -1095,7 +1117,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `Array element type mismatch: expected '${elemType}', got '${et}'`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1357,7 +1379,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `getStateScript() takes no arguments`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         return BYTESTRING;
@@ -1369,7 +1391,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addOutput() is only available in StatefulSmartContract`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
           return VOID;
         }
@@ -1379,7 +1401,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         // Type-check: first arg = bigint (satoshis)
@@ -1389,7 +1411,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
-              args[0]!.sourceLocation,
+              args[0]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1401,7 +1423,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
               'error',
-              args[i + 1]!.sourceLocation,
+              args[i + 1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1417,7 +1439,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addRawOutput() is only available in StatefulSmartContract`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
           return VOID;
         }
@@ -1425,7 +1447,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         if (args.length >= 1) {
@@ -1434,7 +1456,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
-              args[0]!.sourceLocation,
+              args[0]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1444,7 +1466,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
               'error',
-              args[1]!.sourceLocation,
+              args[1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1456,7 +1478,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addDataOutput() is only available in StatefulSmartContract`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
           return VOID;
         }
@@ -1464,7 +1486,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         if (args.length >= 1) {
@@ -1473,7 +1495,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
-              args[0]!.sourceLocation,
+              args[0]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1483,7 +1505,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
               'error',
-              args[1]!.sourceLocation,
+              args[1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1519,6 +1541,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `getStateScript() takes no arguments`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           return BYTESTRING;
@@ -1530,6 +1553,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() is only available in StatefulSmartContract`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1539,6 +1563,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (normalizedArgs.length >= 1) {
@@ -1547,6 +1572,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
+                normalizedArgs[0]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1557,6 +1583,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
                 'error',
+                normalizedArgs[i + 1]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1571,6 +1598,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() is only available in StatefulSmartContract`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1578,6 +1606,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1586,6 +1615,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
+                args[0]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1595,6 +1625,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
+                args[1]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1606,6 +1637,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() is only available in StatefulSmartContract`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1613,6 +1645,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1621,6 +1654,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
+                args[0]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1630,6 +1664,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
+                args[1]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1653,7 +1688,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() is only available in StatefulSmartContract`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1663,7 +1698,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (normalizedArgs.length >= 1) {
@@ -1672,7 +1707,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
-                args[0]!.sourceLocation,
+                args[0]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1683,7 +1718,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
                 'error',
-                args[i + 1]!.sourceLocation,
+                args[i + 1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1698,7 +1733,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() is only available in StatefulSmartContract`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1706,7 +1741,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1715,7 +1750,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
-                args[0]!.sourceLocation,
+                args[0]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1725,7 +1760,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
-                args[1]!.sourceLocation,
+                args[1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1737,7 +1772,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() is only available in StatefulSmartContract`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1745,7 +1780,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1754,7 +1789,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
-                args[0]!.sourceLocation,
+                args[0]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1764,7 +1799,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
-                args[1]!.sourceLocation,
+                args[1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
