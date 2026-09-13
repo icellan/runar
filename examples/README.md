@@ -8,7 +8,25 @@ Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rus
 
 ## Contract Index
 
-Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`):
+**Scale, measured rather than remembered (R-199).** The catalogue is far larger
+than the table below, which lists the contracts worth reading FIRST, not the
+whole set:
+
+| tree | contract directories | sources |
+| --- | --- | --- |
+| `ts/` | 80 | 83 `.runar.ts` |
+| `rust/`, `python/` | 79 | 81 each |
+| `sol/`, `move/`, `go/`, `ruby/`, `zig/` | 78 | 80–81 each |
+| `java/` | Gradle layout — `src/main/java/runar/examples/<name>/` | 76 `.runar.java` |
+| `end2end-example/` | one app in nine surfaces + two webapps | 11 |
+
+This README previously claimed "21 contracts" with a "16-contract sol/move
+subset", and left `ruby/` and `java/` out of the testing sections entirely. Use
+`ls -d examples/<tree>/*/` for the current list of any tree; the numbers above
+are what that command reported when this paragraph was written.
+
+The table is a curated starting set, available across the native-language
+frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`) unless a row says otherwise:
 
 | Contract | Directory | Pattern | Complexity | Description |
 |---|---|---|---|---|
@@ -35,7 +53,7 @@ Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`,
 | **SHA-256 Compress** | `{ts,go,rust,python,zig}/sha256-compress/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 compression builtin directly. |
 | **SHA-256 Finalize** | `{ts,go,rust,python,zig}/sha256-finalize/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 finalize builtin directly. |
 
-The Solidity-like and Move-style example trees include the original 16-contract subset plus `r1-k1-wallet`: `auction`, `blake3`, `covenant-vault`, `ec-demo`, `escrow`, `math-demo`, `oracle-price`, `p2blake3pkh`, `p2pkh`, `property-initializers`, `r1-k1-wallet`, `sha256-compress`, `sha256-finalize`, `stateful-counter`, `tic-tac-toe`, `token-ft`, and `token-nft`.
+The Solidity-like and Move-style trees are NOT a 16-contract subset — each carries 78 contract directories, essentially the whole catalogue (R-199). The frontend-parity claim in CLAUDE.md is what that breadth is for: every fixture in `conformance/tests` is parsed from all nine surfaces by the `--parser-only` matrix.
 
 ---
 
@@ -154,6 +172,31 @@ Compile a Zig example through the Zig compiler:
 ```bash
 cd compilers/zig && zig build run -- compile ../../examples/zig/p2pkh/P2PKH.runar.zig
 ```
+
+### Ruby (rspec)
+
+R-199: this section, and the one below it, were missing entirely — two of the
+nine example trees had no documented way to run them.
+
+```bash
+cd examples/ruby && bundle exec rspec
+```
+
+Each contract directory holds `<Name>.runar.rb` beside a `*_spec.rb` that runs
+the contract as native Ruby against the mock types in `packages/runar-rb`, plus
+a Rúnar compile check.
+
+### Java (Gradle + JUnit 5)
+
+```bash
+cd examples/java && ./gradlew test
+```
+
+The Java tree uses the Gradle source layout rather than one directory per
+contract at the top level: sources live under
+`src/main/java/runar/examples/<contract>/<Name>.runar.java`, with the JUnit
+tests beside them under `src/test/java/`. `CompileCheck.run(Path)` invokes the
+real Java frontend through the composite build.
 
 Run the Zig compiler verification suite:
 
