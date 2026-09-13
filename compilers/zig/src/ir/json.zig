@@ -32,6 +32,12 @@ const ParseError = error{
     // honour. Zig's IR loader carries no message payload, so the error name is
     // the whole diagnostic and has to say which rule fired.
     LoopCountExceedsMaximum,
+    // R-126 / CL-BUG-164: an `add_output` whose stateValues list does not have
+    // exactly one entry per MUTABLE property. Distinct from UnexpectedValueType
+    // because the field's type is fine — it is the LENGTH that no emitter can
+    // honour. Zig's IR loader carries no message payload, so the error name is
+    // the whole diagnostic and has to say which rule fired.
+    AddOutputArityMismatch,
 };
 
 const max_parse_depth: u32 = 256;
@@ -180,11 +186,58 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     }
     if (!has_public) return ParseError.NoPublicMethods;
 
+    // R-126 / CL-BUG-164: an add_output must name exactly one state value per
+    // MUTABLE property.
+    //
+    // The source pipeline counts addOutput arity in the typechecker (the
+    // N20 / N23 / N26 negatives). `--ir` runs no frontend, so such a node
+    // reached stack lowering directly, and lowerAddOutput serializes the
+    // OP_RETURN payload with the MIN of the two lists. Under-arity emitted an
+    // output carrying fewer state fields than the contract has; over-arity
+    // silently dropped the surplus. Measured through each tier's own --ir CLI
+    // on a two-mutable-field contract (correct arity = 1394 hexchars): go,
+    // rust, zig, ruby, python and java ALL accepted, emitting 1388 and 1396
+    // hexchars respectively.
+    //
+    // CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+    // mutable fields, so a short-payload continuation is spendable only by a
+    // hand-crafted transaction, and the successor it produces is permanently
+    // unspendable because the next call's deserialize_state slices at fixed
+    // offsets.
+    var mutable_count: usize = 0;
+    for (properties) |prop| {
+        if (!prop.readonly) mutable_count += 1;
+    }
+    for (method_list.items) |m| {
+        try checkAddOutputArity(m.body, mutable_count);
+    }
+
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
         .properties = properties,
         .methods = try method_list.toOwnedSlice(allocator),
     };
+}
+
+/// Walk a binding list — nested `if` arms and `loop` bodies included — and
+/// refuse any `add_output` whose stateValues list is not exactly
+/// `mutable_count` long. See the call site in `parseProgram` for why.
+fn checkAddOutputArity(bindings: []const types.ANFBinding, mutable_count: usize) ParseError!void {
+    for (bindings) |binding| {
+        switch (binding.value) {
+            .add_output => |ao| {
+                if (ao.state_values.len != mutable_count) {
+                    return ParseError.AddOutputArityMismatch;
+                }
+            },
+            .@"if" => |iv| {
+                try checkAddOutputArity(iv.then, mutable_count);
+                try checkAddOutputArity(iv.@"else", mutable_count);
+            },
+            .loop => |lv| try checkAddOutputArity(lv.body, mutable_count),
+            else => {},
+        }
+    }
 }
 
 fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]types.ANFProperty {
@@ -2496,6 +2549,10 @@ test "parse stateful contract with check_preimage and get_state_script" {
     }
 }
 
+// R-126: this fixture used to declare `"properties": []` while its add_output
+// named two state values — the very mismatch `checkAddOutputArity` now refuses,
+// sitting in the parser's own unit test. Two mutable properties were added to
+// make the program well-formed; the assertions below are unchanged.
 test "parse add_output ANF IR" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2522,7 +2579,10 @@ test "parse add_output ANF IR" {
         \\      "params": []
         \\    }
         \\  ],
-        \\  "properties": []
+        \\  "properties": [
+        \\    { "name": "a", "readonly": false, "type": "bigint" },
+        \\    { "name": "b", "readonly": false, "type": "bigint" }
+        \\  ]
         \\}
     ;
 

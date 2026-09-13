@@ -321,9 +321,27 @@ class AnfLoaderTest {
 
     @Test
     void parsesAddOutputNode() {
-        AnfBinding b = firstBinding(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"add_output\","
-                + "\"satoshis\":\"sats\",\"stateValues\":[\"a\",\"b\"],\"preimage\":\"p\"}}");
+        // R-126: this case cannot use EMPTY_SHELL. That shell declares
+        // "properties":[] while this node names two state values — exactly the
+        // mismatch AnfLoader.checkAddOutputArity now refuses, sitting in the
+        // loader's own unit test. A two-mutable-property shell makes the
+        // program well-formed; the assertions below are unchanged.
+        AnfProgram program = AnfLoader.parse("""
+            {
+              "contractName":"X",
+              "properties":[
+                {"name":"a","type":"bigint","readonly":false},
+                {"name":"b","type":"bigint","readonly":false}
+              ],
+              "methods":[
+                {"name":"m","isPublic":true,"params":[],"body":[%s]}
+              ]
+            }
+            """.formatted(
+                "{\"name\":\"t0\",\"value\":{\"kind\":\"add_output\","
+                    + "\"satoshis\":\"sats\",\"stateValues\":[\"a\",\"b\"],"
+                    + "\"preimage\":\"p\"}}"));
+        AnfBinding b = program.methods().get(0).body().get(0);
         assertTrue(b.value() instanceof AddOutput ao
             && "sats".equals(ao.satoshis())
             && ao.stateValues().size() == 2

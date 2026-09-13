@@ -66,6 +66,16 @@ func ValidateIR(program *ANFProgram) error {
 		return fmt.Errorf("IR validation: contractName is required")
 	}
 
+	// R-126 / CL-BUG-164: an add_output must name exactly one state value per
+	// MUTABLE property. Counted once, up front, so the per-binding check below
+	// is a comparison rather than a rescan.
+	mutableCount := 0
+	for _, prop := range program.Properties {
+		if !prop.Readonly {
+			mutableCount++
+		}
+	}
+
 	for i, method := range program.Methods {
 		if method.Name == "" {
 			return fmt.Errorf("IR validation: method[%d] has empty name", i)
@@ -78,7 +88,7 @@ func ValidateIR(program *ANFProgram) error {
 				return fmt.Errorf("IR validation: method %s param %s has empty type", method.Name, param.Name)
 			}
 		}
-		if err := validateBindings(method.Body, method.Name); err != nil {
+		if err := validateBindings(method.Body, method.Name, mutableCount); err != nil {
 			return err
 		}
 	}
@@ -142,7 +152,7 @@ var knownKinds = map[string]bool{
 	"raw_script":        true,
 }
 
-func validateBindings(bindings []ANFBinding, methodName string) error {
+func validateBindings(bindings []ANFBinding, methodName string, mutableCount int) error {
 	for i, binding := range bindings {
 		if binding.Name == "" {
 			return fmt.Errorf("IR validation: method %s binding[%d] has empty name", methodName, i)
@@ -186,12 +196,38 @@ func validateBindings(bindings []ANFBinding, methodName string) error {
 			}
 		}
 
+		// R-126 / CL-BUG-164: add_output state-value arity.
+		//
+		// The source pipeline counts addOutput arity in the typechecker (the
+		// N20 / N23 / N26 negatives). `--ir` runs no frontend, so such a node
+		// reached stack lowering directly, and lowerAddOutput serializes the
+		// OP_RETURN payload with the MIN of the two lists:
+		//
+		//     for i := 0; i < len(stateValues) && i < len(stateProps); i++
+		//
+		// Under-arity therefore emitted an output carrying fewer state fields
+		// than the contract has; over-arity silently dropped the surplus.
+		// Measured through each tier's own --ir CLI on a two-mutable-field
+		// contract (correct arity = 1394 hexchars): go, rust, zig, ruby, python
+		// and java ALL accepted, emitting 1388 and 1396 hexchars respectively.
+		//
+		// CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+		// mutable fields, so a short-payload continuation is spendable only by a
+		// hand-crafted transaction, and the successor it produces is permanently
+		// unspendable because the next call's deserialize_state slices at fixed
+		// offsets. The message is shared verbatim with the other six tiers.
+		if kind == "add_output" && len(binding.Value.StateValues) != mutableCount {
+			return fmt.Errorf(
+				"IR validation: add_output in method '%s' carries %d state values, but the contract declares %d mutable properties. The output's OP_RETURN payload is serialized from this list while deserialize_state slices the declared properties at fixed offsets, so any other count commits to a state payload no SDK-built transaction can produce and a successor that cannot be spent.",
+				methodName, len(binding.Value.StateValues), mutableCount)
+		}
+
 		// Validate nested bindings
 		if kind == "if" {
-			if err := validateBindings(binding.Value.Then, methodName); err != nil {
+			if err := validateBindings(binding.Value.Then, methodName, mutableCount); err != nil {
 				return err
 			}
-			if err := validateBindings(binding.Value.Else, methodName); err != nil {
+			if err := validateBindings(binding.Value.Else, methodName, mutableCount); err != nil {
 				return err
 			}
 		}
@@ -202,7 +238,7 @@ func validateBindings(bindings []ANFBinding, methodName string) error {
 			if binding.Value.Count > MaxLoopCount {
 				return fmt.Errorf("IR validation: method %s binding %s has loop count %d exceeding maximum %d", methodName, binding.Name, binding.Value.Count, MaxLoopCount)
 			}
-			if err := validateBindings(binding.Value.Body, methodName); err != nil {
+			if err := validateBindings(binding.Value.Body, methodName, mutableCount); err != nil {
 				return err
 			}
 		}

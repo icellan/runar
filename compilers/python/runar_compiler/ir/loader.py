@@ -137,6 +137,10 @@ def validate_ir(program: ANFProgram) -> list[str]:
     if not program.contract_name:
         errors.append("contractName is required")
 
+    # R-126 / CL-BUG-164: an add_output must name exactly one state value per
+    # MUTABLE property. Counted once, up front.
+    mutable_count = sum(1 for p in program.properties if not p.readonly)
+
     for i, method in enumerate(program.methods):
         if not method.name:
             errors.append(f"method[{i}] has empty name")
@@ -149,7 +153,9 @@ def validate_ir(program: ANFProgram) -> list[str]:
                 errors.append(
                     f"method {method.name} param {param.name} has empty type"
                 )
-        errors.extend(_validate_bindings(method.body, method.name))
+        errors.extend(
+            _validate_bindings(method.body, method.name, mutable_count)
+        )
 
     for i, prop in enumerate(program.properties):
         if not prop.name:
@@ -231,7 +237,7 @@ def _allowed_arity(name: str):
 
 
 def _validate_bindings(
-    bindings: list[ANFBinding], method_name: str
+    bindings: list[ANFBinding], method_name: str, mutable_count: int
 ) -> list[str]:
     """Validate a list of ANF bindings, including nested ones."""
     errors: list[str] = []
@@ -280,15 +286,45 @@ def _validate_bindings(
                         f"{func_name}() with {got} argument(s); it takes {wanted}"
                     )
 
+        # R-126 / CL-BUG-164: add_output state-value arity.
+        #
+        # The source pipeline counts addOutput arity in the typechecker (the
+        # N20 / N23 / N26 negatives). ``--ir`` runs no frontend, so such a node
+        # reached stack lowering directly, and ``lower_add_output`` serializes
+        # the OP_RETURN payload with the MIN of the two lists. Under-arity
+        # emitted an output carrying fewer state fields than the contract has;
+        # over-arity silently dropped the surplus. Measured through each tier's
+        # own --ir CLI on a two-mutable-field contract (correct arity = 1394
+        # hexchars): go, rust, zig, ruby, python and java ALL accepted, emitting
+        # 1388 and 1396 hexchars respectively.
+        #
+        # CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+        # mutable fields, so a short-payload continuation is spendable only by a
+        # hand-crafted transaction, and the successor it produces is permanently
+        # unspendable because the next call's deserialize_state slices at fixed
+        # offsets. The message is shared verbatim with the other six tiers.
+        if kind == "add_output":
+            got = len(binding.value.state_values or [])
+            if got != mutable_count:
+                errors.append(
+                    f"add_output in method '{method_name}' carries {got} state "
+                    f"values, but the contract declares {mutable_count} mutable "
+                    f"properties. The output's OP_RETURN payload is serialized "
+                    f"from this list while deserialize_state slices the declared "
+                    f"properties at fixed offsets, so any other count commits to "
+                    f"a state payload no SDK-built transaction can produce and a "
+                    f"successor that cannot be spent."
+                )
+
         # Validate nested bindings
         if kind == "if":
             if binding.value.then:
                 errors.extend(
-                    _validate_bindings(binding.value.then, method_name)
+                    _validate_bindings(binding.value.then, method_name, mutable_count)
                 )
             if binding.value.else_:
                 errors.extend(
-                    _validate_bindings(binding.value.else_, method_name)
+                    _validate_bindings(binding.value.else_, method_name, mutable_count)
                 )
 
         if kind == "loop":
@@ -305,7 +341,7 @@ def _validate_bindings(
                 )
             if binding.value.body:
                 errors.extend(
-                    _validate_bindings(binding.value.body, method_name)
+                    _validate_bindings(binding.value.body, method_name, mutable_count)
                 )
 
         if kind == "raw_script":

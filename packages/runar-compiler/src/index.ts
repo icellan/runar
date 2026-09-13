@@ -654,8 +654,10 @@ export function compileFromANF(
  * both shapes so a TS `--from-ir` invocation can consume IR produced by
  * any peer compiler.
  *
- * Throws on malformed JSON. Does NOT perform deep schema validation —
- * downstream stack-lowering will reject malformed IR with an explicit error.
+ * Throws on malformed JSON. Does NOT perform deep schema validation, with one
+ * exception: `add_output` state-value arity is checked here (R-126), because
+ * downstream stack lowering does NOT reject a mismatch — it silently
+ * serializes the min() of the two lists. See `assertAddOutputArity`.
  */
 export function loadANFFromJSON(json: string): ANFProgram {
   // Input-bytes guard: reject obviously oversized IR before JSON.parse.
@@ -700,7 +702,70 @@ export function loadANFFromJSON(json: string): ANFProgram {
   if (!Array.isArray(program.methods)) {
     throw new Error('loadANFFromJSON: missing array field "methods"');
   }
+  assertAddOutputArity(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * R-126 / CL-BUG-164 — every `add_output` must name exactly one state value
+ * per MUTABLE property.
+ *
+ * The source pipeline counts addOutput arity in the typechecker (N20 / N23 /
+ * N26 in the negatives corpus). `--from-ir` runs no frontend, so such a node
+ * reaches stack lowering directly, and every tier's `lowerAddOutput`
+ * serializes the OP_RETURN payload with the MIN of the two lists:
+ *
+ *     for i := 0; i < len(stateValues) && i < len(stateProps); i++
+ *
+ * Under-arity therefore emits an output carrying fewer state fields than the
+ * contract has; over-arity silently drops the surplus. Measured through each
+ * tier's own `--ir` CLI on a two-mutable-field contract (correct arity = 1394
+ * hexchars): go, rust, zig, ruby, python and java ALL accepted, emitting 1388
+ * and 1396 hexchars respectively.
+ *
+ * CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL mutable
+ * fields, so a short-payload continuation is spendable only by a hand-crafted
+ * transaction, and the successor it produces is permanently unspendable —
+ * the next call's `deserialize_state` slices at fixed offsets.
+ *
+ * Enforced at load rather than in stack lowering because the loader is the
+ * trust boundary: it is where IR from outside the compiler enters. Safe to
+ * enforce — across all 101 checked-in IR files in the repo, all 19
+ * `add_output` nodes already satisfy it exactly.
+ *
+ * The message is shared verbatim with the six native tiers.
+ */
+function assertAddOutputArity(program: ANFProgram): void {
+  const mutableCount = program.properties.filter((p) => !p.readonly).length;
+
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string } & Record<string, unknown>;
+      if (value?.kind === 'add_output') {
+        const stateValues = Array.isArray(value.stateValues) ? value.stateValues : [];
+        if (stateValues.length !== mutableCount) {
+          throw new Error(
+            `loadANFFromJSON: add_output in method '${methodName}' carries ` +
+              `${stateValues.length} state values, but the contract declares ` +
+              `${mutableCount} mutable properties. The output's OP_RETURN payload is ` +
+              `serialized from this list while deserialize_state slices the declared ` +
+              `properties at fixed offsets, so any other count commits to a state payload ` +
+              `no SDK-built transaction can produce and a successor that cannot be spent.`,
+          );
+        }
+      }
+      // add_output can sit inside an if-arm or a loop body, not only at the
+      // method's top level.
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
+
+  for (const method of program.methods) {
+    walk(method.body ?? [], method.name);
+  }
 }
 
 /**

@@ -165,6 +165,10 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
         }
     }
 
+    // R-126 / CL-BUG-164: an add_output must name exactly one state value per
+    // MUTABLE property. Counted once, up front.
+    let mutable_count = program.properties.iter().filter(|p| !p.readonly).count();
+
     for (i, method) in program.methods.iter().enumerate() {
         if method.name.is_empty() {
             return Err(format!("IR validation: method[{}] has empty name", i));
@@ -183,7 +187,7 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
                 ));
             }
         }
-        validate_bindings(&method.body, &method.name)?;
+        validate_bindings(&method.body, &method.name, mutable_count)?;
     }
 
     // N-113 / R-081: a contract with no public method has no spending entry
@@ -210,7 +214,11 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), String> {
+fn validate_bindings(
+    bindings: &[ANFBinding],
+    method_name: &str,
+    mutable_count: usize,
+) -> Result<(), String> {
     for (i, binding) in bindings.iter().enumerate() {
         if binding.name.is_empty() {
             return Err(format!(
@@ -272,13 +280,41 @@ fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), S
             }
         }
 
+        // R-126 / CL-BUG-164: add_output state-value arity.
+        //
+        // The source pipeline counts addOutput arity in the typechecker (the
+        // N20 / N23 / N26 negatives). `--ir` runs no frontend, so such a node
+        // reached stack lowering directly, and lower_add_output serializes the
+        // OP_RETURN payload with the MIN of the two lists. Under-arity emitted
+        // an output carrying fewer state fields than the contract has;
+        // over-arity silently dropped the surplus. Measured through each tier's
+        // own --ir CLI on a two-mutable-field contract (correct arity = 1394
+        // hexchars): go, rust, zig, ruby, python and java ALL accepted,
+        // emitting 1388 and 1396 hexchars respectively.
+        //
+        // CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+        // mutable fields, so a short-payload continuation is spendable only by a
+        // hand-crafted transaction, and the successor it produces is permanently
+        // unspendable because the next call's deserialize_state slices at fixed
+        // offsets. The message is shared verbatim with the other six tiers.
+        if let ANFValue::AddOutput { state_values, .. } = &binding.value {
+            if state_values.len() != mutable_count {
+                return Err(format!(
+                    "IR validation: add_output in method '{}' carries {} state values, but the contract declares {} mutable properties. The output's OP_RETURN payload is serialized from this list while deserialize_state slices the declared properties at fixed offsets, so any other count commits to a state payload no SDK-built transaction can produce and a successor that cannot be spent.",
+                    method_name,
+                    state_values.len(),
+                    mutable_count
+                ));
+            }
+        }
+
         // Validate nested bindings
         match &binding.value {
             ANFValue::If {
                 then, else_branch, ..
             } => {
-                validate_bindings(then, method_name)?;
-                validate_bindings(else_branch, method_name)?;
+                validate_bindings(then, method_name, mutable_count)?;
+                validate_bindings(else_branch, method_name, mutable_count)?;
             }
             ANFValue::Loop { count, body, .. } => {
                 // N-115: the unroll ceiling, at the external-input trust
@@ -309,7 +345,7 @@ fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), S
                         method_name, binding.name, count, MAX_LOOP_COUNT
                     ));
                 }
-                validate_bindings(body, method_name)?;
+                validate_bindings(body, method_name, mutable_count)?;
             }
             ANFValue::RawScript {
                 bytes,

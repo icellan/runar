@@ -121,6 +121,10 @@ module RunarCompiler
         errors << "contractName is required"
       end
 
+      # R-126 / CL-BUG-164: an add_output must name exactly one state value per
+      # MUTABLE property. Counted once, up front.
+      mutable_count = program.properties.count { |p| !p.readonly }
+
       program.methods.each_with_index do |m, i|
         if m.name.nil? || m.name.empty?
           errors << "method[#{i}] has empty name"
@@ -135,7 +139,7 @@ module RunarCompiler
           end
         end
 
-        errors.concat(_validate_bindings(m.body, m.name))
+        errors.concat(_validate_bindings(m.body, m.name, mutable_count))
       end
 
       program.properties.each_with_index do |prop, i|
@@ -214,7 +218,7 @@ module RunarCompiler
         "#{got} argument(s); it takes #{wanted}"
     end
 
-    def self._validate_bindings(bindings, method_name)
+    def self._validate_bindings(bindings, method_name, mutable_count)
       errors = []
 
       bindings.each_with_index do |binding, i|
@@ -244,13 +248,43 @@ module RunarCompiler
           errors << err if err
         end
 
+        # R-126 / CL-BUG-164: add_output state-value arity.
+        #
+        # The source pipeline counts addOutput arity in the typechecker (the
+        # N20 / N23 / N26 negatives). `--ir` runs no frontend, so such a node
+        # reached stack lowering directly, and `_lower_add_output` serializes
+        # the OP_RETURN payload with the MIN of the two lists. Under-arity
+        # emitted an output carrying fewer state fields than the contract has;
+        # over-arity silently dropped the surplus. Measured through each tier's
+        # own --ir CLI on a two-mutable-field contract (correct arity = 1394
+        # hexchars): go, rust, zig, ruby, python and java ALL accepted, emitting
+        # 1388 and 1396 hexchars respectively.
+        #
+        # CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+        # mutable fields, so a short-payload continuation is spendable only by a
+        # hand-crafted transaction, and the successor it produces is permanently
+        # unspendable because the next call's deserialize_state slices at fixed
+        # offsets. The message is shared verbatim with the other six tiers.
+        if kind == "add_output"
+          got = (binding.value.state_values || []).length
+          if got != mutable_count
+            errors << "add_output in method '#{method_name}' carries #{got} state " \
+                      "values, but the contract declares #{mutable_count} mutable " \
+                      "properties. The output's OP_RETURN payload is serialized from " \
+                      "this list while deserialize_state slices the declared properties " \
+                      "at fixed offsets, so any other count commits to a state payload " \
+                      "no SDK-built transaction can produce and a successor that cannot " \
+                      "be spent."
+          end
+        end
+
         # Validate nested bindings
         if kind == "if"
           if binding.value.then
-            errors.concat(_validate_bindings(binding.value.then, method_name))
+            errors.concat(_validate_bindings(binding.value.then, method_name, mutable_count))
           end
           if binding.value.else_
-            errors.concat(_validate_bindings(binding.value.else_, method_name))
+            errors.concat(_validate_bindings(binding.value.else_, method_name, mutable_count))
           end
         end
 
@@ -265,7 +299,7 @@ module RunarCompiler
                       "has loop count #{count} exceeding maximum #{MAX_LOOP_COUNT}"
           end
           if binding.value.body
-            errors.concat(_validate_bindings(binding.value.body, method_name))
+            errors.concat(_validate_bindings(binding.value.body, method_name, mutable_count))
           end
         end
 
