@@ -3386,7 +3386,13 @@ module RunarCompiler::Codegen
       max_pow_iterations = 32
       max_pow_iterations.times do |i|
         emit_op({ op: "push", value: { kind: "bigint", big_int: 2 } })
-        emit_op({ op: "pick" })
+        # R-166/R-191: this was the one depth-less `{ op: "pick" }` in the file.
+        # Everywhere else `pick` carries the depth it was picked at (see
+        # emit_pick, which pushes the literal and then records depth:), so a
+        # depth-less one is a different op wearing the same name. The depth here
+        # is the literal 2 pushed on the line above, exactly as the TS reference
+        # and the go / python / java tiers spell it: a raw OP_PICK.
+        emit_opcode("OP_PICK")
         emit_op({ op: "push", value: { kind: "bigint", big_int: i } })
         emit_opcode("OP_GREATERTHAN")
         emit_op({ op: "if", then: [
