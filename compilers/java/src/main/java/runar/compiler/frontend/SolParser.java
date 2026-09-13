@@ -573,12 +573,45 @@ public final class SolParser {
             expect(TOK_RBRACE);
 
             if (constructor == null) {
+                // R-114: synthesise one from the declared properties, with
+                // super() first — CLAUDE.md, "Auto-generated constructors MUST
+                // include super() as the first statement". This used to build
+                // an EMPTY constructor, which validation then rejected with
+                // "constructor must call super() as its first statement": a
+                // `.runar.sol` with no constructor compiled in ts/go/zig/ruby
+                // and failed here and in python, while rust refused it at parse
+                // time. Mirrors compilers/go/frontend/parser_sol.go:495-530.
+                SourceLocation synthLoc = new SourceLocation(fileName, 1, 0);
+                List<PropertyNode> uninit = new ArrayList<>();
+                for (PropertyNode pn : properties) {
+                    if (pn.initializer() == null) {
+                        uninit.add(pn);
+                    }
+                }
+                List<ParamNode> synthParams = new ArrayList<>();
+                List<Expression> synthSuperArgs = new ArrayList<>();
+                for (PropertyNode pn : uninit) {
+                    synthParams.add(new ParamNode(pn.name(), pn.type()));
+                    synthSuperArgs.add(new Identifier(pn.name()));
+                }
+                List<Statement> synthBody = new ArrayList<>();
+                synthBody.add(new ExpressionStatement(
+                    new CallExpr(new Identifier("super"), synthSuperArgs),
+                    synthLoc
+                ));
+                for (PropertyNode pn : uninit) {
+                    synthBody.add(new AssignmentStatement(
+                        new PropertyAccessExpr(pn.name()),
+                        new Identifier(pn.name()),
+                        synthLoc
+                    ));
+                }
                 constructor = new MethodNode(
                     "constructor",
-                    List.of(),
-                    List.of(),
+                    synthParams,
+                    synthBody,
                     Visibility.PUBLIC,
-                    new SourceLocation(fileName, 1, 0)
+                    synthLoc
                 );
             }
 

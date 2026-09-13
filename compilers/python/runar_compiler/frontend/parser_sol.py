@@ -420,12 +420,40 @@ class _SolParser:
         self.expect(TOK_RBRACE)
 
         if constructor is None:
+            # R-114: synthesise one from the declared properties, with super()
+            # first — CLAUDE.md, "Auto-generated constructors MUST include
+            # super() as the first statement". This used to build an EMPTY
+            # constructor, which validation then rejected with "constructor
+            # must call super() as its first statement": a `.runar.sol` with no
+            # constructor compiled in ts/go/zig/ruby and failed here and in
+            # java, while rust refused it at parse time. Mirrors
+            # compilers/go/frontend/parser_sol.go:495-530.
+            loc = SourceLocation(file=self.file_name, line=1, column=0)
+            uninit = [prop for prop in properties if prop.initializer is None]
+            params = [ParamNode(name=prop.name, type=prop.type) for prop in uninit]
+            body: list[Statement] = [
+                ExpressionStmt(
+                    expr=CallExpr(
+                        callee=Identifier(name="super"),
+                        args=[Identifier(name=prop.name) for prop in uninit],
+                    ),
+                    source_location=loc,
+                )
+            ]
+            for prop in uninit:
+                body.append(
+                    AssignmentStmt(
+                        target=PropertyAccessExpr(property=prop.name),
+                        value=Identifier(name=prop.name),
+                        source_location=loc,
+                    )
+                )
             constructor = MethodNode(
                 name="constructor",
-                params=[],
-                body=[],
+                params=params,
+                body=body,
                 visibility="public",
-                source_location=SourceLocation(file=self.file_name, line=1, column=0),
+                source_location=loc,
             )
 
         return ContractNode(

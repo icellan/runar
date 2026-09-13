@@ -22,6 +22,7 @@
  *   R-085  undeclared identifier (Java)       located diagnostic, not acceptance
  *   N-134  256-bit hex literal                 7 tiers identical; hex spelling ==
  *                                              decimal spelling, in every tier
+ *   R-114  .runar.sol with no constructor      7 tiers accept and agree (was 4/3)
  *
  * R-076 deserves a note: it is only TESTABLE at all since N-124 taught the Zig
  * tier to compile `this.arr[i]++`. Before that, the probe could not reach the
@@ -306,6 +307,11 @@ const MUST_COMPILE = [
     file: 'MutLocal.runar.ts',
     finding: 'R-077 / R-078',
     what: 'a method whose only mutation is through a local binding',
+  },
+  {
+    file: 'NoCtorSol.runar.sol',
+    finding: 'R-114',
+    what: 'a `.runar.sol` contract with no constructor — four tiers synthesised one, three refused',
   },
   {
     file: 'HexBigLiteral.runar.ts',
