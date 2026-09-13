@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "R-122 / R-124 (CL-BUG-130, CL-BUG-162): a call to a function name no tier",
+    "knows. The typechecker rejects this on the source path; --ir runs no",
+    "frontend at all, so this is how it reaches codegen.",
+    "",
+    "Measured before the fix, same file through every --ir CLI:",
+    "  go / ruby / python   compiled clean, script 00 — the OP_0 placeholder",
+    "  rust / zig / java    refused",
+    "",
+    "The placeholder is not inert: it is pushed where the call's result belongs,",
+    "so it becomes the operand of the assert below. An unknown name therefore",
+    "compiled into an unconditionally FALSE spend instead of a rejected program."
+  ],
+  "contractName": "UnknownBuiltinCall",
+  "properties": [
+    { "name": "threshold", "type": "bigint", "readonly": true }
+  ],
+  "methods": [
+    {
+      "name": "go",
+      "isPublic": true,
+      "params": [{ "name": "x", "type": "bigint" }],
+      "body": [
+        { "name": "t0", "value": { "kind": "load_param", "name": "x" } },
+        { "name": "t1", "value": { "kind": "call", "func": "mysteryBuiltin", "args": ["t0"] } },
+        { "name": "t2", "value": { "kind": "assert", "value": "t1" } }
+      ]
+    }
+  ]
+}

@@ -1960,10 +1960,21 @@ module RunarCompiler::Codegen
 
       opcodes = BUILTIN_OPCODES[func_name]
       if opcodes.nil?
-        # Unknown function -- push placeholder
-        emit_push_int(0)
-        @sm.push(binding_name)
-        return
+        # R-124 / CL-BUG-162. This used to push OP_0 and carry on. The
+        # placeholder does not stay unused: it is pushed where the call's
+        # result belongs, so it becomes the value the contract asserts on, and
+        # a name this tier does not know compiles into an unconditionally FALSE
+        # spend rather than a rejected program. Reproduced through `--ir` with
+        # `toByteString` renamed: Ruby and Go both emitted 7c00827700a077 --
+        # the `00` is the placeholder -- while Java refused.
+        #
+        # Unreachable from source (the typechecker rejects unknown functions
+        # first), reachable from `--ir`, which runs no frontend. This file
+        # already refuses exactly this in two other places, in these words.
+        raise "Stack lowering: call to unknown function '#{func_name}' " \
+              "(binding '#{binding_name}'). Refusing to emit a silent OP_0 placeholder -- " \
+              "the value would become the contract's assert operand, making the spend " \
+              "unconditionally false rather than rejecting the program."
       end
 
       opcodes.each { |code| emit_opcode(code) }
