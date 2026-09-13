@@ -190,15 +190,27 @@ def _optimize_ec(program: ANFProgram) -> ANFProgram:
     return optimize_ec(program)
 
 
-def _eliminate_dead_code(program: ANFProgram) -> ANFProgram:
-    """Dead Code Elimination (Pass 4.75) -- discrete named pass.
-
-    See frontend/dce.py. Idempotent w.r.t. the EC optimizer's internal DCE;
-    runs as a safety net for any post-EC residual dead bindings and to
-    mirror the standalone DCE pass shape used by the Zig reference compiler.
-    """
-    from runar_compiler.frontend.dce import eliminate_dead_code
-    return eliminate_dead_code(program)
+# R-240: a `_eliminate_dead_code` wrapper used to sit here, documented as
+# "Dead Code Elimination (Pass 4.75) -- discrete named pass" that "runs as a
+# safety net for any post-EC residual dead bindings". It was called by none of
+# the three pipeline entry points, so it ran never and guarded nothing.
+#
+# Where dead-binding elimination actually happens: frontend/anf_optimize.py's
+# optimize_ec imports `eliminate_dead_bindings` from frontend/dce.py and runs it
+# only when the program contains EC calls — see the `if not any_changed: return
+# program` gate. A program with no EC calls is not DCE'd at all.
+#
+# That gate is load-bearing, measured rather than assumed: moving the sweep ahead
+# of it so DCE runs on every program makes this tier FAIL TO COMPILE 11 of the 78
+# conformance fixtures — all-readonly-cleanstack, bounded-loop,
+# branch-merged-locals, function-patterns, if-else, if-without-else,
+# loop-if-merged-locals, loop-shapes, merge-locals-prop-updates,
+# merge-locals-shapes, multi-method. Exactly the same 11 the TS tier fails under
+# the same probe (R-194), so this is the shared DCE design removing bindings
+# stack lowering still needs — filed as N-140 — and not a Python bug.
+#
+# `eliminate_dead_code` (the whole-program entry) is still used, on a deep-copied
+# probe, by _collect_referenced_props below, for the @embedAlways warning.
 
 
 def _lower_to_stack(program: ANFProgram) -> list[Any]:

@@ -6,10 +6,23 @@ check_preimage, add_output, add_raw_output, add_data_output, call,
 method_call, raw_script). Iterates to a fixed point so transitively
 dead bindings are also removed.
 
-This module is the canonical, standalone DCE pass for the Python
-compiler. It mirrors the Zig reference implementation in
-``compilers/zig/src/passes/dce.zig``. The earlier inline implementation
-in ``anf_optimize.py`` has been surgically extracted here.
+R-240: this used to say "the canonical, standalone DCE pass for the
+Python compiler". It is canonical — every dead-binding sweep in this
+tier comes from here — but it is NOT standalone. Its only pipeline
+caller is ``anf_optimize.optimize_ec``, which runs it after the
+``if not any_changed: return program`` gate, so a program containing no
+EC calls is never swept. ``eliminate_dead_code`` has one other caller,
+``compiler._collect_referenced_props``, and that one runs on a
+deep-copied probe purely to compute the @embedAlways warning.
+
+The gate is load-bearing. Moving the sweep ahead of it makes this tier
+fail to compile 11 of the 78 conformance fixtures (the same 11 the TS
+tier fails under the same probe, R-194) — DCE as written removes
+bindings stack lowering still needs. That is N-140, and it is a defect
+to fix inside DCE before it is a wiring change.
+
+The earlier inline implementation in ``anf_optimize.py`` has been
+surgically extracted here.
 
 Behaviour: byte-for-byte identical to the previous inline DCE in
 ``anf_optimize.py``. Verified by the conformance suite (cross-tier hex
