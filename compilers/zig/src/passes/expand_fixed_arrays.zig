@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const types = @import("../ir/types.zig");
+const typecheck = @import("typecheck.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -130,6 +131,42 @@ const ArrayMeta = struct {
     /// For nested arrays, per-slot sub-meta keyed by slot name.
     nested: ?std.StringHashMapUnmanaged(*ArrayMeta) = null,
 };
+
+/// Which literal family a FixedArray element type demands, or null when the
+/// type is not one this pass can judge (it then declines to complain). N-133.
+///
+/// The two predicates are typecheck.zig's, not copies -- a second list is how
+/// the ByteString family drifted once already (see the N-076 note there).
+fn familyOfElementType(t: RunarType) ?[]const u8 {
+    if (t == .boolean) return "boolean";
+    if (typecheck.isBigintFamily(t)) return "bigint";
+    if (typecheck.isByteFamily(t)) return "ByteString";
+    return null;
+}
+
+/// The literal family of an initializer element, or null. N-133.
+fn familyOfLiteral(expr: Expression) ?[]const u8 {
+    return switch (expr) {
+        .literal_int => "bigint",
+        .literal_bool => "boolean",
+        .literal_bytes => "ByteString",
+        else => null,
+    };
+}
+
+/// The declared element type as it appears in a diagnostic. N-133.
+fn typeDisplayName(t: RunarType) []const u8 {
+    return switch (t) {
+        .bigint => "bigint", .boolean => "boolean", .byte_string => "ByteString",
+        .pub_key => "PubKey", .sig => "Sig", .sha256 => "Sha256",
+        .ripemd160 => "Ripemd160", .addr => "Addr",
+        .sig_hash_preimage => "SigHashPreimage", .rabin_sig => "RabinSig",
+        .rabin_pub_key => "RabinPubKey", .point => "Point",
+        .p256_point => "P256Point", .p384_point => "P384Point",
+        .fixed_array => "FixedArray",
+        else => "unknown",
+    };
+}
 
 const Ctx = struct {
     allocator: Allocator,
@@ -316,6 +353,23 @@ const Ctx = struct {
                 };
                 try self.expandMeta(out, sub, readonly, sub_init, chain);
             } else {
+                // N-133: the element-type check. typecheck's array-literal
+                // branch never sees a property initializer -- it is consumed
+                // here -- so before this every tier accepted
+                // `FixedArray<bigint, 2> = [1n, true]` and emitted a DIFFERENT
+                // program (the boolean became the number 1, a hex literal
+                // became a byte string under OP_ADD).
+                if (slot_init) |si| {
+                    const want = familyOfElementType(meta.element);
+                    const got = familyOfLiteral(si);
+                    if (want != null and got != null and !std.mem.eql(u8, want.?, got.?)) {
+                        try self.pushErrorFmt(
+                            "Property '{s}' initializer element {d} is a {s} literal, but the FixedArray element type is '{s}'",
+                            .{ meta.root_name, i, got.?, typeDisplayName(meta.element) },
+                        );
+                    }
+                }
+
                 try out.append(self.allocator, PropertyNode{
                     .name = slot,
                     .type_info = meta.element,

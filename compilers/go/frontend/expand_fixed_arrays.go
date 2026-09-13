@@ -260,6 +260,42 @@ func (ctx *expandContext) extractArrayLiteralElements(prop PropertyNode, meta *a
 	return arrLit.Elements, extractOK
 }
 
+// familyOfElementType reports which literal family a FixedArray element type
+// demands: "bigint", "boolean", "ByteString", or "" when the type is not one
+// this pass can judge (it then declines to complain). N-133.
+//
+// The two predicates are typecheck.go's, not copies -- a second list is how
+// the ByteString family drifted once already.
+func familyOfElementType(t TypeNode) string {
+	prim, ok := t.(PrimitiveType)
+	if !ok {
+		return ""
+	}
+	switch {
+	case prim.Name == "boolean":
+		return "boolean"
+	case isBigintFamily(prim.Name):
+		return "bigint"
+	case isByteFamily(prim.Name):
+		return "ByteString"
+	}
+	return ""
+}
+
+// familyOfLiteral reports the literal family of an initializer element, or ""
+// when the expression is not a literal this pass can judge. N-133.
+func familyOfLiteral(expr Expression) string {
+	switch expr.(type) {
+	case BigIntLiteral:
+		return "bigint"
+	case BoolLiteral:
+		return "boolean"
+	case ByteStringLiteral:
+		return "ByteString"
+	}
+	return ""
+}
+
 // expandArrayMeta recursively emits scalar leaf properties for the given
 // array meta. Initializer elements are distributed pairwise; for nested
 // arrays a non-array-literal element is a compile error.
@@ -316,6 +352,30 @@ func (ctx *expandContext) expandArrayMeta(
 			}
 			out = append(out, ctx.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere)...)
 		} else {
+			// N-133: the element-type check. typecheck's array-literal branch
+			// never sees a property initializer -- it is consumed here -- so
+			// before this every tier accepted
+			// `FixedArray<bigint, 2> = [1n, true]` and emitted a DIFFERENT
+			// program (the boolean became the number 1, a hex literal became a
+			// byte string under OP_ADD).
+			if slotInit != nil {
+				want := familyOfElementType(meta.elementType)
+				got := familyOfLiteral(slotInit)
+				if want != "" && got != "" && want != got {
+					declared := "FixedArray"
+					if prim, ok := meta.elementType.(PrimitiveType); ok {
+						declared = prim.Name
+					}
+					ctx.pushError(
+						fmt.Sprintf(
+							"Property '%s' initializer element %d is a %s literal, but the FixedArray element type is '%s'",
+							meta.rootName, i, got, declared,
+						),
+						loc,
+					)
+				}
+			}
+
 			out = append(out, PropertyNode{
 				Name:                slot,
 				Type:                meta.elementType,

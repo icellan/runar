@@ -242,7 +242,10 @@ pub fn isByteFamily(t: RunarType) bool {
 }
 
 /// BigInt-family types: all are subtypes of bigint.
-fn isBigintFamily(t: RunarType) bool {
+///
+/// `pub` for the same reason as `isByteFamily` above: expand_fixed_arrays.zig
+/// needs the question answered (N-133) and must not keep a second copy.
+pub fn isBigintFamily(t: RunarType) bool {
     return switch (t) {
         .bigint, .rabin_sig, .rabin_pub_key => true,
         else => false,

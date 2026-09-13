@@ -44,6 +44,7 @@
 
 require_relative "ast_nodes"
 require_relative "diagnostic"
+require_relative "typecheck"
 
 module RunarCompiler
   module Frontend
@@ -272,6 +273,30 @@ module RunarCompiler
         nil
       end
 
+      # Which literal family a FixedArray element type demands: "bigint",
+      # "boolean", "ByteString", or +nil+ when the type is not one this pass
+      # can judge (it then declines to complain).  N-133.
+      #
+      # The two predicates are typecheck's, not copies -- a second list is how
+      # the ByteString family drifted once already.
+      def family_of_element_type(type_node)
+        return nil unless type_node.is_a?(PrimitiveType)
+        return "boolean" if type_node.name == "boolean"
+        return "bigint" if Frontend.bigint_family?(type_node.name)
+        return "ByteString" if Frontend.byte_family?(type_node.name)
+
+        nil
+      end
+
+      # The literal family of an initializer element, or +nil+.  N-133.
+      def family_of_literal(expr)
+        return "bigint" if expr.is_a?(BigIntLiteral)
+        return "boolean" if expr.is_a?(BoolLiteral)
+        return "ByteString" if expr.is_a?(ByteStringLiteral)
+
+        nil
+      end
+
       # Recursively emit scalar leaf properties.  Nested arrays descend; a
       # non-array-literal element at a nested level is a compile error.  Each
       # leaf PropertyNode receives the full +synthetic_array_chain+,
@@ -309,6 +334,25 @@ module RunarCompiler
             end
             out.concat(expand_array_meta(nested_meta, readonly, loc, nested_init, chain_here))
           else
+            # N-133: the element-type check. typecheck's array-literal branch
+            # never sees a property initializer -- it is consumed here -- so
+            # before this every tier accepted
+            # +FixedArray<bigint, 2> = [1n, true]+ and emitted a DIFFERENT
+            # program (the boolean became the number 1, a hex literal became a
+            # byte string under OP_ADD).
+            unless slot_init.nil?
+              want = family_of_element_type(meta.element_type)
+              got = family_of_literal(slot_init)
+              if !want.nil? && !got.nil? && want != got
+                declared = meta.element_type.is_a?(PrimitiveType) ? meta.element_type.name : "FixedArray"
+                add_error(
+                  "Property '#{meta.root_name}' initializer element #{i} is a #{got} literal, " \
+                  "but the FixedArray element type is '#{declared}'",
+                  loc: loc
+                )
+              end
+            end
+
             out << PropertyNode.new(
               name: slot,
               type: meta.element_type,

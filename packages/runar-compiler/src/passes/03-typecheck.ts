@@ -273,6 +273,16 @@ export function isByteStringFamilyType(t: string): boolean {
   return BYTESTRING_SUBTYPES.has(t as TType);
 }
 
+/**
+ * Is `t` a member of the bigint family — a value that sits on the stack as a
+ * script NUMBER? The counterpart of `isByteStringFamilyType`, exported for the
+ * same reason: 03b-expand-fixed-arrays needs the question answered and must
+ * not keep a second copy of the list (N-133).
+ */
+export function isBigintFamilyType(t: string): boolean {
+  return BIGINT_SUBTYPES.has(t as TType);
+}
+
 function isSubtype(actual: TType, expected: TType): boolean {
   if (actual === expected) return true;
 

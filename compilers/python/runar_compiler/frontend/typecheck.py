@@ -331,8 +331,12 @@ def is_bigint_family(t: str) -> bool:
     return t in _BIGINT_SUBTYPES
 
 
-def _is_byte_family(t: str) -> bool:
-    """Return True if *t* belongs to the ByteString type family."""
+def is_byte_family(t: str) -> bool:
+    """Return True if *t* belongs to the ByteString type family.
+
+    Public (no leading underscore) because ``expand_fixed_arrays`` needs the
+    question answered for N-133 and must not keep a second copy of the list.
+    """
     return t in _BYTESTRING_SUBTYPES
 
 
@@ -700,7 +704,7 @@ class _TypeChecker:
         right_type = self._infer_expr_type(e.right, env)
 
         # ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
-        if e.op == "+" and _is_byte_family(left_type) and _is_byte_family(right_type):
+        if e.op == "+" and is_byte_family(left_type) and is_byte_family(right_type):
             return "ByteString"
 
         # Arithmetic: bigint x bigint -> bigint
@@ -767,7 +771,7 @@ class _TypeChecker:
 
         # Bitwise operators: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
         if e.op in ("&", "|", "^"):
-            if _is_byte_family(left_type) and _is_byte_family(right_type):
+            if is_byte_family(left_type) and is_byte_family(right_type):
                 return "ByteString"
             if not is_bigint_family(left_type):
                 self._add_error(
@@ -803,7 +807,7 @@ class _TypeChecker:
             return "bigint"
 
         if e.op == "~":
-            if _is_byte_family(operand_type):
+            if is_byte_family(operand_type):
                 return "ByteString"
             if not is_bigint_family(operand_type):
                 self._add_error(

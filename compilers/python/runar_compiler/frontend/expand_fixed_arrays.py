@@ -100,11 +100,43 @@ from runar_compiler.frontend.ast_nodes import (
     VariableDeclStmt,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.typecheck import is_bigint_family, is_byte_family
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _family_of_element_type(type_node: TypeNode) -> Optional[str]:
+    """Which literal family a FixedArray element type demands.
+
+    Returns ``"bigint"``, ``"boolean"``, ``"ByteString"``, or ``None`` when the
+    type is not one this pass can judge (it then declines to complain). N-133.
+
+    The two predicates are typecheck's, not copies -- a second list is how the
+    ByteString family drifted once already (see the N-076 note there).
+    """
+    if not isinstance(type_node, PrimitiveType):
+        return None
+    if type_node.name == "boolean":
+        return "boolean"
+    if is_bigint_family(type_node.name):
+        return "bigint"
+    if is_byte_family(type_node.name):
+        return "ByteString"
+    return None
+
+
+def _family_of_literal(expr: Expression) -> Optional[str]:
+    """The literal family of an initializer element, or None. N-133."""
+    if isinstance(expr, BigIntLiteral):
+        return "bigint"
+    if isinstance(expr, BoolLiteral):
+        return "boolean"
+    if isinstance(expr, ByteStringLiteral):
+        return "ByteString"
+    return None
 
 
 @dataclass
@@ -341,6 +373,27 @@ class _ExpandContext:
                     )
                 )
             else:
+                # N-133: the element-type check. typecheck's array-literal
+                # branch never sees a property initializer -- it is consumed
+                # here -- so before this every tier accepted
+                # `FixedArray<bigint, 2> = [1n, true]` and emitted a DIFFERENT
+                # program (the boolean became the number 1, a hex literal
+                # became a byte string under OP_ADD).
+                if slot_init is not None:
+                    want = _family_of_element_type(meta.element_type)
+                    got = _family_of_literal(slot_init)
+                    if want is not None and got is not None and want != got:
+                        declared = (
+                            meta.element_type.name
+                            if isinstance(meta.element_type, PrimitiveType)
+                            else "FixedArray"
+                        )
+                        self._add_error(
+                            f"Property '{meta.root_name}' initializer element {i} is a "
+                            f"{got} literal, but the FixedArray element type is '{declared}'",
+                            loc,
+                        )
+
                 out.append(
                     PropertyNode(
                         name=slot,

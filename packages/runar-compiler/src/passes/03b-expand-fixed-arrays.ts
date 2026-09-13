@@ -95,6 +95,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { isBigintFamilyType, isByteStringFamilyType } from './03-typecheck.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -157,6 +158,32 @@ export function expandFixedArrays(contract: ContractNode): ExpandFixedArraysResu
  * tree. The `leaves` list is every fully-scalar descendant in traversal
  * order, with its flattened synthetic name.
  */
+/**
+ * N-133: which literal family a FixedArray element type demands, or null when
+ * the type is not one this pass can judge (it then declines to complain).
+ *
+ * The two predicates are 03-typecheck's, not copies: a second list is exactly
+ * how the ByteString family drifted once already (see the N-076 note there).
+ */
+type LiteralFamily = 'bigint' | 'boolean' | 'ByteString';
+
+function familyOfElementType(type: TypeNode): LiteralFamily | null {
+  if (type.kind !== 'primitive_type') return null;
+  if (type.name === 'boolean') return 'boolean';
+  if (isBigintFamilyType(type.name)) return 'bigint';
+  if (isByteStringFamilyType(type.name)) return 'ByteString';
+  return null;
+}
+
+function familyOfLiteral(expr: Expression): LiteralFamily | null {
+  switch (expr.kind) {
+    case 'bigint_literal': return 'bigint';
+    case 'bool_literal': return 'boolean';
+    case 'bytestring_literal': return 'ByteString';
+    default: return null;
+  }
+}
+
 interface ArrayMeta {
   rootName: string;
   /** The outer-most fixed_array_type node. Used to read the outer length. */
@@ -426,6 +453,25 @@ class ExpandContext {
         // levels that produced this leaf, outermost first. The
         // iterative re-grouper in the assembler consumes one level
         // at a time, innermost first, until the chain is exhausted.
+        // N-133: the element-type check. 03-typecheck's array_literal branch
+        // never sees a property initializer — it is consumed here — so before
+        // this every tier accepted `FixedArray<bigint, 2> = [1n, true]` and
+        // emitted a DIFFERENT program (the boolean became the number 1, a hex
+        // literal became a byte string under OP_ADD).
+        if (slotInit !== undefined) {
+          const want = familyOfElementType(meta.elementType);
+          const got = familyOfLiteral(slotInit);
+          if (want !== null && got !== null && want !== got) {
+            const declared = meta.elementType.kind === 'primitive_type' ? meta.elementType.name : 'FixedArray';
+            this.errors.push(makeDiagnostic(
+              `Property '${meta.rootName}' initializer element ${i} is a ${got} literal, ` +
+              `but the FixedArray element type is '${declared}'`,
+              'error',
+              loc,
+            ));
+          }
+        }
+
         out.push({
           kind: 'property',
           name: slot,

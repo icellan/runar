@@ -204,7 +204,10 @@ public final class Typecheck {
      * the cross-tier gate; {@code R092UnknownOperandRejectionTest} is the unit
      * gate.
      */
-    private static boolean isBigintFamily(String t) {
+    // Package-visible (N-133): ExpandFixedArrays needs the same question
+    // answered for FixedArray initializer elements, and must not keep a
+    // second copy of BIGINT_SUBTYPES.
+    static boolean isBigintFamily(String t) {
         return BIGINT_SUBTYPES.contains(t);
     }
 

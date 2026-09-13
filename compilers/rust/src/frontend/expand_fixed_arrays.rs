@@ -39,6 +39,7 @@ use std::collections::HashMap;
 
 use super::ast::*;
 use super::diagnostic::Diagnostic;
+use super::typecheck::{is_bigint_subtype, is_bytestring_subtype};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -110,6 +111,39 @@ pub fn expand_fixed_arrays(contract: &ContractNode) -> ExpandResult {
         errors: ctx.errors,
     }
 }
+
+/// Which literal family a FixedArray element type demands, or `None` when the
+/// type is not one this pass can judge (it then declines to complain). N-133.
+///
+/// The two predicates are typecheck.rs's, not copies -- a second list is how
+/// the ByteString family drifted once already (see the N-076 note there).
+fn family_of_element_type(t: &TypeNode) -> Option<&'static str> {
+    let name = match t {
+        TypeNode::Primitive(p) => p.as_str(),
+        _ => return None,
+    };
+    if name == "boolean" {
+        Some("boolean")
+    } else if is_bigint_subtype(name) {
+        Some("bigint")
+    } else if is_bytestring_subtype(name) {
+        Some("ByteString")
+    } else {
+        None
+    }
+}
+
+/// The literal family of an initializer element, or `None` when the expression
+/// is not a literal this pass can judge. N-133.
+fn family_of_literal(expr: &Expression) -> Option<&'static str> {
+    match expr {
+        Expression::BigIntLiteral { .. } => Some("bigint"),
+        Expression::BoolLiteral { .. } => Some("boolean"),
+        Expression::ByteStringLiteral { .. } => Some("ByteString"),
+        _ => None,
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Metadata
@@ -364,6 +398,32 @@ impl<'a> ExpandContext<'a> {
                     self.expand_array_meta(&nested_meta, readonly, loc, nested_init, chain_here);
                 out.extend(nested_expanded);
             } else {
+                // N-133: the element-type check. typecheck's array-literal
+                // branch never sees a property initializer -- it is consumed
+                // here -- so before this every tier accepted
+                // `FixedArray<bigint, 2> = [1n, true]` and emitted a DIFFERENT
+                // program (the boolean became the number 1, a hex literal
+                // became a byte string under OP_ADD).
+                if let Some(init) = slot_init.as_ref() {
+                    if let (Some(want), Some(got)) =
+                        (family_of_element_type(&meta.element_type), family_of_literal(init))
+                    {
+                        if want != got {
+                            let declared = match &meta.element_type {
+                                TypeNode::Primitive(p) => p.as_str(),
+                                _ => "FixedArray",
+                            };
+                            self.errors.push(Diagnostic::error(
+                                format!(
+                                    "Property '{}' initializer element {} is a {} literal, but the FixedArray element type is '{}'",
+                                    meta.root_name, i, got, declared
+                                ),
+                                Some(loc.clone()),
+                            ));
+                        }
+                    }
+                }
+
                 out.push(PropertyNode {
                     name: slot.clone(),
                     prop_type: meta.element_type.clone(),

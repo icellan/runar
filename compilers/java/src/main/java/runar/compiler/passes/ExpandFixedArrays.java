@@ -333,6 +333,31 @@ public final class ExpandFixedArrays {
             return new ExtractResult(false, arr.elements());
         }
 
+        /**
+         * Which literal family a FixedArray element type demands: "bigint",
+         * "boolean", "ByteString", or null when the type is not one this pass
+         * can judge (it then declines to complain). N-133.
+         *
+         * <p>The two predicates are Typecheck's, not copies -- a second list is
+         * how the ByteString family drifted once already.
+         */
+        private static String familyOfElementType(TypeNode type) {
+            if (!(type instanceof PrimitiveType prim)) return null;
+            String name = prim.name().canonical();
+            if ("boolean".equals(name)) return "boolean";
+            if (Typecheck.isBigintFamily(name)) return "bigint";
+            if (Typecheck.isByteStringFamily(name)) return "ByteString";
+            return null;
+        }
+
+        /** The literal family of an initializer element, or null. N-133. */
+        private static String familyOfLiteral(Expression expr) {
+            if (expr instanceof BigIntLiteral) return "bigint";
+            if (expr instanceof BoolLiteral) return "boolean";
+            if (expr instanceof ByteStringLiteral) return "ByteString";
+            return null;
+        }
+
         List<PropertyNode> expandArrayMeta(
             ArrayMeta meta,
             boolean readonly,
@@ -372,6 +397,28 @@ public final class ExpandFixedArrays {
                     }
                     out.addAll(expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere));
                 } else {
+                    // N-133: the element-type check. Typecheck's array-literal
+                    // branch never sees a property initializer -- it is
+                    // consumed here -- so before this every tier accepted
+                    // `FixedArray<bigint, 2> = [1n, true]` and emitted a
+                    // DIFFERENT program (the boolean became the number 1, a hex
+                    // literal became a byte string under OP_ADD).
+                    if (slotInit != null) {
+                        String want = familyOfElementType(meta.elementType);
+                        String got = familyOfLiteral(slotInit);
+                        if (want != null && got != null && !want.equals(got)) {
+                            String declared = (meta.elementType instanceof PrimitiveType p)
+                                ? p.name().canonical()
+                                : "FixedArray";
+                            error(
+                                "Property '" + meta.rootName + "' initializer element " + i
+                                    + " is a " + got + " literal, but the FixedArray element type is '"
+                                    + declared + "'",
+                                loc
+                            );
+                        }
+                    }
+
                     out.add(new PropertyNode(
                         slot,
                         meta.elementType,

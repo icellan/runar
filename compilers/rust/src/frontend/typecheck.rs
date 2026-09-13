@@ -235,7 +235,11 @@ pub(crate) fn is_bytestring_subtype(t: &str) -> bool {
 }
 
 /// Bigint subtypes -- types represented as integers on the stack.
-fn is_bigint_subtype(t: &str) -> bool {
+///
+/// `pub(crate)` for the same reason as `is_bytestring_subtype` above:
+/// `expand_fixed_arrays.rs` needs the question answered (N-133) and must not
+/// keep a second copy of the list.
+pub(crate) fn is_bigint_subtype(t: &str) -> bool {
     matches!(t, "bigint" | "RabinSig" | "RabinPubKey")
 }
 
