@@ -1908,11 +1908,23 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 
 	opcodes, ok := builtinOpcodes[funcName]
 	if !ok {
-		// Unknown function — push a placeholder. This can happen for
-		// private method calls in non-public methods that are never emitted.
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
-		ctx.sm.push(bindingName)
-		return
+		// R-122 / CL-BUG-130. This used to push OP_0 and carry on, with the
+		// comment "this can happen for private method calls in non-public
+		// methods that are never emitted" — but the placeholder does not stay
+		// unemitted: it becomes the VALUE the contract goes on to assert, so a
+		// name this tier does not know compiles into an always-false spend
+		// instead of a refusal.
+		//
+		// Unreachable from source (the typechecker rejects unknown functions
+		// first), reachable from `--ir`, which runs no frontend at all — the
+		// same hole R-012 closed for the SP1 verifier. Two other sites in this
+		// file already refuse exactly this, in the same words.
+		panic(fmt.Errorf(
+			"stack lowering: call to unknown function %q (binding %q). "+
+				"Refusing to emit a silent OP_0 placeholder — the value would "+
+				"become the contract's assert operand, making the spend "+
+				"unconditionally false rather than rejecting the program.",
+			funcName, bindingName))
 	}
 	for _, code := range opcodes {
 		ctx.emitOp(StackOp{Op: "opcode", Code: code})
