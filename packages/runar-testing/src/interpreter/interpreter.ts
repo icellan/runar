@@ -861,10 +861,25 @@ export class RunarInterpreter {
       }
 
       case 'checkMultiSig': {
-        // checkMultiSig is not currently used in any contracts.
-        // When array types are added to the interpreter, this should
-        // verify each sig against the pubkeys using verifyTestMessageSig.
-        return { kind: 'boolean', value: false };
+        // R-112: this used to `return false`, silently.
+        //
+        // A stub that answers is worse than one that refuses. Every
+        // `TestContract` test of a multisig contract was asserting against a
+        // hardcoded failure — the spend could not have succeeded whatever the
+        // signatures were, so the test proved nothing and would not have
+        // noticed a broken contract. The three example suites that call it all
+        // asserted `typeof result.success === 'boolean'`, which is true of any
+        // outcome.
+        //
+        // Verifying properly needs array values, which the interpreter does
+        // not have (see the `array_literal` refusal above). Until it does, say
+        // so: a caller who needs a real answer has ScriptVM, which runs the
+        // compiled OP_CHECKMULTISIG against real secp256k1.
+        throw new Error(
+          'checkMultiSig is not implemented in the interpreter (it cannot verify a ' +
+          'signature set without array values, and must not answer as though it had). ' +
+          'Use ScriptVM — it executes the compiled OP_CHECKMULTISIG against real secp256k1.',
+        );
       }
 
       case 'len': {

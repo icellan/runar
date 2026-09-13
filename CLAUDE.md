@@ -248,7 +248,7 @@ void testCompile() throws Exception {
 }
 ```
 
-`TestContract` uses the interpreter (not the VM) — it tests business logic with mocked crypto (`checkSig` always true, `checkPreimage` always true). Go, Rust, Python, Zig, Ruby, and Java tests run contracts as native code with mock types from the `runar` package/crate/gem/jar. The Java SDK additionally ships an off-chain `ContractSimulator` (`packages/runar-java/src/main/java/runar/lang/runtime/ContractSimulator.java`) for running compiled artifacts against real hashes + real secp256k1 with mocked signature-verify.
+`TestContract` uses the interpreter (not the VM) — it tests business logic. Its crypto is a MIXTURE, not a blanket mock (R-112): `checkSig` and `verifyRabinSig` are REAL (ECDSA over a fixed test message; real Rabin), `checkPreimage` is stubbed to `true`, and `checkMultiSig` REFUSES — it throws rather than answer, because it cannot verify a signature set without array values. Use `ScriptVM` when you need the real OP_CHECKMULTISIG. Go, Rust, Python, Zig, Ruby, and Java tests run contracts as native code with mock types from the `runar` package/crate/gem/jar. The Java SDK additionally ships an off-chain `ContractSimulator` (`packages/runar-java/src/main/java/runar/lang/runtime/ContractSimulator.java`) for running compiled artifacts against real hashes + real secp256k1 with mocked signature-verify.
 
 The `CompileCheck` / `compile_check` functions run the contract through the Rúnar frontend (parse → validate → typecheck) to verify it's valid Rúnar that will compile to Bitcoin Script.
 
