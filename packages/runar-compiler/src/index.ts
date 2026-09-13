@@ -703,7 +703,53 @@ export function loadANFFromJSON(json: string): ANFProgram {
     throw new Error('loadANFFromJSON: missing array field "methods"');
   }
   assertAddOutputArity(program as ANFProgram);
+  assertSuperOnlyInConstructor(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * R-164 / CL-BUG-134 — `super` is only valid in a constructor.
+ *
+ * `super` emits no opcodes (the constructor args are already on the stack) but
+ * stack lowering pushes a stackMap slot for it anyway: +1 model, +0 physical.
+ * On the SOURCE path that is invisible, because the constructor is never
+ * lowered to script. Via `--from-ir` it is reachable, and every subsequent
+ * PICK/ROLL depth in the method is off by one. Measured against the same IR
+ * with the binding deleted:
+ *
+ *     with super     0000 53 7a 53 7a a0 7777    PUSH 3; OP_ROLL, twice
+ *     without super  0000 7b 7b a0 77            OP_ROT, twice
+ *
+ * Three physical items are on the stack at that point, so a depth-3 roll
+ * addresses a fourth that does not exist.
+ *
+ * Refusing beats inventing a physical push for a call with no runtime meaning:
+ * a scan of all 114 checked-in IR files found 110 `super` calls and every one
+ * of them is inside a constructor. Message shared with the six native loaders.
+ */
+function assertSuperOnlyInConstructor(program: ANFProgram): void {
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string; func?: string } & Record<string, unknown>;
+      if (value?.kind === 'call' && value.func === 'super') {
+        throw new Error(
+          `loadANFFromJSON: super() is only valid in a constructor; method ` +
+            `'${methodName}' calls it. It emits no opcodes — the constructor args are ` +
+            `already on the stack — so stack lowering pushes a model slot with no ` +
+            `physical value, and every later PICK/ROLL depth in the method is off by one.`,
+        );
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
+
+  for (const method of program.methods) {
+    if (method.name === 'constructor') continue;
+    walk(method.body ?? [], method.name);
+  }
 }
 
 /**

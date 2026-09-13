@@ -280,6 +280,23 @@ fn validate_bindings(
             }
         }
 
+        // R-164 / CL-BUG-134: `super` outside a constructor.
+        //
+        // `super` emits no opcodes — the constructor args are already on the
+        // stack — but stack lowering pushes a stackMap slot for it anyway:
+        // +1 model, +0 physical. Invisible on the SOURCE path (the constructor
+        // is never lowered to script) and reachable via `--ir`, where every
+        // subsequent PICK/ROLL depth is off by one. Refusing beats inventing a
+        // physical push for a call with no runtime meaning.
+        if let ANFValue::Call { func, .. } = &binding.value {
+            if func == "super" && method_name != "constructor" {
+                return Err(format!(
+                    "IR validation: super() is only valid in a constructor; method '{}' calls it. It emits no opcodes — the constructor args are already on the stack — so stack lowering pushes a model slot with no physical value, and every later PICK/ROLL depth in the method is off by one.",
+                    method_name
+                ));
+            }
+        }
+
         // R-126 / CL-BUG-164: add_output state-value arity.
         //
         // The source pipeline counts addOutput arity in the typechecker (the

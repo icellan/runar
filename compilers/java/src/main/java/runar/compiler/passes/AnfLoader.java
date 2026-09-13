@@ -146,6 +146,9 @@ public final class AnfLoader {
         }
         for (AnfMethod m : methods) {
             String err = checkAddOutputArity(m.body(), m.name(), mutableCount);
+            if (err == null && !"constructor".equals(m.name())) {
+                err = checkNoSuperCall(m.body(), m.name());
+            }
             if (err != null) {
                 throw new RuntimeException(err);
             }
@@ -187,6 +190,49 @@ public final class AnfLoader {
                 }
             } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
                 String err = checkAddOutputArity(loop.body(), methodName, mutableCount);
+                if (err != null) {
+                    return err;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Refuse a {@code super} call anywhere in a non-constructor method body
+     * (R-164).
+     *
+     * <p>{@code super} emits no opcodes — the constructor args are already on
+     * the stack — but stack lowering pushes a model slot for it anyway: +1
+     * model, +0 physical. On the source path that is invisible because the
+     * constructor is never lowered to script; via {@code --ir} it is reachable,
+     * and every subsequent PICK/ROLL depth in the method is off by one.
+     * Measured against the same IR with the binding deleted: PUSH 3; OP_ROLL
+     * where the correct lowering emits OP_ROT, addressing a fourth stack item
+     * that does not exist.
+     */
+    private static String checkNoSuperCall(List<AnfBinding> bindings, String methodName) {
+        if (bindings == null) {
+            return null;
+        }
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            if (v instanceof runar.compiler.ir.anf.Call call && "super".equals(call.func())) {
+                return "super() is only valid in a constructor; method '" + methodName
+                    + "' calls it. It emits no opcodes — the constructor args are already on the"
+                    + " stack — so stack lowering pushes a model slot with no physical value, and"
+                    + " every later PICK/ROLL depth in the method is off by one.";
+            }
+            if (v instanceof runar.compiler.ir.anf.If branch) {
+                String err = checkNoSuperCall(branch.thenBranch(), methodName);
+                if (err == null) {
+                    err = checkNoSuperCall(branch.elseBranch(), methodName);
+                }
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                String err = checkNoSuperCall(loop.body(), methodName);
                 if (err != null) {
                     return err;
                 }

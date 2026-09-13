@@ -129,3 +129,82 @@ describe('R-126 add_output state-value arity on the --ir path', () => {
     expect(() => loadANFFromJSON(nested)).toThrow(/add_output/);
   });
 });
+
+/**
+ * R-164 / CL-BUG-134 — `super` outside a constructor, checked at the same trust
+ * boundary and for the same reason: the loader is where IR from outside the
+ * compiler enters.
+ *
+ * `super` emits no opcodes but stack lowering pushes a model slot for it
+ * anyway, so every later PICK/ROLL depth is off by one. Measured on the Go tier
+ * against the same IR with the binding deleted:
+ *
+ *     with super     0000 53 7a 53 7a a0 7777    PUSH 3; OP_ROLL, twice
+ *     without super  0000 7b 7b a0 77            OP_ROT, twice
+ *
+ * The six native tiers are gated by
+ * `conformance/negatives/ir/I14-super-outside-constructor.ir.json`.
+ */
+describe('R-164 super() outside a constructor', () => {
+  const withSuper = (methodName: string) =>
+    JSON.stringify({
+      contractName: 'SuperProbe',
+      properties: [{ name: 'a', type: 'bigint', readonly: true }],
+      methods: [
+        {
+          name: methodName,
+          isPublic: methodName !== 'constructor',
+          params: [{ name: 'x', type: 'bigint' }],
+          body: [
+            { name: 't0', value: { kind: 'load_prop', name: 'a' } },
+            { name: 't1', value: { kind: 'call', func: 'super', args: ['t0'] } },
+          ],
+        },
+      ],
+    });
+
+  it('refuses it in a public method', () => {
+    expect(() => loadANFFromJSON(withSuper('go'))).toThrow(/super\(\).*constructor/s);
+  });
+
+  it('names the method, so a multi-method program says which one', () => {
+    let message = '';
+    try {
+      loadANFFromJSON(withSuper('spend'));
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("'spend'");
+  });
+
+  it('accepts it in the constructor — the only place it means anything', () => {
+    expect(() => loadANFFromJSON(withSuper('constructor'))).not.toThrow();
+  });
+
+  it('sees it nested inside an if-branch', () => {
+    const nested = JSON.stringify({
+      contractName: 'SuperProbe',
+      properties: [{ name: 'a', type: 'bigint', readonly: true }],
+      methods: [
+        {
+          name: 'go',
+          isPublic: true,
+          params: [{ name: 'x', type: 'bigint' }],
+          body: [
+            { name: 't0', value: { kind: 'load_param', name: 'x' } },
+            {
+              name: 't1',
+              value: {
+                kind: 'if',
+                cond: 't0',
+                then: [{ name: 't2', value: { kind: 'call', func: 'super', args: [] } }],
+                else: [],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(() => loadANFFromJSON(nested)).toThrow(/super\(\)/);
+  });
+});

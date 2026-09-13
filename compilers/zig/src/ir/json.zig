@@ -38,6 +38,12 @@ const ParseError = error{
     // honour. Zig's IR loader carries no message payload, so the error name is
     // the whole diagnostic and has to say which rule fired.
     AddOutputArityMismatch,
+    // R-164 / CL-BUG-134: a `super` call outside a constructor. `super` emits
+    // no opcodes — the constructor args are already on the stack — but stack
+    // lowering pushes a model slot for it anyway (+1 model, +0 physical), so
+    // every later PICK/ROLL depth in the method is off by one. Distinct error
+    // name because Zig's IR loader carries no message payload.
+    SuperOutsideConstructor,
 };
 
 const max_parse_depth: u32 = 256;
@@ -210,6 +216,7 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     }
     for (method_list.items) |m| {
         try checkAddOutputArity(m.body, mutable_count);
+        if (!std.mem.eql(u8, m.name, "constructor")) try checkNoSuperCall(m.body);
     }
 
     return types.ANFProgram{
@@ -235,6 +242,24 @@ fn checkAddOutputArity(bindings: []const types.ANFBinding, mutable_count: usize)
                 try checkAddOutputArity(iv.@"else", mutable_count);
             },
             .loop => |lv| try checkAddOutputArity(lv.body, mutable_count),
+            else => {},
+        }
+    }
+}
+
+/// Refuse a `super` call anywhere in a non-constructor method body (R-164).
+/// See the `SuperOutsideConstructor` error for why.
+fn checkNoSuperCall(bindings: []const types.ANFBinding) ParseError!void {
+    for (bindings) |binding| {
+        switch (binding.value) {
+            .call => |c| {
+                if (std.mem.eql(u8, c.func, "super")) return ParseError.SuperOutsideConstructor;
+            },
+            .@"if" => |iv| {
+                try checkNoSuperCall(iv.then);
+                try checkNoSuperCall(iv.@"else");
+            },
+            .loop => |lv| try checkNoSuperCall(lv.body),
             else => {},
         }
     }

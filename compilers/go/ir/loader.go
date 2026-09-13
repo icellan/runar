@@ -196,6 +196,26 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 			}
 		}
 
+		// R-164 / CL-BUG-134: `super` outside a constructor.
+		//
+		// `super` emits no opcodes — the constructor args are already on the
+		// stack — but stack lowering pushes a stackMap slot for it anyway:
+		// +1 model, +0 physical. On the SOURCE path that is invisible because
+		// the constructor is never lowered to script; via `--ir` it is
+		// reachable, and every subsequent PICK/ROLL depth is off by one.
+		// Measured against the same IR with the binding deleted: PUSH 3;
+		// OP_ROLL where the correct lowering emits OP_ROT, addressing a fourth
+		// stack item that does not exist.
+		//
+		// Refusing beats inventing a physical push for a call with no runtime
+		// meaning: a scan of all 114 checked-in IR files found 110 `super`
+		// calls, every one inside a constructor.
+		if kind == "call" && binding.Value.Func == "super" && methodName != "constructor" {
+			return fmt.Errorf(
+				"IR validation: super() is only valid in a constructor; method '%s' calls it. It emits no opcodes — the constructor args are already on the stack — so stack lowering pushes a model slot with no physical value, and every later PICK/ROLL depth in the method is off by one.",
+				methodName)
+		}
+
 		// R-126 / CL-BUG-164: add_output state-value arity.
 		//
 		// The source pipeline counts addOutput arity in the typechecker (the

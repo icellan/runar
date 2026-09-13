@@ -286,6 +286,23 @@ def _validate_bindings(
                         f"{func_name}() with {got} argument(s); it takes {wanted}"
                     )
 
+        # R-164 / CL-BUG-134: ``super`` outside a constructor.
+        #
+        # ``super`` emits no opcodes -- the constructor args are already on the
+        # stack -- but stack lowering pushes a stackMap slot for it anyway:
+        # +1 model, +0 physical. Invisible on the SOURCE path (the constructor
+        # is never lowered to script) and reachable via ``--ir``, where every
+        # subsequent PICK/ROLL depth is off by one. Refusing beats inventing a
+        # physical push for a call with no runtime meaning.
+        if kind == "call" and (binding.value.func or "") == "super" and method_name != "constructor":
+            errors.append(
+                f"super() is only valid in a constructor; method '{method_name}' "
+                f"calls it. It emits no opcodes -- the constructor args are already "
+                f"on the stack -- so stack lowering pushes a model slot with no "
+                f"physical value, and every later PICK/ROLL depth in the method is "
+                f"off by one."
+            )
+
         # R-126 / CL-BUG-164: add_output state-value arity.
         #
         # The source pipeline counts addOutput arity in the typechecker (the

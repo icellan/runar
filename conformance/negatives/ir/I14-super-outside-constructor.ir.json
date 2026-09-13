@@ -1,0 +1,102 @@
+{
+  "_comment": [
+    "R-164 (CL-BUG-134): a `super` call outside a constructor.",
+    "",
+    "`super` emits no opcodes -- the constructor args are already on the stack --",
+    "but every tier's stack lowering pushes a stackMap slot for it anyway:",
+    "+1 model, +0 physical. On the SOURCE path that is invisible, because the",
+    "constructor is not lowered to script at all. Via `--ir` it is reachable, and",
+    "every subsequent PICK/ROLL depth is off by one.",
+    "",
+    "Measured on this file against the same file with the `super` binding deleted,",
+    "through the Go tier (all six agree byte for byte):",
+    "",
+    "  with super     0000 53 7a 53 7a a0 7777    PUSH 3; OP_ROLL, twice",
+    "  without super  0000 7b 7b a0 77            OP_ROT, twice",
+    "",
+    "Three physical items are on the stack at that point, so a depth-3 roll",
+    "addresses a fourth that does not exist. The model and the machine disagree,",
+    "and the script is wrong in a way nothing downstream can notice.",
+    "",
+    "`super` outside a constructor is not a program any of the nine frontends",
+    "produces -- a scan of all 114 checked-in IR files found 110 `super` calls and",
+    "every one of them is in a constructor -- so the loader refuses the shape",
+    "rather than inventing a physical push for a call that has no runtime meaning.",
+    "Same trust-boundary rule as the add_output arity check (R-126)."
+  ],
+  "contractName": "SuperProbe",
+  "properties": [
+    {
+      "name": "a",
+      "type": "bigint",
+      "readonly": true
+    },
+    {
+      "name": "b",
+      "type": "bigint",
+      "readonly": true
+    }
+  ],
+  "methods": [
+    {
+      "name": "go",
+      "isPublic": true,
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        }
+      ],
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "call",
+            "func": "super",
+            "args": [
+              "t0",
+              "t1"
+            ]
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "op": ">",
+            "left": "t3",
+            "right": "t0"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ]
+    }
+  ]
+}
