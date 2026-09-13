@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Provider } from './provider.js';
-import { txToTransactionData } from './provider.js';
+import { txToTransactionData, warnNonFatal } from './provider.js';
 import type { Signer } from '../signers/signer.js';
 import type { TransactionData, UTXO } from '../types.js';
 import { buildP2PKHScript } from '../script-utils.js';
@@ -193,7 +193,7 @@ export class WalletProvider implements Provider {
       const txid = result.txid;
       this.txCache.set(txid, tx.toHex());
       if (this.overlayUrl && this.overlayTopics && this.overlayTopics.length > 0) {
-        this.submitToOverlay(tx).catch(() => {});
+        this.submitToOverlay(tx).catch((e) => warnNonFatal('overlay submission', e));
       }
       return txid;
     }
@@ -217,7 +217,7 @@ export class WalletProvider implements Provider {
 
     // Fire-and-forget: submit to overlay for indexing
     if (this.overlayUrl && this.overlayTopics && this.overlayTopics.length > 0) {
-      this.submitToOverlay(tx).catch(() => {});
+      this.submitToOverlay(tx).catch((e) => warnNonFatal('overlay submission', e));
     }
 
     return txid;
@@ -372,8 +372,12 @@ export class WalletProvider implements Provider {
         if (txid) this.txCache.set(txid, rawHex);
 
         // Broadcast to ARC (may already be known — non-fatal)
-        await this.broadcastTx(Transaction.fromHex(rawHex)).catch(() => {});
-      } catch { /* funding tx parse failure is non-fatal */ }
+        await this.broadcastTx(Transaction.fromHex(rawHex)).catch((e) =>
+          warnNonFatal('funding-tx broadcast', e),
+        );
+      } catch (e) {
+        warnNonFatal('funding-tx parse', e);
+      }
     }
   }
 }

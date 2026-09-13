@@ -6,7 +6,7 @@ import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import { InputLimits } from 'runar-ir-schema';
 import { assertScriptHexUnderLimit, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
-import { txToTransactionData } from './providers/provider.js';
+import { txToTransactionData, warnNonFatal } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
 import type { Inscription } from './ordinals/types.js';
@@ -661,8 +661,12 @@ export class RunarContract {
           walletProvider.cacheTx(txid, tx.toHex());
         }
         // Broadcast to ARC (may already be known — non-fatal)
-        await walletProvider.broadcast(tx).catch(() => {});
-      } catch { /* BEEF parse failure is non-fatal */ }
+        await walletProvider.broadcast(tx).catch((e) =>
+          warnNonFatal('deploy-tx broadcast', e),
+        );
+      } catch (e) {
+        warnNonFatal('deploy-tx BEEF parse', e);
+      }
     }
 
     const txid = result.txid || '';
