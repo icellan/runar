@@ -225,7 +225,7 @@ func TestSp1FriVerifier_OnChainRejectsCorruptions(t *testing.T) {
 			// The unlocking script is encoded from the SAME bytes the covenant
 			// is asked to accept, so the Step 1 push-and-hash binding holds and
 			// any rejection comes from the verifier body.
-			unlocking, err := sp1fri.EncodeUnlockingScript(proof, proofBytes, pubBytes, nil, params)
+			unlocking, err := sp1fri.EncodeUnlockingScript(proof, nil, pubBytes, nil, params)
 			if err != nil {
 				t.Fatalf("EncodeUnlockingScript: %v", err)
 			}

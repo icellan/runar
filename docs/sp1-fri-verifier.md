@@ -77,6 +77,26 @@ push-and-hash shape instead:
 The cost of the concatenation re-hash is `O(|proof|)` in SHA-256 block
 work — far cheaper than splitting.
 
+**Canonicalisation, and what the binding covered before R-059.** A stack
+item holding a field element is a script NUMBER, whose encoding is
+minimal and therefore variable-length — `1` is one byte, `300` is two.
+Hashing those raw would bind an ambiguous serialisation, so each numeric
+slot is canonicalised to 4 little-endian bytes (`OP_NUM2BIN 4`) before
+the `OP_CAT`, and the trailing `publicValues` slot is hashed as bytes.
+`sp1fri.CanonicalProofBlob` writes exactly those bytes off-chain: the
+`proofBlob` argument **is** that serialisation, not the raw postcard
+proof.
+
+Until R-059 (CL-BUG-102) the implementation did not match the paragraph
+above. Step 1 asserted `sha256(proofBlob) == sha256(chunk_0||…||chunk_7)`
+over eight *dummy* chunks — arbitrary contiguous slices of that same blob,
+pushed by the unlocking script and dropped unread — while every value the
+verifier consumed came from the separate field layer the check never
+touched. The equality therefore held for **any** blob: a spend carrying
+1589 bytes of the attacker's choosing was measured being accepted by the
+script VM. `packages/runar-go/sp1fri.TestEncodeUnlockingScript_RejectsForgedProofBlob`
+is the gate; the chunk layer is gone.
+
 ### 2.1. Pre-pushed field order (unlocking-script layout)
 
 The unlocking script must push every parsed proof field as a single

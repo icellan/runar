@@ -39,6 +39,7 @@ package sp1fri
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"math/big"
 )
@@ -91,14 +92,6 @@ type ParamSet struct {
 	BaseDegreeBits int
 	// PreprocessedWidth — 0 when there is no preprocessed trace (Fib AIR).
 	PreprocessedWidth int
-
-	// NumChunks is the number of dummy proof-body chunks the unlocking
-	// script pushes for the Step 1 SHA-256 binding. The validated
-	// `EmitFullSP1FriVerifierBody` orchestrator hardcodes this to 8 (see
-	// `sp1_fri.go:316`); we expose it here so the encoder stays in lock
-	// step with future codegen evolutions but default to 8 via
-	// `MinimalGuestParams()`.
-	NumChunks int
 }
 
 // MinimalGuestParams returns the canonical PoC parameter set. It mirrors
@@ -122,7 +115,6 @@ func MinimalGuestParams() ParamSet {
 		DegreeBits:           3,
 		BaseDegreeBits:       3,
 		PreprocessedWidth:    0,
-		NumChunks:            8, // matches sp1_fri.go::EmitFullSP1FriVerifierBody numChunks
 	}
 }
 
@@ -148,13 +140,12 @@ func MinimalGuestParams() ParamSet {
 //     - traceDigest[0..7]
 //     - publicValues               (single ByteString)
 //
-//  3. Raw proof-body chunks (params.NumChunks) — arbitrary contiguous
-//     slices whose concatenation == proofBlob (see `chunkProof` in
-//     `compilers/go/codegen/sp1_fri_test.go:61` and Step 1 binding
-//     rationale at `sp1_fri.go::EmitProofBlobBindingHash`).
-//
-//  4. Typed args (top, in declaration order):
-//     - proofBlob
+//  3. Typed args (top, in declaration order):
+//     - proofBlob — the CANONICAL SERIALISATION of the transcript inputs in
+//     item 2 (4 little-endian bytes per numeric slot, then the publicValues
+//     bytes). R-059: this used to be the raw bincode proof, bound only to a
+//     layer of dummy chunks sliced from itself — an equality that held for
+//     any bytes at all.
 //     - publicValues  (re-pushed; the transcript absorbs the deeper
 //     `_obs_public_values` slot, and the orchestrator's Step 1e
 //     OP_EQUALVERIFYs this typed copy against it — the two MUST be
@@ -177,33 +168,59 @@ func EncodeUnlockingScript(
 	sp1VKeyHash []byte,
 	params ParamSet,
 ) ([]byte, error) {
+	scriptBytes, _, err := buildUnlockingScript(proof, proofBlobRaw, publicValues, sp1VKeyHash, params, nil)
+	return scriptBytes, err
+}
+
+// CanonicalProofBlob returns the bytes the Step 1 binding re-derives on-chain:
+// every transcript input in canonical order as 4 little-endian bytes, followed
+// by the publicValues bytes (R-059). This IS the `proofBlob` argument — pass it
+// to `EncodeUnlockingScript` (or pass nil there and let it derive the same
+// bytes), and use it when building the spending transaction.
+func CanonicalProofBlob(
+	proof *Proof,
+	publicValues []byte,
+	params ParamSet,
+) ([]byte, error) {
+	_, canon, err := buildUnlockingScript(proof, nil, publicValues, nil, params, nil)
+	return canon, err
+}
+
+// buildUnlockingScript is the single implementation behind both exported
+// entry points. `forceBlob`, when non-nil, replaces the canonical blob in the
+// emitted push — the adversarial gate for R-059 uses it to prove the script VM
+// (not this encoder) is what refuses a forged blob. Production callers pass
+// nil.
+func buildUnlockingScript(
+	proof *Proof,
+	proofBlobRaw []byte,
+	publicValues []byte,
+	sp1VKeyHash []byte,
+	params ParamSet,
+	forceBlob []byte,
+) ([]byte, []byte, error) {
 	if proof == nil {
-		return nil, fmt.Errorf("EncodeUnlockingScript: proof is nil")
+		return nil, nil, fmt.Errorf("EncodeUnlockingScript: proof is nil")
 	}
-	if len(proofBlobRaw) == 0 {
-		return nil, fmt.Errorf("EncodeUnlockingScript: proofBlobRaw is empty")
-	}
-	if params.NumChunks < 1 {
-		return nil, fmt.Errorf("EncodeUnlockingScript: NumChunks must be >= 1, got %d", params.NumChunks)
-	}
+	// R-059: proofBlobRaw is now OPTIONAL. Since the blob is the canonical
+	// serialisation of the transcript inputs, the encoder can derive it; a
+	// caller that supplies one is asserting which bytes it expects, and the
+	// check below refuses anything else.
+
 	if params.NumQueries < 1 {
-		return nil, fmt.Errorf("EncodeUnlockingScript: NumQueries must be >= 1, got %d", params.NumQueries)
+		return nil, nil, fmt.Errorf("EncodeUnlockingScript: NumQueries must be >= 1, got %d", params.NumQueries)
 	}
 	if params.LogFinalPolyLen < 0 {
-		return nil, fmt.Errorf("EncodeUnlockingScript: LogFinalPolyLen must be >= 0, got %d", params.LogFinalPolyLen)
+		return nil, nil, fmt.Errorf("EncodeUnlockingScript: LogFinalPolyLen must be >= 0, got %d", params.LogFinalPolyLen)
 	}
-	if params.NumChunks > len(proofBlobRaw) {
-		return nil, fmt.Errorf(
-			"EncodeUnlockingScript: NumChunks=%d > |proofBlobRaw|=%d (cannot split into non-empty chunks)",
-			params.NumChunks, len(proofBlobRaw))
-	}
+
 	if params.PublicValuesByteSize > 0 && len(publicValues) != params.PublicValuesByteSize {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: publicValues length mismatch: want %d got %d",
 			params.PublicValuesByteSize, len(publicValues))
 	}
 	if params.SP1VKeyHashByteSize > 0 && len(sp1VKeyHash) != params.SP1VKeyHashByteSize {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: sp1VKeyHash length mismatch: want %d got %d",
 			params.SP1VKeyHashByteSize, len(sp1VKeyHash))
 	}
@@ -214,24 +231,24 @@ func EncodeUnlockingScript(
 		traceLocal[i] = FromKbExt4(e)
 	}
 	if proof.OpenedValues.TraceNext == nil {
-		return nil, fmt.Errorf("EncodeUnlockingScript: proof.OpenedValues.TraceNext is nil — fixture missing transition row")
+		return nil, nil, fmt.Errorf("EncodeUnlockingScript: proof.OpenedValues.TraceNext is nil — fixture missing transition row")
 	}
 	traceNext := make([]Ext4, len(*proof.OpenedValues.TraceNext))
 	for i, e := range *proof.OpenedValues.TraceNext {
 		traceNext[i] = FromKbExt4(e)
 	}
 	if len(traceLocal) < 2 || len(traceNext) < 2 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: AIR width mismatch: want >=2 trace cols, got local=%d next=%d",
 			len(traceLocal), len(traceNext))
 	}
 	if len(proof.OpenedValues.QuotientChunks) < 1 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: proof.OpenedValues.QuotientChunks is empty (need >=1 quotient batch)")
 	}
 	quotChunks0 := proof.OpenedValues.QuotientChunks[0]
 	if len(quotChunks0) < 4 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: quotientChunks[0] has %d Ext4 elements, want >=4",
 			len(quotChunks0))
 	}
@@ -241,7 +258,7 @@ func EncodeUnlockingScript(
 	}
 
 	if len(proof.Commitments.Trace) < 1 || len(proof.Commitments.QuotientChunks) < 1 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: missing trace/quotient commitments (cap_height=0 expects 1 digest each)")
 	}
 	traceDigest := CanonicalDigest(proof.Commitments.Trace[0])
@@ -249,18 +266,18 @@ func EncodeUnlockingScript(
 
 	numRounds := len(proof.OpeningProof.CommitPhaseCommits)
 	if numRounds < 1 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: proof.OpeningProof.CommitPhaseCommits is empty (need >=1 round)")
 	}
 	if len(proof.OpeningProof.CommitPowWitnesses) != numRounds {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: CommitPowWitnesses len=%d != numRounds=%d",
 			len(proof.OpeningProof.CommitPowWitnesses), numRounds)
 	}
 	friCommitDigests := make([][8]uint32, numRounds)
 	for r, cap := range proof.OpeningProof.CommitPhaseCommits {
 		if len(cap) < 1 {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"EncodeUnlockingScript: CommitPhaseCommits[%d] is empty (cap_height=0 expects 1 digest)", r)
 		}
 		friCommitDigests[r] = CanonicalDigest(cap[0])
@@ -272,7 +289,7 @@ func EncodeUnlockingScript(
 
 	finalPolyLen := 1 << params.LogFinalPolyLen
 	if len(proof.OpeningProof.FinalPoly) != finalPolyLen {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"EncodeUnlockingScript: FinalPoly len=%d != 1<<LogFinalPolyLen=%d",
 			len(proof.OpeningProof.FinalPoly), finalPolyLen)
 	}
@@ -285,7 +302,7 @@ func EncodeUnlockingScript(
 	if len(proof.OpeningProof.QueryProofs) > 0 {
 		ops := proof.OpeningProof.QueryProofs[0].CommitPhaseOpenings
 		if len(ops) != numRounds {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"EncodeUnlockingScript: QueryProofs[0].CommitPhaseOpenings len=%d != numRounds=%d",
 				len(ops), numRounds)
 		}
@@ -303,24 +320,42 @@ func EncodeUnlockingScript(
 	// (the authoritative reference).
 	var buf bytes.Buffer
 
+	// R-059: every numeric transcript input is ALSO written, in the same
+	// order, as 4 little-endian bytes into `canon`. That byte string is what
+	// the locking script's Step 1 re-derives on-chain (OP_NUM2BIN 4 per slot,
+	// OP_CAT, SHA-256) and OP_EQUALVERIFYs against the proofBlob argument — so
+	// `canon` IS the proofBlob. Writing both from the same loop is deliberate:
+	// the previous design let the blob and the checked values drift by
+	// construction, which is the whole of CL-BUG-102.
+	var canon bytes.Buffer
+	pushField := func(v uint32) {
+		emitPushUint32(&buf, v)
+		var le [4]byte
+		binary.LittleEndian.PutUint32(le[:], v)
+		canon.Write(le[:])
+	}
+
 	// 1a. Step 8 inputs (deepest of the transcript-input layer). Mirrors
 	// sp1_fri.go::sp1FriPrePushedFieldNames §1 (lines 207-224) and
 	// sp1_fri_test.go:583-598.
-	emitPushUint32(&buf, queryPowWitness)
+	pushField(queryPowWitness)
 	for r := numRounds - 1; r >= 0; r-- {
-		emitPushInt(&buf, int64(logArities[r]))
+		if logArities[r] < 0 {
+			return nil, nil, fmt.Errorf("EncodeUnlockingScript: negative logArity[%d]=%d", r, logArities[r])
+		}
+		pushField(uint32(logArities[r]))
 	}
 	for i := 0; i < finalPolyLen; i++ {
 		ext := finalPoly[i]
 		for j := 0; j < 4; j++ {
-			emitPushUint32(&buf, ext[j])
+			pushField(ext[j])
 		}
 	}
 	for r := 0; r < numRounds; r++ {
 		for i := 0; i < 8; i++ {
-			emitPushUint32(&buf, friCommitDigests[r][i])
+			pushField(friCommitDigests[r][i])
 		}
-		emitPushUint32(&buf, commitPowWitnesses[r])
+		pushField(commitPowWitnesses[r])
 	}
 
 	// 1b. Steps 2-5 inputs (above Step 8 inputs). Mirrors
@@ -329,38 +364,53 @@ func EncodeUnlockingScript(
 	for i := 0; i < 2; i++ {
 		ext := traceLocal[i]
 		for j := 0; j < 4; j++ {
-			emitPushUint32(&buf, ext[j])
+			pushField(ext[j])
 		}
 	}
 	for i := 0; i < 2; i++ {
 		ext := traceNext[i]
 		for j := 0; j < 4; j++ {
-			emitPushUint32(&buf, ext[j])
+			pushField(ext[j])
 		}
 	}
 	for i := 0; i < 4; i++ {
 		ext := quotChunks0Canon[i]
 		for j := 0; j < 4; j++ {
-			emitPushUint32(&buf, ext[j])
+			pushField(ext[j])
 		}
 	}
 	for i := 0; i < 8; i++ {
-		emitPushUint32(&buf, quotientDigest[i])
+		pushField(quotientDigest[i])
 	}
 	for i := 0; i < 8; i++ {
-		emitPushUint32(&buf, traceDigest[i])
+		pushField(traceDigest[i])
 	}
+	// The trailing slot is a ByteString, hashed as it stands on both sides.
 	emitPushBytes(&buf, publicValues) // _obs_public_values
+	canon.Write(publicValues)
 
-	// 2. Raw proof-body chunks (above transcript inputs). Mirrors
-	// sp1_fri_test.go:629-631 + chunkProof helper at line 61.
-	chunks := chunkProofBytes(proofBlobRaw, params.NumChunks)
-	for _, c := range chunks {
-		emitPushBytes(&buf, c)
+	// 2. proofBlob typed arg — the canonical serialisation of the transcript
+	// inputs above (R-059). The dummy proof-body chunk layer that used to sit
+	// here is gone: it backed a binding that held for any blob at all.
+	//
+	// A caller that supplies `proofBlobRaw` is asserting "these are the bytes
+	// I expect to be bound"; if that is not the canonical serialisation the
+	// spend could never succeed, so say so here rather than emitting a script
+	// that dies in the VM.
+	canonBlob := canon.Bytes()
+	pushedBlob := canonBlob
+	if forceBlob != nil {
+		pushedBlob = forceBlob
 	}
-
-	// 3. proofBlob typed arg.
-	emitPushBytes(&buf, proofBlobRaw)
+	if len(proofBlobRaw) > 0 && forceBlob == nil && !bytes.Equal(proofBlobRaw, canonBlob) {
+		return nil, nil, fmt.Errorf(
+			"EncodeUnlockingScript: proofBlobRaw is not the canonical transcript-input "+
+				"serialisation (|given|=%d, |canonical|=%d). Since R-059 the Step 1 binding "+
+				"covers the values the verifier consumes, so the blob must be exactly those "+
+				"bytes — pass nil to have them derived, or CanonicalProofBlob() to precompute them",
+			len(proofBlobRaw), len(canonBlob))
+	}
+	emitPushBytes(&buf, pushedBlob)
 
 	// 4. publicValues typed arg (re-pushed; the transcript absorbs the
 	// deeper _obs_public_values slot and Step 1e OP_EQUALVERIFYs this typed
@@ -388,26 +438,7 @@ func EncodeUnlockingScript(
 	// callers can assert the length they compiled against (validated above).
 	_ = sp1VKeyHash
 
-	return buf.Bytes(), nil
-}
-
-// chunkProofBytes splits `bs` into `n` contiguous, non-empty pieces in
-// canonical (left-to-right) order. The resulting concatenation equals
-// `bs` byte-for-byte. Mirrors `chunkProof(t, bs, n)` in
-// `compilers/go/codegen/sp1_fri_test.go:61` and is the only chunking the
-// Step 1 SHA-256 binding requires (the binding only checks
-// `sha256(concat(chunks)) == sha256(proofBlob)`; structural per-field
-// decoding lives in the field-push layer above the chunks).
-//
-// The caller has already validated `n >= 1` and `n <= len(bs)`.
-func chunkProofBytes(bs []byte, n int) [][]byte {
-	chunkSize := len(bs) / n
-	out := make([][]byte, n)
-	for i := 0; i < n-1; i++ {
-		out[i] = bs[i*chunkSize : (i+1)*chunkSize]
-	}
-	out[n-1] = bs[(n-1)*chunkSize:]
-	return out
+	return buf.Bytes(), canonBlob, nil
 }
 
 // =============================================================================

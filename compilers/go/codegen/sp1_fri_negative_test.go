@@ -336,7 +336,7 @@ func TestSp1FriVerifier_TruncatedFailsPushAndHashBinding(t *testing.T) {
 	ops = append(ops, pushBytes(full)) // proofBlob the covenant committed to
 
 	ops = append(ops, gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(chunks))
+		EmitProofBlobBindingHash(emit, len(chunks), 0)
 	})...)
 	for range chunks {
 		ops = append(ops, opcode("OP_DROP"))
@@ -357,7 +357,7 @@ func TestSp1FriVerifier_TruncatedFailsPushAndHashBinding(t *testing.T) {
 	}
 	okOps = append(okOps, pushBytes(full))
 	okOps = append(okOps, gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(honest))
+		EmitProofBlobBindingHash(emit, len(honest), 0)
 	})...)
 	for range honest {
 		okOps = append(okOps, opcode("OP_DROP"))

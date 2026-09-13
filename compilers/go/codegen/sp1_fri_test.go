@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -97,7 +98,7 @@ func TestSp1FriVerifier_Step1_ProofBlobBinding_SingleField(t *testing.T) {
 	ops = append(ops, pushBytes(bs)) // proofBlob
 
 	bindingOps := gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, 1)
+		EmitProofBlobBindingHash(emit, 1, 0)
 	})
 	ops = append(ops, bindingOps...)
 
@@ -139,7 +140,7 @@ func TestSp1FriVerifier_Step1_ProofBlobBinding_FourChunks(t *testing.T) {
 	ops = append(ops, pushBytes(bs)) // proofBlob
 
 	bindingOps := gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(chunks))
+		EmitProofBlobBindingHash(emit, len(chunks), 0)
 	})
 	ops = append(ops, bindingOps...)
 
@@ -175,7 +176,7 @@ func TestSp1FriVerifier_Step1_ProofBlobBinding_RejectsTampered(t *testing.T) {
 	ops = append(ops, pushBytes(bs)) // unmodified proofBlob
 
 	bindingOps := gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(chunks))
+		EmitProofBlobBindingHash(emit, len(chunks), 0)
 	})
 	ops = append(ops, bindingOps...)
 	for i := 0; i < len(chunks); i++ {
@@ -202,13 +203,13 @@ func TestSp1FriVerifier_Step1_ProofBlobBinding_RejectsTampered(t *testing.T) {
 //
 // Test shape:
 //
-//   1. Absorb 8 base-field elements (1..8) into the reference DuplexChallenger,
-//      sample 4 elements — capture canonical values.
-//   2. Build a Bitcoin Script that does the equivalent: push 16 zeros for the
-//      sponge state, then absorb 1..8 (which fills rate and triggers permute),
-//      then squeeze 4 elements. Assert each squeezed element equals the
-//      reference value via OP_NUMEQUALVERIFY.
-//   3. Execute via BuildAndExecuteOps. The script must succeed.
+//  1. Absorb 8 base-field elements (1..8) into the reference DuplexChallenger,
+//     sample 4 elements — capture canonical values.
+//  2. Build a Bitcoin Script that does the equivalent: push 16 zeros for the
+//     sponge state, then absorb 1..8 (which fills rate and triggers permute),
+//     then squeeze 4 elements. Assert each squeezed element equals the
+//     reference value via OP_NUMEQUALVERIFY.
+//  3. Execute via BuildAndExecuteOps. The script must succeed.
 func TestFiatShamirKB_SqueezeMatchesReference(t *testing.T) {
 	// 1. Reference values.
 	ref := sp1fri.NewDuplexChallenger()
@@ -509,6 +510,27 @@ func TestSp1FriVerifier_TranscriptMatchesReference(t *testing.T) {
 // off-chain reference are validated in fresh-tracker sub-blocks below — those
 // are kept independent of the main orchestrator so any per-step regression
 // has a locally diagnosable failure mode.
+// appendField pushes a numeric transcript-input slot AND accumulates its
+// canonical 4-byte little-endian encoding (R-059). The two must be written
+// from the same call: the Step 1 binding re-derives exactly this
+// serialisation on-chain (OP_NUM2BIN 4 per slot, OP_CAT, SHA-256) and
+// OP_EQUALVERIFYs it against the proofBlob argument, so a prelude that pushed
+// one thing and hashed another would be testing nothing. Mirrors
+// `sp1fri.EncodeUnlockingScript`'s `pushField`.
+func appendField(ops []StackOp, canon []byte, v int64) ([]StackOp, []byte) {
+	ops = append(ops, pushInt64(v))
+	var le [4]byte
+	binary.LittleEndian.PutUint32(le[:], uint32(v))
+	return ops, append(canon, le[:]...)
+}
+
+// appendBytesField is the ByteString counterpart — today only the trailing
+// publicValues slot, hashed as it stands on both sides.
+func appendBytesField(ops []StackOp, canon []byte, b []byte) ([]StackOp, []byte) {
+	ops = append(ops, pushBytes(b))
+	return ops, append(canon, b...)
+}
+
 func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	bs := loadMinimalGuestProofBlob(t)
 	proof, err := sp1fri.DecodeProof(bs)
@@ -575,27 +597,27 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	//   3. proofBlob (typed arg)
 	//   4. publicValues (typed arg)
 	//   5. sp1VKeyHash (typed arg; only when SP1VKeyHashByteSize > 0)
-	chunks := chunkProof(t, bs, 8)
 
 	var ops []StackOp
+	var canon []byte
 
 	// 1a. Step 8 inputs (deepest of the transcript-input layer). Mirrors
 	// sp1_fri.go::sp1FriPrePushedFieldNames §1.
-	ops = append(ops, pushInt64(int64(queryPowWitness)))
+	ops, canon = appendField(ops, canon, (int64(queryPowWitness)))
 	for r := numRounds - 1; r >= 0; r-- {
-		ops = append(ops, pushInt64(int64(logArities[r])))
+		ops, canon = appendField(ops, canon, (int64(logArities[r])))
 	}
 	for i := 0; i < len(finalPoly); i++ {
 		ext := finalPoly[i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for r := 0; r < numRounds; r++ {
 		for i := 0; i < 8; i++ {
-			ops = append(ops, pushInt64(int64(friCommitDigests[r][i])))
+			ops, canon = appendField(ops, canon, (int64(friCommitDigests[r][i])))
 		}
-		ops = append(ops, pushInt64(int64(commitPowWitnesses[r])))
+		ops, canon = appendField(ops, canon, (int64(commitPowWitnesses[r])))
 	}
 
 	// 1b. Steps 2-5 inputs (above Step 8 inputs). Mirrors
@@ -603,36 +625,33 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		ext := traceLocal[i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for i := 0; i < 2; i++ {
 		ext := traceNext[i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for i := 0; i < 4; i++ {
 		ext := quotChunks[0][i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for i := 0; i < 8; i++ {
-		ops = append(ops, pushInt64(int64(quotientDigest[i])))
+		ops, canon = appendField(ops, canon, (int64(quotientDigest[i])))
 	}
 	for i := 0; i < 8; i++ {
-		ops = append(ops, pushInt64(int64(traceDigest[i])))
+		ops, canon = appendField(ops, canon, (int64(traceDigest[i])))
 	}
-	ops = append(ops, pushBytes(pubVals)) // _obs_public_values
+	ops, canon = appendBytesField(ops, canon, pubVals) // _obs_public_values
 
-	// 2. Raw proof-body chunks (above transcript inputs).
-	for _, c := range chunks {
-		ops = append(ops, pushBytes(c))
-	}
-
-	// 3. proofBlob typed arg.
-	ops = append(ops, pushBytes(bs))
+	// 2. proofBlob typed arg — R-059: the canonical serialisation of the
+	// transcript inputs above, which is what Step 1 now binds. The dummy
+	// chunk layer that used to sit here is gone.
+	ops = append(ops, pushBytes(canon))
 
 	// 4. publicValues typed arg (re-pushed; the orchestrator discards this
 	// copy and uses the deeper _obs_public_values slot — see
@@ -846,10 +865,10 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	}
 
 	t.Logf("Steps 1 + 2-5 + 6 + 7 + 8 + 10 + 10A + 11 accepted canonical fixture; "+
-		"|proofBlob|=%d, |chunks|=%d, |unlocking prelude ops|=%d, |locking body ops|=%d, "+
+		"|canonical proofBlob|=%d, |unlocking prelude ops|=%d, |locking body ops|=%d, "+
 		"numRounds=%d, finalPolyLen=%d, total ops=%d, total script bytes=%d, "+
 		"queryIndexes=%v",
-		len(bs), len(chunks), prelude, len(bodyOps), numRounds, len(finalPoly),
+		len(canon), prelude, len(bodyOps), numRounds, len(finalPoly),
 		len(ops), scriptBytes, queryIndexes)
 }
 
@@ -1651,8 +1670,8 @@ func TestSp1FriVerifier_PerQueryConditionalFoldsMatchReference(t *testing.T) {
 //
 // For each bit ∈ {0, 1}:
 //   - Construct (folded, sibling) and derive (e_low, e_high) per the bit:
-//       bit==0 → (e_low, e_high) = (folded, sibling)
-//       bit==1 → (e_low, e_high) = (sibling, folded)
+//     bit==0 → (e_low, e_high) = (folded, sibling)
+//     bit==1 → (e_low, e_high) = (sibling, folded)
 //   - Compute reference fold via the validated lagrangeInterpolateAt.
 //   - Emit on-chain via emitFriFoldRowConditional with the runtime bit.
 //   - Assert on-chain Ext4 result matches the reference byte-identical.
@@ -2251,8 +2270,6 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 	params.PublicValuesByteSize = len(pubVals)
 	params.SP1VKeyHashByteSize = 0
 
-	chunks := chunkProof(t, bs, 8)
-
 	// === Build the unlocking-script prelude. Order matches
 	// `sp1FriPrePushedFieldNames` byte-for-byte (deepest-first). Same
 	// structure as the PoC test (sp1_fri_test.go:583-643), only the
@@ -2260,59 +2277,57 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 	// PoW witnesses + logArities) while the finalPoly itself is a single
 	// Ext4 element (logFinalPolyLen=0 ⇒ 1<<0 = 1 Ext4 = 4 base elements).
 	var ops []StackOp
+	var canon []byte
 
 	// 1a. Step 8 inputs (deepest of the transcript-input layer).
-	ops = append(ops, pushInt64(int64(queryPowWitness)))
+	ops, canon = appendField(ops, canon, (int64(queryPowWitness)))
 	for r := numRounds - 1; r >= 0; r-- {
-		ops = append(ops, pushInt64(int64(logArities[r])))
+		ops, canon = appendField(ops, canon, (int64(logArities[r])))
 	}
 	for i := 0; i < len(finalPoly); i++ {
 		ext := finalPoly[i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for r := 0; r < numRounds; r++ {
 		for i := 0; i < 8; i++ {
-			ops = append(ops, pushInt64(int64(friCommitDigests[r][i])))
+			ops, canon = appendField(ops, canon, (int64(friCommitDigests[r][i])))
 		}
-		ops = append(ops, pushInt64(int64(commitPowWitnesses[r])))
+		ops, canon = appendField(ops, canon, (int64(commitPowWitnesses[r])))
 	}
 
 	// 1b. Steps 2-5 inputs.
 	for i := 0; i < 2; i++ {
 		ext := traceLocal[i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for i := 0; i < 2; i++ {
 		ext := traceNext[i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for i := 0; i < 4; i++ {
 		ext := quotChunks[0][i]
 		for j := 0; j < 4; j++ {
-			ops = append(ops, pushInt64(int64(ext[j])))
+			ops, canon = appendField(ops, canon, (int64(ext[j])))
 		}
 	}
 	for i := 0; i < 8; i++ {
-		ops = append(ops, pushInt64(int64(quotientDigest[i])))
+		ops, canon = appendField(ops, canon, (int64(quotientDigest[i])))
 	}
 	for i := 0; i < 8; i++ {
-		ops = append(ops, pushInt64(int64(traceDigest[i])))
+		ops, canon = appendField(ops, canon, (int64(traceDigest[i])))
 	}
-	ops = append(ops, pushBytes(pubVals)) // _obs_public_values
+	ops, canon = appendBytesField(ops, canon, pubVals) // _obs_public_values
 
-	// 2. Raw proof-body chunks.
-	for _, c := range chunks {
-		ops = append(ops, pushBytes(c))
-	}
-
-	// 3. proofBlob typed arg.
-	ops = append(ops, pushBytes(bs))
+	// 2. proofBlob typed arg — R-059: the canonical serialisation of the
+	// transcript inputs above, which is what Step 1 now binds. The dummy
+	// chunk layer that used to sit here is gone.
+	ops = append(ops, pushBytes(canon))
 
 	// 4. publicValues typed arg (re-pushed; orchestrator discards).
 	ops = append(ops, pushBytes(pubVals))
@@ -2320,7 +2335,7 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 	// 5. sp1VKeyHash omitted (SP1VKeyHashByteSize=0).
 
 	prelude := len(ops)
-	initNames := sp1FriPrePushedFieldNames(params, 8, numRounds, len(finalPoly))
+	initNames := sp1FriPrePushedFieldNames(params, numRounds, len(finalPoly))
 	peakInitDepth := len(initNames)
 
 	// === Locking script body — emitted via the dispatch-wired orchestrator.
@@ -2346,13 +2361,13 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 		scriptBytes = len(result.ScriptHex) / 2
 	}
 
-	t.Logf("PRODUCTION FIXTURE ACCEPTED: |proofBlob|=%d B, |chunks|=%d, "+
+	t.Logf("PRODUCTION FIXTURE ACCEPTED: |canonical proofBlob|=%d B, "+
 		"|prelude ops|=%d (= numFinalPolyPushes %d × 4 + everything else), "+
 		"|body ops|=%d, total ops=%d, peak named-stack depth=%d, "+
 		"compiled script=%d B (~%d KB), wall-clock=%v, "+
 		"params: numQueries=%d, logBlowup=%d, logFinalPolyLen=%d, "+
 		"degreeBits=%d, commitPow=%d, queryPow=%d",
-		len(bs), len(chunks), prelude, len(finalPoly),
+		len(canon), prelude, len(finalPoly),
 		len(bodyOps), len(ops), peakInitDepth,
 		scriptBytes, scriptBytes/1024, wallClock,
 		numQueries, logBlowup, logFinalPolyLen, degreeBits,

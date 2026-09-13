@@ -212,14 +212,6 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 // sp1VKeyHash). The list mirrors the test-side `tracker.pushInt` sequence in
 // `TestSp1FriVerifier_AcceptsMinimalGuestFixture` byte-for-byte.
 //
-// `numChunks` is the number of dummy proof-body chunks the unlocking script
-// uses to back the Step 1 SHA-256 binding; the chunks are arbitrary contiguous
-// slices of the raw proofBlob bytes whose concatenation equals proofBlob.
-// In production each chunk corresponds to a single canonically-encoded proof
-// field per `docs/sp1-fri-verifier.md` §2.1; for the validated PoC fixture
-// any chunking is sufficient (Step 1 is a SHA-256 equality check, not a
-// per-field structural decode).
-//
 // `numRounds` is the number of FRI commit-phase rounds for this param tuple
 // (= len(proof.OpeningProof.CommitPhaseCommits); for the PoC = 1).
 //
@@ -229,10 +221,7 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 // Returns the slot-name slice ordered deepest-first so it can be passed
 // directly to `NewKBTracker(initNames, ...)` — the deepest pre-push has
 // index 0 in the slice.
-func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numChunks, numRounds, finalPolyLen int) []string {
-	if numChunks < 1 {
-		panic(fmt.Sprintf("sp1FriPrePushedFieldNames: numChunks must be >= 1, got %d", numChunks))
-	}
+func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numRounds, finalPolyLen int) []string {
 	if numRounds < 1 {
 		panic(fmt.Sprintf("sp1FriPrePushedFieldNames: numRounds must be >= 1, got %d", numRounds))
 	}
@@ -353,7 +342,6 @@ func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numChunks, numRounds
 func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams) {
 	// Static PoC layout — all derived from `params` plus the validated
 	// minimal-guest fixture shape (sp1fri/verify.go:48-62 + fri.go:25-95).
-	const numChunks = 8 // matches chunkProof(t, bs, 8) in the test harness
 	// numRounds is derived from the FRI commit-phase recursion. For arity-2
 	// folding (max_log_arity = 1, total_log_reduction = sum(logArity_r) ⇒
 	// numRounds = total_log_reduction). The off-chain reference computes
@@ -390,12 +378,12 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 	// transcript-input slots and are consumed directly via raw StackOps below
 	// (the tracker only tracks the transcript-input layer used by the absorb
 	// helpers).
-	initNames := sp1FriPrePushedFieldNames(params, numChunks, numRounds, finalPolyLen)
+	initNames := sp1FriPrePushedFieldNames(params, numRounds, finalPolyLen)
 
 	// Unlocking-script layout (deepest → top):
 	//   - initNames         — transcript-input slots (tracked)
-	//   - chunks (numChunks) — raw proof-body chunks (untracked; consumed below)
-	//   - proofBlob         — typed arg (untracked; consumed by Step 1)
+	//   - proofBlob         — typed arg (untracked; consumed by Step 1, which
+	//                         binds it to the slots above — R-059)
 	//   - publicValues      — typed arg (untracked; consumed below)
 	//   - sp1VKeyHash       — typed arg (only if SP1VKeyHashByteSize > 0)
 
@@ -417,22 +405,28 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 	// duplication cannot diverge (R-058 — it could, and did).
 	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 
-	// 1c. proofBlob is now on top with the `numChunks` chunks immediately
-	// below. Run the Step 1 SHA-256 binding (see EmitProofBlobBindingHash;
-	// docs/sp1-fri-verifier.md §2). After this call, proofBlob is consumed
-	// and the chunks remain on the data stack in declaration order.
-	EmitProofBlobBindingHash(emit, numChunks)
-
-	// 1d. Drop the chunks. In production each chunk would be the canonical
-	// byte encoding of a single proof field consumed by subsequent steps;
-	// for the PoC fixture the chunks are dummy slices of the raw blob and
-	// the structured transcript inputs are pushed deeper in the stack as
-	// canonical u32s (see sp1FriPrePushedFieldNames). Drop them en masse.
-	// The chunks were never tracked, so we use raw `drop` ops without
-	// touching tracker.nm.
-	for i := 0; i < numChunks; i++ {
-		emit(StackOp{Op: "drop"})
-	}
+	// 1c. proofBlob is now on top, with the TRANSCRIPT-INPUT slots immediately
+	// below it. Bind the blob to those slots (docs/sp1-fri-verifier.md §2).
+	//
+	// R-059 / CL-BUG-102. This used to bind the blob to `numChunks` dummy
+	// chunks pushed by the unlocking script — arbitrary contiguous slices of
+	// that same blob — which were then dropped unread, while every value the
+	// verifier consumes came from the separate layer below. The equality held
+	// by construction for ANY blob: the reviewer's "choose a blob, split it
+	// into eight pieces, push both", measured as a spend carrying 1589 bytes
+	// of the attacker's choosing that the script VM accepted.
+	//
+	// The binding now covers exactly what the verifier consumes: every
+	// transcript-input slot, in canonical order, each numeric slot
+	// canonicalised to 4 little-endian bytes (OP_NUM2BIN) so the
+	// serialisation is unambiguous, with the trailing publicValues slot
+	// hashed as bytes. `sp1fri.CanonicalProofBlob` writes exactly these bytes
+	// off-chain, so `proofBlob` IS the canonical serialisation of the values
+	// checked — and a blob that is anything else fails here.
+	//
+	// The slots are only PICKed, never consumed: they stay in declaration
+	// order for the steps that drain them.
+	EmitProofBlobBindingHash(emit, len(initNames), len(initNames)-1)
 
 	// 1e. Restore publicValues from alt-stack and BIND it to the deep
 	// `_obs_public_values` slot the transcript actually absorbs.
@@ -625,9 +619,31 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 // References:
 //   - docs/sp1-fri-verifier.md §2 + §2.1.
 //   - packages/runar-go/sp1fri/decode.go:25-48 (canonical traversal order).
-func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
+func EmitProofBlobBindingHash(emit func(StackOp), numFields, numericFields int) {
 	if numFields < 1 {
 		panic(fmt.Sprintf("EmitProofBlobBindingHash: numFields must be >= 1, got %d", numFields))
+	}
+	if numericFields < 0 || numericFields > numFields {
+		panic(fmt.Sprintf(
+			"EmitProofBlobBindingHash: numericFields must be in [0, numFields=%d], got %d",
+			numFields, numericFields))
+	}
+
+	// R-059: `numericFields` counts, from the DEEPEST field forward, how many
+	// of the bound items are script NUMBERS rather than byte strings. A script
+	// number's encoding is minimal and therefore variable-length — 1 is one
+	// byte, 300 is two — so hashing numbers raw would bind an ambiguous
+	// serialisation: different field values can produce the same concatenation.
+	// Each numeric field is canonicalised to 4 little-endian bytes with
+	// OP_NUM2BIN first, which is exactly what the off-chain encoder writes
+	// (`sp1fri.CanonicalProofBlob`). Byte-string fields (today only the
+	// trailing publicValues slot) are hashed as they stand.
+	canonicalise := func(index int) {
+		if index >= numericFields {
+			return
+		}
+		emit(StackOp{Op: "push", Value: bigIntPush(4)})
+		emit(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 	}
 
 	// Step 1a: hash proofBlob (currently on top), park digest on alt-stack.
@@ -640,6 +656,7 @@ func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
 	field0Depth := numFields - 1
 	emit(StackOp{Op: "push", Value: bigIntPush(int64(field0Depth))})
 	emit(StackOp{Op: "pick", Depth: field0Depth})
+	canonicalise(0)
 
 	// Step 1c: walk forward through the fields, picking each and CAT-ing into
 	// the accumulator. With the accumulator sitting one slot above the
@@ -651,6 +668,7 @@ func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
 		depth := numFields - i
 		emit(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
 		emit(StackOp{Op: "pick", Depth: depth})
+		canonicalise(i)
 		emit(StackOp{Op: "opcode", Code: "OP_CAT"})
 	}
 

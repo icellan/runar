@@ -147,7 +147,9 @@ func TestSp1FriVerifier_VerifyingKeyBindsTheProgram(t *testing.T) {
 	ups := sp1fri.MinimalGuestParams()
 	ups.SP1VKeyHashByteSize = p.SP1VKeyHashByteSize
 	unlocking, err := sp1fri.EncodeUnlockingScript(
-		proof, proofBytes, pubBytes, candidateVk(0), ups)
+		// R-059: nil ⇒ the encoder derives the canonical transcript-input
+		// serialisation, which is what the Step 1 binding checks.
+		proof, nil, pubBytes, candidateVk(0), ups)
 	if err != nil {
 		t.Fatalf("EncodeUnlockingScript: %v", err)
 	}

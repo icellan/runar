@@ -53,7 +53,9 @@ func sp1MinimalGuestUnlocking(t *testing.T) (unlocking []byte, pubBytes []byte) 
 	}
 
 	unlocking, err = sp1fri.EncodeUnlockingScript(
-		proof, proofBytes, pubBytes, nil, sp1fri.MinimalGuestParams())
+		// R-059: nil ⇒ the encoder derives the canonical transcript-input
+		// serialisation, which is what the Step 1 binding checks.
+		proof, nil, pubBytes, nil, sp1fri.MinimalGuestParams())
 	if err != nil {
 		t.Fatalf("EncodeUnlockingScript: %v", err)
 	}
