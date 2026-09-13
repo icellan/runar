@@ -6129,10 +6129,9 @@ fn setupMethodStack(ctx: *LowerCtx, program: types.ANFProgram, method: types.ANF
     }
 }
 
-fn setupPropertyStack(ctx: *LowerCtx, program: types.ANFProgram) !void {
-    _ = ctx;
-    _ = program;
-}
+// R-295: `setupPropertyStack` used to live here. Its entire body was
+// `_ = ctx; _ = program;` — it took two parameters, discarded both, and had no
+// callers.
 
 pub fn methodBindings(method: types.ANFMethod) []const types.ANFBinding {
     return if (method.body.len > 0) method.body else method.bindings;
@@ -6355,94 +6354,11 @@ fn findPrivateMethod(methods: []const types.ANFMethod, name: []const u8) ?types.
     return null;
 }
 
-fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
-    var public_indices = std.ArrayListUnmanaged(usize).empty;
-    defer public_indices.deinit(ctx.allocator);
-
-    for (program.methods, 0..) |method, idx| {
-        if (method.is_public) {
-            try public_indices.append(ctx.allocator, idx);
-        }
-    }
-
-    if (public_indices.items.len == 0) return;
-
-    const last_pub = public_indices.items.len - 1;
-
-    for (public_indices.items, 0..) |method_idx, pub_idx| {
-        const method = program.methods[method_idx];
-        const bindings = if (method.body.len > 0) method.body else method.bindings;
-
-        const ensureMethodPrelude = struct {
-            fn apply(inner_ctx: *LowerCtx, inner_bindings: []const types.ANFBinding, inner_method: types.ANFMethod) !void {
-                if (methodUsesCodePart(inner_bindings) and inner_ctx.stack.findDepth("_codePart") == null) {
-                    try inner_ctx.stack.push(inner_ctx.allocator, "_codePart");
-                    inner_ctx.trackDepth();
-                }
-                // BUG-100 fix: no _opPushTxSig — signature derived on-chain from
-                // the preimage (see lowerCheckPreimage).
-                for (inner_method.params) |param| {
-                    try inner_ctx.stack.push(inner_ctx.allocator, param.name);
-                }
-                inner_ctx.trackDepth();
-            }
-        };
-
-        if (pub_idx < last_pub) {
-            try ctx.emitOp(.op_dup);
-            try ctx.emitPushInt(@intCast(pub_idx));
-            try ctx.emitOp(.op_numequal);
-            try ctx.emitOp(.op_if);
-            try ctx.emitOp(.op_drop);
-
-            var branch_stack = try ctx.stack.clone(ctx.allocator);
-            const saved_stack = ctx.stack;
-            const saved_force_copy_bindings = ctx.force_copy_bindings;
-            ctx.stack = branch_stack;
-            ctx.force_copy_bindings = .empty;
-            try ensureMethodPrelude.apply(ctx, bindings, method);
-
-            try ctx.lowerBindings(bindings, method.is_public);
-            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
-            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
-            // every public method also fixes all-readonly stateful methods.
-            if (method.is_public) {
-                try ctx.cleanupExcessStack();
-            }
-            if (!endsWithAssert(bindings)) {
-                try ctx.emitOp(.op_1);
-            }
-
-            branch_stack = ctx.stack;
-            branch_stack.deinit(ctx.allocator);
-            ctx.stack = saved_stack;
-            ctx.force_copy_bindings.deinit(ctx.allocator);
-            ctx.force_copy_bindings = saved_force_copy_bindings;
-
-            try ctx.emitOp(.op_else);
-        } else {
-            try ctx.emitPushInt(@intCast(pub_idx));
-            try ctx.emitOp(.op_numequalverify);
-            try ensureMethodPrelude.apply(ctx, bindings, method);
-
-            try ctx.lowerBindings(bindings, method.is_public);
-            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
-            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
-            // every public method also fixes all-readonly stateful methods.
-            if (method.is_public) {
-                try ctx.cleanupExcessStack();
-            }
-            if (!endsWithAssert(bindings)) {
-                try ctx.emitOp(.op_1);
-            }
-        }
-    }
-
-    var endif_count: usize = 0;
-    while (endif_count < last_pub) : (endif_count += 1) {
-        try ctx.emitOp(.op_endif);
-    }
-}
+// R-295: an 88-line `emitDispatchTable` used to live here — a copy of the live
+// method-lowering loop with no callers, which had already drifted away from it
+// (it never gained the `endsWithTerminalRawScript` companion the live path
+// uses). A second copy of the dispatch loop is the shape that absorbs a fix
+// silently: the tests would all still pass.
 
 // ============================================================================
 // Tests
