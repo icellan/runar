@@ -13,7 +13,7 @@
 
 ## Write Once, Compile Anywhere
 
-Rúnar lets you write Bitcoin SV smart contracts in the language you already know. All formats compile through the same pipeline and produce identical Bitcoin Script.
+Rúnar lets you write Bitcoin SV smart contracts in the language you already know. All nine surface formats parse into the same AST and run the same pipeline, and every compiler produces byte-identical Bitcoin Script for every contract that is not explicitly scoped to one tier.
 
 <table>
 <tr>
@@ -188,7 +188,7 @@ Bitcoin Script development today forces a choice between hand-writing opcodes (e
 - **No decorators** — uses native language keywords (`readonly`, `public`, `immutable`, `#[readonly]`, `prop`)
 - **Write in your language** — TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity-like, or Move-style
 - **Test natively** — `vitest` for TS, `go test` for Go, `cargo test` for Rust, `rspec` for Ruby, `pytest` for Python, `zig build test` for Zig, JUnit for Java examples
-- **Seven compilers** — TypeScript (reference), Go, Rust, Python, Zig, Ruby, Java — all produce byte-identical output
+- **Seven compilers** — TypeScript (reference), Go, Rust, Python, Zig, Ruby, Java — byte-identical output, with one stated exception: the EVM/STARK proof-system primitives (BN254/Groth16, BabyBear, KoalaBear, Poseidon2, Merkle, SP1 FRI) are Go-only by project policy, and the 4 conformance fixtures that use them carry an explicit `"compilers": ["go"]` allowlist. The other 74 are byte-identical across all seven. See [CLAUDE.md](CLAUDE.md) for the two invariants stated exactly, and `conformance/README.md` for the per-fixture allowlist.
 - **Post-quantum (experimental)** — WOTS+ and SLH-DSA (FIPS 205) signature verification in Bitcoin Script. The shipped wallet examples are deliberately naive constructions (see `examples/ts/post-quantum-*-naive-INSECURE*`); treat the PQ surface as experimental, not production-ready.
 - **Nanopass architecture** — 6 small passes, each auditable in a single sitting
 - **Full IDE support** — type checking, autocompletion, go-to-definition in every language
