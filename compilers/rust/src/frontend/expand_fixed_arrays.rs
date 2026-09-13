@@ -984,6 +984,30 @@ impl<'a> ExpandContext<'a> {
         if base_name.is_none() {
             let new_obj = self.rewrite_expression(object, prelude);
             let new_idx = self.rewrite_expression(index, prelude);
+
+            // R-167: a runtime index on the SECOND level of a nested array.
+            //
+            // `try_resolve_array_base` only recognises a `PropertyAccess`
+            // object, and for `self.g[0][i]` the object is itself an
+            // `IndexAccess`, so control reached this generic path. The
+            // rewritten form `g__0[i]` then survived into ANF and died in STACK
+            // LOWERING, telling the author that `g__0` — a synthetic this pass
+            // invents, appearing nowhere in their source — has no deploy-time
+            // slot. Two passes downstream of the one that knows what is wrong.
+            //
+            // After the rewrite the object IS a `PropertyAccess` naming that
+            // synthetic, so re-asking the same question catches it. The message
+            // is the one the first-level spelling has always given: they are
+            // the same unsupported feature.
+            if as_literal_index(&new_idx).is_none() && self.try_resolve_array_base(&new_obj).is_some()
+            {
+                self.errors.push(Diagnostic::error(
+                    "Runtime index access on a nested FixedArray is not supported",
+                    self.current_stmt_loc.clone(),
+                ));
+                return Expression::BigIntLiteral { value: BigInt::from(0) };
+            }
+
             return Expression::IndexAccess {
                 object: Box::new(new_obj),
                 index: Box::new(new_idx),
