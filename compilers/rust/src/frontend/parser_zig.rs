@@ -136,6 +136,11 @@ enum Token {
     FalseLit,
     Void,
 
+    /// A character the lexer has no token for. Never produced by a valid
+    /// source; exists so the parser reports it instead of the lexer dropping
+    /// it (N-144).
+    Unknown(char),
+
     // Identifiers and literals
     Ident(String),
     NumberLit(BigInt),
@@ -357,7 +362,16 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
-        // Skip unrecognised characters
+        // A character the Zig surface has no meaning for. Carry it through as a
+        // token so the parser can refuse it (N-144).
+        //
+        // This used to `pos += 1` in silence, so `sum = sum ?? i;` lexed as
+        // `sum = sum i;` — two statements, both well-formed — and the contract
+        // COMPILED, to a different script than the one the author read. Every
+        // other tier refuses the same source. No `.runar.zig` in the repo (92
+        // files, string literals and comments excluded) contains a character
+        // this arm reaches, so nothing that parsed before stops parsing.
+        tokens.push(Token::Unknown(ch));
         pos += 1;
     }
 
@@ -1734,8 +1748,23 @@ impl<'a> ZigParser<'a> {
             }
         }
 
-        // Fallback
-        self.advance();
+        // Nothing in the grammar starts with this token. Say so (N-144).
+        //
+        // This used to `self.advance()` and return the literal 0 in silence, so
+        // `sum = sum +++ ?? i;` parsed as an expression tree with zeros in it
+        // and COMPILED — to a different, well-formed script than the contract
+        // the author wrote. parser_ruby.rs has always pushed an error here; this
+        // parser was the one missing the arm.
+        //
+        // The placeholder stays: with `errors` non-empty `parse_source` reports
+        // a parse failure and nothing downstream ever sees it. Advancing is what
+        // keeps the loop making progress, including at Eof.
+        let offending = format!("{:?}", self.peek());
+        self.errors
+            .push(format!("Unexpected token in expression: {}", offending));
+        if *self.peek() != Token::Eof {
+            self.advance();
+        }
         Expression::BigIntLiteral { value: BigInt::from(0) }
     }
 
