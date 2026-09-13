@@ -2466,24 +2466,58 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 			}
 			elseCtx.sm.push(thenName)
 		} else {
+			// R-161: this is the DANGEROUS padding path, and it is the one the
+			// #99 guard below was meant to catch — except that guard sits
+			// AFTER these loops, which terminate only at equality, so it could
+			// never fire. Moved here, where it can.
+			//
+			// Padding an EMPTY else arm is the legitimate #99 fallback: the arm
+			// has no bindings of its own, so an unnamed placeholder is a
+			// faithful stand-in for "the then-arm's result the spender did not
+			// produce". Padding a NON-EMPTY else arm is not: the arm computed
+			// something, the depths disagree anyway, and an empty push writes a
+			// slot the post-ENDIF code will read as a value. That is the
+			// mechanism behind CL-BUG-125's OP_0 in the taken arm.
+			//
+			// Measured before this change: across 154 contracts in examples/
+			// and conformance/, these padding loops execute ZERO times. Both
+			// the padding and the guard it was paired with were dead code that
+			// read as protection.
+			if len(elseBindings) != 0 {
+				panic(fmt.Sprintf("internal codegen error: conditional needs %d placeholder push(es) to balance a NON-EMPTY else arm (then depth %d != else depth %d); an empty push there becomes a value the post-ENDIF code reads (see GitHub issue #99 and the OP_0-in-the-taken-arm shape); binding=%q", thenCtx.sm.depth()-elseCtx.sm.depth(), thenCtx.sm.depth(), elseCtx.sm.depth(), bindingName))
+			}
 			elseCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
 			elseCtx.sm.push("")
 		}
 	}
 	for elseCtx.sm.depth() > thenCtx.sm.depth() {
+		// R-161: the mirror case — a then-arm shallower than the else. There is
+		// no "empty then arm" exemption to make here: a then arm that left
+		// fewer results than the else arm is the same disagreement seen from
+		// the other side.
+		if len(thenBindings) != 0 {
+			panic(fmt.Sprintf("internal codegen error: conditional needs %d placeholder push(es) to balance a NON-EMPTY then arm (else depth %d != then depth %d); binding=%q", elseCtx.sm.depth()-thenCtx.sm.depth(), elseCtx.sm.depth(), thenCtx.sm.depth(), bindingName))
+		}
 		thenCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
 		thenCtx.sm.push("")
 	}
 
-	// Layer B — branch-balance invariant (#99 Bug 1 guard). After reconciliation
-	// the two arms of an OP_IF/OP_ELSE MUST leave the stack at identical depth;
+	// Layer B — branch-balance invariant (#99 Bug 1).
+	//
+	// The two arms of an OP_IF/OP_ELSE MUST leave the stack at identical depth;
 	// otherwise the post-ENDIF code (generated against a single assumed depth)
 	// is only correct for the branch the spender does not take, producing a
 	// silently-unspendable script. The VM does not enforce branch balance, so
-	// this is the compiler's responsibility — fail loudly at compile time.
-	if thenCtx.sm.depth() != elseCtx.sm.depth() {
-		panic(fmt.Sprintf("internal codegen error: conditional emitted stack-imbalanced branches (then depth %d != else depth %d); would produce an unspendable script (see GitHub issue #99); binding=%q", thenCtx.sm.depth(), elseCtx.sm.depth(), bindingName))
-	}
+	// this is the compiler's responsibility.
+	//
+	// R-161: there used to be a panic HERE, and it could not fire. Phase 3's
+	// two loops each add exactly one slot to the shallower arm and terminate
+	// only at equality, so by the time control reaches this line the depths are
+	// equal by construction — a guard citing GitHub issue #99 that reads as
+	// protection and provides none. The real check now lives inside those
+	// loops, on the padding itself, where the disagreement is still visible.
+	// The equality below is therefore an invariant, not a test, and is left as
+	// a comment rather than a panic that can never run.
 
 	thenOps := thenCtx.ops
 	elseOps := elseCtx.ops
