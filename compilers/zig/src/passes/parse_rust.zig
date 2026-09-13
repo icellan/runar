@@ -1144,9 +1144,9 @@ const Parser = struct {
         if (self.current.kind == .number) {
             const start_tok = self.bump();
             init_value = parseNumberLiteral(start_tok.text);
-        } else {
-            // Non-literal start — parse as expression and try to extract
-            _ = self.parseExpression();
+        } else if (self.parseExpression()) |e| {
+            // N-138: keep a negated literal instead of discarding it.
+            if (loopStartLiteral(e)) |v| init_value = v;
         }
 
         // Consume '..'
@@ -2127,4 +2127,26 @@ test "reject #[public] attribute (Rust DSL)" {
         if (std.mem.indexOf(u8, err, "#[public]") != null) found = true;
     }
     try std.testing.expect(found);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// discard path, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

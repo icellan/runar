@@ -330,6 +330,11 @@ const MUST_COMPILE = [
     finding: 'N-134',
     what: 'the same number in decimal — the spelling that always worked',
   },
+  {
+    file: 'NegLoopStart.runar.ts',
+    finding: 'N-138',
+    what: 'a for-loop starting at a NEGATIVE literal — the Zig tier unrolled from 0 on all nine surfaces',
+  },
 ] as const;
 
 /** Contracts every tier must REFUSE, with a real located diagnostic. */

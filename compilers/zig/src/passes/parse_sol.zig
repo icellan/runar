@@ -1330,8 +1330,9 @@ const Parser = struct {
                     _ = self.bump();
                     if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 0) catch 0;
-                    } else {
-                        _ = self.parseExpression();
+                    } else if (self.parseExpression()) |e| {
+                        // N-138: keep a negated literal instead of discarding it.
+                        if (loopStartLiteral(e)) |v| init_value = v;
                     }
                 }
             }
@@ -1343,8 +1344,9 @@ const Parser = struct {
                     _ = self.bump();
                     if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 0) catch 0;
-                    } else {
-                        _ = self.parseExpression();
+                    } else if (self.parseExpression()) |e| {
+                        // N-138: keep a negated literal instead of discarding it.
+                        if (loopStartLiteral(e)) |v| init_value = v;
                     }
                 }
             }
@@ -2238,4 +2240,26 @@ test "sol type resolution" {
     try std.testing.expectEqual(RunarType.point, Parser.resolveSolType("Point"));
     // Unknown
     try std.testing.expectEqual(RunarType.unknown, Parser.resolveSolType("SomeRandomType"));
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser recognised a bare `.number` (or a
+/// folded `.literal_int`) and let `-1` fall through to the discard path, so a
+/// loop written `for (… i = -1; …)` unrolled from 0 — a different program from
+/// the one the source describes, and byte-divergent from the other six tiers
+/// with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

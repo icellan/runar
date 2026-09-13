@@ -1203,7 +1203,21 @@ const Parser = struct {
                 }
                 if (self.current.kind == .assign) {
                     _ = self.bump();
-                    if (self.current.kind == .number) {
+                    // N-138: a NEGATIVE literal start is a literal. This branch
+                    // used to recognise `.number` only, so `for (let i = -1n; …)`
+                    // fell through to "parse the expression and throw it away"
+                    // and unrolled from 0 — byte-divergent from the other six
+                    // tiers on the same source, with no size difference to
+                    // notice. `extractBigIntValue` in the reference tier walks
+                    // a unary minus for exactly this reason.
+                    if (self.current.kind == .minus) {
+                        _ = self.bump();
+                        if (self.current.kind == .number) {
+                            init_value = -(std.fmt.parseInt(i64, self.bump().text, 10) catch 0);
+                        } else {
+                            _ = self.parseExpression();
+                        }
+                    } else if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 10) catch 0;
                     } else {
                         _ = self.parseExpression();

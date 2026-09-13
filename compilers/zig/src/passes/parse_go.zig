@@ -1407,7 +1407,8 @@ const Parser = struct {
                 } else {
                     const init_expr = self.parseExpression();
                     if (init_expr) |e| {
-                        if (e == .literal_int) init_value = e.literal_int;
+                        // N-138: `.literal_int` alone missed a negated literal.
+                        if (loopStartLiteral(e)) |v| init_value = v;
                     }
                 }
 
@@ -2459,4 +2460,26 @@ test "parse IfElse contract (Go)" {
     try std.testing.expectEqual(@as(usize, 1), c.methods.len);
     // Body: short var decl + if-else + assert = 3 statements
     try std.testing.expectEqual(@as(usize, 3), c.methods[0].body.len);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser recognised a bare `.number` (or a
+/// folded `.literal_int`) and let `-1` fall through to the discard path, so a
+/// loop written `for (… i = -1; …)` unrolled from 0 — a different program from
+/// the one the source describes, and byte-divergent from the other six tiers
+/// with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

@@ -1174,10 +1174,8 @@ const Parser = struct {
                     }
                     if (decl_name) |dn| {
                         if (std.mem.eql(u8, dn, s.for_stmt.var_name)) {
-                            const init_val: i64 = if (decl_value) |v| switch (v) {
-                                .literal_int => |n| n,
-                                else => 0,
-                            } else 0;
+                            // N-138: a negated literal is a literal.
+                            const init_val: i64 = if (decl_value) |v| (loopStartLiteral(v) orelse 0) else 0;
                             stmts.items.len -= 1; // pop the decl
                             var merged = s.for_stmt;
                             merged.init_value = init_val;
@@ -2307,4 +2305,26 @@ test "parse error: no module found" {
     const r = parseMove(arena.allocator(), "const x = 5;", "bad.runar.move");
     try std.testing.expect(r.errors.len > 0);
     try std.testing.expect(r.contract == null);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// zero default, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

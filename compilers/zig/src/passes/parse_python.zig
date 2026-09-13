@@ -1387,12 +1387,9 @@ const Parser = struct {
         if (self.match(.comma)) {
             // range(a, b)
             const second = self.parseExpression() orelse return null;
-            switch (first) {
-                .literal_int => |v| {
-                    init_value = v;
-                },
-                else => {},
-            }
+            // N-138: `.literal_int` alone missed a negated literal, so
+            // `range(-1, 5)` started at 0.
+            if (loopStartLiteral(first)) |v| init_value = v;
             switch (second) {
                 .literal_int => |v| {
                     bound = v;
@@ -2333,4 +2330,26 @@ test "python byte string to hex" {
     const allocator = arena.allocator();
     const result = pyByteStringToHex(allocator, "\\xde\\xad");
     try std.testing.expectEqualStrings("dead", result);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// discard path, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

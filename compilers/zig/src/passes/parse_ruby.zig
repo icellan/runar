@@ -1543,10 +1543,9 @@ const Parser = struct {
 
         // Extract integer values for the ForStmt (which uses init_value and bound)
         var init_value: i64 = 0;
-        switch (start_expr) {
-            .literal_int => |v| init_value = v,
-            else => {},
-        }
+        // N-138: `.literal_int` alone missed a negated literal, so
+        // `for i in -1...5` started at 0.
+        if (loopStartLiteral(start_expr)) |v| init_value = v;
 
         var bound: i64 = 0;
         switch (end_expr) {
@@ -2612,4 +2611,26 @@ test "rb parse property with default" {
     }
     // Constructor params should not include properties with defaults
     try std.testing.expectEqual(@as(usize, 0), c.constructor.params.len);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// discard path, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }
