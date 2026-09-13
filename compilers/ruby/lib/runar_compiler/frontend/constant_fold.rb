@@ -10,6 +10,7 @@
 
 require "json"
 require_relative "../ir/types"
+require_relative "dce"
 
 module RunarCompiler
   module Frontend
@@ -489,20 +490,29 @@ module RunarCompiler
       # Side-effect detection
       # -----------------------------------------------------------------
 
-      SIDE_EFFECT_KINDS = %w[
-        assert update_prop check_preimage deserialize_state
-        add_output add_raw_output add_data_output
-        if loop call method_call raw_script
-      ].freeze
+      # R-262: this list and SIDE_EFFECT_FREE_KINDS below used to be a second,
+      # hand-maintained copy of DCE's. They had already drifted: R-140 taught
+      # DCE to decide `if` and `loop` by RECURSING into their arms instead of
+      # treating them as unconditionally side-effecting, and this copy kept the
+      # old flat entries. Harmless only because nothing in lib/ calls the two
+      # functions below — the tests do, to pin the F-003 unknown-kind guard and
+      # its cross-tier location strings.
+      #
+      # Derived from DCE now, so a change there reaches here. The `if`/`loop`
+      # difference is deliberate and is the whole reason this is a superset
+      # rather than an alias: this folder does NOT recurse into arms, so a flat
+      # entry is what keeps it from raising UnknownANFKindError on a legitimate
+      # conditional.
+      SIDE_EFFECT_KINDS = (
+        ::RunarCompiler::Frontend::DCE::SIDE_EFFECT_KINDS + %w[if loop]
+      ).freeze
 
       # Kinds known to have no observable side effects.  Listed explicitly
       # so an unknown kind raises UnknownANFKindError instead of silently
       # being treated as side-effect-free (which would cause DCE to drop
       # a new side-effecting variant).
-      SIDE_EFFECT_FREE_KINDS = %w[
-        load_param load_prop load_const get_state_script
-        bin_op unary_op array_literal
-      ].freeze
+      # R-262: identical to DCE's list, so it IS DCE's list.
+      SIDE_EFFECT_FREE_KINDS = ::RunarCompiler::Frontend::DCE::SIDE_EFFECT_FREE_KINDS
 
       # Return true if this value kind has observable side effects.
       def self.has_side_effect(value)
