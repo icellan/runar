@@ -2408,3 +2408,38 @@ test for the non-transaction case. Ten call-path tests injected the contract
 UTXO straight into the `RunarContract` and never told the provider about it, so
 the gate had nothing to check — the very vacuity this phase closes; they now
 register the outpoint.
+
+## Wire-protocol primitives
+
+Two things in this SDK are not ergonomics: their **bytes cross a tier boundary**,
+so all seven SDKs must produce the same ones. A signature produced here is
+verified by a process running another tier's SDK, and a one-byte difference makes
+every such signature fail — at runtime, in someone else's process.
+
+**Canonical JSON** is an RFC 8785 (JCS) serializer. Payloads are hashed through
+it before signing. Reaching for the language's own JSON encoder instead is the
+mistake this section exists to prevent: object key order, number formatting and
+string escaping all differ between stdlib encoders, and any of them changes the
+hash.
+
+**The signed envelope** is the wire shape used by overlay apps (the
+`runar-overlay-express` server, the `runar-react` hooks, and any non-TS overlay
+backend). Every SDK must accept the same envelope, produce signatures every other
+tier verifies, and return the SAME rejection reason for the same bad envelope —
+the reason code is part of the protocol, not a local diagnostic.
+
+Cross-tier interop is pinned by `conformance/sdk-envelope/`: one TS-signed
+envelope replayed against every tier's verifier, plus a known-bad envelope per
+rejection reason. Any change to envelope code has to round-trip through it.
+
+This tier's API (`runar.lang.sdk.Envelope`):
+
+| primitive | symbol |
+| --- | --- |
+| canonical JSON | `Envelope.canonicalJson(Object value)` |
+| envelope shape | `Envelope.SignedEnvelope` |
+| sign | `Envelope.sign(SignEnvelopeOpts opts)` |
+| verify | `Envelope.verify(VerifyEnvelopeOpts opts)` |
+
+Note the shorter names: this tier spells them `sign` / `verify` on the
+`Envelope` class rather than `signEnvelope` / `verifyEnvelope`.

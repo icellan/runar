@@ -1833,3 +1833,38 @@ to `76a914 <20 zero bytes> 88ac` — a hash nobody holds. The SDK signed with th
 real key, so `OP_EQUALVERIFY` on `hash160(pubkey)` failed: those deploys and
 calls were **unspendable**, and the always-ack provider reported success. They
 now use `BuildP2PKHScript(addr)` and pass under full script validation.
+
+## Wire-protocol primitives
+
+Two things in this SDK are not ergonomics: their **bytes cross a tier boundary**,
+so all seven SDKs must produce the same ones. A signature produced here is
+verified by a process running another tier's SDK, and a one-byte difference makes
+every such signature fail — at runtime, in someone else's process.
+
+**Canonical JSON** is an RFC 8785 (JCS) serializer. Payloads are hashed through
+it before signing. Reaching for the language's own JSON encoder instead is the
+mistake this section exists to prevent: object key order, number formatting and
+string escaping all differ between stdlib encoders, and any of them changes the
+hash.
+
+**The signed envelope** is the wire shape used by overlay apps (the
+`runar-overlay-express` server, the `runar-react` hooks, and any non-TS overlay
+backend). Every SDK must accept the same envelope, produce signatures every other
+tier verifies, and return the SAME rejection reason for the same bad envelope —
+the reason code is part of the protocol, not a local diagnostic.
+
+Cross-tier interop is pinned by `conformance/sdk-envelope/`: one TS-signed
+envelope replayed against every tier's verifier, plus a known-bad envelope per
+rejection reason. Any change to envelope code has to round-trip through it.
+
+This tier's API (`sdk_envelope.go`):
+
+| primitive | symbol |
+| --- | --- |
+| canonical JSON | `CanonicalJSON(value any) (string, error)` |
+| envelope shape | `type SignedEnvelope struct` |
+| sign | `SignEnvelope(opts SignEnvelopeOpts) (SignedEnvelope, error)` |
+| verify | `VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult` |
+
+`encoding/json` is NOT interchangeable with `CanonicalJSON` here: Go's marshaller
+sorts map keys but not struct fields, and escapes differently.
