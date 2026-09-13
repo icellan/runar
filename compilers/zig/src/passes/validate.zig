@@ -24,6 +24,8 @@ const ConstructorNode = types.ConstructorNode;
 const MethodNode = types.MethodNode;
 const Expression = types.Expression;
 const Statement = types.Statement;
+const ForStmt = types.ForStmt;
+const SourceLocation = types.SourceLocation;
 const RunarType = types.RunarType;
 const ParentClass = types.ParentClass;
 const CompilerDiagnostic = types.CompilerDiagnostic;
@@ -671,7 +673,7 @@ fn validateMethods(
 
         // Validate for-loop bounds are compile-time constants
         for (method.body) |stmt| {
-            try validateStatement(allocator, stmt, errors);
+            try validateStatement(allocator, contract, stmt, errors);
         }
     }
 }
@@ -1110,6 +1112,205 @@ fn isAssertCall(expr: Expression) bool {
     };
 }
 
+// ---------------------------------------------------------------------------
+// R-127 -- output intrinsics inside a loop body
+// ---------------------------------------------------------------------------
+
+/// The three intrinsics that register an output ref.
+const output_intrinsic_names = [_][]const u8{ "addOutput", "addRawOutput", "addDataOutput" };
+
+fn isOutputIntrinsicName(name: []const u8) bool {
+    for (output_intrinsic_names) |n| {
+        if (std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
+/// Where an output intrinsic was found, and how it was reached.
+const IntrinsicSite = struct {
+    intrinsic: []const u8,
+    /// The private method it was reached through, if any.
+    via: ?[]const u8 = null,
+    location: ?SourceLocation = null,
+};
+
+/// Reject an output intrinsic called inside a loop body (R-127).
+///
+/// `anf_lower` lowers a loop body into its own sub-context, which starts with a
+/// fresh empty add-output ref list, and nothing propagates that list back to the
+/// method context -- unlike the if-statement lowering, which concatenates each
+/// arm's outputs into one ref precisely so the parent sees them. The
+/// continuation hash is then built from whatever `addOutput` calls sit at the
+/// method's TOP level while the loop's outputs are still emitted into the
+/// transaction. Measured on a two-iteration loop before this check existed:
+///
+///   * loop only -- ts/go/rust/python blew up inside stack lowering ("method
+///     parameter '_newAmount' is not on the stack at a post-consumption
+///     reference"), zig/ruby emitted a covenant over the WRONG output set, java
+///     emitted none. THIS tier was one of the two that silently shipped the
+///     wrong covenant.
+///   * loop + one top-level call -- compiled clean in every tier, and the ANF
+///     continuation hashed exactly ONE leaf while three outputs were built.
+///
+/// A continuation committing to fewer outputs than the transaction creates is
+/// spendable only by a hand-crafted transaction, is rejected by every shipped
+/// SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+///
+/// Refusal rather than lowering: propagating the refs cannot work by name,
+/// because the loop is unrolled at stack-lowering time and one body binding name
+/// denotes N physical slots. A correct lowering means unrolling at ANF time, a
+/// language feature with no golden behind it; refusing removes nothing that
+/// works today.
+///
+/// The diagnostic text is shared VERBATIM with the other six tiers.
+fn validateNoOutputIntrinsicInLoop(
+    allocator: Allocator,
+    contract: ContractNode,
+    f: ForStmt,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer seen.deinit(allocator);
+    const site = try findOutputIntrinsic(allocator, contract, f.body, &seen) orelse return;
+
+    const via_clause = if (site.via) |v|
+        try std.fmt.allocPrint(allocator, " (reached through private method '{s}')", .{v})
+    else
+        try allocator.dupe(u8, "");
+    try errors.append(allocator, .{
+        .message = try std.fmt.allocPrint(
+            allocator,
+            "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
+                "lowers into its own scope whose declared outputs never reach the method's " ++
+                "output list, so the continuation hash would commit to fewer outputs than the " ++
+                "transaction actually creates: the spend is rejected by every shipped SDK and " ++
+                "any successor it produces is unspendable. Move the call out of the loop.",
+            .{ site.intrinsic, via_clause },
+        ),
+        .severity = .@"error",
+        .location = site.location orelse f.source_loc,
+    });
+}
+
+/// The property/function name a call names, if any.
+fn calleeProperty(expr: Expression) ?[]const u8 {
+    return switch (expr) {
+        .call => |c| c.callee,
+        .method_call => |mc| mc.method,
+        else => null,
+    };
+}
+
+fn privateMethodNamed(contract: ContractNode, name: []const u8) ?MethodNode {
+    for (contract.methods) |m| {
+        if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+    }
+    return null;
+}
+
+/// First output intrinsic reachable from `stmts`, following calls to private
+/// methods: a public method that delegates `addOutput` to a private helper has
+/// that helper INLINED at ANF time, so a helper called in a loop lands its
+/// outputs in the loop's sub-context exactly as a direct call would.
+fn findOutputIntrinsic(
+    allocator: Allocator,
+    contract: ContractNode,
+    stmts: []const Statement,
+    seen: *std.ArrayListUnmanaged([]const u8),
+) Allocator.Error!?IntrinsicSite {
+    for (stmts) |stmt| {
+        if (try findOutputIntrinsicInStatement(allocator, contract, stmt, seen)) |site| return site;
+    }
+    return null;
+}
+
+fn findOutputIntrinsicInStatement(
+    allocator: Allocator,
+    contract: ContractNode,
+    stmt: Statement,
+    seen: *std.ArrayListUnmanaged([]const u8),
+) Allocator.Error!?IntrinsicSite {
+    return switch (stmt) {
+        .expr_stmt => |e| findOutputIntrinsicInExpr(allocator, contract, e.expr, e.source_loc, seen),
+        .const_decl => |d| findOutputIntrinsicInExpr(allocator, contract, d.value, d.source_loc, seen),
+        .let_decl => |d| if (d.value) |v|
+            findOutputIntrinsicInExpr(allocator, contract, v, d.source_loc, seen)
+        else
+            null,
+        .assign => |a| findOutputIntrinsicInExpr(allocator, contract, a.value, a.source_loc, seen),
+        .assert_stmt => |a| findOutputIntrinsicInExpr(allocator, contract, a.condition, a.source_loc, seen),
+        .return_stmt => |r| if (r) |v|
+            findOutputIntrinsicInExpr(allocator, contract, v, null, seen)
+        else
+            null,
+        .if_stmt => |i| blk: {
+            if (try findOutputIntrinsicInExpr(allocator, contract, i.condition, i.source_loc, seen)) |site| {
+                break :blk site;
+            }
+            if (try findOutputIntrinsic(allocator, contract, i.then_body, seen)) |site| break :blk site;
+            if (i.else_body) |eb| {
+                if (try findOutputIntrinsic(allocator, contract, eb, seen)) |site| break :blk site;
+            }
+            break :blk null;
+        },
+        .for_stmt => |f| findOutputIntrinsic(allocator, contract, f.body, seen),
+    };
+}
+
+fn findOutputIntrinsicInExpr(
+    allocator: Allocator,
+    contract: ContractNode,
+    expr: Expression,
+    loc: ?SourceLocation,
+    seen: *std.ArrayListUnmanaged([]const u8),
+) Allocator.Error!?IntrinsicSite {
+    if (calleeProperty(expr)) |name| {
+        if (isOutputIntrinsicName(name)) {
+            return IntrinsicSite{ .intrinsic = name, .location = loc };
+        }
+        if (privateMethodNamed(contract, name)) |helper| {
+            var already = false;
+            for (seen.items) |s| {
+                if (std.mem.eql(u8, s, name)) already = true;
+            }
+            if (!already) {
+                try seen.append(allocator, name);
+                if (try findOutputIntrinsic(allocator, contract, helper.body, seen)) |nested| {
+                    return IntrinsicSite{ .intrinsic = nested.intrinsic, .via = name, .location = loc };
+                }
+            }
+        }
+    }
+    // An intrinsic can sit inside an argument list or an operand, not only as a
+    // bare expression statement.
+    switch (expr) {
+        .call => |c| for (c.args) |a| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, a, loc, seen)) |site| return site;
+        },
+        .method_call => |mc| for (mc.args) |a| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, a, loc, seen)) |site| return site;
+        },
+        .binary_op => |b| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, b.left, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, b.right, loc, seen)) |site| return site;
+        },
+        .unary_op => |u| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, u.operand, loc, seen)) |site| return site;
+        },
+        .ternary => |t| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, t.condition, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, t.then_expr, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, t.else_expr, loc, seen)) |site| return site;
+        },
+        .index_access => |ia| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, ia.object, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, ia.index, loc, seen)) |site| return site;
+        },
+        else => {},
+    }
+    return null;
+}
+
 /// The cross-tier loop-update diagnostic. Shared VERBATIM with the other six
 /// tiers — `compilers/rust/src/frontend/validator.rs` is the source of truth,
 /// and `compilers/go/frontend/validator.go`,
@@ -1186,6 +1387,7 @@ fn isRepresentableForUpdate(allowed: []const u8, update: Statement) bool {
 /// Validate individual statements (currently checks for-loop bounds).
 fn validateStatement(
     allocator: Allocator,
+    contract: ContractNode,
     stmt: Statement,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
@@ -1218,12 +1420,17 @@ fn validateStatement(
                     });
                 }
             }
-            for (f.body) |s| try validateStatement(allocator, s, errors);
+            // R-127: an output intrinsic in the body never reaches
+            // the method's output list, so the continuation would commit to
+            // fewer outputs than the transaction creates. This tier was one of
+            // the two that silently emitted the wrong covenant.
+            try validateNoOutputIntrinsicInLoop(allocator, contract, f, errors);
+            for (f.body) |s| try validateStatement(allocator, contract, s, errors);
         },
         .if_stmt => |if_s| {
-            for (if_s.then_body) |s| try validateStatement(allocator, s, errors);
+            for (if_s.then_body) |s| try validateStatement(allocator, contract, s, errors);
             if (if_s.else_body) |eb| {
-                for (eb) |s| try validateStatement(allocator, s, errors);
+                for (eb) |s| try validateStatement(allocator, contract, s, errors);
             }
         },
         else => {},

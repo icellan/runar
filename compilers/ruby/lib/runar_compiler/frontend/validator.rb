@@ -5,6 +5,7 @@
 # Checks the AST against language subset constraints WITHOUT modifying it.
 # Direct port of compilers/python/runar_compiler/frontend/validator.py.
 
+require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "sighash_validate"
@@ -664,7 +665,150 @@ module RunarCompiler
 
         validate_expression(stmt.init.init)
         validate_for_update(stmt)
+        validate_no_output_intrinsic_in_loop(stmt)
         stmt.body.each { |s| validate_statement(s) }
+      end
+
+      # The three intrinsics that register an output ref.
+      OUTPUT_INTRINSIC_NAMES = %w[addOutput addRawOutput addDataOutput].freeze
+
+      # Build the R-127 rejection. Shared verbatim with the other six
+      # tiers.
+      def self.loop_output_intrinsic_msg(intrinsic, via)
+        via_clause = via ? " (reached through private method '#{via}')" : ""
+        "Output intrinsic '#{intrinsic}'#{via_clause} cannot be called inside a loop " \
+          "body. A loop body lowers into its own scope whose declared outputs never reach " \
+          "the method's output list, so the continuation hash would commit to fewer outputs " \
+          "than the transaction actually creates: the spend is rejected by every shipped SDK " \
+          "and any successor it produces is unspendable. Move the call out of the loop."
+      end
+
+      # Reject an output intrinsic called inside a loop body (R-127).
+      #
+      # `anf_lower` lowers a loop body into its own sub-context, which starts
+      # with a fresh empty add-output ref list, and nothing propagates that list
+      # back to the method context -- unlike the if-statement lowering, which
+      # concatenates each arm's outputs into one ref precisely so the parent
+      # sees them. The continuation hash is then built from whatever `addOutput`
+      # calls sit at the method's TOP level while the loop's outputs are still
+      # emitted into the transaction. Measured on a two-iteration loop before
+      # this check existed:
+      #
+      #   * loop only -- ts/go/rust/python blew up inside stack lowering
+      #     ("method parameter '_newAmount' is not on the stack at a
+      #     post-consumption reference"), zig/ruby emitted a covenant over the
+      #     WRONG output set, java emitted none. THIS tier was one of the two
+      #     that silently shipped the wrong covenant.
+      #   * loop + one top-level call -- compiled clean in every tier, and the
+      #     ANF continuation hashed exactly ONE leaf while three outputs were
+      #     built.
+      #
+      # A continuation committing to fewer outputs than the transaction creates
+      # is spendable only by a hand-crafted transaction, is rejected by every
+      # shipped SDK, and the successor it produces is permanently unspendable
+      # (CL-BUG-164).
+      #
+      # Refusal rather than lowering: propagating the refs cannot work by name,
+      # because the loop is unrolled at stack-lowering time and one body binding
+      # name denotes N physical slots. A correct lowering means unrolling at ANF
+      # time, a language feature with no golden behind it; refusing removes
+      # nothing that works today.
+      def validate_no_output_intrinsic_in_loop(stmt)
+        found = find_output_intrinsic(stmt.body, Set.new)
+        return if found.nil?
+
+        intrinsic, via, loc = found
+        add_error(
+          self.class.loop_output_intrinsic_msg(intrinsic, via),
+          loc: loc || stmt.source_location,
+        )
+      end
+
+      # The property/function name a call names, or nil. Distinct from the
+      # `callee_property` further down, which takes the CALLEE node itself and
+      # does not follow identifiers.
+      def output_callee_property(expr)
+        return nil unless expr.is_a?(CallExpr)
+
+        callee = expr.callee
+        return callee.property if callee.is_a?(PropertyAccessExpr)
+        return callee.property if callee.is_a?(MemberExpr)
+        return callee.name if callee.is_a?(Identifier)
+
+        nil
+      end
+
+      def private_method_named(name)
+        @contract.methods.find { |m| m.name == name && m.visibility == "private" }
+      end
+
+      # First output intrinsic reachable from `stmts`, following calls to
+      # private methods: a public method that delegates `addOutput` to a private
+      # helper has that helper INLINED at ANF time, so a helper called in a loop
+      # lands its outputs in the loop's sub-context exactly as a direct call
+      # would.
+      def find_output_intrinsic(stmts, seen)
+        stmts.each do |stmt|
+          found = find_output_intrinsic_in_statement(stmt, seen)
+          return found unless found.nil?
+        end
+        nil
+      end
+
+      def find_output_intrinsic_in_statement(stmt, seen)
+        case stmt
+        when ExpressionStmt
+          find_output_intrinsic_in_expr(stmt.expr, stmt.source_location, seen)
+        when VariableDeclStmt
+          find_output_intrinsic_in_expr(stmt.init, stmt.source_location, seen)
+        when AssignmentStmt
+          find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        when ReturnStmt
+          find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        when IfStmt
+          found = find_output_intrinsic_in_expr(stmt.condition, stmt.source_location, seen)
+          return found unless found.nil?
+
+          find_output_intrinsic((stmt.then || []) + (stmt.else_ || []), seen)
+        when ForStmt
+          find_output_intrinsic(stmt.body, seen)
+        end
+      end
+
+      def find_output_intrinsic_in_expr(expr, loc, seen)
+        return nil if expr.nil?
+
+        name = output_callee_property(expr)
+        unless name.nil?
+          return [name, nil, loc] if OUTPUT_INTRINSIC_NAMES.include?(name)
+
+          helper = private_method_named(name)
+          if helper && !seen.include?(name)
+            seen << name
+            nested = find_output_intrinsic(helper.body, seen)
+            return [nested[0], name, loc] unless nested.nil?
+          end
+        end
+
+        sub_expressions(expr).each do |child|
+          found = find_output_intrinsic_in_expr(child, loc, seen)
+          return found unless found.nil?
+        end
+        nil
+      end
+
+      # Direct sub-expressions of `expr`, for the intrinsic search above. An
+      # intrinsic can sit inside an argument list or an operand, not only as a
+      # bare expression statement.
+      def sub_expressions(expr)
+        case expr
+        when CallExpr then expr.args || []
+        when BinaryExpr then [expr.left, expr.right]
+        when UnaryExpr then [expr.operand]
+        when TernaryExpr then [expr.condition, expr.consequent, expr.alternate]
+        when IndexAccessExpr then [expr.object, expr.index]
+        else []
+        end
       end
 
       # Shared verbatim with the other six tiers. Per-tier diagnostic drift on

@@ -394,6 +394,23 @@ for (let i: bigint = 0n; i < 10n; i++) {
 - The bound (right side of the comparison) must be a compile-time constant.
 - Only simple increment (`++`) or decrement (`--`) is allowed.
 - Loops are unrolled at compile time -- there are no runtime loops in Bitcoin Script.
+- **Output intrinsics may not appear in a loop body.** `this.addOutput`,
+  `this.addRawOutput` and `this.addDataOutput` are rejected inside a loop --
+  directly, nested in an `if`, or reached through a private helper called
+  there. The loop body lowers into its own scope whose declared outputs never
+  reach the method's output list, so the state continuation would commit to
+  fewer outputs than the transaction actually creates: a covenant no shipped
+  SDK can spend, whose successor is permanently unspendable. Declare the
+  outputs at the method's top level instead. Reading state written in a loop
+  and declaring the output afterwards is fine:
+
+  ```typescript
+  let total: bigint = 0n;
+  for (let i: bigint = 0n; i < 3n; i++) {
+    total = total + i;
+  }
+  this.addOutput(1000n, total);   // OK -- outside the loop
+  ```
 
 ### Assert
 

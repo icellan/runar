@@ -261,7 +261,7 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
 
     // Validate statements in constructor body
     for stmt in &ctor.body {
-        validate_statement(stmt, errors);
+        validate_statement(stmt, contract, errors);
     }
 
     validate_constructor_slot_bijection(contract, errors);
@@ -545,7 +545,7 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
 
     // Validate all statements in method body
     for stmt in &method.body {
-        validate_statement(stmt, errors);
+        validate_statement(stmt, contract, errors);
     }
 }
 
@@ -960,7 +960,189 @@ fn is_assert_call(expr: &Expression) -> bool {
 // Statement validation
 // ---------------------------------------------------------------------------
 
-fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
+// ---------------------------------------------------------------------------
+// R-127 -- output intrinsics inside a loop body
+// ---------------------------------------------------------------------------
+
+/// The three intrinsics that register an output ref.
+const OUTPUT_INTRINSIC_NAMES: [&str; 3] = ["addOutput", "addRawOutput", "addDataOutput"];
+
+/// Build the R-127 rejection. Shared verbatim with the other six tiers.
+fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
+    let via_clause = match via {
+        Some(v) => format!(" (reached through private method '{}')", v),
+        None => String::new(),
+    };
+    format!(
+        "Output intrinsic '{}'{} cannot be called inside a loop body. A loop body lowers into \
+         its own scope whose declared outputs never reach the method's output list, so the \
+         continuation hash would commit to fewer outputs than the transaction actually creates: \
+         the spend is rejected by every shipped SDK and any successor it produces is unspendable. \
+         Move the call out of the loop.",
+        intrinsic, via_clause
+    )
+}
+
+/// Reject an output intrinsic called inside a loop body (R-127).
+///
+/// `anf_lower` lowers a loop body into its own sub-context, which starts with a
+/// fresh empty add-output ref list, and nothing propagates that list back to the
+/// method context -- unlike the if-statement lowering, which concatenates each
+/// arm's outputs into one ref precisely so the parent sees them. The
+/// continuation hash is then built from whatever `addOutput` calls sit at the
+/// method's TOP level while the loop's outputs are still emitted into the
+/// transaction. Measured on a two-iteration loop before this check existed:
+///
+///   * loop only -- ts/go/rust/python blew up inside stack lowering ("method
+///     parameter '_newAmount' is not on the stack at a post-consumption
+///     reference"), zig/ruby emitted a covenant over the WRONG output set, java
+///     emitted none.
+///   * loop + one top-level call -- compiled clean in every tier, and the ANF
+///     continuation hashed exactly ONE leaf while three outputs were built.
+///
+/// A continuation committing to fewer outputs than the transaction creates is
+/// spendable only by a hand-crafted transaction, is rejected by every shipped
+/// SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+///
+/// Refusal rather than lowering: propagating the refs cannot work by name,
+/// because the loop is unrolled at stack-lowering time and one body binding name
+/// denotes N physical slots. A correct lowering means unrolling at ANF time, a
+/// language feature with no golden behind it; refusing removes nothing that
+/// works today.
+fn validate_no_output_intrinsic_in_loop(
+    body: &[Statement],
+    loop_loc: &SourceLocation,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let mut seen: Vec<String> = Vec::new();
+    if let Some((intrinsic, via, loc)) = find_output_intrinsic(body, contract, &mut seen) {
+        errors.push(Diagnostic::error(
+            loop_output_intrinsic_msg(&intrinsic, via.as_deref()),
+            Some(loc.unwrap_or_else(|| loop_loc.clone())),
+        ));
+    }
+}
+
+type IntrinsicSite = (String, Option<String>, Option<SourceLocation>);
+
+/// The property/function name a call names, if any.
+fn callee_property(expr: &Expression) -> Option<&str> {
+    match expr {
+        Expression::CallExpr { callee, .. } => match callee.as_ref() {
+            Expression::PropertyAccess { property } => Some(property.as_str()),
+            Expression::MemberExpr { property, .. } => Some(property.as_str()),
+            Expression::Identifier { name } => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// First output intrinsic reachable from `stmts`, following calls to private
+/// methods: a public method that delegates `addOutput` to a private helper has
+/// that helper INLINED at ANF time, so a helper called in a loop lands its
+/// outputs in the loop's sub-context exactly as a direct call would.
+fn find_output_intrinsic(
+    stmts: &[Statement],
+    contract: &ContractNode,
+    seen: &mut Vec<String>,
+) -> Option<IntrinsicSite> {
+    for stmt in stmts {
+        if let Some(found) = find_output_intrinsic_in_statement(stmt, contract, seen) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_output_intrinsic_in_statement(
+    stmt: &Statement,
+    contract: &ContractNode,
+    seen: &mut Vec<String>,
+) -> Option<IntrinsicSite> {
+    match stmt {
+        Statement::ExpressionStatement { expression, source_location } => {
+            find_output_intrinsic_in_expr(expression, source_location, contract, seen)
+        }
+        Statement::VariableDecl { init, source_location, .. } => {
+            find_output_intrinsic_in_expr(init, source_location, contract, seen)
+        }
+        Statement::Assignment { value, source_location, .. } => {
+            find_output_intrinsic_in_expr(value, source_location, contract, seen)
+        }
+        Statement::ReturnStatement { value, source_location } => value
+            .as_ref()
+            .and_then(|v| find_output_intrinsic_in_expr(v, source_location, contract, seen)),
+        Statement::IfStatement { condition, then_branch, else_branch, source_location } => {
+            if let Some(found) =
+                find_output_intrinsic_in_expr(condition, source_location, contract, seen)
+            {
+                return Some(found);
+            }
+            if let Some(found) = find_output_intrinsic(then_branch, contract, seen) {
+                return Some(found);
+            }
+            else_branch
+                .as_ref()
+                .and_then(|e| find_output_intrinsic(e, contract, seen))
+        }
+        Statement::ForStatement { body, .. } => find_output_intrinsic(body, contract, seen),
+    }
+}
+
+fn find_output_intrinsic_in_expr(
+    expr: &Expression,
+    loc: &SourceLocation,
+    contract: &ContractNode,
+    seen: &mut Vec<String>,
+) -> Option<IntrinsicSite> {
+    if let Some(name) = callee_property(expr) {
+        if OUTPUT_INTRINSIC_NAMES.contains(&name) {
+            return Some((name.to_string(), None, Some(loc.clone())));
+        }
+        let is_private_helper = contract
+            .methods
+            .iter()
+            .any(|m| m.name == name && m.visibility == Visibility::Private);
+        if is_private_helper && !seen.iter().any(|s| s == name) {
+            seen.push(name.to_string());
+            let helper_body: Vec<Statement> = contract
+                .methods
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.body.clone())
+                .unwrap_or_default();
+            if let Some((intrinsic, _, _)) = find_output_intrinsic(&helper_body, contract, seen) {
+                return Some((intrinsic, Some(name.to_string()), Some(loc.clone())));
+            }
+        }
+    }
+    for child in sub_expressions(expr) {
+        if let Some(found) = find_output_intrinsic_in_expr(child, loc, contract, seen) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Direct sub-expressions of `expr`, for the intrinsic search above. An
+/// intrinsic can sit inside an argument list or an operand, not only as a bare
+/// expression statement.
+fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
+    match expr {
+        Expression::CallExpr { args, .. } => args.iter().collect(),
+        Expression::BinaryExpr { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+        Expression::UnaryExpr { operand, .. } => vec![operand.as_ref()],
+        Expression::TernaryExpr { condition, consequent, alternate } => {
+            vec![condition.as_ref(), consequent.as_ref(), alternate.as_ref()]
+        }
+        Expression::IndexAccess { object, index } => vec![object.as_ref(), index.as_ref()],
+        _ => Vec::new(),
+    }
+}
+
+fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     match stmt {
         Statement::VariableDecl { name, var_type, init, .. } => {
             if let Some(TypeNode::FixedArray { .. }) = var_type {
@@ -986,11 +1168,11 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
         } => {
             validate_expression(condition, errors);
             for s in then_branch {
-                validate_statement(s, errors);
+                validate_statement(s, contract, errors);
             }
             if let Some(else_stmts) = else_branch {
                 for s in else_stmts {
-                    validate_statement(s, errors);
+                    validate_statement(s, contract, errors);
                 }
             }
         }
@@ -999,7 +1181,7 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
             init,
             update,
             body,
-            ..
+            source_location,
         } => {
             validate_expression(condition, errors);
 
@@ -1010,6 +1192,11 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
             // written there vanished from the emitted script without a
             // diagnostic.
             validate_for_update(init, condition, update, errors);
+
+            // R-127: an output intrinsic in the body never reaches the
+            // method's output list, so the continuation would commit to fewer
+            // outputs than the transaction creates.
+            validate_no_output_intrinsic_in_loop(body, source_location, contract, errors);
 
             // Check that the loop bound is a compile-time constant. Non-zero
             // starts and countdown loops (`i--` with `>`/`>=`) are supported:
@@ -1032,7 +1219,7 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
 
             // Validate body
             for s in body {
-                validate_statement(s, errors);
+                validate_statement(s, contract, errors);
             }
         }
         Statement::ExpressionStatement { expression, .. } => {

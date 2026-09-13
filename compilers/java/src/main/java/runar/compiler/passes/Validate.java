@@ -946,9 +946,192 @@ public final class Validate {
                 validateExpression(f.init().init());
             }
             validateForUpdate(f);
+            validateNoOutputIntrinsicInLoop(f);
             for (Statement s : f.body()) {
                 validateStatement(s);
             }
+        }
+
+        /** The three intrinsics that register an output ref. */
+        private static final Set<String> OUTPUT_INTRINSIC_NAMES =
+            Set.of("addOutput", "addRawOutput", "addDataOutput");
+
+        /**
+         * Build the R-127 rejection. Shared verbatim with the other six tiers.
+         */
+        private static String loopOutputIntrinsicMsg(String intrinsic, String via) {
+            String viaClause =
+                via == null ? "" : " (reached through private method '" + via + "')";
+            return "Output intrinsic '" + intrinsic + "'" + viaClause
+                + " cannot be called inside a loop body. A loop body lowers into its own scope"
+                + " whose declared outputs never reach the method's output list, so the"
+                + " continuation hash would commit to fewer outputs than the transaction actually"
+                + " creates: the spend is rejected by every shipped SDK and any successor it"
+                + " produces is unspendable. Move the call out of the loop.";
+        }
+
+        /** Where an output intrinsic was found, and how it was reached. */
+        private record IntrinsicSite(String intrinsic, String via, SourceLocation location) {}
+
+        /**
+         * Reject an output intrinsic called inside a loop body (R-127).
+         *
+         * <p>{@code AnfLower} lowers a loop body into its own sub-context, which starts with a
+         * fresh empty add-output ref list, and nothing propagates that list back to the method
+         * context — unlike the if-statement lowering, which concatenates each arm's outputs into
+         * one ref precisely so the parent sees them. The continuation hash is then built from
+         * whatever {@code addOutput} calls sit at the method's TOP level while the loop's outputs
+         * are still emitted into the transaction. Measured on a two-iteration loop before this
+         * check existed:
+         *
+         * <ul>
+         *   <li>loop only — ts/go/rust/python blew up inside stack lowering ("method parameter
+         *       '_newAmount' is not on the stack at a post-consumption reference"), zig/ruby
+         *       emitted a covenant over the WRONG output set, java emitted none.
+         *   <li>loop + one top-level call — compiled clean in every tier, and the ANF continuation
+         *       hashed exactly ONE leaf while three outputs were built.
+         * </ul>
+         *
+         * <p>A continuation committing to fewer outputs than the transaction creates is spendable
+         * only by a hand-crafted transaction, is rejected by every shipped SDK, and the successor
+         * it produces is permanently unspendable (CL-BUG-164).
+         *
+         * <p>Refusal rather than lowering: propagating the refs cannot work by name, because the
+         * loop is unrolled at stack-lowering time and one body binding name denotes N physical
+         * slots. A correct lowering means unrolling at ANF time, a language feature with no golden
+         * behind it; refusing removes nothing that works today.
+         */
+        private void validateNoOutputIntrinsicInLoop(ForStatement f) {
+            IntrinsicSite site = findOutputIntrinsic(f.body(), new HashSet<>());
+            if (site == null) {
+                return;
+            }
+            SourceLocation loc = site.location() != null ? site.location() : f.sourceLocation();
+            error(loopOutputIntrinsicMsg(site.intrinsic(), site.via()), loc);
+        }
+
+        /** The property/function name a call names, or null. */
+        private static String calleeName(Expression expr) {
+            if (!(expr instanceof CallExpr call)) {
+                return null;
+            }
+            Expression callee = call.callee();
+            if (callee instanceof PropertyAccessExpr pa) {
+                return pa.property();
+            }
+            if (callee instanceof MemberExpr me) {
+                return me.property();
+            }
+            if (callee instanceof Identifier id) {
+                return id.name();
+            }
+            return null;
+        }
+
+        private MethodNode privateMethodNamed(String name) {
+            for (MethodNode m : contract.methods()) {
+                if (m.name().equals(name) && m.visibility() == Visibility.PRIVATE) {
+                    return m;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * First output intrinsic reachable from {@code stmts}, following calls to private methods:
+         * a public method that delegates {@code addOutput} to a private helper has that helper
+         * INLINED at ANF time, so a helper called in a loop lands its outputs in the loop's
+         * sub-context exactly as a direct call would.
+         */
+        private IntrinsicSite findOutputIntrinsic(List<Statement> stmts, Set<String> seen) {
+            for (Statement stmt : stmts) {
+                IntrinsicSite found = findOutputIntrinsicInStatement(stmt, seen);
+                if (found != null) {
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        private IntrinsicSite findOutputIntrinsicInStatement(Statement stmt, Set<String> seen) {
+            if (stmt instanceof ExpressionStatement es) {
+                return findOutputIntrinsicInExpr(es.expression(), es.sourceLocation(), seen);
+            }
+            if (stmt instanceof VariableDeclStatement vd) {
+                return findOutputIntrinsicInExpr(vd.init(), vd.sourceLocation(), seen);
+            }
+            if (stmt instanceof AssignmentStatement as) {
+                return findOutputIntrinsicInExpr(as.value(), as.sourceLocation(), seen);
+            }
+            if (stmt instanceof ReturnStatement rs) {
+                return findOutputIntrinsicInExpr(rs.value(), rs.sourceLocation(), seen);
+            }
+            if (stmt instanceof IfStatement is) {
+                IntrinsicSite inCond =
+                    findOutputIntrinsicInExpr(is.condition(), is.sourceLocation(), seen);
+                if (inCond != null) {
+                    return inCond;
+                }
+                List<Statement> both = new ArrayList<>(is.thenBody());
+                if (is.elseBody() != null) {
+                    both.addAll(is.elseBody());
+                }
+                return findOutputIntrinsic(both, seen);
+            }
+            if (stmt instanceof ForStatement fs) {
+                return findOutputIntrinsic(fs.body(), seen);
+            }
+            return null;
+        }
+
+        private IntrinsicSite findOutputIntrinsicInExpr(
+            Expression expr, SourceLocation loc, Set<String> seen) {
+            if (expr == null) {
+                return null;
+            }
+            String name = calleeName(expr);
+            if (name != null) {
+                if (OUTPUT_INTRINSIC_NAMES.contains(name)) {
+                    return new IntrinsicSite(name, null, loc);
+                }
+                MethodNode helper = privateMethodNamed(name);
+                if (helper != null && seen.add(name)) {
+                    IntrinsicSite nested = findOutputIntrinsic(helper.body(), seen);
+                    if (nested != null) {
+                        return new IntrinsicSite(nested.intrinsic(), name, loc);
+                    }
+                }
+            }
+            for (Expression child : subExpressions(expr)) {
+                IntrinsicSite found = findOutputIntrinsicInExpr(child, loc, seen);
+                if (found != null) {
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Direct sub-expressions of {@code expr}, for the intrinsic search above. An intrinsic can
+         * sit inside an argument list or an operand, not only as a bare expression statement.
+         */
+        private static List<Expression> subExpressions(Expression expr) {
+            if (expr instanceof CallExpr c) {
+                return c.args();
+            }
+            if (expr instanceof BinaryExpr b) {
+                return List.of(b.left(), b.right());
+            }
+            if (expr instanceof UnaryExpr u) {
+                return List.of(u.operand());
+            }
+            if (expr instanceof TernaryExpr t) {
+                return List.of(t.condition(), t.consequent(), t.alternate());
+            }
+            if (expr instanceof IndexAccessExpr ia) {
+                return List.of(ia.object(), ia.index());
+            }
+            return List.of();
         }
 
         /**

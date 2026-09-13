@@ -882,10 +882,191 @@ function validateForStatement(
 
   validateForUpdate(stmt, ctx);
 
+  validateNoOutputIntrinsicInLoop(stmt, ctx);
+
   // Validate body
   for (const s of stmt.body) {
     validateStatement(s, ctx);
   }
+}
+
+/**
+ * Reject any output intrinsic called inside a loop body (R-127).
+ *
+ * `lowerForStatement` lowers the body into `ctx.subContext()`, which starts
+ * with a fresh empty `_addOutputRefs`, and nothing propagates that list back to
+ * the method context -- unlike `lowerIfStatement`, which concatenates each
+ * arm's outputs into a single ref precisely so the parent sees them. The
+ * continuation hash is then built from whatever `addOutput` calls sit at the
+ * method's TOP level, while the loop's outputs are still emitted into the
+ * transaction. Measured on a two-iteration loop before this check existed:
+ *
+ *   loop only                 ts/go/rust/python blew up inside stack lowering
+ *                             ("method parameter '_newAmount' is not on the
+ *                             stack at a post-consumption reference"),
+ *                             zig/ruby emitted a covenant over the WRONG
+ *                             output set, java emitted none.
+ *   loop + one top-level call compiled clean everywhere, and the ANF
+ *                             continuation hashed exactly ONE leaf while three
+ *                             outputs were built.
+ *
+ * A continuation committing to fewer outputs than the transaction creates is
+ * spendable only by a hand-crafted transaction, is rejected by every shipped
+ * SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+ *
+ * Refusal rather than lowering: propagating the refs cannot work by name,
+ * because the loop is unrolled at stack-lowering time and one body binding name
+ * denotes N physical slots -- `findDepth` would resolve it to the last
+ * iteration alone. A correct lowering means unrolling at ANF time, a language
+ * feature with no golden behind it; refusing removes nothing that works today
+ * (no fixture or example in the repo declares an output inside a loop). Same
+ * shape as R-065's for-update rejection, and the diagnostic text is shared
+ * verbatim with the other six tiers.
+ */
+const OUTPUT_INTRINSIC_NAMES = new Set<string>([
+  'addOutput', 'addRawOutput', 'addDataOutput',
+]);
+
+function outputIntrinsicCallName(expr: Expression): string | undefined {
+  if (expr.kind !== 'call_expr') return undefined;
+  const callee = expr.callee;
+  // `this.addOutput(...)` parses as property_access in some frontends and as
+  // member_expr in others; the Go/Move surfaces additionally spell it on a
+  // StatefulContext parameter (`ctx.addOutput(...)`). Matching the property
+  // name alone covers all three, and no non-intrinsic carries these names.
+  const property =
+    callee.kind === 'property_access' ? callee.property
+      : callee.kind === 'member_expr' ? callee.property
+        : undefined;
+  if (property !== undefined && OUTPUT_INTRINSIC_NAMES.has(property)) return property;
+  return undefined;
+}
+
+/** The private method a call names, or undefined. */
+function privateMethodCallName(expr: Expression, ctx: ValidationContext): string | undefined {
+  if (expr.kind !== 'call_expr') return undefined;
+  const callee = expr.callee;
+  const property =
+    callee.kind === 'property_access' ? callee.property
+      : callee.kind === 'member_expr' ? callee.property
+        : callee.kind === 'identifier' ? callee.name
+          : undefined;
+  if (property === undefined) return undefined;
+  const m = ctx.contract.methods.find(
+    (x) => x.name === property && x.visibility === 'private',
+  );
+  return m ? property : undefined;
+}
+
+interface OutputIntrinsicSite {
+  /** The intrinsic's name, e.g. `addOutput`. */
+  intrinsic: string;
+  /** The private method it was reached through, if any. */
+  via?: string;
+  location: SourceLocation | undefined;
+}
+
+/**
+ * First output intrinsic reachable from `stmts`, following calls to private
+ * methods (a public method that delegates `addOutput` to a private helper has
+ * that helper INLINED at ANF time, so a helper called in a loop lands its
+ * outputs in the loop's sub-context exactly like a direct call would).
+ */
+function findOutputIntrinsic(
+  stmts: readonly Statement[],
+  ctx: ValidationContext,
+  seen: Set<string>,
+): OutputIntrinsicSite | undefined {
+  for (const stmt of stmts) {
+    const found = findOutputIntrinsicInStatement(stmt, ctx, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findOutputIntrinsicInStatement(
+  stmt: Statement,
+  ctx: ValidationContext,
+  seen: Set<string>,
+): OutputIntrinsicSite | undefined {
+  const fromExpr = (expr: Expression): OutputIntrinsicSite | undefined => {
+    const intrinsic = outputIntrinsicCallName(expr);
+    if (intrinsic !== undefined) {
+      return { intrinsic, location: stmt.sourceLocation };
+    }
+    const helper = privateMethodCallName(expr, ctx);
+    if (helper !== undefined && !seen.has(helper)) {
+      seen.add(helper);
+      const body = ctx.contract.methods.find((m) => m.name === helper)?.body ?? [];
+      const nested = findOutputIntrinsic(body, ctx, seen);
+      if (nested) {
+        return { intrinsic: nested.intrinsic, via: helper, location: stmt.sourceLocation };
+      }
+    }
+    // Recurse into sub-expressions: an intrinsic can sit inside an argument
+    // list or an operand, not only as a bare expression statement.
+    for (const child of subExpressions(expr)) {
+      const found = fromExpr(child);
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  switch (stmt.kind) {
+    case 'expression_statement':
+      return fromExpr(stmt.expression);
+    case 'variable_decl':
+      return fromExpr(stmt.init);
+    case 'assignment':
+      return fromExpr(stmt.value);
+    case 'return_statement':
+      return stmt.value ? fromExpr(stmt.value) : undefined;
+    case 'if_statement': {
+      const inCond = fromExpr(stmt.condition);
+      if (inCond) return inCond;
+      return findOutputIntrinsic([...stmt.then, ...(stmt.else ?? [])], ctx, seen);
+    }
+    case 'for_statement':
+      return findOutputIntrinsic(stmt.body, ctx, seen);
+    default:
+      return undefined;
+  }
+}
+
+/** Direct sub-expressions of `expr`, for the intrinsic search above. */
+function subExpressions(expr: Expression): Expression[] {
+  switch (expr.kind) {
+    case 'call_expr':
+      return [...expr.args];
+    case 'binary_expr':
+      return [expr.left, expr.right];
+    case 'unary_expr':
+      return [expr.operand];
+    case 'ternary_expr':
+      return [expr.condition, expr.consequent, expr.alternate];
+    case 'index_access':
+      return [expr.object, expr.index];
+    default:
+      return [];
+  }
+}
+
+function validateNoOutputIntrinsicInLoop(
+  stmt: Extract<Statement, { kind: 'for_statement' }>,
+  ctx: ValidationContext,
+): void {
+  const site = findOutputIntrinsic(stmt.body, ctx, new Set<string>());
+  if (site === undefined) return;
+  const via = site.via !== undefined ? ` (reached through private method '${site.via}')` : '';
+  ctx.errors.push(makeDiagnostic(
+    `Output intrinsic '${site.intrinsic}'${via} cannot be called inside a loop body. `
+    + `A loop body lowers into its own scope whose declared outputs never reach the method's `
+    + `output list, so the continuation hash would commit to fewer outputs than the transaction `
+    + `actually creates: the spend is rejected by every shipped SDK and any successor it produces `
+    + `is unspendable. Move the call out of the loop.`,
+    'error',
+    site.location ?? stmt.sourceLocation,
+  ));
 }
 
 /**

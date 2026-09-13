@@ -919,9 +919,192 @@ func (ctx *validationContext) validateForStatement(stmt ForStmt) {
 
 	ctx.validateExpression(stmt.Init.Init)
 	ctx.validateForUpdate(stmt)
+	ctx.validateNoOutputIntrinsicInLoop(stmt)
 	for _, s := range stmt.Body {
 		ctx.validateStatement(s)
 	}
+}
+
+// loopOutputIntrinsicMsg builds the R-127 rejection. Shared verbatim
+// with the other six tiers (same mirror list as loopUpdateDiagnosticMsg).
+func loopOutputIntrinsicMsg(intrinsic, via string) string {
+	viaClause := ""
+	if via != "" {
+		viaClause = " (reached through private method '" + via + "')"
+	}
+	return "Output intrinsic '" + intrinsic + "'" + viaClause +
+		" cannot be called inside a loop body. A loop body lowers into its own scope whose " +
+		"declared outputs never reach the method's output list, so the continuation hash would " +
+		"commit to fewer outputs than the transaction actually creates: the spend is rejected by " +
+		"every shipped SDK and any successor it produces is unspendable. Move the call out of the loop."
+}
+
+// outputIntrinsicNames are the three intrinsics that register an output ref.
+var outputIntrinsicNames = map[string]bool{
+	"addOutput": true, "addRawOutput": true, "addDataOutput": true,
+}
+
+// validateNoOutputIntrinsicInLoop rejects an output intrinsic called inside a
+// loop body (R-127).
+//
+// anf_lower lowers a loop body into its own sub-context, which starts with a
+// fresh empty add-output ref list, and nothing propagates that list back to the
+// method context — unlike the if-statement lowering, which concatenates each
+// arm's outputs into one ref precisely so the parent sees them. The
+// continuation hash is then built from whatever addOutput calls sit at the
+// method's TOP level while the loop's outputs are still emitted into the
+// transaction. Measured on a two-iteration loop before this check existed:
+//
+//   - loop only: ts/go/rust/python blew up inside stack lowering ("method
+//     parameter '_newAmount' is not on the stack at a post-consumption
+//     reference"), zig/ruby emitted a covenant over the WRONG output set, java
+//     emitted none.
+//   - loop + one top-level call: compiled clean in every tier, and the ANF
+//     continuation hashed exactly ONE leaf while three outputs were built.
+//
+// A continuation committing to fewer outputs than the transaction creates is
+// spendable only by a hand-crafted transaction, is rejected by every shipped
+// SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+//
+// Refusal rather than lowering: propagating the refs cannot work by name,
+// because the loop is unrolled at stack-lowering time and one body binding name
+// denotes N physical slots. A correct lowering means unrolling at ANF time, a
+// language feature with no golden behind it; refusing removes nothing that
+// works today — no fixture or example in the repo declares an output inside a
+// loop.
+func (ctx *validationContext) validateNoOutputIntrinsicInLoop(stmt ForStmt) {
+	intrinsic, via, loc, found := ctx.findOutputIntrinsic(stmt.Body, map[string]bool{})
+	if !found {
+		return
+	}
+	if loc == nil {
+		l := stmt.SourceLocation
+		loc = &l
+	}
+	ctx.addErrorWithLoc(loopOutputIntrinsicMsg(intrinsic, via), loc)
+}
+
+// calleeProperty returns the property/function name a call names, if any.
+func calleeProperty(expr Expression) string {
+	call, ok := expr.(CallExpr)
+	if !ok {
+		return ""
+	}
+	switch c := call.Callee.(type) {
+	case PropertyAccessExpr:
+		return c.Property
+	case MemberExpr:
+		return c.Property
+	case Identifier:
+		return c.Name
+	}
+	return ""
+}
+
+// privateMethodNamed reports whether name is a private method on the contract.
+func (ctx *validationContext) privateMethodNamed(name string) *MethodNode {
+	if ctx.contract == nil {
+		return nil
+	}
+	for i := range ctx.contract.Methods {
+		m := &ctx.contract.Methods[i]
+		if m.Name == name && m.Visibility == "private" {
+			return m
+		}
+	}
+	return nil
+}
+
+// findOutputIntrinsic returns the first output intrinsic reachable from stmts,
+// following calls to private methods: a public method that delegates addOutput
+// to a private helper has that helper INLINED at ANF time, so a helper called
+// in a loop lands its outputs in the loop's sub-context exactly as a direct
+// call would.
+func (ctx *validationContext) findOutputIntrinsic(
+	stmts []Statement, seen map[string]bool,
+) (string, string, *SourceLocation, bool) {
+	for _, stmt := range stmts {
+		intrinsic, via, loc, found := ctx.findOutputIntrinsicInStatement(stmt, seen)
+		if found {
+			return intrinsic, via, loc, true
+		}
+	}
+	return "", "", nil, false
+}
+
+func (ctx *validationContext) findOutputIntrinsicInStatement(
+	stmt Statement, seen map[string]bool,
+) (string, string, *SourceLocation, bool) {
+	var loc SourceLocation
+	var expr Expression
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		loc, expr = s.SourceLocation, s.Expr
+	case VariableDeclStmt:
+		loc, expr = s.SourceLocation, s.Init
+	case AssignmentStmt:
+		loc, expr = s.SourceLocation, s.Value
+	case ReturnStmt:
+		if s.Value == nil {
+			return "", "", nil, false
+		}
+		loc, expr = s.SourceLocation, s.Value
+	case IfStmt:
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInExpr(s.Condition, &s.SourceLocation, seen); found {
+			return intrinsic, via, l, true
+		}
+		body := append(append([]Statement{}, s.Then...), s.Else...)
+		return ctx.findOutputIntrinsic(body, seen)
+	case ForStmt:
+		return ctx.findOutputIntrinsic(s.Body, seen)
+	default:
+		return "", "", nil, false
+	}
+	return ctx.findOutputIntrinsicInExpr(expr, &loc, seen)
+}
+
+func (ctx *validationContext) findOutputIntrinsicInExpr(
+	expr Expression, loc *SourceLocation, seen map[string]bool,
+) (string, string, *SourceLocation, bool) {
+	if expr == nil {
+		return "", "", nil, false
+	}
+	if name := calleeProperty(expr); name != "" {
+		if outputIntrinsicNames[name] {
+			return name, "", loc, true
+		}
+		if m := ctx.privateMethodNamed(name); m != nil && !seen[name] {
+			seen[name] = true
+			if intrinsic, _, _, found := ctx.findOutputIntrinsic(m.Body, seen); found {
+				return intrinsic, name, loc, true
+			}
+		}
+	}
+	for _, child := range subExpressions(expr) {
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInExpr(child, loc, seen); found {
+			return intrinsic, via, l, true
+		}
+	}
+	return "", "", nil, false
+}
+
+// subExpressions returns the direct sub-expressions of expr, for the intrinsic
+// search above. An intrinsic can sit inside an argument list or an operand, not
+// only as a bare expression statement.
+func subExpressions(expr Expression) []Expression {
+	switch e := expr.(type) {
+	case CallExpr:
+		return e.Args
+	case BinaryExpr:
+		return []Expression{e.Left, e.Right}
+	case UnaryExpr:
+		return []Expression{e.Operand}
+	case TernaryExpr:
+		return []Expression{e.Condition, e.Consequent, e.Alternate}
+	case IndexAccessExpr:
+		return []Expression{e.Object, e.Index}
+	}
+	return nil
 }
 
 // loopUpdateDiagnosticMsg is shared verbatim with the other six tiers. Per-tier

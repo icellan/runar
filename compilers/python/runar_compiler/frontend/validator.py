@@ -30,6 +30,7 @@ from runar_compiler.frontend.ast_nodes import (
     IncrementExpr,
     IndexAccessExpr,
     MemberExpr,
+    MethodNode,
     PrimitiveType,
     PropertyAccessExpr,
     ReturnStmt,
@@ -701,8 +702,143 @@ class _ValidationContext:
         if stmt.init is not None:
             self._validate_expression(stmt.init.init)
         self._validate_for_update(stmt)
+        self._validate_no_output_intrinsic_in_loop(stmt)
         for s in stmt.body:
             self._validate_statement(s)
+
+    # R-127 -- output intrinsics inside a loop body
+    # ------------------------------------------------------------------
+
+    #: The three intrinsics that register an output ref.
+    _OUTPUT_INTRINSIC_NAMES = frozenset({"addOutput", "addRawOutput", "addDataOutput"})
+
+    @staticmethod
+    def _loop_output_intrinsic_msg(intrinsic: str, via: str | None) -> str:
+        """Build the R-127 rejection.
+
+        Shared verbatim with the other six tiers.
+        """
+        via_clause = f" (reached through private method '{via}')" if via else ""
+        return (
+            f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a loop "
+            "body. A loop body lowers into its own scope whose declared outputs never "
+            "reach the method's output list, so the continuation hash would commit to "
+            "fewer outputs than the transaction actually creates: the spend is rejected "
+            "by every shipped SDK and any successor it produces is unspendable. Move the "
+            "call out of the loop."
+        )
+
+    def _validate_no_output_intrinsic_in_loop(self, stmt: ForStmt) -> None:
+        """Reject an output intrinsic called inside a loop body (R-127).
+
+        ``anf_lower`` lowers a loop body into its own sub-context, which starts
+        with a fresh empty add-output ref list, and nothing propagates that list
+        back to the method context -- unlike the if-statement lowering, which
+        concatenates each arm's outputs into one ref precisely so the parent
+        sees them. The continuation hash is then built from whatever
+        ``addOutput`` calls sit at the method's TOP level while the loop's
+        outputs are still emitted into the transaction. Measured on a
+        two-iteration loop before this check existed:
+
+        * loop only -- ts/go/rust/python blew up inside stack lowering ("method
+          parameter '_newAmount' is not on the stack at a post-consumption
+          reference"), zig/ruby emitted a covenant over the WRONG output set,
+          java emitted none.
+        * loop + one top-level call -- compiled clean in every tier, and the ANF
+          continuation hashed exactly ONE leaf while three outputs were built.
+
+        A continuation committing to fewer outputs than the transaction creates
+        is spendable only by a hand-crafted transaction, is rejected by every
+        shipped SDK, and the successor it produces is permanently unspendable
+        (CL-BUG-164).
+
+        Refusal rather than lowering: propagating the refs cannot work by name,
+        because the loop is unrolled at stack-lowering time and one body binding
+        name denotes N physical slots. A correct lowering means unrolling at ANF
+        time, a language feature with no golden behind it; refusing removes
+        nothing that works today.
+        """
+        found = self._find_output_intrinsic(stmt.body, set())
+        if found is None:
+            return
+        intrinsic, via, loc = found
+        self._add_error(
+            self._loop_output_intrinsic_msg(intrinsic, via),
+            loc or stmt.source_location,
+        )
+
+    @staticmethod
+    def _callee_property(expr) -> str | None:
+        """The property/function name a call names, if any."""
+        if not isinstance(expr, CallExpr):
+            return None
+        callee = expr.callee
+        if isinstance(callee, PropertyAccessExpr):
+            return callee.property
+        if isinstance(callee, MemberExpr):
+            return callee.property
+        if isinstance(callee, Identifier):
+            return callee.name
+        return None
+
+    def _private_method_named(self, name: str) -> MethodNode | None:
+        for m in self.contract.methods:
+            if m.name == name and m.visibility == "private":
+                return m
+        return None
+
+    def _find_output_intrinsic(self, stmts, seen: set[str]):
+        """First output intrinsic reachable from ``stmts``.
+
+        Follows calls to private methods: a public method that delegates
+        ``addOutput`` to a private helper has that helper INLINED at ANF time,
+        so a helper called in a loop lands its outputs in the loop's
+        sub-context exactly as a direct call would.
+        """
+        for stmt in stmts:
+            found = self._find_output_intrinsic_in_statement(stmt, seen)
+            if found is not None:
+                return found
+        return None
+
+    def _find_output_intrinsic_in_statement(self, stmt, seen: set[str]):
+        if isinstance(stmt, ExpressionStmt):
+            return self._find_output_intrinsic_in_expr(stmt.expr, stmt.source_location, seen)
+        if isinstance(stmt, VariableDeclStmt):
+            return self._find_output_intrinsic_in_expr(stmt.init, stmt.source_location, seen)
+        if isinstance(stmt, AssignmentStmt):
+            return self._find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        if isinstance(stmt, ReturnStmt):
+            return self._find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        if isinstance(stmt, IfStmt):
+            found = self._find_output_intrinsic_in_expr(
+                stmt.condition, stmt.source_location, seen
+            )
+            if found is not None:
+                return found
+            return self._find_output_intrinsic(list(stmt.then) + list(stmt.else_), seen)
+        if isinstance(stmt, ForStmt):
+            return self._find_output_intrinsic(stmt.body, seen)
+        return None
+
+    def _find_output_intrinsic_in_expr(self, expr, loc, seen: set[str]):
+        if expr is None:
+            return None
+        name = self._callee_property(expr)
+        if name is not None:
+            if name in self._OUTPUT_INTRINSIC_NAMES:
+                return (name, None, loc)
+            helper = self._private_method_named(name)
+            if helper is not None and name not in seen:
+                seen.add(name)
+                nested = self._find_output_intrinsic(helper.body, seen)
+                if nested is not None:
+                    return (nested[0], name, loc)
+        for child in _sub_expressions(expr):
+            found = self._find_output_intrinsic_in_expr(child, loc, seen)
+            if found is not None:
+                return found
+        return None
 
     def _validate_for_update(self, stmt: ForStmt) -> None:
         """Reject any for-loop update clause the loop model cannot represent
@@ -1341,3 +1477,22 @@ def _has_cycle(
 
     stack.discard(name)
     return False
+
+
+def _sub_expressions(expr):
+    """Direct sub-expressions of ``expr``, for the R-127 intrinsic search.
+
+    An intrinsic can sit inside an argument list or an operand, not only as a
+    bare expression statement.
+    """
+    if isinstance(expr, CallExpr):
+        return list(expr.args)
+    if isinstance(expr, BinaryExpr):
+        return [expr.left, expr.right]
+    if isinstance(expr, UnaryExpr):
+        return [expr.operand]
+    if isinstance(expr, TernaryExpr):
+        return [expr.condition, expr.consequent, expr.alternate]
+    if isinstance(expr, IndexAccessExpr):
+        return [expr.object, expr.index]
+    return []

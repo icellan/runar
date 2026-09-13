@@ -418,6 +418,7 @@ ReturnStatement
 
 - **Variable declarations**: `const` variables cannot be reassigned. `let` variables can be reassigned but not re-declared in the same scope.
 - **For loops**: MUST be bounded. The loop bound (the right-hand side of the comparison) MUST be a compile-time constant integer literal or `const` variable initialized to a literal. The loop variable MUST use simple increment (`++`) or decrement (`--`). Nested loops are allowed but the total unrolled iteration count must be statically determinable.
+- **Output intrinsics in a loop body**: `this.addOutput`, `this.addRawOutput` and `this.addDataOutput` MUST NOT be called inside a loop body, directly or through a private helper called there. A loop body lowers into its own scope whose declared outputs never reach the method's output list, so the state continuation would commit to fewer outputs than the transaction actually creates -- a covenant no shipped SDK can spend, whose successor is unspendable. Declare the outputs at the method's top level. (R-127; `conformance/negatives/N30-output-intrinsic-in-loop.runar.ts` is the seven-tier gate.)
 - **While loops, do-while loops**: **disallowed**.
 - **Switch statements**: **disallowed** (use if/else chains).
 - **Labeled statements, break, continue**: **disallowed**.
