@@ -12,13 +12,6 @@ fi
 
 if [ "$1" == "start" ]; then
 
-  mkdir -p $HOME/.keystore
-
-  if [ ! -f "$HOME/.keystore/ps.key" ]; then
-    echo "Creating $HOME/.keystore/ps.key..."
-    echo "tprv8ZgxMBicQKsPfPCcKvAPAhga6QNeC1xPXhPBhFtw1CvRisZHnCF4LAjDbkcY7CwhndHrvTvmRWWwqRM9XzaAVRxwh81wnPV1kX8gU1XbEhx" > $HOME/.keystore/ps.key
-  fi
-
   if [ -L "$0" ]; then
     DIR="$(cd "$($(pwd)/$(readlink "$0"))" && pwd)"
   else
@@ -81,11 +74,6 @@ EOL
   done
 
   mkdir -p $DIR/regtest/n1/regtest
-
-  if [ ! -f "$DIR/regtest/n1/regtest/wallet.dat" ] && [ -f "$DIR/regtest_wallet.dat" ]; then
-    echo "Creating $DIR/regtest/n1/regtest/wallet.dat..."
-    cp "$DIR/regtest_wallet.dat" "$DIR/regtest/n1/regtest/wallet.dat"
-  fi
 
   #IP=$(docker network inspect bridge --format='{{(index .IPAM.Config 0).Gateway}}')
 
