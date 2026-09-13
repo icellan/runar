@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Off-chain ScriptVM: which SDKs ship one
+
+Rúnar does not ship seven ScriptVMs, and it never claimed to — but the fact
+lived in `CLAUDE.md` and in three SDK READMEs, none of which is where someone
+upgrading looks. Stated once here so nobody plans around a VM that is not there:
+
+| SDK | ScriptVM |
+| --- | --- |
+| TypeScript | yes — full execute + step (`@bsv/sdk` `Spend`, driven via `Spend.step()`) |
+| Go | yes — full execute + step (go-sdk `interpreter`, via its `Debugger` hook) |
+| Python | yes — full execute + step (bsv-sdk `Spend`; optional dependency, `pip install runar[script-vm]`) |
+| Rust | yes, **execute-only** — upstream `Spend` keeps its stack and program counter `pub(crate)`, so per-opcode stepping is not observable from a downstream crate |
+| Zig | no ScriptVM |
+| Ruby | no ScriptVM |
+| Java | no ScriptVM |
+
+It is not an accidental gap in Zig, Ruby and Java: no canonical upstream BSV
+script interpreter is usable from those runtimes (there is no bsv-blockchain
+Ruby or Java SDK, and the Zig `bsvz` library's `script/engine.zig` does not
+compile under the repo's Zig 0.16 toolchain). Per project policy those tiers do
+NOT hand-roll one — a hand-written interpreter that disagrees with consensus is
+worse than no interpreter. Off-chain verification there is the ANF interpreter
+plus, in Java, `ContractSimulator`, with byte-level correctness gated by the
+conformance suite instead.
+
+The Zig SDK's `lastValidationReport()` reports `scripts_executed: 0` for the
+same reason — the absence stays visible in the data, not only in prose.
+
+
 ### Testing architecture — six standing requirements for reviewers
 
 Two 2026-08 fund-safety bugs (`23ef2d2b` / merge `e7221a7b`) produced
