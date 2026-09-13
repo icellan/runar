@@ -45,7 +45,25 @@ The parsing frontend uses **SWC** (Speedy Web Compiler) for parsing `.runar.ts` 
 
 Why SWC instead of tree-sitter or a custom parser? SWC provides a typed Rust AST rather than a generic CST, reducing the amount of manual tree-walking needed. It is also the fastest TypeScript parser available, which matters for large projects. The Rust ecosystem already depends heavily on SWC for tooling (Next.js, Parcel, Deno), so it is well-maintained.
 
-Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.rs`, `.runar.py`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+Multi-format source files are parsed by hand-written recursive descent parsers
+that produce the same Rúnar AST. `parser::parse_source` dispatches on the
+extension and handles all eight non-TypeScript surfaces:
+
+| Extension | Parser |
+|---|---|
+| `.runar.sol` | Solidity-like |
+| `.runar.move` | Move-style |
+| `.runar.rs` | Rust DSL |
+| `.runar.py` | Python |
+| `.runar.go` | Go DSL |
+| `.runar.rb` | Ruby |
+| `.runar.zig` | Zig |
+| `.runar.java` | Java surface |
+
+R-231: this sentence used to name four of them (`.sol`, `.move`, `.rs`, `.py`).
+The frontend-parity invariant is that every tier parses all nine surfaces, so a
+list that stops at five is the kind of stale that makes the invariant look
+smaller than it is.
 
 ### Dedicated Codegen Modules
 
