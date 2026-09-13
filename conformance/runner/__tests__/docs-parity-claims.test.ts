@@ -84,3 +84,59 @@ describe('R-096: documented parity claims match the enforced ones', () => {
     });
   }
 });
+
+/**
+ * R-130 — the same document's OTHER parity claim: which tiers carry the
+ * EVM/STARK crypto families.
+ *
+ * CLAUDE.md said Baby Bear, KoalaBear, Poseidon2, BN254, Merkle, SP1 FRI and
+ * FiatShamir-KB "ship Stack-IR codegen in the Go tier only". Measured: a
+ * BabyBear contract compiles to the SAME bytes (9504010000789700…) in go,
+ * rust, python, zig and ruby, only Java refuses, and TypeScript ships its own
+ * `*-codegen.ts` for every one of those families WITH unit tests. A reviewer
+ * taking the old wording at face value would classify a divergence in them as
+ * out of scope — which is exactly what a governing document must not cause.
+ *
+ * The policy itself is real: those fixtures carry a `"compilers": ["go"]`
+ * allowlist, so parity is not REQUIRED of the other tiers. This test pins the
+ * distinction the corrected paragraph draws — conformance scope vs. where code
+ * exists — by failing if the "Go tier only" phrasing comes back while the
+ * other tiers' codegen is still there.
+ */
+describe('R-130: the Go-only claim matches where codegen actually lives', () => {
+  const TS_CODEGEN = [
+    'packages/runar-compiler/src/passes/babybear-codegen.ts',
+    'packages/runar-compiler/src/passes/koalabear-codegen.ts',
+    'packages/runar-compiler/src/passes/merkle-codegen.ts',
+    'packages/runar-compiler/src/passes/bn254-codegen.ts',
+  ];
+
+  it('the TypeScript tier really does carry this codegen (else the claim would be fine)', () => {
+    const missing = TS_CODEGEN.filter((f) => !existsSync(join(REPO, f)));
+    expect(
+      missing,
+      `these are gone, so the "Go tier only" wording may be true again — ` +
+        `re-check CLAUDE.md before deleting this test: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('CLAUDE.md does not say those families ship in the Go tier only', () => {
+    const text = readFileSync(join(REPO, 'CLAUDE.md'), 'utf-8');
+    const hits = text
+      .split('\n')
+      .map((line, i) => ({ line, n: i + 1 }))
+      // The corrected paragraph QUOTES the old sentence to explain what
+      // changed, so only an assertion counts: the phrase used as a claim, not
+      // inside the quotation that names it wrong.
+      .filter(({ line }) => /ship Stack-IR codegen in the \*\*Go tier only\*\*/.test(line))
+      .filter(({ line }) => !/used to say|factually wrong/.test(line));
+
+    expect(
+      hits.map((h) => `CLAUDE.md:${h.n}`),
+      'CLAUDE.md claims these families ship in the Go tier only, but rust, ' +
+        'python, zig, ruby and TypeScript all carry codegen for them and agree ' +
+        'with Go byte for byte (conformance/go-only-parity). Say what the policy ' +
+        'governs — the conformance allowlist — rather than where code exists.',
+    ).toEqual([]);
+  });
+});
