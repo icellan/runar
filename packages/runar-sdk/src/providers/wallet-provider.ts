@@ -8,8 +8,9 @@
 // ---------------------------------------------------------------------------
 
 import type { Provider } from './provider.js';
+import { txToTransactionData } from './provider.js';
 import type { Signer } from '../signers/signer.js';
-import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
+import type { TransactionData, UTXO } from '../types.js';
 import { buildP2PKHScript } from '../script-utils.js';
 import {
   Transaction,
@@ -280,26 +281,32 @@ export class WalletProvider implements Provider {
   }
 
   async getTransaction(txid: string): Promise<TransactionData> {
+    // R-151: this used to fall back to
+    //   { txid, version: 1, inputs: [], outputs: [], locktime: 0 }
+    // on a cache miss OR a parse failure, so a caller could not tell "this
+    // transaction has no outputs" from "I could not find this transaction".
+    // The same shape was already fixed once in this SDK — txToTransactionData
+    // in providers/provider.ts is that remediation — and never applied here.
     const cached = this.txCache.get(txid);
-    if (cached) {
-      try {
-        const tx = Transaction.fromHex(cached);
-        const inputs: TxInput[] = tx.inputs.map((inp) => ({
-          txid: inp.sourceTXID || '',
-          outputIndex: inp.sourceOutputIndex,
-          script: inp.unlockingScript?.toHex() || '',
-          sequence: inp.sequence ?? 0xffffffff,
-        }));
-        const outputs: TxOutput[] = tx.outputs.map((out) => ({
-          satoshis: out.satoshis ?? 0,
-          script: out.lockingScript?.toHex() || '',
-        }));
-        return { txid, version: tx.version, inputs, outputs, locktime: tx.lockTime, raw: cached };
-      } catch { /* fall through */ }
+    if (cached === undefined) {
+      throw new Error(
+        `WalletProvider.getTransaction: transaction ${txid} is not in the provider's ` +
+          `cache. A wallet provider only knows transactions it has broadcast or been ` +
+          `given via cacheTx().`,
+      );
     }
 
-    // Minimal fallback
-    return { txid, version: 1, inputs: [], outputs: [], locktime: 0 };
+    let tx: Transaction;
+    try {
+      tx = Transaction.fromHex(cached);
+    } catch (e) {
+      throw new Error(
+        `WalletProvider.getTransaction: cached hex for ${txid} did not parse as a ` +
+          `transaction: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    return txToTransactionData(txid, tx);
   }
 
   async broadcast(tx: any): Promise<string> {
