@@ -70,3 +70,8 @@ docs/superpowers/
 packages/*/src/**/*.js
 packages/*/src/**/*.js.map
 packages/*/src/**/*.d.ts
+# R-267 / R-282: .d.ts.map was missing from this list, so eight declaration
+# maps were tracked under packages/runar-compiler/src/ — the exact accident the
+# comment above describes, caught a second time by the audit rather than by the
+# ignore rule.
+packages/*/src/**/*.d.ts.map
