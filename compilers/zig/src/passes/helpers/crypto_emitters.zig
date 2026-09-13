@@ -53,7 +53,6 @@ pub fn appendBuiltinInstructions(
 
     switch (builtin) {
         .verify_rabin_sig => try appendVerifyRabinSig(&builder),
-        .ec_negate => try appendEcNegate(&builder),
         .ec_mod_reduce => try appendEcModReduce(&builder),
         .ec_encode_compressed => try appendEcEncodeCompressed(&builder),
         .ec_make_point => try appendEcMakePoint(&builder),
@@ -158,20 +157,18 @@ pub fn appendEcPointY(builder: *Builder) !void {
     try appendBigEndianBytes32AsUnsignedNum(builder);
 }
 
-pub fn appendEcNegate(builder: *Builder) !void {
-    try builder.emitPushInt(32);
-    try builder.emitOp("OP_SPLIT");
-    try appendBigEndianBytes32AsUnsignedNum(builder);
-    try builder.emitPushData(secp256k1_field_p_be[0..]);
-    try appendBigEndianBytes32AsUnsignedNum(builder);
-    try builder.emitOp("OP_SWAP");
-    try builder.emitOp("OP_SUB");
-    try builder.emitPushData(secp256k1_field_p_be[0..]);
-    try appendBigEndianBytes32AsUnsignedNum(builder);
-    try appendEcModReduce(builder);
-    try appendUnsignedNumToBigEndianBytes32(builder);
-    try builder.emitOp("OP_CAT");
-}
+// R-265 / R-284: `appendEcNegate` used to live here — a SECOND ecNegate
+// emitter, with a different op sequence from the live one, unreachable from
+// compilation, and carrying two tests. `stack_lower.zig` routes `.ecNegate` to
+// `lowerEcBuiltin`, i.e. to `ec_emitters.buildBuiltinOps`, the same way it
+// routes `verify_wots` to `pq_emitters` — so this module refuses `.ec_negate`
+// for exactly the reason it already refused `verify_wots`, and the tests below
+// assert that rather than exercising an emitter nothing compiles with.
+//
+// ecNegate is the ONLY EC builtin routed away from this module: ec_mod_reduce,
+// ec_encode_compressed, ec_make_point, ec_point_x and ec_point_y all still come
+// through `lowerCryptoBuiltin` and are emitted here.
+
 
 pub fn builtinTodoNote(builtin: registry.CryptoBuiltin) ?[]const u8 {
     // All crypto builtins are fully implemented. Operations not handled by
@@ -195,12 +192,6 @@ test "implemented crypto emitters append instructions" {
     // compare it used to — see rabin_emitter.zig.
     try std.testing.expectEqualStrings("OP_NUMEQUAL", list.items[list.items.len - 1].op_name);
 
-    var negate_list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
-    defer negate_list.deinit(allocator);
-    try appendBuiltinInstructions(&negate_list, allocator, .ec_negate);
-    try std.testing.expect(negate_list.items.len > 0);
-    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 32 }, negate_list.items[0]);
-    try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_CAT" }, negate_list.items[negate_list.items.len - 1]);
 }
 
 test "non-local crypto emitters return NotImplemented from this module" {
@@ -212,6 +203,10 @@ test "non-local crypto emitters return NotImplemented from this module" {
     // so appendBuiltinInstructions correctly returns NotImplemented here.
     // The actual dispatch in stack_lower.zig routes it to lowerPqBuiltin.
     try std.testing.expectError(error.NotImplemented, appendBuiltinInstructions(&list, allocator, .verify_wots));
+    // R-265 / R-284: ec_negate is emitted by ec_emitters (stack_lower routes it
+    // to lowerEcBuiltin), so this module refuses it for the same reason. It used
+    // to answer with a second, different, uncompiled op sequence.
+    try std.testing.expectError(error.NotImplemented, appendBuiltinInstructions(&list, allocator, .ec_negate));
     // All builtins are fully implemented (via their respective emitter modules)
     try std.testing.expectEqual(@as(?[]const u8, null), builtinTodoNote(.verify_wots));
     try std.testing.expectEqual(@as(?[]const u8, null), builtinTodoNote(.ec_negate));
@@ -249,30 +244,11 @@ test "ec point helpers include numeric conversion steps" {
     try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 2 }, encode_compressed_list.items[14]);
 }
 
-test "ec negate helper emits field subtraction and reduction" {
-    const allocator = std.testing.allocator;
-    var list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
-    defer list.deinit(allocator);
+// R-265 / R-284: a test named "ec negate helper emits field subtraction and
+// reduction" used to live here. It was the second of the two tests that
+// exercised the unreachable `appendEcNegate` — and it is the reason the finding
+// could say this tier had more coverage of the emitter it does NOT use than of
+// the one it does. The live emitter is `ec_emitters`; its ecNegate is covered by
+// the cross-tier conformance corpus, which compares the bytes seven tiers
+// actually produce.
 
-    try appendBuiltinInstructions(&list, allocator, .ec_negate);
-
-    var saw_sub = false;
-    var saw_mod = false;
-    var prime_pushes: usize = 0;
-    for (list.items) |inst| switch (inst) {
-        .op_name => |name| {
-            saw_sub = saw_sub or std.mem.eql(u8, name, "OP_SUB");
-            saw_mod = saw_mod or std.mem.eql(u8, name, "OP_MOD");
-        },
-        .push_data => |data| {
-            if (std.mem.eql(u8, data, secp256k1_field_p_be[0..])) {
-                prime_pushes += 1;
-            }
-        },
-        else => {},
-    };
-
-    try std.testing.expect(saw_sub);
-    try std.testing.expect(saw_mod);
-    try std.testing.expectEqual(@as(usize, 2), prime_pushes);
-}
