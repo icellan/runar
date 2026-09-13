@@ -1,6 +1,6 @@
 # runar-compiler
 
-**Rúnar reference compiler: TypeScript to Bitcoin Script via a 6-pass nanopass pipeline.**
+**Rúnar reference compiler: TypeScript to Bitcoin Script via a 7-pass nanopass pipeline** (parse, validate, typecheck, expand-fixed-arrays, ANF-lower, stack-lower, emit).
 
 This package is the canonical compiler implementation. It reads `.runar.ts`, `.runar.sol`, `.runar.move`, and `.runar.py` source files, runs them through six sequential passes, and produces a compiled artifact containing the Bitcoin Script bytecode, the canonical ANF IR, and metadata.
 
@@ -135,10 +135,10 @@ When `constructorArgs` are provided in `CompileOptions`, the compiler replaces A
 
 ## Individual Pass Functions
 
-Passes 1--4 are also exported individually for fine-grained use (passes 5--6 are internal):
+Passes 1--4 are also exported individually for fine-grained use (stack lowering and emit are internal):
 
 ```typescript
-import { parse, validate, typecheck, lowerToANF } from 'runar-compiler';
+import { parse, validate, typecheck, expandFixedArrays, lowerToANF } from 'runar-compiler';
 import { parseSolSource, parseMoveSource, parsePythonSource } from 'runar-compiler';
 
 // Pass 1: Parse
@@ -154,8 +154,14 @@ if (!parseResult.contract) {
   // Pass 3: Type-check
   const typeCheckResult = typecheck(parseResult.contract);
 
+  // Pass 3b: Expand FixedArray properties into scalar siblings. A real pass
+  // with its own diagnostics — `compile()` runs it between typecheck and ANF
+  // lowering, and a contract with a FixedArray property will not lower
+  // correctly without it (R-196).
+  const expanded = expandFixedArrays(parseResult.contract);
+
   // Pass 4: ANF Lower
-  const anf = lowerToANF(parseResult.contract);
+  const anf = lowerToANF(expanded.contract);
 }
 ```
 

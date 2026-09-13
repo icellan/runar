@@ -94,9 +94,10 @@ Each pass is a pure function in `packages/runar-compiler/src/passes/`:
    - `.runar.java` → Java surface parser (`01-parse-java.ts`)
 2. **02-validate.ts** — Language subset constraints (no mutation of the AST)
 3. **03-typecheck.ts** — Type consistency verification. Rejects calls to non-Rúnar functions (Math.floor, console.log, etc.)
-4. **04-anf-lower.ts** — AST → A-Normal Form IR (flattened let-bindings)
-5. **05-stack-lower.ts** — ANF → Stack IR (Bitcoin Script stack operations)
-6. **06-emit.ts** — Stack IR → hex-encoded Bitcoin Script
+4. **03b-expand-fixed-arrays.ts** — Expands every `FixedArray<T, N>` property into N scalar siblings `<base>__<i>` (recursively for nested arrays) and rewrites `this.arr[i]` reads/writes; distributes array-literal initializers and validates their length AND element types. A real pass with its own diagnostics, run by `index.ts` between typecheck and ANF lowering, and ported to all seven tiers (R-196 — it used to be missing from this list, and from `packages/runar-compiler/README.md`, in a repo where "the documented pipeline" is what reviewers count passes from).
+5. **04-anf-lower.ts** — AST → A-Normal Form IR (flattened let-bindings)
+6. **05-stack-lower.ts** — ANF → Stack IR (Bitcoin Script stack operations)
+7. **06-emit.ts** — Stack IR → hex-encoded Bitcoin Script
 
 The constant folding optimizer (`src/optimizer/constant-fold.ts`) runs between passes 4 and 5 and is **enabled by default** in the user-facing TS / Go / Rust / Python / Zig / Ruby / Java compilers (every CLI ships a `--disable-constant-folding` opt-out for byte-exact replay against the checked-in fold-OFF goldens). The checked-in `expected-ir.json` and `expected-script.hex` files were stamped under fold-OFF. CI exercises **both modes**: the legacy multi-format step passes `--disable-constant-folding` (and verifies cross-tier hex + ANF parity *and* equality with the goldens), and a companion step (`RUNAR_DISABLE_CONSTANT_FOLDING=0`) re-runs the same fixtures with folding ON, enforces cross-tier parity across all 7 tiers, and skips the golden comparison. Any future fold-on cross-tier divergence must either (a) fix the divergent compiler or (b) be allowlisted with a per-fixture justification in `conformance/fold-on-allowlist.json` (see `conformance/README.md`).
 The peephole optimizer (`src/optimizer/peephole.ts`) runs on Stack IR between passes 5 and 6 (always enabled).
