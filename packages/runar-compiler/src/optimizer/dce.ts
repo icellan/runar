@@ -8,11 +8,31 @@
  * one. Iterates to a fixed point so transitively dead bindings are also
  * removed.
  *
- * This module is the canonical, standalone DCE pass. It mirrors the
- * Zig reference implementation in `compilers/zig/src/passes/dce.zig`.
- * The earlier inline implementation in `optimizer/constant-fold.ts`
- * has been surgically extracted here — `eliminateDeadBindings` in
- * `constant-fold.ts` re-exports this module to preserve its public API.
+ * This module is the canonical DEFINITION of DCE — one implementation, mirrored
+ * by `compilers/zig/src/passes/dce.zig` and its five peers, and re-exported by
+ * `optimizer/constant-fold.ts` (where it used to live inline) to preserve that
+ * module's public API.
+ *
+ * It is NOT a standalone pipeline pass, and the header used to say it was
+ * (R-194). The only caller is `optimizer/anf-ec.ts`, at the end of `optimizeEC`
+ * and AFTER its `if (!anyChanged) return program;` early exit — so a program
+ * the EC optimizer does not touch is never DCE'd. Go's `anf_optimize.go` does
+ * the same thing, so there is no cross-tier divergence; the claim was simply
+ * false.
+ *
+ * That gate is load-bearing, not an oversight. Measured by moving the call
+ * ahead of the early exit so DCE runs on every program: the TypeScript tier
+ * then FAILS TO COMPILE 11 of the 78 conformance fixtures —
+ * all-readonly-cleanstack, bounded-loop, branch-merged-locals,
+ * function-patterns, if-else, if-without-else, loop-if-merged-locals,
+ * loop-shapes, merge-locals-prop-updates, merge-locals-shapes, multi-method.
+ * Not byte movement: outright compilation failure. So this pass, run
+ * unconditionally, removes bindings that stack lowering still needs, and
+ * "make DCE standalone" is a defect to fix in DCE before it is a wiring change
+ * (filed as N-140).
+ *
+ * Pinned by `r194-dce-invocation.test.ts` so this description and the call site
+ * cannot drift apart again.
  *
  * Behaviour: byte-for-byte identical to the previous in-place DCE inside
  * `constant-fold.ts`. Verified by the conformance suite (cross-tier hex
