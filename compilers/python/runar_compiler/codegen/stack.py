@@ -5420,34 +5420,12 @@ def _lower_method_with_private_methods(
     )
 
 
-def _lower_method(
-    method: ANFMethod,
-    properties: list[ANFProperty],
-) -> StackMethod:
-    param_names = [p.name for p in method.params]
-
-    ctx = _LoweringContext(param_names, properties)
-    ctx.lower_bindings(method.body, method.is_public)
-
-    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
-    # Excess items can come from deserialize_state (stateful methods reading
-    # mutable fields) or from readonly-field-binding patterns in all-readonly
-    # terminal methods. The depth>1 guard keeps this a no-op for already-clean
-    # methods.
-    if method.is_public and ctx.sm.depth() > 1:
-        excess = ctx.sm.depth() - 1
-        for _ in range(excess):
-            ctx.emit_op(StackOp(op="nip"))
-            ctx.sm.remove_at_depth(1)
-
-    if ctx.max_depth > MAX_STACK_DEPTH:
-        raise RuntimeError(
-            f"method '{method.name}' exceeds maximum stack depth of {MAX_STACK_DEPTH} "
-            f"(actual: {ctx.max_depth}). Simplify the contract logic"
-        )
-
-    return StackMethod(
-        name=method.name,
-        ops=ctx.ops,
-        max_stack_depth=ctx.max_depth,
-    )
+# R-291: a dead `_lower_method` used to live here, running to the end of the
+# file — a second, uncalled copy of the per-method lowering entry point, with no
+# reference anywhere in the package. The live entry is
+# `_lower_method_with_private_methods` above.
+#
+# It had already drifted, which is the reason this matters rather than being
+# tidiness: the dead copy built `StackMethod(name, ops, max_stack_depth)` while
+# the live one also passes `uses_code_part` and `needs_code_separator`. Anyone
+# who fixed the wrong copy would have seen every test pass.
