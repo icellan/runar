@@ -24,6 +24,7 @@ import runar.compiler.passes.ConstantFold;
 import runar.compiler.passes.Emit;
 import runar.compiler.passes.ExpandFixedArrays;
 import runar.compiler.passes.Peephole;
+import runar.compiler.passes.PassLocation;
 import runar.compiler.passes.StackLower;
 import runar.compiler.passes.Typecheck;
 import runar.compiler.passes.Validate;
@@ -184,19 +185,26 @@ public final class Cli {
         }
 
         AnfProgram anf;
+        // R-144: clear before, read after. A pass that publishes no position
+        // reports exactly what it reported before; one that does gets the
+        // file:line:column shape Validate and Typecheck already use.
+        PassLocation.clear();
         try {
             anf = AnfLower.run(contract);
         } catch (RuntimeException e) {
-            err.println("runar-java: anf-lower error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("anf-lower error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
 
         // Pass 4.25: constant folding (gated by --disable-constant-folding).
         // Pass 4.5:  general ANF cleanup (always on, matches Python pipeline).
+        PassLocation.clear();
         try {
             anf = optimizeAnf(anf, parsed.disableConstantFolding);
         } catch (RuntimeException e) {
-            err.println("runar-java: anf-optimize error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("anf-optimize error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
 
@@ -347,10 +355,12 @@ public final class Cli {
         // emits as wasteful push+drop sequences — diverging from the fold-OFF
         // goldens and from the Zig tier, whose compileFromIR never folds IR input.
         // So force folding off here regardless of the flag; peephole still folds.
+        PassLocation.clear();
         try {
             anf = optimizeAnf(anf, /* disableConstantFolding */ true);
         } catch (RuntimeException e) {
-            err.println("runar-java: anf-optimize error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("anf-optimize error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
 
@@ -418,6 +428,7 @@ public final class Cli {
      * <p>Returns 0 on success, non-zero on failure.
      */
     private int writeArtifact(AnfProgram anf, String parentClass, String path) {
+        PassLocation.clear();
         try {
             StackProgram stack = StackLower.run(anf);
             StackProgram optimised = Peephole.run(stack);
@@ -549,7 +560,9 @@ public final class Cli {
             err.println("runar-java: failed to write artifact to " + path + ": " + e.getMessage());
             return 74;
         } catch (RuntimeException e) {
-            err.println("runar-java: artifact emit error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt(
+                    "artifact emit error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
     }
@@ -597,6 +610,7 @@ public final class Cli {
     }
 
     private int emitHex(AnfProgram anf) {
+        PassLocation.clear();
         try {
             StackProgram stack = StackLower.run(anf);
             StackProgram optimised = Peephole.run(stack);
@@ -604,7 +618,8 @@ public final class Cli {
             out.println(hex);
             return 0;
         } catch (RuntimeException e) {
-            err.println("runar-java: emit error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("emit error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
     }

@@ -1381,6 +1381,10 @@ public final class StackLower {
         // ---------------- lower_binding dispatch ----------------
 
         void lowerBinding(AnfBinding b, int idx, Map<String, Integer> lastUses) {
+            // R-144: the binding carries its own position — round-tripped
+            // through the --ir JSON, so it is there even when this pass never
+            // saw a source file. Published for the error path only.
+            PassLocation.set(b.sourceLoc());
             String name = b.name();
             AnfValue v = b.value();
 

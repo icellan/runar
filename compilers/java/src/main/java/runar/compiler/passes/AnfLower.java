@@ -236,6 +236,9 @@ public final class AnfLower {
                 : null;
             AnfProperty prop = new AnfProperty(
                 p.name(), typeToString(p.type()), p.readonly(), init, syntheticChain(p));
+            // R-144: publish the property's own position, so a refusal below
+            // names the declaration the author wrote rather than nothing.
+            PassLocation.set(p.sourceLocation());
             if (init != null) checkStateBigintMagnitude(prop);
             out.add(prop);
         }
@@ -990,6 +993,10 @@ public final class AnfLower {
                 if (stmt.sourceLocation() != null) {
                     currentSourceLoc = stmt.sourceLocation();
                 }
+                // R-144: the same position, published for the error path. The
+                // field above only reaches bindings that are successfully
+                // emitted; a refusal emits none.
+                PassLocation.set(currentSourceLoc);
                 if (stmt instanceof VariableDeclStatement v) {
                     lowerVariableDecl(v);
                 } else if (stmt instanceof AssignmentStatement a) {
