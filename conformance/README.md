@@ -744,7 +744,7 @@ The suite currently contains **64 fixtures** under `tests/` — that directory i
 | `babybear` | BabyBear prime-field arithmetic | Yes |
 | `babybear-ext4` | BabyBear Ext4 extension-field operations | Yes |
 | `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
-| `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on bigint + ByteString | Yes |
+| `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on **bigint** operands. The ByteString half of the language rule is NOT here — the fixture's two properties are both `bigint` (R-197); it is covered instead by `conformance/closed-findings/BitwiseBytes.runar.ts`, which requires all seven tiers to accept it and agree byte for byte | Yes |
 | `blake3` | BLAKE3 compression + full-hash builtins | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
