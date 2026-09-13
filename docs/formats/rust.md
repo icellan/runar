@@ -182,10 +182,29 @@ if amount > threshold {
 }
 ```
 
-### Ternary (if expression)
+### Conditional values: no if-expression
+
+Rúnar's `.runar.rs` surface has **no if-expression**. This page used to show
 
 ```rust
-let x = if cond { a } else { b };
+let x = if cond { a } else { b };   // NOT Rúnar — rejected by all seven tiers
+```
+
+and no tier has ever parsed it: measured by exit code on exactly that spelling,
+TypeScript, Go, Rust, Python, Zig and Ruby exit 1 and Java exits 65, in both the
+statement-first and statement-last arrangement. `spec/frontend-spec.md` carried
+the same false claim independently, which is why correcting one file was not
+enough (R-131).
+
+Use the statement form, as the Go surface does — this compiles in all seven
+tiers:
+
+```rust
+let mut x: Int = self.threshold;
+if amount > self.threshold {
+    x = amount;
+}
+assert!(x >= self.threshold);
 ```
 
 ---

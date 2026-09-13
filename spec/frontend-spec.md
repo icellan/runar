@@ -438,7 +438,7 @@ All integer literals from all formats (with or without `n` suffix) must be repre
 | Solidity | `cond ? a : b` |
 | Move | `if (cond) a else b` (expression) |
 | Go | Not supported (use if/else statement) |
-| Rust | `if cond { a } else { b }` (expression) |
+| Rust | Not supported (use if/else statement) |
 
 ### PropertyAccessExpr
 
