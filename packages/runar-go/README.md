@@ -163,7 +163,7 @@ func (c *Counter) Decrement() {
 }
 ```
 
-`runar.Assert(cond)` is the primary control mechanism — Bitcoin Script `OP_VERIFY` semantics. The compiler auto-injects `checkPreimage` at each public method entry on stateful contracts, and a state-continuation output at exit, so the contract author never writes either by hand. The full language specification is in [`spec/`](../../spec/) and the playground at <https://runar.build> compiles snippets to Bitcoin Script in the browser.
+`runar.Assert(cond)` is the primary control mechanism — Bitcoin Script `OP_VERIFY` semantics. The compiler auto-injects `checkPreimage` at each public method entry on stateful contracts, and a state-continuation output at exit, so the contract author never writes either by hand. The full language specification is in [`spec/`](../../spec/) and the playground at <https://runar.build> — a hosted site, not in this git tree — compiles snippets to Bitcoin Script in the browser.
 
 ---
 
@@ -1769,13 +1769,21 @@ The `MockSignerImpl` name (rather than `MockSigner` as in the other SDKs) is pre
 ## 17. Links
 
 - Project root: <https://github.com/icellan/runar>
-- Rúnar language playground: <https://runar.build>
+- Rúnar language playground: <https://runar.build> (hosted; not in this git tree)
 - Language specification: [`spec/`](../../spec)
 - Go compiler source: [`compilers/go/`](../../compilers/go)
 - Go example contracts: [`examples/go/`](../../examples/go)
 - Go integration tests (regtest): [`integration/go/`](../../integration/go)
 - Cross-SDK output conformance suite: [`conformance/sdk-output/`](../../conformance/sdk-output)
 - Sister SDKs: [`packages/runar-sdk/`](../runar-sdk) (TypeScript), [`packages/runar-rs/`](../runar-rs) (Rust), [`packages/runar-py/`](../runar-py) (Python), [`packages/runar-zig/`](../runar-zig) (Zig), [`packages/runar-rb/`](../runar-rb) (Ruby), [`packages/runar-java/`](../runar-java) (Java).
+
+> **Hosted, not in this repository.** `runar.build` and `runar.run` are sites
+> operated outside this git tree — no source for either is checked in, so their
+> behaviour cannot be verified against this repository and does not move with it.
+> The webapp under `examples/end2end-example/webapp/` is a DIFFERENT thing: a
+> PriceBet demo whose playground pane compiles a pasted snippet to script hex and
+> ASM. It has no gallery, no share links, no source-map view and no debugger.
+> (R-228)
 
 ---
 

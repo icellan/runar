@@ -160,7 +160,7 @@ class Counter extends StatefulSmartContract {
 }
 ```
 
-For a complete tour of the language (types, builtins, the stateful vs stateless distinction, multi-output methods, OP_PUSH_TX semantics, and the language subset rules) see <https://runar.build>.
+For a complete tour of the language (types, builtins, the stateful vs stateless distinction, multi-output methods, OP_PUSH_TX semantics, and the language subset rules) see <https://runar.build> (a hosted site, not in this git tree — see the note under Links).
 
 ---
 
@@ -1419,8 +1419,16 @@ The cross-SDK `conformance/sdk-output/` suite verifies that the TypeScript SDK p
 ## Links
 
 - Project README: <https://github.com/icellan/runar/blob/main/README.md>
-- Language and contract authoring guide: <https://runar.build>
-- Hosted contract gallery and playground: <https://runar.run>
+- Language and contract authoring guide: <https://runar.build> (hosted; not in this git tree)
+- Hosted contract gallery and playground: <https://runar.run> (hosted; not in this git tree)
+
+> **Hosted, not in this repository.** `runar.build` and `runar.run` are sites
+> operated outside this git tree — no source for either is checked in, so their
+> behaviour cannot be verified against this repository and does not move with it.
+> The webapp under `examples/end2end-example/webapp/` is a DIFFERENT thing: a
+> PriceBet demo whose playground pane compiles a pasted snippet to script hex and
+> ASM. It has no gallery, no share links, no source-map view and no debugger.
+> (R-228)
 - Examples (TypeScript, Go, Rust, Python, Solidity-like, Move-style, Java, Ruby, Zig): <https://github.com/icellan/runar/tree/main/examples>
 - Issues and discussions: <https://github.com/icellan/runar/issues>
 
