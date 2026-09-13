@@ -1695,9 +1695,7 @@ const LowerCtx = struct {
         blake3,
         ecAdd,
         ecMul,
-        ecPairing,
         slhDsaVerify,
-        schnorrVerify,
         // NIST P-256
         verifyECDSA_P256,
         p256Add,
@@ -1836,7 +1834,6 @@ const LowerCtx = struct {
         .{ "blake3", .blake3 },
         .{ "ecAdd", .ecAdd },
         .{ "ecMul", .ecMul },
-        .{ "ecPairing", .ecPairing },
         .{ "verifySLHDSA_SHA2_128s", .slhDsaVerify },
         .{ "verifySLHDSA_SHA2_128f", .slhDsaVerify },
         .{ "verifySLHDSA_SHA2_192s", .slhDsaVerify },
@@ -1844,7 +1841,6 @@ const LowerCtx = struct {
         .{ "verifySLHDSA_SHA2_256s", .slhDsaVerify },
         .{ "verifySLHDSA_SHA2_256f", .slhDsaVerify },
         .{ "slhDsaVerify", .slhDsaVerify },
-        .{ "schnorrVerify", .schnorrVerify },
         .{ "bbFieldAdd", .bbFieldAdd },
         .{ "bbFieldSub", .bbFieldSub },
         .{ "bbFieldMul", .bbFieldMul },
@@ -2052,16 +2048,6 @@ const LowerCtx = struct {
             .p384EncodeCompressed => try self.lowerNistEcBuiltin(bind_name, args, .p384_encode_compressed),
             // super() is the constructor superclass call — no-op in Bitcoin Script
             .super_call => {
-                try self.stack.push(self.allocator, bind_name);
-                self.trackDepth();
-            },
-            // Wave 3 placeholders — consume args and push placeholder
-            .ecPairing, .schnorrVerify => {
-                for (args) |arg| {
-                    try self.bringToTopOperand(arg, args);
-                    _ = self.stack.pop();
-                }
-                try self.emitPushInt(0);
                 try self.stack.push(self.allocator, bind_name);
                 self.trackDepth();
             },
