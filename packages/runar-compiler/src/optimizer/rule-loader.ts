@@ -6,7 +6,11 @@
  * the rules procedurally for performance, but this loader validates that
  * the implementation matches the central definition.
  *
- * This module is used by tests to verify rule coverage, not at runtime.
+ * This module is used by tests to verify rule coverage, not at runtime. Until
+ * R-139 it had no callers at all (CL-GAP-005), which is how the JSON came to
+ * declare an unguarded `OP_NOT OP_NOT` elimination that neither implementation
+ * carries; `r139-peephole-rules-json-parity.test.ts` is the caller that now
+ * holds the file to the implemented table.
  */
 
 import { createRequire } from 'module';
@@ -17,6 +21,8 @@ export interface JsonRule {
   match: JsonMatchOp[];
   replace: JsonReplaceOp[];
   type?: string;
+  /** Why a rule is spelled the way it is — see the `not-not-elim` entry (R-139). */
+  note?: string;
 }
 
 export interface JsonMatchOp {
