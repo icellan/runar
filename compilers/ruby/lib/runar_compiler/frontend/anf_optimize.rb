@@ -312,21 +312,23 @@ module RunarCompiler
       # Helpers -- value inspection
       # -----------------------------------------------------------------
 
-      # Resolve a binding name to its ANFValue, following @ref: aliases.
+      # Resolve a binding name to its ANFValue.
+      #
+      # R-263: this used to carry an alias-chasing loop guarded on
+      # `val.kind == "load_param" && val.name.start_with?("@ref:")`. No such
+      # value exists. Aliases are created as load_const carrying the reference
+      # in `const_string` (see make_alias below, and anf_lower's
+      # `_make_load_const_string("@ref:...")`); `load_param` values carry real
+      # parameter names like "txPreimage". The branch could not fire, and the
+      # loop around it did nothing but walk one step and return.
+      #
+      # Not repaired into a working chase, which would be a behaviour change:
+      # the TypeScript reference's `resolveArg` is a plain map lookup too, so
+      # following aliases here would enable rewrites no other tier performs.
+      # Where alias-following genuinely belongs, dce.rb:98 already does it
+      # correctly, through `const_string`.
       def self.resolve(name, vm)
-        seen = Set.new
-        current = name
-        while vm.key?(current)
-          break if seen.include?(current)
-          seen.add(current)
-          val = vm[current]
-          if val.kind == "load_param" && val.name && val.name.start_with?("@ref:")
-            current = val.name[5..]
-            next
-          end
-          return val
-        end
-        vm[current]
+        vm[name]
       end
       private_class_method :resolve
 
@@ -364,21 +366,13 @@ module RunarCompiler
       end
       private_class_method :same_binding?
 
-      # Follow @ref: chains to get the canonical binding name.
-      def self.canonical(name, vm)
-        seen = Set.new
-        current = name
-        while vm.key?(current)
-          break if seen.include?(current)
-          seen.add(current)
-          val = vm[current]
-          if val.kind == "load_param" && val.name && val.name.start_with?("@ref:")
-            current = val.name[5..]
-            next
-          end
-          break
-        end
-        current
+      # The canonical binding name.
+      #
+      # R-263: the @ref: chain this claimed to follow was guarded on the same
+      # impossible `load_param` shape as `resolve` above, so every call already
+      # returned its argument unchanged.
+      def self.canonical(name, _vm)
+        name
       end
       private_class_method :canonical
 
