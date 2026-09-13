@@ -340,6 +340,83 @@ public final class Envelope {
         }
     }
 
+    /**
+     * Unpaired-surrogate detection on an envelope payload (R-115 / CL-BUG-066).
+     *
+     * <p>{@code verify} hashes the payload string RAW — it never routes it
+     * through {@link #canonicalJson} — so canonicalJson's lone-surrogate
+     * rejection (audit D6, fixture vector v22) never sees the envelope path,
+     * and each tier fell back on whatever its JSON parser happened to do.
+     *
+     * <p>Two shapes count as unpaired: a {@code \\uD800}–{@code \\uDBFF}
+     * escape not immediately followed by a low-surrogate escape (or a lone low
+     * one), and a raw unpaired surrogate {@code char} in the text.
+     */
+    static boolean payloadHasLoneSurrogate(String text) {
+        if (text == null) {
+            return false;
+        }
+        // Raw code units first — a Java String can hold an unpaired surrogate.
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 >= text.length() || !Character.isLowSurrogate(text.charAt(i + 1))) {
+                    return true;
+                }
+                i++;
+            } else if (Character.isLowSurrogate(c)) {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) != '\\') {
+                continue;
+            }
+            int run = 0;
+            while (i + run < text.length() && text.charAt(i + run) == '\\') {
+                run++;
+            }
+            int esc = i + run - 1;
+            i = esc;
+            if (run % 2 == 0) {
+                continue;
+            }
+            int code = escapedCodeUnitAt(text, esc);
+            if (code < 0) {
+                continue;
+            }
+            if (code >= 0xD800 && code <= 0xDBFF) {
+                int low = escapedCodeUnitAt(text, esc + 6);
+                if (low < 0xDC00 || low > 0xDFFF) {
+                    return true;
+                }
+                i = esc + 11;
+            } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                return true;
+            } else {
+                i = esc + 5;
+            }
+        }
+        return false;
+    }
+
+    /** The code unit of a {@code \\uXXXX} escape starting at {@code i}, or -1. */
+    private static int escapedCodeUnitAt(String text, int i) {
+        if (i < 0 || i + 5 >= text.length() || text.charAt(i) != '\\' || text.charAt(i + 1) != 'u') {
+            return -1;
+        }
+        int code = 0;
+        for (int k = 0; k < 4; k++) {
+            int v = Character.digit(text.charAt(i + 2 + k), 16);
+            if (v < 0) {
+                return -1;
+            }
+            code = code * 16 + v;
+        }
+        return code;
+    }
+
     public static VerifyEnvelopeResult verify(VerifyEnvelopeOpts opts) {
         SignedEnvelope env = opts.envelope;
 
@@ -380,6 +457,14 @@ public final class Envelope {
         }
 
         // 3. Parse payload.
+        //
+        // R-115: an unpaired surrogate makes the payload ill-formed Unicode,
+        // and the seven tiers' JSON parsers disagree about it — ts/go/python/
+        // java accepted it and fell through to bad-sig, rust/ruby/zig rejected
+        // it here. Decided on the payload TEXT so every tier answers the same.
+        if (payloadHasLoneSurrogate(env.payload)) {
+            return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_JSON, null);
+        }
         Map<String, Object> parsed;
         try {
             Object raw = Json.parse(env.payload);

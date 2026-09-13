@@ -557,6 +557,15 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	}
 
 	// 3. Parse payload.
+	//
+	// R-115: an unpaired surrogate makes the payload ill-formed Unicode, and
+	// the seven tiers' JSON parsers disagree about it. Decide it here, on the
+	// TEXT — `encoding/json` accepts `\ud800` and rewrites it to U+FFFD, so a
+	// post-parse check in this tier can never see it. See
+	// sdk_envelope_lone_surrogate.go.
+	if payloadHasLoneSurrogate(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
 	var parsed map[string]any
 	dec := json.NewDecoder(stringReader(env.Payload))
 	dec.UseNumber()

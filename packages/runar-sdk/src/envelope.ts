@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
+import { hasLoneSurrogate } from './lone-surrogate.js';
 import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
 import { canonicalJsonStringify, InputLimits } from 'runar-ir-schema';
 
@@ -156,6 +157,15 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
   }
 
   // 3. Parse payload.
+  //
+  // R-115: an unpaired surrogate makes the payload ill-formed Unicode, and the
+  // seven tiers' JSON parsers disagree about it (ts/go/python/java accepted it,
+  // rust/ruby/zig refused). Decide it here, on the text, so every tier returns
+  // the same reason — and so Go can see the `\uD800` escape before its parser
+  // rewrites it to U+FFFD.
+  if (hasLoneSurrogate(env.payload)) {
+    return { ok: false, reason: 'bad-json' };
+  }
   let parsed: Record<string, unknown>;
   try {
     const raw = JSON.parse(env.payload);

@@ -282,6 +282,64 @@ class VerifyEnvelopeResult:
     data: Optional[dict] = None
 
 
+def _payload_has_lone_surrogate(text: str) -> bool:
+    """Unpaired-surrogate detection on an envelope payload (R-115 / CL-BUG-066).
+
+    ``verify_envelope`` hashes the payload string RAW -- it never routes it
+    through ``canonical_json`` -- so canonical_json's lone-surrogate rejection
+    (audit D6, fixture vector v22) never sees the envelope path. What each tier
+    did instead was whatever its JSON parser happened to do, and the parsers
+    disagree. Measured on one envelope whose payload holds ``"x\\ud800y"``:
+
+        ts / go / python / java   accepted it, fell through to bad-sig
+        rust / ruby / zig         rejected it at the parse step, bad-json
+
+    The check runs on the payload TEXT rather than the parsed value, because
+    that is the only form every tier still has -- Go's ``encoding/json``
+    rewrites ``\\ud800`` to U+FFFD while parsing.
+    """
+    # Raw code points first (a Python str can hold a lone surrogate).
+    for ch in text:
+        if 0xD800 <= ord(ch) <= 0xDFFF:
+            return True
+
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "\\":
+            i += 1
+            continue
+        run = 0
+        while i + run < n and text[i + run] == "\\":
+            run += 1
+        esc = i + run - 1
+        i = esc + 1
+        if run % 2 == 0:
+            continue
+        if esc + 5 >= n or text[esc + 1] != "u":
+            continue
+        hex_digits = text[esc + 2 : esc + 6]
+        try:
+            code = int(hex_digits, 16)
+        except ValueError:
+            continue
+        if 0xD800 <= code <= 0xDBFF:
+            if esc + 11 >= n or text[esc + 6] != "\\" or text[esc + 7] != "u":
+                return True
+            try:
+                low = int(text[esc + 8 : esc + 12], 16)
+            except ValueError:
+                return True
+            if not (0xDC00 <= low <= 0xDFFF):
+                return True
+            i = esc + 12
+        elif 0xDC00 <= code <= 0xDFFF:
+            return True
+        else:
+            i = esc + 6
+    return False
+
+
 def verify_envelope(
     envelope: SignedEnvelope,
     expected_keys: Optional[List[str]] = None,
@@ -324,6 +382,12 @@ def verify_envelope(
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.EXPIRED, None)
 
     # 3. Parse payload.
+    #
+    # R-115: an unpaired surrogate makes the payload ill-formed Unicode, and
+    # the seven tiers' JSON parsers disagree about it. Decide it here, on the
+    # text, so every tier returns the same reason.
+    if _payload_has_lone_surrogate(envelope.payload):
+        return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
     try:
         parsed = json.loads(envelope.payload)
     except json.JSONDecodeError:

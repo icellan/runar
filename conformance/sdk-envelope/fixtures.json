@@ -142,7 +142,7 @@
       "_audit_ref": "audits/canonical-json-rfc8785-parity.md §3 rec 5 (D5)",
       "_notes": "Float at the ECMA-262 1e21 boundary MUST emit `1e+21`. The D5 divergence is fixed: every tier now emits the spec ECMA-262 Number::toString form via its `*Ecma262Double` formatter (Go appendEcma262Double, Rust format_ecma262_double, Python _format_double, Zig appendEcma262Double, Ruby format_ecma262_double, Java formatEcma262Double; TS uses the native JS formatter). `expected` is the spec form and is enforced as a byte-parity gate across all tiers.",
       "input": {
-        "big": 1e21
+        "big": 1e+21
       },
       "expected": "{\"big\":1e+21}"
     },
@@ -163,7 +163,9 @@
       "_notes": "Lone surrogate (U+D800 with no low-surrogate partner) is invalid Unicode per RFC 8785 and MUST be rejected. The D6 fix has landed: every tier now rejects this input — TS (canonical-json.ts: lone-surrogate code path), Go (sdk_envelope.go: WTF-8 0xED,0xA0..0xBF detection), Python (envelope.py: 0xD800..0xDFFF check), Zig (sdk_envelope.zig: error.LoneSurrogate), Ruby (envelope.rb: U+D800..U+DFFF raise), Java (Envelope.java: Character.isHighSurrogate/isLowSurrogate check). Rust cannot represent a lone surrogate in its `&str` type at all (structurally rejected at the type boundary). The Go interop test `packages/runar-go/sdk_envelope_interop_test.go` (TestEnvelopeInterop_CanonicalJSONRejectionVectors) asserts this rejection against this vector. This vector now ENFORCES rejection across all tiers. The input is supplied as a UTF-16 code-unit array so each tier constructs the string deterministically without relying on its JSON parser's lone-surrogate handling.",
       "description": "object with a value containing the lone high surrogate U+D800",
       "input_object_key": "surrogate",
-      "input_value_utf16_units": [55296]
+      "input_value_utf16_units": [
+        55296
+      ]
     }
   ],
   "valid_envelope": {
@@ -219,6 +221,19 @@
       "envelope": {
         "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
         "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d7015202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "v23-lone-surrogate-payload-bad-json",
+      "_audit_ref": "R-115 / CL-BUG-066",
+      "_notes": "The payload is well-formed JSON by the grammar but contains an UNPAIRED SURROGATE escape (\\ud800 with no low-surrogate partner), so the string it denotes is not well-formed Unicode. Measured before the fix, on the same envelope: ts / go / python / java accepted it and fell through to 'bad-sig', while rust / ruby / zig rejected it at the parse step with 'bad-json' — four tiers against three, returning different VerifyEnvelopeReason for identical wire input. The project already holds that a lone surrogate is invalid Unicode and must be rejected (vector v22, audit D6); verifyEnvelope hashes the payload RAW, so canonicalJson's detector never sees it and each tier needs the check on the payload text itself.",
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"msg\":\"x\\ud800y\",\"nonce\":1700000000000}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
         "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         "nonce": 1700000000000,
         "expiresAt": 1700000030000

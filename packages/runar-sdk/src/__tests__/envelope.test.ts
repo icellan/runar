@@ -276,4 +276,45 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('missing-fields');
   });
+
+  // R-115 / CL-BUG-066. The fixture's `v23-lone-surrogate-payload-bad-json`
+  // vector covers the six tiers whose verify takes an injectable clock; the TS
+  // verify reads `Date.now()` directly, so it gets the same envelope built
+  // around a live clock instead.
+  it('rejects a payload containing an unpaired surrogate with bad-json', () => {
+    const now = Date.now();
+    const payload = `{"expiresAt":${now + 60_000},"msg":"x\\ud800y","nonce":${now}}`;
+    const r = verifyEnvelope({
+      envelope: {
+        payload,
+        sig: '30'.repeat(36),
+        pubkey: `02${'ab'.repeat(32)}`,
+        nonce: now,
+        expiresAt: now + 60_000,
+      },
+    });
+    expect(r.ok).toBe(false);
+    // Before the fix this was 'bad-sig': JSON.parse accepted the unpaired
+    // surrogate and the run fell through to the signature check, while rust,
+    // ruby and zig had already rejected the same bytes as bad JSON.
+    expect(r.reason).toBe('bad-json');
+  });
+
+  it('still accepts a payload whose surrogates are correctly PAIRED', () => {
+    const now = Date.now();
+    // U+1F600, spelled as the surrogate pair \ud83d\ude00 — legal JSON, legal
+    // Unicode, and it must not be caught by the lone-surrogate guard.
+    const payload = `{"expiresAt":${now + 60_000},"msg":"\\ud83d\\ude00","nonce":${now}}`;
+    const r = verifyEnvelope({
+      envelope: {
+        payload,
+        sig: '30'.repeat(36),
+        pubkey: `02${'ab'.repeat(32)}`,
+        nonce: now,
+        expiresAt: now + 60_000,
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad-sig');
+  });
 });
