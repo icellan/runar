@@ -2163,13 +2163,24 @@ fn lower_member_expr(
     // SigHash.ALL etc. -> load constant
     if let Expression::Identifier { name } = object {
         if name == "SigHash" {
+            // R-190: the match used to close with `_ => 0`, so `SigHash.All`
+            // — the real member in the wrong case — lowered to `load_const 0`.
+            // Zero is not a sighash flag and nothing downstream rejects it, so
+            // the contract compiled with the wrong constant baked in. The other
+            // six tiers refuse this source; this tier was the only one that
+            // accepted it. Refuse here, in the pass that can still see what the
+            // author wrote.
             let val = match property {
                 "ALL" => 0x01i64,
                 "NONE" => 0x02,
                 "SINGLE" => 0x03,
                 "FORKID" => 0x40,
                 "ANYONECANPAY" => 0x80,
-                _ => 0,
+                unknown => panic!(
+                    "SigHash has no member '{}'. The sighash flags are ALL, NONE, \
+                     SINGLE, FORKID and ANYONECANPAY — all upper case.",
+                    unknown
+                ),
             };
             return ctx.emit(ANFValue::LoadConst {
                 value: serde_json::Value::Number(serde_json::Number::from(val)),
