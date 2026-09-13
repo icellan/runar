@@ -1,7 +1,27 @@
 # Java as a Native Compiler + SDK Tier — Design Plan
 
-**Status:** Proposal / Phase 1 (skeleton only)
-**Target release:** v0.5+ (aligns with current `0.4.x` cadence)
+**Status:** SHIPPED. Java is the seventh tier, complete and held to the same
+invariants as the other six (R-202).
+
+This document is the original design plan and is kept as the record of how the
+tier was specified. It read "Proposal / Phase 1 (skeleton only)" for several
+releases after the tier shipped, which is the kind of stale status line that
+tells a reader to discount everything under it. What it describes is now built:
+
+- `compilers/java/` compiles all nine `.runar.*` surfaces and runs in every
+  conformance lane — golden, `--multi-format`, `--ir-parity` and the all-tier
+  `--parser-only` matrix — at byte-identical output with the other six.
+- `packages/runar-java/` ships the deployment SDK, including the off-chain
+  `ContractSimulator`.
+- 856 tests in the compiler project alone.
+
+Two gaps remain, both tracked elsewhere rather than here: no `maven-publish`
+configuration, so `scripts/publish-all.sh` reports Java as NOT PUBLISHED
+(R-134), and no `ScriptVM`, which is a deliberate project policy for this tier
+(see CLAUDE.md ⇒ "Off-chain Script VM").
+
+**Original target release:** v0.5+ (aligned with the then-current `0.4.x`
+cadence)
 
 ## Context
 
@@ -222,7 +242,9 @@ If any verification step fails, the bug is in the Java implementation — **do n
 
 ## Open questions for maintainer
 
-(Unresolved; non-blocking for Phase 1 skeleton.)
+(Was recorded as unresolved and non-blocking for the Phase 1 skeleton. The
+skeleton is long shipped; see the Status note at the top for what is actually
+outstanding.)
 
 1. **Java package root.** `runar.lang` / `runar.compiler` / `runar.sdk`, or `io.runar.*`, or `build.runar.*`? Determines group ID for Maven Central if publishing.
 2. **Publishing target.** Maven Central or GitHub Packages?
