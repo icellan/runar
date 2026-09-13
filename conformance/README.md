@@ -644,7 +644,13 @@ pnpm run wire-format-audit:self-test
 - The **self-test** (`pnpm run wire-format-audit:self-test`) runs on **every** event, so a rename on `main` that turns a glob into a permanent no-op is caught the moment it lands.
 - The **audit** step runs in **fail** mode on `pull_request`, on `merge_group`, **and on `push` to `main` / `release/*`**. The push path is not optional: the 2026-08 state-framing commit this gate exists for was pushed straight to `main`'s first-parent chain and was never a PR, so a `pull_request`-only gate would have watched it go past. Base resolution per event: `origin/<pull_request.base.ref>` → `merge_group.base_sha` → `github.event.before` → `HEAD^`. It is deliberately a **ref**, not `pull_request.base.sha`: that SHA is the base tip as of the PR's last sync, while the checkout is `refs/pull/N/merge` against the *current* base, so diffing from it sweeps in every golden other PRs merged in between — and one of those would satisfy this gate for free. The script resolves `git merge-base <ref> HEAD` at run time. Only base refs/SHAs from `github.event.*` are consumed, passed via `env:` and never interpolated into a shell command.
 
-> **Branch protection is not configurable from the repository.** For this job to actually block, `Lint — wire-format must-move-a-golden gate` must be added to the **required status checks** for `main` and `release/*` in the repository settings (and to the merge queue's required checks). Nothing in this repo can assert that; until an admin does it, the job reports but does not gate.
+> **Branch protection is not configurable from the repository.** For this job to actually block, `Lint — wire-format must-move-a-golden gate` must be added to the **required status checks** for `main` and `release/*` in the repository settings (and to the merge queue's required checks). Nothing in this repo can *configure* that — but since R-104 the repo does state the claim and check it:
+>
+> - `.github/required-checks.json` lists every `ci.yml` job that must be a required status check, under the exact name GitHub matches, with every remaining job explicitly excluded and a reason;
+> - `tests/required-checks-manifest.test.ts` keeps that list honest offline — a renamed or added job fails the test until it is accounted for;
+> - the `Required checks` workflow asks the API what `main` actually requires and fails when a claimed gate is missing. With only the default `GITHUB_TOKEN` the protection endpoint is unreadable (it needs `administration: read`), and the run then says **ENFORCEMENT UNVERIFIED** out loud instead of passing quietly. Set the `BRANCH_PROTECTION_TOKEN` secret to get a verdict.
+>
+> The residual limitation is unchanged and worth stating plainly: a green CI run does not, by itself, prove a red one would have blocked the merge.
 
 ---
 
