@@ -927,14 +927,20 @@ public final class SolParser {
                 }
             }
 
-            // Match the Python reference: an `if` without an else has
-            // else_=[] (empty list, not None). The Java AST treats null
-            // as "no else"; mapping empty-list -> empty-list keeps the
-            // shape parallel for callers.
-            if (elseBlock == null) {
-                elseBlock = List.of();
-            }
-
+            // R-298: this used to map a missing else to List.of(), to mirror
+            // the Python reference's `else_=[]`. But the Java AST's convention
+            // — which the old comment here acknowledged — is that null means
+            // "no else", and AnfLower's early-return rewrite keyed on exactly
+            // that. Every `if` on this surface therefore looked like an if WITH
+            // an else, the rewrite never fired, and
+            //     if (c) { return A; }
+            //     return B;
+            // lowered to `if c then [A] else []` followed by a separate binding
+            // for B — which, being last, became the method's result. `pick(1)`
+            // answered B on this surface and A on every other.
+            //
+            // AnfLower now accepts both spellings, and this one no longer
+            // invents the misleading list.
             return new IfStatement(condition, thenBlock, elseBlock, loc);
         }
 
@@ -1566,9 +1572,12 @@ public final class SolParser {
         }
         if (stmt instanceof IfStatement ifs) {
             List<Statement> newThen = rewriteStmtBlock(ifs.thenBody(), propNames, new HashSet<>(paramNames), methodNames);
+            // R-298: `: List.of()` here re-introduced the empty else-list that
+            // parseIf had just stopped creating, so the fix upstream was
+            // invisible. null means "no else" in this AST; preserve it.
             List<Statement> newElse = ifs.elseBody() != null
                 ? rewriteStmtBlock(ifs.elseBody(), propNames, new HashSet<>(paramNames), methodNames)
-                : List.of();
+                : null;
             return new IfStatement(
                 rewriteBareProps(ifs.condition(), propNames, paramNames, methodNames),
                 newThen,

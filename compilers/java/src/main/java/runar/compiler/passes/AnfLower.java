@@ -859,8 +859,14 @@ public final class AnfLower {
                 // Early-return nesting: if an if-statement's then-block ends
                 // with return and no else-branch, the remaining statements
                 // logically belong in the else-branch.
+                // R-298: an EMPTY else-list means the same thing as no else,
+                // and at least one frontend emits it that way. Keying on null
+                // alone silently suppressed this rewrite for that whole
+                // surface, leaving the trailing statements AFTER the if — where
+                // the last one becomes the method's result. Ruby's lowerer
+                // already accepts both spellings (anf_lower.rb:884).
                 if (stmt instanceof IfStatement is
-                    && is.elseBody() == null
+                    && (is.elseBody() == null || is.elseBody().isEmpty())
                     && i + 1 < stmts.size()
                     && branchEndsWithReturn(is.thenBody())) {
                     List<Statement> remaining = stmts.subList(i + 1, stmts.size());

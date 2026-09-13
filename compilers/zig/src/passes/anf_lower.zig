@@ -1242,7 +1242,12 @@ fn lowerStatementsWithReads(ctx: *LowerCtx, stmts: []const Statement, reads_afte
         // remaining statements become the else-branch.
         if (stmt == .if_stmt) {
             const if_s = stmt.if_stmt;
-            if (if_s.else_body == null and (i + 1 < stmts.len) and branchEndsWithReturn(if_s.then_body)) {
+            // R-298: an EMPTY else-list means the same thing as no else. Keying
+            // on null alone suppresses this rewrite for any frontend (or --ir
+            // input) that spells it as an empty list, leaving the trailing
+            // statements after the if where the last one becomes the result.
+            const has_no_else = if (if_s.else_body) |eb| eb.len == 0 else true;
+            if (has_no_else and (i + 1 < stmts.len) and branchEndsWithReturn(if_s.then_body)) {
                 const remaining = stmts[i + 1 ..];
                 try lowerIfStatementWithElse(ctx, if_s.condition, if_s.then_body, remaining, reads_after_block);
                 return;
