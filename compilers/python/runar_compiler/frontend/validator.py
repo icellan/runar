@@ -699,6 +699,26 @@ class _ValidationContext:
             if not _is_compile_time_constant(stmt.condition.right):
                 self._add_error("for loop bound must be a compile-time constant")
 
+        # R-148: the START, checked the same way and for the same reason. Until
+        # now only the BOUND was validated here; a non-literal start reached
+        # ``anf_lower._extract_loop_shape``, which raises a bare ``ValueError``
+        # with no location. That escapes ``compile_from_source`` -- the tier's
+        # public API, which every other failure exits through as a
+        # ``CompilationError`` carrying located diagnostics -- so a caller
+        # written against that contract got an exception type it does not catch.
+        # Only the CLI was unaffected, because it wraps the call in a generic
+        # ``except Exception``.
+        #
+        # The message is the other six tiers' sentence, word for word; the raise
+        # in ``_extract_loop_shape`` stays as the backstop for ``--ir`` inputs,
+        # which run no frontend at all.
+        if stmt.init is not None and not _is_compile_time_constant(stmt.init.init):
+            self._add_error(
+                "Cannot determine loop start at compile time. "
+                "For-loop iterators must start at an integer literal.",
+                stmt.source_location,
+            )
+
         if stmt.init is not None:
             self._validate_expression(stmt.init.init)
         self._validate_for_update(stmt)
