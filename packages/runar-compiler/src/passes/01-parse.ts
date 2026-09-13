@@ -802,6 +802,7 @@ function parseExpressionStatement(
         op: compoundOp,
         left: target,
         right,
+        sourceLocation: locFromNode(node, file),
       };
       return {
         kind: 'assignment',
@@ -963,13 +964,13 @@ function parseForUpdate(
     if (op === SyntaxKind.PlusPlusToken) {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'increment_expr', operand, prefix: false },
+        expression: { kind: 'increment_expr', operand, prefix: false, sourceLocation: loc },
         sourceLocation: loc,
       };
     } else {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'decrement_expr', operand, prefix: false },
+        expression: { kind: 'decrement_expr', operand, prefix: false, sourceLocation: loc },
         sourceLocation: loc,
       };
     }
@@ -984,13 +985,13 @@ function parseForUpdate(
     if (op === SyntaxKind.PlusPlusToken) {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'increment_expr', operand, prefix: true },
+        expression: { kind: 'increment_expr', operand, prefix: true, sourceLocation: loc },
         sourceLocation: loc,
       };
     } else {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'decrement_expr', operand, prefix: true },
+        expression: { kind: 'decrement_expr', operand, prefix: true, sourceLocation: loc },
         sourceLocation: loc,
       };
     }
@@ -1130,7 +1131,7 @@ function parseExpression(
     case SyntaxKind.ArrayLiteralExpression: {
       const arrayLit = node.asKindOrThrow(SyntaxKind.ArrayLiteralExpression);
       const elements = arrayLit.getElements().map(elem => parseExpression(elem, file, errors));
-      return { kind: 'array_literal', elements };
+      return { kind: 'array_literal', elements, sourceLocation: locFromNode(node, file) };
     }
 
     default:
@@ -1182,7 +1183,7 @@ function parseBinaryExpression(
       'warning',
       locFromNode(opToken, file),
     ));
-    return { kind: 'binary_expr', op: '===', left, right };
+    return { kind: 'binary_expr', op: '===', left, right, sourceLocation: locFromNode(node, file) };
   }
   if (opKind === SyntaxKind.ExclamationEqualsToken) {
     errors.push(makeDiagnostic(
@@ -1190,12 +1191,12 @@ function parseBinaryExpression(
       'warning',
       locFromNode(opToken, file),
     ));
-    return { kind: 'binary_expr', op: '!==', left, right };
+    return { kind: 'binary_expr', op: '!==', left, right, sourceLocation: locFromNode(node, file) };
   }
 
   const op = OP_MAP[opKind];
   if (op) {
-    return { kind: 'binary_expr', op, left, right };
+    return { kind: 'binary_expr', op, left, right, sourceLocation: locFromNode(node, file) };
   }
 
   errors.push(makeDiagnostic(
@@ -1203,7 +1204,7 @@ function parseBinaryExpression(
     'error',
     locFromNode(opToken, file),
   ));
-  return { kind: 'binary_expr', op: '+', left, right };
+  return { kind: 'binary_expr', op: '+', left, right, sourceLocation: locFromNode(node, file) };
 }
 
 function parsePrefixUnaryExpression(
@@ -1223,15 +1224,15 @@ function parsePrefixUnaryExpression(
 
   // ++ and --
   if (opToken === SyntaxKind.PlusPlusToken) {
-    return { kind: 'increment_expr', operand, prefix: true };
+    return { kind: 'increment_expr', operand, prefix: true, sourceLocation: locFromNode(node, file) };
   }
   if (opToken === SyntaxKind.MinusMinusToken) {
-    return { kind: 'decrement_expr', operand, prefix: true };
+    return { kind: 'decrement_expr', operand, prefix: true, sourceLocation: locFromNode(node, file) };
   }
 
   const op = UNARY_MAP[opToken];
   if (op) {
-    return { kind: 'unary_expr', op, operand };
+    return { kind: 'unary_expr', op, operand, sourceLocation: locFromNode(node, file) };
   }
 
   errors.push(makeDiagnostic(
@@ -1239,7 +1240,7 @@ function parsePrefixUnaryExpression(
     'error',
     locFromNode(node, file),
   ));
-  return { kind: 'unary_expr', op: '-', operand };
+  return { kind: 'unary_expr', op: '-', operand, sourceLocation: locFromNode(node, file) };
 }
 
 function parsePostfixUnaryExpression(
@@ -1252,10 +1253,10 @@ function parsePostfixUnaryExpression(
   const opToken = postfix.getOperatorToken();
 
   if (opToken === SyntaxKind.PlusPlusToken) {
-    return { kind: 'increment_expr', operand, prefix: false };
+    return { kind: 'increment_expr', operand, prefix: false, sourceLocation: locFromNode(node, file) };
   }
   if (opToken === SyntaxKind.MinusMinusToken) {
-    return { kind: 'decrement_expr', operand, prefix: false };
+    return { kind: 'decrement_expr', operand, prefix: false, sourceLocation: locFromNode(node, file) };
   }
 
   errors.push(makeDiagnostic(
@@ -1296,7 +1297,7 @@ function parseCallExpression(
     args.push(parseExpression(arg, file, errors));
   }
 
-  return { kind: 'call_expr', callee, args };
+  return { kind: 'call_expr', callee, args, sourceLocation: locFromNode(node, file) };
 }
 
 /**
@@ -1797,7 +1798,7 @@ function parseElementAccessExpression(
     index = { kind: 'bigint_literal', value: 0n };
   }
 
-  return { kind: 'index_access', object, index };
+  return { kind: 'index_access', object, index, sourceLocation: locFromNode(node, file) };
 }
 
 function parseTernaryExpression(
@@ -1810,7 +1811,7 @@ function parseTernaryExpression(
   const consequent = parseExpression(condExpr.getWhenTrue(), file, errors);
   const alternate = parseExpression(condExpr.getWhenFalse(), file, errors);
 
-  return { kind: 'ternary_expr', condition, consequent, alternate };
+  return { kind: 'ternary_expr', condition, consequent, alternate, sourceLocation: locFromNode(node, file) };
 }
 
 // ---------------------------------------------------------------------------

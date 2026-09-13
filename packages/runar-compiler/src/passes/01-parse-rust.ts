@@ -455,6 +455,7 @@ class RustParser extends ParserCore<RustToken> {
             kind: 'call_expr' as const,
             callee: { kind: 'identifier' as const, name: 'super' },
             args: uninitProps.map(p => ({ kind: 'identifier' as const, name: p.name })),
+            sourceLocation: loc,
           },
           sourceLocation: loc,
         },
@@ -838,6 +839,7 @@ class RustParser extends ParserCore<RustToken> {
           kind: 'call_expr',
           callee: { kind: 'identifier', name: 'assert' },
           args: [expr],
+          sourceLocation: location,
         },
         sourceLocation: location,
       };
@@ -1043,6 +1045,9 @@ class RustParser extends ParserCore<RustToken> {
    */
   protected parsePostfixChain(expr: Expression, selfNames: Set<string>): Expression {
     while (true) {
+      // R-142: same locations the base ParserCore attaches — this override
+      // exists only for snake_case conversion and `.clone()` stripping.
+      const at = this.loc();
       if (this.current().type === '(') {
         // Function call
         this.advance();
@@ -1058,7 +1063,7 @@ class RustParser extends ParserCore<RustToken> {
           if (this.current().type === ',') this.advance();
         }
         this.expect(')');
-        expr = { kind: 'call_expr', callee: expr, args };
+        expr = { kind: 'call_expr', callee: expr, args, sourceLocation: at };
       } else if (this.current().type === '.') {
         this.advance();
         const rawProp = this.current().value;
@@ -1075,15 +1080,15 @@ class RustParser extends ParserCore<RustToken> {
 
         // self.property -> PropertyAccessExpr
         if (expr.kind === 'identifier' && selfNames.has(expr.name)) {
-          expr = { kind: 'property_access', property: prop };
+          expr = { kind: 'property_access', property: prop, sourceLocation: at };
         } else {
-          expr = { kind: 'member_expr', object: expr, property: prop };
+          expr = { kind: 'member_expr', object: expr, property: prop, sourceLocation: at };
         }
       } else if (this.current().type === '[') {
         this.advance();
         const index = this.parseExpression();
         this.expect(']');
-        expr = { kind: 'index_access', object: expr, index };
+        expr = { kind: 'index_access', object: expr, index, sourceLocation: at };
       } else {
         break;
       }
@@ -1092,17 +1097,18 @@ class RustParser extends ParserCore<RustToken> {
   }
 
   protected parseUnary(): Expression {
+    const at = this.loc();
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.parseUnary(), sourceLocation: at };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.parseUnary(), sourceLocation: at };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.parseUnary(), sourceLocation: at };
     }
     // Skip reference operator & in expression context
     if (this.current().type === '&') {
