@@ -34,6 +34,7 @@ packages/
   runar-zig/           # Zig package: types, mock crypto, real hashes, deployment SDK
   runar-rb/            # Ruby gem: types, mock crypto, real hashes, deployment SDK
   runar-java/          # Java package: types, mock crypto, real hashes, deployment SDK, contract simulator
+  decompiler/          # Bitcoin Script -> Rúnar decompiler; powers `runar decompile` and the CI `decompiler-roundtrip` job
 compilers/
   go/                 # Go compiler implementation
   rust/               # Rust compiler implementation
