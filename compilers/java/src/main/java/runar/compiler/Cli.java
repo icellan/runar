@@ -584,8 +584,33 @@ public final class Cli {
         }
     }
 
+    /**
+     * The artifact build time, as an ISO-8601 second-resolution UTC string.
+     *
+     * <p>Honours SOURCE_DATE_EPOCH
+     * (https://reproducible-builds.org/specs/source-date-epoch/): when it holds
+     * a Unix seconds value, that instant is stamped instead of the clock, so two
+     * builds of the same source produce byte-identical artifacts. Without it,
+     * the wall clock, exactly as before.
+     *
+     * <p>R-212: the Go tier honoured this and the other six did not, so six of
+     * seven artifacts could not be reproduced — and reproducing the artifact is
+     * how someone other than the author checks that a published locking script
+     * is what the published source compiles to. A malformed value is ignored
+     * rather than failing the build: the variable is an environment convention,
+     * not input.
+     */
     private static String buildTimestamp() {
-        return java.time.Instant.now()
+        java.time.Instant instant = java.time.Instant.now();
+        String raw = System.getenv("SOURCE_DATE_EPOCH");
+        if (raw != null && raw.trim().matches("\\d+")) {
+            try {
+                instant = java.time.Instant.ofEpochSecond(Long.parseLong(raw.trim()));
+            } catch (NumberFormatException | java.time.DateTimeException ignored) {
+                // Out of range for an Instant: fall through to the clock.
+            }
+        }
+        return instant
             .truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
             .toString()
             .replace("Z", "") + "Z";

@@ -111,6 +111,27 @@ class Artifact:
     raw_script_spans: list | None = None
 
 
+
+def _build_timestamp() -> str:
+    """The artifact build time, as an ISO-8601 second-resolution UTC string.
+
+    Honours SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+    when it holds a Unix seconds value that instant is stamped instead of the
+    clock, so two builds of the same source produce byte-identical artifacts.
+    Without it, the wall clock, exactly as before.
+
+    R-212: the Go tier honoured this and the other six did not, so six of seven
+    artifacts could not be reproduced — and reproducing the artifact is how
+    someone other than the author checks that a published locking script is what
+    the published source compiles to. A malformed value is ignored rather than
+    failing the build: the variable is an environment convention, not input.
+    """
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if raw.isdigit():
+        return datetime.fromtimestamp(int(raw), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 SCHEMA_VERSION = "runar-v1.0.0-rc.1"
 COMPILER_VERSION = "1.0.0-rc.1-python"
 
@@ -856,7 +877,7 @@ def _assemble_artifact(
         code_sep_index_slots=code_sep_index_slots or [],
         code_separator_index=cs_index,
         code_separator_indices=cs_indices,
-        build_timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        build_timestamp=_build_timestamp(),
         raw_script_spans=raw_script_spans if raw_script_spans else None,
     )
 

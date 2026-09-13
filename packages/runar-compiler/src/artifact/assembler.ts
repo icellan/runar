@@ -277,6 +277,31 @@ export interface AssembleOptions {
 // Constants
 // ---------------------------------------------------------------------------
 
+/**
+ * The artifact build time, as an ISO-8601 string.
+ *
+ * Honours SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+ * when it holds a Unix seconds value, that instant is stamped instead of the
+ * clock, so two builds of the same source produce byte-identical artifacts.
+ * Without it, the wall clock, exactly as before.
+ *
+ * R-212: the Go tier honoured this and the other six did not, so six of seven
+ * artifacts could not be reproduced — and reproducing the artifact is how
+ * someone other than the author checks that a published locking script is what
+ * the published source compiles to. A malformed value is ignored rather than
+ * failing the build: the variable is an environment convention, not input.
+ */
+function buildTimestamp(): string {
+  const raw = process.env.SOURCE_DATE_EPOCH;
+  if (raw !== undefined && /^\d+$/.test(raw.trim())) {
+    const seconds = Number(raw.trim());
+    if (Number.isSafeInteger(seconds)) {
+      return new Date(seconds * 1000).toISOString();
+    }
+  }
+  return new Date().toISOString();
+}
+
 const ARTIFACT_VERSION = 'runar-v1.0.0-rc.1';
 const DEFAULT_COMPILER_VERSION = '1.0.0-rc.1';
 
@@ -781,7 +806,7 @@ export function assembleArtifact(
     abi,
     script: scriptHex,
     asm: scriptAsm,
-    buildTimestamp: new Date().toISOString(),
+    buildTimestamp: buildTimestamp(),
   };
 
   // Optional source map

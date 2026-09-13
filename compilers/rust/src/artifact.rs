@@ -318,13 +318,30 @@ pub fn assemble_artifact(
 }
 
 /// Simple UTC timestamp without pulling in the full chrono crate.
+///
+/// Honours SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+/// when it holds a Unix seconds value, that instant is stamped instead of the
+/// clock, so two builds of the same source produce byte-identical artifacts.
+/// Without it, the wall clock, exactly as before.
+///
+/// R-212: the Go tier honoured this and the other six did not, so six of seven
+/// artifacts could not be reproduced — and reproducing the artifact is how
+/// someone other than the author checks that a published locking script is what
+/// the published source compiles to. A malformed value is ignored rather than
+/// failing the build: the variable is an environment convention, not input.
 fn chrono_lite_utc_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
+    let secs = match std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        Some(pinned) => pinned,
+        None => SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
 
     // Convert epoch seconds to a rough ISO-8601 string.
     // This is a simplified implementation; for production use chrono.
