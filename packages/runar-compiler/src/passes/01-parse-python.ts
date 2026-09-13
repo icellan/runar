@@ -33,6 +33,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
+import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -1658,6 +1659,9 @@ class PyParser {
 // ---------------------------------------------------------------------------
 
 export function parsePythonSource(source: string, fileName: string): ParseResult {
+  // R-146: this function is exported from the package index, so the
+  // dispatcher's size guard has to be here too — see ./source-limits.ts.
+  assertSourceWithinLimits(source, 'parsePythonSource');
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, fileName, errors);
   const parser = new PyParser(tokens, fileName, errors);

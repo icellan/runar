@@ -43,6 +43,7 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
+import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -1670,6 +1671,9 @@ function syntheticConstructor(properties: PropertyNode[], file: string): MethodN
 // ---------------------------------------------------------------------------
 
 export function parseJavaSource(source: string, fileName?: string): ParseResult {
+  // R-146: this function is exported from the package index, so the
+  // dispatcher's size guard has to be here too — see ./source-limits.ts.
+  assertSourceWithinLimits(source, 'parseJavaSource');
   const file = fileName ?? 'contract.runar.java';
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);

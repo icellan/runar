@@ -33,6 +33,7 @@ import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -1260,6 +1261,9 @@ class GoParser extends ParserCore<GoToken> {
 // ---------------------------------------------------------------------------
 
 export function parseGoSource(source: string, fileName?: string): ParseResult {
+  // R-146: this function is exported from the package index, so the
+  // dispatcher's size guard has to be here too — see ./source-limits.ts.
+  assertSourceWithinLimits(source, 'parseGoSource');
   const file = fileName ?? 'contract.runar.go';
   const errors: CompilerDiagnostic[] = [];
   const tokens = tokenize(source, file, errors);
