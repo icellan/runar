@@ -4585,15 +4585,24 @@ class _LoweringContext:
         for _ in range(3):
             self.sm.pop()
 
-        # Delegate to the SLH-DSA codegen module
+        # Delegate to the SLH-DSA codegen module.
+        #
+        # The try covers the IMPORT ONLY (R-299). It used to cover the call as
+        # well, so an ImportError raised from inside the codegen module — a
+        # missing transitive dependency, a typo'd import in that module — was
+        # reported as "module not available. Please implement
+        # runar_compiler.codegen.slh_dsa", sending the author to write a module
+        # that is right there, with the real cause discarded. The `from exc`
+        # keeps the cause attached for the case the message IS about.
+        # The EC handler below has always been written this way.
         try:
             from runar_compiler.codegen.slh_dsa import emit_verify_slh_dsa
-            emit_verify_slh_dsa(lambda op: self.emit_op(op), param_key)
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "SLH-DSA codegen module not available. "
                 "Please implement runar_compiler.codegen.slh_dsa."
-            )
+            ) from exc
+        emit_verify_slh_dsa(lambda op: self.emit_op(op), param_key)
 
         self.sm.push(binding_name)
         self._track_depth()
