@@ -6288,8 +6288,14 @@ func (ctx *loweringContext) lowerMerkleRootPoseidon2KB(bindingName string, args 
 	// Range-check the *big.Int BEFORE narrowing (CL-BUG-127) — see
 	// lowerMerkleRoot for the modular-truncation failure mode.
 	depth := ir.MustIntValueExact(depthVal, "merkleRootPoseidon2KB: depth")
-	if depth < 1 || depth > 64 {
-		panic(fmt.Sprintf("merkleRootPoseidon2KB: depth must be between 1 and 64, got %d", depth))
+	// The bound is 32, not 64 (R-172). EmitPoseidon2MerkleRoot refuses anything
+	// above 32 — its roll counts grow quadratically in depth — so a gate at 64
+	// left 33..64 passing a check that claimed to bound them and dying in the
+	// emitter, under a message naming a function the author never called.
+	// merkleRootSha256 keeps 1..64: its emitter carries no bound of its own.
+	if depth < 1 || depth > poseidon2MerkleMaxDepth {
+		panic(fmt.Sprintf("merkleRootPoseidon2KB: depth must be between 1 and %d, got %d",
+			poseidon2MerkleMaxDepth, depth))
 	}
 
 	// Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth

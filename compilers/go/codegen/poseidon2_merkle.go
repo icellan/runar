@@ -43,6 +43,13 @@ func emitRoll(emit func(StackOp), d int) {
 	emit(StackOp{Op: "roll", Depth: d})
 }
 
+// poseidon2MerkleMaxDepth is the largest Merkle depth EmitPoseidon2MerkleRoot
+// can emit. Higher depths produce quadratically larger scripts because of the
+// roll operations at each level. It is the ONE place the limit is written:
+// lowerMerkleRootPoseidon2KB reads it too, so the check the author sees and the
+// check the emitter enforces cannot drift apart again (R-172).
+const poseidon2MerkleMaxDepth = 32
+
 // EmitPoseidon2MerkleRoot emits Poseidon2 Merkle root computation.
 //
 // Stack in:  [..., leaf(8 elems), proof(depth*8 elems), index]
@@ -51,8 +58,13 @@ func emitRoll(emit func(StackOp), d int) {
 // depth is a compile-time constant (unrolled loop). Must be in [1, 32].
 // Higher depths produce quadratically larger scripts due to roll operations.
 func EmitPoseidon2MerkleRoot(emit func(StackOp), depth int) {
-	if depth < 1 || depth > 32 {
-		panic(fmt.Sprintf("EmitPoseidon2MerkleRoot: depth must be in [1, 32], got %d", depth))
+	// Internal assertion, not the author-facing gate: lowerMerkleRootPoseidon2KB
+	// checks the same bound against the constant in the source and reports it
+	// under the builtin's own name (R-172). Reaching this panic means a caller
+	// bypassed that gate.
+	if depth < 1 || depth > poseidon2MerkleMaxDepth {
+		panic(fmt.Sprintf("EmitPoseidon2MerkleRoot: depth must be in [1, %d], got %d",
+			poseidon2MerkleMaxDepth, depth))
 	}
 	// Strategy overview:
 	//
