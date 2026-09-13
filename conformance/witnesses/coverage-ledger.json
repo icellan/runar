@@ -207,16 +207,6 @@
       }
     },
     {
-      "fixture": "oracle-price",
-      "cause": "crypto-witness-infeasible",
-      "reason": "Rabin signature (verifyRabinSig) + ECDSA checkSig — Rabin witness is not secp256k1; real signatures required",
-      "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/oracle_price_test.zig",
-        "note": "real deploy + spend on a live regtest node: OraclePriceFeed_SpendValidPrice (accept) and OraclePriceFeed_BelowThresholdRejected (reject). Compiled output verified byte-identical to expected-script.hex (44 bytes)."
-      }
-    },
-    {
       "fixture": "p256-wallet",
       "cause": "crypto-witness-infeasible",
       "reason": "NIST P-256 signature verification + ECDSA checkSig — non-secp256k1 signature; real signatures required",
