@@ -4317,7 +4317,14 @@ class LoweringContext {
     // For the default ALL|FORKID (sighashFlag undefined) the blob is
     // byte-identical to the pinned cross-tier constant; issue #123 lets a
     // method declare a different mode, which only changes the appended sighash
-    // flag byte (TS-reference tier only until the 6-tier port lands). Net stack
+    // flag byte. R-256: this used to add "(TS-reference tier only until the
+    // 6-tier port lands)". The port landed — measured on a stateful method
+    // declaring `@sighash ALL|ANYONECANPAY|FORKID`, all seven tiers accept it
+    // and emit the same 1372 hexchars, against 1370 for the same contract at
+    // the default, and `conformance/closed-findings` already pins a
+    // SINGLE|FORKID probe as 7-tier identical. What IS still TS-only is the
+    // SURFACE: the eight non-.runar.ts frontends reject the directive outright
+    // rather than ignoring it. Net stack
     // effect is zero: the preimage is consumed internally as a copy and left on
     // top; OP_CHECKSIGVERIFY aborts the script unless the binding holds.
     emitCheckPreimageBindingRaw((op) => this.emitOp(op), sighashFlag);
