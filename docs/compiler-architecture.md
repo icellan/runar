@@ -139,7 +139,30 @@ t3 = bin_op("==", t1, t2)
 t4 = assert(t3)
 ```
 
-Each temporary (`t0`, `t1`, ...) is numbered sequentially within each method. The sequence of bindings IS the evaluation order, which is exactly what the stack machine needs.
+Each temporary (`t0`, `t1`, ...) is numbered sequentially within a lowering
+**context**. The sequence of bindings IS the evaluation order, which is exactly
+what the stack machine needs.
+
+> **Binding names are not unique within a method (R-181).** It is tempting to
+> read the numbering as SSA. It is not. Two reuses are normal and deliberate:
+>
+> * a branch arm rebinds a merged local under its own name, so the same name
+>   appears twice in one binding list — this is how both arms are given the
+>   same result set in the same order;
+> * an arm lowers in its own context, so its temp indices can collide with the
+>   parent's. A conditional binding `t18` can itself contain a `t18`.
+>
+> Measured over the 78 golden `expected-ir.json` files: 21 same-list reuses and
+> 93 nested-context reuses.
+>
+> What holds instead — and what makes the reuse safe — is ordinary **lexical
+> scope**: every value reference resolves to a binding earlier in its own list,
+> or in an enclosing list, or to a method parameter. Measured over the same
+> corpus: 2531 references, zero resolving outside their scope. Anything that
+> FLATTENS an arm into its parent (branch inlining, a whole-method walk keyed by
+> name) must rename first — `remap_value_refs`, `max_temp_index` and
+> `compute_last_uses` are all keyed by name and all operate within one context.
+> `conformance/anf-scope.test.ts` pins this.
 
 ### Why ANF?
 
@@ -151,7 +174,7 @@ Each temporary (`t0`, `t1`, ...) is numbered sequentially within each method. Th
 
 The ANF IR is the **conformance boundary** for the multi-compiler strategy. All compilers must produce byte-identical ANF IR (serialized via RFC 8785 / JCS) for the same source. To ensure this:
 
-- Temporaries are numbered sequentially per method (`t0`, `t1`, ...).
+- Temporaries are numbered sequentially per lowering context (`t0`, `t1`, ...) — see the note above on why that is not per method.
 - Sub-expressions are flattened left-to-right.
 - Constants are always wrapped in `load_const` (never inlined).
 - Logical operators (`&&`, `||`) SHORT-CIRCUIT -- they desugar to the conditional, so the right operand is evaluated only when the left does not already decide the result.
