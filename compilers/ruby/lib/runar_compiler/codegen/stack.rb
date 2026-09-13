@@ -4544,7 +4544,22 @@ module RunarCompiler::Codegen
     # the F-003 regression test) can identify the missed kind directly.
     raise
   rescue => e
-    raise RuntimeError, "stack lowering: #{e}"
+    # R-171: everything reaching here is an INTERNAL error, by construction --
+    # the tier's deliberate refusals raise RuntimeError and are re-raised
+    # untouched above, as is the typed unknown-kind guard. So a TypeError or
+    # NoMethodError arriving here is a bug in this file, not a diagnosis of the
+    # author's contract, and saying "stack lowering: undefined method `foo' for
+    # nil" sends them to rewrite code that is fine.
+    #
+    # Says so now, and keeps the error CLASS -- the single most useful fact in a
+    # bug report, and the one the old message discarded. `raise ... , e.backtrace`
+    # preserves the frame that actually failed instead of restarting the trace
+    # here; Ruby sets `cause` to the original either way. Same distinction R-138
+    # drew for the Rust tier between a refusal and an internal error.
+    raise RuntimeError,
+          "stack lowering: internal error (#{e.class}): #{e.message} " \
+          "-- this is a compiler bug, not a problem with the contract",
+          e.backtrace
   end
 
   # @api private
