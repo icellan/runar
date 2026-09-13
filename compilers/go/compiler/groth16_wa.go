@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"time"
 
 	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/packages/runar-go/bn254witness"
@@ -323,7 +322,11 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 		},
 		Script:         emitResult.ScriptHex,
 		ASM:            emitResult.ScriptAsm,
-		BuildTimestamp: time.Now().UTC().Format(time.RFC3339),
+		// buildTimestamp(), not time.Now(): this path used to stamp the clock
+		// directly, so SOURCE_DATE_EPOCH was honoured by every artifact except
+		// the one whose entire purpose is to be reproduced from the same
+		// vk.json by someone deciding whether to trust it (R-176).
+		BuildTimestamp: buildTimestamp(),
 		Groth16WA: &Groth16WAMeta{
 			NumPubInputs: numPubInputs,
 			VKDigest:     vkDigest,
