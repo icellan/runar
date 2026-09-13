@@ -159,11 +159,44 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
 pub fn hasSideEffect(v: types.ANFValue) bool {
     return switch (v) {
         .assert, .update_prop, .check_preimage, .deserialize_state,
-        .add_output, .add_raw_output, .add_data_output, .@"if", .loop, .call, .method_call,
+        .add_output, .add_raw_output, .add_data_output, .call, .method_call,
         // raw_script bytes are opaque — DCE must never eliminate them, even
         // when the binding is unreferenced.
         .raw_script,
         => true,
+        // R-140: `if` / `loop` are effectful IFF some NESTED binding is.
+        //
+        // They used to sit in the unconditional list above, so an unreferenced
+        // branch or loop whose bodies are entirely pure was kept here and
+        // deleted by the Go, Java, Rust and TypeScript tiers — three tiers
+        // against four on the same predicate. Measured on the predicate
+        // itself, since no shipped path reaches DCE with that shape today and
+        // the conformance suite therefore cannot see it:
+        //
+        //     go  HasSideEffect(pure if)   = false   zig (before) = true
+        //     go  HasSideEffect(pure loop) = false   zig (before) = true
+        //
+        // Recursion is what makes retention both safe and precise: nested
+        // bindings live inside the parent node rather than flattened into the
+        // method body, so dropping an effectful `if` would take every nested
+        // assert / check_preimage / add_output with it — retention is
+        // all-or-nothing. Mirrors packages/runar-compiler/src/optimizer/dce.ts
+        // and compilers/go/frontend/dce.go.
+        .@"if" => |iv| blk: {
+            for (iv.then) |b| {
+                if (hasSideEffect(b.value)) break :blk true;
+            }
+            for (iv.@"else") |b| {
+                if (hasSideEffect(b.value)) break :blk true;
+            }
+            break :blk false;
+        },
+        .loop => |lv| blk: {
+            for (lv.body) |b| {
+                if (hasSideEffect(b.value)) break :blk true;
+            }
+            break :blk false;
+        },
         // Issue #109 (@embedAlways): a load_prop injected to force a readonly
         // field into the deployed locking script carries `preserve = true`, so
         // DCE must keep it even though nothing references it. Ordinary
@@ -233,4 +266,38 @@ test "eliminateDeadBindings preserves side-effecting bindings" {
 
     // Both kept: t0 is referenced by t1, t1 has side effect
     try std.testing.expectEqual(@as(usize, 2), result.len);
+}
+
+// R-140: the predicate itself, pinned. No shipped path reaches DCE with an
+// unreferenced pure branch today, so an end-to-end hex test cannot see this
+// divergence — the predicate is the only place it is observable, and it is
+// where the three tiers disagreed with the other four.
+test "R-140 hasSideEffect recurses into if / loop bodies" {
+    var then_b = [_]types.ANFBinding{.{ .name = "t1", .value = .{ .load_const = .{ .value = .{ .integer = 1 } } }, .source_loc = null }};
+    var else_b = [_]types.ANFBinding{.{ .name = "t2", .value = .{ .load_const = .{ .value = .{ .integer = 2 } } }, .source_loc = null }};
+    var pure_if = types.ANFIf{ .cond = "c", .then = then_b[0..], .@"else" = else_b[0..] };
+    try std.testing.expect(!hasSideEffect(.{ .@"if" = &pure_if }));
+
+    var body_b = [_]types.ANFBinding{.{ .name = "t3", .value = .{ .load_const = .{ .value = .{ .integer = 3 } } }, .source_loc = null }};
+    var pure_loop = types.ANFLoop{ .count = 2, .body = body_b[0..], .iter_var = "i" };
+    try std.testing.expect(!hasSideEffect(.{ .loop = &pure_loop }));
+
+    // An effect in EITHER arm keeps the node.
+    var eff_b = [_]types.ANFBinding{.{ .name = "t4", .value = .{ .assert = .{ .value = "c" } }, .source_loc = null }};
+    var eff_then = types.ANFIf{ .cond = "c", .then = eff_b[0..], .@"else" = else_b[0..] };
+    try std.testing.expect(hasSideEffect(.{ .@"if" = &eff_then }));
+    var eff_else = types.ANFIf{ .cond = "c", .then = then_b[0..], .@"else" = eff_b[0..] };
+    try std.testing.expect(hasSideEffect(.{ .@"if" = &eff_else }));
+
+    var eff_loop = types.ANFLoop{ .count = 2, .body = eff_b[0..], .iter_var = "i" };
+    try std.testing.expect(hasSideEffect(.{ .loop = &eff_loop }));
+
+    // And an effect two levels down — the case a top-level-only scan misses.
+    var inner_holder = [_]types.ANFBinding{.{ .name = "t5", .value = .{ .@"if" = &eff_then }, .source_loc = null }};
+    var outer = types.ANFIf{ .cond = "c", .then = inner_holder[0..], .@"else" = else_b[0..] };
+    try std.testing.expect(hasSideEffect(.{ .@"if" = &outer }));
+
+    // An empty `if` carries nothing, so it carries no effect.
+    var empty = types.ANFIf{ .cond = "c", .then = &.{}, .@"else" = &.{} };
+    try std.testing.expect(!hasSideEffect(.{ .@"if" = &empty }));
 }

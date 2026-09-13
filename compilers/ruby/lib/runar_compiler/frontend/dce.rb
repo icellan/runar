@@ -23,11 +23,18 @@ require_relative "../ir/types"
 module RunarCompiler
   module Frontend
     module DCE
+      # R-140: +if+ and +loop+ are NOT in this list. They are effectful iff some
+      # NESTED binding is, and +has_side_effect?+ recurses for them. They used
+      # to sit here unconditionally, so an unreferenced branch or loop whose
+      # bodies are entirely pure was kept in this tier and deleted by the Go,
+      # Java, Rust and TypeScript tiers -- three tiers against four on the same
+      # predicate, measured on the predicate itself because no shipped path
+      # reaches DCE with that shape today.
       SIDE_EFFECT_KINDS = %w[
         assert update_prop check_preimage deserialize_state
         add_output add_raw_output add_data_output
         raw_script
-        if loop call method_call
+        call method_call
       ].to_set.freeze
 
       # Kinds known to have no observable side effects.  Listed explicitly
@@ -137,6 +144,18 @@ module RunarCompiler
         # load_props (preserve = false) remain freely eliminable. Mirrors
         # compilers/zig/src/passes/dce.zig.
         return v.preserve == true if kind == "load_prop"
+
+        # R-140: recursion is what makes retention both safe and precise.
+        # Nested bindings live inside the parent node rather than flattened into
+        # the method body, so dropping an effectful +if+ would take every nested
+        # assert / check_preimage / add_output with it -- retention is
+        # all-or-nothing. Mirrors packages/runar-compiler/src/optimizer/dce.ts
+        # and compilers/go/frontend/dce.go.
+        if kind == "if"
+          return (v.then || []).any? { |b| has_side_effect?(b.value) } ||
+                 (v.else_ || []).any? { |b| has_side_effect?(b.value) }
+        end
+        return (v.body || []).any? { |b| has_side_effect?(b.value) } if kind == "loop"
 
         return true  if SIDE_EFFECT_KINDS.include?(kind)
         return false if SIDE_EFFECT_FREE_KINDS.include?(kind)

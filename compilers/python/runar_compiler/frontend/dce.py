@@ -174,6 +174,29 @@ def has_side_effect(v: ANFValue) -> bool:
     if v.kind == "load_prop":
         return v.preserve
 
+    # R-140: ``if`` / ``loop`` are effectful IFF some NESTED binding is.
+    #
+    # They used to sit in the flat list below, so an unreferenced branch or loop
+    # whose bodies are entirely pure was kept here and deleted by the Go, Java,
+    # Rust and TypeScript tiers -- three tiers against four on the same
+    # predicate. Measured directly, since no shipped path reaches DCE with that
+    # shape today and the conformance suite therefore cannot see it:
+    #
+    #     go  HasSideEffect(pure if)   = false     zig hasSideEffect(pure if)   = true
+    #     go  HasSideEffect(pure loop) = false     zig hasSideEffect(pure loop) = true
+    #
+    # Recursion is what makes retention both safe and precise: nested bindings
+    # live inside the parent node rather than flattened into the method body, so
+    # dropping an effectful ``if`` would take every nested ``assert`` /
+    # ``check_preimage`` / ``add_output`` with it -- retention is all-or-nothing.
+    # Mirrors ``packages/runar-compiler/src/optimizer/dce.ts``.
+    if v.kind == "if":
+        return any(has_side_effect(b.value) for b in (v.then or [])) or any(
+            has_side_effect(b.value) for b in (v.else_ or [])
+        )
+    if v.kind == "loop":
+        return any(has_side_effect(b.value) for b in (v.body or []))
+
     return v.kind in (
         "assert",
         "update_prop",
@@ -182,8 +205,6 @@ def has_side_effect(v: ANFValue) -> bool:
         "add_output",
         "add_raw_output",
         "add_data_output",
-        "if",
-        "loop",
         "call",
         "method_call",
         # Opaque byte span -- DCE must never eliminate it.
