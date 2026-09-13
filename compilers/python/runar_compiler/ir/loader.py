@@ -181,6 +181,55 @@ def validate_ir(program: ANFProgram) -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Builtin call arity (R-128 / R-165)
+# ---------------------------------------------------------------------------
+#
+# The source pipeline type-checks every call before codegen. ``--ir`` runs no
+# frontend at all, so a call with the wrong number of arguments used to reach
+# stack lowering, where each dispatch family pops ``len(args)`` from the stack
+# MODEL and then emits a FIXED-arity opcode blob. Measured through the six
+# ``--ir`` CLIs on one file:
+#
+#   cat(1 arg, needs 2)   go / ruby / rust / python compiled it to ``7e``,
+#                         a bare OP_CAT with nothing beneath it
+#   assert(0 args)        the same four emitted an EMPTY script -- the only
+#                         guard in the contract vanished, which is
+#                         anyone-can-spend, not merely wrong
+#                         (java and zig refused both)
+#
+# The table is READ from the frontend's own signature map rather than copied,
+# so the two cannot drift. Two builtins accept more than one count, both
+# special-cased in ``typecheck`` for the same reason (an optional trailing
+# argument the signature table cannot express), and one is variadic by a rule.
+
+_VARIABLE_ARITY: dict[str, tuple[int, ...]] = {
+    "assert": (1, 2),
+    "extractPrevOutputScript": (2, 3),
+}
+
+
+def _merkle_poseidon2_arity_ok(got: int) -> tuple[bool, str]:
+    """merkleRootPoseidon2KB takes 8 leaf + 8 per level + index + depth."""
+    if got < 10:
+        return False, "at least 10 arguments (8 leaf + index + depth)"
+    if (got - 10) % 8 != 0:
+        return False, "8*depth + 10 arguments"
+    return True, ""
+
+
+def _allowed_arity(name: str):
+    """Allowed argument counts for a builtin, or None when it is not one."""
+    from runar_compiler.frontend.typecheck import BUILTIN_FUNCTIONS
+
+    if name in _VARIABLE_ARITY:
+        return _VARIABLE_ARITY[name]
+    sig = BUILTIN_FUNCTIONS.get(name)
+    if sig is None:
+        return None
+    return (len(sig.params),)
+
+
 def _validate_bindings(
     bindings: list[ANFBinding], method_name: str
 ) -> list[str]:
@@ -205,6 +254,31 @@ def _validate_bindings(
                 f"method {method_name} binding {binding.name} "
                 f"has unknown kind {kind!r}"
             )
+
+        # R-128 / R-165: builtin call arity, checked here because `--ir` runs
+        # no frontend and stack lowering emits a fixed-arity blob regardless.
+        if kind == "call":
+            func_name = binding.value.func or ""
+            got = len(binding.value.args or [])
+            if func_name == "merkleRootPoseidon2KB":
+                ok, rule = _merkle_poseidon2_arity_ok(got)
+                if not ok:
+                    errors.append(
+                        f"method {method_name} binding {binding.name} calls "
+                        f"{func_name}() with {got} argument(s); it takes {rule}"
+                    )
+            else:
+                allowed = _allowed_arity(func_name)
+                if allowed is not None and got not in allowed:
+                    wanted = (
+                        str(allowed[0])
+                        if len(allowed) == 1
+                        else ", ".join(str(a) for a in allowed[:-1]) + f" or {allowed[-1]}"
+                    )
+                    errors.append(
+                        f"method {method_name} binding {binding.name} calls "
+                        f"{func_name}() with {got} argument(s); it takes {wanted}"
+                    )
 
         # Validate nested bindings
         if kind == "if":

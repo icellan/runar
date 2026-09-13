@@ -106,6 +106,20 @@ public final class AnfLoader {
                 + " an empty locking script is anyone-can-spend"
             );
         }
+
+        // R-128 / R-165 family: builtin call arity. The source pipeline
+        // type-checks every call; this loader is the `--ir` path, which runs no
+        // frontend, so a wrong-arity call used to reach stack lowering — where
+        // each dispatch family consumes args.size() from the stack MODEL and
+        // then emits a FIXED-arity opcode blob. `cat` with one argument
+        // compiled to a bare OP_CAT; `assert` with none compiled to an EMPTY
+        // script, dropping the contract's only guard.
+        for (AnfMethod m : methods) {
+            String err = checkCallArity(m.body(), m.name());
+            if (err != null) {
+                throw new RuntimeException(err);
+            }
+        }
         return new AnfProgram(name, props, methods);
     }
 
@@ -220,6 +234,38 @@ public final class AnfLoader {
             for (Object b : lst) body.add(toBinding(asObject(b)));
         }
         return new AnfMethod(name, params, body, isPublic);
+    }
+
+    /** Walks every binding, including nested ones, checking builtin arity. */
+    private static String checkCallArity(List<AnfBinding> bindings, String methodName) {
+        if (bindings == null) {
+            return null;
+        }
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            if (v instanceof runar.compiler.ir.anf.Call call) {
+                String err = BuiltinArity.check(
+                    methodName, b.name(), call.func(),
+                    call.args() == null ? 0 : call.args().size());
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.If branch) {
+                String err = checkCallArity(branch.thenBranch(), methodName);
+                if (err == null) {
+                    err = checkCallArity(branch.elseBranch(), methodName);
+                }
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                String err = checkCallArity(loop.body(), methodName);
+                if (err != null) {
+                    return err;
+                }
+            }
+        }
+        return null;
     }
 
     private static AnfBinding toBinding(Map<?, ?> obj) {

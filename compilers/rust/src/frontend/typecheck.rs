@@ -59,6 +59,28 @@ struct FuncSig {
     return_type: &'static str,
 }
 
+/// Allowed argument counts per builtin, for validating ANF IR that never went
+/// through this pass (R-128 / R-165).
+///
+/// `--ir` runs no frontend, so a wrong-arity call used to reach stack
+/// lowering, where each dispatch family pops `args.len()` from the stack MODEL
+/// and then emits a FIXED-arity opcode blob: `cat` with one argument compiled
+/// to a bare OP_CAT, `assert` with none to an EMPTY script. Derived from the
+/// signature table below rather than copied, so the two cannot drift.
+///
+/// Two builtins accept more than one count — `assert` (1 or 2) and
+/// `extractPrevOutputScript` (2 or 3) — both special-cased in `check_call_args`
+/// for the same reason. `merkleRootPoseidon2KB` is variadic by a rule and is
+/// handled by the caller.
+pub fn builtin_allowed_arity(name: &str) -> Option<Vec<usize>> {
+    match name {
+        "assert" => return Some(vec![1, 2]),
+        "extractPrevOutputScript" => return Some(vec![2, 3]),
+        _ => {}
+    }
+    builtin_functions().get(name).map(|sig| vec![sig.params.len()])
+}
+
 fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     let mut m = HashMap::new();
 

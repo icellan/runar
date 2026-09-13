@@ -158,7 +158,13 @@ module RunarCompiler
       "extractLocktime"       => FuncSig.new(params: ["SigHashPreimage"], return_type: "bigint"),
       "extractSigHashType"    => FuncSig.new(params: ["SigHashPreimage"], return_type: "bigint"),
       "buildChangeOutput"     => FuncSig.new(params: ["ByteString", "bigint"], return_type: "ByteString"),
-      "computeStateOutput"    => FuncSig.new(params: ["ByteString", "bigint"], return_type: "ByteString"),
+      # R-165: three arguments, not two. The ANF lowerer has always emitted
+      # `computeStateOutput(preimage, stateScript, newAmount)` -- see
+      # anf_lower's single-output continuation, and every tier's stack lowering
+      # reads args[0..2]. Only this tier declares the builtin at all, and its
+      # entry was one argument short; the IR-path arity check added with R-165
+      # is what surfaced it, by refusing the compiler's OWN round-tripped IR.
+      "computeStateOutput"    => FuncSig.new(params: ["ByteString", "ByteString", "bigint"], return_type: "ByteString"),
       # Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
       # that compile down to standard primitives + auto-injected method params.
       # See docs/cross-covenant-pattern.md.

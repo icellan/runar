@@ -227,6 +227,51 @@ fn validate_bindings(bindings: &[ANFBinding], method_name: &str) -> Result<(), S
             ));
         }
 
+        // R-128 / R-165: builtin call arity. The source pipeline type-checks
+        // every call; `--ir` runs no frontend, so a wrong-arity call used to
+        // reach stack lowering, where each dispatch family pops args.len()
+        // from the stack MODEL and then emits a FIXED-arity opcode blob. `cat`
+        // with one argument compiled to a bare OP_CAT; `assert` with none
+        // compiled to an EMPTY script, dropping the contract's only guard.
+        if let ANFValue::Call { func, args, .. } = &binding.value {
+            let got = args.len();
+            if func == "merkleRootPoseidon2KB" {
+                // 8 leaf elements + 8 per proof level + index + depth.
+                if got < 10 {
+                    return Err(format!(
+                        "IR validation: method {} binding {} calls {}() with {} argument(s); \
+                         it takes at least 10 arguments (8 leaf + index + depth)",
+                        method_name, binding.name, func, got
+                    ));
+                }
+                if (got - 10) % 8 != 0 {
+                    return Err(format!(
+                        "IR validation: method {} binding {} calls {}() with {} argument(s); \
+                         it takes 8*depth + 10 arguments",
+                        method_name, binding.name, func, got
+                    ));
+                }
+            } else if let Some(allowed) = crate::frontend::typecheck::builtin_allowed_arity(func) {
+                if !allowed.contains(&got) {
+                    // "exactly" is load-bearing: R-067's delegate-arity tests
+                    // assert the diagnostic says the arity is exact, and this
+                    // check now fires before the lowering-level one they were
+                    // written against.
+                    let wanted = if allowed.len() == 1 {
+                        format!("exactly {}", allowed[0])
+                    } else {
+                        let head: Vec<String> =
+                            allowed[..allowed.len() - 1].iter().map(|a| a.to_string()).collect();
+                        format!("{} or {}", head.join(", "), allowed[allowed.len() - 1])
+                    };
+                    return Err(format!(
+                        "IR validation: method {} binding {} calls {}() with {} argument(s); it takes {}",
+                        method_name, binding.name, func, got, wanted
+                    ));
+                }
+            }
+        }
+
         // Validate nested bindings
         match &binding.value {
             ANFValue::If {

@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "R-128 / R-165 (CL-BUG-174, CL-BUG-135): a builtin called with the wrong",
+    "number of arguments. `cat` takes two; this passes one.",
+    "",
+    "The source pipeline type-checks every call. --ir runs no frontend, so the",
+    "call reached stack lowering, where each dispatch family consumes",
+    "len(args) from the stack MODEL and then emits a FIXED-arity opcode blob.",
+    "Measured before the fix, same file through every --ir CLI:",
+    "  go / ruby / rust / python / java   compiled clean, script 7e",
+    "                                     — a bare OP_CAT with nothing beneath",
+    "  zig                                refused (InvalidBuiltin)"
+  ],
+  "contractName": "BuiltinWrongArity",
+  "properties": [
+    { "name": "threshold", "type": "bigint", "readonly": true }
+  ],
+  "methods": [
+    {
+      "name": "go",
+      "isPublic": true,
+      "params": [{ "name": "x", "type": "bigint" }],
+      "body": [
+        { "name": "t0", "value": { "kind": "load_param", "name": "x" } },
+        { "name": "t1", "value": { "kind": "call", "func": "cat", "args": ["t0"] } },
+        { "name": "t2", "value": { "kind": "assert", "value": "t1" } }
+      ]
+    }
+  ]
+}

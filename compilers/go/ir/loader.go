@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"encoding/json"
 )
@@ -120,19 +121,19 @@ func ValidateIR(program *ANFProgram) error {
 
 // knownKinds enumerates all valid ANF value kinds.
 var knownKinds = map[string]bool{
-	"load_param":       true,
-	"load_prop":        true,
-	"load_const":       true,
-	"bin_op":           true,
-	"unary_op":         true,
-	"call":             true,
-	"method_call":      true,
-	"if":               true,
-	"loop":             true,
-	"assert":           true,
-	"update_prop":      true,
-	"get_state_script": true,
-	"check_preimage":     true,
+	"load_param":        true,
+	"load_prop":         true,
+	"load_const":        true,
+	"bin_op":            true,
+	"unary_op":          true,
+	"call":              true,
+	"method_call":       true,
+	"if":                true,
+	"loop":              true,
+	"assert":            true,
+	"update_prop":       true,
+	"get_state_script":  true,
+	"check_preimage":    true,
 	"deserialize_state": true,
 	"add_output":        true,
 	"add_raw_output":    true,
@@ -152,6 +153,37 @@ func validateBindings(bindings []ANFBinding, methodName string) error {
 		}
 		if !knownKinds[kind] {
 			return fmt.Errorf("IR validation: method %s binding %s has unknown kind %q", methodName, binding.Name, kind)
+		}
+
+		// R-163 / R-165: builtin call arity. The source pipeline type-checks
+		// every call; `--ir` runs no frontend, so a wrong-arity call used to
+		// reach stack lowering, where each dispatch family pops len(args) from
+		// the stack MODEL and then emits a FIXED-arity opcode blob. `cat` with
+		// one argument compiled to a bare OP_CAT; `assert` with none compiled
+		// to an EMPTY script, dropping the contract's only guard. See
+		// builtin_arity.go.
+		if kind == "call" {
+			if ok, rule, isVariadic := VariadicArityOK(binding.Value.Func, len(binding.Value.Args)); isVariadic {
+				if !ok {
+					return fmt.Errorf(
+						"IR validation: method %s binding %s calls %s() with %d argument(s); it takes %s",
+						methodName, binding.Name, binding.Value.Func, len(binding.Value.Args), rule)
+				}
+			} else if allowed, known := AllowedArity(binding.Value.Func); known {
+				got := len(binding.Value.Args)
+				ok := false
+				for _, want := range allowed {
+					if got == want {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					return fmt.Errorf(
+						"IR validation: method %s binding %s calls %s() with %d argument(s); it takes %s",
+						methodName, binding.Name, binding.Value.Func, got, formatAllowedArity(allowed))
+				}
+			}
 		}
 
 		// Validate nested bindings
@@ -223,4 +255,20 @@ func isHexString(s string) bool {
 		}
 	}
 	return true
+}
+
+// formatAllowedArity renders an arity list for a diagnostic: "2", or "2 or 3".
+func formatAllowedArity(allowed []int) string {
+	switch len(allowed) {
+	case 0:
+		return "no arguments"
+	case 1:
+		return fmt.Sprintf("%d", allowed[0])
+	default:
+		parts := make([]string, len(allowed))
+		for i, a := range allowed {
+			parts[i] = fmt.Sprintf("%d", a)
+		}
+		return strings.Join(parts[:len(parts)-1], ", ") + " or " + parts[len(parts)-1]
+	}
 }

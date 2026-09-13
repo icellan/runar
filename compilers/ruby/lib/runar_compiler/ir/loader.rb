@@ -9,6 +9,9 @@
 require "json"
 require "set"
 require_relative "types"
+# R-128 / R-165: the arity check below reads the frontend's own signature
+# table rather than keeping a second copy of it.
+require_relative "../frontend/typecheck"
 require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
 
@@ -169,6 +172,48 @@ module RunarCompiler
     end
 
     # Validate a list of ANF bindings, including nested ones.
+    # Allowed argument counts per builtin, READ from the frontend's own
+    # signature table so the two cannot drift. Two builtins accept more than
+    # one count (an optional trailing argument the table cannot express) and
+    # one is variadic by a rule; both are special-cased in typecheck for the
+    # same reasons. R-128 / R-165.
+    VARIABLE_ARITY = {
+      "assert" => [1, 2],
+      "extractPrevOutputScript" => [2, 3]
+    }.freeze
+
+    def self._check_builtin_arity(method_name, binding)
+      func_name = binding.value.func.to_s
+      got = (binding.value.args || []).length
+
+      if func_name == "merkleRootPoseidon2KB"
+        # 8 leaf elements + 8 per proof level + index + depth.
+        if got < 10
+          return "method #{method_name} binding #{binding.name} calls " \
+                 "#{func_name}() with #{got} argument(s); it takes at least 10 " \
+                 "arguments (8 leaf + index + depth)"
+        end
+        if ((got - 10) % 8) != 0
+          return "method #{method_name} binding #{binding.name} calls " \
+                 "#{func_name}() with #{got} argument(s); it takes 8*depth + 10 arguments"
+        end
+        return nil
+      end
+
+      allowed = VARIABLE_ARITY[func_name]
+      if allowed.nil?
+        sig = ::RunarCompiler::Frontend::BUILTIN_FUNCTIONS[func_name]
+        return nil if sig.nil?
+
+        allowed = [sig.params.length]
+      end
+      return nil if allowed.include?(got)
+
+      wanted = allowed.length == 1 ? allowed[0].to_s : "#{allowed[0..-2].join(', ')} or #{allowed[-1]}"
+      "method #{method_name} binding #{binding.name} calls #{func_name}() with " \
+        "#{got} argument(s); it takes #{wanted}"
+    end
+
     def self._validate_bindings(bindings, method_name)
       errors = []
 
@@ -186,6 +231,17 @@ module RunarCompiler
         unless KNOWN_KINDS.include?(kind)
           errors << "method #{method_name} binding #{binding.name} " \
                     "has unknown kind #{kind.inspect}"
+        end
+
+        # R-128 / R-165: builtin call arity. The source pipeline type-checks
+        # every call; `--ir` runs no frontend, so a wrong-arity call used to
+        # reach stack lowering, where each dispatch family pops len(args) from
+        # the stack MODEL and then emits a FIXED-arity opcode blob. `cat` with
+        # one argument compiled to a bare OP_CAT; `assert` with none compiled
+        # to an EMPTY script, dropping the contract's only guard.
+        if kind == "call"
+          err = _check_builtin_arity(method_name, binding)
+          errors << err if err
         end
 
         # Validate nested bindings
