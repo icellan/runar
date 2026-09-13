@@ -16,6 +16,21 @@ type CompileOptions struct {
 	// Default (false) enables constant folding.
 	DisableConstantFolding bool
 
+	// DisableEcOptimizer skips the EC rewrite pass (pass 4.5), which also
+	// carries the dead-binding cleanup it triggers.
+	//
+	// DisablePeephole skips the Stack-IR peephole pass between lowering and
+	// emission.
+	//
+	// Both default to false — every optimizer on, which is what every golden in
+	// conformance/ was stamped under. They exist for the same reason the TS
+	// tier has them (`disableEcOptimizer`, `disablePeephole` in
+	// packages/runar-compiler/src/index.ts): when the seven tiers disagree on a
+	// byte, the first question is which PASS introduced it, and answering that
+	// meant editing and rebuilding this compiler (R-260).
+	DisableEcOptimizer bool
+	DisablePeephole    bool
+
 	// ParseOnly stops compilation after the parse pass (pass 1).
 	ParseOnly bool
 

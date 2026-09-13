@@ -270,7 +270,9 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 	// EC optimization — algebraic simplification of EC calls.
 	// Delegates internally to frontend/dce.go for dead-binding cleanup
 	// after any EC rewrite (see eliminateDeadBindings in anf_optimize.go).
-	program = frontend.OptimizeEC(program)
+	if !o.DisableEcOptimizer {
+		program = frontend.OptimizeEC(program)
+	}
 
 	lowerOpts, err := buildLowerOptions(o)
 	if err != nil {
@@ -284,8 +286,10 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 	}
 
 	// Peephole optimization — runs on Stack IR before emission.
-	for i := range stackMethods {
-		stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+	if !o.DisablePeephole {
+		for i := range stackMethods {
+			stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+		}
 	}
 
 	// Pass 6: Emit
@@ -647,7 +651,9 @@ func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgra
 		program = frontend.FoldConstants(program)
 	}
 
-	program = frontend.OptimizeEC(program)
+	if !o.DisableEcOptimizer {
+		program = frontend.OptimizeEC(program)
+	}
 	return program, nil
 }
 
@@ -820,7 +826,9 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Pass 4.5: EC optimization
-	result.ANF = frontend.OptimizeEC(result.ANF)
+	if !o.DisableEcOptimizer {
+		result.ANF = frontend.OptimizeEC(result.ANF)
+	}
 
 	// Issue #109: warn when DCE strips an un-annotated readonly field. Computed
 	// from the post-lowering ANF (the surviving load_prop set), mirroring the TS
@@ -866,8 +874,10 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Peephole optimization
-	for i := range stackMethods {
-		stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+	if !o.DisablePeephole {
+		for i := range stackMethods {
+			stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+		}
 	}
 
 	// Pass 6: Emit (recover from panics)
