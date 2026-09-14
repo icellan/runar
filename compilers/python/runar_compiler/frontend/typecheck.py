@@ -498,13 +498,32 @@ class _TypeChecker:
         # (codePart >= 253 bytes forces a 3-byte CompactSize length prefix,
         # never the P2PKH template's 0x19), so the contract is PERMANENTLY
         # unspendable. The terminal case (no state mutation -> no continuation)
-        # stays valid, and addOutput/addRawOutput layouts are left to the
-        # developer.
+        # stays valid.
+        #
+        # R-300: "addOutput/addRawOutput layouts are left to the developer" used
+        # to finish that sentence, and it was wrong -- no layout the developer
+        # can pick makes the offsets work. this.addOutput(...) writes the
+        # continuation (codePart plus serialised state, hundreds of bytes) at
+        # output 0, so outputIndex*34 lands INSIDE that script for every index.
+        # addRawOutput's length is a runtime value, so the stride cannot be
+        # proven there either. See
+        # conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         if self.contract.parent_class == "StatefulSmartContract":
             mutable_props = {
                 p.name for p in self.contract.properties if not p.readonly
             }
             sig = _analyze_method_output_signals(method.body, mutable_props)
+            if has_require_p2pkh and sig.has_state_output:
+                self._add_error(
+                    f"method '{method.name}' mixes requireOutputP2PKH() with "
+                    "this.addOutput()/addRawOutput() — the intrinsic reads output i at byte "
+                    "offset i*34, which is only correct when every earlier output is exactly "
+                    "34 bytes, and a state-continuation output never is (codePart plus "
+                    "serialised state). The assertion would read bytes from the middle of the "
+                    "contract's own locking script, so the contract would be permanently "
+                    "unspendable. Assert the payment from a separate method that emits no "
+                    "output of its own"
+                )
             if (
                 sig.requires_output_p2pkh_zero
                 and sig.mutates_state

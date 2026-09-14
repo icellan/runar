@@ -787,13 +787,39 @@ class TypeChecker {
     // 0 to also be a 34-byte P2PKH is impossible (codePart >= 253 bytes forces a
     // 3-byte CompactSize length prefix, never the P2PKH template's 0x19), so the
     // contract is PERMANENTLY unspendable. The terminal case (no state mutation
-    // -> no continuation) stays valid, and addOutput/addRawOutput layouts are
-    // left to the developer.
+    // -> no continuation) stays valid.
+    //
+    // R-300: "addOutput/addRawOutput layouts are left to the developer" used to
+    // finish that sentence, and it was wrong — there is no layout the developer
+    // can choose that makes the offsets work. `this.addOutput(...)` writes the
+    // contract's continuation (codePart plus serialised state, hundreds of
+    // bytes) at output 0, so `outputIndex * 34` lands INSIDE that script for
+    // every index, and the assertion compares bytes from the middle of the
+    // contract's own locking script against a P2PKH serialisation. No honest
+    // spend satisfies it. `addRawOutput` is no better: its script length is a
+    // runtime value, so the compiler cannot prove the stride either. Measured
+    // before this guard existed — ts `success = true`, go `exit = 0` — see
+    // conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
     if (this.contract.parentClass === 'StatefulSmartContract') {
       const mutableProps = new Set(
         this.contract.properties.filter(p => !p.readonly).map(p => p.name),
       );
       const sig = analyzeMethodOutputSignals(method.body, mutableProps);
+      if (hasRequireP2PKH && sig.hasStateOutput) {
+        this.errors.push(makeDiagnostic(
+          `method '${method.name}' mixes requireOutputP2PKH() with ` +
+            `this.addOutput()/addRawOutput() — the intrinsic reads output i at byte ` +
+            `offset i*34, which is only correct when every earlier output is exactly ` +
+            `34 bytes, and a state-continuation output never is (codePart plus ` +
+            `serialised state). The assertion would read bytes from the middle of the ` +
+            `contract's own locking script, so the contract would be permanently ` +
+            `unspendable. Assert the payment from a separate method that emits no ` +
+            `output of its own`,
+          'error',
+          method.sourceLocation,
+        ));
+      }
+
       if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' calls requireOutputP2PKH(0, ...) but also mutates state ` +
