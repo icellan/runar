@@ -115,6 +115,24 @@ Go, Rust, Python, Zig, Ruby, and Java compilers have their own parser dispatch:
 ### AST Types Are Defined in Two Places
 `packages/runar-compiler/src/ir/runar-ast.ts` and `packages/runar-ir-schema/src/runar-ast.ts` must stay in sync. Both define `ContractNode`, `PropertyNode`, `MethodNode`, etc.
 
+### The Artifact Type Is Defined in THREE Places
+`RunarArtifact` and the ABI types are declared independently in:
+
+- `packages/runar-compiler/src/ir/artifact.ts`
+- `packages/runar-compiler/src/artifact/assembler.ts`
+- `packages/runar-ir-schema/src/artifact.ts`
+
+All three must declare the same fields. TypeScript will not tell you when they
+drift: it is structurally typed, so an object carrying a field still satisfies a
+narrower interface, and the field simply cannot be read or set through the view
+that is missing it — which is how `unsoundPrimitives` came to be declared in the
+schema and read by the SDKs while both compiler-side copies lacked it (R-245).
+
+The artifact is the wire format the seven SDKs read and the conformance suite
+compares across tiers, so a field that exists in one declaration and not the
+others is a cross-tier gap, not a local tidiness question.
+`tests/r245-artifact-definition-sync.test.ts` gates the three against each other.
+
 ### Adding a New ANF Value Kind
 When adding a new ANF IR node (like `add_output`), update ALL of these:
 - `packages/runar-compiler/src/ir/anf-ir.ts` — add interface + union member
