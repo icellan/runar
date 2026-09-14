@@ -6,6 +6,7 @@ test {
     _ = @import("ir/json_size_guard_test.zig");
     _ = @import("ir/n113_ir_trust_boundary_test.zig");
     _ = @import("ir/n115_ir_loop_cap_test.zig");
+    _ = @import("ir/n115_ir_float_narrowing_test.zig");
     _ = @import("tests/n119_ir_cli_clean_stderr.zig");
     _ = @import("ir/sp1_fri_ir_guard_test.zig");
     _ = @import("frontend/input_limits.zig");

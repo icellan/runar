@@ -60,6 +60,39 @@ pub const MAX_IR_BYTES: usize = 16 * 1024 * 1024;
 /// in depth; whichever fires first wins. BUG-008 follow-up.
 pub const MAX_IR_NESTING: usize = 512;
 
+/// N-115 (second half) — total `f64` -> integer narrowing for the `--ir`
+/// trust boundary.
+///
+/// `@intFromFloat` is ILLEGAL BEHAVIOUR whenever the value's integer part does
+/// not fit the destination: a safety-checked abort in Debug/ReleaseSafe,
+/// undefined behaviour in ReleaseFast. Every float this loader sees arrived as
+/// JSON written outside the compiler, so the range check has to happen BEFORE
+/// the cast — which is exactly what the first N-115 fix got wrong. It put the
+/// loop-count magnitude guard on the line AFTER the narrowing, so
+/// `{"count":1e30}` aborted (rc=134) instead of being refused, and three other
+/// call sites had no guard anywhere near them. All six `@intFromFloat` sites
+/// in this file were reachable from ordinary IR JSON; all six now come through
+/// here.
+///
+/// The bounds are exact powers of two, so the comparison itself is exact: a
+/// signed `T` of N bits holds [-2^(N-1), 2^(N-1) - 1], and both -2^(N-1) and
+/// 2^(N-1) are representable in f64 with no rounding. `f >= -2^(N-1) and
+/// f < 2^(N-1)` therefore admits precisely the values the cast can take. NaN
+/// and the infinities fail both comparisons, so the same expression refuses
+/// them without a special case — a bounds check written as `if (f > limit)`
+/// would have let them straight through to the abort.
+///
+/// Fractional values are deliberately NOT rejected here. Truncation is what
+/// this loader already did, four tiers agree on it, and tightening it is a
+/// separate cross-tier decision; this change is about the abort class alone.
+/// Call sites that need exactness keep their own round-trip check.
+fn floatToInt(comptime T: type, f: f64) ParseError!T {
+    const bits = @typeInfo(T).int.bits;
+    const limit: f64 = @floatFromInt(@as(u128, 1) << (bits - 1));
+    if (!(f >= -limit and f < limit)) return ParseError.InvalidConstValue;
+    return @intFromFloat(f);
+}
+
 /// Walks the raw JSON bytes and returns ParseError.MaxRecursionDepthExceeded
 /// the first time the structural nesting (objects + arrays) exceeds
 /// MAX_IR_NESTING. Runs BEFORE std.json.parseFromSlice so a deeply-nested
@@ -284,7 +317,7 @@ fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]typ
         const initial_value = if (prop_obj.get("initialValue")) |initial| switch (initial) {
             .integer => |v| @as(?types.ConstValue, .{ .integer = v }),
             .float => |f| blk: {
-                const int_val: i128 = @intFromFloat(f);
+                const int_val: i128 = try floatToInt(i128, f);
                 const roundtrip: f64 = @floatFromInt(int_val);
                 if (roundtrip != f) return ParseError.InvalidConstValue;
                 break :blk @as(?types.ConstValue, .{ .integer = int_val });
@@ -501,7 +534,7 @@ fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     const in_arity: i32 = switch (in_arity_val) {
         .integer => |i| @intCast(i),
         .float => |f| blk: {
-            const i: i64 = @intFromFloat(f);
+            const i: i64 = try floatToInt(i64, f);
             const roundtrip: f64 = @floatFromInt(i);
             if (roundtrip != f) return ParseError.InvalidConstValue;
             break :blk @intCast(i);
@@ -514,7 +547,7 @@ fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     const out_arity: i32 = switch (out_arity_val) {
         .integer => |i| @intCast(i),
         .float => |f| blk: {
-            const i: i64 = @intFromFloat(f);
+            const i: i64 = try floatToInt(i64, f);
             const roundtrip: f64 = @floatFromInt(i);
             if (roundtrip != f) return ParseError.InvalidConstValue;
             break :blk @intCast(i);
@@ -536,7 +569,7 @@ fn parseLoadConst(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     switch (val) {
         .integer => |i| return .{ .load_const = .{ .value = .{ .integer = i } } },
         .float => |f| {
-            const int_val: i128 = @intFromFloat(f);
+            const int_val: i128 = try floatToInt(i128, f);
             const roundtrip: f64 = @floatFromInt(int_val);
             if (roundtrip != f) return ParseError.InvalidConstValue;
             return .{ .load_const = .{ .value = .{ .integer = int_val } } };
@@ -715,9 +748,15 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
     //
     // Comparing the raw i64 first is what makes the cast total: everything that
     // reaches @intCast is now in [0, 10000].
+    // N-115 second half: a float whose integer part does not fit `i64` is at
+    // least 2^63 in magnitude — six orders of magnitude past the 10000 ceiling
+    // this function is about — or is not a number at all. Refusing it under
+    // the cap's own error name is both accurate and what the peers say:
+    // python reports "loop count 1e+30 exceeding maximum 10000", ruby the
+    // same. The narrowing itself can no longer abort.
     const raw_count: i64 = switch (count_val) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| floatToInt(i64, f) catch return ParseError.LoopCountExceedsMaximum,
         else => return ParseError.UnexpectedValueType,
     };
     if (raw_count > types.MAX_LOOP_COUNT or raw_count < 0) {
@@ -731,9 +770,12 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
     // Issue #121: decode the iterator start value (a bare number, or a decimal
     // `Nn` string for oversize starts) and step direction. Older ANF payloads
     // without start/step describe zero-start counting-up loops (start=0, step=1).
+    // N-115 second half: this site had NO bounds check of any kind, so moving
+    // the loop-count guard above its own cast would have left it open.
+    // `{"start":1e30}` aborted here.
     const start: i64 = if (obj.get("start")) |v| switch (v) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| try floatToInt(i64, f),
         .string => |s| blk: {
             const text = if (s.len > 0 and s[s.len - 1] == 'n') s[0 .. s.len - 1] else s;
             break :blk std.fmt.parseInt(i64, text, 10) catch 0;
