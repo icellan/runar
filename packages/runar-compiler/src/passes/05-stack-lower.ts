@@ -2898,7 +2898,32 @@ class LoweringContext {
       // the N stale old property values that now sit beneath the result block.
       const resultCount = thenCtx.stackMap.depth - this.stackMap.depth;
       for (let i = resultCount - 1; i >= 0; i--) {
-        this.stackMap.push(thenCtx.stackMap.peekAtDepth(i) ?? bindingName);
+        const slot = thenCtx.stackMap.peekAtDepth(i);
+        // R-188: this used to read `?? bindingName`. An anonymous slot would
+        // then be adopted under the `if`'s own binding name, and with TWO of
+        // them the stack map holds that name twice — `findDepth` resolves every
+        // later reference to the shallower one and the deeper value is
+        // unreachable. That is exactly the shape of silent fallback that hid
+        // the 2026-08 miscompile family, so it refuses instead.
+        //
+        // It is unreachable today, and the reason is ordering:
+        // `drainBranchPrivateResidue` runs on each arm BEFORE this reconcile
+        // and removes every unnamed slot, so by the time we read
+        // `peekAtDepth` every result is named. Measured, not assumed — all 176
+        // in-repo `.runar.ts` contracts compiled in both fold modes (352
+        // compilations) with this site instrumented, and it never fired; nor
+        // did two hand-built contracts that put `substr` residue and two state
+        // writes in the same arm. If that ordering ever changes, this says so.
+        if (slot === null) {
+          throw new Error(
+            `branch reconcile for '${bindingName}': result slot ${i} of ${resultCount} is ` +
+              `anonymous. Adopting it under the binding name would put that name on the ` +
+              `stack map twice and make the deeper value unreachable. ` +
+              `drainBranchPrivateResidue is supposed to have removed every unnamed slot ` +
+              `before this point.`,
+          );
+        }
+        this.stackMap.push(slot);
       }
       const resultNames: (string | null)[] = [];
       for (let i = 0; i < resultCount; i++) {
