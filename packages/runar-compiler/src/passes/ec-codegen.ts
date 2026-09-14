@@ -10,6 +10,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import { stackDelta } from './stack-op-effects.js';
 
 // ===========================================================================
 // Constants
@@ -39,6 +40,43 @@ function bigintToBytes32(n: bigint): Uint8Array {
 // ===========================================================================
 // ECTracker — named stack state tracker (mirrors SLHTracker)
 // ===========================================================================
+
+/**
+ * R-285 (CL-GAP-075) — check an `emitIf` branch against what it claims to leave.
+ *
+ * The tracker updates `nm` from the CALLER's `resultName` argument: one name
+ * pushed, or none. Nothing verified that against the opcodes the two arms
+ * actually emit, so a `resultName` that disagreed with the arms — or two arms
+ * that disagreed with each other — desynchronised the model from the real
+ * stack. Every `findDepth` after that point returns a depth that is wrong by
+ * the same amount, and PICK/ROLL silently address the wrong item: a different
+ * locking script, not a compile error. The secp256k1 ladder runs this path 257
+ * times per `ecMul`, and the P-256/P-384 and BN254 codegens reuse it.
+ *
+ * Both arms must leave the same depth, and that depth must be the one
+ * `resultName` promises: +1 for a named result, 0 for none.
+ */
+function assertArmsMatchDeclaredResult(
+  thenOps: StackOp[],
+  elseOps: StackOp[],
+  resultName: string | null,
+): void {
+  const expected = resultName === null ? 0 : 1;
+  const thenDelta = stackDelta(thenOps);
+  const elseDelta = stackDelta(elseOps);
+  if (thenDelta !== elseDelta) {
+    throw new Error(
+      `ECTracker.emitIf: branch arms leave different stack depths ` +
+      `(then ${thenDelta}, else ${elseDelta})`,
+    );
+  }
+  if (thenDelta !== expected) {
+    throw new Error(
+      `ECTracker.emitIf: arms leave ${thenDelta} item(s) but the branch declares ` +
+      `${resultName === null ? 'no result' : `result '${resultName}'`} (${expected})`,
+    );
+  }
+}
 
 export class ECTracker {
   nm: (string | null)[];
@@ -133,6 +171,7 @@ export class ECTracker {
     const elseOps: StackOp[] = [];
     thenFn((op) => thenOps.push(op));
     elseFn((op) => elseOps.push(op));
+    assertArmsMatchDeclaredResult(thenOps, elseOps, resultName);
     this._e({ op: 'if', then: thenOps, else: elseOps });
     if (resultName !== null)
       this.nm.push(resultName);
