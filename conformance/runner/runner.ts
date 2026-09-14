@@ -1772,6 +1772,14 @@ export function printParserCoverageReport(report: ParserCoverageReport): void {
 //     source-driven multi-format mode.
 //   * Only the six NON-TS tiers participate. TS is covered by the
 //     multi-format runner (which compiles from source).
+//     TS's own IR-INPUT path is a separate question, and for a long time the
+//     answer was "nothing gates it": `loadANFFromJSON` could not decode a
+//     plain JSON number, so 52 of these 78 goldens were unloadable by the TS
+//     tier and it could not have joined this loop even if asked. That is
+//     fixed, and `tests/ir-loader-consumes-conformance-goldens.test.ts` now
+//     replays every golden through `loadANFFromJSON` + `compileFromANF` and
+//     compares against `expected-script.hex` — the TS half of this gate,
+//     living in vitest because it needs no subprocess.
 //   * The per-fixture `compilers` allowlist in source.json SCOPES this gate
 //     (unlike `--parser-only`, where it is intentionally ignored). A fixture
 //     whose allowlist has no overlap with the six tiers is skipped.

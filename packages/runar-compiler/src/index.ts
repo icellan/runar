@@ -702,9 +702,84 @@ export function loadANFFromJSON(json: string): ANFProgram {
   if (!Array.isArray(program.methods)) {
     throw new Error('loadANFFromJSON: missing array field "methods"');
   }
+  coerceNumericBigInts(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * Turn the JSON numbers that stand for `bigint` fields into actual BigInts.
+ *
+ * `loadANFFromJSON`'s reviver already handles the TS emitter's own `"42n"`
+ * strings, and the six native emitters use that same quoted form for anything
+ * past int64. What they use for ordinary values is a plain JSON number, and
+ * those arrived here as JS `number`s: they matched neither the `bigint` nor
+ * the `boolean` arm of `pushValue`, fell through to the hex-string arm, and
+ * threw `Invalid hex string length: undefined`. 52 of the 78 checked-in
+ * `expected-ir.json` goldens were unloadable for that reason, which is why
+ * the TS tier was never wired into `conformance --ir-parity` and why a
+ * `_codePart` divergence (R-287) could sit in its Stack-IR path unnoticed.
+ *
+ * Only the three positions the ANF types declare as `bigint` are touched —
+ * `LoadConst.value`, `Loop.start`, `ANFProperty.initialValue`. Every other
+ * numeric field (`Loop.count`, `Loop.step`, array indices) is a JS number by
+ * declaration and is left alone.
+ *
+ * A string value is NOT converted here. `LoadConst.value` carries hex
+ * ByteStrings and `@ref:`/`@this` markers in that slot, and the canonical
+ * rule the native loaders implement (`isDecimalBigIntLiteral` in
+ * `compilers/go/ir/types.go`) is that only a digit string with a trailing
+ * `n` is a BigInt — which the reviver has already converted.
+ */
+function coerceNumericBigInts(program: ANFProgram): void {
+  const toBigInt = (n: number, where: string): bigint => {
+    if (!Number.isInteger(n)) {
+      throw new Error(`loadANFFromJSON: ${where} must be an integer, got ${n}`);
+    }
+    if (!Number.isSafeInteger(n)) {
+      // JSON.parse has already rounded this value, so the exact integer the
+      // producer wrote is gone. Compiling the rounded one would be a wrong
+      // locking script with no diagnostic. Peer emitters encode anything this
+      // large as a quoted `"…n"` decimal string for exactly this reason.
+      throw new Error(
+        `loadANFFromJSON: ${where} exceeds JSON safe-integer precision (${n}); ` +
+        `encode it as a decimal string with an 'n' suffix instead`,
+      );
+    }
+    return BigInt(n);
+  };
+
+  const visitBindings = (bindings: ANFBinding[], where: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as Record<string, unknown> & { kind: string };
+      if (value.kind === 'load_const' && typeof value.value === 'number') {
+        value.value = toBigInt(value.value, `${where}.${binding.name}.value`);
+      }
+      if (value.kind === 'loop') {
+        if (typeof value.start === 'number') {
+          value.start = toBigInt(value.start, `${where}.${binding.name}.start`);
+        }
+        visitBindings((value.body ?? []) as ANFBinding[], where);
+      }
+      if (value.kind === 'if') {
+        visitBindings((value.then ?? []) as ANFBinding[], where);
+        visitBindings((value.else ?? []) as ANFBinding[], where);
+      }
+    }
+  };
+
+  for (const property of program.properties) {
+    if (typeof property.initialValue === 'number') {
+      property.initialValue = toBigInt(
+        property.initialValue,
+        `property '${property.name}' initialValue`,
+      );
+    }
+  }
+  for (const method of program.methods) {
+    visitBindings(method.body ?? [], `method '${method.name}'`);
+  }
 }
 
 /**
