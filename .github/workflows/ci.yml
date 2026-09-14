@@ -561,6 +561,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The Go peer is not decoration. `tests/test_n094_sighash_ir_wire_format.py`
+      # carries a cross-tier case that asks Go to load OUR ANF and checks it
+      # reaches the same script; it `pytest.skip`s when `compilers/go/runar-go`
+      # is absent. Without this toolchain the job exited 0 with that case
+      # skipped on every run, so the one assertion in the file that crosses a
+      # tier boundary had never executed in CI.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - name: Build the Go peer compiler
+        run: cd compilers/go && go build -o runar-go .
       - run: pip install pytest
       - run: cd compilers/python && python -m pytest tests/ -v
 
@@ -573,7 +585,37 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: cd compilers/zig && zig build test
+      # N-086 (`src/tests/n086_cross_tier_sighash_fixed_array.zig`) compiles the
+      # same @sighash FixedArray contract with every peer tier it can find and
+      # requires byte-identical hex. A tier counts as a peer only if its probe
+      # path exists AND its interpreter answers `--version`, and the test skips
+      # only when it finds ZERO peers.
+      #
+      # That is why this job was not failing: ubuntu-latest ships python3 and
+      # ruby, and both of those tiers probe a checked-in SOURCE file, so the
+      # comparison ran against an accidental two-tier peer set that nothing
+      # here pinned. The three COMPILED tiers — Go, Rust, Java, the ones whose
+      # codegen can actually drift — were never in it, and had the runner image
+      # dropped ruby the comparison would have quietly narrowed with the job
+      # still green.
+      #
+      # So pin the set: build the Go peer, and set the floor that turns a
+      # too-small peer set from a silent narrowing into a red job. Rust and
+      # Java are deliberately left out — their builds cost more than this job
+      # is worth, and the full seven-tier comparison is the `conformance` job's
+      # responsibility.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - name: Build the Go peer compiler
+        run: cd compilers/go && go build -o runar-go .
+      - name: 'Zig compiler unit tests (cross-tier floor: go + python + ruby)'
+        env:
+          # Counts PEERS, which excludes Zig itself. Verified locally: with 5
+          # peers built, 5 exits 0 and 7 exits non-zero naming what is missing.
+          RUNAR_CROSS_TIER_MIN: '3'
+        run: cd compilers/zig && zig build test
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
       - name: Build release binary
@@ -623,6 +665,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      # Same reason as the Python job: `test/test_n094_sighash_ir_wire_format.rb`
+      # skips its cross-tier case unless `compilers/go/runar-go` is executable,
+      # so without the Go toolchain that case never ran here.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - name: Build the Go peer compiler
+        run: cd compilers/go && go build -o runar-go .
       - name: Ruby compiler unit tests
         run: cd compilers/ruby && rake test
       - name: Ruby compiler conformance (IR -> hex)
