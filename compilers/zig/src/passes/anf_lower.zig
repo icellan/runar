@@ -3401,13 +3401,27 @@ fn remapValueRefs(
             } };
         },
         .assert => |a| {
-            return .{ .assert = .{ .value = r(name_map, a.value) } };
+            // R-296: is_auto_injected_state_check must ride along. Omitting it
+            // let the struct default (false) silently replace a true marker,
+            // which tells an SDK interpreter the compiler's own continuation
+            // check is a developer covenant assert.
+            return .{ .assert = .{
+                .value = r(name_map, a.value),
+                .is_auto_injected_state_check = a.is_auto_injected_state_check,
+            } };
         },
         .update_prop => |up| {
             return .{ .update_prop = .{ .name = up.name, .value = r(name_map, up.value) } };
         },
         .check_preimage => |cp| {
-            return .{ .check_preimage = .{ .preimage = r(name_map, cp.preimage) } };
+            // R-296: sighash_flag must ride along. Omitting it let the struct
+            // default (0 = ALL|FORKID) silently replace a declared @sighash
+            // mode, so the on-chain OP_PUSH_TX binding would commit to a
+            // different sighash type than the author wrote.
+            return .{ .check_preimage = .{
+                .preimage = r(name_map, cp.preimage),
+                .sighash_flag = cp.sighash_flag,
+            } };
         },
         .deserialize_state => |ds| {
             return .{ .deserialize_state = .{ .preimage = r(name_map, ds.preimage) } };
@@ -3442,6 +3456,9 @@ fn remapValueRefs(
                 .cond = r(name_map, ifv.cond),
                 .then = ifv.then,
                 .@"else" = ifv.@"else",
+                // R-296: declared results must ride along; the default is an
+                // empty slice, which loses the branch's result declaration.
+                .results = ifv.results,
             };
             return .{ .@"if" = new_if };
         },
@@ -4491,4 +4508,85 @@ test "lowering still accepts a zero-start counting-up loop" {
         }
     }
     try std.testing.expect(found_loop);
+}
+
+// ---------------------------------------------------------------------------
+// R-296 (CL-GAP-091): remapValueRefs must carry every field of the node it
+// rebuilds, not only the ones holding SSA refs.
+//
+// The function rebuilds each ANFValue variant explicitly to rewrite the binding
+// names inside it, and three arms listed only the ref fields:
+//
+//   .assert          dropped is_auto_injected_state_check  (default false)
+//   .check_preimage  dropped sighash_flag                  (default 0)
+//   .@"if"           dropped results                       (default &.{})
+//
+// Zig's struct-literal defaults are what make this silent: the rebuild compiles
+// and every dropped field comes back as its default. The Java and Ruby peers
+// preserve all three.
+//
+// The reviewer called it unreachable today, and that is right — the callers are
+// restricted to the branch-lift's condition-setup and value bindings, which are
+// pure. It is worth fixing anyway because of WHICH fields these are:
+// sighash_flag reverting to 0 means the on-chain OP_PUSH_TX binding commits to
+// ALL|FORKID instead of the mode the author declared, and
+// is_auto_injected_state_check reverting to false means an SDK interpreter
+// treats the compiler's own continuation check as a developer covenant assert.
+// Both are silent, and both are decided by a field default rather than by
+// anything anyone wrote.
+// ---------------------------------------------------------------------------
+
+test "remapValueRefs preserves the assert auto-injected marker" {
+    const allocator = std.testing.allocator;
+    var name_map: std.StringHashMapUnmanaged([]const u8) = .{};
+    defer name_map.deinit(allocator);
+    try name_map.put(allocator, "t0", "t9");
+
+    const out = try remapValueRefs(
+        allocator,
+        .{ .assert = .{ .value = "t0", .is_auto_injected_state_check = true } },
+        &name_map,
+    );
+
+    try std.testing.expectEqualStrings("t9", out.assert.value);
+    try std.testing.expect(out.assert.is_auto_injected_state_check);
+}
+
+test "remapValueRefs preserves the check_preimage sighash flag" {
+    const allocator = std.testing.allocator;
+    var name_map: std.StringHashMapUnmanaged([]const u8) = .{};
+    defer name_map.deinit(allocator);
+    try name_map.put(allocator, "t0", "t9");
+
+    const out = try remapValueRefs(
+        allocator,
+        .{ .check_preimage = .{ .preimage = "t0", .sighash_flag = 0x43 } },
+        &name_map,
+    );
+
+    try std.testing.expectEqualStrings("t9", out.check_preimage.preimage);
+    try std.testing.expectEqual(@as(i32, 0x43), out.check_preimage.sighash_flag);
+}
+
+test "remapValueRefs preserves the if node's declared results" {
+    const allocator = std.testing.allocator;
+    var name_map: std.StringHashMapUnmanaged([]const u8) = .{};
+    defer name_map.deinit(allocator);
+    try name_map.put(allocator, "c0", "c9");
+
+    const results = [_][]const u8{ "r0", "r1" };
+    var if_node = types.ANFIf{
+        .cond = "c0",
+        .then = &.{},
+        .@"else" = &.{},
+        .results = &results,
+    };
+
+    const out = try remapValueRefs(allocator, .{ .@"if" = &if_node }, &name_map);
+    defer allocator.destroy(out.@"if");
+
+    try std.testing.expectEqualStrings("c9", out.@"if".cond);
+    try std.testing.expectEqual(@as(usize, 2), out.@"if".results.len);
+    try std.testing.expectEqualStrings("r0", out.@"if".results[0]);
+    try std.testing.expectEqualStrings("r1", out.@"if".results[1]);
 }
