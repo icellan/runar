@@ -1449,7 +1449,13 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
               'error',
-              args[i + 1]!.sourceLocation ?? this.currentStmtLoc,
+              // R-126: the NORMALIZED list, not the raw one. A tuple-form call —
+              // `addOutput(sats, [a, b, c])` — arrives here with args.length === 2
+              // while the loop runs over normalizedArgs, so args[i + 1] is
+              // undefined for every i >= 1 and reading .sourceLocation off it
+              // threw a TypeError out of the typechecker. Same expression the
+              // StatefulContext copy already uses.
+              normalizedArgs[i + 1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1744,7 +1750,13 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
                 'error',
-                args[i + 1]!.sourceLocation ?? this.currentStmtLoc,
+                // R-126: the NORMALIZED list, not the raw one. A tuple-form call —
+                // `addOutput(sats, [a, b, c])` — arrives here with args.length === 2
+                // while the loop runs over normalizedArgs, so args[i + 1] is
+                // undefined for every i >= 1 and reading .sourceLocation off it
+                // threw a TypeError out of the typechecker. Same expression the
+                // StatefulContext copy already uses.
+                normalizedArgs[i + 1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
