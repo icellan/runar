@@ -1931,7 +1931,7 @@ def _make_load_const_int(val: int) -> ANFValue:
     # AND so consuming IR decoders can distinguish a decimal-encoded big
     # integer from a hex-encoded ByteString literal. ``bigint_json_value``
     # owns the boundary (Number.MAX_SAFE_INTEGER, not int64).
-    raw = json.dumps(bigint_json_value(val))
+    raw = bigint_json_value(val)
     return ANFValue(
         kind="load_const",
         raw_value=raw,
@@ -1941,7 +1941,7 @@ def _make_load_const_int(val: int) -> ANFValue:
 
 
 def _make_load_const_bool(val: bool) -> ANFValue:
-    raw = json.dumps(val)
+    raw = val
     return ANFValue(
         kind="load_const",
         raw_value=raw,
@@ -1950,7 +1950,7 @@ def _make_load_const_bool(val: bool) -> ANFValue:
 
 
 def _make_load_const_string(val: str) -> ANFValue:
-    raw = json.dumps(val)
+    raw = val
     return ANFValue(
         kind="load_const",
         raw_value=raw,
@@ -2193,7 +2193,7 @@ def _collect_updated_props(bindings: list[ANFBinding], out: list[str]) -> None:
 
 
 def _make_assert(value_ref: str) -> ANFValue:
-    raw = json.dumps(value_ref)
+    raw = value_ref
     return ANFValue(
         kind="assert",
         raw_value=raw,
@@ -2210,7 +2210,7 @@ def _make_auto_injected_state_check_assert(value_ref: str) -> ANFValue:
     code with identical IR shape (covenant rules, e.g.
     ``examples/rust/covenant-vault``).
     """
-    raw = json.dumps(value_ref)
+    raw = value_ref
     return ANFValue(
         kind="assert",
         raw_value=raw,
@@ -2220,7 +2220,7 @@ def _make_auto_injected_state_check_assert(value_ref: str) -> ANFValue:
 
 
 def _make_update_prop(name: str, value_ref: str) -> ANFValue:
-    raw = json.dumps(value_ref)
+    raw = value_ref
     return ANFValue(
         kind="update_prop",
         name=name,
@@ -2750,11 +2750,11 @@ def _remap_value_refs(value: ANFValue, name_map: dict[str, str]) -> ANFValue:
             if mapped is not None:
                 new_ref = "@ref:" + mapped
                 new_v.const_string = new_ref
-                new_v.raw_value = json.dumps(new_ref)
+                new_v.raw_value = new_ref
 
     # Refresh raw_value for kinds that store the value reference there
     if value.kind in ("assert", "update_prop") and new_v.value_ref is not None:
-        new_v.raw_value = json.dumps(new_v.value_ref)
+        new_v.raw_value = new_v.value_ref
 
     return new_v
 
@@ -2954,7 +2954,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     name=value_name,
                     value=ANFValue(
                         kind="load_const",
-                        raw_value=json.dumps(value_ref_str),
+                        raw_value=value_ref_str,
                         const_string=value_ref_str,
                     ),
                 ))
@@ -2967,7 +2967,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     name=keep_name,
                     value=ANFValue(
                         kind="load_const",
-                        raw_value=json.dumps(ref_str),
+                        raw_value=ref_str,
                         const_string=ref_str,
                     ),
                 ),
@@ -2992,7 +2992,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                 value=ANFValue(
                     kind="update_prop",
                     name=branch.prop_name,
-                    raw_value=json.dumps(cond_if_ref),
+                    raw_value=cond_if_ref,
                     value_ref=cond_if_ref,
                 ),
             ))

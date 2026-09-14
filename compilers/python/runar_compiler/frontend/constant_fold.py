@@ -371,24 +371,24 @@ def _const_to_anf_value(cv: ConstValue) -> ANFValue:
         # double-backed consumers.
         return ANFValue(
             kind="load_const",
-            raw_value=json.dumps(bigint_json_value(val)),
+            raw_value=bigint_json_value(val),
             const_big_int=val,
             const_int=val,
         )
     if tag == "bool":
         return ANFValue(
             kind="load_const",
-            raw_value=json.dumps(val),
+            raw_value=val,
             const_bool=val,
         )
     if tag == "str":
         return ANFValue(
             kind="load_const",
-            raw_value=json.dumps(val),
+            raw_value=val,
             const_string=val,
         )
     # Fallback (shouldn't happen)
-    return ANFValue(kind="load_const", raw_value=json.dumps(val))
+    return ANFValue(kind="load_const", raw_value=val)
 
 
 # ---------------------------------------------------------------------------

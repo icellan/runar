@@ -308,7 +308,7 @@ def _make_const_int(n: int) -> ANFValue:
     # an unquoted 256-bit JSON number that every double-based consumer
     # silently truncates. Same encoding as
     # frontend/anf_lower.py::_make_load_const_int.
-    raw = json.dumps(bigint_json_value(n))
+    raw = bigint_json_value(n)
     return ANFValue(kind="load_const", const_big_int=n, const_int=n, raw_value=raw)
 
 

@@ -376,12 +376,12 @@ def _anf_to_camel_dict(obj: object) -> object:
             v = getattr(obj, f.name)
             if v is None:
                 continue
-            # raw_value is the canonical Go JSON "value" field — parse and emit its content
+            # `raw_value` is the canonical Go JSON "value" field, held DECODED
+            # (see ir/types.py and frontend/anf_lower.py — one representation on
+            # both build paths). Emit it as-is: a `json.loads` here turned the
+            # all-digit hex ByteString "3030" into the number 3030.
             if f.name == "raw_value":
-                try:
-                    d["value"] = _json.loads(v)
-                except (ValueError, TypeError):
-                    d["value"] = v
+                d["value"] = v
                 has_raw_value = True
                 continue
             # Skip value_ref if raw_value was already emitted as "value"

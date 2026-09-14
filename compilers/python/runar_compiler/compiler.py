@@ -1013,8 +1013,12 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
         if v.name is not None:
             d["name"] = v.name
         if v.raw_value is not None:
-            # raw_value is already JSON-ready (string, number, bool)
-            d["value"] = json.loads(v.raw_value) if isinstance(v.raw_value, str) else v.raw_value
+            # `raw_value` is the DECODED JSON value on both build paths — the
+            # source frontend and `ir/types.py`'s loader agree since the fix
+            # for the `--ir --output` crash. Re-parsing it here was what broke:
+            # `json.loads("@ref:t0")` raised, and `json.loads("3030")` would
+            # have silently turned a hex ByteString into a number.
+            d["value"] = v.raw_value
         if v.op is not None:
             d["op"] = v.op
         if v.left is not None:
