@@ -68,6 +68,19 @@ fn sig(comptime params: []const RunarType, comptime ret: RunarType) FuncSig {
     return .{ .params = params, .return_type = ret };
 }
 
+/// Names that are legal without being a local, a builtin or a property: the
+/// `SigHash` namespace object and the three secp256k1 constants from
+/// runar-lang. Every frontend hands them to the typechecker as bare
+/// identifiers. They used to be carried by the `.unknown` fall-through; once
+/// that fall-through raises they have to be listed, exactly as the TS
+/// reference tier lists them in KNOWN_GLOBALS.
+const known_globals = std.StaticStringMap(RunarType).initComptime(.{
+    .{ "SigHash", .unknown },
+    .{ "EC_P", .bigint },
+    .{ "EC_N", .bigint },
+    .{ "EC_G", .point },
+});
+
 const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     // Hash functions
     .{ "sha256", sig(&.{.byte_string}, .sha256) },
@@ -751,9 +764,36 @@ const TypeChecker = struct {
             .identifier => |name| {
                 if (std.mem.eql(u8, name, "this") or std.mem.eql(u8, name, "self")) return .unknown; // sentinel
                 if (std.mem.eql(u8, name, "super")) return .unknown;
+                if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) return .boolean;
+                // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+                // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+                // identifier arm as a name to be typed. It is a discard, not a reference:
+                // nothing is being looked up, so `undefined` is the wrong word for it.
+                // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+                // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+                // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+                // surfaces) already broken for this shape. Listing it here rather than
+                // letting the new fall-through reject it keeps the six tiers' bytes and
+                // brings the seventh into line.
+                if (std.mem.eql(u8, name, "_")) return .unknown;
                 if (env.lookup(name)) |t| return t;
                 if (self.prop_types.get(name)) |t| return t;
                 if (builtin_functions.get(name) != null) return .unknown; // builtin ref
+                if (known_globals.get(name)) |t| return t;
+                // GK-BUG-009 -- a name that resolves to nothing is an error HERE,
+                // at the only pass that can see the binding environment. It used
+                // to return `.unknown` silently, and `.unknown` is compatible
+                // with everything under isSubtype by design (R-092), so
+                // `notAThing === 1n` raised nothing. `notAThing > 1n` did raise
+                // -- the bigint-family check does not admit `.unknown` -- which
+                // is why R-085's `>` pin read as closed while the `===` path was
+                // wide open. Where the reference is reachable from codegen,
+                // stack lowering later refuses to emit an OP_0 placeholder and
+                // the compile still fails, but for the wrong reason; where it is
+                // NOT reachable (an uncalled private helper, a zero-iteration
+                // loop) nothing fired at all and the contract compiled to a
+                // locking script.
+                self.addError("Undefined variable '{s}'", .{name});
                 return .unknown;
             },
             .property_access => |pa| {

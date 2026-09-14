@@ -259,6 +259,19 @@ _BYTESTRING_SUBTYPES: frozenset[str] = frozenset({
     "P384Point",
 })
 
+# Names that are legal without being a local, a builtin or a property: the
+# `SigHash` namespace object and the three secp256k1 constants from runar-lang.
+# Every frontend hands them to the typechecker as bare identifiers. They used to
+# be carried by the "<unknown>" fall-through; once that fall-through raises they
+# have to be listed, exactly as the TS reference tier lists them in
+# KNOWN_GLOBALS.
+KNOWN_GLOBALS: dict[str, str] = {
+    "SigHash": "<namespace>",
+    "EC_P": "bigint",
+    "EC_N": "bigint",
+    "EC_G": "Point",
+}
+
 _BIGINT_SUBTYPES: frozenset[str] = frozenset({
     "bigint",
     "RabinSig",
@@ -639,6 +652,20 @@ class _TypeChecker:
                 return "<this>"
             if expr.name == "super":
                 return "<super>"
+            if expr.name in ("true", "false"):
+                return "boolean"
+            # The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+            # the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+            # identifier arm as a name to be typed. It is a discard, not a reference:
+            # nothing is being looked up, so `undefined` is the wrong word for it.
+            # Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+            # `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+            # "Undefined variable '_'" — invariant 1 (all seven parse all nine
+            # surfaces) already broken for this shape. Listing it here rather than
+            # letting the new fall-through reject it keeps the six tiers' bytes and
+            # brings the seventh into line.
+            if expr.name == "_":
+                return "<unknown>"
             t, found = env.lookup(expr.name)
             if found:
                 return t
@@ -653,6 +680,22 @@ class _TypeChecker:
             # only fails to RESOLVE.
             if expr.name in self.prop_types:
                 return self.prop_types[expr.name]
+            if expr.name in KNOWN_GLOBALS:
+                return KNOWN_GLOBALS[expr.name]
+            # GK-BUG-009 -- a name that resolves to nothing is an error HERE, at
+            # the only pass that can see the binding environment. It used to
+            # return "<unknown>" silently, and "<unknown>" is compatible with
+            # everything under is_subtype by design (R-092), so
+            # `notAThing === 1n` raised nothing. `notAThing > 1n` did raise --
+            # is_bigint_family does not admit "<unknown>" -- which is why
+            # R-085's `>` pin read as closed while the `===` path was wide open.
+            # Where the reference is reachable from codegen, stack lowering
+            # later refuses to emit an OP_0 placeholder and the compile still
+            # fails, but for the wrong reason and with a message that calls the
+            # name a "method parameter"; where it is NOT reachable (an uncalled
+            # private helper, a zero-iteration loop) nothing fired at all and
+            # the contract compiled to a locking script.
+            self._add_error(f"Undefined variable '{expr.name}'")
             return "<unknown>"
 
         if isinstance(expr, PropertyAccessExpr):

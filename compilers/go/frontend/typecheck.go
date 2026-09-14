@@ -232,6 +232,20 @@ var builtinFunctions = map[string]funcSig{
 // Subtyping
 // ---------------------------------------------------------------------------
 
+// knownGlobals are names that resolve to neither a local, a builtin function
+// nor a contract property, and are still legal: the `SigHash` namespace object
+// and the three secp256k1 constants from runar-lang. They reach the typechecker
+// as bare identifiers from every frontend. Before GK-BUG-009 the Identifier arm
+// fell through to "<unknown>" for anything it did not recognise, so these were
+// carried for free by the fall-through; once the fall-through raises an error
+// they have to be listed, exactly as the TS reference tier lists them.
+var knownGlobals = map[string]string{
+	"SigHash": "<namespace>",
+	"EC_P":    "bigint",
+	"EC_N":    "bigint",
+	"EC_G":    "Point",
+}
+
 var byteStringSubtypes = map[string]bool{
 	"ByteString":     true,
 	"PubKey":         true,
@@ -1005,6 +1019,22 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		if e.Name == "super" {
 			return "<super>"
 		}
+		if e.Name == "true" || e.Name == "false" {
+			return "boolean"
+		}
+		// The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+		// the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+		// identifier arm as a name to be typed. It is a discard, not a reference:
+		// nothing is being looked up, so `undefined` is the wrong word for it.
+		// Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+		// `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+		// "Undefined variable '_'" — invariant 1 (all seven parse all nine
+		// surfaces) already broken for this shape. Listing it here rather than
+		// letting the new fall-through reject it keeps the six tiers' bytes and
+		// brings the seventh into line.
+		if e.Name == "_" {
+			return "<unknown>"
+		}
 		if t, ok := env.lookup(e.Name); ok {
 			return t
 		}
@@ -1021,6 +1051,22 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		if t, ok := tc.propTypes[e.Name]; ok {
 			return t
 		}
+		if t, ok := knownGlobals[e.Name]; ok {
+			return t
+		}
+		// GK-BUG-009 — a name that resolves to nothing is an error HERE, at the
+		// only pass that can see the binding environment. It used to return
+		// "<unknown>" silently, and "<unknown>" is compatible with everything
+		// under isSubtype by design (R-092), so `notAThing === 1n` raised
+		// nothing. `notAThing > 1n` did raise — the bigint-family check does not
+		// admit "<unknown>" — which is why R-085's `>` pin read as closed while
+		// the `===` path was wide open. Where the reference is reachable from
+		// codegen, stack lowering later refuses to emit an OP_0 placeholder and
+		// the compile still fails, but for the wrong reason and with a message
+		// that calls the name a "method parameter"; where it is NOT reachable
+		// (an uncalled private helper, a zero-iteration loop) nothing fired at
+		// all and the contract compiled to a locking script.
+		tc.addError(fmt.Sprintf("Undefined variable '%s'", e.Name))
 		return "<unknown>"
 
 	case PropertyAccessExpr:

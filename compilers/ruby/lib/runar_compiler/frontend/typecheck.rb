@@ -28,6 +28,19 @@ module RunarCompiler
     # Signature of a function: parameter types and return type.
     FuncSig = Struct.new(:params, :return_type, keyword_init: true)
 
+    # Names that are legal without being a local, a builtin or a property: the
+    # `SigHash` namespace object and the three secp256k1 constants from
+    # runar-lang. Every frontend hands them to the typechecker as bare
+    # identifiers. They used to be carried by the "<unknown>" fall-through;
+    # once that fall-through raises they have to be listed, exactly as the TS
+    # reference tier lists them in KNOWN_GLOBALS.
+    KNOWN_GLOBALS = {
+      "SigHash" => "<namespace>",
+      "EC_P"    => "bigint",
+      "EC_N"    => "bigint",
+      "EC_G"    => "Point",
+    }.freeze
+
     # All built-in Runar function signatures.
     BUILTIN_FUNCTIONS = {
       "sha256"            => FuncSig.new(params: ["ByteString"], return_type: "Sha256"),
@@ -1022,6 +1035,18 @@ module RunarCompiler
         when Identifier
           return "<this>" if expr.name == "this"
           return "<super>" if expr.name == "super"
+          return "boolean" if expr.name == "true" || expr.name == "false"
+          # The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+          # the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+          # identifier arm as a name to be typed. It is a discard, not a reference:
+          # nothing is being looked up, so `undefined` is the wrong word for it.
+          # Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+          # `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+          # "Undefined variable '_'" — invariant 1 (all seven parse all nine
+          # surfaces) already broken for this shape. Listing it here rather than
+          # letting the new fall-through reject it keeps the six tiers' bytes and
+          # brings the seventh into line.
+          return "<unknown>" if expr.name == "_"
 
           type_name, found = env.lookup(expr.name)
           return type_name if found
@@ -1035,7 +1060,21 @@ module RunarCompiler
           # `--parse-only` matrix cannot see, because the identifier PARSES fine and
           # only fails to RESOLVE.
           return @prop_types[expr.name] if @prop_types.key?(expr.name)
+          return KNOWN_GLOBALS[expr.name] if KNOWN_GLOBALS.key?(expr.name)
 
+          # GK-BUG-009 — a name that resolves to nothing is an error HERE, at
+          # the only pass that can see the binding environment. It used to
+          # return "<unknown>" silently, and "<unknown>" is compatible with
+          # everything under subtype? by design (R-092), so `notAThing === 1n`
+          # raised nothing. `notAThing > 1n` did raise — the bigint-family check
+          # does not admit "<unknown>" — which is why R-085's `>` pin read as
+          # closed while the `===` path was wide open. Where the reference is
+          # reachable from codegen, stack lowering later refuses to emit an OP_0
+          # placeholder and the compile still fails, but for the wrong reason;
+          # where it is NOT reachable (an uncalled private helper, a
+          # zero-iteration loop) nothing fired at all and the contract compiled
+          # to a locking script.
+          add_error("Undefined variable '#{expr.name}'")
           "<unknown>"
 
         when PropertyAccessExpr

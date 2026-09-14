@@ -258,6 +258,20 @@ public final class Typecheck {
     // Checker
     // ------------------------------------------------------------------
 
+    /**
+     * Names that are legal without being a local, a builtin, a method or a
+     * property: the {@code SigHash} namespace object and the three secp256k1
+     * constants from runar-lang. Every frontend hands them to the typechecker
+     * as bare identifiers. They used to be carried by the {@code "<unknown>"}
+     * fall-through; once that fall-through raises they have to be listed,
+     * exactly as the TS reference tier lists them in KNOWN_GLOBALS.
+     */
+    private static final Map<String, String> KNOWN_GLOBALS = Map.of(
+            "SigHash", "<namespace>",
+            "EC_P", "bigint",
+            "EC_N", "bigint",
+            "EC_G", "Point");
+
     private static final class Checker {
         final ContractNode contract;
         final List<String> errors = new ArrayList<>();
@@ -806,11 +820,39 @@ public final class Typecheck {
             if (e instanceof Identifier id) {
                 if ("this".equals(id.name())) return "<this>";
                 if ("super".equals(id.name())) return "<super>";
+                if ("true".equals(id.name()) || "false".equals(id.name())) return "boolean";
+                // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+                // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+                // identifier arm as a name to be typed. It is a discard, not a reference:
+                // nothing is being looked up, so `undefined` is the wrong word for it.
+                // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+                // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+                // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+                // surfaces) already broken for this shape. Listing it here rather than
+                // letting the new fall-through reject it keeps the six tiers' bytes and
+                // brings the seventh into line.
+                if ("_".equals(id.name())) return "<unknown>";
                 String t = env.lookup(id.name());
                 if (t != null) return t;
                 if (BuiltinRegistry.isBuiltin(id.name())) return "<builtin>";
                 if (methodSigs.containsKey(id.name())) return "<method>";
                 if (propTypes.containsKey(id.name())) return propTypes.get(id.name());
+                String global = KNOWN_GLOBALS.get(id.name());
+                if (global != null) return global;
+                // GK-BUG-009 -- a name that resolves to nothing is an error HERE,
+                // at the only pass that can see the binding environment. It used
+                // to return "<unknown>" silently, and "<unknown>" is compatible
+                // with everything under isSubtype by design (R-092), so
+                // `notAThing === 1n` raised nothing. `notAThing > 1n` did raise
+                // -- the bigint-family check does not admit "<unknown>" -- which
+                // is why R-085's `>` pin read as closed while the `===` path was
+                // wide open. Where the reference is reachable from codegen,
+                // stack lowering later refuses to emit an OP_0 placeholder and
+                // the compile still fails, but for the wrong reason; where it is
+                // NOT reachable (an uncalled private helper, a zero-iteration
+                // loop) nothing fired at all and the contract compiled to a
+                // locking script.
+                error("Undefined variable '" + id.name() + "'");
                 return "<unknown>";
             }
 

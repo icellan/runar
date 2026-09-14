@@ -981,6 +981,17 @@ class TypeChecker {
         if (expr.name === 'this') return '<this>';
         if (expr.name === 'super') return '<super>';
         if (expr.name === 'true' || expr.name === 'false') return BOOLEAN;
+        // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+        // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+        // identifier arm as a name to be typed. It is a discard, not a reference:
+        // nothing is being looked up, so `undefined` is the wrong word for it.
+        // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+        // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+        // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+        // surfaces) already broken for this shape. Listing it here rather than
+        // letting the new fall-through reject it keeps the six tiers' bytes and
+        // brings the seventh into line.
+        if (expr.name === '_') return '<unknown>';
 
         const t = env.lookup(expr.name);
         if (t !== undefined) return t;

@@ -20,6 +20,7 @@
  *   R-080  addRawOutput() with no arguments   located diagnostic in every tier
  *   R-083  `i += 2n` loop update              refused before ANF lowering
  *   R-085  undeclared identifier (Java)       located diagnostic, not acceptance
+ *   GK-BUG-009 undeclared identifier under `===`  six tiers emitted a script
  *   N-134  256-bit hex literal                 7 tiers identical; hex spelling ==
  *                                              decimal spelling, in every tier
  *   R-114  .runar.sol with no constructor      7 tiers accept and agree (was 4/3)
@@ -336,6 +337,16 @@ const MUST_COMPILE = [
     what: 'a for-loop starting at a NEGATIVE literal — the Zig tier unrolled from 0 on all nine surfaces',
   },
   {
+    file: 'BlankId.runar.go',
+    finding: 'GK-BUG-009 control',
+    what: 'the blank identifier `_` as an assignment target — six tiers carried it on the fall-through the fix replaces, and TS alone used to refuse it',
+  },
+  {
+    file: 'BareProp.runar.java',
+    finding: 'GK-BUG-009 control',
+    what: 'a declared property referenced with no receiver — the case the undeclared-identifier fix must not break',
+  },
+  {
     file: 'BytesInit.runar.ts',
     finding: 'R-204',
     what: 'a ByteString-literal property initializer — the one documented initializer type the property-initializers fixture never covered',
@@ -373,6 +384,58 @@ const MUST_REFUSE = [
     finding: 'R-085',
     what: 'a condition using an undeclared identifier',
     expect: /notDeclaredAnywhere|unknown|undefined|unresolved|bigint/i,
+  },
+  // GK-BUG-009. Two fixtures, two surfaces, one defect: an Identifier that
+  // resolves to nothing must be a TYPECHECK error.
+  //
+  // `expect` here is deliberately narrower than R-085's. R-085 is satisfied by
+  // "left operand of '>' must be bigint, got '<unknown>'" — a downstream
+  // complaint that happens to fire because `<unknown>` is not in the bigint
+  // family. `===` goes through `isSubtype`, where `<unknown>` is compatible
+  // with everything by design (R-092), so no downstream check fires at all and
+  // the only honest diagnostic is the resolution failure itself. Matching just
+  // /notDeclaredAnywhere/ would be satisfied by the stack-lowering net's
+  // "method parameter 'notDeclaredAnywhere' is not on the stack", which names
+  // the identifier while saying something false about it — the exact "an
+  // unrelated error fired" hole a pin is supposed to close. So both halves are
+  // asserted: `expect` pins the LAYER, `names` pins the IDENTIFIER.
+  //
+  // Not asserted: file:line:col. Every native tier renders a location for a
+  // typecheck diagnostic; the TS CLI computes `sourceLocation` and then prints
+  // the message without it. Requiring a location here would redden the
+  // reference tier for a renderer gap, which is a separate item.
+  //
+  // The fixtures are named "Ghost", not "Undeclared", because rust and java
+  // echo the source path into every diagnostic. Named `UndeclaredEq.runar.ts`,
+  // both tiers matched /undeclared/ against their own argv and passed this pin
+  // while emitting the stack-lowering message it exists to reject.
+  {
+    file: 'GhostEq.runar.ts',
+    finding: 'GK-BUG-009',
+    what: 'an undeclared identifier compared with `===`',
+    expect: /undefined variable|undeclared|unresolved|unknown (variable|identifier)/i,
+    names: /notDeclaredAnywhere/,
+  },
+  {
+    file: 'GhostEq.runar.py',
+    finding: 'GK-BUG-009',
+    what: 'the same `===` probe on the Python surface',
+    expect: /undefined variable|undeclared|unresolved|unknown (variable|identifier)/i,
+    names: /notDeclaredAnywhere/,
+  },
+  {
+    file: 'GhostDeadHelper.runar.ts',
+    finding: 'GK-BUG-009',
+    what: 'an undeclared identifier in an uncalled private helper — six tiers emitted 009c',
+    expect: /undefined variable|undeclared|unresolved|unknown (variable|identifier)/i,
+    names: /notDeclaredAnywhere/,
+  },
+  {
+    file: 'GhostDeadHelper.runar.py',
+    finding: 'GK-BUG-009',
+    what: 'the uncalled-helper probe on the Python surface',
+    expect: /undefined variable|undeclared|unresolved|unknown (variable|identifier)/i,
+    names: /notDeclaredAnywhere/,
   },
 ] as const;
 
@@ -458,7 +521,9 @@ describe('regression pins for previously-closed findings', () => {
     }
   });
 
-  for (const { file, finding, what, expect: pattern } of MUST_REFUSE) {
+  for (const entry of MUST_REFUSE) {
+    const { file, finding, what, expect: pattern } = entry;
+    const names: RegExp | undefined = (entry as { names?: RegExp }).names;
     const src = join(__dirname, file);
 
     describe(`${finding} — ${what} (must be refused)`, () => {
@@ -478,6 +543,14 @@ describe('regression pins for previously-closed findings', () => {
               `reader cannot tell a real rejection from an unrelated failure:\n` +
               `${(v as { ok: false; diag: string }).diag.slice(0, 700)}`,
           ).toBe(true);
+          if (names !== undefined) {
+            expect(
+              names.test((v as { ok: false; diag: string }).diag),
+              `${tier.id} refused for the right KIND of reason but never named the ` +
+                `offending identifier, so the message cannot be acted on:\n` +
+                `${(v as { ok: false; diag: string }).diag.slice(0, 700)}`,
+            ).toBe(true);
+          }
         });
       }
     });
