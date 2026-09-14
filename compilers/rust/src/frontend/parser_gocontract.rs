@@ -1428,30 +1428,53 @@ impl<'a> GoParser<'a> {
                 source_location: loc,
             })
         } else {
-            // `for condition { body }` — simple while-like loop
-            // We need a dummy init
-            let condition = self.parse_expr()?;
-            let body = self.parse_block();
-
-            let dummy_init = Statement::VariableDecl {
-                name: "_i".to_string(),
-                var_type: None,
-                mutable: true,
-                init: Expression::BigIntLiteral { value: BigInt::from(0) },
-                source_location: loc.clone(),
-            };
-            let dummy_update = Statement::ExpressionStatement {
-                expression: Expression::Identifier { name: "_i".to_string() },
-                source_location: loc.clone(),
-            };
-
-            Some(Statement::ForStatement {
-                init: Box::new(dummy_init),
-                condition,
-                update: Box::new(dummy_update),
-                body,
-                source_location: loc,
-            })
+            // R-065 — `for cond { body }` and bare `for { body }`.
+            //
+            // This arm used to SYNTHESISE a header the source never wrote:
+            // `_i := 0` for the init and a bare `Identifier("_i")` for the
+            // update. A bare identifier is on R-029's accepted-update list on
+            // purpose — it is the no-op sentinel the zig / move while-shaped
+            // parsers emit when the surface has no continue expression — so
+            // R-065 waved the loop through and the iteration count came out of
+            // the CONDITION alone.
+            //
+            // That derivation is not sound. Whatever advances the loop lives
+            // in the body, where nothing proves it runs unconditionally, runs
+            // once per iteration, or advances by one. Measured before this
+            // change, on `for i < 5 { ... }`:
+            //
+            //     body `sum = sum + start + i; i++`        184 hexchars
+            //     body `if start > 3 { i++ }; sum = sum+i` 234 hexchars
+            //
+            // The second is a Go program that never terminates when
+            // `start <= 3`. It compiled clean to a fixed five-iteration
+            // script — a locking script for a program nobody wrote, which is
+            // worse than no script. spec/grammar.md:420 already requires a
+            // simple `++` / `--` update clause, and six of the seven tiers
+            // refuse both shapes (five at the parser, one at R-065); Zig, the
+            // only other tier that accepted them, emitted a DIFFERENT wrong
+            // answer (the body silently dropped) and has been fixed to refuse.
+            //
+            // Refusing here rather than in the validator keeps the no-op
+            // sentinel available to the while-shaped parsers that need it.
+            self.errors.push(Diagnostic::error(
+                "For loop header must be the three-part form `for i := <literal>; i < <bound>; i++`. \
+                 A `for <cond> { }` or bare `for { }` loop carries no update clause, so the unrolled \
+                 loop model -- which synthesises iteration k as `start + k*step` -- has no iteration \
+                 count to derive; an update written in the body is not guaranteed to run, to run once \
+                 per iteration, or to advance by one",
+                Some(loc.clone()),
+            ));
+            // Consume the header and body so the rest of the file still parses
+            // and the user sees every diagnostic, not only this one. The
+            // statement is dropped: a loop whose shape could not be derived has
+            // no honest AST, and returning one with an invented header is the
+            // defect itself.
+            while !matches!(self.current().typ, TokenType::LBrace | TokenType::Eof) {
+                self.advance();
+            }
+            let _ = self.parse_block();
+            None
         }
     }
 

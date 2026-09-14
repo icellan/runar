@@ -1437,6 +1437,15 @@ fn validateStatement(
             // cannot represent. `null` means the surface syntax carries no
             // update at all (`for i in 0..N`, `range(N)`, a bare `while (c)`),
             // which is always representable.
+            //
+            // R-065 (second hole): "no update at all" was doing double duty.
+            // A C-style three-part header has an update SLOT, and `for i :=
+            // runar.Int(0); i < 5; {` — legal Go, update in the body — left it
+            // empty. That arrived here as `update == null` too and sailed
+            // straight through this `if`, so Zig unrolled it five times (114
+            // hexchars) while all six peers refused the program. The AST now
+            // records which of the two shapes produced the null, and only the
+            // implied-step surfaces are exempt.
             if (f.update) |u| {
                 if (!isRepresentableForUpdate(f.var_name, u.*)) {
                     try errors.append(allocator, .{
@@ -1445,6 +1454,12 @@ fn validateStatement(
                         .location = f.source_loc,
                     });
                 }
+            } else if (f.header_requires_update) {
+                try errors.append(allocator, .{
+                    .message = loop_update_diagnostic,
+                    .severity = .@"error",
+                    .location = f.source_loc,
+                });
             }
             // R-127: an output intrinsic in the body never reaches
             // the method's output list, so the continuation would commit to

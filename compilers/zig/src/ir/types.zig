@@ -325,7 +325,15 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// therefore compiled — in this tier alone — to byte-identical output to
 /// `for (let i = 0n; …)`, committing to a sum the source never computes. The
 /// other six tiers refuse the shape; `validate.zig` now does too.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, update: ?*const Statement = null, source_loc: ?SourceLocation = null };
+/// R-065: `header_requires_update` distinguishes a C-style three-part header
+/// (`for i := 0; i < N; i++`), whose post clause is a slot the source either
+/// filled or left empty, from a surface whose step is implied by the syntax
+/// itself (`for i in 0..N`, `range(N)`, `while (c) : (i += 1)`). Both arrive
+/// with `update == null` when there is no update statement, and validate.zig's
+/// R-065 rule must refuse the first and accept the second — which it could not
+/// do while the AST conflated them. Only the C-style parsers set it; every
+/// other parser gets the `false` default and is unaffected.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {

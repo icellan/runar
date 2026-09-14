@@ -1372,6 +1372,13 @@ const Parser = struct {
         var descending: bool = false;
         var inclusive: bool = false;
         var update: ?*const Statement = null;
+        // R-065: did we actually parse a C-style three-part header? Everything
+        // below depends on it — `bound` comes from the condition and `update`
+        // from the post clause, and neither has a meaningful default. The flag
+        // is what lets the refusal below distinguish "a header we read" from
+        // "a header we gave up on", which is precisely the distinction the
+        // pre-fix code erased.
+        var three_part: bool = false;
 
         // Check if we have an initializer (look for :=)
         // Parse: varname := expr
@@ -1386,6 +1393,7 @@ const Parser = struct {
 
             if (self.current.kind == .colon_assign) {
                 // for i := expr; ...
+                three_part = true;
                 var_name = goToCamelCase(self.allocator, name_tok.text);
                 _ = self.bump(); // consume ':='
 
@@ -1472,21 +1480,71 @@ const Parser = struct {
                     }
                 }
             } else {
-                // Not a three-part for; restore and try as condition-only
+                // Not a three-part for. Restore so the refusal below reports
+                // the header's real first token rather than the one we peeked
+                // past.
                 self.tokenizer.pos = saved_pos;
                 self.tokenizer.line = saved_line;
                 self.tokenizer.col = saved_col;
                 self.current = saved_current;
-
-                // For condition-only or range loops, just parse condition before '{'
-                while (self.current.kind != .lbrace and self.current.kind != .eof) {
-                    _ = self.bump();
-                }
             }
         }
 
+        // R-065 — refuse any `for` header this parser could not read as the
+        // three-part form.
+        //
+        // This branch used to DISCARD the header outright:
+        //
+        //     while (self.current.kind != .lbrace and ...) { _ = self.bump(); }
+        //
+        // and then fall through to the shared `return .{ .for_stmt = ... }`
+        // below with every field at its declaration default. `bound` stayed 0,
+        // so `anf_lower.lowerForStatement` computed `base = bound - start = 0`
+        // and unrolled the loop ZERO times; `update` was null only as a side
+        // effect, which is why validate.zig's R-065 rule never had anything to
+        // inspect. Measured on the three shapes a developer can actually write:
+        //
+        //     for i < 5 { sum = sum + start + i; i++ }
+        //         16 hexchars, `0000007b7c9c7777` — body gone. `sum` never
+        //         accumulates, so the guard degrades to `0 == expectedSum`:
+        //         anyone-can-spend if that constant is 0, permanently
+        //         unspendable if it is not. Fund loss either way.
+        //     for { sum = sum + start }
+        //         8 hexchars, `00009c77` — same shape from a bare Go infinite
+        //         loop. Go's tier rejects it.
+        //     for i := runar.Int(0); i < 5; { ... }
+        //         reaches validate.zig instead; see the R-065 rule there.
+        //
+        // The unrolled loop model carries `{count, iterVar, start, step, body}`
+        // and synthesises iteration k as `start + k*step`. A header with no
+        // update clause puts the advance (if any) in the BODY, where nothing
+        // proves it runs unconditionally, runs once per iteration, or advances
+        // by one — so no count is derivable. spec/grammar.md:420 already says
+        // so: "The loop variable MUST use simple increment (`++`) or decrement
+        // (`--`)". Six peer tiers refuse these programs; the Rust tier used to
+        // guess a count from the condition alone, which is unsound for a body
+        // whose update is conditional, and has been fixed to refuse too.
+        //
+        // The statement is DROPPED rather than returned with a default bound:
+        // a loop whose shape the parser could not derive has no honest AST,
+        // and handing one downstream is the defect itself. The body is still
+        // consumed so the rest of the file parses and the user sees every
+        // diagnostic, not just this one.
+        if (!three_part) {
+            self.addError("For loop header must be the three-part form `for i := <literal>; i < <bound>; i++`. " ++
+                "A `for <cond> { }` or bare `for { }` loop carries no update clause, so the unrolled " ++
+                "loop model -- which synthesises iteration k as `start + k*step` -- has no iteration " ++
+                "count to derive; an update written in the body is not guaranteed to run, to run once " ++
+                "per iteration, or to advance by one");
+            while (self.current.kind != .lbrace and self.current.kind != .eof) {
+                _ = self.bump();
+            }
+            _ = self.parseBlock();
+            return null;
+        }
+
         const body = self.parseBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .update = update, .body = body, .source_loc = loc, .header_requires_update = true } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
