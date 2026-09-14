@@ -495,7 +495,7 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
         emit_result.source_map,
         emit_result.raw_script_spans,
         &stack_methods,
-    );
+    )?;
     Ok(artifact)
 }
 
@@ -698,9 +698,16 @@ pub fn compile_from_source_str_with_result(
                 emit_result.raw_script_spans,
         &stack_methods,
             );
-            result.script_hex = Some(emit_result.script_hex);
-            result.script_asm = Some(emit_result.script_asm);
-            result.artifact = Some(artifact);
+            match artifact {
+                Ok(a) => {
+                    result.script_hex = Some(emit_result.script_hex);
+                    result.script_asm = Some(emit_result.script_asm);
+                    result.artifact = Some(a);
+                }
+                Err(e) => {
+                    result.diagnostics.push(Diagnostic::error(e, None));
+                }
+            }
         }
         Ok(Err(e)) => {
             result.diagnostics.push(Diagnostic::error(

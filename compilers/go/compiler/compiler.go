@@ -298,12 +298,15 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	artifact := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	if err != nil {
+		return nil, err
+	}
 	return artifact, nil
 }
 
 // assembleArtifact builds the final output artifact from the compilation products.
-func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) *Artifact {
+func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
 	// ---------------------------------------------------------------------
 	// Build ABI
 	// ---------------------------------------------------------------------
@@ -324,7 +327,10 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 			index: i,
 		})
 	}
-	regroupedCtor := regroupSyntheticRuns(ctorEntries)
+	regroupedCtor, err := regroupSyntheticRuns(ctorEntries)
+	if err != nil {
+		return nil, err
+	}
 	var constructorParams []ABIParam
 	for _, e := range regroupedCtor {
 		p := ABIParam{Name: e.name, Type: e.typ}
@@ -349,7 +355,10 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 			index:        i,
 		})
 	}
-	regroupedState := regroupSyntheticRuns(stateEntries)
+	regroupedState, err := regroupSyntheticRuns(stateEntries)
+	if err != nil {
+		return nil, err
+	}
 	var stateFields []StateField
 	for _, e := range regroupedState {
 		sf := StateField{
@@ -474,7 +483,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		}
 	}
 
-	return artifact
+	return artifact, nil
 }
 
 // CompileFromSource compiles a .runar.ts source file through all passes to a Rúnar artifact.
@@ -901,7 +910,15 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			return
 		}
 
-		artifact := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		if aerr != nil {
+			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
+				aerr.Error(),
+				frontend.SeverityError,
+				nil,
+			))
+			return
+		}
 		result.Artifact = artifact
 		result.ScriptHex = emitResult.ScriptHex
 		result.ScriptAsm = emitResult.ScriptAsm

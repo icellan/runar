@@ -422,9 +422,17 @@ function regroupOnePass(entries: RegroupEntry[]): { out: RegroupEntry[]; changed
     }
     const marker = entry.chain[chainLen - 1]!;
     if (marker.index !== 0) {
-      out.push(entry);
-      i++;
-      continue;
+      // R-289: a sibling that reaches the head of the loop has no run head
+      // before it — the head consumes its whole run and advances past it, so
+      // index != 0 here means the chain did not come from pass 3b. Pushing it
+      // through as a scalar publishes an ABI the SDK reads as N independent
+      // fields instead of one array, with no diagnostic.
+      throw new Error(
+        `malformed synthetic-array chain on '${entry.name}': element ${marker.index} ` +
+          `of '${marker.base}' appears without the element 0 that starts its run. ` +
+          `Synthetic-array chains are written by the expand-fixed-arrays pass; ` +
+          `this IR did not come from it.`,
+      );
     }
 
     // Greedily extend: every follower must share the same innermost
@@ -452,12 +460,17 @@ function regroupOnePass(entries: RegroupEntry[]): { out: RegroupEntry[]; changed
     }
 
     if (runEntries.length !== marker.length) {
-      // Partial or broken run — defensive. A well-formed expansion
-      // always emits all N siblings contiguously, so this only fires
-      // on bugs/malformed inputs. Leave them ungrouped.
-      out.push(entry);
-      i++;
-      continue;
+      // R-289: a well-formed expansion always emits all N siblings
+      // contiguously, so a short run means the chain was not written by pass
+      // 3b. Leaving them ungrouped published an ABI the SDK reads as N
+      // independent fields instead of one array — a wrong state layout from an
+      // artifact the compiler called valid.
+      throw new Error(
+        `malformed synthetic-array chain on '${entry.name}': '${marker.base}' declares ` +
+          `${marker.length} elements but the contiguous run has ${runEntries.length}. ` +
+          `Synthetic-array chains are written by the expand-fixed-arrays pass; ` +
+          `this IR did not come from it.`,
+      );
     }
 
     // Collapse this run into one intermediate entry. The parent chain

@@ -1926,9 +1926,18 @@ fn regroupOnePass(allocator: std.mem.Allocator, entries: []const RegroupEntry) !
         }
         const marker = entry.chain[chain_len - 1];
         if (marker.index != 0) {
-            try out.append(allocator, entry);
-            i += 1;
-            continue;
+            // R-289: a sibling reaching the head of the loop has no run head
+            // before it — the head consumes its whole run and advances past
+            // it, so an index != 0 here means the chain was not written by
+            // pass 3b. Emitting it as a scalar publishes an ABI the SDK reads
+            // as N independent fields instead of one array, with no
+            // diagnostic. The peers carry the detail in the error message;
+            // a Zig error set cannot, so it is logged (the R-238 pattern).
+            std.log.warn(
+                "malformed synthetic-array chain on '{s}': element {d} of '{s}' appears without the element 0 that starts its run. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+                .{ entry.name, marker.index, marker.base },
+            );
+            return error.MalformedSyntheticArrayChain;
         }
 
         // Greedily extend: every follower must share the same innermost
@@ -1947,9 +1956,16 @@ fn regroupOnePass(allocator: std.mem.Allocator, entries: []const RegroupEntry) !
             run_count += 1;
         }
         if (run_count != marker.length) {
-            try out.append(allocator, entry);
-            i += 1;
-            continue;
+            // R-289: a well-formed expansion always emits all N siblings
+            // contiguously, so a short run means the chain was not written by
+            // pass 3b. Leaving them ungrouped published an ABI the SDK reads
+            // as N independent fields instead of one array — a wrong state
+            // layout from an artifact the compiler called valid.
+            std.log.warn(
+                "malformed synthetic-array chain on '{s}': '{s}' declares {d} elements but the contiguous run has {d}. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+                .{ entry.name, marker.base, marker.length, run_count },
+            );
+            return error.MalformedSyntheticArrayChain;
         }
 
         // Collapse the run.

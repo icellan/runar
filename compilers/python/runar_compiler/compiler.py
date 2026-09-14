@@ -669,9 +669,17 @@ def _regroup_one_pass(entries: list[dict]) -> tuple[list[dict], bool]:
             continue
         marker = chain[-1]
         if marker["index"] != 0:
-            out.append(entry)
-            i += 1
-            continue
+            # R-289: a sibling reaching the head of the loop has no run head
+            # before it -- the head consumes its whole run and advances past
+            # it, so index != 0 here means the chain was not written by pass
+            # 3b. Emitting it as a scalar publishes an ABI the SDK reads as N
+            # independent fields instead of one array, with no diagnostic.
+            raise ValueError(
+                f"malformed synthetic-array chain on {entry['name']!r}: element "
+                f"{marker['index']} of {marker['base']!r} appears without the element 0 "
+                "that starts its run. Synthetic-array chains are written by the "
+                "expand-fixed-arrays pass; this IR did not come from it"
+            )
 
         # Greedy extend: collect run of sequential siblings.
         run_entries = [entry]
@@ -696,9 +704,18 @@ def _regroup_one_pass(entries: list[dict]) -> tuple[list[dict], bool]:
             j += 1
 
         if len(run_entries) != marker_len:
-            out.append(entry)
-            i += 1
-            continue
+            # R-289: a well-formed expansion always emits all N siblings
+            # contiguously, so a short run means the chain was not written by
+            # pass 3b. Leaving them ungrouped published an ABI the SDK reads as
+            # N independent fields instead of one array -- a wrong state layout
+            # from an artifact the compiler called valid.
+            raise ValueError(
+                f"malformed synthetic-array chain on {entry['name']!r}: "
+                f"{marker_base!r} declares {marker_len} elements but the "
+                f"contiguous run has {len(run_entries)}. "
+                "Synthetic-array chains are written by the expand-fixed-arrays "
+                "pass; this IR did not come from it"
+            )
 
         inner_type = entry["type"]
         grouped_type = f"FixedArray<{inner_type}, {marker_len}>"

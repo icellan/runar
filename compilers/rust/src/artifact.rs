@@ -156,7 +156,7 @@ pub fn assemble_artifact(
     source_mappings: Vec<SourceMapping>,
     raw_script_spans: Vec<RawScriptSpan>,
     stack_methods: &[crate::codegen::stack::StackMethod],
-) -> RunarArtifact {
+) -> Result<RunarArtifact, String> {
     // Build constructor params from properties, excluding those with initializers
     // (properties with default values are not constructor parameters).
     // Group contiguous synthetic FixedArray leaves back into a single
@@ -167,7 +167,7 @@ pub fn assemble_artifact(
         .filter(|p| p.initial_value.is_none())
         .map(regroup_entry_from_property)
         .collect();
-    let ctor_regrouped = regroup_synthetic_runs(ctor_entries);
+    let ctor_regrouped = regroup_synthetic_runs(ctor_entries)?;
     let constructor_params: Vec<ABIParam> = ctor_regrouped
         .iter()
         .map(|e| ABIParam {
@@ -190,7 +190,7 @@ pub fn assemble_artifact(
             e
         })
         .collect();
-    let state_regrouped = regroup_synthetic_runs(state_entries);
+    let state_regrouped = regroup_synthetic_runs(state_entries)?;
     let state_fields: Vec<StateField> = state_regrouped
         .iter()
         .map(|e| StateField {
@@ -291,7 +291,7 @@ pub fn assemble_artifact(
         None
     };
 
-    RunarArtifact {
+    Ok(RunarArtifact {
         version: SCHEMA_VERSION.to_string(),
         compiler_version: COMPILER_VERSION.to_string(),
         contract_name: program.contract_name.clone(),
@@ -314,7 +314,7 @@ pub fn assemble_artifact(
         raw_script_spans,
         build_timestamp: now,
         anf,
-    }
+    })
 }
 
 /// Simple UTC timestamp without pulling in the full chrono crate.
@@ -419,20 +419,20 @@ fn regroup_entry_from_property(prop: &ANFProperty) -> RegroupEntry {
 
 /// Iteratively regroup synthetic FixedArray runs until no entry has any
 /// remaining chain.
-fn regroup_synthetic_runs(entries: Vec<RegroupEntry>) -> Vec<RegroupEntry> {
+fn regroup_synthetic_runs(entries: Vec<RegroupEntry>) -> Result<Vec<RegroupEntry>, String> {
     let mut current = entries;
     for _ in 0..1024 {
-        let (out, changed) = regroup_one_pass(current);
+        let (out, changed) = regroup_one_pass(current)?;
         current = out;
         if !changed {
-            return current;
+            return Ok(current);
         }
     }
     panic!("regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)");
 }
 
 /// Run one pass of the iterative regrouper.
-fn regroup_one_pass(entries: Vec<RegroupEntry>) -> (Vec<RegroupEntry>, bool) {
+fn regroup_one_pass(entries: Vec<RegroupEntry>) -> Result<(Vec<RegroupEntry>, bool), String> {
     let mut out: Vec<RegroupEntry> = Vec::with_capacity(entries.len());
     let mut changed = false;
     let mut i = 0;
@@ -446,9 +446,15 @@ fn regroup_one_pass(entries: Vec<RegroupEntry>) -> (Vec<RegroupEntry>, bool) {
         }
         let marker = &entry.chain[chain_len - 1];
         if marker.index != 0 {
-            out.push(entry.clone());
-            i += 1;
-            continue;
+            // R-289: a sibling reaching the head of the loop has no run head
+            // before it — the head consumes its whole run and advances past
+            // it, so index != 0 here means the chain was not written by pass
+            // 3b. Emitting it as a scalar publishes an ABI the SDK reads as N
+            // independent fields instead of one array, with no diagnostic.
+            return Err(format!(
+                "malformed synthetic-array chain on '{}': element {} of '{}' appears without the element 0 that starts its run. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+                entry.name, marker.index, marker.base
+            ));
         }
 
         // Greedily extend: every follower shares the same innermost
@@ -476,10 +482,18 @@ fn regroup_one_pass(entries: Vec<RegroupEntry>) -> (Vec<RegroupEntry>, bool) {
         }
 
         if run_indices.len() != marker.length {
-            // Partial/broken run — leave as-is.
-            out.push(entry.clone());
-            i += 1;
-            continue;
+            // R-289: a well-formed expansion always emits all N siblings
+            // contiguously, so a short run means the chain was not written by
+            // pass 3b. Leaving them ungrouped published an ABI the SDK reads
+            // as N independent fields instead of one array — a wrong state
+            // layout from an artifact the compiler called valid.
+            return Err(format!(
+                "malformed synthetic-array chain on '{}': '{}' declares {} elements but the contiguous run has {}. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+                entry.name,
+                marker.base,
+                marker.length,
+                run_indices.len()
+            ));
         }
 
         let inner_type = entry.r#type.clone();
@@ -530,5 +544,5 @@ fn regroup_one_pass(entries: Vec<RegroupEntry>) -> (Vec<RegroupEntry>, bool) {
         i = j;
         changed = true;
     }
-    (out, changed)
+    Ok((out, changed))
 }

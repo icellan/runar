@@ -713,9 +713,16 @@ module RunarCompiler
 
       marker = chain[-1]
       if marker[:index] != 0
-        out << entry
-        i += 1
-        next
+        # R-289: a sibling reaching the head of the loop has no run head before
+        # it -- the head consumes its whole run and advances past it, so an
+        # index != 0 here means the chain was not written by pass 3b. Emitting
+        # it as a scalar publishes an ABI the SDK reads as N independent fields
+        # instead of one array, with no diagnostic.
+        raise ArgumentError,
+              "malformed synthetic-array chain on #{entry[:name].inspect}: element " \
+              "#{marker[:index]} of #{marker[:base].inspect} appears without the " \
+              "element 0 that starts its run. Synthetic-array chains are written by " \
+              "the expand-fixed-arrays pass; this IR did not come from it"
       end
 
       # Greedily extend the run: every follower must share innermost
@@ -741,9 +748,17 @@ module RunarCompiler
       end
 
       if run.length != marker[:length]
-        out << entry
-        i += 1
-        next
+        # R-289: a well-formed expansion always emits all N siblings
+        # contiguously, so a short run means the chain was not written by pass
+        # 3b. Leaving them ungrouped published an ABI the SDK reads as N
+        # independent fields instead of one array -- a wrong state layout from
+        # an artifact the compiler called valid.
+        raise ArgumentError,
+              "malformed synthetic-array chain on #{entry[:name].inspect}: " \
+              "#{marker[:base].inspect} declares #{marker[:length]} elements but the " \
+              "contiguous run has #{run.length}. " \
+              "Synthetic-array chains are written by the expand-fixed-arrays pass; " \
+              "this IR did not come from it"
       end
 
       inner_type = entry[:type]
