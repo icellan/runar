@@ -64,6 +64,7 @@ test {
     _ = @import("tests/r073_fixed_array_element_type.zig");
     _ = @import("tests/n086_expansion_field_preservation.zig");
     _ = @import("tests/n086_cross_tier_sighash_fixed_array.zig");
+    _ = @import("tests/r238_merkle_depth_diagnostic.zig");
     _ = @import("tests/n092_fixed_array_ctor_param.zig");
     _ = @import("tests/n095_synthetic_array_chain.zig");
     _ = @import("tests/n097_fixed_array_element_read.zig");

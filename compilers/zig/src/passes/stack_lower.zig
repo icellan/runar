@@ -221,6 +221,13 @@ const LowerError = error{
     DuplicateDeclaredResults,
     VariableNotFound,
     InvalidBuiltin,
+    /// R-238: a Merkle builtin's compile-time `depth` argument is outside the
+    /// range the emitter unrolls. It used to share `InvalidBuiltin` with "this
+    /// builtin does not exist here", so an author who wrote a legal
+    /// `merkleRootSha256` with depth 65 was told the BUILTIN was invalid — and
+    /// went looking for a misspelled name or a missing port, which is the one
+    /// thing that was not wrong. Five peer tiers name the depth and the range.
+    MerkleDepthOutOfRange,
     UnsupportedOperation,
     BranchStackMismatch,
     /// A ref (method param or @ref: value) is no longer on the stack at a
@@ -2425,12 +2432,28 @@ const LowerCtx = struct {
         // args: [leaf, proof, index, depth]
         // depth must be a compile-time constant
         if (args.len != 4) return LowerError.InvalidBuiltin;
-        _ = func_name;
 
         // Extract depth constant from ANF binding
         const depth_arg = args[3];
-        const depth_value = self.findConstantInt(depth_arg) orelse return LowerError.InvalidBuiltin;
-        if (depth_value < 1 or depth_value > 64) return LowerError.InvalidBuiltin;
+        const depth_value = self.findConstantInt(depth_arg) orelse {
+            // R-238: not "unknown builtin" either — the builtin is fine, its
+            // depth is not a compile-time constant.
+            std.log.warn(
+                "{s}: depth (4th argument) must be a compile-time constant integer literal",
+                .{func_name},
+            );
+            return LowerError.MerkleDepthOutOfRange;
+        };
+        if (depth_value < 1 or depth_value > 64) {
+            // R-238: same wording the go / rust / ruby / ts / python tiers use,
+            // so a cross-tier diff of the diagnostics is about the tiers rather
+            // than about five spellings of one sentence.
+            std.log.warn(
+                "{s}: depth must be between 1 and 64, got {d}",
+                .{ func_name, depth_value },
+            );
+            return LowerError.MerkleDepthOutOfRange;
+        }
 
         // Remove depth from the real stack FIRST (compile-time constant, not runtime).
         if (self.stack.findDepth(depth_arg) != null) {
