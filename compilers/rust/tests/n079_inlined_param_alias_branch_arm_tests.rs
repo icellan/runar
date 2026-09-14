@@ -251,20 +251,20 @@ fn seven_tier_script_for_inlined_param_alias() {
         (
             "if-arm",
             IF_ARM_BODY,
-            705,
-            "5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8",
+            704,
+            "0bbd49f182e77dbc5483e96f58f8a54e033741f89cba7e0c231f89d8a91c9d2e",
         ),
         (
             "if-arm-manual",
             IF_ARM_MANUAL_BODY,
-            705,
-            "5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8",
+            704,
+            "0bbd49f182e77dbc5483e96f58f8a54e033741f89cba7e0c231f89d8a91c9d2e",
         ),
         (
             "if-arm-200",
             IF_ARM_200_BODY,
-            706,
-            "b9aaa48a3400eb488fba40c6e7898c4928aafdce60b0a85899572b80093477aa",
+            705,
+            "a0c90541131862a8f5cdf769992c8f2026137194f50cc1e00e1a5c293d01435b",
         ),
         (
             "ternary-arm",
@@ -299,14 +299,14 @@ fn seven_tier_script_for_inlined_param_alias() {
         (
             "stmt-level",
             STMT_LEVEL_BODY,
-            701,
-            "9f61cc84ac3a68d928a73a5f0bb9dc129b9bf7d0d3ca873c4f4bd0cbad214d62",
+            700,
+            "99a4048c2311be65c0b463a5dbf666f970c8f0f70878664429d547d3b36adf37",
         ),
         (
             "passthrough",
             PASSTHROUGH_BODY,
-            703,
-            "5c30a0ad7a1e728ce44f723cefe1823ff9855b28a1d52ececf28c7715924adb0",
+            702,
+            "b0a101dddb8547a0779029930b04856140ee40c7066d793257b6b42ae05fcb8f",
         ),
     ];
 

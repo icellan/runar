@@ -132,8 +132,8 @@ const CASES = [_]Case{
     .{ .label = "ternary-arm/+1", .source = TERNARY_ARM_PLUS_1, .want = "7600a0638b6700776800a2" },
     .{ .label = "ternary-arm/+2", .source = TERNARY_ARM_PLUS_2, .want = "7600a06352936700776800a2" },
     .{ .label = "ternary-arm-manual-inline", .source = TERNARY_ARM_MANUAL_INLINE, .want = "7600a0638b6700776800a2" },
-    .{ .label = "if-statement-arm", .source = IF_STATEMENT_ARM, .want = "007800a0637c8b767676537a757777670076537a757768517a7500a2" },
-    .{ .label = "if-statement-arm-no-helper", .source = IF_STATEMENT_ARM_NO_HELPER, .want = "007800a0637c8b7677670076537a757768517a7500a2" },
+    .{ .label = "if-statement-arm", .source = IF_STATEMENT_ARM, .want = "007800a0637c8b767676537a757777670076537a7577687c7500a2" },
+    .{ .label = "if-statement-arm-no-helper", .source = IF_STATEMENT_ARM_NO_HELPER, .want = "007800a0637c8b7677670076537a7577687c7500a2" },
     .{ .label = "statement-position", .source = STATEMENT_POSITION, .want = "8b00a2" },
 };
 

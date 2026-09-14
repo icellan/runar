@@ -700,7 +700,10 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // `OP_NOP OP_CODESEPARATOR` prologue at offset 1, and every checkPreimage
     // site gains the `_codePart` authentication sequence that pins the
     // spender-supplied code part to the executing script — 7624 -> 7778.)
-    const expected_bytes: usize = 7778;
+    // (R-187: the `if` reconcile's `roll` metadata now matches the depth it
+    // pushes, so the peephole folds `push 1|2 + roll` into OP_SWAP / OP_ROT —
+    // 7778 -> 7776.)
+    const expected_bytes: usize = 7776;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

@@ -577,6 +577,19 @@ const LowerCtx = struct {
             return;
         }
 
+        // R-187: with the reference tier's `roll` metadata corrected, its
+        // peephole folds `push 2 + roll 2` to OP_ROT before the drop. Depth 1
+        // keeps OP_NIP — that shape already matched and did not move.
+        if (depth == 2) {
+            try ctx.emitOp(.op_rot);
+            const rolled2 = ctx.stack.peekAtDepth(2);
+            try ctx.stack.removeAtDepth(ctx.allocator, 2);
+            try ctx.stack.push(ctx.allocator, rolled2);
+            try ctx.emitOp(.op_drop);
+            _ = ctx.stack.pop();
+            return;
+        }
+
         try ctx.emitPushInt(@intCast(depth));
         try ctx.stack.push(ctx.allocator, null);
         try ctx.emitOp(.op_roll);
@@ -1553,8 +1566,19 @@ const LowerCtx = struct {
                 }
             }
             if (old_depth) |od| {
+                // R-187: the reference tier's `roll` metadata now matches the
+                // depth it pushes, so its peephole folds `push 2 + roll 2` to
+                // OP_ROT before the drop. Mirror that here or this tier emits
+                // three bytes where the other six emit one.
+                //
+                // Depth 1 stays OP_NIP: this site has always emitted it and
+                // has always matched, so the reference tier reaches the same
+                // shape by a different route. Only the depth-2 case moved.
                 if (od == 1) {
                     try self.emitOp(.op_nip);
+                } else if (od == 2) {
+                    try self.emitOp(.op_rot);
+                    try self.emitOp(.op_drop);
                 } else {
                     try self.emitPushInt(@intCast(od));
                     try self.emitOp(.op_roll);
@@ -5238,22 +5262,57 @@ const LowerCtx = struct {
                 while (d < self.stack.depth()) : (d += 1) {
                     if (self.stack.peekAtDepth(d)) |nm2| {
                         if (std.mem.eql(u8, nm2, name)) {
-                            // The unconditional push/roll/drop of the
-                            // pre-existing N>=2 reconcile, NOT
-                            // `removeStalePropertyAtDepth` — that helper nips at
-                            // depth 1, and the reference tier does not, so using
-                            // it here would diverge by three bytes on every
-                            // single-result `if` whose stale slot sits at depth
-                            // 1 (`if-else`, `selector`).
-                            try self.emitPushInt(@intCast(d));
-                            try self.stack.push(self.allocator, null);
-                            try self.emitOp(.op_roll);
-                            _ = self.stack.pop();
-                            const rolled = self.stack.peekAtDepth(d);
-                            try self.stack.removeAtDepth(self.allocator, d);
-                            try self.stack.push(self.allocator, rolled);
-                            try self.emitOp(.op_drop);
-                            _ = self.stack.pop();
+                            // R-187: the reference tier's reconcile used to
+                            // emit `roll` with depth `d + 1` while pushing `d`,
+                            // so its own peephole rules (push N + roll N →
+                            // swap / rot / nothing) could never match and the
+                            // sequence stayed literal. This site mirrored that
+                            // deliberately — the note that used to sit here
+                            // said `removeStalePropertyAtDepth` "would diverge
+                            // by three bytes on every single-result `if` whose
+                            // stale slot sits at depth 1". With the metadata
+                            // corrected the reference tier folds, so the folded
+                            // forms are now what byte-equality requires.
+                            //
+                            // Folded to the shapes TS's peephole produces, NOT
+                            // to `removeStalePropertyAtDepth`: that helper nips
+                            // at depth 1, whereas the rule `push 1 + roll 1 →
+                            // swap` leaves OP_SWAP + OP_DROP. Two bytes either
+                            // way, different bytes.
+                            switch (d) {
+                                0 => {
+                                    // push 0 + roll 0 is a no-op; only the drop survives.
+                                    try self.emitOp(.op_drop);
+                                    _ = self.stack.pop();
+                                },
+                                1 => {
+                                    try self.emitOp(.op_swap);
+                                    const rolled1 = self.stack.peekAtDepth(1);
+                                    try self.stack.removeAtDepth(self.allocator, 1);
+                                    try self.stack.push(self.allocator, rolled1);
+                                    try self.emitOp(.op_drop);
+                                    _ = self.stack.pop();
+                                },
+                                2 => {
+                                    try self.emitOp(.op_rot);
+                                    const rolled2 = self.stack.peekAtDepth(2);
+                                    try self.stack.removeAtDepth(self.allocator, 2);
+                                    try self.stack.push(self.allocator, rolled2);
+                                    try self.emitOp(.op_drop);
+                                    _ = self.stack.pop();
+                                },
+                                else => {
+                                    try self.emitPushInt(@intCast(d));
+                                    try self.stack.push(self.allocator, null);
+                                    try self.emitOp(.op_roll);
+                                    _ = self.stack.pop();
+                                    const rolled = self.stack.peekAtDepth(d);
+                                    try self.stack.removeAtDepth(self.allocator, d);
+                                    try self.stack.push(self.allocator, rolled);
+                                    try self.emitOp(.op_drop);
+                                    _ = self.stack.pop();
+                                },
+                            }
                             post_endif_drops += 1;
                             if (d - n_declared > sink_below) sink_below = d - n_declared;
                             break;

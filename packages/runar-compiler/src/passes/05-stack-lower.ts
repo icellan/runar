@@ -2850,7 +2850,7 @@ class LoweringContext {
           if (this.stackMap.peekAtDepth(d) === name) {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -2935,7 +2935,7 @@ class LoweringContext {
           if (this.stackMap.peekAtDepth(d) === name) {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);
@@ -2964,7 +2964,7 @@ class LoweringContext {
             } else {
               this.emitOp({ op: 'push', value: BigInt(d) });
               this.stackMap.push(null);
-              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.emitOp({ op: 'roll', depth: d });
               this.stackMap.pop();
               const rolled = this.stackMap.removeAtDepth(d);
               this.stackMap.push(rolled);
@@ -2991,7 +2991,7 @@ class LoweringContext {
             } else {
               this.emitOp({ op: 'push', value: BigInt(d) });
               this.stackMap.push(null);
-              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.emitOp({ op: 'roll', depth: d });
               this.stackMap.pop();
               const rolled = this.stackMap.removeAtDepth(d);
               this.stackMap.push(rolled);
@@ -3236,7 +3236,7 @@ class LoweringContext {
           } else {
             this.emitOp({ op: 'push', value: BigInt(d) });
             this.stackMap.push(null);
-            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.emitOp({ op: 'roll', depth: d });
             this.stackMap.pop();
             const rolled = this.stackMap.removeAtDepth(d);
             this.stackMap.push(rolled);

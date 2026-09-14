@@ -114,37 +114,37 @@ const CASES = [_]Case{
         .label = "dead-arm-k2/fold-on",
         .source = DEAD_ARM_K2,
         .disable_constant_folding = false,
-        .want = "00014e01ce006351547a6e7b757b7567527978557a7568527a75537a75527a7c7ba177",
+        .want = "00014e01ce006351547a6e7b757b7567527978557a75687b75537a75527a7c7ba177",
     },
     .{
         .label = "dead-arm-k2/fold-off",
         .source = DEAD_ARM_K2,
         .disable_constant_folding = true,
-        .want = "00014e8f006351537a6e7b757b75676e547a7568527a75527a757ca1",
+        .want = "00014e8f006351537a6e7b757b75676e547a75687b757b757ca1",
     },
     .{
         .label = "self-read-both-arms/fold-on",
         .source = SELF_READ_BOTH_ARMS,
         .disable_constant_folding = false,
-        .want = "000340420f0340428f7b7ca069517b00a06351787c9376776751787c94767768517a750340420f0340428f7b7ca07777",
+        .want = "000340420f0340428f7b7ca069517b00a06351787c9376776751787c947677687c750340420f0340428f7b7ca07777",
     },
     .{
         .label = "self-read-both-arms/fold-off",
         .source = SELF_READ_BOTH_ARMS,
         .disable_constant_folding = true,
-        .want = "000340420f8fa069517c00a06351787c9376776751787c94767768517a750340420f8fa0",
+        .want = "000340420f8fa069517c00a06351787c9376776751787c947677687c750340420f8fa0",
     },
     .{
         .label = "const-condition-k1/fold-on",
         .source = CONST_CONDITION_K1,
         .disable_constant_folding = false,
-        .want = "000340420f0340428f7b7ca0695151635276776753767768517a750340420f0340428f7b7ca0777777",
+        .want = "000340420f0340428f7b7ca06951516352767767537677687c750340420f0340428f7b7ca0777777",
     },
     .{
         .label = "const-condition-k1/fold-off",
         .source = CONST_CONDITION_K1,
         .disable_constant_folding = true,
-        .want = "000340420f8fa0695151635276776753767768517a750340420f8fa077",
+        .want = "000340420f8fa06951516352767767537677687c750340420f8fa077",
     },
 };
 

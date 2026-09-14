@@ -346,8 +346,11 @@ class TestExpandFixedArrays < Minitest::Test
     # Then R-010 took it 7624 -> 7778: each of the six methods now
     # authenticates its `_codePart` witness against the preimage's scriptCode,
     # and the six per-method OP_CODESEPARATORs collapse into one at offset 1.
-    assert_equal 7778, v1.script.length / 2, "v1 script must be 7778 bytes"
-    assert_equal 7778, v2.script.length / 2, "v2 script must be 7778 bytes"
+    # Then R-187 took it 7778 -> 7776: the `if` reconcile's `roll` metadata now
+    # matches the depth it pushes, so the peephole folds `push 1|2 + roll` into
+    # OP_SWAP / OP_ROT.
+    assert_equal 7776, v1.script.length / 2, "v1 script must be 7776 bytes"
+    assert_equal 7776, v2.script.length / 2, "v2 script must be 7776 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

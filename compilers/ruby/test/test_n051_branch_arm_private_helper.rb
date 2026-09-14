@@ -138,9 +138,9 @@ class TestN051BranchArmPrivateHelper < Minitest::Test
       ["ternary-arm/+2", TERNARY_ARM_PLUS_2, "7600a06352936700776800a2"],
       ["ternary-arm-manual-inline", TERNARY_ARM_MANUAL_INLINE, "7600a0638b6700776800a2"],
       ["if-statement-arm", IF_STATEMENT_ARM,
-       "007800a0637c8b767676537a757777670076537a757768517a7500a2"],
+       "007800a0637c8b767676537a757777670076537a7577687c7500a2"],
       ["if-statement-arm-no-helper", IF_STATEMENT_ARM_NO_HELPER,
-       "007800a0637c8b7677670076537a757768517a7500a2"],
+       "007800a0637c8b7677670076537a7577687c7500a2"],
       ["statement-position", STATEMENT_POSITION, "8b00a2"]
     ]
 

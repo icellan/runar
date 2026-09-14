@@ -2568,7 +2568,7 @@ module RunarCompiler::Codegen
             if @sm.peek_at_depth(d) == name
               emit_push_int(d)
               @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
+              emit_op({ op: "roll", depth: d })
               @sm.pop
               rolled = @sm.remove_at_depth(d)
               @sm.push(rolled)
@@ -2628,7 +2628,7 @@ module RunarCompiler::Codegen
             if @sm.peek_at_depth(d) == name
               emit_push_int(d)
               @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
+              emit_op({ op: "roll", depth: d })
               @sm.pop
               rolled = @sm.remove_at_depth(d)
               @sm.push(rolled)
@@ -2656,7 +2656,7 @@ module RunarCompiler::Codegen
             else
               emit_push_int(d)
               @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
+              emit_op({ op: "roll", depth: d })
               @sm.pop
               rolled = @sm.remove_at_depth(d)
               @sm.push(rolled)
@@ -2678,7 +2678,7 @@ module RunarCompiler::Codegen
             else
               emit_push_int(d)
               @sm.push("")
-              emit_op({ op: "roll", depth: d + 1 })
+              emit_op({ op: "roll", depth: d })
               @sm.pop
               rolled = @sm.remove_at_depth(d)
               @sm.push(rolled)
@@ -2901,7 +2901,7 @@ module RunarCompiler::Codegen
           else
             emit_push_int(d)
             @sm.push("")
-            emit_op({ op: "roll", depth: d + 1 })
+            emit_op({ op: "roll", depth: d })
             @sm.pop
             rolled = @sm.remove_at_depth(d)
             @sm.push(rolled)

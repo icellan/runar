@@ -248,16 +248,16 @@ func TestN079InlinedParamAlias_SevenTierScript(t *testing.T) {
 		wantLen int
 		wantSha string
 	}{
-		{"if-arm", n079IfArm, 705, "5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8"},
-		{"if-arm-manual", n079IfArmManual, 705, "5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8"},
-		{"if-arm-200", n079IfArm200, 706, "b9aaa48a3400eb488fba40c6e7898c4928aafdce60b0a85899572b80093477aa"},
+		{"if-arm", n079IfArm, 704, "0bbd49f182e77dbc5483e96f58f8a54e033741f89cba7e0c231f89d8a91c9d2e"},
+		{"if-arm-manual", n079IfArmManual, 704, "0bbd49f182e77dbc5483e96f58f8a54e033741f89cba7e0c231f89d8a91c9d2e"},
+		{"if-arm-200", n079IfArm200, 705, "a0c90541131862a8f5cdf769992c8f2026137194f50cc1e00e1a5c293d01435b"},
 		{"ternary-arm", n079TernaryArm, 691, "f6b2ae0526262ccee7adc71d1291bb8e0ae193de42c1a4e3936b782da95e3caf"},
 		{"ternary-arm-manual", n079TernaryArmManual, 691, "f6b2ae0526262ccee7adc71d1291bb8e0ae193de42c1a4e3936b782da95e3caf"},
 		{"loop-body", n079LoopBody, 698, "3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55"},
 		{"loop-body-manual", n079LoopBodyManual, 698, "3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55"},
 		{"no-if", n079NoIf, 683, "2807bc651b0cfac58c0a0835f42b39cf46ce28d1e64d1ba7421279ccfe6680ed"},
-		{"stmt-level", n079StmtLevel, 701, "9f61cc84ac3a68d928a73a5f0bb9dc129b9bf7d0d3ca873c4f4bd0cbad214d62"},
-		{"passthrough", n079Passthrough, 703, "5c30a0ad7a1e728ce44f723cefe1823ff9855b28a1d52ececf28c7715924adb0"},
+		{"stmt-level", n079StmtLevel, 700, "99a4048c2311be65c0b463a5dbf666f970c8f0f70878664429d547d3b36adf37"},
+		{"passthrough", n079Passthrough, 702, "b0a101dddb8547a0779029930b04856140ee40c7066d793257b6b42ae05fcb8f"},
 	}
 
 	for _, tc := range cases {

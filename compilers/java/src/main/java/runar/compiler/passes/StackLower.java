@@ -3099,7 +3099,7 @@ public final class StackLower {
                         if (name.equals(sm.peekAtDepth(d))) {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3161,7 +3161,7 @@ public final class StackLower {
                         if (name.equals(sm.peekAtDepth(d))) {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);
@@ -3249,7 +3249,7 @@ public final class StackLower {
                     } else {
                         emitOp(new PushOp(PushValue.of(d)));
                         sm.push("");
-                        emitOp(new RollOp(d + 1));
+                        emitOp(new RollOp(d));
                         sm.pop();
                         String rolled = sm.removeAtDepth(d);
                         sm.push(rolled);
@@ -3426,7 +3426,7 @@ public final class StackLower {
                         } else {
                             emitOp(new PushOp(PushValue.of(d)));
                             sm.push("");
-                            emitOp(new RollOp(d + 1));
+                            emitOp(new RollOp(d));
                             sm.pop();
                             String rolled = sm.removeAtDepth(d);
                             sm.push(rolled);

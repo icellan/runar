@@ -136,8 +136,8 @@ func TestN051BranchArmPrivateHelper_SevenTierScript(t *testing.T) {
 		{"ternary-arm/+1", n051TernaryArmPlus1, "7600a0638b6700776800a2"},
 		{"ternary-arm/+2", n051TernaryArmPlus2, "7600a06352936700776800a2"},
 		{"ternary-arm-manual-inline", n051TernaryArmManualInline, "7600a0638b6700776800a2"},
-		{"if-statement-arm", n051IfStatementArm, "007800a0637c8b767676537a757777670076537a757768517a7500a2"},
-		{"if-statement-arm-no-helper", n051IfStatementArmNoHelper, "007800a0637c8b7677670076537a757768517a7500a2"},
+		{"if-statement-arm", n051IfStatementArm, "007800a0637c8b767676537a757777670076537a7577687c7500a2"},
+		{"if-statement-arm-no-helper", n051IfStatementArmNoHelper, "007800a0637c8b7677670076537a7577687c7500a2"},
 		{"statement-position", n051StatementPosition, "8b00a2"},
 	}
 

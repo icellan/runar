@@ -126,8 +126,8 @@ const SEVEN_TIER_HEX: Record<string, string> = {
   'ternary-arm/+1': '7600a0638b6700776800a2',
   'ternary-arm/+2': '7600a06352936700776800a2',
   'ternary-arm-manual-inline': '7600a0638b6700776800a2',
-  'if-statement-arm': '007800a0637c8b767676537a757777670076537a757768517a7500a2',
-  'if-statement-arm-no-helper': '007800a0637c8b7677670076537a757768517a7500a2',
+  'if-statement-arm': '007800a0637c8b767676537a757777670076537a7577687c7500a2',
+  'if-statement-arm-no-helper': '007800a0637c8b7677670076537a7577687c7500a2',
   'statement-position': '8b00a2',
 };
 

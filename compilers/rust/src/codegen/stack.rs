@@ -2685,7 +2685,7 @@ impl LoweringContext {
                     if self.sm.peek_at_depth(d) == name.as_str() {
                         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                         self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.emit_op(StackOp::Roll { depth: d });
                         self.sm.pop();
                         let rolled = self.sm.remove_at_depth(d);
                         self.sm.push(&rolled);
@@ -2758,7 +2758,7 @@ impl LoweringContext {
                     if self.sm.peek_at_depth(d) == name.as_str() {
                         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                         self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.emit_op(StackOp::Roll { depth: d });
                         self.sm.pop();
                         let rolled = self.sm.remove_at_depth(d);
                         self.sm.push(&rolled);
@@ -2791,7 +2791,7 @@ impl LoweringContext {
                         } else {
                             self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                             self.sm.push("");
-                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.emit_op(StackOp::Roll { depth: d });
                             self.sm.pop();
                             let rolled = self.sm.remove_at_depth(d);
                             self.sm.push(&rolled);
@@ -2817,7 +2817,7 @@ impl LoweringContext {
                         } else {
                             self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                             self.sm.push("");
-                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.emit_op(StackOp::Roll { depth: d });
                             self.sm.pop();
                             let rolled = self.sm.remove_at_depth(d);
                             self.sm.push(&rolled);
@@ -3063,7 +3063,7 @@ impl LoweringContext {
                     } else {
                         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(d as i128))));
                         self.sm.push("");
-                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.emit_op(StackOp::Roll { depth: d });
                         self.sm.pop();
                         let rolled = self.sm.remove_at_depth(d);
                         self.sm.push(&rolled);
