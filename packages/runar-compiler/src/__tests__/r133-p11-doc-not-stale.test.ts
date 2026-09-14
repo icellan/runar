@@ -23,9 +23,10 @@ import { resolve } from 'node:path';
  * HEAD.
  *
  * The guard pins the pair: the note must not assert the shape is open, and the
- * reduction that proves it closed must still be a live suite (no `it.skip`,
- * `describe.skip` or `.todo`) — because a doc saying "fixed" backed by a
- * skipped test is the same lie wearing the other hat.
+ * reduction that proves it closed must still be a live suite — no skipped or
+ * `.todo`-marked case, asserted below against the whole vitest skip surface —
+ * because a doc saying "fixed" backed by a skipped test is the same lie
+ * wearing the other hat.
  */
 
 const REPO = resolve(__dirname, '../../../..');
