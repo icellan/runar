@@ -1,8 +1,10 @@
 package runar.compiler.passes;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import runar.compiler.ir.anf.AddDataOutput;
 import runar.compiler.ir.anf.AddOutput;
@@ -39,15 +41,29 @@ import runar.compiler.ir.anf.UpdateProp;
  * method_call, raw_script). Iterates to a fixed point so transitively
  * dead bindings are also removed.
  *
+ * <p>"Results" is plural on purpose (N-140). A binding does not only define
+ * its own {@code name}: an {@code if} that merges branch locals also defines
+ * every name in {@code results}, and both an {@code if} and a {@code loop}
+ * define the names their nested bindings bind. Liveness used to test
+ * {@code used.contains(b.name())} alone, so an {@code if} named {@code t9}
+ * carrying {@code results ["a","b"]} — a name nothing ever references,
+ * because callers reference {@code a} and {@code b} — was deleted whenever its
+ * arms happened to be pure, and the merged locals kept their pre-branch
+ * values. See {@code conformance/dce/live-if.test.ts}.
+ *
  * <p>This module is the canonical, standalone DCE pass for the Java
  * compiler. It mirrors the Zig reference implementation in
  * {@code compilers/zig/src/passes/dce.zig}. The earlier inline
  * implementation in {@code AnfOptimize.java} has been surgically
  * extracted here.
  *
- * <p>Behaviour: byte-for-byte identical to the previous inline DCE in
- * {@code AnfOptimize.java}. Verified by the conformance suite (cross-tier
- * hex parity) and the unknown-kind exhaustiveness tests.
+ * <p>Behaviour: byte-for-byte identical, at the time of that extraction, to
+ * the previous inline DCE in {@code AnfOptimize.java}. Verified by the
+ * conformance suite (cross-tier hex parity) and the unknown-kind
+ * exhaustiveness tests.
+ *
+ * <p>N-140 is the one deliberate behaviour change since: liveness considers
+ * the names a binding DEFINES, not only its own {@code name}.
  */
 public final class Dce {
 
@@ -75,13 +91,20 @@ public final class Dce {
     public static List<AnfBinding> eliminateDead(List<AnfBinding> body) {
         List<AnfBinding> current = body;
         while (true) {
-            Set<String> used = new HashSet<>();
-            for (AnfBinding b : current) collectRefs(b.value(), used);
+            List<Set<String>> ownRefs = new ArrayList<>(current.size());
+            Map<String, Integer> refCount = new HashMap<>();
+            for (AnfBinding b : current) {
+                Set<String> own = new HashSet<>();
+                collectRefs(b.value(), own);
+                ownRefs.add(own);
+                for (String name : own) refCount.merge(name, 1, Integer::sum);
+            }
 
             List<AnfBinding> kept = new ArrayList<>(current.size());
             boolean removed = false;
-            for (AnfBinding b : current) {
-                if (used.contains(b.name()) || hasSideEffect(b.value())) {
+            for (int i = 0; i < current.size(); i++) {
+                AnfBinding b = current.get(i);
+                if (isReferencedExternally(b, ownRefs.get(i), refCount) || hasSideEffect(b.value())) {
                     kept.add(b);
                 } else {
                     removed = true;
@@ -90,6 +113,54 @@ public final class Dce {
             if (!removed) return kept;
             current = kept;
         }
+    }
+
+    /**
+     * Every SSA name a binding brings into scope: its own {@code name}, plus —
+     * for the two nesting kinds — an {@code if}'s declared {@code results} (the
+     * merged branch locals / property slots both arms leave behind) and the
+     * names bound inside {@code then}, {@code else} and a {@code loop} body,
+     * recursively.
+     *
+     * <p>{@code iterVar} is deliberately absent: it is the loop's own induction
+     * variable, referenced only from inside the body, so counting it as defined
+     * would make every non-trivial loop unconditionally live.
+     */
+    public static void collectDefinedNames(AnfBinding binding, Set<String> out) {
+        out.add(binding.name());
+        AnfValue v = binding.value();
+        if (v instanceof If ifv) {
+            for (String r : orEmpty(ifv.results())) out.add(r);
+            for (AnfBinding b : orEmpty(ifv.thenBranch())) collectDefinedNames(b, out);
+            for (AnfBinding b : orEmpty(ifv.elseBranch())) collectDefinedNames(b, out);
+        } else if (v instanceof Loop loop) {
+            for (AnfBinding b : orEmpty(loop.body())) collectDefinedNames(b, out);
+        }
+    }
+
+    /**
+     * Is any name this binding defines referenced by some OTHER binding?
+     *
+     * <p>{@code refCount} maps a name to the number of DISTINCT bindings
+     * referencing it; {@code ownRefs} is this binding's own contribution.
+     * Subtracting it is what keeps the rule from degenerating into "never
+     * delete an {@code if} or a {@code loop}": an arm's bindings almost always
+     * reference each other, and counting those self-references would make
+     * every nesting node immortal.
+     *
+     * <p>For a non-nesting binding this is exactly the old
+     * {@code used.contains(b.name())}: ANF has no self-reference, so
+     * {@code ownRefs} never holds the binding's own name.
+     */
+    private static boolean isReferencedExternally(
+        AnfBinding binding, Set<String> ownRefs, Map<String, Integer> refCount) {
+        Set<String> defined = new HashSet<>();
+        collectDefinedNames(binding, defined);
+        for (String name : defined) {
+            int external = refCount.getOrDefault(name, 0) - (ownRefs.contains(name) ? 1 : 0);
+            if (external > 0) return true;
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------

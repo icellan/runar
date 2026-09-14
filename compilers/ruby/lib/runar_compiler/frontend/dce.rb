@@ -8,14 +8,27 @@
 # method_call, raw_script). Iterates to a fixed point so transitively
 # dead bindings are also removed.
 #
+# "Results" is plural on purpose (N-140). A binding does not only define
+# its own +name+: an +if+ that merges branch locals also defines every
+# name in +results+, and both an +if+ and a +loop+ define the names their
+# nested bindings bind. Liveness used to test +used.include?(binding.name)+
+# alone, so an +if+ named +t9+ carrying +results ["a","b"]+ -- a name
+# nothing ever references, because callers reference +a+ and +b+ -- was
+# deleted whenever its arms happened to be pure, and the merged locals kept
+# their pre-branch values. See +conformance/dce/live-if.test.ts+.
+#
 # This module is the canonical, standalone DCE pass for the Ruby
 # compiler. It mirrors the Zig reference implementation in
 # +compilers/zig/src/passes/dce.zig+. The earlier inline implementation
 # in +anf_optimize.rb+ has been surgically extracted here.
 #
-# Behaviour: byte-for-byte identical to the previous inline DCE in
-# +anf_optimize.rb+. Verified by the conformance suite (cross-tier hex
-# parity) and the unknown-kind exhaustiveness tests.
+# Behaviour: byte-for-byte identical, at the time of that extraction, to
+# the previous inline DCE in +anf_optimize.rb+. Verified by the
+# conformance suite (cross-tier hex parity) and the unknown-kind
+# exhaustiveness tests.
+#
+# N-140 is the one deliberate behaviour change since: liveness considers
+# the names a binding DEFINES, not only its own +name+.
 
 require "set"
 require_relative "../ir/types"
@@ -67,12 +80,17 @@ module RunarCompiler
 
         while changed
           changed = false
-          used = Set.new
-          current.each { |binding| collect_refs(binding.value, used) }
+          own_refs = current.map do |binding|
+            own = Set.new
+            collect_refs(binding.value, own)
+            own
+          end
+          ref_count = Hash.new(0)
+          own_refs.each { |own| own.each { |name| ref_count[name] += 1 } }
 
           filtered = []
-          current.each do |binding|
-            if used.include?(binding.name) || has_side_effect?(binding.value)
+          current.each_with_index do |binding, i|
+            if referenced_externally?(binding, own_refs[i], ref_count) || has_side_effect?(binding.value)
               filtered << binding
             else
               changed = true
@@ -83,6 +101,46 @@ module RunarCompiler
         end
 
         method.body = current
+      end
+
+      # Collect every SSA name a binding brings into scope: its own +name+,
+      # plus -- for the two nesting kinds -- an +if+'s declared +results+ (the
+      # merged branch locals / property slots both arms leave behind) and the
+      # names bound inside +then+, +else_+ and a +loop+ body, recursively.
+      #
+      # +iter_var+ is deliberately absent: it is the loop's own induction
+      # variable, referenced only from inside the body, so counting it as
+      # defined would make every non-trivial loop unconditionally live.
+      def self.collect_defined_names(binding, out)
+        out.add(binding.name)
+        v = binding.value
+        case v.kind
+        when "if"
+          v.results&.each { |r| out.add(r) }
+          v.then&.each  { |b| collect_defined_names(b, out) }
+          v.else_&.each { |b| collect_defined_names(b, out) }
+        when "loop"
+          v.body&.each { |b| collect_defined_names(b, out) }
+        end
+      end
+
+      # Is any name this binding defines referenced by some OTHER binding?
+      #
+      # +ref_count+ maps a name to the number of DISTINCT bindings referencing
+      # it; +own_refs+ is this binding's own contribution. Subtracting it is
+      # what keeps the rule from degenerating into "never delete an +if+ or a
+      # +loop+": an arm's bindings almost always reference each other, and
+      # counting those self-references would make every nesting node immortal.
+      #
+      # For a non-nesting binding this is exactly the old
+      # +used.include?(binding.name)+: ANF has no self-reference, so +own_refs+
+      # never holds the binding's own name.
+      def self.referenced_externally?(binding, own_refs, ref_count)
+        defined_names = Set.new
+        collect_defined_names(binding, defined_names)
+        defined_names.any? do |name|
+          ref_count[name] - (own_refs.include?(name) ? 1 : 0) > 0
+        end
       end
 
       # Walk an ANFValue and collect all binding name references.

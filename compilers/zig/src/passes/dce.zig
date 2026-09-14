@@ -4,6 +4,15 @@
 //! preserving bindings with observable side effects (assert, update_prop,
 //! check_preimage, add_output, etc.).
 //!
+//! "Results" is plural on purpose (N-140). A binding does not only define its
+//! own `name`: an `if` that merges branch locals also defines every name in
+//! `results`, and both an `if` and a `loop` define the names their nested
+//! bindings bind. Liveness used to test `used.contains(binding.name)` alone,
+//! so an `if` named `t9` carrying `results` `["a","b"]` -- a name nothing ever
+//! references, because callers reference `a` and `b` -- was deleted whenever
+//! its arms happened to be pure, and the merged locals kept their pre-branch
+//! values. See `conformance/dce/live-if.test.ts`.
+//!
 //! Runs as a standalone pass after constant folding (pass 4.25) and before
 //! EC optimization (pass 4.5). Also used internally by the EC optimizer
 //! to clean up temporaries created during algebraic simplification.
@@ -65,16 +74,36 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
 
     while (changed) {
         changed = false;
-        var used = std.StringHashMap(void).init(allocator);
-        defer used.deinit();
 
-        for (current) |binding| try collectRefs(binding.value, &used);
+        // Per-binding ref sets, plus how many DISTINCT bindings reference each
+        // name. Subtracting a binding's own contribution below is what keeps
+        // the liveness rule from degenerating into "never delete an `if` or a
+        // `loop`" -- an arm's bindings almost always reference each other.
+        const own_refs = try allocator.alloc(std.StringHashMap(void), current.len);
+        defer {
+            for (own_refs) |*m| m.deinit();
+            allocator.free(own_refs);
+        }
+        var ref_count = std.StringHashMap(usize).init(allocator);
+        defer ref_count.deinit();
+
+        for (current, 0..) |binding, i| {
+            own_refs[i] = std.StringHashMap(void).init(allocator);
+            try collectRefs(binding.value, &own_refs[i]);
+            var it = own_refs[i].keyIterator();
+            while (it.next()) |name| {
+                const gop = try ref_count.getOrPut(name.*);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+            }
+        }
 
         var filtered = std.ArrayListUnmanaged(types.ANFBinding).empty;
         defer filtered.deinit(allocator);
 
-        for (current) |binding| {
-            if (used.contains(binding.name) or hasSideEffect(binding.value)) {
+        for (current, 0..) |binding, i| {
+            const live = try isReferencedExternally(allocator, binding, &own_refs[i], &ref_count);
+            if (live or hasSideEffect(binding.value)) {
                 try filtered.append(allocator, binding);
             } else {
                 changed = true;
@@ -88,6 +117,53 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
     }
 
     return current;
+}
+
+/// Every SSA name a binding brings into scope: its own `name`, plus -- for the
+/// two nesting kinds -- an `if`'s declared `results` (the merged branch locals
+/// / property slots both arms leave behind) and the names bound inside `then`,
+/// `else` and a `loop` body, recursively.
+///
+/// `iter_var` is deliberately absent: it is the loop's own induction variable,
+/// referenced only from inside the body, so counting it as defined would make
+/// every non-trivial loop unconditionally live.
+fn collectDefinedNames(binding: types.ANFBinding, out: *std.StringHashMap(void)) !void {
+    try out.put(binding.name, {});
+    switch (binding.value) {
+        .@"if" => |if_val| {
+            for (if_val.results) |r| try out.put(r, {});
+            for (if_val.then) |b| try collectDefinedNames(b, out);
+            for (if_val.@"else") |b| try collectDefinedNames(b, out);
+        },
+        .loop => |loop_val| {
+            for (loop_val.body) |b| try collectDefinedNames(b, out);
+        },
+        else => {},
+    }
+}
+
+/// Is any name this binding defines referenced by some OTHER binding?
+///
+/// For a non-nesting binding this is exactly the old
+/// `used.contains(binding.name)`: ANF has no self-reference, so `own_refs`
+/// never holds the binding's own name and the subtraction is a no-op.
+fn isReferencedExternally(
+    allocator: Allocator,
+    binding: types.ANFBinding,
+    own_refs: *const std.StringHashMap(void),
+    ref_count: *const std.StringHashMap(usize),
+) !bool {
+    var defined = std.StringHashMap(void).init(allocator);
+    defer defined.deinit();
+    try collectDefinedNames(binding, &defined);
+
+    var it = defined.keyIterator();
+    while (it.next()) |name| {
+        const total = ref_count.get(name.*) orelse 0;
+        const own: usize = if (own_refs.contains(name.*)) 1 else 0;
+        if (total > own) return true;
+    }
+    return false;
 }
 
 /// Walk an ANFValue and collect all binding name references.

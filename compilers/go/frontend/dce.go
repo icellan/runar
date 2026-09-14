@@ -8,14 +8,26 @@ package frontend
 // add_data_output, call, method_call, raw_script). Iterates to a fixed point
 // so transitively dead bindings are also removed.
 //
+// "Results" is plural on purpose (N-140). A binding does not only define its
+// own Name: an `if` that merges branch locals also defines every name in
+// Results, and both an `if` and a `loop` define the names their nested
+// bindings bind. Liveness used to test refs[b.Name] alone, so an `if` named
+// `t9` carrying Results ["a","b"] — a name nothing ever references, because
+// callers reference `a` and `b` — was deleted whenever its arms happened to be
+// pure, and the merged locals kept their pre-branch values. See
+// conformance/dce/live-if.test.ts.
+//
 // This module is the canonical, standalone DCE pass for the Go compiler.
 // It mirrors the Zig reference implementation in
 // `compilers/zig/src/passes/dce.zig`. The earlier inline implementation in
 // `anf_optimize.go` has been surgically extracted here.
 //
-// Behaviour: byte-for-byte identical to the previous inline DCE in
-// anf_optimize.go. Verified by the conformance suite (cross-tier hex
-// parity) and the unknown-kind exhaustiveness tests.
+// Behaviour: byte-for-byte identical, at the time of that extraction, to the
+// previous inline DCE in anf_optimize.go. Verified by the conformance suite
+// (cross-tier hex parity) and the unknown-kind exhaustiveness tests.
+//
+// N-140 is the one deliberate behaviour change since: liveness considers the
+// names a binding DEFINES, not only its own Name.
 
 import (
 	"strings"
@@ -40,11 +52,20 @@ func EliminateDeadCode(program *ir.ANFProgram) *ir.ANFProgram {
 // binding, iteratively until no more can be removed.
 func EliminateDeadBindings(method *ir.ANFMethod) {
 	for {
-		refs := collectAllRefs(method.Body)
+		ownRefs := make([]map[string]bool, len(method.Body))
+		refCount := make(map[string]int)
+		for i := range method.Body {
+			own := make(map[string]bool)
+			collectValueRefs(&method.Body[i].Value, own)
+			ownRefs[i] = own
+			for name := range own {
+				refCount[name]++
+			}
+		}
 		var kept []ir.ANFBinding
 		removed := false
-		for _, b := range method.Body {
-			if _, used := refs[b.Name]; used || HasSideEffect(&b.Value) {
+		for i, b := range method.Body {
+			if isReferencedExternally(&method.Body[i], ownRefs[i], refCount) || HasSideEffect(&b.Value) {
 				kept = append(kept, b)
 			} else {
 				removed = true
@@ -61,13 +82,62 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 // Core algorithm
 // ---------------------------------------------------------------------------
 
-// collectAllRefs collects all binding names referenced in a list of bindings.
-func collectAllRefs(bindings []ir.ANFBinding) map[string]bool {
-	refs := make(map[string]bool)
-	for _, b := range bindings {
-		collectValueRefs(&b.Value, refs)
+// collectDefinedNames collects every SSA name a binding brings into scope: its
+// own Name, plus — for the two nesting kinds — an `if`'s declared Results (the
+// merged branch locals / property slots both arms leave behind) and the names
+// bound inside Then, Else and a loop Body, recursively.
+//
+// IterVar is deliberately absent: it is the loop's own induction variable,
+// referenced only from inside the body, so counting it as defined would make
+// every non-trivial loop unconditionally live.
+func collectDefinedNames(b *ir.ANFBinding, out map[string]bool) {
+	out[b.Name] = true
+	collectDefinedNamesFromValue(&b.Value, out)
+}
+
+func collectDefinedNamesFromValue(v *ir.ANFValue, out map[string]bool) {
+	switch v.Kind {
+	case "if":
+		for _, r := range v.Results {
+			out[r] = true
+		}
+		for i := range v.Then {
+			collectDefinedNames(&v.Then[i], out)
+		}
+		for i := range v.Else {
+			collectDefinedNames(&v.Else[i], out)
+		}
+	case "loop":
+		for i := range v.Body {
+			collectDefinedNames(&v.Body[i], out)
+		}
 	}
-	return refs
+}
+
+// isReferencedExternally reports whether any name the binding defines is
+// referenced by some OTHER binding.
+//
+// refCount maps a name to the number of DISTINCT bindings referencing it;
+// ownRefs is this binding's own contribution. Subtracting it is what keeps the
+// rule from degenerating into "never delete an `if` or a `loop`": an arm's
+// bindings almost always reference each other, and counting those
+// self-references would make every nesting node immortal.
+//
+// For a non-nesting binding this is exactly the old refs[b.Name]: ANF has no
+// self-reference, so ownRefs never holds the binding's own name.
+func isReferencedExternally(b *ir.ANFBinding, ownRefs map[string]bool, refCount map[string]int) bool {
+	defined := make(map[string]bool)
+	collectDefinedNames(b, defined)
+	for name := range defined {
+		own := 0
+		if ownRefs[name] {
+			own = 1
+		}
+		if refCount[name]-own > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // collectValueRefs collects all name references from an ANFValue.

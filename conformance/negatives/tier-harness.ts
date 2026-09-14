@@ -363,3 +363,53 @@ export function verdict(tier: Tier, input: string): Verdict {
   }
   return 'rejected';
 }
+
+/**
+ * Run one tier's one-shot `source -> hex` CLI and return the locking script
+ * hex, or throw `BrokenTier` if the process never produced one.
+ *
+ * Same spawn discipline as `verdict()` above, and deliberately in this file
+ * rather than in a caller: R-100's finding was that a SECOND, weaker way to
+ * drive a tier is how a gate ends up scoring dead tiers as perfect. This one
+ * needs the tier's OUTPUT rather than its verdict, so it cannot be expressed
+ * as a `verdict()` call — but it must not relax any of the checks:
+ *
+ *   - the child spawned, exited under its own control, and exited 0;
+ *   - stdout carries a non-empty, even-length hex string and nothing else.
+ *
+ * A tier that answers with a usage error, a launcher error, or prose instead
+ * of hex fails loudly here instead of contributing an empty string to a
+ * "all tiers agree" comparison that would then be vacuously true.
+ */
+export function compileHex(tier: Tier, input: string): string {
+  if (tier.cmd === null) throw new BrokenTier(`${tier.id}: no toolchain`);
+  const argv = [...tier.prefix, ...tier.argsFor(input)];
+  const res = spawnSync(tier.cmd, argv, {
+    cwd: tier.cwd,
+    encoding: 'utf-8',
+    timeout: tier.timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  const where = `${tier.id} (${tier.cmd} ${argv.join(' ')})`;
+
+  if (res.error) throw new BrokenTier(`${where} could not run: ${res.error.message}`);
+  if (res.signal !== null) {
+    throw new BrokenTier(
+      `${where} was killed by ${res.signal} (timeout ${tier.timeoutMs}ms); no output.`,
+    );
+  }
+  if (res.status !== 0) {
+    const diag = `${res.stderr ?? ''}\n${res.stdout ?? ''}`.trim();
+    throw new BrokenTier(`${where} exited ${res.status}: ${diag.slice(0, 600)}`);
+  }
+
+  const hex = (res.stdout ?? '').trim();
+  if (hex === '') throw new BrokenTier(`${where} exited 0 with EMPTY stdout.`);
+  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
+    throw new BrokenTier(
+      `${where} exited 0 but stdout is not a hex script:\n${hex.slice(0, 600)}`,
+    );
+  }
+  return hex.toLowerCase();
+}

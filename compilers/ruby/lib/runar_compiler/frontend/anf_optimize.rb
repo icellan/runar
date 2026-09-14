@@ -97,36 +97,30 @@ module RunarCompiler
       end
       private_class_method :deep_copy_binding
 
+      # The FIELDS that hold nested ANFBindings rather than scalars.
+      NESTED_BINDING_FIELDS = %i[then else_ body].freeze
+
+      # Copy every declared FIELD, then deep-copy the three that hold nested
+      # bindings.
+      #
+      # This used to be a hand-written field-by-field list, and a hand-written
+      # list is a list that silently loses fields as the IR grows: it was
+      # missing +results+, +start+, +step+, +bytes+, +in_arity+, +out_arity+
+      # and +is_auto_injected_state_check+. The +results+ drop was the one with
+      # teeth (N-140) -- an EC-optimized contract lost its `if`'s declared
+      # multi-result contract, and stack lowering then refused the node
+      # ("declares no results") the moment DCE stopped deleting it outright.
+      # Driving the copy off IR::ANFValue::FIELDS makes that class of loss
+      # impossible rather than merely fixed once. (That is also what now
+      # carries +preserve+ across -- issue #109's @embedAlways DCE opt-out
+      # flag, which dead-binding elimination reads off THIS copy.)
       def self.deep_copy_value(v)
         nv = IR::ANFValue.new(kind: v.kind)
-        nv.name         = v.name
-        nv.raw_value    = v.raw_value
-        nv.const_string = v.const_string
-        nv.const_big_int = v.const_big_int
-        nv.const_bool   = v.const_bool
-        nv.const_int    = v.const_int
-        nv.op           = v.op
-        nv.left         = v.left
-        nv.right        = v.right
-        nv.result_type  = v.result_type
-        nv.operand      = v.operand
-        nv.func         = v.func
-        nv.args         = v.args&.dup
-        nv.object       = v.object
-        nv.method       = v.method
-        nv.cond         = v.cond
-        nv.count        = v.count
-        nv.iter_var     = v.iter_var
-        nv.value_ref    = v.value_ref
-        nv.preimage     = v.preimage
-        nv.sighash_flag = v.sighash_flag
-        nv.satoshis     = v.satoshis
-        nv.state_values = v.state_values&.dup
-        nv.script_bytes = v.script_bytes
-        nv.elements     = v.elements&.dup
-        # Issue #109: the @embedAlways DCE opt-out flag must survive the EC
-        # deep-copy -- dead-binding elimination runs on THIS copy.
-        nv.preserve     = v.preserve
+        IR::ANFValue::FIELDS.each do |f|
+          next if NESTED_BINDING_FIELDS.include?(f)
+          val = v.public_send(f)
+          nv.public_send(:"#{f}=", val.is_a?(Array) ? val.dup : val)
+        end
         nv.then  = v.then&.map  { |b| deep_copy_binding(b) }
         nv.else_ = v.else_&.map { |b| deep_copy_binding(b) }
         nv.body  = v.body&.map  { |b| deep_copy_binding(b) }

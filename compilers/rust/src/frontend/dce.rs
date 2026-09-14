@@ -7,18 +7,30 @@
 //! one. Iterates to a fixed point so transitively dead bindings are also
 //! removed.
 //!
+//! "Results" is plural on purpose (N-140). A binding does not only define its
+//! own `name`: an `if` that merges branch locals also defines every name in
+//! `results`, and both an `if` and a `loop` define the names their nested
+//! bindings bind. Liveness used to test `refs.contains(&b.name)` alone, so an
+//! `if` named `t9` carrying `results: ["a","b"]` — a name nothing ever
+//! references, because callers reference `a` and `b` — was deleted whenever its
+//! arms happened to be pure, and the merged locals kept their pre-branch
+//! values. See `conformance/dce/live-if.test.ts`.
+//!
 //! This module is the canonical, standalone DCE pass for the Rust compiler.
 //! It mirrors the Zig reference implementation in
 //! `compilers/zig/src/passes/dce.zig`. The earlier inline implementation in
 //! `anf_optimize.rs` has been surgically extracted here.
 //!
-//! Behaviour: byte-for-byte identical to the previous inline DCE in
-//! `anf_optimize.rs`. Verified by the conformance suite (cross-tier hex
-//! parity) and the optimizer unit tests.
+//! Behaviour: byte-for-byte identical, at the time of that extraction, to the
+//! previous inline DCE in `anf_optimize.rs`. Verified by the conformance suite
+//! (cross-tier hex parity) and the optimizer unit tests.
+//!
+//! N-140 is the one deliberate behaviour change since: liveness considers the
+//! names a binding DEFINES, not only its own `name`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::ir::{ANFMethod, ANFProgram, ANFValue};
+use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFValue};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -45,13 +57,29 @@ pub fn eliminate_dead_code(program: ANFProgram) -> ANFProgram {
 pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
     let mut body = method.body.clone();
     loop {
-        let mut refs = HashSet::new();
-        for binding in &body {
-            collect_refs_from_value(&binding.value, &mut refs);
+        let own_refs: Vec<HashSet<String>> = body
+            .iter()
+            .map(|binding| {
+                let mut refs = HashSet::new();
+                collect_refs_from_value(&binding.value, &mut refs);
+                refs
+            })
+            .collect();
+        let mut ref_count: HashMap<&String, usize> = HashMap::new();
+        for refs in &own_refs {
+            for name in refs {
+                *ref_count.entry(name).or_insert(0) += 1;
+            }
         }
 
         let before_len = body.len();
-        body.retain(|b| refs.contains(&b.name) || has_side_effect(&b.value));
+        let mut index = 0usize;
+        body.retain(|b| {
+            let keep = is_referenced_externally(b, &own_refs[index], &ref_count)
+                || has_side_effect(&b.value);
+            index += 1;
+            keep
+        });
 
         if body.len() == before_len {
             break;
@@ -70,6 +98,70 @@ pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
 // ---------------------------------------------------------------------------
 // Core algorithm
 // ---------------------------------------------------------------------------
+
+/// Every SSA name a binding brings into scope: its own `name`, plus — for the
+/// two nesting kinds — an `if`'s declared `results` (the merged branch locals /
+/// property slots both arms leave behind) and the names bound inside `then`,
+/// `else` and a `loop` body, recursively.
+///
+/// `iter_var` is deliberately absent: it is the loop's own induction variable,
+/// referenced only from inside the body, so counting it as defined would make
+/// every non-trivial loop unconditionally live.
+pub fn collect_defined_names(binding: &ANFBinding, out: &mut HashSet<String>) {
+    out.insert(binding.name.clone());
+    collect_defined_names_from_value(&binding.value, out);
+}
+
+fn collect_defined_names_from_value(value: &ANFValue, out: &mut HashSet<String>) {
+    match value {
+        ANFValue::If {
+            then,
+            else_branch,
+            results,
+            ..
+        } => {
+            for r in results {
+                out.insert(r.clone());
+            }
+            for b in then {
+                collect_defined_names(b, out);
+            }
+            for b in else_branch {
+                collect_defined_names(b, out);
+            }
+        }
+        ANFValue::Loop { body, .. } => {
+            for b in body {
+                collect_defined_names(b, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Is any name this binding defines referenced by some OTHER binding?
+///
+/// `ref_count` maps a name to the number of DISTINCT bindings referencing it;
+/// `own_refs` is this binding's own contribution. Subtracting it is what keeps
+/// the rule from degenerating into "never delete an `if` or a `loop`": an arm's
+/// bindings almost always reference each other, and counting those
+/// self-references would make every nesting node immortal.
+///
+/// For a non-nesting binding this is exactly the old `refs.contains(&b.name)`:
+/// ANF has no self-reference, so `own_refs` never holds the binding's own name.
+fn is_referenced_externally(
+    binding: &ANFBinding,
+    own_refs: &HashSet<String>,
+    ref_count: &HashMap<&String, usize>,
+) -> bool {
+    let mut defined = HashSet::new();
+    collect_defined_names(binding, &mut defined);
+    defined.iter().any(|name| {
+        let total = ref_count.get(name).copied().unwrap_or(0);
+        let own = usize::from(own_refs.contains(name));
+        total > own
+    })
+}
 
 /// Collect all referenced binding names from a value.
 pub fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {

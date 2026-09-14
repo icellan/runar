@@ -6,6 +6,16 @@ check_preimage, add_output, add_raw_output, add_data_output, call,
 method_call, raw_script). Iterates to a fixed point so transitively
 dead bindings are also removed.
 
+"Results" is plural on purpose (N-140). A binding does not only define
+its own ``name``: an ``if`` that merges branch locals also defines every
+name in ``results``, and both an ``if`` and a ``loop`` define the names
+their nested bindings bind. Liveness used to test ``binding.name in
+used`` alone, so an ``if`` named ``t9`` carrying ``results ["a","b"]`` —
+a name nothing ever references, because callers reference ``a`` and
+``b`` — was deleted whenever its arms happened to be pure, and the
+merged locals kept their pre-branch values. See
+``conformance/dce/live-if.test.ts``.
+
 R-240: this used to say "the canonical, standalone DCE pass for the
 Python compiler". It is canonical — every dead-binding sweep in this
 tier comes from here — but it is NOT standalone. Its only pipeline
@@ -24,9 +34,13 @@ to fix inside DCE before it is a wiring change.
 The earlier inline implementation in ``anf_optimize.py`` has been
 surgically extracted here.
 
-Behaviour: byte-for-byte identical to the previous inline DCE in
-``anf_optimize.py``. Verified by the conformance suite (cross-tier hex
-parity) and the unknown-kind exhaustiveness tests.
+Behaviour: byte-for-byte identical, at the time of that extraction, to
+the previous inline DCE in ``anf_optimize.py``. Verified by the
+conformance suite (cross-tier hex parity) and the unknown-kind
+exhaustiveness tests.
+
+N-140 is the one deliberate behaviour change since: liveness considers
+the names a binding DEFINES, not only its own ``name``.
 """
 
 from __future__ import annotations
@@ -87,13 +101,20 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
 
     while changed:
         changed = False
-        used: set[str] = set()
+        own_refs: list[set[str]] = []
+        ref_count: dict[str, int] = {}
         for binding in current:
-            collect_refs(binding.value, used)
+            own: set[str] = set()
+            collect_refs(binding.value, own)
+            own_refs.append(own)
+            for name in own:
+                ref_count[name] = ref_count.get(name, 0) + 1
 
         filtered: list[ANFBinding] = []
-        for binding in current:
-            if binding.name in used or has_side_effect(binding.value):
+        for i, binding in enumerate(current):
+            if is_referenced_externally(binding, own_refs[i], ref_count) or has_side_effect(
+                binding.value
+            ):
                 filtered.append(binding)
             else:
                 changed = True
@@ -101,6 +122,55 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
         current = filtered
 
     method.body = current
+
+
+def collect_defined_names(binding: ANFBinding, out: set[str]) -> None:
+    """Collect every SSA name a binding brings into scope.
+
+    Its own ``name``, plus -- for the two nesting kinds -- an ``if``'s
+    declared ``results`` (the merged branch locals / property slots both
+    arms leave behind) and the names bound inside ``then``, ``else_`` and a
+    ``loop`` body, recursively.
+
+    ``iter_var`` is deliberately absent: it is the loop's own induction
+    variable, referenced only from inside the body, so counting it as
+    defined would make every non-trivial loop unconditionally live.
+    """
+    out.add(binding.name)
+    v = binding.value
+    if v.kind == "if":
+        if v.results is not None:
+            out.update(v.results)
+        for b in v.then or []:
+            collect_defined_names(b, out)
+        for b in v.else_ or []:
+            collect_defined_names(b, out)
+    elif v.kind == "loop":
+        for b in v.body or []:
+            collect_defined_names(b, out)
+
+
+def is_referenced_externally(
+    binding: ANFBinding, own_refs: set[str], ref_count: dict[str, int]
+) -> bool:
+    """Is any name this binding defines referenced by some OTHER binding?
+
+    ``ref_count`` maps a name to the number of DISTINCT bindings referencing
+    it; ``own_refs`` is this binding's own contribution. Subtracting it is
+    what keeps the rule from degenerating into "never delete an ``if`` or a
+    ``loop``": an arm's bindings almost always reference each other, and
+    counting those self-references would make every nesting node immortal.
+
+    For a non-nesting binding this is exactly the old ``binding.name in
+    used``: ANF has no self-reference, so ``own_refs`` never holds the
+    binding's own name.
+    """
+    defined: set[str] = set()
+    collect_defined_names(binding, defined)
+    for name in defined:
+        if ref_count.get(name, 0) - (1 if name in own_refs else 0) > 0:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

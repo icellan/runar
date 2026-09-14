@@ -8,6 +8,18 @@
  * one. Iterates to a fixed point so transitively dead bindings are also
  * removed.
  *
+ * "Results" is plural on purpose (N-140). A binding does not only define its
+ * own `name`: an `if` that merges branch locals also defines every name in
+ * `results`, and both an `if` and a `loop` define the names their nested
+ * bindings bind. Liveness used to test `refs.has(binding.name)` alone, so an
+ * `if` named `t9` carrying `results: ['a','b']` — a name nothing ever
+ * references, because callers reference `a` and `b` — was deleted whenever its
+ * arms happened to be pure. The merged locals then kept their pre-branch
+ * values and the contract compiled to a locking script that cannot be
+ * satisfied. See `conformance/dce/live-if.test.ts` for the executable proof;
+ * the defect was identical in all seven tiers, so cross-tier byte parity held
+ * the whole time.
+ *
  * This module is the canonical DEFINITION of DCE — one implementation, mirrored
  * by `compilers/zig/src/passes/dce.zig` and its five peers, and re-exported by
  * `optimizer/constant-fold.ts` (where it used to live inline) to preserve that
@@ -34,9 +46,12 @@
  * Pinned by `r194-dce-invocation.test.ts` so this description and the call site
  * cannot drift apart again.
  *
- * Behaviour: byte-for-byte identical to the previous in-place DCE inside
- * `constant-fold.ts`. Verified by the conformance suite (cross-tier hex
- * parity) and the optimizer unit tests.
+ * Behaviour: byte-for-byte identical, at the time of that extraction, to the
+ * previous in-place DCE inside `constant-fold.ts`. Verified by the conformance
+ * suite (cross-tier hex parity) and the optimizer unit tests.
+ *
+ * N-140 is the one deliberate behaviour change since: liveness considers the
+ * names a binding DEFINES, not only its own `name`.
  */
 
 import type {
@@ -71,14 +86,6 @@ function eliminateDeadInMethod(method: ANFMethod): ANFMethod {
 // ---------------------------------------------------------------------------
 // Core algorithm
 // ---------------------------------------------------------------------------
-
-function collectAllRefs(bindings: ANFBinding[]): Set<string> {
-  const refs = new Set<string>();
-  for (const binding of bindings) {
-    collectRefsFromValue(binding.value, refs);
-  }
-  return refs;
-}
 
 export function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
   switch (value.kind) {
@@ -200,6 +207,61 @@ export function hasSideEffect(value: ANFValue): boolean {
   }
 }
 
+/**
+ * Every SSA name this binding brings into scope.
+ *
+ * Its own `name`, plus — for the two nesting kinds — the names it defines on
+ * behalf of the enclosing method: an `if`'s declared `results` (the merged
+ * branch locals / property slots both arms leave behind) and the names bound
+ * inside `if.then`, `if.else` and `loop.body`, recursively.
+ *
+ * `loop.iterVar` is deliberately NOT here. It is the loop's own induction
+ * variable, referenced only from inside the body, so counting it as defined
+ * would make every non-trivial loop unconditionally live.
+ */
+export function collectDefinedNames(binding: ANFBinding, out: Set<string>): void {
+  out.add(binding.name);
+  collectDefinedNamesFromValue(binding.value, out);
+}
+
+function collectDefinedNamesFromValue(value: ANFValue, out: Set<string>): void {
+  if (value.kind === 'if') {
+    for (const r of value.results ?? []) out.add(r);
+    for (const b of value.then) collectDefinedNames(b, out);
+    for (const b of value.else) collectDefinedNames(b, out);
+  } else if (value.kind === 'loop') {
+    for (const b of value.body) collectDefinedNames(b, out);
+  }
+}
+
+/**
+ * Is `binding` referenced from OUTSIDE itself?
+ *
+ * `refCount` maps a name to the number of DISTINCT bindings that reference it;
+ * `ownRefs` is the set this binding contributes. Subtracting its own
+ * contribution is what keeps the rule from degenerating into "never delete an
+ * `if` or a `loop`": an arm's bindings almost always reference each other, and
+ * counting those self-references would make every nesting node immortal. Only
+ * a reference from a sibling — the `a + b` after the branch — keeps it alive.
+ *
+ * For a non-nesting binding this is exactly the old `refs.has(binding.name)`:
+ * ANF has no self-reference, so `ownRefs` never contains the binding's own
+ * name and the subtraction is a no-op.
+ */
+function isReferencedExternally(
+  binding: ANFBinding,
+  ownRefs: Set<string>,
+  refCount: Map<string, number>,
+): boolean {
+  const defined = new Set<string>();
+  collectDefinedNames(binding, defined);
+  for (const name of defined) {
+    const external = (refCount.get(name) ?? 0) - (ownRefs.has(name) ? 1 : 0);
+    if (external > 0) return true;
+  }
+  return false;
+}
+
 function filterLiveBindings(bindings: ANFBinding[]): ANFBinding[] {
   // Iterate to a fixed point so transitively dead bindings are removed too.
   let current = bindings;
@@ -207,11 +269,23 @@ function filterLiveBindings(bindings: ANFBinding[]): ANFBinding[] {
 
   while (changed) {
     changed = false;
-    const refs = collectAllRefs(current);
+    const ownRefs = current.map((b) => {
+      const s = new Set<string>();
+      collectRefsFromValue(b.value, s);
+      return s;
+    });
+    const refCount = new Map<string, number>();
+    for (const s of ownRefs) {
+      for (const name of s) refCount.set(name, (refCount.get(name) ?? 0) + 1);
+    }
     const filtered: ANFBinding[] = [];
 
-    for (const binding of current) {
-      if (refs.has(binding.name) || hasSideEffect(binding.value)) {
+    for (let i = 0; i < current.length; i++) {
+      const binding = current[i]!;
+      if (
+        isReferencedExternally(binding, ownRefs[i]!, refCount) ||
+        hasSideEffect(binding.value)
+      ) {
         filtered.push(binding);
       } else {
         changed = true;
