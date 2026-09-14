@@ -47,9 +47,8 @@ pip install runar
 
 | Extra | What you get | Install |
 |-------|--------------|---------|
-| `bsv-sdk` | Native C-extension ECDSA in `LocalSigner` (faster than the bundled pure-Python signer) | `pip install bsv-sdk` |
+| `bsv-sdk` | Native C-extension ECDSA in `LocalSigner` (faster than the bundled pure-Python signer) | `pip install runar[crypto]` |
 | `runar-compiler` | The Rúnar compiler frontend, required only for `compile_check(...)` | `pip install runar-compiler` |
-| `coincurve` | Optional secp256k1 backend | `pip install runar[crypto]` |
 
 `LocalSigner` automatically detects whether `bsv-sdk` is installed and falls back to the bundled pure-Python ECDSA implementation otherwise. Both produce identical low-S DER signatures.
 

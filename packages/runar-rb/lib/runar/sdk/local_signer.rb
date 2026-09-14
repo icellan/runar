@@ -40,6 +40,21 @@ module Runar
       # Attempt to load the bsv-sdk gem once at class definition time.
       # We store the result in a constant so every instance can check it
       # without rescuing again.
+      #
+      # R-213: in this repository that branch cannot be taken. No such gem is
+      # published — CLAUDE.md records that there is no `bsv-blockchain` Ruby
+      # SDK, which is also why this tier ships no ScriptVM — and neither the
+      # gemspec nor the Gemfile declares one, so the require always raises
+      # LoadError and BSV_SDK_AVAILABLE is always false. The pure-Ruby ECDSA in
+      # Runar::ECDSA is therefore the ONLY signing implementation that runs
+      # here, not a fallback that rarely fires.
+      #
+      # The branch is kept rather than deleted for two reasons: it is the seam
+      # the specs stub to exercise the "neither backend usable" path, and it is
+      # where a real gem would be wired in if one ever ships. What is NOT kept
+      # is the impression that this file is library-backed today.
+      # `tests/r213-crypto-backends.test.ts` fails if the gem becomes a declared
+      # dependency without this note being revisited.
       begin
         require 'bsv-sdk'
         BSV_SDK_AVAILABLE = true
