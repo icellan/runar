@@ -23,6 +23,15 @@ env:
   # into no-ops.
   TURBO_CACHE_DIR: .turbo/cache
 
+permissions:
+  # R-217: least privilege. These jobs check out, build, test and upload
+  # artifacts — `actions/upload-artifact` uses the artifact service, not the
+  # contents scope — so read is all they need. Without this block the workflow
+  # inherits the repository default, which on many repositories is read-write
+  # across contents, issues and packages: a compromised step in any job would
+  # then reach the whole repository rather than the job.
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Lint — block reintroduction of dishonest test patterns
