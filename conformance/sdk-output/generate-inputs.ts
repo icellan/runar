@@ -520,6 +520,19 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '85070591730234615893513767959916445698' },
     ],
   },
+  {
+    // R-094's FixedArray WRITE fixture, mirrored at the SDK layer. Pass 3b
+    // expands `table: FixedArray<bigint, 4>` into four mutable properties
+    // `table__0..table__3`, so this is the only artifact in the suite whose
+    // state section is a compiler-SYNTHESISED field list — every other
+    // fixture's stateFields are names the developer wrote. A tier whose state
+    // serializer ordered, named or counted the expanded slots differently
+    // would produce a divergent state section and the contract would not be
+    // spendable; nothing covered that, because no sdk-output fixture carried
+    // a `__N` state field at all.
+    name: 'fixed-array-write',
+    constructorArgs: [],
+  },
 ];
 
 const TMP_DIR = join(__dirname, '.tmp');
