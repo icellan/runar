@@ -232,6 +232,80 @@ function checkNum2BinWidth(minimalWidth: number, byteLen: bigint): void {
 // RunarInterpreter
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Partial SHA-256 (FIPS 180-4 §6.2.2), for the `sha256Compress` /
+// `sha256Finalize` builtins. Pure byte functions, mirroring the reference in
+// `packages/runar-py/runar/builtins.py` (R-226).
+// ---------------------------------------------------------------------------
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+const rotr32 = (x: number, n: number): number => ((x >>> n) | (x << (32 - n))) >>> 0;
+
+/** One SHA-256 block compression: 32-byte state + 64-byte block -> 32-byte state. */
+function sha256Compress(state: Uint8Array, block: Uint8Array): Uint8Array {
+  const h = new Uint32Array(8);
+  const sv = new DataView(state.buffer, state.byteOffset, state.byteLength);
+  for (let i = 0; i < 8; i++) h[i] = sv.getUint32(i * 4, false);
+
+  const w = new Uint32Array(64);
+  const bv = new DataView(block.buffer, block.byteOffset, block.byteLength);
+  for (let i = 0; i < 16; i++) w[i] = bv.getUint32(i * 4, false);
+  for (let t = 16; t < 64; t++) {
+    const s0 = (rotr32(w[t - 15]!, 7) ^ rotr32(w[t - 15]!, 18) ^ (w[t - 15]! >>> 3)) >>> 0;
+    const s1 = (rotr32(w[t - 2]!, 17) ^ rotr32(w[t - 2]!, 19) ^ (w[t - 2]! >>> 10)) >>> 0;
+    w[t] = (s1 + w[t - 7]! + s0 + w[t - 16]!) >>> 0;
+  }
+
+  let [a, b, c, d, e, f, g, hh] = [h[0]!, h[1]!, h[2]!, h[3]!, h[4]!, h[5]!, h[6]!, h[7]!];
+  for (let t = 0; t < 64; t++) {
+    const S1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) >>> 0;
+    const ch = ((e & f) ^ (~e & g)) >>> 0;
+    const temp1 = (hh + S1 + ch + SHA256_K[t]! + w[t]!) >>> 0;
+    const S0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) >>> 0;
+    const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+    const temp2 = (S0 + maj) >>> 0;
+    hh = g; g = f; f = e;
+    e = (d + temp1) >>> 0;
+    d = c; c = b; b = a;
+    a = (temp1 + temp2) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const ov = new DataView(out.buffer);
+  const next = [a, b, c, d, e, f, g, hh];
+  for (let i = 0; i < 8; i++) ov.setUint32(i * 4, (h[i]! + next[i]!) >>> 0, false);
+  return out;
+}
+
+/** SHA-256 padding + the final one or two compressions. */
+function sha256Finalize(state: Uint8Array, remaining: Uint8Array, msgBitLen: bigint): Uint8Array {
+  const withMarker = new Uint8Array(remaining.length + 1);
+  withMarker.set(remaining);
+  withMarker[remaining.length] = 0x80;
+
+  const blocks = withMarker.length + 8 <= 64 ? 1 : 2;
+  const padded = new Uint8Array(blocks * 64);
+  padded.set(withMarker);
+  new DataView(padded.buffer).setBigUint64(padded.length - 8, msgBitLen, false);
+
+  let s = state;
+  for (let i = 0; i < blocks; i++) {
+    s = sha256Compress(s, padded.subarray(i * 64, (i + 1) * 64));
+  }
+  return s;
+}
+
+
 export class RunarInterpreter {
   private readonly props: Map<string, RunarValue>;
   private _outputs: { satoshis: RunarValue; stateValues: Record<string, RunarValue> }[] = [];
@@ -831,6 +905,51 @@ export class RunarInterpreter {
         const data = this.toBytes(args[0]!);
         const hash = createHash('sha256').update(data).digest();
         return { kind: 'bytes', value: new Uint8Array(hash) };
+      }
+
+      // R-226: the partial-SHA-256 pair. Without these the interpreter threw
+      // "Unknown function", so the two contracts that use them
+      // (examples/ts/sha256-compress, sha256-finalize — both also conformance
+      // fixtures) could only ever be executed by the ScriptVM. That leaves the
+      // differential oracle with ONE engine for this codegen family: a
+      // miscompile of the partial-SHA-256 emitter would have had nothing to
+      // disagree with it.
+      //
+      // FIPS 180-4 §6.2.2, mirroring packages/runar-py/runar/builtins.py.
+      case 'sha256Compress': {
+        const state = this.toBytes(args[0]!);
+        const block = this.toBytes(args[1]!);
+        if (state.length !== 32) {
+          throw new Error(`sha256Compress: state must be 32 bytes, got ${state.length}`);
+        }
+        if (block.length !== 64) {
+          throw new Error(`sha256Compress: block must be 64 bytes, got ${block.length}`);
+        }
+        return { kind: 'bytes', value: sha256Compress(state, block) };
+      }
+
+      case 'sha256Finalize': {
+        const state = this.toBytes(args[0]!);
+        const remaining = this.toBytes(args[1]!);
+        const bitLenVal = args[2]!;
+        if (bitLenVal.kind !== 'bigint') {
+          throw new Error('sha256Finalize: msgBitLen must be a bigint');
+        }
+        if (state.length !== 32) {
+          throw new Error(`sha256Finalize: state must be 32 bytes, got ${state.length}`);
+        }
+        if (remaining.length > 119) {
+          // Past 119 the padding needs a third block, which neither the codegen
+          // nor this function emits. Refusing beats returning a digest that no
+          // engine agrees with.
+          throw new Error(
+            `sha256Finalize: remaining must be 0-119 bytes, got ${remaining.length}`,
+          );
+        }
+        return {
+          kind: 'bytes',
+          value: sha256Finalize(state, remaining, bitLenVal.value),
+        };
       }
 
       case 'ripemd160': {
