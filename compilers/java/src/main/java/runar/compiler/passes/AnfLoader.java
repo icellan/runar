@@ -96,9 +96,17 @@ public final class AnfLoader {
         // priority — a malformed binding is the more actionable error when
         // both are present. Mirrors compilers/go/ir/loader.go, ordering
         // included.
+        //
+        // N-113: the CONSTRUCTOR does not count. This mirrors Validate.java,
+        // but runs over a differently-shaped list: the AST keeps the
+        // constructor in its own field while ANF lowering flattens it INTO
+        // `methods`, so one `isPublic: true` on the constructor walked past
+        // the guard. It is never a spending entry point (Emit.java and
+        // StackLower both filter it out by NAME) and the contract emitted an
+        // EMPTY locking script at exit 0.
         boolean hasPublic = false;
         for (AnfMethod m : methods) {
-            if (m.isPublic()) { hasPublic = true; break; }
+            if (m.isPublic() && !"constructor".equals(m.name())) { hasPublic = true; break; }
         }
         if (!hasPublic) {
             throw new RuntimeException(

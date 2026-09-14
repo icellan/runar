@@ -166,7 +166,15 @@ module RunarCompiler
       # malformed binding is the more actionable error when both are present
       # (load_ir raises errors[0]). Mirrors compilers/go/ir/loader.go,
       # including the ordering.
-      unless program.methods.any?(&:is_public)
+      #
+      # N-113: the CONSTRUCTOR does not count. This check mirrors
+      # frontend/validator.rb, but runs over a differently-shaped list: the
+      # AST keeps the constructor in its own field while ANF lowering flattens
+      # it INTO `program.methods`, so one `isPublic: true` on the constructor
+      # walked past the guard. It is never a spending entry point (emit and
+      # stack lowering both filter it out by NAME) and the contract emitted an
+      # EMPTY locking script at exit 0.
+      unless program.methods.any? { |m| m.is_public && m.name != 'constructor' }
         errors << "contract #{program.contract_name} has no public methods " \
                   "— no spending entry points; an empty locking script is " \
                   "anyone-can-spend"

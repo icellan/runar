@@ -115,9 +115,19 @@ func ValidateIR(program *ANFProgram) error {
 	//
 	// Checked LAST so the structural diagnostics above keep priority — a
 	// malformed binding is the more actionable error when both are present.
+	//
+	// N-113: the CONSTRUCTOR does not count. This loop was written to mirror
+	// frontend/validator.go's, but it runs over a differently-shaped list:
+	// the AST that validator scans keeps the constructor in its own field
+	// (ContractNode.Constructor), while ANF lowering flattens it INTO
+	// program.Methods. So a single `isPublic: true` on the constructor walked
+	// straight past this guard. It is never a spending entry point — both
+	// codegen/emit.go and codegen/stack.go filter it out by NAME — and the
+	// contract then emitted a locking script of "" at exit 0, with a
+	// well-formed artifact an SDK would deploy.
 	hasPublic := false
 	for _, method := range program.Methods {
-		if method.IsPublic {
+		if method.IsPublic && method.Name != "constructor" {
 			hasPublic = true
 			break
 		}

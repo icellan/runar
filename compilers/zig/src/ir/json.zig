@@ -183,9 +183,17 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     // Checked LAST so the structural diagnostics above keep priority — a
     // malformed binding is the more actionable error when both are present.
     // Mirrors compilers/go/ir/loader.go, including the ordering.
+    //
+    // N-113: the CONSTRUCTOR does not count. This mirrors passes/validate.zig,
+    // but runs over a differently-shaped list: the AST keeps the constructor
+    // in its own field while ANF lowering flattens it INTO the method list, so
+    // one `isPublic: true` on the constructor walked past the guard. It is
+    // never a spending entry point (emit and stack lowering both filter it out
+    // by NAME) and the contract emitted a bare OP_1 locking script at exit 0 —
+    // spendable with no witness at all.
     var has_public = false;
     for (method_list.items) |m| {
-        if (m.is_public) {
+        if (m.is_public and !std.mem.eql(u8, m.name, "constructor")) {
             has_public = true;
             break;
         }

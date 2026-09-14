@@ -177,7 +177,15 @@ def validate_ir(program: ANFProgram) -> list[str]:
     # Appended LAST so the structural diagnostics above keep priority -- a
     # malformed binding is the more actionable error when both are present.
     # Mirrors compilers/go/ir/loader.go, including the ordering.
-    if not any(m.is_public for m in program.methods):
+    #
+    # N-113: the CONSTRUCTOR does not count. This check mirrors
+    # frontend/validator.py, but runs over a differently-shaped list: the AST
+    # keeps the constructor in `self.contract.constructor` while ANF lowering
+    # flattens it INTO `program.methods`, so one `isPublic: true` on the
+    # constructor walked past the guard. It is never a spending entry point
+    # (emit and stack lowering both filter it out by NAME) and the contract
+    # emitted an EMPTY locking script at exit 0.
+    if not any(m.is_public and m.name != "constructor" for m in program.methods):
         errors.append(
             f"contract {program.contract_name} has no public methods "
             f"— no spending entry points; an empty locking script is "

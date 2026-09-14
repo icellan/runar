@@ -221,7 +221,19 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     // Checked LAST so the structural diagnostics above keep priority — a
     // malformed binding is the more actionable error when both are present.
     // Mirrors compilers/go/ir/loader.go, including the ordering.
-    if !program.methods.iter().any(|m| m.is_public) {
+    //
+    // N-113: the CONSTRUCTOR does not count. This check mirrors
+    // frontend/validator.rs, but runs over a differently-shaped list: the AST
+    // keeps the constructor in its own field while ANF lowering flattens it
+    // INTO `program.methods`, so one `isPublic: true` on the constructor
+    // walked past the guard. It is never a spending entry point (emit and
+    // stack lowering both filter it out by NAME) and the contract emitted an
+    // EMPTY locking script at exit 0.
+    if !program
+        .methods
+        .iter()
+        .any(|m| m.is_public && m.name != "constructor")
+    {
         return Err(format!(
             "IR validation: contract {} has no public methods — no spending entry points; an empty locking script is anyone-can-spend",
             program.contract_name
