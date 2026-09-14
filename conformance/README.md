@@ -300,6 +300,40 @@ Tuning knobs when a loaded host trips this:
 
 ---
 
+## What the byte-identical guarantee does NOT cover
+
+"All seven compilers produce byte-identical output" is true of exactly two
+things per fixture: the canonical **ANF IR JSON** and the **script hex**. Two
+places drop fields before comparing, both deliberately, and several artifact
+fields are never compared at all. Listed here because the gap that matters is
+not the stripping — it is a reader concluding the whole artifact is gated
+(R-302).
+
+**Stripped before the ANF comparison**
+
+| field | where | why |
+| --- | --- | --- |
+| `sourceLoc` | `runner/runner.ts` `sortKeys()` | source locations legitimately differ between parser implementations; they are debug data, not wire bytes |
+
+**Stripped by the sdk-vertical generator** (`sdk-vertical/generate.ts`,
+`STRIPPED`): `ir`, `anf`, `asm`, `sourceMap`, `buildTimestamp`. Those cases test
+what an SDK does with an artifact, not how the artifact was compiled.
+
+**Never compared by the main runner**
+
+- `constructorSlots` (including each slot's `byteOffset`)
+- `codeSeparatorIndex` and `codeSeparatorIndices`
+- `sourceMap`
+- `buildTimestamp` — deliberately, it is a build time; it is pinned instead by
+  each tier honouring `SOURCE_DATE_EPOCH` (R-212)
+
+`constructorSlots[].byteOffset` is the one to keep in mind. It is where the SDKs
+splice constructor arguments into the locking script, so a tier that computed it
+wrongly while emitting identical script hex would pass this gate and produce a
+deployed contract whose arguments land in the wrong place. What covers that today
+is `conformance/sdk-output/` (all seven SDKs must produce identical DEPLOYED
+locking scripts, which is splicing applied) and `sdk-vertical/`, not this suite.
+
 ## How to Add New Test Cases
 
 1. Create a new directory under `tests/` with a descriptive name:
