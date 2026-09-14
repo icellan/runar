@@ -6,7 +6,40 @@ Bitcoin Script → Rúnar TypeScript decompiler. v0, TypeScript-only output.
 
 A **left inverse** of `runar-compiler` on its own output. Given a hex Bitcoin Script that was produced by the TS compiler, this package recovers a `.runar.ts` source whose recompiled bytes are byte-identical to the input.
 
-**v0 status**: 59 / 63 corpus entries round-trip byte-identical (93.7%). The 4 holdouts are pre-peephole-optimization conformance fixtures from `compilerVersion: 0.1.0` that the current compiler can no longer reproduce — they are uncrossable under the current peephole-always-on defaults, not bugs.
+**v0 status** (read from `coverage.json`, generated 2026-08-18): **77 of 82 corpus
+entries round-trip byte-identical**, with **0 byte-diff, 0 compile-error, 0
+parse-error** and 5 skipped. Every entry the decompiler attempts round-trips —
+the 5 skips are the naive SLH-DSA contracts, whose 200–900 KB scripts are
+skipped by size rather than failed.
+
+Where the wins come from, same file's `pathBreakdown`:
+
+| path | wins |
+|---|---|
+| `template` | 72 |
+| `raw_script` | 4 |
+| `assert-recognizer` | 1 |
+| `symexec` | **0** |
+
+**The symbolic-execution lifter contributes nothing.** `src/symexec.ts` is the
+largest component here and recovers no entry that the template matcher and the
+assert recogniser do not already recover. That is a statement about the CORPUS,
+not a claim that the code is dead: the corpus is Rúnar-compiled output, which is
+exactly what template matching is best at. It matters because "the decompiler
+handles this" and "the template database happens to contain this" are different
+guarantees, and only the second is currently evidenced. Template-free
+decompilation of arbitrary Rúnar-compiled script remains the open item at the
+bottom of this file.
+
+R-218: this section used to carry a hand-written pass rate and a note about
+pre-peephole "holdouts". Both were stale — the figures matched neither the
+`coverage-baseline.json` CI floor nor the current `coverage.json`, and nothing
+is failing today, so there are no holdouts to describe.
+`tests/r218-decompiler-readme-matches-coverage.test.ts` now derives every number
+above from `coverage.json`, so this headline cannot drift from the artifact
+again. (The superseded figures are in the finding and in that test's header, not
+here — repeating a wrong number in the document that carries the right one is
+how the next reader gets confused.)
 
 ## What this is NOT
 
@@ -24,7 +57,7 @@ The pipeline tries each layer in order; the first that produces a byte-matching 
 
 1. **Exact-hex manifest** (`templates-data.json`). Generated at build time by walking every `.runar.ts` corpus contract and pairing its compiled scriptHex with the canonical source. Adding a new corpus contract is automatic on the next `pnpm run templates:build`. 58/63 wins land here.
 2. **Opcode-pattern templates** (`src/templates.ts`). Match opcode-name sequences regardless of constructor-arg byte values — covers shape-stable patterns like the canonical peephole-optimized P2PKH that re-occurs even when the surrounding contract differs.
-3. **Symbolic-assert recovery** (`src/symexec.ts`). Recognizes terminal `assert(true)` / `assert(false)` / chained-assert patterns; emits the matching source. Catches the `fixture/simple` case (1/63 wins land here).
+3. **Symbolic-assert recovery** (`src/symexec.ts`). Recognizes terminal `assert(true)` / `assert(false)` / chained-assert patterns; emits the matching source. One corpus entry lands here, and it is attributed to `assert-recognizer` rather than `symexec` in the path breakdown — `symexec` itself is credited with 0 (R-218).
 4. **RAW-fallback symbolic skeleton.** When no other layer fits, emit a wrapper class with `/* RAW: <hex> */` body + safety `assert(true)` terminator. Re-compile will not match, but the recovered source is human-readable.
 
 After the candidate is emitted, the **verify** step forward-compiles it via `runar-compiler` and byte-diffs against the target. A future refinement loop (skeleton in `src/refine.ts`) explores alternative fingerprints / type variants / branch swaps when the candidate diverges; v0 always uses the first candidate.
