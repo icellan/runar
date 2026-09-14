@@ -680,29 +680,64 @@ public final class StackLower {
     }
 
     /**
-     * R-095 — deploy-time byte GROWTH of the single OP_0 placeholder a
-     * constructor slot of this type occupies in the template, or {@code null}
-     * when the type has no compile-time width.
-     *
-     * <p>Mirrors the SDK's {@code encodeArg}: a fixed-size data type bakes as
-     * {@code <1-byte push header><N value bytes>}, so it grows the script by N;
-     * a boolean bakes as a single OP_TRUE/OP_0 opcode, so it grows it by
-     * nothing. {@code bigint} (minimally-encoded Script number) and
-     * {@code ByteString} (arbitrary-length data push) depend on the VALUE,
-     * which the compiler never sees — those return {@code null} and demote the
-     * pin to a lower bound.
+     * Baked value width, in bytes, of every fixed-size constructor-arg type.
+     * Mirrors the {@code raw}-encoded entries of the shared
+     * {@code STATE_FIELD_WIDTHS} table.
      */
-    private static Integer constructorSlotGrowth(String type) {
-        if (type == null) return null;
+    private static Integer constructorSlotValueBytes(String type) {
         return switch (type) {
             case "PubKey" -> 33;
             case "Sha256" -> 32;
             case "Addr", "Ripemd160" -> 20;
             case "Point", "P256Point" -> 64;
             case "P384Point" -> 96;
-            case "boolean" -> 0;
             default -> null;
         };
+    }
+
+    /**
+     * Byte length of the push header {@code encodePushData} puts in front of an
+     * N-byte payload: the length byte itself up to 75, then
+     * OP_PUSHDATA1 / 2 / 4.
+     */
+    private static int pushHeaderLen(int valueBytes) {
+        if (valueBytes <= 75) return 1;
+        if (valueBytes <= 0xff) return 2;
+        if (valueBytes <= 0xffff) return 3;
+        return 5;
+    }
+
+    /**
+     * R-095 — deploy-time byte GROWTH of the single OP_0 placeholder a
+     * constructor slot of this type occupies in the template, or {@code null}
+     * when the type has no compile-time width.
+     *
+     * <p>Mirrors the SDK's {@code encodeArg}: a fixed-size data type bakes as
+     * {@code <push header><N value bytes>} over a 1-byte placeholder, so it
+     * grows the script by {@code pushHeaderLen(N) + N - 1}.
+     *
+     * <p>The header is NOT always one byte, and this method used to assume it
+     * was. {@code P384Point} is 96 bytes — past the 75-byte direct-push
+     * ceiling — so the SDK bakes it through OP_PUSHDATA1 as
+     * {@code 4c 60 || <96>} and it grows the script by 97, not 96.
+     * Under-counting by one emits an {@code exact} pin one byte short, and
+     * every honest spend of such a contract fails OP_VERIFY with the funds
+     * already locked. Deriving the header from the width keeps the next type
+     * above 75 bytes from repeating that silently.
+     *
+     * <p>A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
+     * placeholder, so it grows the script by nothing. {@code bigint}
+     * (minimally-encoded Script number) and {@code ByteString}
+     * (arbitrary-length data push) depend on the VALUE, which the compiler
+     * never sees — those return {@code null} and demote the pin to a lower
+     * bound.
+     */
+    private static Integer constructorSlotGrowth(String type) {
+        if (type == null) return null;
+        if (type.equals("boolean")) return 0;
+        Integer valueBytes = constructorSlotValueBytes(type);
+        if (valueBytes == null) return null;
+        return pushHeaderLen(valueBytes) + valueBytes - 1;
     }
 
     /**

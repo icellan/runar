@@ -6078,16 +6078,9 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
     };
 }
 
-/// Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
-/// of this type occupies in the template, or null when the type has no
-/// compile-time width.
-///
-/// Mirrors the SDK's `encodeArg`: a fixed-size data type bakes as
-/// `<1-byte push header><N value bytes>`, growing the script by N; a boolean
-/// bakes as one OP_TRUE/OP_0 opcode byte, growing it by nothing. `bigint`
-/// (minimally-encoded Script number) and `ByteString` (arbitrary-length data
-/// push) depend on the VALUE, which the compiler never sees.
-fn constructorSlotGrowth(type_name: []const u8) ?i64 {
+/// Baked value width, in bytes, of every fixed-size constructor-arg type.
+/// Mirrors the `raw`-encoded entries of the shared STATE_FIELD_WIDTHS table.
+fn constructorSlotValueBytes(type_name: []const u8) ?i64 {
     if (std.mem.eql(u8, type_name, "PubKey")) return 33;
     if (std.mem.eql(u8, type_name, "Sha256")) return 32;
     if (std.mem.eql(u8, type_name, "Addr")) return 20;
@@ -6095,8 +6088,42 @@ fn constructorSlotGrowth(type_name: []const u8) ?i64 {
     if (std.mem.eql(u8, type_name, "Point")) return 64;
     if (std.mem.eql(u8, type_name, "P256Point")) return 64;
     if (std.mem.eql(u8, type_name, "P384Point")) return 96;
-    if (std.mem.eql(u8, type_name, "boolean")) return 0;
     return null;
+}
+
+/// Byte length of the push header `encodePushData` puts in front of an N-byte
+/// payload: the length byte itself up to 75, then OP_PUSHDATA1 / 2 / 4.
+fn pushHeaderLen(value_bytes: i64) i64 {
+    if (value_bytes <= 75) return 1;
+    if (value_bytes <= 0xff) return 2;
+    if (value_bytes <= 0xffff) return 3;
+    return 5;
+}
+
+/// Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
+/// of this type occupies in the template, or null when the type has no
+/// compile-time width.
+///
+/// Mirrors the SDK's `encodeArg`: a fixed-size data type bakes as
+/// `<push header><N value bytes>` over a 1-byte placeholder, so it grows the
+/// script by `pushHeaderLen(N) + N - 1`.
+///
+/// The header is NOT always one byte, and this function used to assume it was.
+/// `P384Point` is 96 bytes — past the 75-byte direct-push ceiling — so the SDK
+/// bakes it through OP_PUSHDATA1 as `4c 60 || <96>` and it grows the script by
+/// 97, not 96. Under-counting by one emits an `exact` pin one byte short, and
+/// every honest spend of such a contract fails OP_VERIFY with the funds already
+/// locked. Deriving the header from the width keeps the next type above 75
+/// bytes from repeating that silently.
+///
+/// A boolean bakes as one OP_TRUE/OP_0 opcode byte, the same width as the
+/// placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
+/// Script number) and `ByteString` (arbitrary-length data push) depend on the
+/// VALUE, which the compiler never sees.
+fn constructorSlotGrowth(type_name: []const u8) ?i64 {
+    if (std.mem.eql(u8, type_name, "boolean")) return 0;
+    const value_bytes = constructorSlotValueBytes(type_name) orelse return null;
+    return pushHeaderLen(value_bytes) + value_bytes - 1;
 }
 
 /// R-095 — resolve delta/exact on every `verify_code_part_len` instruction.

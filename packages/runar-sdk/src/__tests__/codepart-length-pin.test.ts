@@ -156,6 +156,37 @@ class VarLenVariableCtor extends StatefulSmartContract {
 }
 `;
 
+
+/**
+ * Variable-length state plus a readonly param whose baked width crosses the
+ * direct-push ceiling. `P384Point` is 96 bytes, and 96 > 75, so the SDK bakes
+ * it as `4c 60 || <96 bytes>` — a TWO-byte push header — replacing the 1-byte
+ * OP_0 placeholder with 98 bytes, not 97. Every other fixed-width type in the
+ * table (PubKey 33, Sha256 32, Addr/Ripemd160 20, Point/P256Point 64) fits in
+ * a direct push, so this is the one type that can catch a growth derivation
+ * that assumes a 1-byte header.
+ */
+const VARLEN_P384_CTOR = `
+import { StatefulSmartContract, assert } from 'runar-lang';
+import type { ByteString, P384Point } from 'runar-lang';
+
+class VarLenP384Ctor extends StatefulSmartContract {
+  memo: ByteString;
+  readonly anchor: P384Point;
+
+  constructor(memo: ByteString, anchor: P384Point) {
+    super(memo, anchor);
+    this.memo = memo;
+    this.anchor = anchor;
+  }
+
+  public post(newMemo: ByteString, claimed: P384Point) {
+    assert(this.anchor === claimed);
+    this.memo = newMemo;
+  }
+}
+`;
+
 /** Fixed-size state — clause 8a still covers it, so NO pin may be emitted. */
 const FIXED_STATE = `
 import { StatefulSmartContract } from 'runar-lang';
@@ -229,6 +260,30 @@ describe('R-095 code-part length pin', () => {
         expect(pin.exact).toBe(false);
         expect(pin.value).toBeLessThanOrEqual(deployedLen);
       }
+    }
+  });
+
+  it('an exact pin survives a readonly arg wider than the 75-byte direct-push ceiling', () => {
+    const r = compileOrThrow(VARLEN_P384_CTOR, 'VarLenP384Ctor.runar.ts');
+    const pins = decodePins(r.scriptHex!);
+    expect(pins.length).toBeGreaterThanOrEqual(1);
+
+    // A real 96-byte P-384 point, baked through the SDK's own encoder.
+    const anchor = 'ab'.repeat(96);
+    const contract = new RunarContract(r.artifact!, ['48656c6c6f', anchor]);
+    const deployedLen = contract.getCodePartHex().length / 2;
+
+    // The SDK really does spend two header bytes here — if this ever stops
+    // holding, the derivation below is measuring the wrong thing.
+    const slot = r.artifact!.constructorSlots!.find(s => s.type === 'P384Point')!;
+    expect(slot.fixedValueByteLength).toBe(96);
+    expect(slot.fixedPushHeaderBytes).toBe(2);
+    expect(deployedLen - r.scriptHex!.length / 2).toBe(97);
+
+    for (const pin of pins) {
+      expect(pin.exact).toBe(true);
+      // One byte short and OP_NUMEQUAL fails: funds locked at deploy.
+      expect(pin.value).toBe(deployedLen);
     }
   });
 

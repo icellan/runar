@@ -6173,30 +6173,59 @@ export function lowerToStack(program: ANFProgram): StackProgram {
 }
 
 /**
+ * Baked value width, in bytes, of every fixed-size constructor-arg type.
+ * Mirrors `STATE_FIELD_WIDTHS`' `raw`-encoded entries.
+ */
+const CONSTRUCTOR_SLOT_VALUE_BYTES: Readonly<Record<string, number>> = {
+  PubKey: 33,
+  Sha256: 32,
+  Addr: 20,
+  Ripemd160: 20,
+  Point: 64,
+  P256Point: 64,
+  P384Point: 96,
+};
+
+/**
+ * Byte length of the push header `encodePushData` puts in front of an N-byte
+ * payload: the length byte itself up to 75, then OP_PUSHDATA1 / 2 / 4.
+ */
+function pushHeaderLen(valueBytes: number): number {
+  if (valueBytes <= 75) return 1;
+  if (valueBytes <= 0xff) return 2;
+  if (valueBytes <= 0xffff) return 3;
+  return 5;
+}
+
+/**
  * Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot of
  * this type occupies in the template, or `null` when the type has no
  * compile-time width.
  *
  * Mirrors the SDK's `encodeArg` (packages/runar-sdk/src/contract.ts): a
- * fixed-size data type bakes as `<1-byte push header><N value bytes>`, so it
- * grows the script by N; a boolean bakes as a single OP_TRUE/OP_0 opcode, so
- * it grows it by nothing. `bigint` (minimally-encoded Script number) and
- * `ByteString` (arbitrary-length data push) depend on the VALUE, which the
- * compiler never sees — those return `null` and demote the pin to a lower
- * bound.
+ * fixed-size data type bakes as `<push header><N value bytes>` over a 1-byte
+ * placeholder, so it grows the script by `pushHeaderLen(N) + N - 1`.
+ *
+ * The header is NOT always one byte, and this function used to assume it was.
+ * `P384Point` is 96 bytes — past the 75-byte direct-push ceiling — so the SDK
+ * bakes it through OP_PUSHDATA1 as `4c 60 || <96>` and it grows the script by
+ * 97, not 96. Under-counting by one emits an `exact` pin one byte short, and
+ * every honest spend of such a contract fails OP_VERIFY with the funds already
+ * locked. Deriving the header from the width keeps the next type above 75
+ * bytes from repeating that silently.
+ *
+ * A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
+ * placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
+ * Script number) and `ByteString` (arbitrary-length data push) depend on the
+ * VALUE, which the compiler never sees — those return `null` and demote the
+ * pin to a lower bound.
  */
 function constructorSlotGrowth(type: string | undefined): number | null {
-  switch (type) {
-    case 'PubKey': return 33;
-    case 'Sha256': return 32;
-    case 'Addr':
-    case 'Ripemd160': return 20;
-    case 'Point':
-    case 'P256Point': return 64;
-    case 'P384Point': return 96;
-    case 'boolean': return 0;
-    default: return null;
-  }
+  if (type === undefined) return null;
+  if (type === 'boolean') return 0;
+  const valueBytes = CONSTRUCTOR_SLOT_VALUE_BYTES[type];
+  if (valueBytes === undefined) return null;
+  return pushHeaderLen(valueBytes) + valueBytes - 1;
 }
 
 /**
