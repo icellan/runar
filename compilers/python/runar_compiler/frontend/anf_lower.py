@@ -291,7 +291,7 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
         )
         if prop.initializer is not None and prop.name not in ctor_assigned:
             anf_prop.initial_value = _extract_literal_value(prop.initializer)
-            _check_state_bigint_magnitude(anf_prop)
+            _check_state_bigint_magnitude(anf_prop, prop.source_location)
         # Propagate synthetic FixedArray chain (set by expand_fixed_arrays)
         # so the artifact assembler can iteratively re-group synthetic runs.
         chain = getattr(prop, "synthetic_array_chain", None)
@@ -310,7 +310,7 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
 _STATE_BIGINT_MAGNITUDE_LIMIT = 1 << 63
 
 
-def _check_state_bigint_magnitude(prop: ANFProperty) -> None:
+def _check_state_bigint_magnitude(prop: ANFProperty, loc: object = None) -> None:
     """Reject a MUTABLE bigint property initialised beyond the 8-byte state word.
 
     The state section writes every bigint field with OP_NUM2BIN 8, which cannot
@@ -337,6 +337,7 @@ def _check_state_bigint_magnitude(prop: ANFProperty) -> None:
     if -_STATE_BIGINT_MAGNITUDE_LIMIT < value < _STATE_BIGINT_MAGNITUDE_LIMIT:
         return
     raise ValueError(
+        f"{_at(loc)}"
         f"Cannot compile state property '{prop.name}' initialised to {value}: it "
         "does not fit the fixed 8-byte sign-magnitude state word (magnitude must "
         "be < 2^63). Reduce the value, or make the property readonly if it is a "
@@ -1096,6 +1097,7 @@ class _LowerCtx:
             )
             if reason is not None:
                 raise ValueError(
+                    f"{_at(stmt.source_location)}"
                     "Cannot compile conditional that both declares outputs and "
                     f"{reason}. Move the addOutput/addRawOutput/addDataOutput "
                     "call after the if-statement."
@@ -1121,6 +1123,7 @@ class _LowerCtx:
         for _name in merged_locals:
             if _name in arm_props:
                 raise ValueError(
+                    f"{_at(stmt.source_location)}"
                     f"Local variable '{_name}' shadows contract property "
                     f"'this.{_name}', and the conditional assigns both. The "
                     f"branch's result slots are identified by name, so the two "
@@ -1940,6 +1943,22 @@ def _make_load_const_int(val: int) -> ANFValue:
     )
 
 
+def _at(loc: object) -> str:
+    """``file:line:column: `` prefix for an ANF-stage rejection.
+
+    R-180: the rejections raised during ANF lowering are ordinary input
+    rejections — the user wrote something the language does not accept — but
+    they arrived with no location, while every validation-stage rejection
+    carries one. Same spelling as ``Diagnostic.format_message`` so the two
+    stages read identically.
+    """
+    if loc is None or not getattr(loc, "file", ""):
+        return ""
+    if getattr(loc, "column", 0) > 0:
+        return f"{loc.file}:{loc.line}:{loc.column}: "
+    return f"{loc.file}:{loc.line}: "
+
+
 def _make_load_const_bool(val: bool) -> ANFValue:
     raw = val
     return ANFValue(
@@ -2392,12 +2411,14 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
     start = _extract_bigint_value(stmt.init.init if stmt.init else None)
     if start is None:
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             "Cannot determine loop start at compile time. For-loop iterators "
             "must start at an integer literal."
         )
 
     if not isinstance(stmt.condition, BinaryExpr):
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             "Cannot determine loop bound at compile time. For-loop bounds must "
             "be integer literals."
         )
@@ -2405,6 +2426,7 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
     bound = _extract_bigint_value(stmt.condition.right)
     if bound is None:
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             "Cannot determine loop bound at compile time. For-loop bounds must "
             "be integer literals."
         )
@@ -2419,6 +2441,7 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
             count = bound - start + 1
         else:
             raise ValueError(
+                f"{_at(stmt.source_location)}"
                 f"For loop counting up (i++) must use '<' or '<=' (got '{op}')."
             )
     else:
@@ -2428,6 +2451,7 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
             count = start - bound + 1
         else:
             raise ValueError(
+                f"{_at(stmt.source_location)}"
                 f"For loop counting down (i--) must use '>' or '>=' (got '{op}')."
             )
 
@@ -2439,6 +2463,7 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
     # CL-BUG-088.
     if count > MAX_LOOP_COUNT:
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             f"For loop unrolls to {count} iterations, exceeding the maximum "
             f"loop count of {MAX_LOOP_COUNT}."
         )
