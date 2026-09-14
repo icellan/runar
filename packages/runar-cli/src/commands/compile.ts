@@ -299,10 +299,25 @@ export async function compileCommand(
     }
 
     if (!compileResult.success || !compileResult.artifact) {
+      // Keep the location. `compile()` attaches a `loc` to most diagnostics and
+      // this used to `.map(d => d.message)` it away, so the reference tier
+      // printed a bare sentence where all six native tiers print
+      // `file:line:column: message`. A diagnostic with no `loc` (a parse
+      // failure before any node exists) still prints — the location is
+      // additive, never a filter.
       const errors = (compileResult.diagnostics ?? [])
         .filter(d => d.severity === 'error')
-        .map(d => d.message)
-        .filter((m): m is string => typeof m === 'string' && m.length > 0);
+        .map(d => {
+          const msg = d.message;
+          if (typeof msg !== 'string' || msg.length === 0) return '';
+          const loc = (d as { loc?: { file?: string; line?: number; column?: number } }).loc;
+          if (!loc || typeof loc.line !== 'number') return msg;
+          const where = [loc.file, loc.line, loc.column]
+            .filter(v => v !== undefined && v !== null)
+            .join(':');
+          return `${where}: ${msg}`;
+        })
+        .filter((m): m is string => m.length > 0);
 
       if (errors.length > 0) {
         console.error(`  Compilation failed:`);
