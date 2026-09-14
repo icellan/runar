@@ -396,10 +396,7 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     try std.testing.expectEqual(@as(usize, 0), try typecheckErrorCount(a, GOOD_BYTESTRING_WORDS));
     const hex = try compileHex(a, GOOD_BYTESTRING_WORDS, "PosWords.runar.ts");
     defer a.free(hex);
-    // R-187: 1778 -> 1776. The `if` reconcile's `roll` metadata now matches the
-    // depth it pushes, so the peephole folds `push 1|2 + roll` into OP_SWAP /
-    // OP_ROT.
-    try std.testing.expectEqual(@as(usize, 1776), hex.len);
+    try std.testing.expectEqual(@as(usize, 1778), hex.len);
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 

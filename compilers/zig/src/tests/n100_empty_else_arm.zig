@@ -204,7 +204,7 @@ const CONTROL_CASES = [_]Case{
     .{ .label = "ctl/ternary-no-call", .source = CTL_TERNARY_NO_CALL, .want = "7c63007768009c" },
     .{ .label = "ctl/then-arm-private-call", .source = CTL_THEN_ARM_PRIVATE_CALL, .want = "7c6367007768009c" },
     .{ .label = "ctl/statement-private-call", .source = CTL_STATEMENT_PRIVATE_CALL, .want = "76009c77" },
-    .{ .label = "ctl/if-statement-else-private-call", .source = CTL_IF_STATEMENT_ELSE_PRIVATE_CALL, .want = "007b630076537a7577677c767676537a757777687c75009c" },
+    .{ .label = "ctl/if-statement-else-private-call", .source = CTL_IF_STATEMENT_ELSE_PRIVATE_CALL, .want = "007b630076537a7577677c767676537a75777768517a75009c" },
     .{ .label = "ctl/else-arm-builtin-call", .source = CTL_ELSE_ARM_BUILTIN_CALL, .want = "7c630077679068009c" },
     .{ .label = "ctl/else-arm-nontrivial-helper", .source = CTL_ELSE_ARM_NONTRIVIAL_HELPER, .want = "7c630077678b68009c" },
     .{ .label = "ctl/if-statement-both-arms-call", .source = CTL_IF_STATEMENT_BOTH_ARMS_CALL, .want = "7c6300009c7767767c9c68" },

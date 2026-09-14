@@ -2608,7 +2608,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 				if ctx.sm.peekAtDepth(d) == name {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -2674,7 +2674,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 				if ctx.sm.peekAtDepth(d) == name {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)
@@ -2710,7 +2710,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 					} else {
 						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 						ctx.sm.push("")
-						ctx.emitOp(StackOp{Op: "roll", Depth: d})
+						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
 						ctx.sm.pop()
 						rolled := ctx.sm.removeAtDepth(d)
 						ctx.sm.push(rolled)
@@ -2734,7 +2734,7 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 					} else {
 						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 						ctx.sm.push("")
-						ctx.emitOp(StackOp{Op: "roll", Depth: d})
+						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
 						ctx.sm.pop()
 						rolled := ctx.sm.removeAtDepth(d)
 						ctx.sm.push(rolled)
@@ -2964,7 +2964,7 @@ func (ctx *loweringContext) lowerUpdateProp(propName, valueRef string, bindingIn
 				} else {
 					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
 					ctx.sm.push("")
-					ctx.emitOp(StackOp{Op: "roll", Depth: d})
+					ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
 					ctx.sm.pop()
 					rolled := ctx.sm.removeAtDepth(d)
 					ctx.sm.push(rolled)

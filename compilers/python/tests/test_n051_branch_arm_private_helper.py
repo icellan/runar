@@ -157,12 +157,12 @@ def compile_script_hex(source: str, disable_constant_folding: bool) -> str:
         (
             "if-statement-arm",
             IF_STATEMENT_ARM,
-            "007800a0637c8b767676537a757777670076537a7577687c7500a2",
+            "007800a0637c8b767676537a757777670076537a757768517a7500a2",
         ),
         (
             "if-statement-arm-no-helper",
             IF_STATEMENT_ARM_NO_HELPER,
-            "007800a0637c8b7677670076537a7577687c7500a2",
+            "007800a0637c8b7677670076537a757768517a7500a2",
         ),
         ("statement-position", STATEMENT_POSITION, "8b00a2"),
     ],
