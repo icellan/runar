@@ -251,6 +251,54 @@ const first: PubKey = keys[0n];
 - Represented as N consecutive stack items in Script.
 - Supports index read (`arr[i]`), index write (`arr[i] = val`), and `.length`.
 
+#### Out-of-range indices
+
+A **literal** index outside `0..N-1` is a compile error, in every tier.
+
+A **runtime** index is not bounds-checked, and this is the one place where
+Rúnar's behaviour is not what a TypeScript author expects. Measured on
+`FixedArray<bigint, 4> = [10n, 20n, 30n, 40n]`:
+
+| shape | index | result |
+|-------|-------|--------|
+| read, in an expression (`arr[i] + 0n`) | `0n` | `10n` |
+| read, in an expression | `3n` | `40n` |
+| read, in an expression | `4n` | **`40n`** — the last element |
+| read, in an expression | `99n` | **`40n`** — the last element |
+
+The out-of-range read does not fail. The spend is accepted by the AST
+interpreter, by the `@bsv/sdk` ScriptVM, and by the full-consensus
+`Spend.validate()` leg, so nothing downstream rejects it either: a contract that
+reads past the end silently computes with the last element.
+
+The reason is structural. A runtime-indexed read lowers to a nested ternary
+chain, `(i === 0n) ? a0 : ((i === 1n) ? a1 : ... : a{N-1})`, whose terminal arm
+is the last slot. An expression cannot run `assert(false)`, so there is nowhere
+in the chain to put the refusal.
+
+**Bounds-check runtime indices yourself** when the index can exceed `N-1`:
+
+```typescript
+assert(within(i, 0n, 4n));   // then arr[i] is safe
+```
+
+Two related behaviours, recorded because they are easy to assume otherwise:
+
+- A runtime-indexed read in *statement* position (the direct right-hand side of
+  an assignment, a variable declaration, or an expression statement) lowers to an
+  `if`/`else` chain instead, which the compiler can and does terminate with a
+  refusal.
+- A runtime-indexed **write** out of range does not fail in the AST interpreter
+  either — it silently writes nothing. The source comments in
+  `03b-expand-fixed-arrays.ts` describe the emitted script's write chain as
+  ending in `else { assert(false); }`; that claim is about the Script path and is
+  not what the interpreter does.
+
+This is a v1 limitation, not a design goal — `03b-expand-fixed-arrays.ts` calls
+the clamping read "wrong" in its own comments. Enforcing it would add a bounds
+check to every runtime-indexed read, which moves script bytes, so it is deferred
+rather than papered over.
+
 ### Disallowed Types
 
 `number`, `string`, `any`, `unknown`, `never`, `null`, `undefined`, `Array<T>`, `T[]`, object types, interfaces, type aliases, union types, `Map`, `Set`, `Promise`, and all standard library types.
