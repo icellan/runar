@@ -85,10 +85,23 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     def self.move_snake_to_camel(name)
-      # Mirror the canonical TS Move parser regex `/_([a-z0-9])/g`: only
-      # collapse `_<lowercase|digit>` — preserve `_<uppercase>` boundaries
-      # (e.g. `verifyECDSA_P256`) so cross-format identifiers stay intact.
-      name.gsub(/_([a-z0-9])/) { ::Regexp.last_match(1).upcase }
+      # Split on `_` and capitalize the first character of every following
+      # part, skipping empty parts — the shared R-113 rule, identical to
+      # `snakeToCamelCore` (TS), `snakeToCamel` (Go/Zig/Java) and
+      # `snake_to_camel` (Rust/Python) for this surface.
+      #
+      # The comment this replaces claimed the old `gsub(/_([a-z0-9])/)` form
+      # mirrored the canonical TS Move parser. It did not: TS moved onto
+      # `snakeToCamelCore` in the first R-113 sweep, and on a `.runar.move`
+      # contract with a property `total_A` this tier ALONE emitted `total_A`
+      # while the other six emitted `totalA`. Nothing preserves an
+      # `_<uppercase>` boundary any more; builtins that need one (e.g.
+      # `verifyECDSA_P256`) are anchored on the RAW token by
+      # MOVE_ANCHORED_NAMES, consulted before this function.
+      parts = name.split("_", -1)
+      return name if parts.length <= 1
+
+      parts[0] + parts[1..].reject(&:empty?).map { |part| part[0].upcase + part[1..] }.join
     end
 
     # -------------------------------------------------------------------
@@ -147,6 +160,17 @@ module RunarCompiler
       "ecPointX" => "ecPointX", "ecPointY" => "ecPointY",
       # SHA-256 partial
       "sha256Compress" => "sha256Compress", "sha256Finalize" => "sha256Finalize",
+    }.freeze
+
+    # R-113: builtin names carrying an underscore before a CAPITAL, matched on
+    # the RAW token before any snake -> camel conversion. Mirrors +preserved+
+    # in packages/runar-compiler/src/passes/01-parse-move.ts and the raw
+    # spellings in Go's +moveBuiltinMap+.
+    MOVE_ANCHORED_NAMES = {
+      "verifyECDSA_P256"  => "verifyECDSA_P256",
+      "verifyECDSA_P384"  => "verifyECDSA_P384",
+      "verify_ecdsa_p256" => "verifyECDSA_P256",
+      "verify_ecdsa_p384" => "verifyECDSA_P384",
     }.freeze
 
     def self.move_map_builtin(name)
@@ -1307,6 +1331,18 @@ module RunarCompiler
         # Identifier
         if tok.kind == TOK_IDENT
           advance
+          # R-113: consult the anchored table on the RAW name first, mirroring
+          # the TS tier (+preserved+ in 01-parse-move.ts) and the Go tier
+          # (+moveMapBuiltin+, whose map carries the raw spellings). Several
+          # Runar builtin names legitimately contain an underscore before a
+          # CAPITAL -- +verifyECDSA_P256+ -- and the old +gsub(/_([a-z0-9])/)+
+          # preserved them only by accident, because it refused to uppercase
+          # after +_+ unless the next character was lower-case. Now that the
+          # normalisation matches the other six tiers, they have to be
+          # anchored explicitly.
+          anchored = MOVE_ANCHORED_NAMES[tok.value]
+          return Identifier.new(name: anchored) if anchored
+
           name = Frontend.move_snake_to_camel(tok.value)
           mapped = Frontend.move_map_builtin(name)
           return Identifier.new(name: mapped)

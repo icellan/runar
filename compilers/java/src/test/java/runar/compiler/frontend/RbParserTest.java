@@ -22,6 +22,7 @@ import runar.compiler.ir.ast.PropertyAccessExpr;
 import runar.compiler.ir.ast.PropertyNode;
 import runar.compiler.ir.ast.ReturnStatement;
 import runar.compiler.ir.ast.UnaryExpr;
+import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -373,14 +374,50 @@ class RbParserTest {
     }
 
     @Test
-    void preservesEcConstantNameUnchanged() {
-        // EC_P / EC_N / EC_G have uppercase letters after underscores so the
-        // snake_case→camelCase regex must NOT touch them.
-        assertEquals("EC_P", RbParser.snakeToCamel("EC_P"));
-        assertEquals("EC_N", RbParser.snakeToCamel("EC_N"));
-        // Mixed: lowercase after underscore *is* converted.
+    void preservesEcConstantNameUnchanged() throws Exception {
+        // EC_P / EC_N / EC_G reach the AST unchanged because SPECIAL_NAMES is
+        // consulted BEFORE snakeToCamel, which is where the go/ts/rust/zig
+        // tiers protect them too. Asserted end-to-end, through the parser:
+        // this test used to assert it on the raw snakeToCamel helper instead,
+        // which pinned the old `/_([a-z0-9])/` rule in place and made this
+        // tier disagree with the other six about every OTHER identifier of
+        // the shape `total_A` (R-113).
+        String src = """
+            require 'runar'
+            class O < Runar::SmartContract
+              prop :x, Bigint, readonly: true
+
+              runar_public
+              def go
+                z = EC_P
+                assert z > 0
+              end
+            end
+            """;
+        ContractNode c = parse(src, "O.runar.rb");
+        MethodNode go = c.methods().stream().filter(m -> m.name().equals("go")).findFirst().orElseThrow();
+        VariableDeclStatement decl = (VariableDeclStatement) go.body().get(0);
+        assertInstanceOf(Identifier.class, decl.init());
+        assertEquals("EC_P", ((Identifier) decl.init()).name());
+    }
+
+    @Test
+    void snakeToCamelUsesTheSharedSevenTierRule() {
+        // R-113: split on `_`, capitalise the first character of every
+        // following part. Identical to snakeToCamelCore (TS), rbConvertName
+        // (Go), snake_to_camel (Rust) and snakeToCamel (Zig).
+        //
+        // `total_A` is the boundary the old rule got wrong: it uppercased
+        // only a lower-case letter or digit after the underscore, so this
+        // tier emitted the artifact state field `total_A` where ts/go/rust/
+        // zig emitted `totalA`. The script hex is identical either way.
+        assertEquals("totalA", RbParser.snakeToCamel("total_A"));
+        assertEquals("totalB", RbParser.snakeToCamel("total_b"));
+        assertEquals("total1", RbParser.snakeToCamel("total_1"));
         assertEquals("pubKeyHash", RbParser.snakeToCamel("pub_key_hash"));
-        // Leading underscore stripped, no capitalisation of first letter.
+        assertEquals("fooBar", RbParser.snakeToCamel("foo__bar"));
+        assertEquals("count", RbParser.snakeToCamel("count"));
+        // Leading underscore stripped, no capitalisation of the first letter.
         assertEquals("requireOwner", RbParser.snakeToCamel("_require_owner"));
     }
 

@@ -19,8 +19,6 @@ Ruby syntax conventions used in Runar contracts:
 
 from __future__ import annotations
 
-import re
-
 from runar_compiler.frontend.ast_nodes import (
     ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
@@ -234,17 +232,27 @@ _PASSTHROUGH_NAMES: frozenset[str] = frozenset({
 def _snake_to_camel(name: str) -> str:
     """Convert a snake_case identifier to camelCase.
 
-    Only capitalizes lowercase letters and digits after underscores, matching
-    the TS reference: ``name.replace(/_([a-z0-9])/g, ...)``.  This means
-    ``EC_P`` passes through unchanged (uppercase P is not matched).
+    Split on ``_`` and capitalize the first character of every following part,
+    skipping empty parts. This is the shared R-113 rule — the same algorithm as
+    ``snakeToCamelCore`` (TS), ``rbConvertName`` (Go), ``snake_to_camel``
+    (Rust) and ``snakeToCamel`` (Zig).
+
+    It used to be ``re.sub(r"_([a-z0-9])", ...)``, which uppercases only a
+    lower-case letter or digit after the underscore and leaves ``_`` before a
+    CAPITAL in place: a property ``total_A`` reached the artifact as
+    ``total_A`` here and as ``totalA`` in ts/go/rust/zig. The script hex is
+    identical either way, so hex parity never saw it — but ``serializeState``
+    looks state up by ``field.name``, so the two spellings do not interoperate.
 
     Leading underscores are stripped so that ``_require_owner`` becomes
-    ``requireOwner`` (not ``RequireOwner``).
+    ``requireOwner`` (not ``RequireOwner``). An all-underscore name has nothing
+    left to convert and is returned unchanged, as in the Go tier.
     """
-    leading = len(name) - len(name.lstrip("_"))
-    if leading > 0:
-        return re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), name[leading:])
-    return re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), name)
+    stripped = name.lstrip("_")
+    if not stripped:
+        return name
+    head, *rest = stripped.split("_")
+    return head + "".join(part[0].upper() + part[1:] for part in rest if part)
 
 
 def _map_builtin_name(name: str) -> str:

@@ -314,11 +314,22 @@ module RunarCompiler
     # ignores unknown keys, so a +@sighash SINGLE|FORKID+ covenant
     # round-tripped through +--emit-ir+ as ALL|FORKID: one byte, same script
     # length, wrong sighash mode.
+    #
+    # R-113: split on +_+ and capitalize the first character of every
+    # following part — the same rule as the Python tier's +_snake_key+ and
+    # every parser's +snake_to_camel+. The +gsub(/_([a-z0-9])/)+ form this
+    # replaces was the fourth surviving copy of the old rule, which leaves
+    # +_+ before a CAPITAL in place. No ANF field name has that shape today,
+    # so this moves no wire byte; it is here so the repo has ONE rule and the
+    # next field named with an upper-case segment does not re-open N-094.
     def _snake_key(k)
       return FIELD_ALIASES[k] if FIELD_ALIASES.key?(k)
       return k if SNAKE_WIRE_FIELDS.include?(k)
 
-      k.gsub(/_([a-z0-9])/) { Regexp.last_match(1).upcase }
+      parts = k.split("_", -1)
+      return k if parts.length <= 1
+
+      parts[0] + parts[1..].reject(&:empty?).map { |part| part[0].upcase + part[1..] }.join
     end
 
     # Convert an ANF dataclass tree to a dict matching Go/TS IR JSON format.

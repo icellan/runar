@@ -251,29 +251,42 @@ public final class RbParser {
     );
 
     /**
-     * Convert a snake_case identifier to camelCase. Only capitalises
-     * lower-case letters or digits following an underscore (so {@code EC_P}
-     * is left untouched). Strips leading underscores so {@code _foo_bar}
-     * becomes {@code fooBar}.
+     * Convert a snake_case identifier to camelCase: split on {@code _} and
+     * capitalise the first character of every following part, skipping empty
+     * parts. This is the shared R-113 rule — the same algorithm as
+     * {@code snakeToCamelCore} (TS), {@code rbConvertName} (Go),
+     * {@code snake_to_camel} (Rust) and {@code snakeToCamel} (Zig), and the
+     * one {@link MoveParser} and {@link RustParser} already used here.
+     *
+     * <p>This method used to walk the characters and uppercase only a
+     * lower-case letter or digit following the underscore, leaving {@code _}
+     * before a CAPITAL in place — the {@code /_([a-z0-9])/} rule spelled out
+     * by hand, which is why grepping for that pattern did not find it. A
+     * property {@code total_A} reached the artifact as {@code total_A} here
+     * and as {@code totalA} in ts/go/rust/zig. The script hex is identical
+     * either way, so hex parity never saw it — but {@code serializeState}
+     * looks state up by {@code field.name}, so the two spellings do not
+     * interoperate.
+     *
+     * <p>Strips leading underscores so {@code _foo_bar} becomes
+     * {@code fooBar}. An all-underscore name has nothing left to convert and
+     * is returned unchanged, as in the Go tier.
      */
     static String snakeToCamel(String name) {
         int leading = 0;
         while (leading < name.length() && name.charAt(leading) == '_') {
             leading++;
         }
-        String s = name.substring(leading);
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '_' && i + 1 < s.length()) {
-                char next = s.charAt(i + 1);
-                if ((next >= 'a' && next <= 'z') || (next >= '0' && next <= '9')) {
-                    sb.append(Character.toUpperCase(next));
-                    i++;
-                    continue;
-                }
-            }
-            sb.append(c);
+        String stripped = name.substring(leading);
+        if (stripped.isEmpty()) return name;
+        String[] parts = stripped.split("_", -1);
+        if (parts.length <= 1) return stripped;
+        StringBuilder sb = new StringBuilder(stripped.length());
+        sb.append(parts[0]);
+        for (int i = 1; i < parts.length; i++) {
+            String part = parts[i];
+            if (part.isEmpty()) continue;
+            sb.append(Character.toUpperCase(part.charAt(0))).append(part.substring(1));
         }
         return sb.toString();
     }

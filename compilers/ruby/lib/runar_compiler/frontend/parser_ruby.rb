@@ -225,16 +225,29 @@ module RunarCompiler
 
     # Convert a snake_case identifier to camelCase.
     #
-    # Only capitalizes lowercase letters and digits after underscores, matching
-    # the TS reference: +name.replace(/_([a-z0-9])/g, ...)+. This means
-    # +EC_P+ passes through unchanged (uppercase P is not matched).
+    # Split on +_+ and capitalize the first character of every following part,
+    # skipping empty parts. This is the shared R-113 rule — the same algorithm
+    # as +snakeToCamelCore+ (TS), +rbConvertName+ (Go), +snake_to_camel+
+    # (Rust) and +snakeToCamel+ (Zig).
+    #
+    # It used to be +gsub(/_([a-z0-9])/)+, which uppercases only a lower-case
+    # letter or digit after the underscore and leaves +_+ before a CAPITAL in
+    # place: a property +total_A+ reached the artifact as +total_A+ here and
+    # as +totalA+ in ts/go/rust/zig. The script hex is identical either way,
+    # so hex parity never saw it — but +serializeState+ looks state up by
+    # +field.name+, so the two spellings do not interoperate.
     #
     # Leading underscores are stripped so that +_require_owner+ becomes
-    # +requireOwner+ (not +RequireOwner+).
+    # +requireOwner+ (not +RequireOwner+). An all-underscore name has nothing
+    # left to convert and is returned unchanged, as in the Go tier.
     def self.snake_to_camel(name)
-      leading = name.length - name.sub(/\A_+/, "").length
-      stripped = leading > 0 ? name[leading..] : name
-      stripped.gsub(/_([a-z0-9])/) { ::Regexp.last_match(1).upcase }
+      stripped = name.sub(/\A_+/, "")
+      return name if stripped.empty?
+
+      parts = stripped.split("_", -1)
+      return stripped if parts.length <= 1
+
+      parts[0] + parts[1..].reject(&:empty?).map { |part| part[0].upcase + part[1..] }.join
     end
 
     # Map a Ruby snake_case name to its Runar AST callee name.
