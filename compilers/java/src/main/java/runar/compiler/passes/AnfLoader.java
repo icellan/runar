@@ -462,7 +462,7 @@ public final class AnfLoader {
                 asString(obj.get("iterVar")),
                 // Iterator start / step (issue #121). Older payloads without
                 // these describe zero-start counting-up loops.
-                obj.containsKey("start") ? asBigInt(obj.get("start")) : BigInteger.ZERO,
+                obj.containsKey("start") ? loopStart(obj.get("start")) : BigInteger.ZERO,
                 obj.containsKey("step") ? asInt(obj.get("step"), "loop step") : 1
             );
             case "assert" -> new Assert(
@@ -650,6 +650,57 @@ public final class AnfLoader {
         if (v instanceof Long l) return BigInteger.valueOf(l);
         if (v instanceof Integer i) return BigInteger.valueOf(i);
         throw new RuntimeException("expected integer, got " + (v == null ? "null" : v.getClass()));
+    }
+
+    /**
+     * A {@code loop}'s iterator start: a JSON integer, or the sanctioned
+     * {@code "<decimal>n"} string for a start too wide for a tier's native
+     * integer (issue #121).
+     *
+     * <p>The schema has said {@code integer | string} all along, and the
+     * {@code n}-suffixed decimal string is the same encoding
+     * {@code load_const.value} and {@code ANFProperty.initialValue} already
+     * use — both of which this loader already accepts as strings.
+     * {@code loop.start} was the one place the arm was missing, so this tier
+     * refused ({@code exit 65}, "expected integer, got class
+     * java.lang.String") a payload its five peers accepted and agreed on
+     * byte-for-byte.
+     *
+     * <p>The suffix is REQUIRED, and that narrowness is the point. The peers
+     * agree on {@code "0n"} / {@code "5n"} / {@code "-3n"} and on nothing
+     * else: {@code "5"} reads as 5 in go/python/zig/ruby and as 0 in rust;
+     * {@code "abc"}, {@code ""} and {@code "5nn"} are refused by go and python
+     * and read as 0 by rust/zig/ruby. There is no majority answer to adopt for
+     * any of those, so they keep the existing refusal. Refusing an input the
+     * tiers disagree about is the safe side of that line — the alternative is
+     * silently inventing a loop start, which is the class of defect N-131 was
+     * about.
+     *
+     * <p>Strips exactly ONE trailing {@code n} and then requires the remainder
+     * to be a plain decimal, so {@code "5nn"} and {@code "n"} stay refused and
+     * a float-shaped {@code "1.5n"} cannot sneak a float back in through the
+     * string arm.
+     */
+    private static BigInteger loopStart(Object v) {
+        if (v instanceof String s) {
+            if (s.length() >= 2 && s.charAt(s.length() - 1) == 'n') {
+                String decimal = s.substring(0, s.length() - 1);
+                try {
+                    return new BigInteger(decimal);
+                } catch (NumberFormatException e) {
+                    throw new RuntimeException(
+                        "loop start: expected a decimal integer before the `n` suffix, got \"" + s + "\"");
+                }
+            }
+            throw new RuntimeException(
+                "loop start: a string start must be the `<decimal>n` form, got \"" + s + "\"");
+        }
+        if (v instanceof BigInteger bi) return bi;
+        if (v instanceof Long l) return BigInteger.valueOf(l);
+        if (v instanceof Integer i) return BigInteger.valueOf(i);
+        throw new RuntimeException(
+            "loop start: expected an integer or a `<decimal>n` string, got "
+                + (v == null ? "null" : v.getClass()));
     }
 
     // ------------------------------------------------------------------
