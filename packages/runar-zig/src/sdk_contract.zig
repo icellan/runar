@@ -195,7 +195,16 @@ pub const RunarContract = struct {
         if (artifact.state_fields.len > 0) {
             state_vals = try allocator.alloc(types.StateValue, artifact.state_fields.len);
             for (artifact.state_fields, 0..) |field, i| {
-                if (field.initial_value) |init_val| {
+                if (field.initial_array) |leaves| {
+                    // A FixedArray field's compile-time default. Parse each
+                    // leaf against the array's LEAF type and regroup into the
+                    // declared shape, so the serializer writes the values the
+                    // contract declared. This branch used to be unreachable —
+                    // the array was dropped on parse — and the field fell
+                    // through to `.int = 0`, deploying N zero words whatever
+                    // the source said.
+                    state_vals[i] = buildInitialArrayValue(allocator, field, leaves) catch .{ .int = 0 };
+                } else if (field.initial_value) |init_val| {
                     // Parse initial value string based on type
                     state_vals[i] = parseInitialValue(allocator, init_val, field.type_name) catch .{ .int = 0 };
                 } else if (field.index >= 0 and @as(usize, @intCast(field.index)) < constructor_args.len) {
@@ -3431,6 +3440,35 @@ fn anfToStateValue(allocator: std.mem.Allocator, av: anf_interp.ANFValue) !types
 // ---------------------------------------------------------------------------
 // Helper: parse initial value string to StateValue
 // ---------------------------------------------------------------------------
+
+/// Build the grouped `.array_value` for a FixedArray state field from its
+/// flattened per-leaf default literals.
+fn buildInitialArrayValue(
+    allocator: std.mem.Allocator,
+    field: types.StateField,
+    leaves: []const []const u8,
+) !types.StateValue {
+    const leaf_type = state_mod.unwrapFixedArrayLeaf(field.type_name);
+
+    const flat = try allocator.alloc(types.StateValue, leaves.len);
+    var filled: usize = 0;
+    defer {
+        for (flat[0..filled]) |v| v.deinit(allocator);
+        allocator.free(flat);
+    }
+    for (leaves) |leaf| {
+        flat[filled] = parseInitialValue(allocator, leaf, leaf_type) catch types.StateValue{ .int = 0 };
+        filled += 1;
+    }
+
+    var dims_buf: [state_mod.MAX_FIXED_ARRAY_DIMS]u32 = undefined;
+    const dims = state_mod.parseFixedArrayDims(field.type_name, &dims_buf);
+    // A declared shape that does not multiply out to the leaf count means the
+    // artifact's `type` and its `initialValue` disagree; keep the leaves as one
+    // flat array rather than dropping the default entirely.
+    return state_mod.regroupStateValues(allocator, flat[0..filled], dims) catch
+        try state_mod.regroupStateValues(allocator, flat[0..filled], &[_]u32{@intCast(filled)});
+}
 
 fn parseInitialValue(allocator: std.mem.Allocator, init_str: []const u8, type_name: []const u8) !types.StateValue {
     if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "bigint")) {

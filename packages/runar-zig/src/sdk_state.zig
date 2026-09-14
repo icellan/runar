@@ -29,7 +29,19 @@ pub fn serializeState(
 
     for (sorted) |field_idx| {
         if (field_idx >= values.len) continue;
-        const encoded = try encodeStateValue(allocator, values[field_idx], fields[field_idx].type_name);
+        const field = fields[field_idx];
+        // A FixedArray field occupies one state slot PER LEAF ELEMENT, not one
+        // slot in total. Its `type_name` is the whole `"FixedArray<bigint, 4>"`
+        // string, which matches no scalar case in `encodeStateValue`, so
+        // dispatching on it alone fell through to the variable-length branch
+        // and wrote the single byte `00` where the contract's own on-chain
+        // reader rebuilds N fixed-width words (32 bytes for a 4-element bigint
+        // array). The deploy succeeded and the UTXO was unspendable.
+        if (field.fixed_array) |fa| {
+            try appendFixedArrayField(allocator, &hex_out, field, fa, values[field_idx]);
+            continue;
+        }
+        const encoded = try encodeStateValue(allocator, values[field_idx], field.type_name);
         defer allocator.free(encoded);
         try hex_out.appendSlice(allocator, encoded);
     }
@@ -62,7 +74,14 @@ pub fn deserializeState(
 
     var offset: usize = 0;
     for (sorted) |field_idx| {
-        const decoded = try decodeStateValue(allocator, script_hex, offset, fields[field_idx].type_name);
+        const field = fields[field_idx];
+        if (field.fixed_array) |fa| {
+            const read = try readFixedArrayField(allocator, field, fa, script_hex, offset);
+            result[field_idx] = read.value;
+            offset += read.hex_chars_read;
+            continue;
+        }
+        const decoded = try decodeStateValue(allocator, script_hex, offset, field.type_name);
         result[field_idx] = decoded.value;
         offset += decoded.hex_chars_read;
     }
@@ -635,6 +654,153 @@ pub fn encodeArg(allocator: std.mem.Allocator, value: types.StateValue) ![]u8 {
 // ---------------------------------------------------------------------------
 // FixedArray flatten / regroup for state values
 // ---------------------------------------------------------------------------
+
+/// Maximum `FixedArray<...>` nesting depth the state codec walks. Deeper types
+/// are truncated to this many dimensions rather than recursing without bound;
+/// no compiler tier emits anything close.
+pub const MAX_FIXED_ARRAY_DIMS = 8;
+
+/// Index of the last TOP-LEVEL `,` in `inner` — depth 0 with respect to
+/// `<`/`>`, scanned from the right, exactly like the TS and Go tiers. That is
+/// what separates `FixedArray<FixedArray<bigint, 2>, 3>`'s element type from
+/// its length without being fooled by the inner comma.
+fn splitLastTopLevelComma(inner: []const u8) ?usize {
+    var depth: i32 = 0;
+    var i: usize = inner.len;
+    while (i > 0) {
+        i -= 1;
+        const ch = inner[i];
+        if (ch == '>') {
+            depth += 1;
+        } else if (ch == '<') {
+            depth -= 1;
+        } else if (ch == ',' and depth == 0) {
+            return i;
+        }
+    }
+    return null;
+}
+
+/// Parse a nested `FixedArray<...>` type string into its dimensions,
+/// outermost-first, writing into `buf` and returning the filled prefix:
+///
+///     "FixedArray<bigint, 9>"                            -> { 9 }
+///     "FixedArray<FixedArray<bigint, 2>, 3>"             -> { 3, 2 }
+///     "FixedArray<FixedArray<FixedArray<bigint,2>,3>,4>" -> { 4, 3, 2 }
+///
+/// A non-FixedArray type yields an empty slice. Mirrors `parseFixedArrayDims`
+/// in packages/runar-sdk/src/state.ts and packages/runar-go/sdk_state.go.
+pub fn parseFixedArrayDims(type_name: []const u8, buf: []u32) []u32 {
+    var n: usize = 0;
+    var current = std.mem.trim(u8, type_name, " ");
+    while (n < buf.len and
+        std.mem.startsWith(u8, current, "FixedArray<") and
+        std.mem.endsWith(u8, current, ">"))
+    {
+        const inner = current["FixedArray<".len .. current.len - 1];
+        const split = splitLastTopLevelComma(inner) orelse break;
+        const len_str = std.mem.trim(u8, inner[split + 1 ..], " ");
+        const len = std.fmt.parseInt(u32, len_str, 10) catch break;
+        if (len == 0) break;
+        buf[n] = len;
+        n += 1;
+        current = std.mem.trim(u8, inner[0..split], " ");
+    }
+    return buf[0..n];
+}
+
+/// Return the innermost scalar type of a (possibly nested) FixedArray string.
+///
+/// This is deliberately NOT `FixedArrayInfo.element_type`: for a nested array
+/// that field is the IMMEDIATE child (`"FixedArray<bigint, 2>"`), which is not
+/// a scalar `encodeStateValue` knows, so encoding against it would take the
+/// push-data branch and produce a state section the script cannot read.
+pub fn unwrapFixedArrayLeaf(type_name: []const u8) []const u8 {
+    var current = std.mem.trim(u8, type_name, " ");
+    while (std.mem.startsWith(u8, current, "FixedArray<") and
+        std.mem.endsWith(u8, current, ">"))
+    {
+        const inner = current["FixedArray<".len .. current.len - 1];
+        const split = splitLastTopLevelComma(inner) orelse return current;
+        current = std.mem.trim(u8, inner[0..split], " ");
+    }
+    return current;
+}
+
+/// Append the `fa.synthetic_names.len` leaf words a FixedArray state field
+/// occupies. The caller may pass the value grouped (`.array_value`, nested to
+/// any depth); it is flattened depth-first into leaf order.
+///
+/// A leaf the caller did not supply is written as the scalar DEFAULT, never
+/// skipped: a state section short of what the contract's on-chain reader
+/// rebuilds is unspendable, so padding is the only non-destructive choice.
+/// Matches the Go tier, where a missing element reaches `encodeStateValue` as
+/// a nil `interface{}` and encodes as a zero word.
+fn appendFixedArrayField(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    field: types.StateField,
+    fa: types.FixedArrayInfo,
+    value: types.StateValue,
+) !void {
+    const leaf_type = unwrapFixedArrayLeaf(field.type_name);
+
+    var flat: std.ArrayListUnmanaged(types.StateValue) = .empty;
+    defer {
+        for (flat.items) |v| v.deinit(allocator);
+        flat.deinit(allocator);
+    }
+    if (value == .array_value) try flattenStateValue(allocator, &flat, value);
+
+    var i: usize = 0;
+    while (i < fa.synthetic_names.len) : (i += 1) {
+        const elem: types.StateValue = if (i < flat.items.len)
+            flat.items[i]
+        else
+            .{ .int = 0 };
+        const encoded = try encodeStateValue(allocator, elem, leaf_type);
+        defer allocator.free(encoded);
+        try out.appendSlice(allocator, encoded);
+    }
+}
+
+/// Read the leaf words of a FixedArray state field and regroup them into the
+/// nested shape declared by `field.type_name`.
+fn readFixedArrayField(
+    allocator: std.mem.Allocator,
+    field: types.StateField,
+    fa: types.FixedArrayInfo,
+    hex: []const u8,
+    start_offset: usize,
+) !DecodedValue {
+    const leaf_type = unwrapFixedArrayLeaf(field.type_name);
+    const slots = fa.synthetic_names.len;
+
+    const flat = try allocator.alloc(types.StateValue, slots);
+    var filled: usize = 0;
+    defer {
+        for (flat[0..filled]) |v| v.deinit(allocator);
+        allocator.free(flat);
+    }
+
+    var offset = start_offset;
+    while (filled < slots) {
+        const decoded = try decodeStateValue(allocator, hex, offset, leaf_type);
+        flat[filled] = decoded.value;
+        filled += 1;
+        offset += decoded.hex_chars_read;
+    }
+
+    var dims_buf: [MAX_FIXED_ARRAY_DIMS]u32 = undefined;
+    const dims = parseFixedArrayDims(field.type_name, &dims_buf);
+    // A declared shape that does not multiply out to the slot count means the
+    // artifact's `type` and `syntheticNames` disagree; hand back the leaves as
+    // one flat array rather than dropping the field.
+    const value = regroupStateValues(allocator, flat[0..filled], dims) catch
+        try regroupStateValues(allocator, flat[0..filled], &[_]u32{@intCast(filled)});
+
+    return .{ .value = value, .hex_chars_read = offset - start_offset };
+}
 
 /// Recursively flatten a StateValue into the scalar leaves it represents. Used
 /// to write a nested FixedArray value into N scalar state slots. Scalar values

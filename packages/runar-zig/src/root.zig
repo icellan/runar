@@ -250,6 +250,7 @@ test {
     _ = @import("sdk_state_range_guard_test.zig");
     _ = @import("sdk_state_curve_point_test.zig");
     _ = @import("sdk_state_boolean_spelling_test.zig");
+    _ = @import("sdk_state_fixed_array_test.zig");
     _ = @import("sdk_anf_interpreter.zig");
     _ = @import("sdk_anf_interpreter_intent_test.zig");
     _ = @import("sdk_anf_parse_failclosed_test.zig");

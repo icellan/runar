@@ -547,12 +547,39 @@ pub const FixedArrayInfo = struct {
     }
 };
 
+/// Flatten a (possibly nested) JSON array `initialValue` depth-first into one
+/// string literal per leaf, in the same order as `fixedArray.syntheticNames`.
+///
+/// A leaf shape we cannot render becomes "0" rather than nothing: dropping it
+/// would shift every later element into the wrong state slot, which is a worse
+/// failure than one wrong element.
+fn flattenInitialArray(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    switch (value) {
+        .array => |items| for (items.items) |item| try flattenInitialArray(allocator, item, out),
+        .string, .number_string => |s| try out.append(allocator, try allocator.dupe(u8, s)),
+        .integer => |n| try out.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{n})),
+        .bool => |b| try out.append(allocator, try allocator.dupe(u8, if (b) "true" else "false")),
+        else => try out.append(allocator, try allocator.dupe(u8, "0")),
+    }
+}
+
 /// StateField describes a state field in a stateful contract.
 pub const StateField = struct {
     name: []const u8 = &.{},
     type_name: []const u8 = &.{},
     index: i32 = 0,
     initial_value: ?[]const u8 = null, // stored as string representation
+    /// A FixedArray field's compile-time default, flattened depth-first into
+    /// one string literal per LEAF element. `initial_value` cannot carry it:
+    /// the JSON is an array (nested, for a nested FixedArray), not a scalar.
+    /// A null here on a `fixed_array` field means "no compile-time default",
+    /// not "all zeros" — the two used to be indistinguishable because the
+    /// array was dropped on parse, and the field silently deployed as zeros.
+    initial_array: ?[][]const u8 = null,
     /// When non-null, this state field is a logical FixedArray that expands
     /// into `fixed_array.synthetic_names.len` scalar slots. The SDK flattens
     /// array-typed state values on write and regroups them on read.
@@ -562,6 +589,10 @@ pub const StateField = struct {
         if (self.name.len > 0) allocator.free(self.name);
         if (self.type_name.len > 0) allocator.free(self.type_name);
         if (self.initial_value) |iv| allocator.free(iv);
+        if (self.initial_array) |ia| {
+            for (ia) |leaf| allocator.free(leaf);
+            allocator.free(ia);
+        }
         if (self.fixed_array) |*fa| fa.deinit(allocator);
         self.* = .{};
     }
@@ -587,6 +618,15 @@ pub const StateField = struct {
                 },
                 .bool => |b| {
                     field.initial_value = try allocator.dupe(u8, if (b) "true" else "false");
+                },
+                .array => {
+                    var leaves: std.ArrayListUnmanaged([]const u8) = .empty;
+                    errdefer {
+                        for (leaves.items) |leaf| allocator.free(leaf);
+                        leaves.deinit(allocator);
+                    }
+                    try flattenInitialArray(allocator, v, &leaves);
+                    field.initial_array = try leaves.toOwnedSlice(allocator);
                 },
                 else => {},
             }
