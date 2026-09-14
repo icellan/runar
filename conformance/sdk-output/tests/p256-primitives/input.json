@@ -61,21 +61,27 @@
         "byteOffset": 454087,
         "name": "expectedPoint",
         "type": "P256Point",
-        "valueEncoding": "data"
+        "valueEncoding": "data",
+        "fixedValueByteLength": 64,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 0,
         "byteOffset": 474063,
         "name": "expectedPoint",
         "type": "P256Point",
-        "valueEncoding": "data"
+        "valueEncoding": "data",
+        "fixedValueByteLength": 64,
+        "fixedPushHeaderBytes": 1
       },
       {
         "paramIndex": 0,
         "byteOffset": 928215,
         "name": "expectedPoint",
         "type": "P256Point",
-        "valueEncoding": "data"
+        "valueEncoding": "data",
+        "fixedValueByteLength": 64,
+        "fixedPushHeaderBytes": 1
       }
     ],
     "templateDigest": {
