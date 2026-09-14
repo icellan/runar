@@ -999,14 +999,25 @@ class TypeChecker {
         // Check if it's a builtin function name (used as a reference)
         if (BUILTIN_FUNCTIONS.has(expr.name)) return '<builtin>';
 
+        // Check if it's a contract property used as a bare identifier
+        // (some frontends like Solidity and Java emit `pubKeyHash` instead of
+        // `this.pubKeyHash`).
+        //
+        // This is deliberately checked BEFORE KNOWN_GLOBALS: a property named
+        // `EC_P` / `EC_N` / `EC_G` / `SigHash` shadows the global, which is
+        // what the other six tiers do and what lexical scoping implies. With
+        // the two the other way round, a Java-surface contract declaring
+        // `Bigint EC_G` and calling `ecMul(EC_G, k)` typed the bigint property
+        // as the global `Point` and compiled a 424 KB EC scalar multiply over
+        // a value that is not a point — while go, rust, python, zig, ruby and
+        // java all rejected the same source with "argument 1 of ecMul():
+        // expected 'Point', got 'bigint'".
+        const propType = this.propTypes.get(expr.name);
+        if (propType !== undefined) return propType;
+
         // Check if it's a known global constant
         const globalType = KNOWN_GLOBALS.get(expr.name);
         if (globalType !== undefined) return globalType;
-
-        // Check if it's a contract property used as a bare identifier
-        // (some frontends like Solidity emit `pubKeyHash` instead of `this.pubKeyHash`)
-        const propType = this.propTypes.get(expr.name);
-        if (propType !== undefined) return propType;
 
         // Undeclared variable -- emit error
         this.errors.push(makeDiagnostic(
