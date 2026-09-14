@@ -809,6 +809,32 @@ export function assembleArtifact(
   options?: AssembleOptions,
 ): RunarArtifact {
   const abi = extractABI(contract);
+  // Propagate ANF lowering's auto-injected witness params into the ABI.
+  //
+  // `extractABI` builds each method's param list from the AST, which predates
+  // pass 04. `requireOutputP2PKH` / `extractPrevOutputScript` inject
+  // `_serialisedOutputs` and `_prevOutScript_<i>` DURING that pass, so those
+  // params were in the emitted script and in the ANF but absent from the ABI
+  // the SDK reads to decide which witness values a caller must supply — a
+  // caller following the TS artifact could not know to supply them, and the
+  // script's `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
+  // commitment then fails. Go, Rust, Python, Ruby and Zig all listed them;
+  // only this tier did not.
+  //
+  // The ANF is the authority: it is byte-identical across all seven tiers.
+  // Restricted to the two auto-injected witness prefixes on purpose — the ANF
+  // also carries the EXPANDED `x__0..x__N` form of FixedArray params, which
+  // `regroupAbiParams` has deliberately collapsed back to `x` above.
+  for (const m of abi.methods) {
+    const anfMethod = anfProgram.methods.find(a => a.name === m.name);
+    if (!anfMethod?.params) continue;
+    const present = new Set(m.params.map(p => p.name));
+    for (const p of anfMethod.params) {
+      if (present.has(p.name)) continue;
+      if (p.name !== '_serialisedOutputs' && !p.name.startsWith('_prevOutScript_')) continue;
+      m.params.push({ name: p.name, type: p.type });
+    }
+  }
   // Propagate stack-lowering's authoritative `_codePart` decision into the ABI
   // so the SDK can supply `_codePart` for terminal var-length reads (issue #100).
   for (const m of abi.methods) {
