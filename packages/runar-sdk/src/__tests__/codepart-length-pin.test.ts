@@ -292,3 +292,79 @@ describe('R-095 code-part length pin', () => {
     expect(decodePins(r.scriptHex!)).toEqual([]);
   });
 });
+
+/**
+ * N-043 — the exact pin versus the 1sat-ordinals inscription envelope.
+ *
+ * `getCodePartHex()` concatenates the envelope INTO the code part, because a
+ * stateful contract's on-chain output reconstruction treats it as part of the
+ * immutable code. The envelope's length is a DEPLOY-time value: the compiler
+ * never sees it, so the exact pin it bakes in describes a code part without
+ * one. Attaching an inscription makes `SIZE(_codePart)` larger than the pinned
+ * number and every honest spend fails OP_VERIFY.
+ *
+ * Both escape routes are closed, which is what makes it a lock rather than an
+ * inconvenience: supplying the true code part fails the equality pin, and
+ * supplying one truncated back to the pinned length fails clause 8b, because
+ * the byte at that split is the envelope's leading `0x00`, not `0x6a`.
+ *
+ * The assertion is the invariant, not a number: whatever the SDK ends up
+ * doing, it must never hand back a contract whose pin disagrees with the code
+ * part it produces.
+ */
+describe('N-043 exact pin vs the inscription envelope', () => {
+  it('an inscribed contract is either refused or agrees with its own pin', () => {
+    const r = compileOrThrow(VARLEN_NO_CTOR_SLOTS, 'VarLenNoSlots.runar.ts');
+    const pins = decodePins(r.scriptHex!);
+    expect(pins.length).toBe(1);
+    const pin = pins[0]!;
+    expect(pin.exact).toBe(true);
+
+    // Uninscribed, the pin is honoured — the guard must not break this.
+    const plain = new RunarContract(r.artifact!, ['48656c6c6f']);
+    expect(pin.value).toBe(plain.getCodePartHex().length / 2);
+
+    const inscribed = new RunarContract(r.artifact!, ['48656c6c6f']);
+    let refusal: Error | null = null;
+    try {
+      inscribed.withInscription({ contentType: 'text/plain', data: '6869' });
+    } catch (e) {
+      refusal = e as Error;
+    }
+
+    if (refusal === null) {
+      // Accepted the inscription: then the pin MUST describe the code part the
+      // SDK now produces, or the contract is unspendable.
+      expect(
+        pin.value,
+        `pin says ${pin.value}, inscribed codePart is ` +
+          `${inscribed.getCodePartHex().length / 2} — every honest spend fails OP_VERIFY`,
+      ).toBe(inscribed.getCodePartHex().length / 2);
+    } else {
+      // Refused: the refusal must name the reason, and the contract must be
+      // left un-inscribed rather than half-mutated.
+      expect(refusal.message).toMatch(/inscription/i);
+      expect(inscribed.inscription).toBeNull();
+      expect(inscribed.getCodePartHex().length / 2).toBe(pin.value);
+    }
+  });
+
+  it('a fixed-state contract carries no exact pin and accepts an inscription', () => {
+    // Clause 8a pins the REMAINDER for this shape, and the remainder is
+    // unaffected by an envelope that lands inside the code part. Nothing here
+    // is broken, so the guard must leave it alone.
+    const r = compileOrThrow(FIXED_STATE, 'FixedState.runar.ts');
+    expect(decodePins(r.scriptHex!)).toEqual([]);
+
+    const c = new RunarContract(r.artifact!, [7n]);
+    c.withInscription({ contentType: 'text/plain', data: '6869' });
+    expect(c.inscription).not.toBeNull();
+
+    // The envelope lands inside the code part, and the state section still
+    // follows its OP_RETURN separator.
+    const code = c.getCodePartHex();
+    const locking = c.getLockingScript();
+    expect(locking.startsWith(code)).toBe(true);
+    expect(locking.slice(code.length, code.length + 2)).toBe('6a');
+  });
+});

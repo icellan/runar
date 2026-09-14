@@ -178,6 +178,36 @@ function invalidateTxCache(tx: BsvTransaction): void {
 const AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts';
 
 /**
+ * Decode the value of every EQUALITY `verify_code_part_len` pin in a compiled
+ * script.
+ *
+ * The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+ *
+ *     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+ *     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+ *
+ * `9c` is OP_NUMEQUAL — an exact pin, the only variant a longer code part can
+ * violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+ * satisfy, so it is deliberately not returned here.
+ *
+ * Read from the emitted TEMPLATE rather than from a built code script: the
+ * template holds OP_0 placeholders where constructor args go, so no
+ * caller-supplied byte string can be mistaken for a pin.
+ */
+function decodeExactCodePartLenPins(scriptHex: string): number[] {
+  const values: number[] = [];
+  for (let i = 0; i + 18 <= scriptHex.length; i += 2) {
+    const seq = scriptHex.slice(i, i + 18);
+    if (!seq.startsWith('7604')) continue;
+    if (seq.slice(12, 14) !== '81') continue;
+    if (seq.slice(14, 16) !== '9c') continue;
+    if (seq.slice(16, 18) !== '69') continue;
+    values.push(parseInt(seq.slice(4, 12).match(/../g)!.reverse().join(''), 16));
+  }
+  return values;
+}
+
+/**
  * Deep-review finding C8: offline dry-run of ONE input of a fully-assembled
  * tx through @bsv/sdk's production `Spend` interpreter (real `OP_CHECKSIG`,
  * real BIP-143). Used by `finalizeCall` to fail closed on a script-invalid
@@ -447,10 +477,55 @@ export class RunarContract {
    * ```ts
    * contract.withInscription({ contentType: 'image/png', data: pngHex });
    * ```
+   *
+   * N-043 — THROWS when the envelope would break the contract's own
+   * `SIZE(_codePart)` pin. A stateful contract with a variable-length state
+   * section carries an equality pin on the deployed code-part length, and the
+   * envelope lands INSIDE the code part (see `getCodePartHex`). The compiler
+   * bakes that number before any inscription exists, so the pinned length and
+   * the real one differ by the envelope's size and every honest spend aborts
+   * at OP_VERIFY — with the funds already committed. Refusing here turns a
+   * permanent, silent lock into a loud error before a single satoshi moves.
    */
   withInscription(inscription: Inscription): this {
+    const previous = this._inscription;
     this._inscription = inscription;
+    try {
+      this.assertCodePartLengthPinHonoured();
+    } catch (err) {
+      this._inscription = previous;
+      throw err;
+    }
     return this;
+  }
+
+  /**
+   * Verify that every equality `verify_code_part_len` pin the compiler baked
+   * into this artifact still describes the code part this contract produces.
+   *
+   * The check is the invariant itself, not a restatement of the compiler's
+   * derivation: it decodes the pinned number straight out of the emitted
+   * template and compares it to `getCodePartHex()`. So it permits every
+   * combination that actually works — a stateless contract or a fixed-size
+   * state layout carries no pin at all, and a lower-bound pin is satisfied by
+   * a longer code part — and rejects only the shape that would lock funds.
+   */
+  private assertCodePartLengthPinHonoured(): void {
+    const pinned = decodeExactCodePartLenPins(this.artifact.script);
+    if (pinned.length === 0) return;
+    const actual = this.getCodePartHex().length / 2;
+    for (const value of pinned) {
+      if (value === actual) continue;
+      throw new Error(
+        `RunarContract.withInscription: ${this.artifact.contractName} pins ` +
+          `SIZE(_codePart) == ${value}, but with this inscription attached the ` +
+          `code part is ${actual} bytes. Deploying it would make every spend ` +
+          `fail OP_VERIFY and lock the contract's funds permanently. An ` +
+          `inscription cannot be attached to a stateful contract with a ` +
+          `variable-length state section: the envelope is part of the code ` +
+          `part, and its length is not known when the pin is compiled.`,
+      );
+    }
   }
 
   /** Returns the current inscription, if any. */
