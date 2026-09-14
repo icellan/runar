@@ -75,13 +75,24 @@ cd examples/go && go test ./...                 # Run Go contract tests (busines
 cd examples/rust && cargo test                  # Run Rust contract tests (business logic + Rúnar compile check)
 cd packages/runar-py && python3 -m pytest       # Run Python SDK + package tests
 cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest  # Run Python contract tests
-cd compilers/zig && zig build test              # Run Zig compiler tests
+cd compilers/zig && zig build test              # Run Zig compiler tests (cross-tier note below)
 cd compilers/ruby && rake test                  # Run Ruby compiler tests (Ruby >= 2.7; see RunarCompiler::MINIMUM_RUBY_VERSION)
 cd packages/runar-zig && zig build test         # Run Zig SDK + package tests
 cd compilers/java && ./gradlew test             # Run Java compiler tests (wrapper pinned at Gradle 8.5; first run downloads it)
 cd packages/runar-java && ./gradlew test        # Run Java SDK + package tests
 cd examples/java && ./gradlew test              # Run Java contract tests (business logic + Rúnar compile check)
 ```
+
+**No build order is required — each tier's suite stands alone.** One Zig test,
+`compilers/zig/src/tests/n086_cross_tier_sighash_fixed_array.zig`, additionally shells
+out to whichever peer compilers happen to be built and asserts every one of them emits a
+byte-identical script. Those peers are opportunistic, never required: when none is
+available the test reports itself as **skipped** — visible in the `zig build test
+--summary all` counts — and prints the build command for each tier it could not reach,
+rather than passing and certifying an agreement it never checked. A peer that IS built
+and then disagrees, refuses, or prints nothing still fails hard. Set
+`RUNAR_CROSS_TIER_MIN=<n>` to require n peers and fail instead of skip; a job that builds
+all six should set 6.
 
 ## Compiler Pipeline
 
