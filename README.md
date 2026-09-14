@@ -578,6 +578,31 @@ pnpm install && pnpm build
 cd conformance && npm ci && cd ..   # second npm root — see below
 ```
 
+#### `pnpm build` may report FULL TURBO and replay another worktree's log
+
+turbo's cache is shared across every checkout and worktree on the machine, so a
+build here can be served from a compile that happened somewhere else, and the
+replayed log lines cite that other path. It looks like your tree was not built.
+
+It was. The cache key is content-addressed — measured, not assumed (R-227):
+
+```
+first run                    0 cached, 1 total
+repeat                       1 cached, 1 total   (FULL TURBO)
+append one comment line      0 cached, 1 total   <- a MISS
+revert that line             1 cached, 1 total   <- a HIT again
+```
+
+A hit means the inputs are byte-identical to the inputs that produced those
+outputs, whichever worktree ran the compile, so the artifacts are this commit's.
+
+When you need to SEE it compile — a release build, or a review where the build
+log is the evidence:
+
+```bash
+turbo run build --force        # ignore the cache, compile every package here
+```
+
 `conformance/` is **not** a pnpm workspace member. It has its own
 `package.json` and `package-lock.json` (`tsx`, `typescript`, `fast-check`), so
 `pnpm install` does not install it and every conformance script fails to resolve
