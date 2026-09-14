@@ -10,9 +10,10 @@
  * `tools/analyzer-runner/<tier>.sh`. The wrapper takes a single argument
  * (the hex file path) and writes the JSON report to stdout.
  *
- * Currently only the TypeScript tier is wired in. The other six tiers
- * (Go, Rust, Python, Zig, Ruby, Java) attach themselves by dropping a
- * wrapper script under `tools/analyzer-runner/`.
+ * R-219: this used to say only the TypeScript tier was wired in. All seven
+ * ship a wrapper and all seven pass — 8 fixtures x 7 tiers, 56/56. A tier
+ * attaches itself by dropping a wrapper script under `tools/analyzer-runner/`,
+ * so the set is discovered rather than listed here.
  *
  * Usage:
  *   ./node_modules/.pnpm/node_modules/.bin/tsx conformance/analyzer/run.ts

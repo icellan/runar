@@ -993,6 +993,22 @@ jobs:
         # loudly on the PR that moves the code, not weeks later as a mystery
         # survivor. See conformance/mutation/__tests__/mutant-staleness.test.ts.
         run: npx vitest run conformance/mutation
+      - name: Bitcoin Script static analyzer — 7-tier conformance
+        # R-219: the analyzer is implemented in all seven tiers, has 8 committed
+        # goldens, and `conformance/analyzer/run.ts` diffs every (fixture, tier)
+        # pair against them — and nothing ran it. A working seven-tier gate with
+        # no CI step is a gate that silently stops being true.
+        #
+        # It was also DEAD in an ordinary checkout: tools/analyzer-runner/ts.sh
+        # hardcoded `node_modules/.pnpm/node_modules/.bin/tsx`, a path pnpm only
+        # materialises under some hoisting settings, so the wrapper died with
+        # "No such file or directory" on every fixture. Fixed to try the layouts
+        # that actually occur, then PATH.
+        #
+        # The driver exits non-zero on any mismatch or runner error, so this
+        # step needs no extra assertion. Runs in the `conformance` job because
+        # it needs the same seven compiler binaries already downloaded above.
+        run: npx tsx conformance/analyzer/run.ts
 
   conformance-anf-parity:
     # Cross-interpreter parity for the ANF lenient interpreter shipped by

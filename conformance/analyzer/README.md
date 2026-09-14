@@ -57,12 +57,27 @@ Any change must be paired with a spec update.
 
 ## Running the conformance suite
 
-(Driver lands once at least one non-TS tier ships its analyzer.)
+The driver exists and every tier is wired in. R-219 found it had no CI step —
+a working seven-tier gate nobody ran — and that the TS wrapper hardcoded
+`node_modules/.pnpm/node_modules/.bin/tsx`, a path pnpm only materialises under
+some hoisting settings, so in an ordinary checkout it died with "No such file or
+directory" on every fixture. Both are fixed; `ci.yml` runs it in the
+`conformance` job.
 
 ```bash
-# planned
-pnpm --filter runar-conformance test:analyzer
+npx tsx conformance/analyzer/run.ts
+
+# or filter
+npx tsx conformance/analyzer/run.ts --tiers ts,go --fixtures basic-p2pkh,escrow
+```
+
+Current state — 8 fixtures × 7 tiers:
+
+```
+=== analyzer conformance ===
+pass: 56  fail: 0  skip: 0  error: 0
 ```
 
 The driver iterates over `(fixture, tier)` pairs and diffs each tier's
-JSON output against the golden. Any byte-level mismatch is a failure.
+JSON output against the golden. Any byte-level mismatch is a failure, and it
+exits non-zero on any mismatch or runner error.
