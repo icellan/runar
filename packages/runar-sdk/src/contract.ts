@@ -686,6 +686,13 @@ export class RunarContract {
   async deployWithWallet(options: {
     satoshis?: number;
     description?: string;
+    /**
+     * R-062: builtins the caller accepts despite the compiler not claiming
+     * they are sound. Required — naming each one — when the artifact declares
+     * `unsoundPrimitives`; ignored otherwise. Same mechanism and same error as
+     * `DeployOptions.acknowledgeUnsound` on the ordinary `deploy()` path.
+     */
+    acknowledgeUnsound?: readonly string[];
   } = {}): Promise<{ txid: string; outputIndex: number }> {
     if (!(this._provider instanceof WalletProvider)) {
       throw new Error(
@@ -703,6 +710,16 @@ export class RunarContract {
     assertScriptHexUnderLimit(
       lockingScript,
       InputLimits.MAX_SCRIPT_BYTES,
+      `${this.artifact.contractName}.deployWithWallet`,
+    );
+
+    // R-062: the wallet is a SECOND funding path, and it must make the same
+    // decision `deploy()` makes — refuse to fund a script reaching a builtin
+    // the compiler does not claim is sound unless the caller says so here.
+    // Before `createAction`, so no wallet is ever asked for the coins.
+    assertUnsoundPrimitivesAcknowledged(
+      this.artifact,
+      options.acknowledgeUnsound,
       `${this.artifact.contractName}.deployWithWallet`,
     );
 

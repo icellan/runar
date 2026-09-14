@@ -78,7 +78,7 @@ export class {{contractName}}Contract {
     return (this.inner.deploy as Function)(...args);
   }
 
-  async deployWithWallet(options: { satoshis?: number; description?: string } = {}): Promise<{ txid: string; outputIndex: number }> {
+  async deployWithWallet(options: { satoshis?: number; description?: string; acknowledgeUnsound?: readonly string[] } = {}): Promise<{ txid: string; outputIndex: number }> {
     return this.inner.deployWithWallet(options);
   }
 

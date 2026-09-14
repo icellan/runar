@@ -93,7 +93,24 @@ pub fn buildDeployTransaction(
     // Output 1: change (if any)
     if (change > 0) {
         if (change_address) |addr| {
-            try builder.payToAddress(addr, change);
+            // `payToAddress` only accepts Base58Check. The SDK also uses a bare
+            // 40-hex pubkey hash as an "address" internally — WalletSigner's
+            // getAddress returns exactly that — and handing one to payToAddress
+            // fails with InvalidCharacter, which is why every wallet-funded
+            // deploy with a change output died before broadcast. buildP2PKHScript
+            // already accepts both spellings; route the hex form through it.
+            if (addr.len == 40 and isHex(addr)) {
+                const change_script_hex = try buildP2PKHScript(allocator, addr);
+                defer allocator.free(change_script_hex);
+                const change_script = bsvz.primitives.hex.decode(allocator, change_script_hex) catch return DeployError.InvalidScript;
+                defer allocator.free(change_script);
+                try builder.addOutput(.{
+                    .satoshis = change,
+                    .locking_script = bsvz.script.Script.init(change_script),
+                });
+            } else {
+                try builder.payToAddress(addr, change);
+            }
         }
     }
 

@@ -10,10 +10,12 @@ use bsv::transaction::Transaction as BsvTransaction;
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 use serde_json::Value;
-use super::types::{TransactionData, TxInput, TxOutput, Utxo};
+use super::types::{RunarArtifact, TransactionData, TxInput, TxOutput, Utxo};
 use super::provider::Provider;
 use super::signer::Signer;
 use super::script_utils::build_p2pkh_script;
+use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
+use super::unsound_primitives::assert_unsound_primitives_acknowledged;
 
 // ---------------------------------------------------------------------------
 // WalletClient trait
@@ -616,6 +618,11 @@ pub struct DeployWithWalletOptions {
     pub satoshis: Option<i64>,
     /// Human-readable description for the wallet action.
     pub description: Option<String>,
+    /// Builtins the caller accepts despite the compiler not claiming they are
+    /// sound (R-062). Required — naming each one — when the artifact declares
+    /// `unsound_primitives`; ignored otherwise. Same mechanism and same error
+    /// as `DeployOptions::acknowledge_unsound` on the ordinary deploy path.
+    pub acknowledge_unsound: Vec<String>,
 }
 
 impl Default for DeployWithWalletOptions {
@@ -623,6 +630,7 @@ impl Default for DeployWithWalletOptions {
         DeployWithWalletOptions {
             satoshis: None,
             description: None,
+            acknowledge_unsound: Vec::new(),
         }
     }
 }
@@ -635,13 +643,35 @@ impl Default for DeployWithWalletOptions {
 /// This is a standalone function rather than a method on RunarContract to avoid
 /// generic type parameter complications. The caller should update the contract's
 /// UTXO tracking after deployment.
+///
+/// R-062: takes the `artifact` — not just its name — because this is a funding
+/// path, and a funding path has to be able to read `unsound_primitives` before
+/// it asks a wallet for coins. `locking_script` stays separate: it is the built
+/// script, with constructor args spliced in, which is not `artifact.script`.
 pub fn deploy_with_wallet<W: WalletClient>(
     wallet: &W,
     basket: &str,
     locking_script: &str,
-    contract_name: &str,
+    artifact: &RunarArtifact,
     options: Option<&DeployWithWalletOptions>,
 ) -> Result<(String, usize), String> {
+    let contract_name = artifact.contract_name.as_str();
+    let context = format!("{contract_name}.deploy_with_wallet");
+
+    // DoS-bound: reject pathological scripts BEFORE involving the wallet.
+    // `deploy` has run this since it was added; the wallet path never did.
+    assert_script_hex_under_limit(locking_script, MAX_SCRIPT_BYTES, &context)?;
+
+    // R-062: the wallet is a SECOND funding path, and it must make the same
+    // decision `deploy` makes — refuse to fund a script reaching a builtin the
+    // compiler does not claim is sound unless the caller says so here. Before
+    // `create_action`, so no wallet is ever asked for the coins.
+    assert_unsound_primitives_acknowledged(
+        artifact,
+        options.map(|o| o.acknowledge_unsound.as_slice()).unwrap_or(&[]),
+        &context,
+    )?;
+
     let satoshis = options
         .and_then(|o| o.satoshis)
         .unwrap_or(1);
@@ -1352,6 +1382,26 @@ mod tests {
     // deploy_with_wallet tests
     // -----------------------------------------------------------------------
 
+    /// Minimal artifact with no unsound primitives (R-062 control shape).
+    fn test_artifact(name: &str) -> RunarArtifact {
+        use super::super::types::{Abi, AbiConstructor};
+        RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: name.to_string(),
+            parent_class: None,
+            abi: Abi { constructor: AbiConstructor { params: vec![] }, methods: vec![] },
+            script: "51".to_string(),
+            asm: None,
+            state_fields: None,
+            constructor_slots: None,
+            code_sep_index_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
+            anf: None,
+            unsound_primitives: None,
+        }
+    }
+
     #[test]
     fn deploy_with_wallet_creates_action() {
         let wallet = MockWalletClient::new();
@@ -1359,7 +1409,7 @@ mod tests {
             &wallet,
             "my-basket",
             "76a91400000000000000000000000000000000000000008888ac",
-            "TestContract",
+            &test_artifact("TestContract"),
             None,
         )
         .unwrap();
@@ -1379,12 +1429,13 @@ mod tests {
         let opts = DeployWithWalletOptions {
             satoshis: Some(5000),
             description: Some("My custom deploy".to_string()),
+            acknowledge_unsound: Vec::new(),
         };
         let (txid, _) = deploy_with_wallet(
             &wallet,
             "my-basket",
             "51",
-            "MyContract",
+            &test_artifact("MyContract"),
             Some(&opts),
         )
         .unwrap();

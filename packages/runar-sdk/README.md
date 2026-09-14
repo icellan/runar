@@ -763,10 +763,12 @@ Builds a deploy transaction, signs all P2PKH inputs, broadcasts, and updates `cu
 ##### `contract.deployWithWallet(options)`
 
 ```typescript
-deployWithWallet(options?: { satoshis?: number; description?: string }): Promise<{ txid: string; outputIndex: number }>
+deployWithWallet(options?: { satoshis?: number; description?: string; acknowledgeUnsound?: readonly string[] }): Promise<{ txid: string; outputIndex: number }>
 ```
 
 BRC-100 path. Requires the connected provider to be a `WalletProvider`. Calls `wallet.createAction(...)` so the wallet itself signs the deploy transaction. Throws `'deployWithWallet requires a connected WalletProvider...'` otherwise.
+
+R-062: `acknowledgeUnsound` must name every primitive the artifact's `unsoundPrimitives` declares, or the deploy is refused before the wallet is ever asked for coins — the same gate, and the same error, as `deploy()`.
 
 ##### `contract.call(methodName, args, options?)` / `contract.call(methodName, args, provider, signer, options?)`
 

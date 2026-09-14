@@ -227,11 +227,14 @@ function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
 }
 
 /**
- * N-043: a fixture whose `input.json` carries `expectRefusal` inverts the
- * comparison. There is no golden hex to agree on, because no tier is allowed to
- * PRODUCE one: the (artifact, inscription) pair would deploy a contract whose
- * own `SIZE(_codePart)` pin it violates, and every honest spend would fail
- * OP_VERIFY with the funds already committed.
+ * N-043 / R-062: a fixture whose `input.json` carries `expectRefusal` inverts
+ * the comparison. There is no golden hex to agree on, because no tier is
+ * allowed to PRODUCE one — the fixture describes a deploy that must not happen.
+ * N-043's case is an (artifact, inscription) pair that would deploy a contract
+ * whose own `SIZE(_codePart)` pin it violates, so every honest spend would fail
+ * OP_VERIFY with the funds already committed. R-062's is an artifact reaching a
+ * builtin the compiler does not claim is sound, funded through a tier's WALLET
+ * path by a caller who acknowledged nothing.
  *
  * What the seven tiers must agree on is the VERDICT plus its reason — an
  * accept/refuse split across tiers is exactly the cross-tier divergence this
@@ -249,7 +252,7 @@ function evaluateRefusal(
     if (r.success) {
       ok = false;
       errors.push(
-        `${r.sdk}: ACCEPTED an inscription every tier must refuse ` +
+        `${r.sdk}: ACCEPTED what every tier must refuse ` +
           `(produced ${r.hex.length / 2} bytes of locking script)`,
       );
       continue;

@@ -1,0 +1,78 @@
+{
+  "$comment": "R-062 CONTROL (hand-authored, see r062-wallet-unsound-refused/$comment): an artifact that DOES declare an unsound primitive, funded through the wallet path by a caller who names it, must still deploy \u2014 and produce the same locking script every tier produces without the marker.",
+  "artifact": {
+    "version": "runar-v1.0.0-rc.1",
+    "compilerVersion": "1.0.0-rc.1",
+    "contractName": "Sp1Rollup",
+    "parentClass": "SmartContract",
+    "abi": {
+      "constructor": {
+        "params": [
+          {
+            "name": "pubKeyHash",
+            "type": "Addr"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "name": "unlock",
+          "params": [
+            {
+              "name": "sig",
+              "type": "Sig"
+            },
+            {
+              "name": "pubKey",
+              "type": "PubKey"
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    },
+    "script": "76a90088ac",
+    "constructorSlots": [
+      {
+        "paramIndex": 0,
+        "byteOffset": 2,
+        "name": "pubKeyHash",
+        "type": "Addr",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 20,
+        "fixedPushHeaderBytes": 1
+      }
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 2,
+          "slot": "pubKeyHash"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    },
+    "unsoundPrimitives": [
+      "verifySP1FRI"
+    ]
+  },
+  "constructorArgs": [
+    {
+      "type": "Addr",
+      "value": "89abcdefabbaabbaabbaabbaabbaabbaabbaabba"
+    }
+  ],
+  "walletDeploy": {
+    "satoshis": 1,
+    "acknowledgeUnsound": [
+      "verifySP1FRI"
+    ]
+  }
+}

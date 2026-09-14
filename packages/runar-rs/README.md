@@ -1383,17 +1383,25 @@ Hex-encoded script + satoshis, used as the value type in
 Internal contract output specification (script + satoshis), used by
 `CallTxOptions`.
 
-#### `pub fn deploy_with_wallet<W: WalletClient>(wallet, basket, locking_script, contract_name, options) -> Result<(String, usize), String>`
+#### `pub fn deploy_with_wallet<W: WalletClient>(wallet, basket, locking_script, artifact, options) -> Result<(String, usize), String>`
 One-shot deploy via a BRC-100 wallet — bypasses `RunarContract::deploy` and
 uses `WalletClient::create_action` directly. Returns `(txid, output_index)`.
+Takes the `&RunarArtifact` rather than a bare contract name (R-062): this is a
+funding path, so it has to read `unsound_primitives` and enforce
+`MAX_SCRIPT_BYTES` before asking a wallet for coins. `locking_script` stays a
+separate argument — it is the built script with constructor args spliced in,
+which is not `artifact.script`.
 
 #### `pub struct DeployOptions`
 Fields: `satoshis: i64`, `change_address: Option<String>`.
 
 #### `pub struct DeployWithWalletOptions`
 Optional knobs for `deploy_with_wallet`. Fields: `satoshis: Option<i64>`,
-`description: Option<String>`. Implements `Default` (1 sat, generic
-description).
+`description: Option<String>`, `acknowledge_unsound: Vec<String>`. Implements
+`Default` (1 sat, generic description, nothing acknowledged). R-062:
+`acknowledge_unsound` must name every primitive the artifact's
+`unsound_primitives` declares, or the deploy is refused — the same gate, and
+the same error, as `RunarContract::deploy`.
 
 #### `pub fn deserialize_state(fields: &[StateField], script_hex: &str) -> HashMap<String, SdkValue>`
 Parse a state byte section back into a `HashMap`. Inverse of

@@ -490,6 +490,11 @@ type DeployWithWalletOptions struct {
 	Description string
 	Basket      string
 	Tags        []string
+	// AcknowledgeUnsound names the builtins the caller accepts despite the
+	// compiler not claiming they are sound (R-062). Required — naming each one
+	// — when the artifact declares UnsoundPrimitives; ignored otherwise. Same
+	// mechanism and same error as DeployOptions.AcknowledgeUnsound on Deploy.
+	AcknowledgeUnsound []string
 }
 
 // DeployWithWalletResult is the result of a wallet-based deployment.
@@ -512,6 +517,26 @@ func (c *RunarContract) DeployWithWallet(options *DeployWithWalletOptions) (*Dep
 	lockingScript := c.GetLockingScript()
 	if lockingScript == "" {
 		return nil, fmt.Errorf("RunarContract.DeployWithWallet: empty locking script")
+	}
+
+	// DoS-bound: reject pathological scripts BEFORE involving the wallet. Deploy
+	// has run this since it was added; the wallet path never did.
+	if guardErr := assertScriptHexUnderLimit(
+		lockingScript, MaxScriptBytes,
+		c.Artifact.ContractName+".DeployWithWallet",
+	); guardErr != nil {
+		return nil, guardErr
+	}
+
+	// R-062: the wallet is a SECOND funding path, and it must make the same
+	// decision Deploy makes — refuse to fund a script reaching a builtin the
+	// compiler does not claim is sound unless the caller says so here. Before
+	// CreateAction, so no wallet is ever asked for the coins.
+	if guardErr := assertUnsoundPrimitivesAcknowledged(
+		c.Artifact, options.AcknowledgeUnsound,
+		c.Artifact.ContractName+".DeployWithWallet",
+	); guardErr != nil {
+		return nil, guardErr
 	}
 
 	satoshis := options.Satoshis

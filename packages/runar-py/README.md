@@ -1434,6 +1434,7 @@ class RunarContract:
 
     def deploy_with_wallet(
         self, satoshis: int = 1, description: str = '',
+        acknowledge_unsound: Sequence[str] = (),
     ) -> tuple[str, int]: ...
 
     def call(

@@ -980,7 +980,7 @@ type DeployOptions struct {
 #### `DeployWithWalletOptions` / `DeployWithWalletResult`
 
 ```go
-type DeployWithWalletOptions struct { Satoshis int64; Description, Basket string; Tags []string }
+type DeployWithWalletOptions struct { Satoshis int64; Description, Basket string; Tags []string; AcknowledgeUnsound []string }
 type DeployWithWalletResult struct { Txid, RawTx string }
 ```
 

@@ -259,8 +259,12 @@ module Runar
       #
       # @param satoshis    [Integer]     satoshis to lock in the contract output (default: 1)
       # @param description [String, nil] human-readable description for the wallet action
+      # @param acknowledge_unsound [Array<String>] builtins the caller accepts despite
+      #   the compiler not claiming they are sound (R-062). Required — naming each one —
+      #   when the artifact declares +unsound_primitives+; ignored otherwise. Same
+      #   mechanism and same error as +DeployOptions#acknowledge_unsound+ on +deploy+.
       # @return [Hash] { txid: String, output_index: Integer }
-      def deploy_with_wallet(satoshis: 1, description: nil)
+      def deploy_with_wallet(satoshis: 1, description: nil, acknowledge_unsound: [])
         unless @provider.is_a?(WalletProvider)
           raise 'deploy_with_wallet requires a connected WalletProvider. ' \
                 'Call connect(wallet_provider, signer) first.'
@@ -274,6 +278,14 @@ module Runar
         # DoS-bound: reject pathological scripts BEFORE involving the wallet.
         SDK.assert_script_hex_under_limit(
           locking_script, SDK::MAX_SCRIPT_BYTES,
+          "#{@artifact.contract_name}.deploy_with_wallet"
+        )
+
+        # R-062: the wallet is a SECOND funding path, and it must make the same
+        # decision +deploy+ makes. Before +create_action+, so no wallet is ever
+        # asked for the coins.
+        SDK.assert_unsound_primitives_acknowledged(
+          @artifact, acknowledge_unsound,
           "#{@artifact.contract_name}.deploy_with_wallet"
         )
 

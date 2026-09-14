@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib
 import warnings
+from typing import Sequence
 from runar.sdk.types import (
     RunarArtifact, Utxo, TransactionData, TxOutput,
     DeployOptions, CallOptions, OutputSpec, TerminalOutput, PreparedCall,
@@ -393,6 +394,7 @@ class RunarContract:
         self,
         satoshis: int = 1,
         description: str = '',
+        acknowledge_unsound: Sequence[str] = (),
     ) -> tuple[str, int]:
         """Deploy the contract using a BRC-100 wallet.
 
@@ -403,6 +405,12 @@ class RunarContract:
         Args:
             satoshis: Satoshis to lock in the contract output (default: 1).
             description: Human-readable description for the wallet action.
+            acknowledge_unsound: Builtins the caller accepts despite the
+                compiler not claiming they are sound (R-062). Required —
+                naming each one — when the artifact declares
+                ``unsound_primitives``; ignored otherwise. Same mechanism and
+                same error as ``DeployOptions.acknowledge_unsound`` on
+                ``deploy()``.
 
         Returns:
             (txid, output_index) tuple.
@@ -425,6 +433,14 @@ class RunarContract:
         # DoS-bound: reject pathological scripts BEFORE involving the wallet.
         assert_script_hex_under_limit(
             locking_script, MAX_SCRIPT_BYTES,
+            f"{self.artifact.contract_name}.deploy_with_wallet",
+        )
+
+        # R-062: the wallet is a SECOND funding path, and it must make the same
+        # decision ``deploy()`` makes. Before ``create_action``, so no wallet is
+        # ever asked for the coins.
+        assert_unsound_primitives_acknowledged(
+            self.artifact, acknowledge_unsound,
             f"{self.artifact.contract_name}.deploy_with_wallet",
         )
 

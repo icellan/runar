@@ -1769,11 +1769,17 @@ pub fn deployWithWallet(
         funding_tag: ?[]const u8 = null,
         network: ?[]const u8 = null,
         fee_rate: ?i64 = null,
+        acknowledge_unsound: []const []const u8 = &.{},
     },
 ) ![]u8;
 ```
 
 [src/sdk_wallet.zig](src/sdk_wallet.zig).
+
+R-062: this tier never had the wallet-path bypass the other SDKs did — it
+delegates to `contract.deploy`, which runs the gate — but it had no way to
+SUPPLY an acknowledgement, so a legitimate acknowledged deploy was refused.
+`acknowledge_unsound` is forwarded to `DeployOptions.acknowledge_unsound`.
 
 ### 15.7 HTTP transports
 

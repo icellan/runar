@@ -1297,7 +1297,7 @@ Runtime contract wrapper. `attr_reader :artifact, :inscription`.
 - `with_inscription(inscription) -> self` — attach a 1Sat ordinals envelope.
 - `connect(provider, signer)` — store provider + signer for later calls.
 - `deploy(provider = nil, signer = nil, options = nil) -> [String, TransactionData]`
-- `deploy_with_wallet(satoshis: 1, description: nil) -> { txid:, output_index: }` — wallet-funded deploy via a connected `WalletProvider`.
+- `deploy_with_wallet(satoshis: 1, description: nil, acknowledge_unsound: []) -> { txid:, output_index: }` — wallet-funded deploy via a connected `WalletProvider`. R-062: `acknowledge_unsound` must name every primitive the artifact's `unsound_primitives` declares, or the deploy is refused before the wallet is asked for coins — the same gate, and the same error, as `deploy`.
 - `call(method_name, args = [], provider = nil, signer = nil, options = nil) -> [String, TransactionData]`
 - `prepare_call(method_name, args = [], provider = nil, signer = nil, options = nil) -> PreparedCall`
 - `finalize_call(prepared, signatures, provider = nil) -> [String, TransactionData]`

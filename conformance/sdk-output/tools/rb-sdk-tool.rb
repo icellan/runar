@@ -45,4 +45,32 @@ if data['inscription']
     exit 1
   end
 end
+# R-062: the smallest BRC-100 wallet that can fund a deploy.
+class StubWallet < Runar::SDK::WalletClient
+  def create_action(description:, outputs:)
+    { txid: 'ab' * 32 }
+  end
+end
+
+if data['walletDeploy']
+  wd = data['walletDeploy']
+  # R-062: a refusal is a RESULT, not a crash — exit non-zero with the reason
+  # on stderr so the runner can compare the verdict across all seven tiers.
+  wallet = StubWallet.new
+  signer = Runar::SDK::MockSigner.new
+  contract.connect(
+    Runar::SDK::WalletProvider.new(wallet: wallet, signer: signer, basket: 'conformance'),
+    signer
+  )
+  begin
+    contract.deploy_with_wallet(
+      satoshis: wd['satoshis'] || 1,
+      acknowledge_unsound: wd['acknowledgeUnsound'] || []
+    )
+  rescue StandardError => e
+    $stderr.puts e.message
+    exit 1
+  end
+end
+
 $stdout.write(contract.get_locking_script)
