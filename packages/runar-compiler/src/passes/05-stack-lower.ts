@@ -3083,9 +3083,34 @@ class LoweringContext {
 
       // Clean up the iteration variable if it was not consumed by the body.
       // The body may not reference _iterVar at all, leaving it on the stack.
+      //
+      // R-186 / R-292: it is not always on TOP when that happens. A body whose
+      // last binding LEAVES a value — the accumulator `sum = sum + x`, which
+      // rebinds `sum` in place and ends holding it — buries the iteration
+      // variable one slot down. Dropping only at depth 0 left one slot behind
+      // per iteration: correct output (the model tracks the residue, and the
+      // public-method epilogue nips it) at a cost of one stack item and one
+      // OP_NIP per iteration, until the leak alone crossed MAX_STACK_DEPTH and
+      // the compiler refused a contract with a working set of three.
+      //
+      // Removing it wherever it sits is the same operation
+      // `drainBranchPrivateResidue` performs, spelled the same way, so the two
+      // stay comparable: OP_NIP at depth 1, ROLL-to-top then OP_DROP below that.
       if (this.stackMap.has(_iterVar)) {
         const depth = this.stackMap.findDepth(_iterVar);
         if (depth === 0) {
+          this.emitOp({ op: 'drop' });
+          this.stackMap.pop();
+        } else if (depth === 1) {
+          this.emitOp({ op: 'nip' });
+          this.stackMap.removeAtDepth(1);
+        } else {
+          this.emitOp({ op: 'push', value: BigInt(depth) });
+          this.stackMap.push(null);
+          this.emitOp({ op: 'roll', depth });
+          this.stackMap.pop();
+          const rolled = this.stackMap.removeAtDepth(depth);
+          this.stackMap.push(rolled);
           this.emitOp({ op: 'drop' });
           this.stackMap.pop();
         }

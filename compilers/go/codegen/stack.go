@@ -2892,9 +2892,30 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 
 		// Clean up the iteration variable if it was not consumed by the body.
 		// The body may not reference iterVar at all, leaving it on the stack.
+		//
+		// R-186 / R-292: it is not always on TOP when that happens. A body whose
+		// last binding LEAVES a value — the accumulator `sum = sum + x`, which
+		// rebinds `sum` in place and ends holding it — buries the iteration
+		// variable one slot down. Dropping only at depth 0 left one slot behind
+		// per iteration, until the leak alone crossed maxStackDepth and the
+		// compiler refused a contract with a working set of three. Removing it
+		// wherever it sits is the same operation drainBranchPrivateResidue
+		// performs, spelled the same way.
 		if ctx.sm.has(iterVar) {
 			depth := ctx.sm.findDepth(iterVar)
 			if depth == 0 {
+				ctx.emitOp(StackOp{Op: "drop"})
+				ctx.sm.pop()
+			} else if depth == 1 {
+				ctx.emitOp(StackOp{Op: "nip"})
+				ctx.sm.removeAtDepth(1)
+			} else {
+				ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
+				ctx.sm.push("")
+				ctx.emitOp(StackOp{Op: "roll", Depth: depth})
+				ctx.sm.pop()
+				rolled := ctx.sm.removeAtDepth(depth)
+				ctx.sm.push(rolled)
 				ctx.emitOp(StackOp{Op: "drop"})
 				ctx.sm.pop()
 			}

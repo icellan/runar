@@ -3363,9 +3363,32 @@ public final class StackLower {
                 for (int j = 0; j < body.size(); j++) {
                     lowerBinding(body.get(j), j, lastUses);
                 }
+                // Clean up the iteration variable if it was not consumed by the body.
+                //
+                // R-186 / R-292: it is not always on TOP when that happens. A body
+                // whose last binding LEAVES a value — the accumulator
+                // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+                // — buries the iteration variable one slot down. Dropping only at
+                // depth 0 left one slot behind per iteration, until the leak alone
+                // crossed MAX_STACK_DEPTH and the compiler refused a contract with
+                // a working set of three. Removing it wherever it sits is the same
+                // operation drainBranchPrivateResidue performs, spelled the same
+                // way.
                 if (sm.has(iterVar)) {
                     int d = sm.findDepth(iterVar);
                     if (d == 0) {
+                        emitOp(new DropOp());
+                        sm.pop();
+                    } else if (d == 1) {
+                        emitOp(new NipOp());
+                        sm.removeAtDepth(1);
+                    } else {
+                        emitOp(new PushOp(PushValue.of(d)));
+                        sm.push("");
+                        emitOp(new RollOp(d));
+                        sm.pop();
+                        String rolled = sm.removeAtDepth(d);
+                        sm.push(rolled);
                         emitOp(new DropOp());
                         sm.pop();
                     }

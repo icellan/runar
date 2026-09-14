@@ -2823,9 +2823,30 @@ module RunarCompiler::Codegen
         end
 
         # Clean up the iteration variable if it was not consumed
+        #
+        # R-186 / R-292: it is not always on TOP when that happens. A body whose
+        # last binding LEAVES a value -- the accumulator `sum = sum + x`, which
+        # rebinds `sum` in place and ends holding it -- buries the iteration
+        # variable one slot down. Dropping only at depth 0 left one slot behind
+        # per iteration, until the leak alone crossed MAX_STACK_DEPTH and the
+        # compiler refused a contract with a working set of three. Removing it
+        # wherever it sits is the same operation drain_branch_private_residue
+        # performs, spelled the same way.
         if @sm.has?(iter_var)
           depth = @sm.find_depth(iter_var)
           if depth == 0
+            emit_op({ op: "drop" })
+            @sm.pop
+          elsif depth == 1
+            emit_op({ op: "nip" })
+            @sm.remove_at_depth(1)
+          else
+            emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(depth) })
+            @sm.push("")
+            emit_op({ op: "roll", depth: depth })
+            @sm.pop
+            rolled = @sm.remove_at_depth(depth)
+            @sm.push(rolled)
             emit_op({ op: "drop" })
             @sm.pop
           end

@@ -2957,11 +2957,37 @@ impl LoweringContext {
 
             // Clean up the iteration variable if it was not consumed by the body.
             // The body may not reference iter_var at all, leaving it on the stack.
+            //
+            // R-186 / R-292: it is not always on TOP when that happens. A body
+            // whose last binding LEAVES a value — the accumulator
+            // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+            // — buries the iteration variable one slot down. Dropping only at
+            // depth 0 left one slot behind per iteration, until the leak alone
+            // crossed MAX_STACK_DEPTH and the compiler refused a contract with a
+            // working set of three. Removing it wherever it sits is the same
+            // operation `drain_branch_private_residue` performs, spelled the
+            // same way.
             if self.sm.has(iter_var) {
-                let depth = self.sm.find_depth(iter_var);
-                if let Some(0) = depth {
-                    self.emit_op(StackOp::Drop);
-                    self.sm.pop();
+                match self.sm.find_depth(iter_var) {
+                    Some(0) => {
+                        self.emit_op(StackOp::Drop);
+                        self.sm.pop();
+                    }
+                    Some(1) => {
+                        self.emit_op(StackOp::Nip);
+                        self.sm.remove_at_depth(1);
+                    }
+                    Some(depth) => {
+                        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(depth as i128))));
+                        self.sm.push("");
+                        self.emit_op(StackOp::Roll { depth });
+                        self.sm.pop();
+                        let rolled = self.sm.remove_at_depth(depth);
+                        self.sm.push(&rolled);
+                        self.emit_op(StackOp::Drop);
+                        self.sm.pop();
+                    }
+                    None => {}
                 }
             }
         }

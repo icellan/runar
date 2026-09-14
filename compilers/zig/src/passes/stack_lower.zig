@@ -5776,12 +5776,18 @@ const LowerCtx = struct {
             self.last_uses.deinit(self.allocator);
             self.last_uses = enclosing_last_uses;
 
-            // Remove iteration variable if still on stack
+            // Remove iteration variable if still on stack.
+            //
+            // R-186 / R-292: it is not always on TOP when the body leaves it
+            // behind. A body whose last binding LEAVES a value — the
+            // accumulator `sum = sum + x`, which rebinds `sum` in place and ends
+            // holding it — buries the iteration variable one slot down. Dropping
+            // only at depth 0 left one slot behind per iteration, until the leak
+            // alone crossed the peers' MAX_STACK_DEPTH and they refused a
+            // contract with a working set of three. `removeBranchValueAtDepth`
+            // is the same removal `drainBranchPrivateResidue` uses.
             if (self.stack.findDepth(fl.var_name)) |d| {
-                if (d == 0) {
-                    try self.emitOp(.op_drop);
-                    _ = self.stack.pop();
-                }
+                try removeBranchValueAtDepth(self, d);
             }
         }
 

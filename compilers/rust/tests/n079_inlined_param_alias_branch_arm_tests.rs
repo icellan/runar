@@ -281,14 +281,14 @@ fn seven_tier_script_for_inlined_param_alias() {
         (
             "loop-body",
             LOOP_BODY_BODY,
-            701,
-            "d38d2062c8f9458c3658c5d0c3bc17978c0a7bc8e4e2ab4a767892129d40d81a",
+            698,
+            "3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55",
         ),
         (
             "loop-body-manual",
             LOOP_BODY_MANUAL_BODY,
-            701,
-            "d38d2062c8f9458c3658c5d0c3bc17978c0a7bc8e4e2ab4a767892129d40d81a",
+            698,
+            "3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55",
         ),
         (
             "no-if",
