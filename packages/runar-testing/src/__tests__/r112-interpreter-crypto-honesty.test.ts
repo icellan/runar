@@ -151,4 +151,27 @@ describe('R-112 interpreter crypto honesty', () => {
       );
     }
   });
+
+  it('the docs never claim, in the present tense, that checkSig/checkMultiSig always return true', () => {
+    // GK-DOC-001 — the guard above matched ONE phrasing ("mocked crypto
+    // (`checkSig` always true"). The README's opening section carried the same
+    // false claim in different words, split across two lines, and sailed
+    // straight through it. Match the CLAIM on whitespace-normalised text, and
+    // allow only a clearly-marked historical quotation of it.
+    const CLAIM = /`?check(?:Sig|MultiSig)`?[^.]{0,160}?always\s+(?:returns?\s+)?`?true`?/gi;
+    const HISTORICAL =
+      /used to (?:say|claim|read)|previously (?:said|claimed|read)|no longer (?:says|claims)|formerly|old wording|used to be/i;
+
+    for (const rel of ['CLAUDE.md', 'packages/runar-testing/README.md']) {
+      const flat = readFileSync(resolve(REPO, rel), 'utf8').replace(/\s+/g, ' ');
+      for (const m of flat.matchAll(CLAIM)) {
+        const at = m.index ?? 0;
+        const before = flat.slice(Math.max(0, at - 120), at);
+        expect(
+          HISTORICAL.test(before),
+          `${rel} asserts as CURRENT FACT: "${m[0]}"`,
+        ).toBe(true);
+      }
+    }
+  });
 });
