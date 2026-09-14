@@ -76,7 +76,7 @@ cd examples/rust && cargo test                  # Run Rust contract tests (busin
 cd packages/runar-py && python3 -m pytest       # Run Python SDK + package tests
 cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest  # Run Python contract tests
 cd compilers/zig && zig build test              # Run Zig compiler tests
-cd compilers/ruby && rake test                  # Run Ruby compiler tests
+cd compilers/ruby && rake test                  # Run Ruby compiler tests (Ruby >= 2.7; see RunarCompiler::MINIMUM_RUBY_VERSION)
 cd packages/runar-zig && zig build test         # Run Zig SDK + package tests
 cd compilers/java && ./gradlew test             # Run Java compiler tests (wrapper pinned at Gradle 8.5; first run downloads it)
 cd packages/runar-java && ./gradlew test        # Run Java SDK + package tests
