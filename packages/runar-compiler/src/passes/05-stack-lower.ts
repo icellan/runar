@@ -62,6 +62,47 @@ import {
 
 const MAX_STACK_DEPTH = 800;
 
+// ---------------------------------------------------------------------------
+// BIP-143 sighash preimage layout
+// ---------------------------------------------------------------------------
+//
+// R-288: the fixed tail that follows scriptCode was hand-derived at four call
+// sites, twice in one order and twice in the other, and every one of them
+// pushed the literal 52. They agreed, but by coincidence of four independent
+// derivations — a layout change or a typo had four places to be wrong in.
+//
+// The preimage ends:
+//
+//     ... scriptCode || amount(8) || nSequence(4) || hashOutputs(32)
+//                    || nLocktime(4) || sighashType(4)
+//
+// so everything after scriptCode is a known, fixed width. Sizes are named once
+// here and the totals are added up rather than written down.
+
+/** `amount`: the spent output's value, little-endian int64. */
+const BIP143_AMOUNT_BYTES = 8;
+/** `nSequence` of the input being signed. */
+const BIP143_NSEQUENCE_BYTES = 4;
+/** `hashOutputs`: a double-SHA256 digest. */
+const BIP143_HASH_OUTPUTS_BYTES = 32;
+/** `nLocktime` of the spending transaction. */
+const BIP143_NLOCKTIME_BYTES = 4;
+/** `sighashType`, little-endian uint32. */
+const BIP143_SIGHASH_TYPE_BYTES = 4;
+
+/** Everything after `amount`: nSequence + hashOutputs + nLocktime + sighashType. */
+const BIP143_TAIL_AFTER_AMOUNT_BYTES =
+  BIP143_NSEQUENCE_BYTES +
+  BIP143_HASH_OUTPUTS_BYTES +
+  BIP143_NLOCKTIME_BYTES +
+  BIP143_SIGHASH_TYPE_BYTES;
+
+/**
+ * Everything after scriptCode. `OP_SIZE <this> OP_SUB OP_SPLIT` cuts a preimage
+ * at the end of scriptCode, which is what all four sites want.
+ */
+const BIP143_TAIL_WITH_AMOUNT_BYTES = BIP143_AMOUNT_BYTES + BIP143_TAIL_AFTER_AMOUNT_BYTES;
+
 /**
  * Value of one hex digit, or -1 if `code` is not `[0-9a-fA-F]`.
  *
@@ -3291,7 +3332,7 @@ class LoweringContext {
     // Extract amount: last 52 bytes, take 8 bytes at offset 0.
     this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 52n }); // 8 (amount) + 44 (tail)
+    this.emitOp({ op: 'push', value: BigInt(BIP143_TAIL_WITH_AMOUNT_BYTES) }); // 8 (amount) + 44 (tail)
     this.stackMap.push(null);
     this.emitOp({ op: 'opcode', code: 'OP_SUB' });
     this.stackMap.pop();
@@ -4146,7 +4187,7 @@ class LoweringContext {
     //    + nLocktime 4 + sighashType 4).
     this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 52n });
+    this.emitOp({ op: 'push', value: BigInt(BIP143_TAIL_WITH_AMOUNT_BYTES) });
     this.stackMap.push(null);
     this.emitOp({ op: 'opcode', code: 'OP_SUB' });
     this.stackMap.pop(); this.stackMap.pop();
@@ -4621,7 +4662,7 @@ class LoweringContext {
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null);
         this.stackMap.push(null);
-        this.emitOp({ op: 'push', value: 52n });
+        this.emitOp({ op: 'push', value: BigInt(BIP143_TAIL_WITH_AMOUNT_BYTES) });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_SUB' });
         this.stackMap.pop();
@@ -4703,7 +4744,7 @@ class LoweringContext {
         // Now have the tail from offset 104. Get its size - 52 = scriptCode length.
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null);
-        this.emitOp({ op: 'push', value: 52n });
+        this.emitOp({ op: 'push', value: BigInt(BIP143_TAIL_WITH_AMOUNT_BYTES) });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_SUB' });
         this.stackMap.pop();
