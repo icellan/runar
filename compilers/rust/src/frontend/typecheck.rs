@@ -727,6 +727,17 @@ terminal (no state mutation)",
                     return "<builtin>".to_string();
                 }
 
+                // A contract property named without a receiver. Java lets a method say
+                // `strikePrice` for `this.strikePrice`, and the Solidity frontend emits the
+                // same shape; the TS reference tier has resolved it here since that frontend
+                // landed. Without this the identifier types as `<unknown>` and any operator
+                // that demands a type rejects valid source — a frontend parity break the
+                // `--parse-only` matrix cannot see, because the identifier PARSES fine and
+                // only fails to RESOLVE.
+                if let Some(t) = self.prop_types.get(name.as_str()) {
+                    return t.clone();
+                }
+
                 "<unknown>".to_string()
             }
 

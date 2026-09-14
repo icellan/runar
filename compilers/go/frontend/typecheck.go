@@ -1011,6 +1011,16 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		if _, ok := builtinFunctions[e.Name]; ok {
 			return "<builtin>"
 		}
+		// A contract property named without a receiver. Java lets a method say
+		// `strikePrice` for `this.strikePrice`, and the Solidity frontend emits
+		// the same shape; the TS reference tier has resolved it here since that
+		// frontend landed. Without this the identifier types as `<unknown>` and
+		// any operator that demands a type rejects valid source — a frontend
+		// parity break the `--parse-only` matrix cannot see, because the
+		// identifier PARSES fine and only fails to RESOLVE.
+		if t, ok := tc.propTypes[e.Name]; ok {
+			return t
+		}
 		return "<unknown>"
 
 	case PropertyAccessExpr:
