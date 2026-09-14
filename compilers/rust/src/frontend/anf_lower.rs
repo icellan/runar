@@ -777,9 +777,6 @@ struct MethodScope {
     auto_injected_params: Vec<ANFParam>,
     /// Dedup set for `auto_injected_params`.
     auto_injected_set: HashSet<String>,
-    /// requireOutputP2PKH emits its `hash256(serialisedOutputs) ==
-    /// extractOutputHash(txPreimage)` check at most once per method body.
-    did_emit_hash_outputs_check: bool,
 }
 
 impl MethodScope {
@@ -853,6 +850,20 @@ struct LoweringContext<'a> {
     /// loop body, or an inlined helper's block — and false only in the context a
     /// method's own body is lowered into.
     nested: bool,
+    /// R-072. `requireOutputP2PKH` emits its `hash256(_serialisedOutputs) ==
+    /// extractOutputHash(txPreimage)` commitment at most once per CONTROL-FLOW
+    /// PATH, so this lives on the context and deliberately NOT on
+    /// `method_scope` (which is shared through an `Rc`).
+    ///
+    /// `sub_context` copies the parent's value in, because a commitment on a
+    /// dominating path really has been established by the time the nested block
+    /// runs; the copy means writes inside the block stay there, so an `if`'s two
+    /// arms cannot latch the flag for each other. Exactly one arm executes on
+    /// chain, and the arm-local per-output assertion only compares a substring
+    /// of the spender-supplied `_serialisedOutputs` witness: an arm without its
+    /// own commitment constrains nothing about the transaction's real outputs,
+    /// and the bond it claims to enforce can be satisfied with invented bytes.
+    did_emit_hash_outputs_check: bool,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -878,6 +889,7 @@ impl<'a> LoweringContext<'a> {
             method_scope: Rc::new(RefCell::new(MethodScope::default())),
             sighash_flag: None,
             nested: false,
+            did_emit_hash_outputs_check: false,
         }
     }
 
@@ -1042,6 +1054,9 @@ impl<'a> LoweringContext<'a> {
         // Issue #123: a manual checkPreimage inside a nested block must bind
         // under the method's declared @sighash mode.
         sub.sighash_flag = self.sighash_flag;
+        // R-072: inherited by VALUE — a parent commitment dominates this block,
+        // but one emitted inside it must not flow back out to a sibling arm.
+        sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check;
         // `lift_branch_update_props` walks method.body and does NOT recurse, so
         // an `if` its recogniser accepts is only actually REWRITTEN at method
         // top level. `lower_if_statement` needs the same distinction before it
@@ -2439,9 +2454,11 @@ fn lower_call_expr(
     // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
     // (once per method) and emits hash256(serialisedOutputs) ==
     // extractOutputHash(txPreimage) the first time the intrinsic is called
-    // in a method body. Subsequent calls in the same method skip the
-    // hashOutputs check (already established) and emit only the per-output
-    // substring assertion.
+    // on a given CONTROL-FLOW PATH. A later call on the same path skips the
+    // commitment (already established there) and emits only the per-output
+    // substring assertion; a call on a path the commitment does not dominate
+    // emits its own (R-072 — the substring assertion alone only constrains the
+    // spender-supplied witness, not the transaction).
     //
     // v1 assumes all outputs in the serialised set are exactly 34 bytes
     // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
@@ -2474,15 +2491,13 @@ fn lower_call_expr(
                 .record_auto_injected_param("_serialisedOutputs", "ByteString");
             ctx.add_param("_serialisedOutputs");
 
-            // Emit the hashOutputs(preimage) check exactly once per method.
-            let need_hash_check = {
-                let mut scope = ctx.method_scope.borrow_mut();
-                if !scope.did_emit_hash_outputs_check {
-                    scope.did_emit_hash_outputs_check = true;
-                    true
-                } else {
-                    false
-                }
+            // Emit the hashOutputs(preimage) commitment once per control-flow
+            // path (R-072 — see LoweringContext::did_emit_hash_outputs_check).
+            let need_hash_check = if ctx.did_emit_hash_outputs_check {
+                false
+            } else {
+                ctx.did_emit_hash_outputs_check = true;
+                true
             };
             if need_hash_check {
                 let serialised_ref = ctx.emit(ANFValue::LoadParam {

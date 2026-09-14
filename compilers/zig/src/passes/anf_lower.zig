@@ -900,9 +900,6 @@ const MethodScope = struct {
     /// dedup set; appended to the method's ABI params list AFTER txPreimage.
     auto_injected_params: std.ArrayListUnmanaged(ParamNode) = .empty,
     auto_injected_set: std.StringHashMapUnmanaged(void) = .empty,
-    /// requireOutputP2PKH emits its hashOutputs(preimage) check at most once
-    /// per METHOD — flipped on the first call, wherever in the body it sits.
-    did_emit_hash_outputs_check: bool = false,
 
     /// Record an intent-intrinsic-injected witness param. Idempotent — a
     /// repeat call with the same name is a no-op. Insertion order is
@@ -963,8 +960,7 @@ const LowerCtx = struct {
     /// pointer to the method context's `owned_method_scope`. R-072 — an
     /// intrinsic called inside an `if` arm / `for` body / ternary arm must
     /// register its witness param where the method's ABI augmentation will
-    /// see it, and must see the once-per-method hashOutputs guard the
-    /// statement-level call already flipped.
+    /// see it.
     method_scope: ?*MethodScope = null,
     /// Issue #123: the declared non-default `@sighash` flag for the method
     /// being lowered, so a MANUAL checkPreimage(pre) call binds under the same
@@ -978,6 +974,21 @@ const LowerCtx = struct {
     /// `method.body` and does NOT recurse, so an `if` its recogniser accepts is
     /// only actually REWRITTEN at method top level.
     nested: bool = false,
+    /// R-072. `requireOutputP2PKH` emits its
+    /// `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
+    /// commitment at most once per CONTROL-FLOW PATH, so this lives on the
+    /// context and deliberately NOT on `MethodScope` (which sub-contexts borrow
+    /// by pointer).
+    ///
+    /// `subContext()` copies the parent's value in, because a commitment on a
+    /// dominating path really has been established by the time the nested block
+    /// runs; the copy means writes inside the block stay there, so an `if`'s two
+    /// arms cannot latch the flag for each other. Exactly one arm executes on
+    /// chain, and the arm-local per-output assertion only compares a substring
+    /// of the spender-supplied `_serialisedOutputs` witness: an arm without its
+    /// own commitment constrains nothing about the transaction's real outputs,
+    /// and the bond it claims to enforce can be satisfied with invented bytes.
+    did_emit_hash_outputs_check: bool = false,
     /// Optional sink for the detail behind a refusal (see `LowerDiagnostic`).
     /// Null when the caller used `lowerToANF`. Propagated into sub-contexts so
     /// a refusal raised inside an if/for body still reaches the caller.
@@ -1121,10 +1132,12 @@ const LowerCtx = struct {
         sub.diagnostic = self.diagnostic;
         // R-072: borrowed, not copied. A witness param an intrinsic registers
         // inside this branch has to land on the list the METHOD's ABI
-        // augmentation reads, and the once-per-method hashOutputs guard has to
-        // stay flipped across the block boundary in both directions. Copying
-        // by value would lose the first and duplicate the second.
+        // augmentation reads; copying by value would lose it.
         sub.method_scope = self.methodScope();
+        // R-072: the hashOutputs commitment flag travels the other way — copied
+        // by VALUE. A parent commitment dominates this block, but one emitted
+        // inside it must not flow back out to a sibling arm.
+        sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check;
         // Copy local names
         var local_it = self.local_names.iterator();
         while (local_it.next()) |entry| {
@@ -2191,9 +2204,11 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
     // (once per method) and emits hash256(serialisedOutputs) ==
     // extractOutputHash(txPreimage) the first time the intrinsic is called
-    // in a method body. Subsequent calls in the same method skip the
-    // hashOutputs check (already established) and emit only the per-output
-    // substring assertion.
+    // on a given CONTROL-FLOW PATH. A later call on the same path skips the
+    // commitment (already established there) and emits only the per-output
+    // substring assertion; a call on a path the commitment does not dominate
+    // emits its own (R-072 — the substring assertion alone only constrains the
+    // spender-supplied witness, not the transaction).
     //
     // v1 assumes all outputs in the serialised set are exactly 34 bytes
     // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
@@ -2210,9 +2225,10 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         try ctx.recordAutoInjectedParam("_serialisedOutputs", .byte_string, "ByteString");
         try ctx.addParam("_serialisedOutputs");
 
-        // Emit the hashOutputs(preimage) check exactly once per method.
-        if (!ctx.methodScope().did_emit_hash_outputs_check) {
-            ctx.methodScope().did_emit_hash_outputs_check = true;
+        // Emit the hashOutputs(preimage) commitment once per control-flow path
+        // (R-072 — see `LowerCtx.did_emit_hash_outputs_check`).
+        if (!ctx.did_emit_hash_outputs_check) {
+            ctx.did_emit_hash_outputs_check = true;
             const serialised_ref0 = try ctx.emit(.{ .load_param = .{ .name = "_serialisedOutputs" } });
             const actual_out_hash_ref = try ctx.emit(.{ .call = .{
                 .func = "hash256",

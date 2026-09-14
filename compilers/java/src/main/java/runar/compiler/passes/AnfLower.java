@@ -579,7 +579,6 @@ public final class AnfLower {
     private static final class MethodScope {
         final List<AnfParam> autoInjectedParams = new ArrayList<>();
         final Set<String> autoInjectedSet = new HashSet<>();
-        boolean didEmitHashOutputsCheck = false;
 
         void recordAutoInjectedParam(String name, String type) {
             if (autoInjectedSet.add(name)) {
@@ -635,6 +634,25 @@ public final class AnfLower {
          * REWRITTEN at method top level.
          */
         boolean nested = false;
+        /**
+         * R-072. {@code requireOutputP2PKH} emits its
+         * {@code hash256(_serialisedOutputs) === extractOutputHash(txPreimage)}
+         * commitment at most once per CONTROL-FLOW PATH, so this lives on the
+         * context and deliberately NOT on {@link MethodScope} (which
+         * sub-contexts share by reference).
+         *
+         * <p>{@link #subContext()} copies the parent's value in, because a
+         * commitment on a dominating path really has been established by the
+         * time the nested block runs; the copy means writes inside the block
+         * stay there, so an {@code if}'s two arms cannot latch the flag for
+         * each other. Exactly one arm executes on chain, and the arm-local
+         * per-output assertion only compares a substring of the
+         * spender-supplied {@code _serialisedOutputs} witness: an arm without
+         * its own commitment constrains nothing about the transaction's real
+         * outputs, and the bond it claims to enforce can be satisfied with
+         * invented bytes.
+         */
+        boolean didEmitHashOutputsCheck = false;
 
         LowerCtx(ContractNode contract) {
             this.contract = contract;
@@ -825,6 +843,10 @@ public final class AnfLower {
             // manual checkPreimage() inside an if/else / ternary / inlined
             // branch binds under the same mode instead of the default.
             sub.sighashFlag = this.sighashFlag;
+            // R-072: inherited by VALUE — a parent commitment dominates this
+            // block, but one emitted inside it must not flow back out to a
+            // sibling arm.
+            sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
             // GAP-002: inherit the outer statement's source location so
             // bindings emitted inside an if/else / loop branch are still
             // mapped back to the originating AST statement.
@@ -1780,8 +1802,11 @@ public final class AnfLower {
             // standard P2PKH paying `amount` satoshis to `pubkeyHash`.
             // Auto-injects `_serialisedOutputs` (once per method) and emits
             // hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
-            // first time the intrinsic is called; subsequent calls in the
-            // same method emit only the per-output substring assertion.
+            // first time the intrinsic is called on a given CONTROL-FLOW PATH;
+            // a later call on the same path emits only the per-output substring
+            // assertion, while a call on a path the commitment does not
+            // dominate emits its own (R-072 — the substring assertion alone
+            // only constrains the spender-supplied witness, not the tx).
             //
             // v1 assumes all outputs in the serialised set are exactly 34
             // bytes (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script).
@@ -1798,9 +1823,10 @@ public final class AnfLower {
                 methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString");
                 addParam("_serialisedOutputs");
 
-                // Emit the hashOutputs(preimage) check exactly once per method.
-                if (!methodScope.didEmitHashOutputsCheck) {
-                    methodScope.didEmitHashOutputsCheck = true;
+                // Emit the hashOutputs(preimage) commitment once per
+                // control-flow path (R-072 — see LowerCtx.didEmitHashOutputsCheck).
+                if (!didEmitHashOutputsCheck) {
+                    didEmitHashOutputsCheck = true;
                     String serialisedRef = emit(new LoadParam("_serialisedOutputs"));
                     String actualOutHashRef = emit(new Call("hash256", List.of(serialisedRef)));
                     String preimageRef = emit(new LoadParam("txPreimage"));

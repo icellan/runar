@@ -719,6 +719,21 @@ type lowerCtx struct {
 	// only actually REWRITTEN at method top level; lowerIfStatement needs the
 	// same distinction before it defers to that pass.
 	nested bool
+
+	// didEmitHashOutputsCheck — R-072. requireOutputP2PKH emits its
+	// hash256(_serialisedOutputs) === extractOutputHash(txPreimage) commitment
+	// at most once per CONTROL-FLOW PATH, so this lives on the context and
+	// deliberately NOT on methodScope (which is shared by pointer).
+	//
+	// subContext copies the parent's value in, because a commitment on a
+	// dominating path really has been established by the time the nested block
+	// runs; the copy means writes inside the block stay there, so an `if`'s two
+	// arms cannot latch the flag for each other. Exactly one arm executes on
+	// chain, and the arm-local per-output assertion only compares a substring of
+	// the spender-supplied _serialisedOutputs witness: an arm without its own
+	// commitment constrains nothing about the transaction's real outputs, and
+	// the bond it claims to enforce can be satisfied with invented bytes.
+	didEmitHashOutputsCheck bool
 }
 
 // methodScopeT holds per-method bookkeeping shared by parent and
@@ -726,9 +741,8 @@ type lowerCtx struct {
 // reads autoInjectedParams to append witness params to the final method
 // param list.
 type methodScopeT struct {
-	autoInjectedParams      []ir.ANFParam   // append-only, insertion order
-	autoInjectedSet         map[string]bool // dedup
-	didEmitHashOutputsCheck bool            // requireOutputP2PKH emits its hashOutputs(preimage) check at most once per method
+	autoInjectedParams []ir.ANFParam   // append-only, insertion order
+	autoInjectedSet    map[string]bool // dedup
 }
 
 func newMethodScope() *methodScopeT {
@@ -981,7 +995,10 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		sideEffects:      ctx.sideEffects, // read-only summary — a nested call site must make the same inlining decision as a top-level one
 		methodScope:      ctx.methodScope, // shared pointer — auto-injection registers propagate up
 		sighashFlag:      ctx.sighashFlag, // #123: nested manual checkPreimage inherits the method's mode
-		nested:           true,
+		// R-072: inherited by VALUE — a parent commitment dominates this block,
+		// but one emitted inside it must not flow back out to a sibling arm.
+		didEmitHashOutputsCheck: ctx.didEmitHashOutputsCheck,
+		nested:                  true,
 	}
 	// Share local name set
 	for k := range ctx.localNames {
@@ -2133,9 +2150,11 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
 	// (once per method) and emits hash256(serialisedOutputs) ==
 	// extractOutputHash(txPreimage) the first time the intrinsic is called
-	// in a method body. Subsequent calls in the same method skip the
-	// hashOutputs check (already established) and emit only the per-output
-	// substring assertion.
+	// on a given CONTROL-FLOW PATH. A later call on the same path skips the
+	// commitment (already established there) and emits only the per-output
+	// substring assertion; a call on a path the commitment does not dominate
+	// emits its own (R-072 — the substring assertion alone only constrains the
+	// spender-supplied witness, not the transaction).
 	//
 	// v1 assumes all outputs in the serialised set are exactly 34 bytes
 	// (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
@@ -2155,9 +2174,10 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		ctx.methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString")
 		ctx.addParam("_serialisedOutputs")
 
-		// Emit the hashOutputs(preimage) check exactly once per method.
-		if !ctx.methodScope.didEmitHashOutputsCheck {
-			ctx.methodScope.didEmitHashOutputsCheck = true
+		// Emit the hashOutputs(preimage) commitment once per control-flow path
+		// (R-072 — see lowerCtx.didEmitHashOutputsCheck).
+		if !ctx.didEmitHashOutputsCheck {
+			ctx.didEmitHashOutputsCheck = true
 			serialisedRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_serialisedOutputs"})
 			actualOutHashRef := ctx.emit(makeCall("hash256", []string{serialisedRef}))
 			preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})

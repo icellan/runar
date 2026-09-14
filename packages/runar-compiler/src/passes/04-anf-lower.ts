@@ -585,12 +585,6 @@ class MethodScope {
   readonly autoInjectedParams: ANFParam[] = [];
   /** Dedup set keyed by param name. */
   private readonly autoInjectedSet: Set<string> = new Set();
-  /**
-   * Idempotency flag: requireOutputP2PKH emits its
-   * `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
-   * check at most once per method body, even if called multiple times.
-   */
-  didEmitHashOutputsCheck = false;
 
   /** Idempotent — second call with the same name is a no-op. */
   recordAutoInjectedParam(name: string, type: string): void {
@@ -665,6 +659,23 @@ class LoweringContext {
    * which leaves it with no correct lowering at all.
    */
   nested = false;
+
+  /**
+   * R-072. `requireOutputP2PKH` emits its
+   * `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)` commitment
+   * at most once per CONTROL-FLOW PATH — deliberately NOT on `methodScope`.
+   *
+   * A sub-context inherits the flag from its parent, because a commitment on a
+   * dominating path really has been established by the time the nested block
+   * runs. Its WRITES stay local, so an `if`'s two arms cannot latch the flag for
+   * each other. Exactly one arm executes on chain, and the arm-local per-output
+   * assertion only compares a substring of the spender-supplied
+   * `_serialisedOutputs` witness: an arm without its own commitment constrains
+   * nothing about the transaction's real outputs, and the bond it claims to
+   * enforce can be satisfied by bytes the spender invented. Mirrors the Python
+   * reference (`compilers/python/runar_compiler/frontend/anf_lower.py`).
+   */
+  didEmitHashOutputsCheck = false;
 
   constructor(contract: ContractNode, sideEffects: SideEffectSummary | null = null) {
     this.contract = contract;
@@ -902,6 +913,11 @@ class LoweringContext {
     // Share the method scope so auto-injection from intrinsics called
     // inside the nested block bubbles up to the parent's ABI list.
     sub.methodScope = this.methodScope;
+    // R-072: inherit the per-path hashOutputs commitment flag by VALUE. The
+    // parent's commitment dominates this block, so it need not be repeated —
+    // but a commitment emitted inside this block does not flow back out, so a
+    // sibling arm cannot inherit a commitment that never runs on its path.
+    sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
     sub.nested = true;
     return sub;
   }
@@ -2102,9 +2118,11 @@ function lowerCallExpr(
   // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
   // (once per method) and emits hash256(serialisedOutputs) ==
   // extractOutputHash(txPreimage) the first time the intrinsic is called
-  // in a method body. Subsequent calls in the same method skip the
-  // hashOutputs check (already established) and emit only the per-output
-  // substring assertion.
+  // on a given CONTROL-FLOW PATH. A later call on the same path skips the
+  // commitment (already established there) and emits only the per-output
+  // substring assertion; a call on a path the commitment does not dominate
+  // emits its own (R-072 — the substring assertion alone only constrains the
+  // spender-supplied witness, not the transaction).
   //
   // v1 assumes all outputs in the serialised set are exactly 34 bytes
   // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
@@ -2124,9 +2142,10 @@ function lowerCallExpr(
     ctx.methodScope.recordAutoInjectedParam('_serialisedOutputs', 'ByteString');
     ctx.addParam('_serialisedOutputs');
 
-    // Emit the hashOutputs(preimage) check exactly once per method.
-    if (!ctx.methodScope.didEmitHashOutputsCheck) {
-      ctx.methodScope.didEmitHashOutputsCheck = true;
+    // Emit the hashOutputs(preimage) commitment once per control-flow path
+    // (R-072 — see LoweringContext.didEmitHashOutputsCheck).
+    if (!ctx.didEmitHashOutputsCheck) {
+      ctx.didEmitHashOutputsCheck = true;
       const serialisedRef = ctx.emit({ kind: 'load_param', name: '_serialisedOutputs' });
       const actualOutHashRef = ctx.emit({ kind: 'call', func: 'hash256', args: [serialisedRef] });
       const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });

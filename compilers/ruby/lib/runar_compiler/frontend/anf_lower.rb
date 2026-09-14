@@ -651,12 +651,10 @@ module RunarCompiler
     # reference compiler's methodScopeT struct.
     class MethodScope
       attr_reader :auto_injected_params
-      attr_accessor :did_emit_hash_outputs_check
 
       def initialize
         @auto_injected_params = []
         @auto_injected_set = {}
-        @did_emit_hash_outputs_check = false
       end
 
       # Idempotent: second call with the same name is a no-op.
@@ -709,6 +707,8 @@ module RunarCompiler
         # loop body, or an inlined helper's block -- and false only in the
         # context a method's own body is lowered into.
         @nested = false
+        # R-072: see the +did_emit_hash_outputs_check+ accessor below.
+        @did_emit_hash_outputs_check = false
       end
 
       # @return [MethodScope] shared per-method bookkeeping for intent intrinsics
@@ -723,6 +723,22 @@ module RunarCompiler
       # walks method.body and does NOT recurse, so an +if+ its recogniser accepts
       # is only actually REWRITTEN at method top level.
       attr_accessor :nested
+
+      # R-072. +requireOutputP2PKH+ emits its
+      # +hash256(_serialisedOutputs) === extractOutputHash(txPreimage)+
+      # commitment at most once per CONTROL-FLOW PATH, so this lives on the
+      # context and deliberately NOT on +method_scope+ (which is shared by
+      # reference).
+      #
+      # +sub_context+ copies the parent's value in, because a commitment on a
+      # dominating path really has been established by the time the nested block
+      # runs; the copy means writes inside the block stay there, so an +if+'s two
+      # arms cannot latch the flag for each other. Exactly one arm executes on
+      # chain, and the arm-local per-output assertion only compares a substring
+      # of the spender-supplied +_serialisedOutputs+ witness: an arm without its
+      # own commitment constrains nothing about the transaction's real outputs,
+      # and the bond it claims to enforce can be satisfied with invented bytes.
+      attr_accessor :did_emit_hash_outputs_check
 
       # Push an alias for a parameter name, used while inlining the body of
       # a private method into this context: identifier references to that
@@ -965,9 +981,13 @@ module RunarCompiler
           @param_alias_stack.each_with_object({}) { |(k, v), h| h[k] = v.dup }
         )
         # Share the per-method intent-intrinsic bookkeeping so witness-param
-        # registrations and the once-per-method hashOutputs flag propagate up
-        # from if/else branches. Mirrors Go subContext.methodScope sharing.
+        # registrations propagate up from if/else branches. Mirrors Go
+        # subContext.methodScope sharing.
         sub.instance_variable_set(:@method_scope, @method_scope)
+        # R-072: the hashOutputs commitment flag is inherited by VALUE -- a
+        # parent commitment dominates this block, but one emitted inside it must
+        # not flow back out to a sibling arm.
+        sub.did_emit_hash_outputs_check = @did_emit_hash_outputs_check
         # Propagate the method's declared @sighash flag (issue #123) so a manual
         # checkPreimage inside an if/else branch binds under the same mode.
         sub.sighash_flag = @sighash_flag
@@ -1632,9 +1652,11 @@ module RunarCompiler
         # paying `amount` satoshis to `pubkeyHash`. Auto-injects
         # `_serialisedOutputs` (once per method) and emits
         # hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
-        # first time the intrinsic is called in a method body. Subsequent
-        # calls in the same method skip the hashOutputs check and emit only
-        # the per-output substring assertion.
+        # first time the intrinsic is called on a given CONTROL-FLOW PATH. A
+        # later call on the same path skips the commitment and emits only the
+        # per-output substring assertion; a call on a path the commitment does
+        # not dominate emits its own (R-072 -- the substring assertion alone
+        # only constrains the spender-supplied witness, not the transaction).
         #
         # v1 assumes all outputs in the serialised set are exactly 34 bytes
         # (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte
@@ -1651,9 +1673,10 @@ module RunarCompiler
           add_param("_serialisedOutputs")
           register_param_type("_serialisedOutputs", "ByteString")
 
-          # Emit the hashOutputs(preimage) check exactly once per method.
-          unless @method_scope.did_emit_hash_outputs_check
-            @method_scope.did_emit_hash_outputs_check = true
+          # Emit the hashOutputs(preimage) commitment once per control-flow path
+          # (R-072 -- see the +did_emit_hash_outputs_check+ accessor).
+          unless @did_emit_hash_outputs_check
+            @did_emit_hash_outputs_check = true
             serialised_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_serialisedOutputs" })
             actual_out_hash_ref = emit(Frontend._make_call("hash256", [serialised_ref]))
             preimage_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
