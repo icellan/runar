@@ -4,7 +4,7 @@ package contract
 
 import "runar"
 
-// LoopShapes — Go port. Non-zero loop start plus a countdown loop (R-102).
+// LoopShapes — Go port. A NON-ZERO loop start, ascending (R-102).
 type LoopShapes struct {
 	runar.SmartContract
 	Target runar.Int `runar:"readonly"`

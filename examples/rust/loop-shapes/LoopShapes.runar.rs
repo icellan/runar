@@ -1,6 +1,6 @@
 use runar::prelude::*;
 
-/// LoopShapes — Rust DSL port. A NON-ZERO loop start (R-102).
+/// LoopShapes — Rust DSL port. A NON-ZERO loop start, ascending (R-102).
 #[runar::contract]
 struct LoopShapes {
     #[readonly]

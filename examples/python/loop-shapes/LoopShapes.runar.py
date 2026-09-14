@@ -2,7 +2,7 @@ from runar import SmartContract, Bigint, public, assert_
 
 
 class LoopShapes(SmartContract):
-    # LoopShapes — Python port. A NON-ZERO loop start (R-102).
+    # LoopShapes — Python port. A NON-ZERO loop start, ascending (R-102).
     target: Bigint
 
     def __init__(self, target: Bigint):

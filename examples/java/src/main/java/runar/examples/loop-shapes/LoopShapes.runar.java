@@ -8,12 +8,15 @@ import runar.lang.types.Bigint;
 import static runar.lang.Builtins.assertThat;
 
 /**
- * LoopShapes — Java port. A NON-ZERO loop start (R-102).
+ * LoopShapes — Java port. A NON-ZERO loop start, ascending (R-102).
  *
  * The repository contained exactly two `for` loops before this example, both
  * zero-start and incrementing, so the ANF `loop` node's `start` field was never
  * exercised by any fixture. Go's constant folder dropped it (N-128) and stayed
  * green for that reason.
+ *
+ * The one loop below runs i = 3, 4, 5, 6, so `verify(seed)` asserts
+ * `seed + 18`. See LoopShapes.runar.ts for the full note.
  */
 class LoopShapes extends SmartContract {
 

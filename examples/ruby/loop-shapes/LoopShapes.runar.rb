@@ -1,6 +1,6 @@
 require 'runar'
 
-# LoopShapes -- Ruby port. A NON-ZERO loop start (R-102).
+# LoopShapes -- Ruby port. A NON-ZERO loop start, ascending (R-102).
 class LoopShapes < Runar::SmartContract
   prop :target, Bigint
 

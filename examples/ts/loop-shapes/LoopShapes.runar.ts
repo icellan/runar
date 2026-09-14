@@ -1,19 +1,24 @@
 import { SmartContract, assert } from 'runar-lang';
 
 /**
- * LoopShapes — the loop shapes the corpus never had (R-102).
+ * LoopShapes — the loop shape the corpus never had (R-102).
  *
- * Every tier implements non-zero loop starts and countdown loops; the ANF
- * `loop` node carries explicit `start` and `step` fields precisely for them.
- * Until this example, the entire repository contained two `for` loops, both
- * zero-start and incrementing, so none of that code was exercised — which is
- * how Go's constant folder came to drop `start` and `step` (N-128) and stay
- * green.
+ * The ANF `loop` node carries explicit `start` and `step` fields. Until this
+ * example, the entire repository contained two `for` loops, both zero-start
+ * and incrementing, so neither field was exercised — which is how Go's
+ * constant folder came to drop `start` and `step` (N-128) and stay green.
  *
- *   non-zero start:  3 + 4 + 5 + 6 = 18
- *   countdown:       5 + 4 + 3 + 2 = 14
+ * This contract closes the non-zero-start half of that gap and nothing more.
+ * It holds exactly one loop, and that loop ascends:
  *
- * so `verify(seed)` asserts `seed + 32`.
+ *   loop 1 (i = 3n; i < 7n; i++):  3 + 4 + 5 + 6 = 18
+ *
+ * so `verify(seed)` asserts `seed + 18`.
+ *
+ * The descending half is still open: no fixture anywhere carries `step = -1`,
+ * and three of the nine surfaces cannot spell a decrementing loop at all
+ * (N-130), so that shape needs a fixture of its own rather than a second loop
+ * bolted onto this one.
  */
 export class LoopShapes extends SmartContract {
   readonly target: bigint;

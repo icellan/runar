@@ -1,4 +1,4 @@
-// LoopShapes -- Move-style port. A NON-ZERO loop start (R-102).
+// LoopShapes -- Move-style port. A NON-ZERO loop start, ascending (R-102).
 module LoopShapes {
     use runar::types::{Int};
 

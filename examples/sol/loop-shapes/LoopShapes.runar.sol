@@ -1,7 +1,7 @@
 pragma runar ^0.1.0;
 
-/// LoopShapes — Solidity-like port. Non-zero loop start plus a countdown loop
-/// (R-102: the corpus had neither).
+/// LoopShapes — Solidity-like port. A NON-ZERO loop start, ascending
+/// (R-102: the corpus had none).
 contract LoopShapes is SmartContract {
     int immutable target;
 

@@ -1,6 +1,6 @@
 const runar = @import("runar");
 
-// LoopShapes -- Zig port. A NON-ZERO loop start (R-102).
+// LoopShapes -- Zig port. A NON-ZERO loop start, ascending (R-102).
 pub const LoopShapes = struct {
     pub const Contract = runar.SmartContract;
 
