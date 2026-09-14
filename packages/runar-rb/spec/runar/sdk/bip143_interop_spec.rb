@@ -36,11 +36,15 @@ RSpec.describe 'Runar::SDK BIP-143 cross-tier interop' do
 
     scenarios.each do |s|
       name = s['scenario']
-      expect(s['sighashFlags']).to eq(0x41), "#{name}: only SIGHASH_ALL|FORKID supported"
-
-      # 1. Independently recompute the BIP-143 preimage (hand-written impl).
+      # 1. Independently recompute the BIP-143 preimage (hand-written impl)
+      #    under the scenario's OWN sighash flags.
+      #
+      #    R-206: this used to reject anything but 0x41, and every scenario in
+      #    the fixture was ALL|FORKID — so the per-mode zeroing rules were
+      #    implemented seven times and compared zero times.
       _sig_hex, got_preimage = Runar::SDK.compute_op_push_tx(
-        s['unsignedTxHex'], s['inputIndex'], s['prevScriptHex'], s['prevValueSats']
+        s['unsignedTxHex'], s['inputIndex'], s['prevScriptHex'], s['prevValueSats'],
+        -1, s['sighashFlags']
       )
       expect(got_preimage).to eq(s['preimageHex']),
                               "#{name}: BIP-143 PREIMAGE DIVERGENCE from TS reference\n" \

@@ -60,8 +60,35 @@ import { sign as ecdsaSign, verify as ecdsaVerify } from '@bsv/sdk/primitives/EC
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '..', '..');
 
-/** SIGHASH_ALL | SIGHASH_FORKID — the only sighash type these SDKs emit. */
+/** SIGHASH_ALL | SIGHASH_FORKID — the default every stateful call uses. */
 const SIGHASH_ALL_FORKID = 0x41;
+
+/**
+ * R-206: the other sighash modes the compiler accepts.
+ *
+ * `passes/sighash-directive.ts` parses `@sighash NONE|FORKID`,
+ * `SINGLE|FORKID`, `ALL|ANYONECANPAY|FORKID` and so on, and
+ * `passes/sighash-validate.ts` carries a table of which BIP-143 digest fields
+ * each mode zeroes. All seven SDKs already take a sighash-flag parameter —
+ * `ComputeOpPushTxWithSigHash`, `compute_op_push_tx_with_code_sep_sighash`,
+ * `sig_hash_type`, `computeOpPushTxWithSigHash`, `OpPushTx.preimage(..., flag)`
+ * — so seven independent implementations of the zeroing rules existed and
+ * NOTHING compared them. Every scenario in this fixture was 0x41, and every
+ * consuming tier asserted `sighashFlags == 0x41` and would have failed loudly
+ * rather than skip, which is why the gap stayed invisible instead of rotting
+ * quietly.
+ *
+ * The zeroing rules these exercise (BIP-143, as the validator's table states):
+ *   hashPrevouts  zeroed under ANYONECANPAY
+ *   hashSequence  zeroed unless the mode is exactly ALL
+ *   hashOutputs   zeroed under NONE; under SINGLE it covers ONLY the output at
+ *                 the signing index (and is zeroed if there is no such output)
+ */
+const SIGHASH_NONE_FORKID = 0x42;
+const SIGHASH_SINGLE_FORKID = 0x43;
+const SIGHASH_ALL_ACP_FORKID = 0xc1;
+const SIGHASH_NONE_ACP_FORKID = 0xc2;
+const SIGHASH_SINGLE_ACP_FORKID = 0xc3;
 
 const ALICE_PRIV = new PrivateKey(1);
 const ALICE_PUB_HEX = ALICE_PRIV.toPublicKey().toDER('hex') as string;
@@ -147,6 +174,8 @@ interface PreimageArgs {
   inputs: TxIn[];
   outputs: TxOut[];
   lockTime: number;
+  /** R-206: BIP-143 sighash flags. Drives which digest fields are zeroed. */
+  scope: number;
 }
 
 function computePreimageHex(a: PreimageArgs): string {
@@ -175,13 +204,13 @@ function computePreimageHex(a: PreimageArgs): string {
     subscript: Script.fromHex(a.prevScriptHex) as unknown as Parameters<typeof TransactionSignature.format>[0]['subscript'],
     inputSequence: input.sequence,
     lockTime: a.lockTime,
-    scope: SIGHASH_ALL_FORKID,
+    scope: a.scope,
   });
   return Buffer.from(preimage).toString('hex');
 }
 
 /** Deterministic RFC-6979 + low-S DER signature over sha256d(preimage), + sighash byte. */
-function signPreimage(preimageHex: string): { sigHex: string; digestHex: string } {
+function signPreimage(preimageHex: string, scope: number): { sigHex: string; digestHex: string } {
   const preimage = Utils.toArray(preimageHex, 'hex');
   // BIP-143 sighash digest = sha256d(preimage) — this is THE message the
   // signature commits to and the value every consuming tier verifies the
@@ -192,7 +221,7 @@ function signPreimage(preimageHex: string): { sigHex: string; digestHex: string 
   const digest = Hash.sha256(Hash.sha256(preimage)); // sha256d
   const sig = ecdsaSign(new BigNumber(digest), ALICE_PRIV, true); // forceLowS
   const der = Utils.toHex(sig.toDER() as number[]);
-  const sigHex = der + SIGHASH_ALL_FORKID.toString(16).padStart(2, '0');
+  const sigHex = der + scope.toString(16).padStart(2, '0');
   const digestHex = Utils.toHex(digest);
   return { sigHex, digestHex };
 }
@@ -228,6 +257,7 @@ function buildScenario(
   inputIndex: number,
   prevScriptHex: string,
   prevValueSats: number,
+  scope: number = SIGHASH_ALL_FORKID,
   lockTime = 0,
 ): Scenario {
   const unsignedTxHex = buildUnsignedTx(inputs, outputs, lockTime);
@@ -239,8 +269,9 @@ function buildScenario(
     inputs,
     outputs,
     lockTime,
+    scope,
   });
-  const { sigHex, digestHex } = signPreimage(preimageHex);
+  const { sigHex, digestHex } = signPreimage(preimageHex, scope);
   return {
     scenario: name,
     description,
@@ -248,7 +279,7 @@ function buildScenario(
     inputIndex,
     prevScriptHex,
     prevValueSats,
-    sighashFlags: SIGHASH_ALL_FORKID,
+    sighashFlags: scope,
     preimageHex,
     digestHex,
     sigHex,
@@ -377,6 +408,74 @@ async function buildScenarios(): Promise<Scenario[]> {
     ),
   );
 
+  // ---- Scenarios 4-8: one per sighash mode (R-206) ----
+  //
+  // Every scenario above is SIGHASH_ALL|FORKID, which exercises exactly one
+  // row of the BIP-143 zeroing table. The compiler accepts NONE, SINGLE and
+  // ANYONECANPAY via `@sighash`, `sighash-validate.ts` reasons about what each
+  // one zeroes, and all seven SDKs take a flag parameter — so seven
+  // independent implementations of those rules shipped with nothing comparing
+  // them against each other.
+  //
+  // The tx shape is deliberately shared across all five so the ONLY difference
+  // between their preimages is the flag: two inputs with distinct sequences
+  // and two outputs, signing input 1. Two outputs matter for SINGLE, which
+  // commits to the output at the signing index alone — with one output,
+  // signing index 1 would hit the "no corresponding output" case and zero
+  // hashOutputs, making SINGLE indistinguishable from NONE and the fixture
+  // worthless for telling them apart.
+  const modeInputs: TxIn[] = [
+    { prevTxid: 'e'.repeat(64), prevVout: 0, sequence: 0xfffffffd },
+    { prevTxid: 'f'.repeat(64), prevVout: 1, sequence: 0xfffffffe },
+  ];
+  const modeOutputs: TxOut[] = [
+    { satoshis: 2200, scriptHex: p2pkhScript(pkh) },
+    { satoshis: 3300, scriptHex: p2pkhScript(pkh) },
+  ];
+  const modes: Array<{ name: string; scope: number; zeroes: string }> = [
+    {
+      name: 'sighash_none_forkid',
+      scope: SIGHASH_NONE_FORKID,
+      zeroes: 'hashSequence and hashOutputs zeroed; the signer commits to no output at all',
+    },
+    {
+      name: 'sighash_single_forkid',
+      scope: SIGHASH_SINGLE_FORKID,
+      zeroes: 'hashSequence zeroed; hashOutputs covers ONLY output 1 (the signing index)',
+    },
+    {
+      name: 'sighash_all_anyonecanpay_forkid',
+      scope: SIGHASH_ALL_ACP_FORKID,
+      zeroes: 'hashPrevouts and hashSequence zeroed; hashOutputs covers every output',
+    },
+    {
+      name: 'sighash_none_anyonecanpay_forkid',
+      scope: SIGHASH_NONE_ACP_FORKID,
+      zeroes: 'hashPrevouts, hashSequence and hashOutputs all zeroed — the weakest commitment',
+    },
+    {
+      name: 'sighash_single_anyonecanpay_forkid',
+      scope: SIGHASH_SINGLE_ACP_FORKID,
+      zeroes: 'hashPrevouts and hashSequence zeroed; hashOutputs covers ONLY output 1',
+    },
+  ];
+  for (const mode of modes) {
+    scenarios.push(
+      buildScenario(
+        mode.name,
+        `Sighash mode 0x${mode.scope.toString(16)}: ${mode.zeroes}. ` +
+          'Same 2-in/2-out tx and signing index as its siblings, so the preimage ' +
+          'difference is attributable to the flag alone.',
+        modeInputs,
+        modeOutputs,
+        1,
+        p2pkhPrevScript,
+        9000,
+        mode.scope,
+      ),
+    );
+  }
+
   return scenarios;
 }
 
@@ -403,6 +502,7 @@ function selfValidate(scenarios: Scenario[]): void {
       inputs: reInputs,
       outputs: reOutputs,
       lockTime: 0,
+      scope: s.sighashFlags,
     });
     if (re !== s.preimageHex) {
       throw new Error(
@@ -504,7 +604,7 @@ async function main(): Promise<void> {
     const scenarios = committed.scenarios as Scenario[];
     selfValidate(scenarios); // preimage recomputes + digest matches + sig verifies
     for (const s of scenarios) {
-      const { sigHex, digestHex } = signPreimage(s.preimageHex);
+      const { sigHex, digestHex } = signPreimage(s.preimageHex, s.sighashFlags);
       if (sigHex !== s.sigHex) {
         console.error(`FAIL: ${s.scenario}.sigHex drifted from the TS reference`);
         console.error(`  committed:  ${s.sigHex}`);
@@ -526,10 +626,14 @@ async function main(): Promise<void> {
   const fixture = {
     fixture_version: 1,
     notes:
-      'Cross-tier BIP-143 sighash fixture (GAP-003). TS (@bsv/sdk TransactionSignature.format) is the reference. Every SDK tier must INDEPENDENTLY recompute preimageHex from (unsignedTxHex, inputIndex, prevScriptHex, prevValueSats, sighashFlags) and assert byte-equality, then verify sigHex against pubkeyHex over sha256d(preimage). sigHex is deterministic RFC-6979 + low-S DER over sha256d(preimage) with priv=1, sighash byte 0x41 appended. See conformance/sdk-bip143/generate-fixtures.ts.',
+      'Cross-tier BIP-143 sighash fixture (GAP-003). TS (@bsv/sdk TransactionSignature.format) is the reference. Every SDK tier must INDEPENDENTLY recompute preimageHex from (unsignedTxHex, inputIndex, prevScriptHex, prevValueSats, sighashFlags) and assert byte-equality, then verify sigHex against pubkeyHex over sha256d(preimage). sigHex is deterministic RFC-6979 + low-S DER over sha256d(preimage) with priv=1 and the scenario\'s own sighash byte appended. See conformance/sdk-bip143/generate-fixtures.ts.',
+    provenance_note:
+      'R-206 asked whether these vectors are self-graded. Partly: they are produced by the TS tier, but they are CHECKED by seven independent implementations, two of which are upstream third-party libraries rather than repo code — @bsv/sdk (TS) and bsv-blockchain/go-sdk (Go, via CalcInputPreimage). Rust, Python, Zig, Ruby and Java hand-roll the preimage. Two independent upstream BIP-143 implementations agreeing is category (b), not (c). What is still missing is a category-(a) vector published by the BIP itself; adding one requires fetching it from the spec, and transcribing digests from memory would be fabricating test data.',
+    coverage_note:
+      'Sighash modes covered: ALL|FORKID (0x41, three tx shapes), NONE|FORKID (0x42), SINGLE|FORKID (0x43), ALL|ANYONECANPAY|FORKID (0xc1), NONE|ANYONECANPAY|FORKID (0xc2), SINGLE|ANYONECANPAY|FORKID (0xc3). The five mode scenarios share one 2-in/2-out transaction signing input 1, so the only difference between their preimages is the flag. Two outputs are required: under SINGLE the digest covers the output at the SIGNING index, and with a single output index 1 would hit the no-corresponding-output case, zero hashOutputs, and make SINGLE indistinguishable from NONE.',
     signer_priv_hex: '0000000000000000000000000000000000000000000000000000000000000001',
     signer_pub_hex: ALICE_PUB_HEX,
-    sighash_note: '0x41 = SIGHASH_ALL | SIGHASH_FORKID. digestHex = sha256d(preimage) = the value ECDSA actually signs.',
+    sighash_note: '0x41 = SIGHASH_ALL | SIGHASH_FORKID. digestHex = sha256d(preimage) = the value ECDSA actually signs. Each scenario carries its own sighashFlags; consumers must recompute under THAT value, not a hardcoded one.',
     scenarios,
   };
 

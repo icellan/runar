@@ -139,12 +139,18 @@ class Bip143InteropTest {
             String wantDigest = (String) s.get("digestHex");
             String sigHex = (String) s.get("sigHex");
             String pubkeyHex = (String) s.get("pubkeyHex");
-            assertEquals(0x41, asInt(s.get("sighashFlags")), name + ": only SIGHASH_ALL|FORKID supported");
+            int sighashFlags = asInt(s.get("sighashFlags"));
 
-            // 1. Independently recompute the BIP-143 preimage.
+            // 1. Independently recompute the BIP-143 preimage under the
+            //    scenario's OWN sighash flags.
+            //
+            //    R-206: this used to reject anything but 0x41, and every
+            //    scenario in the fixture was ALL|FORKID — so the per-mode
+            //    zeroing rules were implemented seven times and compared zero
+            //    times.
             RawTx tx = parseRawTx(txHex);
             byte[] scriptCode = ScriptUtils.hexToBytes(prevScriptHex);
-            byte[] preimage = OpPushTx.preimage(tx, inputIndex, scriptCode, prevValueSats, 0x41);
+            byte[] preimage = OpPushTx.preimage(tx, inputIndex, scriptCode, prevValueSats, sighashFlags);
             String gotPreimage = ScriptUtils.bytesToHex(preimage);
             assertEquals(wantPreimage, gotPreimage, name + ": BIP-143 PREIMAGE DIVERGENCE from TS reference");
 

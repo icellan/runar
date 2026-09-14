@@ -75,12 +75,16 @@ func TestBip143Interop_PreimageAndSignature(t *testing.T) {
 	for _, s := range f.Scenarios {
 		s := s
 		t.Run(s.Scenario, func(t *testing.T) {
-			// 1. Independently recompute the BIP-143 preimage. ComputeOpPushTx
-			//    runs this tier's CalcInputPreimage with SIGHASH_ALL|FORKID.
-			if s.SighashFlags != 0x41 {
-				t.Fatalf("unexpected sighashFlags %#x (only ALL|FORKID supported)", s.SighashFlags)
-			}
-			_, preimage, err := ComputeOpPushTx(s.UnsignedTxHex, s.InputIndex, s.PrevScriptHex, s.PrevValueSats)
+			// 1. Independently recompute the BIP-143 preimage under the
+			//    scenario's OWN sighash flags.
+			//
+			//    R-206: this used to reject anything but 0x41. Every scenario in
+			//    the fixture was ALL|FORKID, so the per-mode zeroing rules —
+			//    hashPrevouts under ANYONECANPAY, hashSequence unless pure ALL,
+			//    hashOutputs under NONE and the single-output rule under SINGLE
+			//    — were implemented seven times and compared zero times.
+			_, preimage, err := ComputeOpPushTxWithSigHash(
+				s.UnsignedTxHex, s.InputIndex, s.PrevScriptHex, s.PrevValueSats, -1, s.SighashFlags)
 			if err != nil {
 				t.Fatalf("ComputeOpPushTx: %v", err)
 			}
