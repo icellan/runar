@@ -81,6 +81,26 @@ class FuncSig:
     return_type: str
 
 
+# Builtins the Go tier implements and this one deliberately does not (R-258 /
+# R-259). They belong to the proof-system families root CLAUDE.md scopes to the
+# Go reference compiler, so their absence here is policy rather than a gap — but
+# reporting them as "unknown function" told the author a real Runar builtin does
+# not exist, which sends them looking for a typo or a missing import. The Java
+# tier already names the policy for the families it skips; this is the same
+# sentence.
+#
+# Keyed by builtin name, valued by the family to name in the diagnostic.
+GO_ONLY_BUILTINS: dict[str, str] = {
+    "assertGroth16WitnessAssisted": "BN254 + Groth16",
+    "assertGroth16WitnessAssistedWithMSM": "BN254 + Groth16",
+    "groth16PublicInput": "BN254 + Groth16",
+    "bn254Pairing": "BN254 pairing",
+    "bn254MultiPairing3": "BN254 pairing",
+    "bn254MultiPairing4": "BN254 pairing",
+    "merkleRootPoseidon2KB": "Poseidon2 Merkle",
+    "verifySP1FRI": "SP1 FRI",
+}
+
 BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "sha256":            FuncSig(params=["ByteString"], return_type="Sha256"),
     "ripemd160":         FuncSig(params=["ByteString"], return_type="Ripemd160"),
@@ -854,10 +874,22 @@ class _TypeChecker:
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "<unknown>"
-            self._add_error(
-                f"unknown function '{name}' -- only Runar built-in functions "
-                f"and contract methods are allowed"
-            )
+            if name in GO_ONLY_BUILTINS:
+                family = GO_ONLY_BUILTINS[name]
+                self._add_error(
+                    f"builtin '{name}' belongs to the {family} family, which is "
+                    f"scoped to the Go tier by project policy -- see CLAUDE.md "
+                    f"(\"EVM/STARK proof-system primitives\") and "
+                    f"conformance/README.md (\"Per-fixture compiler allowlist\"). "
+                    f"Compile this contract with the Go compiler, or opt the "
+                    f"fixture out of the Python tier via source.json's "
+                    f"\"compilers\" allowlist."
+                )
+            else:
+                self._add_error(
+                    f"unknown function '{name}' -- only Runar built-in functions "
+                    f"and contract methods are allowed"
+                )
             for arg in e.args:
                 self._infer_expr_type(arg, env)
             return "<unknown>"
