@@ -77,7 +77,7 @@ func officialHex(t *testing.T, source, fileName string) string {
 
 func TestPlaygroundMatchesOfficialPipeline_FoldSensitive(t *testing.T) {
 	want := officialHex(t, foldSensitiveSource, "FoldSensitive.runar.ts")
-	got, _, err := compileSource([]byte(foldSensitiveSource), "FoldSensitive.runar.ts")
+	got, _, _, err := compileSource([]byte(foldSensitiveSource), "FoldSensitive.runar.ts")
 	if err != nil {
 		t.Fatalf("playground compile failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestPlaygroundMatchesOfficialPipeline_FoldSensitive(t *testing.T) {
 
 func TestPlaygroundMatchesOfficialPipeline_FixedArray(t *testing.T) {
 	want := officialHex(t, fixedArraySource, "ArrayRead.runar.ts")
-	got, _, err := compileSource([]byte(fixedArraySource), "ArrayRead.runar.ts")
+	got, _, _, err := compileSource([]byte(fixedArraySource), "ArrayRead.runar.ts")
 	if err != nil {
 		t.Fatalf("playground compile failed — pass 3b (ExpandFixedArrays) is what "+
 			"turns a FixedArray property into scalar slots, so without it this "+
@@ -109,7 +109,7 @@ func TestPlaygroundMatchesOfficialPipeline_P2PKH(t *testing.T) {
 	// The canonical contract. It has nothing for the optimizers to do, so it is
 	// the control: if this one ever differs, the divergence is not about passes.
 	want := officialHex(t, p2pkhSource, "P2PKH.runar.ts")
-	got, _, err := compileSource([]byte(p2pkhSource), "P2PKH.runar.ts")
+	got, _, _, err := compileSource([]byte(p2pkhSource), "P2PKH.runar.ts")
 	if err != nil {
 		t.Fatalf("playground compile failed: %v", err)
 	}

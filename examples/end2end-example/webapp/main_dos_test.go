@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // R-048: /api/compile is a public playground endpoint that runs the full
@@ -51,9 +53,9 @@ func TestCompile_OversizeBodyRejectedWithoutFullRead(t *testing.T) {
 	maxCompileBodyBytes = 256
 
 	compiled := false
-	compileSourceFn = func(src []byte, filename string) (string, string, error) {
+	compileSourceFn = func(src []byte, filename string) (string, string, *ir.ANFProgram, error) {
 		compiled = true
-		return "", "", nil
+		return "", "", nil, nil
 	}
 
 	// A body two orders of magnitude over the cap. The real endpoint has no
@@ -120,10 +122,10 @@ func TestCompile_AbandonsCompileThatOverrunsDeadline(t *testing.T) {
 	})
 
 	compileTimeout = 25 * time.Millisecond
-	compileSourceFn = func(src []byte, filename string) (string, string, error) {
+	compileSourceFn = func(src []byte, filename string) (string, string, *ir.ANFProgram, error) {
 		defer close(stubDone)
 		<-release // stands in for a pathological compile that never returns
-		return "", "", nil
+		return "", "", nil, nil
 	}
 
 	payload, _ := json.Marshal(map[string]string{"lang": "ts", "source": "class C {}"})

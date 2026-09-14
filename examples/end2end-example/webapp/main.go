@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 const contractSats = 20000
@@ -603,12 +605,13 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 	type compileResult struct {
 		scriptHex string
 		scriptAsm string
+		anf       *ir.ANFProgram
 		err       error
 	}
 	resultCh := make(chan compileResult, 1)
 	go func() {
-		hex, asm, err := compileSourceFn([]byte(req.Source), filename)
-		resultCh <- compileResult{hex, asm, err}
+		hex, asm, anf, err := compileSourceFn([]byte(req.Source), filename)
+		resultCh <- compileResult{hex, asm, anf, err}
 	}()
 
 	select {
@@ -621,11 +624,18 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, res.err.Error(), 400)
 			return
 		}
-		jsonResponse(w, map[string]string{
+		payload := map[string]any{
 			"scriptHex": res.scriptHex,
 			"scriptAsm": res.scriptAsm,
 			"filename":  filename,
-		})
+		}
+		// R-214: the ANF IR is what makes this a playground rather than a hex
+		// printer. Omitted entirely when the pipeline produced none, so a
+		// client can tell "no IR" from "empty IR".
+		if res.anf != nil {
+			payload["anfIr"] = res.anf
+		}
+		jsonResponse(w, payload)
 	}
 }
 

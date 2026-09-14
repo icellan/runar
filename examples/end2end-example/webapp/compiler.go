@@ -9,6 +9,7 @@ import (
 
 	gocompiler "github.com/icellan/runar/compilers/go/compiler"
 	"github.com/icellan/runar/compilers/go/frontend"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // sourceLang describes how to locate a PriceBet source variant and what
@@ -177,7 +178,15 @@ func readContractSource(spec sourceLang) ([]byte, error) {
 //
 // It now calls the same library entry point the CLI uses, so the playground and
 // `runar-go --source` cannot disagree. `compiler_pipeline_test.go` pins that.
-func compileSource(source []byte, filename string) (scriptHex string, scriptAsm string, err error) {
+//
+// R-214: the ANF IR comes back too. `CompileFromSourceStrWithResult` has always
+// returned it on the result struct and this function used to drop it on the
+// floor, so the playground could show WHAT a contract compiles to but never
+// WHY — which binding became which push, where the constant folder fired, what
+// the fixed-array expansion produced. Stack IR is deliberately not returned:
+// no tier serialises it (CLAUDE.md, invariant 2), so there is no canonical
+// form to hand out.
+func compileSource(source []byte, filename string) (scriptHex string, scriptAsm string, anf *ir.ANFProgram, err error) {
 	result := gocompiler.CompileFromSourceStrWithResult(string(source), filename)
 	if !result.Success {
 		var msgs []string
@@ -189,7 +198,7 @@ func compileSource(source []byte, filename string) (scriptHex string, scriptAsm 
 		if len(msgs) == 0 {
 			msgs = append(msgs, "compilation failed with no error diagnostic")
 		}
-		return "", "", fmt.Errorf("compile: %s", strings.Join(msgs, "; "))
+		return "", "", nil, fmt.Errorf("compile: %s", strings.Join(msgs, "; "))
 	}
-	return result.ScriptHex, result.ScriptAsm, nil
+	return result.ScriptHex, result.ScriptAsm, result.ANF, nil
 }

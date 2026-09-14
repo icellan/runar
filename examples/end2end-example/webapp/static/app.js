@@ -126,6 +126,27 @@ function pgResultAppendPre(parent, text, cls) {
   parent.appendChild(pre);
 }
 
+// R-214: the ANF IR reached the browser and was thrown away there too. Hex and
+// ASM say WHAT a contract compiles to; the A-Normal Form says why — which
+// binding became which push, where the constant folder fired, what the
+// fixed-array expansion produced. Collapsed by default so the common case
+// (glance at the hex) is unchanged.
+function pgResultAppendAnf(parent, anf) {
+  if (!anf) return;
+  const details = document.createElement('details');
+  details.className = 'pg-anf';
+  const summary = document.createElement('summary');
+  const methodCount = Array.isArray(anf.methods) ? anf.methods.length : 0;
+  summary.textContent = 'ANF IR (' + methodCount + ' method' +
+    (methodCount === 1 ? '' : 's') + ')';
+  details.appendChild(summary);
+  const pre = document.createElement('pre');
+  pre.className = 'pg-ir';
+  pre.textContent = JSON.stringify(anf, null, 2);
+  details.appendChild(pre);
+  parent.appendChild(details);
+}
+
 async function compileSource() {
   const lang = selectedPlaygroundLang();
   const source = document.getElementById('pg-source').value;
@@ -153,6 +174,7 @@ async function compileSource() {
     pgResultAppendPre(resultEl, data.scriptHex, 'pg-hex');
     pgResultAppendLabel(resultEl, 'Script asm');
     pgResultAppendPre(resultEl, data.scriptAsm, 'pg-asm');
+    pgResultAppendAnf(resultEl, data.anfIr);
   } catch (e) {
     while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
     const err = document.createElement('div');
