@@ -230,6 +230,14 @@ func (ctx *validationContext) validatePropertyType(t TypeNode, loc SourceLocatio
 		if !validPropTypes[t.Name] {
 			if t.Name == "void" {
 				ctx.addErrorWithLoc(fmt.Sprintf("property type 'void' is not valid at %s:%d", loc.File, loc.Line), &loc)
+			} else {
+				// R-246: any other unrecognised primitive name used to fall
+				// through in silence, while the identical name arriving as a
+				// CustomType is refused below. No parser produces a
+				// PrimitiveType with an unknown name today — they all map an
+				// unrecognised name to CustomType — but Validate takes an AST,
+				// and the frontend is not the only thing that builds one.
+				ctx.addErrorWithLoc(fmt.Sprintf("unsupported type '%s' in property declaration at %s:%d", t.Name, loc.File, loc.Line), &loc)
 			}
 		}
 	case FixedArrayType:

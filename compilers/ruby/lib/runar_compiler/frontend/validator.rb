@@ -454,6 +454,17 @@ module RunarCompiler
                 "property type 'void' is not valid at #{loc.file}:#{loc.line}",
                 loc: loc
               )
+            else
+              # R-246: any other unrecognised primitive name used to fall
+              # through in silence, while the identical name arriving as a
+              # CustomType is refused below. No parser produces a PrimitiveType
+              # with an unknown name today -- they all map an unrecognised name
+              # to CustomType -- but +validate+ takes an AST, and the frontend
+              # is not the only thing that builds one.
+              add_error(
+                "unsupported type '#{type_node.name}' in property declaration at #{loc.file}:#{loc.line}",
+                loc: loc
+              )
             end
           end
         elsif type_node.is_a?(FixedArrayType)

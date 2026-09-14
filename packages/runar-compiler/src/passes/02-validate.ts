@@ -185,6 +185,18 @@ function validatePropertyType(
             'error',
             loc,
           ));
+        } else {
+          // R-246: any other unrecognised primitive name used to fall through
+          // in silence, while the identical name arriving as a `custom_type` is
+          // refused below. No parser produces a `primitive_type` with an unknown
+          // name today — they all map an unrecognised name to `custom_type` —
+          // but `validate` takes an AST, and the frontend is not the only thing
+          // that builds one.
+          ctx.errors.push(makeDiagnostic(
+            `Unsupported type '${type.name}' in property declaration. Use one of: ${[...VALID_PRIMITIVE_TYPES].join(', ')}, or FixedArray<T, N>`,
+            'error',
+            loc,
+          ));
         }
       }
       break;
