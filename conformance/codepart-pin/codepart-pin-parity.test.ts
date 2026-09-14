@@ -230,3 +230,168 @@ describe('R-095: the code-part length pin equals the deployed length, in every t
     }, TIMEOUT_MS + 30_000);
   }
 });
+
+// ---------------------------------------------------------------------------
+// R-010 — clauses 8a/8b must constrain the remainder the SDK actually deploys.
+//
+// The pin above rides on the CODE part's length. Clauses 8a/8b ride on the
+// REMAINDER: everything the deployed locking script carries after the code
+// part. For a StatefulSmartContract with zero mutable properties there is no
+// state section at all — no separator, no payload — so the remainder is empty.
+// `fixedStateSectionLength()` nonetheless summed to 0 in all seven tiers,
+// which read as "a fixed section of length zero" and emitted
+// `SIZE(rest) == 1 + 0` plus a demand for a trailing `0x6a`. Same shape of
+// defect as R-095, same consequence: every honest spend aborts and the funds
+// are locked.
+//
+// The assertion is again absolute, not cross-tier: each tier's own clause is
+// checked against the remainder the SDK really writes.
+// ---------------------------------------------------------------------------
+
+const ZERO_MUTABLE_FIXTURE = join(__dirname, 'ZeroMutableContinuation.runar.ts');
+
+/** A compressed secp256k1 point. Only its LENGTH matters to the layout. */
+const ZM_OWNER = '02' + '11'.repeat(32);
+
+/** Push2 OP_SUB OP_ROT OP_SWAP OP_SPLIT — step 8's split, right before 8a. */
+const SPLIT_ANCHOR = '52947b7c7f';
+
+interface AuthClause {
+  /** Length clause 8a demands of the remainder, or null when 8a is absent. */
+  demandedRestLen: number | null;
+  /** Whether clause 8b demands a leading OP_RETURN byte in the remainder. */
+  demandsSeparator: boolean;
+}
+
+/** Decode a minimally-encoded numeric push at `i`; returns [value, nextIndex]. */
+function readPush(bytes: number[], i: number): [number, number] {
+  const op = bytes[i]!;
+  if (op === 0x00) return [0, i + 1];
+  if (op >= 0x51 && op <= 0x60) return [op - 0x50, i + 1];
+  if (op >= 0x01 && op <= 0x4b) {
+    let v = 0;
+    for (let k = op - 1; k >= 0; k--) v = (v << 8) | bytes[i + 1 + k]!;
+    return [v, i + 1 + op];
+  }
+  throw new Error(`not a numeric push at ${i}: 0x${op.toString(16)}`);
+}
+
+function decodeAuthClause(scriptHex: string): AuthClause {
+  const at = scriptHex.indexOf(SPLIT_ANCHOR);
+  if (at < 0) throw new Error('no code-part authentication clause in this script');
+  if (scriptHex.indexOf(SPLIT_ANCHOR, at + 2) >= 0) {
+    throw new Error('ambiguous: more than one split anchor');
+  }
+  const bytes = scriptHex.match(/../g)!.map((b) => parseInt(b, 16));
+  let i = at / 2 + SPLIT_ANCHOR.length / 2;
+
+  let demandedRestLen: number | null = null;
+  if (bytes[i] === 0x82) {
+    const [n, next] = readPush(bytes, i + 1);
+    if (bytes[next] !== 0x9d) throw new Error('clause 8a is not OP_NUMEQUALVERIFY-terminated');
+    demandedRestLen = n;
+    i = next + 1;
+  }
+  const demandsSeparator =
+    bytes[i] === 0x51 && bytes[i + 1] === 0x7f && bytes[i + 2] === 0x75 &&
+    bytes[i + 3] === 0x01 && bytes[i + 4] === 0x6a && bytes[i + 5] === 0x88;
+
+  return { demandedRestLen, demandsSeparator };
+}
+
+/**
+ * The remainder the SDK really deploys for the zero-mutable fixture, MEASURED
+ * through the SDK rather than restated as a constant: everything
+ * `getLockingScript()` puts after `getCodePartHex()`. A `stateFields`-less
+ * artifact writes nothing there, and this is the number clauses 8a/8b have to
+ * agree with.
+ */
+function measuredZeroMutableRest(): string {
+  const source = require('node:fs').readFileSync(ZERO_MUTABLE_FIXTURE, 'utf-8') as string;
+  const r = compile(source, { fileName: 'ZeroMutableContinuation.runar.ts' });
+  if (!r.artifact || !r.scriptHex) {
+    throw new Error(`reference compile failed: ${JSON.stringify(r.diagnostics)}`);
+  }
+  const c = new RunarContract(r.artifact, [ZM_OWNER]);
+  const code = c.getCodePartHex();
+  const locking = c.getLockingScript();
+  if (!locking.startsWith(code)) {
+    throw new Error('getLockingScript() does not begin with getCodePartHex()');
+  }
+  return locking.slice(code.length);
+}
+
+/** Compile an arbitrary fixture with one tier. Mirrors `compileWith`. */
+function compileFixtureWith(tier: Tier, fixture: string): string {
+  if (tier.cmd === null) throw new Error(`${tier.id}: no toolchain`);
+  const argv = [...tier.prefix, ...tier.argsFor(fixture)];
+  const res = spawnSync(tier.cmd, argv, {
+    cwd: tier.cwd,
+    encoding: 'utf-8',
+    timeout: TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  const where = `${tier.id} (${tier.cmd} ${argv.join(' ')})`;
+  if (res.error) throw new Error(`${where} could not run: ${res.error.message}`);
+  if (res.signal !== null) {
+    throw new Error(`${where} was killed by ${res.signal}; a signalled child has no verdict`);
+  }
+  if (res.status === null) throw new Error(`${where} could not run: no exit status`);
+
+  const diag = `${res.stderr ?? ''}\n${res.stdout ?? ''}`.trim();
+  if (res.status !== 0) {
+    if (USAGE_ERROR_RE.test(diag)) {
+      throw new Error(`${where} exited ${res.status} with a USAGE error:\n${diag.slice(0, 600)}`);
+    }
+    if (LAUNCH_ERROR_RE.test(diag)) {
+      throw new Error(`${where} exited ${res.status} with a LAUNCHER error:\n${diag.slice(0, 600)}`);
+    }
+    throw new Error(`${where} refused the fixture (exit ${res.status}):\n${diag.slice(0, 600)}`);
+  }
+
+  const hex = (res.stdout ?? '').replace(/\s+/g, '').toLowerCase();
+  if (!/^[0-9a-f]+$/.test(hex)) {
+    throw new Error(`${where} exited 0 but printed no script hex:\n${diag.slice(0, 600)}`);
+  }
+  return hex;
+}
+
+describe('R-010: clauses 8a/8b match the deployed remainder, in every tier', () => {
+  it('the zero-mutable artifact really has no state section', () => {
+    // If this ever stops holding, the oracle below is measuring the wrong
+    // thing and the per-tier assertions become vacuous.
+    expect(measuredZeroMutableRest()).toBe('');
+  });
+
+  for (const tier of TIERS) {
+    const run = tier.cmd === null ? it.skip : it;
+    run(`${tier.id}: demands exactly the remainder the SDK writes`, () => {
+      const rest = measuredZeroMutableRest();
+      const hex = compileFixtureWith(tier, ZERO_MUTABLE_FIXTURE);
+      const clause = decodeAuthClause(hex);
+
+      expect(
+        clause.demandedRestLen,
+        `${tier.id} clause 8a demands SIZE(rest)==${clause.demandedRestLen}, ` +
+          `SDK deploys ${rest.length / 2} — every honest spend aborts`,
+      ).toBe(rest.length / 2);
+
+      expect(
+        clause.demandsSeparator,
+        `${tier.id} clause 8b demands an OP_RETURN the SDK never writes`,
+      ).toBe(rest.startsWith('6a'));
+    }, TIMEOUT_MS + 30_000);
+  }
+
+  it('all available tiers agree byte for byte on this fixture', () => {
+    // Parity is not the oracle, but a split here would mean one tier took a
+    // different branch through the fix.
+    const byTier = AVAILABLE.map((t) => [t.id, compileFixtureWith(t, ZERO_MUTABLE_FIXTURE)] as const);
+    const distinct = new Set(byTier.map(([, hex]) => hex));
+    expect(
+      distinct.size,
+      `tiers diverged: ${byTier.map(([id, hex]) => `${id}=${hex.length / 2}B`).join(' ')}`,
+    ).toBe(1);
+  }, TIMEOUT_MS * 2);
+});

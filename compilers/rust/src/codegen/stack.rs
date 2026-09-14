@@ -3421,14 +3421,20 @@ impl LoweringContext {
         self.bring_to_top("_codePart", false);
         // --- Stack: [..., codePart] ---
 
-        // Step 2: Append OP_RETURN byte (0x6a).
-        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_CAT".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        // --- Stack: [..., codePart+OP_RETURN] ---
+        // Step 2: Append OP_RETURN byte (0x6a) — but ONLY when there is a state
+        // section for it to separate. R-010: with zero mutable properties the
+        // SDK's `get_locking_script` emits the bare code and stops, so a
+        // separator here would make the continuation output one byte longer
+        // than the script the SDK deploys.
+        if !state_props.is_empty() {
+            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_CAT".into()));
+            self.sm.pop();
+            self.sm.pop();
+            self.sm.push("");
+        }
+        // --- Stack: [..., codePart(+OP_RETURN when stateful)] ---
 
         // Step 3: Serialize each state value and concatenate.
         for (i, value_ref) in state_values.iter().enumerate() {
@@ -3817,12 +3823,31 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
     }
 
+    /// Whether the deployed locking script carries a trailing
+    /// `OP_RETURN || state` section at all (R-010).
+    ///
+    /// NOT the same question as "is the state section empty". A
+    /// `StatefulSmartContract` with zero mutable properties compiles to an
+    /// artifact with no state fields, and the SDK's `get_locking_script`
+    /// appends neither the separator nor any payload — the deployed script IS
+    /// the code part. `fixed_state_section_length` answers `Some(0)` for that
+    /// shape, which reads as "a fixed section of length zero" and made clause
+    /// 8a pin `SIZE(rest) == 1` for a remainder that is always empty, locking
+    /// the contract's funds.
+    fn has_state_section(&self) -> bool {
+        self.properties.iter().any(|p| !p.readonly)
+    }
+
     /// Byte length of the serialized state section (excluding the OP_RETURN
     /// separator) when every mutable property is fixed-size, else `None`.
     ///
     /// Mirrors the size table in `lower_deserialize_state`; a ByteString
     /// property makes the section variable-length and its exact length
     /// un-pinnable at compile time.
+    ///
+    /// Only meaningful when `has_state_section()` is true: with no mutable
+    /// properties the sum is vacuously 0, which means "no section", not "an
+    /// empty section".
     fn fixed_state_section_length(&self) -> Option<usize> {
         let mut total = 0usize;
         for prop in &self.properties {
@@ -3929,7 +3954,7 @@ impl LoweringContext {
         //
         //     Cost: 9 bytes per authenticating method, and only on this path —
         //     fixed-size-state contracts keep clause 8a untouched.
-        if self.fixed_state_section_length().is_none() {
+        if self.has_state_section() && self.fixed_state_section_length().is_none() {
             // delta / exact are refined by `pin_code_part_length` once every
             // method has been lowered and the full placeholder set is known.
             // The defaults here are the SOUND ones: a lower bound of
@@ -3956,28 +3981,47 @@ impl LoweringContext {
         self.sm.push(""); self.sm.push("");
 
         // 8a. Pin the split point. Variable-length state layouts are pinned by
-        //     clause 6a instead, from the CODE side.
-        if let Some(fixed_state_len) = self.fixed_state_section_length() {
+        //     clause 6a instead, from the CODE side. R-010: with no mutable
+        //     properties there is no state section and no separator, so the
+        //     remainder must be EMPTY.
+        let has_state = self.has_state_section();
+        let fixed_state_len = if has_state {
+            self.fixed_state_section_length()
+        } else {
+            Some(0)
+        };
+        if let Some(fixed_state_len) = fixed_state_len {
+            let rest_len = if has_state { 1 + fixed_state_len } else { 0 };
             self.emit_op(StackOp::Opcode("OP_SIZE".into()));
             self.sm.push("");
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1 + fixed_state_len))));
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(rest_len))));
             self.sm.push("");
             self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
             self.sm.pop(); self.sm.pop();
         }
-        // 8b. The byte immediately after the code part must be the OP_RETURN
-        //     separator.
-        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop(); self.sm.pop();
-        self.sm.push(""); self.sm.push("");
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
-        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
-        self.sm.pop(); self.sm.pop();
+        // 8b. When a state section exists, the byte immediately after the code
+        //     part must be the OP_RETURN separator. With no state section
+        //     clause 8a has already pinned the remainder to zero bytes, which
+        //     is strictly stronger than any byte test.
+        if has_state {
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push(""); self.sm.push("");
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+            self.sm.pop(); self.sm.pop();
+        } else {
+            // Clause 8a consumed the remainder's SIZE but not the remainder;
+            // with 8b skipped it is dead and must still be dropped so the
+            // stack shape matches the state-bearing path.
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
 
         // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
         self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x61, 0xab])));

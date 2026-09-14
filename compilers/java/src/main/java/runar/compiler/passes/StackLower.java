@@ -3628,11 +3628,35 @@ public final class StackLower {
         }
 
         /**
+         * Whether the deployed locking script carries a trailing
+         * {@code OP_RETURN || state} section at all (R-010).
+         *
+         * <p>NOT the same question as "is the state section empty". A
+         * StatefulSmartContract with zero mutable properties compiles to an
+         * artifact with no state fields, and the SDK's {@code getLockingScript}
+         * appends neither the separator nor any payload — the deployed script
+         * IS the code part. {@link #fixedStateSectionLength} answers 0 for that
+         * shape, which reads as "a fixed section of length zero" and made
+         * clause 8a pin {@code SIZE(rest) == 1} for a remainder that is always
+         * empty, locking the contract's funds.
+         */
+        boolean hasStateSection() {
+            for (AnfProperty prop : properties) {
+                if (!prop.readonly()) return true;
+            }
+            return false;
+        }
+
+        /**
          * Byte length of the serialized state section (excluding the OP_RETURN
          * separator) when every mutable property is fixed-size, and {@code -1}
          * otherwise. Mirrors the size table in {@link #lowerDeserializeState};
          * a ByteString property makes the section variable-length and its exact
          * length un-pinnable at compile time.
+         *
+         * <p>Only meaningful when {@link #hasStateSection()} is true: with no
+         * mutable properties the sum is vacuously 0, which means "no section",
+         * not "an empty section".
          */
         int fixedStateSectionLength() {
             int total = 0;
@@ -3745,7 +3769,7 @@ public final class StackLower {
             //     directly, which no truncation can satisfy.
             //
             //     Stack effect is NET ZERO — the stack map is untouched.
-            if (fixedStateSectionLength() < 0) {
+            if (hasStateSection() && fixedStateSectionLength() < 0) {
                 // delta / exact are refined by pinCodePartLength once every
                 // method has been lowered; the defaults are the SOUND ones (a
                 // lower bound of emittedLength + 0 holds for any deployment).
@@ -3771,29 +3795,43 @@ public final class StackLower {
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
 
-            // 8a. Pin the split point.
-            int fixedStateLen = fixedStateSectionLength();
+            // 8a. Pin the split point. R-010: with no mutable properties there
+            //     is no state section and no separator — the deployed script is
+            //     exactly the code part, so the remainder must be EMPTY.
+            boolean hasState = hasStateSection();
+            int fixedStateLen = hasState ? fixedStateSectionLength() : 0;
             if (fixedStateLen >= 0) {
+                int restLen = hasState ? 1 + fixedStateLen : 0;
                 emitOp(new OpcodeOp("OP_SIZE"));
                 sm.push("");
-                emitOp(new PushOp(PushValue.of(1 + fixedStateLen)));
+                emitOp(new PushOp(PushValue.of(restLen)));
                 sm.push("");
                 emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
                 sm.pop(); sm.pop();
             }
-            // 8b. The byte immediately after the code part must be the
-            //     OP_RETURN separator.
-            emitOp(new PushOp(PushValue.of(1)));
-            sm.push("");
-            emitOp(new OpcodeOp("OP_SPLIT"));
-            sm.pop(); sm.pop();
-            sm.push(""); sm.push("");
-            emitOp(new DropOp());
-            sm.pop();
-            emitOp(new PushOp(PushValue.ofHex("6a")));
-            sm.push("");
-            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
-            sm.pop(); sm.pop();
+            // 8b. When a state section exists, the byte immediately after the
+            //     code part must be the OP_RETURN separator. With no state
+            //     section clause 8a has already pinned the remainder to zero
+            //     bytes, which is strictly stronger than any byte test.
+            if (hasState) {
+                emitOp(new PushOp(PushValue.of(1)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_SPLIT"));
+                sm.pop(); sm.pop();
+                sm.push(""); sm.push("");
+                emitOp(new DropOp());
+                sm.pop();
+                emitOp(new PushOp(PushValue.ofHex("6a")));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+                sm.pop(); sm.pop();
+            } else {
+                // Clause 8a consumed the remainder's SIZE but not the
+                // remainder; with 8b skipped it is dead and must still be
+                // dropped so the stack shape matches the state-bearing path.
+                emitOp(new DropOp());
+                sm.pop();
+            }
 
             // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
             emitOp(new PushOp(PushValue.ofHex("61ab")));
@@ -4241,12 +4279,18 @@ public final class StackLower {
             // Step 1: Bring _codePart to top (PICK)
             bringToTop("_codePart", false);
 
-            // Step 2: Append OP_RETURN byte
-            emitOp(new PushOp(PushValue.ofHex("6a")));
-            sm.push("");
-            emitOp(new OpcodeOp("OP_CAT"));
-            sm.pop(); sm.pop();
-            sm.push("");
+            // Step 2: Append OP_RETURN byte — but ONLY when there is a state
+            // section for it to separate. R-010: with zero mutable properties
+            // the SDK's getLockingScript emits the bare code and stops, so a
+            // separator here would make the continuation output one byte longer
+            // than the script the SDK deploys.
+            if (!stateProps.isEmpty()) {
+                emitOp(new PushOp(PushValue.ofHex("6a")));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_CAT"));
+                sm.pop(); sm.pop();
+                sm.push("");
+            }
 
             // Step 3: Serialise each state value
             int cnt = Math.min(stateValues.size(), stateProps.size());

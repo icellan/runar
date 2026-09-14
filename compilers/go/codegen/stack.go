@@ -3596,14 +3596,20 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 	ctx.bringToTop("_codePart", false)
 	// --- Stack: [..., codePart] ---
 
-	// Step 2: Append OP_RETURN byte (0x6a).
-	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x6a}}})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	// --- Stack: [..., codePart+OP_RETURN] ---
+	// Step 2: Append OP_RETURN byte (0x6a) — but ONLY when there is a state
+	// section for it to separate. R-010: with zero mutable properties the SDK's
+	// getLockingScript emits the bare code and stops, so a separator here would
+	// make the continuation output one byte longer than the script the SDK
+	// deploys.
+	if len(stateProps) > 0 {
+		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x6a}}})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+	}
+	// --- Stack: [..., codePart(+OP_RETURN when stateful)] ---
 
 	// Step 3: Serialize each state value and concatenate.
 	for i := 0; i < len(stateValues) && i < len(stateProps); i++ {
@@ -3955,11 +3961,34 @@ func (ctx *loweringContext) emitStripScriptCodeVarint() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 }
 
+// hasStateSection reports whether the deployed locking script carries a
+// trailing `OP_RETURN || state` section at all (R-010).
+//
+// This is NOT the same question as "is the state section empty". A
+// StatefulSmartContract with zero mutable properties compiles to an artifact
+// with no stateFields, and the SDK's getLockingScript appends neither the
+// separator nor any payload — the deployed script IS the code part.
+// fixedStateSectionLength answers 0 for that shape, which reads as "a fixed
+// section of length zero" and made clause 8a pin SIZE(rest) == 1 for a
+// remainder that is always empty, locking the contract's funds.
+func (ctx *loweringContext) hasStateSection() bool {
+	for _, prop := range ctx.properties {
+		if !prop.Readonly {
+			return true
+		}
+	}
+	return false
+}
+
 // fixedStateSectionLength returns the byte length of the serialized state
 // section (excluding the OP_RETURN separator) when every mutable property is
 // fixed-size, and -1 otherwise. Mirrors the size table in
 // lowerDeserializeState; a ByteString property makes the section
 // variable-length and its exact length un-pinnable at compile time.
+//
+// Only meaningful when hasStateSection reports true: with no mutable
+// properties the sum is vacuously 0, which means "no section", not "an empty
+// section".
 func (ctx *loweringContext) fixedStateSectionLength() int {
 	total := 0
 	for _, prop := range ctx.properties {
@@ -4070,7 +4099,7 @@ func (ctx *loweringContext) emitCodePartAuthentication() {
 	//     satisfies at any offset whose byte happens to be 0x6a. The state's
 	//     length is unknown at compile time; the CODE's is not, so pin that
 	//     instead. See the TypeScript tier for the full argument.
-	if ctx.fixedStateSectionLength() < 0 {
+	if ctx.hasStateSection() && ctx.fixedStateSectionLength() < 0 {
 		// Delta/Exact are refined by pinCodePartLength once every method has
 		// been lowered; the defaults are the sound ones (a lower bound of
 		// emittedLength + 0 holds for any deployment).
@@ -4098,32 +4127,53 @@ func (ctx *loweringContext) emitCodePartAuthentication() {
 	ctx.sm.push("")
 	ctx.sm.push("")
 
-	// 8a. Pin the split point.
-	if fixedStateLen := ctx.fixedStateSectionLength(); fixedStateLen >= 0 {
+	// 8a. Pin the split point. R-010: with no mutable properties there is no
+	//     state section and no separator — the deployed script is exactly the
+	//     code part, so the remainder must be EMPTY.
+	hasState := ctx.hasStateSection()
+	fixedStateLen := 0
+	if hasState {
+		fixedStateLen = ctx.fixedStateSectionLength()
+	}
+	if fixedStateLen >= 0 {
+		restLen := 0
+		if hasState {
+			restLen = 1 + fixedStateLen
+		}
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(1 + fixedStateLen))})
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(restLen))})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
 		ctx.sm.pop()
 		ctx.sm.pop()
 	}
-	// 8b. The byte immediately after the code part must be the OP_RETURN
-	//     separator.
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "drop"})
-	ctx.sm.pop()
-	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x6a}}})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-	ctx.sm.pop()
-	ctx.sm.pop()
+	// 8b. When a state section exists, the byte immediately after the code
+	//     part must be the OP_RETURN separator. With no state section clause
+	//     8a has already pinned the remainder to zero bytes, which is strictly
+	//     stronger than any byte test.
+	if hasState {
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x6a}}})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+	} else {
+		// Clause 8a consumed the remainder's SIZE but not the remainder; with
+		// 8b skipped it is dead and must still be dropped so the stack shape
+		// matches the state-bearing path.
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+	}
 
 	// 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
 	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x61, 0xab}}})

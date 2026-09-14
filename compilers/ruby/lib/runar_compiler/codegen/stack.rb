@@ -3720,6 +3720,23 @@ module RunarCompiler::Codegen
       "Sha256" => 32, "Point" => 64, "P256Point" => 64, "P384Point" => 96
     }.freeze
 
+    # R-010 -- whether the deployed locking script carries a trailing
+    # `OP_RETURN || state` section at all.
+    #
+    # NOT the same question as "is the state section empty". A
+    # StatefulSmartContract with zero mutable properties compiles to an artifact
+    # with no state fields, and the SDK's get_locking_script appends neither the
+    # separator nor any payload -- the deployed script IS the code part.
+    # _fixed_state_section_length answers 0 for that shape, which reads as "a
+    # fixed section of length zero" and made clause 8a pin SIZE(rest) == 1 for a
+    # remainder that is always empty, locking the contract's funds.
+    def _has_state_section
+      @properties.any? { |prop| !prop.readonly }
+    end
+
+    # Only meaningful when _has_state_section is true: with no mutable
+    # properties the sum is vacuously 0, which means "no section", not "an empty
+    # section".
     def _fixed_state_section_length
       total = 0
       @properties.each do |prop|
@@ -3798,7 +3815,7 @@ module RunarCompiler::Codegen
       #
       #     Net stack effect is ZERO (the emitted sequence DUPs, compares and
       #     VERIFYs), so the stack map is untouched.
-      if _fixed_state_section_length.nil?
+      if _has_state_section && _fixed_state_section_length.nil?
         # delta / exact are refined by Codegen._pin_code_part_length once every
         # method has been lowered; the defaults are the SOUND ones (a lower
         # bound of emittedLength + 0 holds for any deployment).
@@ -3818,20 +3835,34 @@ module RunarCompiler::Codegen
       emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
 
       # 8a. Pin the split point. Variable-length state layouts are pinned by
-      #     clause 6a instead, from the CODE side.
-      fixed_state_len = _fixed_state_section_length
+      #     clause 6a instead, from the CODE side. R-010: with no mutable
+      #     properties there is no state section and no separator -- the
+      #     deployed script is exactly the code part, so the remainder must be
+      #     EMPTY.
+      has_state = _has_state_section
+      fixed_state_len = has_state ? _fixed_state_section_length : 0
       unless fixed_state_len.nil?
+        rest_len = has_state ? 1 + fixed_state_len : 0
         emit_opcode("OP_SIZE"); @sm.push("")
-        emit_push_int(1 + fixed_state_len); @sm.push("")
+        emit_push_int(rest_len); @sm.push("")
         emit_opcode("OP_NUMEQUALVERIFY"); @sm.pop; @sm.pop
       end
-      # 8b. The byte immediately after the code part must be the OP_RETURN
-      #     separator.
-      emit_push_int(1); @sm.push("")
-      emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "drop" }); @sm.pop
-      emit_push_bytes([0x6a].pack("C")); @sm.push("")
-      emit_opcode("OP_EQUALVERIFY"); @sm.pop; @sm.pop
+      # 8b. When a state section exists, the byte immediately after the code
+      #     part must be the OP_RETURN separator. With no state section clause
+      #     8a has already pinned the remainder to zero bytes, which is strictly
+      #     stronger than any byte test.
+      if has_state
+        emit_push_int(1); @sm.push("")
+        emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+        emit_op({ op: "drop" }); @sm.pop
+        emit_push_bytes([0x6a].pack("C")); @sm.push("")
+        emit_opcode("OP_EQUALVERIFY"); @sm.pop; @sm.pop
+      else
+        # Clause 8a consumed the remainder's SIZE but not the remainder; with 8b
+        # skipped it is dead and must still be dropped so the stack shape
+        # matches the state-bearing path.
+        emit_op({ op: "drop" }); @sm.pop
+      end
 
       # 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
       emit_push_bytes([0x61, 0xab].pack("C*")); @sm.push("")
@@ -4251,10 +4282,16 @@ module RunarCompiler::Codegen
       # Step 1: Bring _codePart to top (PICK -- never consume)
       bring_to_top("_codePart", false)
 
-      # Step 2: Append OP_RETURN byte (0x6a)
-      emit_push_bytes([0x6A].pack("C"))
-      @sm.push("")
-      emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
+      # Step 2: Append OP_RETURN byte (0x6a) -- but ONLY when there is a state
+      # section for it to separate. R-010: with zero mutable properties the
+      # SDK's get_locking_script emits the bare code and stops, so a separator
+      # here would make the continuation output one byte longer than the script
+      # the SDK deploys.
+      unless state_props.empty?
+        emit_push_bytes([0x6A].pack("C"))
+        @sm.push("")
+        emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
+      end
 
       # Step 3: Serialize each state value and concatenate
       (0...[state_values.length, state_props.length].min).each do |i|

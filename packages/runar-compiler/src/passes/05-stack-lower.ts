@@ -3610,14 +3610,22 @@ class LoweringContext {
     this.bringToTop('_codePart', false);
     // --- Stack: [..., codePart] ---
 
-    // Step 2: Append OP_RETURN byte (0x6a).
-    this.emitOp({ op: 'push', value: new Uint8Array([0x6a]) });
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null);
-    // --- Stack: [..., codePart+OP_RETURN] ---
+    // Step 2: Append OP_RETURN byte (0x6a) — but ONLY when there is a state
+    // section for it to separate. R-010: a StatefulSmartContract with zero
+    // mutable properties has no state fields at all, so the SDK's
+    // `getLockingScript()` emits the bare code and stops. Appending a
+    // separator here would make the continuation output one byte longer than
+    // the script the SDK deploys, and clause 8a of the next spend's code-part
+    // authentication would then pin a state section that does not exist.
+    if (stateProps.length > 0) {
+      this.emitOp({ op: 'push', value: new Uint8Array([0x6a]) });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+      this.stackMap.pop();
+      this.stackMap.pop();
+      this.stackMap.push(null);
+    }
+    // --- Stack: [..., codePart(+OP_RETURN when stateful)] ---
 
     // Step 3: Serialize each state value and concatenate.
     for (let i = 0; i < stateValues.length && i < stateProps.length; i++) {
@@ -4134,12 +4142,33 @@ class LoweringContext {
   }
 
   /**
+   * Whether the deployed locking script carries a trailing
+   * `OP_RETURN || state` section at all.
+   *
+   * R-010: this is NOT the same question as "is the state section empty".
+   * A `StatefulSmartContract` with zero mutable properties compiles to an
+   * artifact whose `stateFields` is absent, and the SDK's
+   * `getLockingScript()` therefore appends neither the separator nor any
+   * payload — the deployed script IS the code part. `fixedStateSectionLength`
+   * answers 0 for that shape, which reads as "a fixed section of length zero"
+   * and made clause 8a pin `SIZE(rest) == 1` for a remainder that is always
+   * empty. Every honest spend aborted at OP_NUMEQUALVERIFY.
+   */
+  private hasStateSection(): boolean {
+    return this._properties.some((p) => !p.readonly);
+  }
+
+  /**
    * Byte length of the serialized state section (excluding the OP_RETURN
    * separator) when every mutable property is fixed-size, else `null`.
    *
    * Mirrors the size table in `lowerDeserializeState`; a ByteString property
    * makes the section variable-length and the exact length un-pinnable at
    * compile time.
+   *
+   * Only meaningful when `hasStateSection()` is true: with no mutable
+   * properties the sum is vacuously 0, which means "no section", not "an
+   * empty section". Gate on `hasStateSection()` before reading this.
    */
   private fixedStateSectionLength(): number | null {
     let total = 0;
@@ -4264,7 +4293,7 @@ class LoweringContext {
     //
     //     Cost: 9 bytes per authenticating method, and only on this path —
     //     fixed-size-state contracts keep clause 8a untouched.
-    if (this.fixedStateSectionLength() === null) {
+    if (this.hasStateSection() && this.fixedStateSectionLength() === null) {
       // delta / exact are refined by `pinCodePartLength` once every method has
       // been lowered and the full placeholder set is known. The defaults here
       // are the SOUND ones: a lower bound of `emittedLength + 0` holds for any
@@ -4302,31 +4331,48 @@ class LoweringContext {
     //     separator plus the serialized state.
     //     Variable-length state layouts are pinned by clause 6a instead, from
     //     the CODE side.
-    const fixedStateLen = this.fixedStateSectionLength();
+    //
+    //     R-010: with no mutable properties there is no state section and no
+    //     separator — the deployed script is exactly the code part, so the
+    //     remainder must be EMPTY. Pinning `SIZE(rest) == 0` is the same
+    //     exact-split guarantee for that shape, and clause 8b below must not
+    //     run: there is no `0x6a` byte to find.
+    const hasState = this.hasStateSection();
+    const fixedStateLen = hasState ? this.fixedStateSectionLength() : 0;
     if (fixedStateLen !== null) {
       // Fixed-size state layout: the remainder's length is a compile-time
       // constant, so the split point — and therefore SIZE(codePart) — is
       // pinned exactly.
       this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
       this.stackMap.push(null);
-      this.emitOp({ op: 'push', value: BigInt(1 + fixedStateLen) });
+      this.emitOp({ op: 'push', value: BigInt(hasState ? 1 + fixedStateLen : 0) });
       this.stackMap.push(null);
       this.emitOp({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
       this.stackMap.pop(); this.stackMap.pop();
     }
-    // 8b. Whatever the state layout, the byte immediately after the code part
-    //     must be the OP_RETURN separator.
-    this.emitOp({ op: 'push', value: 1n });
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-    this.stackMap.pop(); this.stackMap.pop();
-    this.stackMap.push(null); this.stackMap.push(null);
-    this.emitOp({ op: 'drop' });
-    this.stackMap.pop();
-    this.emitOp({ op: 'push', value: new Uint8Array([0x6a]) });
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_EQUALVERIFY' });
-    this.stackMap.pop(); this.stackMap.pop();
+    // 8b. When a state section exists, the byte immediately after the code
+    //     part must be the OP_RETURN separator. With no state section clause
+    //     8a has already pinned the remainder to zero bytes, which is a
+    //     strictly stronger constraint than any byte test could be.
+    if (hasState) {
+      this.emitOp({ op: 'push', value: 1n });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+      this.stackMap.pop(); this.stackMap.pop();
+      this.stackMap.push(null); this.stackMap.push(null);
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+      this.emitOp({ op: 'push', value: new Uint8Array([0x6a]) });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+      this.stackMap.pop(); this.stackMap.pop();
+    } else {
+      // Clause 8a consumed `rest`'s size but not `rest` itself; with 8b
+      // skipped the value is dead and must still be dropped so the stack
+      // shape matches the state-bearing path.
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+    }
     // --- Stack: [..., preimage, codePart, scriptCode[0:n]] ---
 
     // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR) that the

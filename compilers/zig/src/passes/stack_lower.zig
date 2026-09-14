@@ -3137,11 +3137,33 @@ const LowerCtx = struct {
         try self.emitOp(.op_endif);
     }
 
+    /// Whether the deployed locking script carries a trailing
+    /// `OP_RETURN || state` section at all (R-010).
+    ///
+    /// NOT the same question as "is the state section empty". A
+    /// StatefulSmartContract with zero mutable properties compiles to an
+    /// artifact with no state fields, and the SDK's `getLockingScript` appends
+    /// neither the separator nor any payload — the deployed script IS the code
+    /// part. `fixedStateSectionLength` answers 0 for that shape, which reads as
+    /// "a fixed section of length zero" and made clause 8a pin
+    /// `SIZE(rest) == 1` for a remainder that is always empty, locking the
+    /// contract's funds.
+    fn hasStateSection(self: *const LowerCtx) bool {
+        for (self.program.properties) |prop| {
+            if (!prop.readonly) return true;
+        }
+        return false;
+    }
+
     /// Byte length of the serialized state section (excluding the OP_RETURN
     /// separator) when every mutable property is fixed-size, and `null`
     /// otherwise. Mirrors the size table in `lowerDeserializeState`; a
     /// ByteString property makes the section variable-length and its exact
     /// length un-pinnable at compile time.
+    ///
+    /// Only meaningful when `hasStateSection()` is true: with no mutable
+    /// properties the sum is vacuously 0, which means "no section", not "an
+    /// empty section".
     fn fixedStateSectionLength(self: *const LowerCtx) ?i64 {
         var total: i64 = 0;
         for (self.program.properties) |prop| {
@@ -3239,7 +3261,7 @@ const LowerCtx = struct {
         //     to be 0x6a. The state's length is unknown at compile time; the
         //     CODE's is not, so pin that instead. See the TypeScript tier for
         //     the full argument.
-        if (self.fixedStateSectionLength() == null) {
+        if (self.hasStateSection() and self.fixedStateSectionLength() == null) {
             // delta/exact are refined by pinCodePartLength once every method
             // has been lowered; the defaults are the sound ones (a lower bound
             // of emittedLength + 0 holds for any deployment).
@@ -3273,32 +3295,47 @@ const LowerCtx = struct {
         try self.stack.push(self.allocator, null);
         try self.stack.push(self.allocator, null);
 
-        // 8a. Pin the split point.
-        if (self.fixedStateSectionLength()) |fixed_state_len| {
+        // 8a. Pin the split point. R-010: with no mutable properties there is
+        //     no state section and no separator — the deployed script is
+        //     exactly the code part, so the remainder must be EMPTY.
+        const has_state = self.hasStateSection();
+        const fixed_state_len: ?i64 = if (has_state) self.fixedStateSectionLength() else 0;
+        if (fixed_state_len) |len| {
+            const rest_len: i64 = if (has_state) 1 + len else 0;
             try self.emitOp(.op_size);
             try self.stack.push(self.allocator, null);
-            try self.emitPushInt(1 + fixed_state_len);
+            try self.emitPushInt(rest_len);
             try self.stack.push(self.allocator, null);
             try self.emitOp(.op_numequalverify);
             _ = self.stack.pop();
             _ = self.stack.pop();
         }
-        // 8b. The byte immediately after the code part must be the OP_RETURN
-        //     separator.
-        try self.emitPushInt(1);
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_split);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_drop);
-        _ = self.stack.pop();
-        try self.emitPushData(&.{0x6a});
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_equalverify);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
+        // 8b. When a state section exists, the byte immediately after the code
+        //     part must be the OP_RETURN separator. With no state section
+        //     clause 8a has already pinned the remainder to zero bytes, which
+        //     is strictly stronger than any byte test.
+        if (has_state) {
+            try self.emitPushInt(1);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_split);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+            try self.emitPushData(&.{0x6a});
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_equalverify);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+        } else {
+            // Clause 8a consumed the remainder's SIZE but not the remainder;
+            // with 8b skipped it is dead and must still be dropped so the stack
+            // shape matches the state-bearing path.
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+        }
 
         // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
         try self.emitPushData(&.{ 0x61, 0xab });
@@ -5812,12 +5849,19 @@ const LowerCtx = struct {
         }
 
         try self.bringToTop("_codePart", false);
-        try self.emitPushData(&.{0x6a});
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_cat);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
+        // Append the OP_RETURN separator only when there is a state section for
+        // it to separate. R-010: with zero mutable properties the SDK's
+        // getLockingScript emits the bare code and stops, so a separator here
+        // would make the continuation output one byte longer than the script
+        // the SDK deploys.
+        if (state_prop_count > 0) {
+            try self.emitPushData(&.{0x6a});
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_cat);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+        }
         self.trackDepth();
 
         var state_index: usize = 0;
