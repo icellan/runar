@@ -500,3 +500,72 @@ func (c *Grid) Set01() {
 		}
 	}
 }
+
+// R-229 (GK-GAP-008): the expansion pass must not drop a method's
+// `@sighash` directive.
+//
+// The pass rebuilds method nodes while rewriting `this.arr[i]` reads, and a
+// rebuild that lists fields explicitly loses whatever it forgets to list.
+// SighashType is the field that costs money when it goes: validate has already
+// ACCEPTED the directive by the time this pass runs, so losing it silently
+// reverts the method to ALL|FORKID and commits a different signature hash than
+// the author declared. R-025/R-026 fixed exactly that class of drop, and
+// N-086 found four more fields going the same way in the Zig port.
+//
+// The TS, Python and Zig tiers assert this; go, rust, ruby and java did not.
+// This is the Go half.
+func TestExpandFixedArrays_PreservesSighashType(t *testing.T) {
+	// The TS surface, not the Go DSL: the `@sighash` directive is a JSDoc
+	// comment, which is where ParseSource reads it from (see
+	// sighash_parse_test.go). A FixedArray property with no initializer is
+	// enough to make the pass rewrite this method.
+	src := `
+        class Boardy extends StatefulSmartContract {
+          board: FixedArray<bigint, 3>;
+          n: bigint;
+          constructor(n: bigint) { super(n); this.n = n; }
+          /** @sighash SINGLE|FORKID */
+          public bump(): void {
+            this.addOutput(1000n, this.board[0], this.board[1], this.board[2], this.n);
+          }
+        }`
+	pr := ParseSource([]byte(src), "Boardy.runar.ts")
+	if len(pr.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(pr.ErrorStrings(), "; "))
+	}
+	if pr.Contract == nil {
+		t.Fatal("no contract parsed")
+	}
+
+	before := findMethod(pr.Contract, "bump")
+	if before == nil {
+		t.Fatal("no bump method parsed")
+	}
+	if before.SighashType == nil {
+		t.Fatal("the directive did not reach the AST — this test would be vacuous")
+	}
+	if *before.SighashType != 0x43 {
+		t.Fatalf("before expansion: SighashType = %#x, want 0x43 (SINGLE|FORKID)", *before.SighashType)
+	}
+
+	res := ExpandFixedArrays(pr.Contract)
+	if len(res.Errors) > 0 {
+		t.Fatalf("expansion errors: %v", res.Errors)
+	}
+	// The pass must actually have done something, or the assertion below is
+	// about a method nothing touched.
+	if len(res.Contract.Properties) < 3 {
+		t.Fatalf("expansion did not expand: properties = %v", propertyNames(res.Contract))
+	}
+
+	after := findMethod(res.Contract, "bump")
+	if after == nil {
+		t.Fatal("bump vanished during expansion")
+	}
+	if after.SighashType == nil {
+		t.Fatal("expansion dropped SighashType — the method silently reverts to ALL|FORKID")
+	}
+	if *after.SighashType != 0x43 {
+		t.Errorf("after expansion: SighashType = %#x, want 0x43", *after.SighashType)
+	}
+}

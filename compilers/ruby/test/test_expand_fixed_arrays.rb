@@ -369,4 +369,48 @@ class TestExpandFixedArrays < Minitest::Test
     assert_kind_of BinaryExpr, ret.value
     assert_kind_of TernaryExpr, ret.value.left
   end
+
+  # R-229 (GK-GAP-008): the expansion pass must not drop a method's `@sighash`
+  # directive.
+  #
+  # The pass rebuilds method nodes while rewriting `this.arr[i]` reads, and a
+  # rebuild that lists fields explicitly loses whatever it forgets to list.
+  # +sighash_type+ is the field that costs money when it goes: validate has
+  # already ACCEPTED the directive by the time this pass runs, so losing it
+  # silently reverts the method to ALL|FORKID and commits a different signature
+  # hash than the author declared. R-025/R-026 fixed exactly that class of drop,
+  # and N-086 found four more fields going the same way in the Zig port.
+  #
+  # The TS, Python and Zig tiers assert this; ruby, go, rust and java did not.
+  def test_preserves_sighash_type_through_expansion
+    source = <<~TS
+      class Boardy extends StatefulSmartContract {
+        board: FixedArray<bigint, 3> = [0n, 0n, 0n];
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @sighash SINGLE|FORKID */
+        public bump(): void {
+          this.addOutput(1000n, this.board[0], this.board[1], this.board[2], this.n);
+        }
+      }
+    TS
+
+    before = parse_contract(source)
+    bump_before = before.methods.find { |m| m.name == "bump" }
+    refute_nil bump_before, "no bump method parsed"
+    assert_equal 0x43, bump_before.sighash_type,
+                 "the directive did not reach the AST -- this test would be vacuous"
+
+    result = expand(source)
+    assert_empty result.errors.map(&:format_message)
+    # The pass must actually have expanded something, or the assertion below is
+    # about a method nothing touched.
+    assert_operator result.contract.properties.length, :>=, 3,
+                    "expansion did not expand: #{property_names(result.contract).inspect}"
+
+    bump_after = result.contract.methods.find { |m| m.name == "bump" }
+    refute_nil bump_after, "bump vanished during expansion"
+    assert_equal 0x43, bump_after.sighash_type,
+                 "expansion dropped sighash_type -- the method silently reverts to ALL|FORKID"
+  end
 end
