@@ -372,7 +372,15 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 	case "int", "bigint":
 		n := stateFieldInt64(value, label, 8)
 		return encodeNum2Bin(n, 8)
-	case "bool":
+	// 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
+	// what every compiler writes into `stateFields[].type`, alongside
+	// `encoding: "bool1", byteLength: 1` — and `bool` is an accepted alias.
+	// Matching only on "bool" meant a REAL boolean state field fell through to
+	// the push-data `default` below and was framed as the ASCII text
+	// `02 74727565`: 3 bytes longer than the continuation the script's own
+	// reader rebuilds, so hash256(outputs) never matched and the first spend
+	// was impossible.
+	case "bool", "boolean":
 		b, _ := value.(bool)
 		if b {
 			return "01"
@@ -546,8 +554,10 @@ func EncodePushData(dataHex string) string {
 
 func decodeStateValue(hex string, offset int, fieldType string) (interface{}, int) {
 	switch fieldType {
-	case "bool":
-		// 1 raw byte: 0x00 = false, 0x01 = true
+	case "bool", "boolean":
+		// 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+		// encodeStateValue — a reader that knows only "bool" walks a real
+		// boolean field as push data and desynchronises every field after it.
 		if offset+2 > len(hex) {
 			return false, 2
 		}

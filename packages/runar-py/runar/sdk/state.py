@@ -421,7 +421,15 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
         else:
             n = int(value)
         return _encode_num2bin(n, 8, label)
-    elif field_type == 'bool':
+    elif field_type in ('bool', 'boolean'):
+        # 1 raw byte. The canonical Runar primitive name is `boolean` — that is
+        # what every compiler writes into stateFields[].type, alongside
+        # encoding 'bool1' / byteLength 1 — and 'bool' is an accepted alias.
+        # Matching only on 'bool' meant a REAL boolean state field fell through
+        # to the push-data branch below, where a Python bool is not a str and
+        # became the empty string, i.e. a constant '00' — the deploy always
+        # said False whatever the caller passed, and the first call that set
+        # the flag built a continuation the covenant rejects.
         return '01' if value else '00'
     elif field_type in _TYPE_WIDTHS:
         # Fixed-size byte types: raw hex, no framing needed.
@@ -436,8 +444,10 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
 
 
 def _decode_state_value(hex_str: str, offset: int, field_type: str) -> tuple:
-    if field_type == 'bool':
-        # 1 raw byte
+    if field_type in ('bool', 'boolean'):
+        # 1 raw byte: 0x00 = False, 0x01 = True. Both spellings, matching
+        # _encode_state_value — a reader that knows only 'bool' walks a real
+        # boolean field as push data and desynchronises every field after it.
         if offset + 2 > len(hex_str):
             return False, 2
         byte = hex_str[offset:offset + 2]

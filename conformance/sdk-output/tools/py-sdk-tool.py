@@ -14,7 +14,9 @@ def convert_arg(arg: dict):
     v = arg['value']
     if t in ('bigint', 'int'):
         return int(v)
-    if t == 'bool':
+    # `boolean` is the spelling the compiler's ABI carries; `bool` is the
+    # alias some frontends use. Accept both (R-248).
+    if t in ('bool', 'boolean'):
         return v == 'true'
     # ByteString, PubKey, Addr, Sig, Ripemd160, Sha256, Point — hex strings
     return v

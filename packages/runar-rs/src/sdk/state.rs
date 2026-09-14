@@ -395,7 +395,14 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
             let n = state_field_i64(value, label, 8);
             encode_num2bin(n, 8)
         }
-        "bool" => {
+        // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that
+        // is what every compiler writes into `stateFields[].type`, alongside
+        // `encoding: "bool1", byteLength: 1` — and `bool` is an accepted
+        // alias. Matching only on `"bool"` meant a REAL boolean state field
+        // fell through to the `_` arm below, whose `value.as_bytes()` PANICS
+        // on `SdkValue::Bool`: this tier could not serialize a boolean state
+        // field at all.
+        "bool" | "boolean" => {
             if value.as_bool() {
                 "01".to_string()
             } else {
@@ -616,8 +623,11 @@ fn decode_state_value(
     field_type: &str,
 ) -> (SdkValue, usize) {
     match field_type {
-        "bool" => {
-            // 1 raw byte: 0x00 = false, 0x01 = true
+        "bool" | "boolean" => {
+            // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+            // `encode_state_value` — a reader that knows only `"bool"` walks a
+            // real boolean field as push data and desynchronises every field
+            // after it.
             if offset + 2 > hex.len() {
                 return (SdkValue::Bool(false), 2);
             }

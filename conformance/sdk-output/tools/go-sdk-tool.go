@@ -33,7 +33,9 @@ func convertArg(arg TypedArg) interface{} {
 		n := new(big.Int)
 		n.SetString(arg.Value, 10)
 		return n
-	case "bool":
+	// `boolean` is the spelling the compiler's ABI carries; `bool` is the
+	// alias some frontends use. Accept both (R-248).
+	case "bool", "boolean":
 		return arg.Value == "true"
 	default:
 		return arg.Value

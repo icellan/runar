@@ -156,7 +156,15 @@ fn encodeStateValue(
             .array_value => return error.ArrayValueInScalarField,
         };
         return encodeNum2Bin(allocator, n, 8);
-    } else if (std.mem.eql(u8, field_type, "bool")) {
+    } else if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) {
+        // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
+        // what every compiler writes into stateFields[].type, alongside
+        // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
+        // Matching only on "bool" meant a REAL boolean state field fell through
+        // to the variable-length branch below, where a .boolean value is not
+        // .bytes and became the empty string, i.e. a constant "00": the deploy
+        // always said false whatever the caller passed, and the first call that
+        // set the flag built a continuation the covenant rejects.
         const b: bool = switch (value) {
             .boolean => |bv| bv,
             .int => |i| i != 0,
@@ -480,7 +488,10 @@ fn decodeStateValue(
     offset: usize,
     field_type: []const u8,
 ) !DecodedValue {
-    if (std.mem.eql(u8, field_type, "bool")) {
+    if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) {
+        // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+        // encodeStateValue — a reader that knows only "bool" walks a real
+        // boolean field as push data and desynchronises every field after it.
         if (offset + 2 > hex.len) {
             return .{ .value = .{ .boolean = false }, .hex_chars_read = 2 };
         }

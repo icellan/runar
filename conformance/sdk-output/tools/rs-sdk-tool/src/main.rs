@@ -39,7 +39,9 @@ fn convert_arg(arg: &TypedArg) -> SdkValue {
                 SdkValue::BigInt(n)
             }
         }
-        "bool" => SdkValue::Bool(arg.value == "true"),
+        // `boolean` is the spelling the compiler's ABI carries; `bool` is
+        // the alias some frontends use. Accept both (R-248).
+        "bool" | "boolean" => SdkValue::Bool(arg.value == "true"),
         _ => {
             // ByteString, PubKey, Addr, Sig, Ripemd160, Sha256, Point — hex strings
             SdkValue::Bytes(arg.value.clone())

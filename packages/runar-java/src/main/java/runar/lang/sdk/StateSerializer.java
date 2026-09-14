@@ -99,7 +99,15 @@ public final class StateSerializer {
     static String encodeStateValue(Object value, String fieldType, String label) {
         return switch (fieldType) {
             case "int", "bigint" -> encodeNum2Bin(toBigInteger(value), 8, label);
-            case "bool" -> Boolean.TRUE.equals(value) ? "01" : "00";
+            // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
+            // what every compiler writes into stateFields[].type, alongside
+            // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
+            // Matching only on "bool" meant a REAL boolean state field fell through
+            // to the push-data default below and was framed as the ASCII text
+            // 02 74727565: 3 bytes longer than the continuation the script's own
+            // reader rebuilds, so hash256(outputs) never matched and the first
+            // spend was impossible.
+            case "bool", "boolean" -> Boolean.TRUE.equals(value) ? "01" : "00";
             // Fixed-size byte types: raw hex, no framing needed. P256Point (64)
             // and P384Point (96) belong here because runar-lang's cast
             // constructors hard-assert those widths and all seven compilers emit
@@ -171,7 +179,10 @@ public final class StateSerializer {
 
     static Object decodeStateValue(String hex, int[] offset, String fieldType) {
         return switch (fieldType) {
-            case "bool" -> {
+            // Both spellings, matching encodeStateValue — a reader that knows only
+            // "bool" walks a real boolean field as push data and desynchronises
+            // every field after it.
+            case "bool", "boolean" -> {
                 boolean b = !"00".equals(hex.substring(offset[0], offset[0] + 2));
                 offset[0] += 2;
                 yield b;

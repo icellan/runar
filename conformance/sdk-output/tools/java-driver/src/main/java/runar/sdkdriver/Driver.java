@@ -85,7 +85,10 @@ public final class Driver {
             case "bigint":
             case "int":
                 return new BigInteger(value);
+            // `boolean` is the spelling the compiler's ABI carries; `bool`
+            // is the alias some frontends use. Accept both (R-248).
             case "bool":
+            case "boolean":
                 return "true".equals(value);
             default:
                 // ByteString, PubKey, Addr, Sig, Ripemd160, Sha256, Point — hex strings

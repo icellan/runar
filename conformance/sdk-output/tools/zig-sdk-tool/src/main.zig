@@ -97,7 +97,9 @@ fn convertArg(allocator: std.mem.Allocator, type_str: []const u8, value: std.jso
         } else |_| {
             return .{ .big_int = try allocator.dupe(u8, str) };
         }
-    } else if (std.mem.eql(u8, type_str, "bool")) {
+    } else if (std.mem.eql(u8, type_str, "bool") or std.mem.eql(u8, type_str, "boolean")) {
+        // `boolean` is the spelling the compiler's ABI carries; `bool` is the
+        // alias some frontends use. Accept both (R-248).
         const str = switch (value) {
             .string => |s| s,
             .bool => |b| return .{ .boolean = b },

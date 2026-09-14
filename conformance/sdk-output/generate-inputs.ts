@@ -284,6 +284,29 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '0' },
     ],
   },
+  // R-248: the corpus's only MUTABLE `boolean` state field. The compiler
+  // spells the type `boolean` (never `bool`) and annotates it
+  // `encoding: "bool1", byteLength: 1`; five of the seven SDKs matched only
+  // on the spelling `bool` and mis-encoded the canonical one three different
+  // ways. Both polarities are pinned: two of the five wrote a constant `00`
+  // regardless of the value, and a false-only fixture would have let them
+  // through.
+  {
+    name: 'stateful-boolean-true',
+    source: 'conformance/sdk-output/contracts/StatefulFlag.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '7' },
+      { type: 'boolean', value: 'true' },
+    ],
+  },
+  {
+    name: 'stateful-boolean-false',
+    source: 'conformance/sdk-output/contracts/StatefulFlag.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '7' },
+      { type: 'boolean', value: 'false' },
+    ],
+  },
   {
     name: 'tic-tac-toe',
     source: 'examples/ts/tic-tac-toe/TicTacToe.runar.ts',

@@ -8,7 +8,9 @@ def convert_arg(arg)
   case arg['type']
   when 'bigint', 'int'
     arg['value'].to_i
-  when 'bool'
+  # `boolean` is the spelling the compiler's ABI carries; `bool` is the
+  # alias some frontends use. Accept both (R-248).
+  when 'bool', 'boolean'
     arg['value'] == 'true'
   else
     # ByteString, PubKey, Addr, Sig, Ripemd160, Sha256, Point — hex strings
