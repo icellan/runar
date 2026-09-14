@@ -793,6 +793,25 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// Push an op from a delegated codegen module, keeping `source_locs` in step.
+    ///
+    /// R-166: the crypto / EC / hash delegates emit through a `&mut |op| ...`
+    /// callback, and every one of them pushed straight onto `self.ops`. That
+    /// left `source_locs` SHORTER than `ops`, and the peephole's
+    /// loc-preserving variant blanks every location when the two lengths
+    /// disagree — so any contract touching EC, SHA-256, BLAKE3, WOTS+,
+    /// SLH-DSA, Rabin, Merkle, BN254, BabyBear or KoalaBear codegen shipped an
+    /// empty source map.
+    ///
+    /// Deliberately does NOT call `track_depth()`: these modules manage the
+    /// stack model themselves around the delegated block, and adding depth
+    /// tracking here would change `maxStackDepth`. The op stream is untouched,
+    /// so this is byte-neutral — only the location vector grows.
+    fn push_delegated_op(&mut self, op: StackOp) {
+        self.ops.push(op);
+        self.source_locs.push(self.current_source_loc.clone());
+    }
+
     /// Emit a Bitcoin varint encoding of the length on top of the stack.
     ///
     /// Expects stack: `[..., script, len]`
@@ -4837,7 +4856,7 @@ impl LoweringContext {
         self.sm.pop();
         self.sm.pop();
 
-        super::rabin::emit_verify_rabin_sig(&mut |op| self.ops.push(op));
+        super::rabin::emit_verify_rabin_sig(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4938,7 +4957,7 @@ impl LoweringContext {
         for _ in 0..3 { self.sm.pop(); }
 
         // Delegate to wots module
-        super::wots::emit_verify_wots(&mut |op| self.ops.push(op));
+        super::wots::emit_verify_wots(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4971,7 +4990,7 @@ impl LoweringContext {
         }
 
         // Delegate to slh_dsa module
-        super::slh_dsa::emit_verify_slh_dsa(&mut |op| self.ops.push(op), param_key);
+        super::slh_dsa::emit_verify_slh_dsa(&mut |op| self.push_delegated_op(op), param_key);
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -5001,7 +5020,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::sha256::emit_sha256_compress(&mut |op| self.ops.push(op));
+        super::sha256::emit_sha256_compress(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -5027,7 +5046,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::sha256::emit_sha256_finalize(&mut |op| self.ops.push(op));
+        super::sha256::emit_sha256_finalize(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -5053,7 +5072,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::blake3::emit_blake3_compress(&mut |op| self.ops.push(op));
+        super::blake3::emit_blake3_compress(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -5079,7 +5098,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::blake3::emit_blake3_hash(&mut |op| self.ops.push(op));
+        super::blake3::emit_blake3_hash(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -5102,7 +5121,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "ecAdd" => super::ec::emit_ec_add(emit),
@@ -5143,7 +5162,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "p256Add" => super::p256_p384::emit_p256_add(emit),
@@ -5191,7 +5210,7 @@ impl LoweringContext {
         self.sm.pop(); // sig
         self.sm.pop(); // msg
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         if func_name == "verifyECDSA_P256" {
             super::p256_p384::emit_verify_ecdsa_p256(emit);
@@ -5224,7 +5243,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "bbFieldAdd" => super::babybear::emit_bb_field_add(emit),
@@ -5267,7 +5286,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "kbFieldAdd" => super::koalabear::emit_kb_field_add(emit),
@@ -5310,7 +5329,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "bn254FieldAdd" => super::bn254::emit_bn254_field_add(emit),
@@ -5389,7 +5408,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "merkleRootSha256" => super::merkle::emit_merkle_root_sha256(emit, depth),

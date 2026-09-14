@@ -666,15 +666,33 @@ pub fn compile_from_source_str_with_result(
         }
     };
 
-    // Peephole optimization — same source_locs preservation rule as the
-    // primary path above: preserve 1:1 when the count is unchanged, fall
-    // back to all-None when the optimizer shrank the op stream.
+    // Peephole optimization — the SAME source-loc-preserving variant the
+    // primary path uses.
+    //
+    // R-166: this path used to call the plain `optimize_stack_ops` and then
+    // blank every location when the op count changed:
+    //
+    //     if new_ops.len() != method.source_locs.len() {
+    //         method.source_locs = vec![None; new_ops.len()];
+    //     }
+    //
+    // The peephole almost always changes the count — a two-line contract goes
+    // 8 ops -> 3 — so the fallback fired on essentially every compile and this
+    // tier emitted an EMPTY source map for every contract. Measured against the
+    // peers on a contract with no crypto in it at all:
+    //
+    // ```text
+    // go 2 mappings   ts 2   python 3   ruby 3   rust 0
+    // ```
+    //
+    // The CLI's `--source` route lands here, not on the primary path, so
+    // `--emit-source-map` wrote `{"mappings": []}` for everything. The
+    // loc-preserving variant keeps each collapsed window's head location, which
+    // is what the primary path already did.
     for method in &mut stack_methods {
-        let new_ops = optimize_stack_ops(&method.ops);
-        if new_ops.len() != method.source_locs.len() {
-            method.source_locs = vec![None; new_ops.len()];
-        }
+        let (new_ops, new_locs) = optimize_stack_ops_with_locs(&method.ops, &method.source_locs);
         method.ops = new_ops;
+        method.source_locs = new_locs;
     }
 
     // Pass 6: Emit (catch panics)
