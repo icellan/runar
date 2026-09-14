@@ -66,10 +66,16 @@ fn main() {
 
     let mut contract = RunarContract::new(artifact, sdk_args);
     if let Some(insc) = input.inscription {
-        contract.with_inscription(Inscription {
+        // N-043: a refused attach is a RESULT, not a crash — exit non-zero with
+        // the reason on stderr so the runner can compare the refusal verdict
+        // across all seven tiers.
+        if let Err(e) = contract.with_inscription(Inscription {
             content_type: insc.content_type,
             data: insc.data,
-        });
+        }) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     }
     print!("{}", contract.get_locking_script());
 }

@@ -349,6 +349,25 @@ describe('N-043 exact pin vs the inscription envelope', () => {
     }
   });
 
+  it('a LOWER-BOUND pin is satisfied by the envelope and accepts an inscription', () => {
+    // Control: `a2` is OP_GREATERTHANOREQUAL. The extra envelope bytes make the
+    // code part LONGER, which satisfies a lower bound — so the guard must not
+    // fire here. Guarding `a2` would turn this fix into an outage for every
+    // variable-width-constructor contract.
+    const r = compileOrThrow(VARLEN_VARIABLE_CTOR, 'VarLenVariableCtor.runar.ts');
+    const pins = decodePins(r.scriptHex!);
+    expect(pins.length).toBeGreaterThanOrEqual(1);
+    for (const pin of pins) expect(pin.exact).toBe(false);
+
+    const c = new RunarContract(r.artifact!, ['48656c6c6f', 'aa']);
+    c.withInscription({ contentType: 'text/plain', data: '6869' });
+    expect(c.inscription).not.toBeNull();
+
+    // The bound still holds against the inscribed code part.
+    const inscribedLen = c.getCodePartHex().length / 2;
+    for (const pin of pins) expect(pin.value).toBeLessThanOrEqual(inscribedLen);
+  });
+
   it('a fixed-state contract carries no exact pin and accepts an inscription', () => {
     // Clause 8a pins the REMAINDER for this shape, and the remainder is
     // unaffected by an envelope that lands inside the code part. Nothing here

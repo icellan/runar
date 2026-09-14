@@ -22,6 +22,8 @@ interface TestResult {
   allMatch: boolean;
   goldenMatch: boolean;
   errors: string[];
+  /** N-043: the fixture asserts a REFUSAL verdict, not a golden hex. */
+  expectedRefusal?: boolean;
 }
 
 interface SdkTool {
@@ -224,6 +226,45 @@ function runSdkTool(tool: SdkTool, inputPath: string): SdkResult {
   }
 }
 
+/**
+ * N-043: a fixture whose `input.json` carries `expectRefusal` inverts the
+ * comparison. There is no golden hex to agree on, because no tier is allowed to
+ * PRODUCE one: the (artifact, inscription) pair would deploy a contract whose
+ * own `SIZE(_codePart)` pin it violates, and every honest spend would fail
+ * OP_VERIFY with the funds already committed.
+ *
+ * What the seven tiers must agree on is the VERDICT plus its reason — an
+ * accept/refuse split across tiers is exactly the cross-tier divergence this
+ * suite exists to catch, and a tier that refuses for an unrelated reason (a
+ * parse failure, a missing binary) is not a passing tier.
+ */
+function evaluateRefusal(
+  expect: { pattern: string; reason?: string },
+  sdkResults: SdkResult[],
+  errors: string[],
+): boolean {
+  const re = new RegExp(expect.pattern);
+  let ok = true;
+  for (const r of sdkResults) {
+    if (r.success) {
+      ok = false;
+      errors.push(
+        `${r.sdk}: ACCEPTED an inscription every tier must refuse ` +
+          `(produced ${r.hex.length / 2} bytes of locking script)`,
+      );
+      continue;
+    }
+    if (!re.test(r.error ?? '')) {
+      ok = false;
+      errors.push(
+        `${r.sdk}: refused, but not for the expected reason ` +
+          `(/${expect.pattern}/ did not match): ${(r.error ?? '').slice(0, 200)}`,
+      );
+    }
+  }
+  return ok;
+}
+
 function runTest(testDir: string, tools: SdkTool[]): TestResult {
   const testName = testDir.split('/').pop()!;
   const inputPath = join(testDir, 'input.json');
@@ -231,6 +272,23 @@ function runTest(testDir: string, tools: SdkTool[]): TestResult {
 
   const sdkResults = tools.map((tool) => runSdkTool(tool, inputPath));
   const errors: string[] = [];
+
+  const expectRefusal = (
+    JSON.parse(readFileSync(inputPath, 'utf-8')) as {
+      expectRefusal?: { pattern: string; reason?: string };
+    }
+  ).expectRefusal;
+  if (expectRefusal) {
+    const agreed = evaluateRefusal(expectRefusal, sdkResults, errors);
+    return {
+      testName,
+      sdkResults,
+      allMatch: agreed,
+      goldenMatch: agreed,
+      errors,
+      expectedRefusal: true,
+    };
+  }
 
   for (const r of sdkResults) {
     if (!r.success) {
@@ -441,7 +499,9 @@ function main(): void {
       const icon = status === 'PASS' ? '+' : 'x';
       console.log(`[${icon}] ${result.testName}: ${status}`);
       for (const r of result.sdkResults) {
-        const s = r.success ? `OK (${r.durationMs}ms)` : `FAIL: ${r.error}`;
+        const s = result.expectedRefusal
+          ? (r.success ? `ACCEPTED (expected a refusal)` : `REFUSED (${r.durationMs}ms)`)
+          : (r.success ? `OK (${r.durationMs}ms)` : `FAIL: ${r.error}`);
         console.log(`    ${r.sdk}: ${s}`);
       }
       for (const e of result.errors) {

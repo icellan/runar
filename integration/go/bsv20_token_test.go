@@ -78,7 +78,9 @@ func deployBSV20Inscription(t *testing.T, insc *runar.Inscription) (string, *run
 	}
 
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(insc)
+	if _, err := contract.WithInscription(insc); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
@@ -150,7 +152,9 @@ func TestBSV20_TransferAndSpend(t *testing.T) {
 	}
 
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(runar.BSV20Transfer(tick, amt))
+	if _, err := contract.WithInscription(runar.BSV20Transfer(tick, amt)); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	deployTxid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
@@ -199,7 +203,9 @@ func TestBSV20_RoundTripViaFromTxId(t *testing.T) {
 	}
 
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(runar.BSV20Deploy(tick, max, nil, &dec))
+	if _, err := contract.WithInscription(runar.BSV20Deploy(tick, max, nil, &dec)); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {

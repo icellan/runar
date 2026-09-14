@@ -323,13 +323,104 @@ func normalizeWitnessBytes(s string) (string, error) {
 	return strings.ToLower(h), nil
 }
 
+// decodeExactCodePartLenPins decodes the value of every EQUALITY
+// `verify_code_part_len` pin in a compiled script.
+//
+// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+//
+//	76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+//	OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+//
+// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
+// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+// satisfy, so it is deliberately not returned here.
+//
+// Read from the emitted TEMPLATE rather than from a built code script: the
+// template holds OP_0 placeholders where constructor args go, so no
+// caller-supplied byte string can be mistaken for a pin.
+func decodeExactCodePartLenPins(scriptHex string) []int {
+	var values []int
+	for i := 0; i+18 <= len(scriptHex); i += 2 {
+		seq := scriptHex[i : i+18]
+		if seq[0:4] != "7604" {
+			continue
+		}
+		if seq[12:14] != "81" {
+			continue
+		}
+		if seq[14:16] != "9c" {
+			continue
+		}
+		if seq[16:18] != "69" {
+			continue
+		}
+		raw, err := hex.DecodeString(seq[4:12])
+		if err != nil {
+			continue
+		}
+		value := 0
+		for b := 3; b >= 0; b-- { // little-endian
+			value = value<<8 | int(raw[b])
+		}
+		values = append(values, value)
+	}
+	return values
+}
+
+// assertCodePartLengthPinHonoured verifies that every equality
+// `verify_code_part_len` pin the compiler baked into this artifact still
+// describes the code part this contract produces.
+//
+// The check is the invariant itself, not a restatement of the compiler's
+// derivation: it decodes the pinned number straight out of the emitted template
+// and compares it to getCodePartHex(). So it permits every combination that
+// actually works -- a stateless contract or a fixed-size state layout carries
+// no pin at all, and a lower-bound pin is satisfied by a longer code part --
+// and rejects only the shape that would lock funds.
+func (c *RunarContract) assertCodePartLengthPinHonoured() error {
+	pinned := decodeExactCodePartLenPins(c.Artifact.Script)
+	if len(pinned) == 0 {
+		return nil
+	}
+	actual := len(c.getCodePartHex()) / 2
+	for _, value := range pinned {
+		if value == actual {
+			continue
+		}
+		return fmt.Errorf(
+			"RunarContract.WithInscription: %s pins SIZE(_codePart) == %d, but with "+
+				"this inscription attached the code part is %d bytes. Deploying it would "+
+				"make every spend fail OP_VERIFY and lock the contract's funds permanently. "+
+				"An inscription cannot be attached to a stateful contract with a "+
+				"variable-length state section: the envelope is part of the code part, and "+
+				"its length is not known when the pin is compiled",
+			c.Artifact.ContractName, value, actual,
+		)
+	}
+	return nil
+}
+
 // WithInscription attaches a 1sat ordinals inscription to this contract. The
 // inscription envelope is injected into the locking script between the compiled
 // code and the state section (if any). Once deployed, the inscription is
 // immutable -- it persists identically across all state transitions.
-func (c *RunarContract) WithInscription(inscription *Inscription) *RunarContract {
+//
+// N-043 -- returns an error when the envelope would break the contract's own
+// `SIZE(_codePart)` pin. A stateful contract with a variable-length state
+// section carries an equality pin on the deployed code-part length, and the
+// envelope lands INSIDE the code part (see getCodePartHex). The compiler bakes
+// that number before any inscription exists, so the pinned length and the real
+// one differ by the envelope's size and every honest spend aborts at OP_VERIFY
+// -- with the funds already committed. Refusing here turns a permanent, silent
+// lock into a loud error before a single satoshi moves.
+func (c *RunarContract) WithInscription(inscription *Inscription) (*RunarContract, error) {
+	previous := c.inscription
 	c.inscription = inscription
-	return c
+	if err := c.assertCodePartLengthPinHonoured(); err != nil {
+		c.inscription = previous
+		return nil, err
+	}
+	return c, nil
 }
 
 // GetInscription returns the current inscription, if any.

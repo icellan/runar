@@ -88,6 +88,51 @@ fn outputFramingBytes(script_byte_len: usize) i64 {
 // RunarContract — main contract runtime wrapper
 // ---------------------------------------------------------------------------
 
+/// Decode the value of every EQUALITY `verify_code_part_len` pin in a compiled
+/// script.
+///
+/// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+///
+///     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+///     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+///
+/// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
+/// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+/// satisfy, so it is deliberately not returned here.
+///
+/// Read from the emitted TEMPLATE rather than from a built code script: the
+/// template holds OP_0 placeholders where constructor args go, so no
+/// caller-supplied byte string can be mistaken for a pin.
+fn decodeExactCodePartLenPins(
+    allocator: std.mem.Allocator,
+    script_hex: []const u8,
+) !std.ArrayListUnmanaged(usize) {
+    var values: std.ArrayListUnmanaged(usize) = .empty;
+    errdefer values.deinit(allocator);
+
+    var i: usize = 0;
+    while (i + 18 <= script_hex.len) : (i += 2) {
+        const seq = script_hex[i .. i + 18];
+        if (!std.mem.eql(u8, seq[0..4], "7604")) continue;
+        if (!std.mem.eql(u8, seq[12..14], "81")) continue;
+        if (!std.mem.eql(u8, seq[14..16], "9c")) continue;
+        if (!std.mem.eql(u8, seq[16..18], "69")) continue;
+
+        var value: usize = 0;
+        var b: usize = 4;
+        while (b > 0) : (b -= 1) { // little-endian
+            const byte = std.fmt.parseInt(u8, seq[4 + 2 * (b - 1) .. 6 + 2 * (b - 1)], 16) catch {
+                value = 0;
+                break;
+            };
+            value = (value << 8) | byte;
+        } else {
+            try values.append(allocator, value);
+        }
+    }
+    return values;
+}
+
 pub const ContractError = error{
     NotDeployed,
     MethodNotFound,
@@ -268,12 +313,56 @@ pub const RunarContract = struct {
     /// envelope is injected into the locking script between the compiled code
     /// and the state section (if any). Once deployed, the inscription is
     /// immutable -- it persists identically across all state transitions.
+    ///
+    /// N-043 -- returns `error.CodePartLengthPinViolated` when the envelope
+    /// would break the contract's own `SIZE(_codePart)` pin. A stateful contract
+    /// with a variable-length state section carries an equality pin on the
+    /// deployed code-part length, and the envelope lands INSIDE the code part
+    /// (see `getCodePartHex`). The compiler bakes that number before any
+    /// inscription exists, so the pinned length and the real one differ by the
+    /// envelope's size and every honest spend aborts at OP_VERIFY -- with the
+    /// funds already committed. Refusing here turns a permanent, silent lock
+    /// into a loud error before a single satoshi moves. The pinned / actual
+    /// lengths are recorded in `sdk_errors.last_codepart_pin_error`.
     pub fn withInscription(self: *RunarContract, insc: ordinals.Inscription) !void {
-        if (self.inscription) |*old| {
+        const previous = self.inscription;
+        self.inscription = try insc.clone(self.allocator);
+        self.assertCodePartLengthPinHonoured() catch |err| {
+            if (self.inscription) |*attached| {
+                var mi = attached.*;
+                mi.deinit(self.allocator);
+            }
+            self.inscription = previous;
+            return err;
+        };
+        if (previous) |*old| {
             var mi = old.*;
             mi.deinit(self.allocator);
         }
-        self.inscription = try insc.clone(self.allocator);
+    }
+
+    /// Verify that every equality `verify_code_part_len` pin the compiler baked
+    /// into this artifact still describes the code part this contract produces.
+    ///
+    /// The check is the invariant itself, not a restatement of the compiler's
+    /// derivation: it decodes the pinned number straight out of the emitted
+    /// template and compares it to `getCodePartHex()`. So it permits every
+    /// combination that actually works -- a stateless contract or a fixed-size
+    /// state layout carries no pin at all, and a lower-bound pin is satisfied by
+    /// a longer code part -- and rejects only the shape that would lock funds.
+    fn assertCodePartLengthPinHonoured(self: *RunarContract) !void {
+        var pinned = try decodeExactCodePartLenPins(self.allocator, self.artifact.script);
+        defer pinned.deinit(self.allocator);
+        if (pinned.items.len == 0) return;
+
+        const code = try self.getCodePartHex();
+        defer self.allocator.free(code);
+        const actual = code.len / 2;
+
+        for (pinned.items) |value| {
+            if (value == actual) continue;
+            return errors_mod.raiseCodePartLengthPinViolated(value, actual, self.artifact.contract_name);
+        }
     }
 
     /// Returns the current inscription, if any.
@@ -3830,6 +3919,121 @@ test "RunarContract.withInscription on stateful contract injects between code an
     const envelope_pos = std.mem.indexOf(u8, ls, "0063036f726451").?;
     const op_return_pos = std.mem.lastIndexOf(u8, ls, "6a").?;
     try std.testing.expect(envelope_pos < op_return_pos);
+}
+
+// ---------------------------------------------------------------------------
+// N-043 — an ordinals inscription must not break the code-part length pin.
+//
+// A stateful contract with a variable-length state section carries an EQUALITY
+// pin on the deployed code-part length, emitted as a fixed-width nine-byte run:
+//
+//     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+//     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+//
+// `getCodePartHex` concatenates the inscription envelope INTO the code part, so
+// attaching one makes the real code part longer than the pinned number and every
+// honest spend aborts at OP_VERIFY with the funds already committed.
+//
+// Each template below is a 10-byte script — `OP_1` followed by the nine-byte pin
+// run — except the unpinned one. The inscription is a two-byte `text/plain`
+// payload whose envelope is exactly 23 bytes, so an inscribed code part is
+// 10 + 23 = 33 bytes.
+// ---------------------------------------------------------------------------
+
+fn pinFixtureArtifactJson(comptime script: []const u8) []const u8 {
+    return "{\"contractName\":\"PinFixture\",\"version\":\"runar-v1.0.0-rc.1\",\"compilerVersion\":\"1.0.0-rc.1\"," ++
+        "\"parentClass\":\"StatefulSmartContract\",\"script\":\"" ++ script ++ "\",\"asm\":\"\"," ++
+        "\"abi\":{\"constructor\":{\"params\":[{\"name\":\"memo\",\"type\":\"ByteString\"}]}," ++
+        "\"methods\":[{\"name\":\"post\",\"params\":[{\"name\":\"newMemo\",\"type\":\"ByteString\"}],\"isPublic\":true}]}," ++
+        "\"stateFields\":[{\"name\":\"memo\",\"type\":\"ByteString\",\"index\":0}],\"constructorSlots\":[]," ++
+        "\"buildTimestamp\":\"2024-01-01\"}";
+}
+
+const pin_fixture_inscription: ordinals.Inscription = .{ .content_type = "text/plain", .data = "6869" };
+
+/// Exact pin of 10: correct WITHOUT an envelope, violated by one. Refuse.
+const pin_template_exact_10 = "5176040a000000819c69";
+/// Exact pin of 33 (0x21): correct WITH the envelope attached. Accept — and a
+/// decoder that reads the length big-endian gets 0x21000000 here and wrongly
+/// refuses.
+const pin_template_exact_33 = "51760421000000819c69";
+/// LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy it,
+/// so it must never trigger a refusal.
+const pin_template_lower_bound_10 = "5176040a00000081a269";
+/// No pin at all (a bare P2PKH template). Accept.
+const pin_template_none = "76a90088ac";
+
+test "N-043 withInscription refuses an envelope that breaks an exact pin" {
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_exact_10));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    errors_mod.last_codepart_pin_error = null;
+    const result = contract.withInscription(pin_fixture_inscription);
+    try std.testing.expectError(errors_mod.CodePartPinError.CodePartLengthPinViolated, result);
+
+    // Assert the REASON, not merely that something failed: a test that accepts
+    // any error passes when an unrelated one fires.
+    const rec = errors_mod.last_codepart_pin_error.?;
+    try std.testing.expectEqual(@as(usize, 10), rec.pinned);
+    try std.testing.expectEqual(@as(usize, 33), rec.actual);
+    try std.testing.expectEqualStrings("PinFixture", rec.contractName());
+
+    // The contract must be left un-inscribed rather than half-mutated.
+    try std.testing.expect(contract.getInscription() == null);
+    const code = try contract.getCodePartHex();
+    defer allocator.free(code);
+    try std.testing.expectEqual(@as(usize, 10), code.len / 2);
+}
+
+test "N-043 withInscription accepts a pin that already matches the inscribed length" {
+    // Control: a pin whose value already accounts for the envelope is honoured.
+    // Also pins the little-endian decode — a big-endian reader sees 0x21000000.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_exact_33));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    try contract.withInscription(pin_fixture_inscription);
+    try std.testing.expect(contract.getInscription() != null);
+
+    const code = try contract.getCodePartHex();
+    defer allocator.free(code);
+    try std.testing.expectEqual(@as(usize, 33), code.len / 2);
+}
+
+test "N-043 withInscription accepts a lower-bound pin" {
+    // Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes,
+    // so an inscription must still be accepted. Guarding `a2` would turn this
+    // fix into an outage for every lower-bound contract.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_lower_bound_10));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    try contract.withInscription(pin_fixture_inscription);
+    try std.testing.expect(contract.getInscription() != null);
+}
+
+test "N-043 withInscription accepts an unpinned contract" {
+    // Control 2 (mandatory): a contract with no pin at all (stateless, or a
+    // fixed-size state layout) must still accept an inscription.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_none));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    try contract.withInscription(pin_fixture_inscription);
+    try std.testing.expect(contract.getInscription() != null);
 }
 
 // ---------------------------------------------------------------------------

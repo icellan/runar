@@ -195,10 +195,12 @@ await contract.deploy(provider, signer, { satoshis: 1 });
 **Go**
 ```go
 contract := runar.NewRunarContract(&artifact, args)
-contract.WithInscription(&runar.Inscription{
+if _, err := contract.WithInscription(&runar.Inscription{
     ContentType: "image/png",
     Data:        pngHexData,
-})
+}); err != nil {
+    return err // see "When an inscription is refused"
+}
 contract.Deploy(provider, signer,
     runar.DeployOptions{Satoshis: 1})
 ```
@@ -208,10 +210,11 @@ contract.Deploy(provider, signer,
 **Rust**
 ```rust
 let mut contract = RunarContract::new(artifact, args);
+// See "When an inscription is refused" below.
 contract.with_inscription(Inscription {
     content_type: "image/png".into(),
     data: png_hex_data.into(),
-});
+})?;
 contract.deploy(&mut provider, &signer,
     DeployOptions { satoshis: 1, .. })?;
 ```
@@ -248,7 +251,7 @@ contract.deploy(provider, signer, satoshis: 1)
 ```zig
 var contract = try RunarContract.init(
     allocator, &artifact, args);
-contract.withInscription(.{
+try contract.withInscription(.{
     .content_type = "image/png",
     .data = png_hex_data,
 });
@@ -326,7 +329,7 @@ Transfers move tokens by spending the source UTXO and creating new UTXOs with tr
 ```go
 insc := runar.BSV20Deploy("RUNAR", "21000000",
     ptr("1000"), ptr("8"))
-contract.WithInscription(insc)
+if _, err := contract.WithInscription(insc); err != nil { return err }
 
 mint := runar.BSV20Mint("RUNAR", "1000")
 transfer := runar.BSV20Transfer("RUNAR", "50")
@@ -337,7 +340,7 @@ transfer := runar.BSV20Transfer("RUNAR", "50")
 ```rust
 let insc = bsv20_deploy("RUNAR", "21000000",
     Some("1000"), Some("8"));
-contract.with_inscription(insc);
+contract.with_inscription(insc)?;
 
 let mint = bsv20_mint("RUNAR", "1000");
 let transfer = bsv20_transfer("RUNAR", "50");
@@ -418,7 +421,7 @@ await transferContract.deploy(provider, signer, { satoshis: 1 });
 ```go
 insc := runar.BSV21DeployMint("1000000",
     ptr("18"), ptr("RNR"), nil)
-contract.WithInscription(insc)
+if _, err := contract.WithInscription(insc); err != nil { return err }
 
 transfer := runar.BSV21Transfer(tokenId, "100")
 ```
@@ -428,7 +431,7 @@ transfer := runar.BSV21Transfer(tokenId, "100")
 ```rust
 let insc = bsv21_deploy_mint("1000000",
     Some("18"), Some("RNR"), None);
-contract.with_inscription(insc);
+contract.with_inscription(insc)?;
 
 let transfer = bsv21_transfer(&token_id, "100");
 ```
@@ -670,6 +673,43 @@ The provider is available in all 6 SDKs:
 - **Python**: `GorillaPoolProvider("mainnet")`
 - **Zig**: `GorillaPoolProvider.init(allocator, .mainnet)`
 - **Ruby**: `Runar::SDK::GorillaPoolProvider.new("mainnet")`
+
+---
+
+## When an inscription is refused
+
+`withInscription` can REFUSE, in all seven SDKs, and the refusal is a
+funds-safety check rather than a validation nicety.
+
+A stateful contract whose state section is variable-length (any `ByteString`
+state field) carries an on-chain equality pin on its own deployed code-part
+length — `SIZE(_codePart) == N`, with `N` baked in at compile time. The
+ordinals envelope is concatenated INTO the code part, because the contract's
+on-chain output reconstruction treats it as part of the immutable code, and its
+length is a deploy-time value the compiler never sees. Attaching one therefore
+makes the real code part longer than the pinned number, and every honest spend
+aborts at OP_VERIFY — with the funds already committed to the output.
+
+There is no way to spend such an output: the true code part fails the equality
+pin, and a code part truncated back to the pinned length fails the code/state
+split check instead. So the SDKs refuse the combination at attach time, before a
+satoshi moves:
+
+- **TypeScript / Python / Ruby / Java** — throws / raises.
+- **Go** — `WithInscription` returns `(*RunarContract, error)`.
+- **Rust** — `with_inscription` returns `Result<&mut Self, String>`.
+- **Zig** — returns `error.CodePartLengthPinViolated`; the pinned and actual
+  lengths are in `sdk_errors.last_codepart_pin_error`.
+
+Everything that actually works is still allowed. A stateless contract carries no
+such pin. A fixed-size state layout carries none either — its check rides on the
+remainder, which the envelope does not touch. And a contract with a
+variable-width constructor argument carries a LOWER-bound pin, which the extra
+envelope bytes satisfy. Only the shape that would lock funds is rejected.
+
+To inscribe a contract of the refused shape, give it a fixed-size state layout
+(e.g. a `Sha256` digest of the payload instead of the payload itself), or keep
+the ordinal on a separate 1-sat output.
 
 ---
 

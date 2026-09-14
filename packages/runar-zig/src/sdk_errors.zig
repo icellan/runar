@@ -192,3 +192,54 @@ pub fn assertUnsoundPrimitivesAcknowledged(
         return error.UnsoundPrimitiveNotAcknowledged;
     }
 }
+
+/// Distinct typed error returned when a 1sat-ordinals inscription envelope
+/// would break the contract's own `SIZE(_codePart)` pin (N-043).
+///
+/// A stateful contract with a variable-length state section carries an equality
+/// pin on the deployed code-part length, and the envelope lands INSIDE the code
+/// part. The compiler bakes that number before any inscription exists, so
+/// attaching one makes the pinned length and the real one differ by the
+/// envelope's size and every honest spend aborts at OP_VERIFY -- with the funds
+/// already committed.
+pub const CodePartPinError = error{CodePartLengthPinViolated};
+
+/// Last-recorded `CodePartLengthPinViolated` diagnostic. Same single-threaded-
+/// SDK rationale as `last_error` above -- Zig errors don't carry payloads, so
+/// the structured reason lives in a side channel for tests / callers that need
+/// to report which pin was violated and by how much.
+pub var last_codepart_pin_error: ?LastCodePartPinError = null;
+
+pub const LastCodePartPinError = struct {
+    /// The value the compiler baked into the equality pin.
+    pinned: usize,
+    /// The byte length of the code part the contract actually produces.
+    actual: usize,
+    contract_name_buf: [128]u8,
+    contract_name_len: usize,
+
+    pub fn contractName(self: *const LastCodePartPinError) []const u8 {
+        return self.contract_name_buf[0..self.contract_name_len];
+    }
+};
+
+/// Record a `CodePartLengthPinViolated` diagnostic into
+/// `last_codepart_pin_error` and return the typed error. No allocation; the
+/// contract name is truncated into a fixed buffer.
+pub fn raiseCodePartLengthPinViolated(
+    pinned: usize,
+    actual: usize,
+    contract_name: []const u8,
+) CodePartPinError {
+    var rec = LastCodePartPinError{
+        .pinned = pinned,
+        .actual = actual,
+        .contract_name_buf = undefined,
+        .contract_name_len = 0,
+    };
+    const c = @min(contract_name.len, rec.contract_name_buf.len);
+    @memcpy(rec.contract_name_buf[0..c], contract_name[0..c]);
+    rec.contract_name_len = c;
+    last_codepart_pin_error = rec;
+    return error.CodePartLengthPinViolated;
+}

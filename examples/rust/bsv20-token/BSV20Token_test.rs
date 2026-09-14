@@ -84,7 +84,8 @@ fn test_deploy_inscription_has_correct_json() {
     let artifact = compile_artifact();
     let inscription = bsv20_deploy("RUNAR", "21000000", Some("1000"), None);
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script)
@@ -104,7 +105,8 @@ fn test_deploy_inscription_with_decimals() {
     let artifact = compile_artifact();
     let inscription = bsv20_deploy("USDT", "100000000", None, Some("8"));
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script).unwrap();
@@ -121,7 +123,8 @@ fn test_mint_inscription_has_correct_json() {
     let artifact = compile_artifact();
     let inscription = bsv20_mint("RUNAR", "1000");
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script).unwrap();
@@ -143,7 +146,8 @@ fn test_transfer_inscription_has_correct_json() {
     let artifact = compile_artifact();
     let inscription = bsv20_transfer("RUNAR", "50");
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script).unwrap();
@@ -165,7 +169,8 @@ fn test_inscription_survives_from_utxo_round_trip() {
     let artifact = compile_artifact();
     let inscription = bsv20_deploy("TEST", "1000", None, None);
     let mut contract = RunarContract::new(artifact.clone(), constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
 

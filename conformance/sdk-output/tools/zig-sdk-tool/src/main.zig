@@ -71,10 +71,28 @@ pub fn main(init: std.process.Init) !void {
         const insc_obj = insc_val.object;
         const ct = if (insc_obj.get("contentType")) |v| v.string else "";
         const d = if (insc_obj.get("data")) |v| v.string else "";
-        try contract.withInscription(.{
+        // N-043: a refused attach is a RESULT, not a crash — exit non-zero with
+        // the reason on stderr so the runner can compare the refusal verdict
+        // across all seven tiers.
+        contract.withInscription(.{
             .content_type = try allocator.dupe(u8, ct),
             .data = try allocator.dupe(u8, d),
-        });
+        }) catch |err| {
+            if (err == error.CodePartLengthPinViolated) {
+                const rec = runar.sdk_errors.last_codepart_pin_error.?;
+                std.debug.print(
+                    "RunarContract.withInscription: {s} pins SIZE(_codePart) == {d}, but with " ++
+                        "this inscription attached the code part is {d} bytes. Deploying it would " ++
+                        "make every spend fail OP_VERIFY and lock the contract's funds permanently. " ++
+                        "An inscription cannot be attached to a stateful contract with a " ++
+                        "variable-length state section: the envelope is part of the code part, and " ++
+                        "its length is not known when the pin is compiled\n",
+                    .{ rec.contractName(), rec.pinned, rec.actual },
+                );
+                std.process.exit(1);
+            }
+            return err;
+        };
     }
 
     const locking_script = try contract.getLockingScript();

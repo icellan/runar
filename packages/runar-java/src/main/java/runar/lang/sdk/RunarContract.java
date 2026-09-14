@@ -176,8 +176,87 @@ public final class RunarContract {
      * {@code with_inscription}, and TS {@code withInscription}.
      */
     public RunarContract withInscription(Inscription insc) {
+        Inscription previous = this.inscription;
         this.inscription = insc;
+        try {
+            assertCodePartLengthPinHonoured();
+        } catch (IllegalArgumentException e) {
+            this.inscription = previous;
+            throw e;
+        }
         return this;
+    }
+
+    /**
+     * Decodes the value of every EQUALITY {@code verify_code_part_len} pin in a
+     * compiled script.
+     *
+     * <p>The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+     *
+     * <pre>
+     *   76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+     *   OP_DUP  &lt;len LE32&gt;    OP_BIN2NUM  cmp  OP_VERIFY
+     * </pre>
+     *
+     * <p>{@code 9c} is OP_NUMEQUAL — an exact pin, the only variant a longer
+     * code part can violate. {@code a2} is OP_GREATERTHANOREQUAL, a lower bound
+     * that extra bytes satisfy, so it is deliberately not returned here.
+     *
+     * <p>Read from the emitted TEMPLATE rather than from a built code script:
+     * the template holds OP_0 placeholders where constructor args go, so no
+     * caller-supplied byte string can be mistaken for a pin.
+     */
+    static List<Integer> decodeExactCodePartLenPins(String scriptHex) {
+        List<Integer> values = new ArrayList<>();
+        for (int i = 0; i + 18 <= scriptHex.length(); i += 2) {
+            String seq = scriptHex.substring(i, i + 18);
+            if (!seq.startsWith("7604")) continue;
+            if (!seq.regionMatches(12, "81", 0, 2)) continue;
+            if (!seq.regionMatches(14, "9c", 0, 2)) continue;
+            if (!seq.regionMatches(16, "69", 0, 2)) continue;
+            int value = 0;
+            boolean ok = true;
+            for (int b = 3; b >= 0; b--) { // little-endian
+                try {
+                    value = (value << 8) | Integer.parseInt(seq.substring(4 + 2 * b, 6 + 2 * b), 16);
+                } catch (NumberFormatException e) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) values.add(value);
+        }
+        return values;
+    }
+
+    /**
+     * Verifies that every equality {@code verify_code_part_len} pin the compiler
+     * baked into this artifact still describes the code part this contract
+     * produces.
+     *
+     * <p>The check is the invariant itself, not a restatement of the compiler's
+     * derivation: it decodes the pinned number straight out of the emitted
+     * template and compares it to the rendered code part. So it permits every
+     * combination that actually works — a stateless contract or a fixed-size
+     * state layout carries no pin at all, and a lower-bound pin is satisfied by
+     * a longer code part — and rejects only the shape that would lock funds.
+     */
+    private void assertCodePartLengthPinHonoured() {
+        List<Integer> pinned = decodeExactCodePartLenPins(artifact.scriptHex());
+        if (pinned.isEmpty()) return;
+        int actual = ContractScript.renderCodePart(artifact, constructorArgs, inscription).length() / 2;
+        for (int value : pinned) {
+            if (value == actual) continue;
+            throw new IllegalArgumentException(
+                "RunarContract.withInscription: " + artifact.contractName() + " pins "
+                    + "SIZE(_codePart) == " + value + ", but with this inscription attached the "
+                    + "code part is " + actual + " bytes. Deploying it would make every spend "
+                    + "fail OP_VERIFY and lock the contract's funds permanently. An "
+                    + "inscription cannot be attached to a stateful contract with a "
+                    + "variable-length state section: the envelope is part of the code "
+                    + "part, and its length is not known when the pin is compiled"
+            );
+        }
     }
 
     public Inscription inscription() {

@@ -81,7 +81,8 @@ fn test_attaches_png_inscription_to_locking_script() {
     contract.with_inscription(Inscription {
         content_type: "image/png".to_string(),
         data: png_data.to_string(),
-    });
+    })
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let expected_envelope = build_inscription_envelope("image/png", png_data);
@@ -103,7 +104,8 @@ fn test_attaches_text_inscription_to_locking_script() {
     contract.with_inscription(Inscription {
         content_type: "text/plain".to_string(),
         data: text_data.to_string(),
-    });
+    })
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script).unwrap();
@@ -120,7 +122,8 @@ fn test_inscription_survives_from_utxo_round_trip() {
     contract.with_inscription(Inscription {
         content_type: "image/png".to_string(),
         data: png_data.to_string(),
-    });
+    })
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
 

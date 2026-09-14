@@ -36,10 +36,17 @@ def main():
     contract = RunarContract(artifact, args)
     if data.get('inscription'):
         insc = data['inscription']
-        contract.with_inscription(Inscription(
-            content_type=insc['contentType'],
-            data=insc['data'],
-        ))
+        # N-043: a refused attach is a RESULT, not a crash — exit non-zero with
+        # the reason on stderr so the runner can compare the refusal verdict
+        # across all seven tiers.
+        try:
+            contract.with_inscription(Inscription(
+                content_type=insc['contentType'],
+                data=insc['data'],
+            ))
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            sys.exit(1)
     sys.stdout.write(contract.get_locking_script())
 
 

@@ -77,6 +77,61 @@ fn normalize_witness_hex(s: &str) -> Result<String, String> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
+/// Decode the value of every EQUALITY `verify_code_part_len` pin in a compiled
+/// script.
+///
+/// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+///
+/// ```text
+///     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+///     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+/// ```
+///
+/// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
+/// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+/// satisfy, so it is deliberately not returned here.
+///
+/// Read from the emitted TEMPLATE rather than from a built code script: the
+/// template holds OP_0 placeholders where constructor args go, so no
+/// caller-supplied byte string can be mistaken for a pin.
+fn decode_exact_code_part_len_pins(script_hex: &str) -> Vec<usize> {
+    let mut values = Vec::new();
+    let bytes = script_hex.as_bytes();
+    let mut i = 0;
+    while i + 18 <= bytes.len() {
+        let seq = &script_hex[i..i + 18];
+        i += 2;
+        if &seq[0..4] != "7604" {
+            continue;
+        }
+        if &seq[12..14] != "81" {
+            continue;
+        }
+        if &seq[14..16] != "9c" {
+            continue;
+        }
+        if &seq[16..18] != "69" {
+            continue;
+        }
+        let mut value: usize = 0;
+        let mut ok = true;
+        for b in (0..4).rev() {
+            // little-endian
+            match usize::from_str_radix(&seq[4 + 2 * b..6 + 2 * b], 16) {
+                Ok(n) => value = (value << 8) | n,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            values.push(value);
+        }
+    }
+    values
+}
+
 /// The well-known ByteString parameter the SDK fills in with the transaction's
 /// concatenated outpoints (36 bytes per input) once the input list has
 /// converged. It is the ONLY ByteString slot for which an [`SdkValue::Auto`]
@@ -1912,9 +1967,56 @@ impl RunarContract {
     /// envelope is injected into the locking script between the compiled code
     /// and the state section (if any). Once deployed, the inscription is
     /// immutable -- it persists identically across all state transitions.
-    pub fn with_inscription(&mut self, inscription: Inscription) -> &mut Self {
+    ///
+    /// N-043 -- returns `Err` when the envelope would break the contract's own
+    /// `SIZE(_codePart)` pin. A stateful contract with a variable-length state
+    /// section carries an equality pin on the deployed code-part length, and the
+    /// envelope lands INSIDE the code part (see `get_code_part_hex`). The
+    /// compiler bakes that number before any inscription exists, so the pinned
+    /// length and the real one differ by the envelope's size and every honest
+    /// spend aborts at OP_VERIFY -- with the funds already committed. Refusing
+    /// here turns a permanent, silent lock into a loud error before a single
+    /// satoshi moves.
+    pub fn with_inscription(&mut self, inscription: Inscription) -> Result<&mut Self, String> {
+        let previous = self.inscription.take();
         self.inscription = Some(inscription);
-        self
+        if let Err(e) = self.assert_code_part_length_pin_honoured() {
+            self.inscription = previous;
+            return Err(e);
+        }
+        Ok(self)
+    }
+
+    /// Verify that every equality `verify_code_part_len` pin the compiler baked
+    /// into this artifact still describes the code part this contract produces.
+    ///
+    /// The check is the invariant itself, not a restatement of the compiler's
+    /// derivation: it decodes the pinned number straight out of the emitted
+    /// template and compares it to `get_code_part_hex()`. So it permits every
+    /// combination that actually works -- a stateless contract or a fixed-size
+    /// state layout carries no pin at all, and a lower-bound pin is satisfied by
+    /// a longer code part -- and rejects only the shape that would lock funds.
+    fn assert_code_part_length_pin_honoured(&self) -> Result<(), String> {
+        let pinned = decode_exact_code_part_len_pins(&self.artifact.script);
+        if pinned.is_empty() {
+            return Ok(());
+        }
+        let actual = self.get_code_part_hex().len() / 2;
+        for value in pinned {
+            if value == actual {
+                continue;
+            }
+            return Err(format!(
+                "RunarContract::with_inscription: {} pins SIZE(_codePart) == {}, but \
+                 with this inscription attached the code part is {} bytes. Deploying \
+                 it would make every spend fail OP_VERIFY and lock the contract's \
+                 funds permanently. An inscription cannot be attached to a stateful \
+                 contract with a variable-length state section: the envelope is part \
+                 of the code part, and its length is not known when the pin is compiled",
+                self.artifact.contract_name, value, actual,
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the current inscription, if any.
@@ -4112,7 +4214,8 @@ mod tests {
         contract.with_inscription(Inscription {
             content_type: "image/png".to_string(),
             data: "ff00ff".to_string(),
-        });
+        })
+            .expect("with_inscription");
         let insc = contract.inscription().unwrap();
         assert_eq!(insc.content_type, "image/png");
         assert_eq!(insc.data, "ff00ff");
@@ -4122,10 +4225,11 @@ mod tests {
     fn with_inscription_returns_self_for_chaining() {
         let artifact = make_artifact("51", simple_abi());
         let mut contract = RunarContract::new(artifact, vec![]);
-        let _ = contract.with_inscription(Inscription {
+        contract.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: "".to_string(),
-        });
+        })
+            .expect("with_inscription");
         // If it compiles and the inscription is set, chaining works
         assert!(contract.inscription().is_some());
     }
@@ -4138,7 +4242,8 @@ mod tests {
         contract.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: data.clone(),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = contract.get_locking_script();
 
@@ -4168,7 +4273,8 @@ mod tests {
         contract.with_inscription(Inscription {
             content_type: "application/bsv-20".to_string(),
             data: json_data.clone(),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = contract.get_locking_script();
         let envelope = super::super::ordinals::build_inscription_envelope("application/bsv-20", &json_data);
@@ -4188,7 +4294,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "image/png".to_string(),
             data: "deadbeef".to_string(),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4249,7 +4356,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: utf8_to_hex("my counter"),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4275,7 +4383,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: utf8_to_hex("persisted"),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4312,7 +4421,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: utf8_to_hex("via txid"),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let fake_txid = "bb".repeat(32);
@@ -4333,7 +4443,8 @@ mod tests {
         let artifact = make_artifact("aabbccdd", simple_abi());
         let mut contract = RunarContract::new(artifact, vec![]);
         let inscription = super::super::ordinals::bsv20_deploy("RUNAR", "21000000", None, None);
-        contract.with_inscription(inscription);
+        contract.with_inscription(inscription)
+            .expect("with_inscription");
 
         let locking_script = contract.get_locking_script();
         let parsed = super::super::ordinals::parse_inscription_envelope(&locking_script).unwrap();
@@ -4444,5 +4555,109 @@ mod tests {
         assert_eq!(real.get_code_sep_index(1), 3);
         assert_eq!(placeholder.get_code_sep_index(0), real.get_code_sep_index(0));
         assert_eq!(placeholder.get_code_sep_index(1), real.get_code_sep_index(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-043 — an ordinals inscription must not break the code-part length pin
+    // -----------------------------------------------------------------------
+    //
+    // A stateful contract with a variable-length state section carries an
+    // EQUALITY pin on the deployed code-part length, emitted as a fixed-width
+    // nine-byte run:
+    //
+    //     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+    //     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+    //
+    // `get_code_part_hex` concatenates the inscription envelope INTO the code
+    // part, so attaching one makes the real code part longer than the pinned
+    // number and every honest spend aborts at OP_VERIFY with the funds already
+    // committed.
+    //
+    // Each template below is a 10-byte script — `OP_1` followed by the nine-byte
+    // pin run — except the unpinned one. The inscription is a two-byte
+    // `text/plain` payload whose envelope is exactly 23 bytes, so an inscribed
+    // code part is 10 + 23 = 33 bytes.
+
+    /// Exact pin of 10: correct WITHOUT an envelope, violated by one. Refuse.
+    const PIN_TEMPLATE_EXACT_10: &str = "5176040a000000819c69";
+    /// Exact pin of 33 (0x21): correct WITH the envelope attached. Accept — and
+    /// a decoder that reads the length big-endian gets 0x21000000 here and
+    /// wrongly refuses.
+    const PIN_TEMPLATE_EXACT_33: &str = "51760421000000819c69";
+    /// LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy
+    /// it, so it must never trigger a refusal.
+    const PIN_TEMPLATE_LOWER_BOUND_10: &str = "5176040a00000081a269";
+    /// No pin at all (a bare P2PKH template). Accept.
+    const PIN_TEMPLATE_NONE: &str = "76a90088ac";
+
+    fn pin_fixture_contract(script: &str) -> RunarContract {
+        RunarContract::new(make_artifact(script, simple_abi()), vec![])
+    }
+
+    fn pin_fixture_inscription() -> Inscription {
+        Inscription {
+            content_type: "text/plain".to_string(),
+            data: "6869".to_string(),
+        }
+    }
+
+    #[test]
+    fn with_inscription_refuses_when_envelope_breaks_exact_pin() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_EXACT_10);
+
+        let err = contract
+            .with_inscription(pin_fixture_inscription())
+            .expect_err("an exact pin of 10 cannot survive a 23-byte envelope");
+
+        // Assert the REASON, not merely that something failed: a test that
+        // accepts any error passes when an unrelated one fires.
+        for want in ["pins SIZE(_codePart) == 10", "code part is 33 bytes", "inscription"] {
+            assert!(err.contains(want), "refusal message missing {want:?}:\n  {err}");
+        }
+
+        // The contract must be left un-inscribed rather than half-mutated.
+        assert!(contract.inscription().is_none(), "refused attach left the inscription applied");
+        assert_eq!(contract.get_code_part_hex().len() / 2, 10);
+    }
+
+    /// Control: a pin whose value already accounts for the envelope is honoured,
+    /// so the attach must be ACCEPTED. Also pins the little-endian decode.
+    #[test]
+    fn with_inscription_accepts_when_exact_pin_matches_inscribed_length() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_EXACT_33);
+
+        contract
+            .with_inscription(pin_fixture_inscription())
+            .expect("pin equals the inscribed code-part length, must be accepted");
+
+        assert!(contract.inscription().is_some());
+        assert_eq!(contract.get_code_part_hex().len() / 2, 33);
+    }
+
+    /// Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes,
+    /// so an inscription must still be accepted. Guarding `a2` would turn this
+    /// fix into an outage for every lower-bound contract.
+    #[test]
+    fn with_inscription_accepts_lower_bound_pin() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_LOWER_BOUND_10);
+
+        contract
+            .with_inscription(pin_fixture_inscription())
+            .expect("a lower-bound pin must not be guarded");
+
+        assert!(contract.inscription().is_some());
+    }
+
+    /// Control 2 (mandatory): a contract with no pin at all (stateless, or a
+    /// fixed-size state layout) must still accept an inscription.
+    #[test]
+    fn with_inscription_accepts_unpinned_contract() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_NONE);
+
+        contract
+            .with_inscription(pin_fixture_inscription())
+            .expect("an unpinned contract must accept an inscription");
+
+        assert!(contract.inscription().is_some());
     }
 }

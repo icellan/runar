@@ -1640,7 +1640,7 @@ impl RunarContract {
     pub fn get_utxo(&self) -> Option<&Utxo> { None }
 
     // Inscription
-    pub fn with_inscription(&mut self, _i: Inscription) -> &mut Self { self }
+    pub fn with_inscription(&mut self, _i: Inscription) -> Result<&mut Self, String> { Ok(self) }
     pub fn inscription(&self) -> Option<&Inscription> { None }
 
     // Script construction

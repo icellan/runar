@@ -30,11 +30,19 @@ args = data['constructorArgs'].map { |a| convert_arg(a) }
 contract = Runar::SDK::RunarContract.new(artifact, args)
 if data['inscription']
   insc = data['inscription']
-  contract.with_inscription(
-    Runar::SDK::Inscription.new(
-      content_type: insc['contentType'],
-      data: insc['data']
+  # N-043: a refused attach is a RESULT, not a crash — exit non-zero with the
+  # reason on stderr so the runner can compare the refusal verdict across all
+  # seven tiers.
+  begin
+    contract.with_inscription(
+      Runar::SDK::Inscription.new(
+        content_type: insc['contentType'],
+        data: insc['data']
+      )
     )
-  )
+  rescue ArgumentError => e
+    $stderr.puts e.message
+    exit 1
+  end
 end
 $stdout.write(contract.get_locking_script)

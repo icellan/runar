@@ -102,7 +102,9 @@ func TestBSV20Token_DeployInscription(t *testing.T) {
 	lim := "1000"
 	inscription := runar.BSV20Deploy("RUNAR", "21000000", &lim, nil)
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
-	contract.WithInscription(inscription)
+	if _, err := contract.WithInscription(inscription); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 	parsed := runar.ParseInscriptionEnvelope(lockingScript)
@@ -123,7 +125,9 @@ func TestBSV20Token_DeployInscription_WithDecimals(t *testing.T) {
 	dec := "8"
 	inscription := runar.BSV20Deploy("USDT", "100000000", nil, &dec)
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
-	contract.WithInscription(inscription)
+	if _, err := contract.WithInscription(inscription); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 	parsed := runar.ParseInscriptionEnvelope(lockingScript)
@@ -144,7 +148,9 @@ func TestBSV20Token_MintInscription(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV20Mint("RUNAR", "1000")
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
-	contract.WithInscription(inscription)
+	if _, err := contract.WithInscription(inscription); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 	parsed := runar.ParseInscriptionEnvelope(lockingScript)
@@ -168,7 +174,9 @@ func TestBSV20Token_TransferInscription(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV20Transfer("RUNAR", "50")
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
-	contract.WithInscription(inscription)
+	if _, err := contract.WithInscription(inscription); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 	parsed := runar.ParseInscriptionEnvelope(lockingScript)
@@ -192,7 +200,9 @@ func TestBSV20Token_InscriptionFromUtxoRoundTrip(t *testing.T) {
 	a := compileContract(t)
 	inscription := runar.BSV20Deploy("TEST", "1000", nil, nil)
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
-	contract.WithInscription(inscription)
+	if _, err := contract.WithInscription(inscription); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 	reconnected := runar.FromUtxo(a, runar.UTXO{

@@ -73,10 +73,16 @@ func main() {
 
 	contract := runar.NewRunarContract(&artifact, args)
 	if input.Inscription != nil {
-		contract.WithInscription(&runar.Inscription{
+		// N-043: a refused attach is a RESULT, not a crash — exit non-zero with
+		// the reason on stderr so the runner can compare the refusal verdict
+		// across all seven tiers.
+		if _, err := contract.WithInscription(&runar.Inscription{
 			ContentType: input.Inscription.ContentType,
 			Data:        input.Inscription.Data,
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
 	}
 	fmt.Print(contract.GetLockingScript())
 }

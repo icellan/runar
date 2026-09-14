@@ -131,10 +131,29 @@ module Runar
       # compiled code and the state section (if any). Once deployed, the inscription
       # is immutable -- it persists identically across all state transitions.
       #
+      # N-043 -- RAISES when the envelope would break the contract's own
+      # +SIZE(_codePart)+ pin. A stateful contract with a variable-length state
+      # section carries an equality pin on the deployed code-part length, and
+      # the envelope lands INSIDE the code part (see #get_code_part_hex). The
+      # compiler bakes that number before any inscription exists, so the pinned
+      # length and the real one differ by the envelope's size and every honest
+      # spend aborts at OP_VERIFY -- with the funds already committed. Refusing
+      # here turns a permanent, silent lock into a loud error before a single
+      # satoshi moves.
+      #
       # @param insc [Inscription] inscription data (content_type + hex data)
       # @return [self] for chaining
+      # @raise [ArgumentError] when the envelope would break an exact code-part
+      #   length pin
       def with_inscription(insc)
+        previous = @inscription
         @inscription = insc
+        begin
+          assert_code_part_length_pin_honoured
+        rescue ArgumentError
+          @inscription = previous
+          raise
+        end
         self
       end
 
@@ -1835,6 +1854,65 @@ module Runar
           code += Ordinals.build_inscription_envelope(@inscription.content_type, @inscription.data)
         end
         code
+      end
+
+      # Decode the value of every EQUALITY +verify_code_part_len+ pin in a
+      # compiled script.
+      #
+      # The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+      #
+      #     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+      #     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+      #
+      # +9c+ is OP_NUMEQUAL -- an exact pin, the only variant a longer code part
+      # can violate. +a2+ is OP_GREATERTHANOREQUAL, a lower bound that extra
+      # bytes satisfy, so it is deliberately not returned here.
+      #
+      # Read from the emitted TEMPLATE rather than from a built code script: the
+      # template holds OP_0 placeholders where constructor args go, so no
+      # caller-supplied byte string can be mistaken for a pin.
+      def decode_exact_code_part_len_pins(script_hex)
+        values = []
+        i = 0
+        while i + 18 <= script_hex.length
+          seq = script_hex[i, 18]
+          i += 2
+          next unless seq.start_with?('7604')
+          next unless seq[12, 2] == '81'
+          next unless seq[14, 2] == '9c'
+          next unless seq[16, 2] == '69'
+
+          values << [seq[4, 8]].pack('H*').unpack1('V')
+        end
+        values
+      end
+
+      # Verify that every equality +verify_code_part_len+ pin the compiler baked
+      # into this artifact still describes the code part this contract produces.
+      #
+      # The check is the invariant itself, not a restatement of the compiler's
+      # derivation: it decodes the pinned number straight out of the emitted
+      # template and compares it to #get_code_part_hex. So it permits every
+      # combination that actually works -- a stateless contract or a fixed-size
+      # state layout carries no pin at all, and a lower-bound pin is satisfied by
+      # a longer code part -- and rejects only the shape that would lock funds.
+      def assert_code_part_length_pin_honoured
+        pinned = decode_exact_code_part_len_pins(@artifact.script)
+        return if pinned.empty?
+
+        actual = get_code_part_hex.length / 2
+        pinned.each do |value|
+          next if value == actual
+
+          raise ArgumentError,
+                "RunarContract#with_inscription: #{@artifact.contract_name} pins " \
+                "SIZE(_codePart) == #{value}, but with this inscription attached the " \
+                "code part is #{actual} bytes. Deploying it would make every spend " \
+                'fail OP_VERIFY and lock the contract\'s funds permanently. An ' \
+                'inscription cannot be attached to a stateful contract with a ' \
+                'variable-length state section: the envelope is part of the code ' \
+                'part, and its length is not known when the pin is compiled'
+        end
       end
 
       def adjust_code_sep_offset(base_offset)

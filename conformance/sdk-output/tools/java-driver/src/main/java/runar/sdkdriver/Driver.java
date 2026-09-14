@@ -65,10 +65,18 @@ public final class Driver {
         Object rawInsc = input.get("inscription");
         if (rawInsc != null) {
             Map<String, Object> ins = MiniJson.asObject(rawInsc);
-            contract.withInscription(new Inscription(
-                MiniJson.asString(ins.get("contentType")),
-                MiniJson.asString(ins.get("data"))
-            ));
+            // N-043: a refused attach is a RESULT, not a crash — exit non-zero
+            // with the reason on stderr so the runner can compare the refusal
+            // verdict across all seven tiers.
+            try {
+                contract.withInscription(new Inscription(
+                    MiniJson.asString(ins.get("contentType")),
+                    MiniJson.asString(ins.get("data"))
+                ));
+            } catch (IllegalArgumentException e) {
+                System.err.println(e.getMessage());
+                System.exit(1);
+            }
         }
 
         System.out.print(contract.lockingScript());

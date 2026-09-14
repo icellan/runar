@@ -235,10 +235,12 @@ func TestGetLockingScript_Stateless_WithInscription(t *testing.T) {
 
 	contract := NewRunarContract(artifact, []interface{}{})
 	data := hex.EncodeToString([]byte("hello"))
-	contract.WithInscription(&Inscription{
+	if _, err := contract.WithInscription(&Inscription{
 		ContentType: "text/plain",
 		Data:        data,
-	})
+	}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
@@ -267,10 +269,12 @@ func TestGetLockingScript_Stateful_WithInscription(t *testing.T) {
 
 	contract := NewRunarContract(artifact, []interface{}{int64(42)})
 	data := hex.EncodeToString([]byte("token"))
-	contract.WithInscription(&Inscription{
+	if _, err := contract.WithInscription(&Inscription{
 		ContentType: "application/bsv-20",
 		Data:        data,
-	})
+	}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
@@ -474,7 +478,10 @@ func TestWithInscription_Chaining(t *testing.T) {
 	})
 
 	contract := NewRunarContract(artifact, []interface{}{})
-	result := contract.WithInscription(&Inscription{ContentType: "text/plain", Data: "aabb"})
+	result, err := contract.WithInscription(&Inscription{ContentType: "text/plain", Data: "aabb"})
+	if err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	// WithInscription returns the same contract for chaining
 	if result != contract {

@@ -1438,7 +1438,7 @@ type RunarContract struct {
 func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *RunarContract
 
 func (c *RunarContract) Connect(provider Provider, signer Signer)
-func (c *RunarContract) WithInscription(inscription *Inscription) *RunarContract
+func (c *RunarContract) WithInscription(inscription *Inscription) (*RunarContract, error)
 func (c *RunarContract) GetInscription() *Inscription
 
 func (c *RunarContract) Deploy(provider Provider, signer Signer, options DeployOptions) (string, *TransactionData, error)

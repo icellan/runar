@@ -39,6 +39,34 @@ public final class ContractScript {
         Map<String, Object> initialState,
         Inscription inscription
     ) {
+        StringBuilder script = new StringBuilder(renderCodePart(artifact, constructorArgs, inscription));
+        if (artifact.isStateful()) {
+            String stateHex = initialState == null
+                ? ""
+                : StateSerializer.serialize(artifact.stateFields(), initialState);
+            // Stateful template already includes trailing state handling in the code part.
+            // M8 scope emits code + OP_RETURN + state to match Go's GetLockingScript layout.
+            script.append("6a").append(stateHex);
+        }
+        return script.toString();
+    }
+
+    /**
+     * Renders the CODE PART of the locking script: the template with every
+     * constructor-arg / codeSepIndex placeholder spliced in, followed by the
+     * ordinals envelope when one is attached, and nothing else.
+     *
+     * <p>The envelope belongs to the code part — a stateful contract's on-chain
+     * output reconstruction treats it as part of the immutable code — which is
+     * why it lands before the {@code OP_RETURN || state} section and why
+     * attaching one changes {@code SIZE(_codePart)}. Parity target: Go
+     * {@code getCodePartHex}, Rust {@code get_code_part_hex}.
+     */
+    public static String renderCodePart(
+        RunarArtifact artifact,
+        List<Object> constructorArgs,
+        Inscription inscription
+    ) {
         String tpl = artifact.scriptHex();
 
         // Build the unified list of template slot substitutions (constructor args
@@ -72,14 +100,6 @@ public final class ContractScript {
         // Inject ordinals envelope between code and state (matches Go/Rust/Python/Zig/Ruby SDKs).
         if (inscription != null) {
             script.append(inscription.toEnvelopeHex());
-        }
-        if (artifact.isStateful()) {
-            String stateHex = initialState == null
-                ? ""
-                : StateSerializer.serialize(artifact.stateFields(), initialState);
-            // Stateful template already includes trailing state handling in the code part.
-            // M8 scope emits code + OP_RETURN + state to match Go's GetLockingScript layout.
-            script.append("6a").append(stateHex);
         }
         return script.toString();
     }
