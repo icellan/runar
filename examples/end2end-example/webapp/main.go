@@ -117,6 +117,7 @@ func newServer(port string) *http.Server {
 	mux.HandleFunc("/api/round/reveal", handleReveal)
 	mux.HandleFunc("/api/compile", handleCompile)
 	mux.HandleFunc("/api/lang", handleLang)
+	mux.HandleFunc("/api/template", handleTemplate)
 
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -637,6 +638,50 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonResponse(w, payload)
 	}
+}
+
+// handleTemplate serves the starter contract for one language.
+//
+// R-154: the frontend used to carry its own templates and had exactly two of
+// the nine — java and ts — with `|| PLAYGROUND_TEMPLATES.java` covering the
+// rest. Choosing Ruby and clicking "Load Template" produced Java source, which
+// was then sent for compilation as `P2PKH.runar.rb` and rejected. The failure
+// looked like the user's mistake.
+//
+// Seven more string literals in app.js would be the same bug with a longer
+// fuse. These bytes come off disk from the per-language PriceBet sources the
+// webapp already resolves and compiles for every round, so a template that
+// stops compiling is a broken example contract — something the rest of the
+// suite already notices — rather than a stale copy nobody reads.
+//
+// Unlike /api/compile this does NOT fall back to TypeScript for an unknown
+// language. `normalizeLang` maps anything unrecognised to "ts", which is a
+// sensible default for compiling and would reinstate exactly this bug here:
+// handing back a language the caller did not ask for, silently.
+func handleTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "" && r.Method != http.MethodGet {
+		jsonError(w, "GET only", 405)
+		return
+	}
+
+	key := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("lang")))
+	spec, ok := sourceLangs[key]
+	if !ok {
+		jsonError(w, fmt.Sprintf("unknown lang %q", key), 400)
+		return
+	}
+
+	source, err := readContractSource(spec)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("template unavailable for %s: %v", key, err), 500)
+		return
+	}
+
+	jsonResponse(w, map[string]any{
+		"lang":     key,
+		"filename": spec.filename,
+		"source":   string(source),
+	})
 }
 
 // supportedLangs returns the language menu presented to the frontend. The

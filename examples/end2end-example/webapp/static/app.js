@@ -10,62 +10,17 @@ let busy = false;
 // /api/compile. The supported set matches compiler.go#sourceLangs:
 //   ts, sol, move, go, rs, py, rb, zig, java.
 //
-// Java is the newest addition (milestone M17). Its default template mirrors
-// examples/java/src/main/java/runar/examples/p2pkh/P2PKH.runar.java.
-
-const PLAYGROUND_TEMPLATES = {
-  java: [
-    'package runar.examples.p2pkh;',
-    '',
-    'import runar.lang.SmartContract;',
-    'import runar.lang.annotations.Public;',
-    'import runar.lang.annotations.Readonly;',
-    'import runar.lang.types.Addr;',
-    'import runar.lang.types.PubKey;',
-    'import runar.lang.types.Sig;',
-    '',
-    'import static runar.lang.Builtins.assertThat;',
-    'import static runar.lang.Builtins.checkSig;',
-    'import static runar.lang.Builtins.hash160;',
-    '',
-    '// Contract classes in .runar.java files are package-private so javac',
-    '// accepts the compound .runar.java suffix.',
-    'class P2PKH extends SmartContract {',
-    '',
-    '    @Readonly Addr pubKeyHash;',
-    '',
-    '    P2PKH(Addr pubKeyHash) {',
-    '        super(pubKeyHash);',
-    '        this.pubKeyHash = pubKeyHash;',
-    '    }',
-    '',
-    '    @Public',
-    '    void unlock(Sig sig, PubKey pubKey) {',
-    '        assertThat(hash160(pubKey).equals(pubKeyHash));',
-    '        assertThat(checkSig(sig, pubKey));',
-    '    }',
-    '}',
-    '',
-  ].join('\n'),
-  ts: [
-    "import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';",
-    '',
-    'class P2PKH extends SmartContract {',
-    '  readonly pubKeyHash: Addr;',
-    '',
-    '  constructor(pubKeyHash: Addr) {',
-    '    super(pubKeyHash);',
-    '    this.pubKeyHash = pubKeyHash;',
-    '  }',
-    '',
-    '  public unlock(sig: Sig, pubKey: PubKey) {',
-    '    assert(hash160(pubKey) == this.pubKeyHash);',
-    '    assert(checkSig(sig, pubKey));',
-    '  }',
-    '}',
-    '',
-  ].join('\n'),
-};
+// R-154: the starter templates used to live here as string literals, and
+// there were two of them — java and ts — with `|| PLAYGROUND_TEMPLATES.java`
+// covering the other seven. Choosing Ruby and clicking "Load Template" handed
+// back Java source, which was then submitted as `P2PKH.runar.rb` and rejected.
+// The failure looked like the user's mistake.
+//
+// Seven more literals here would be the same bug with a longer fuse: one copy
+// per language, none of them compiled by anything. `/api/template` serves the
+// per-language PriceBet source the backend already resolves from disk and
+// compiles on every round, so a template that stops working is a broken
+// example contract rather than a stale string in a script tag.
 
 const LANG_FILENAMES = {
   ts: 'P2PKH.runar.ts',
@@ -104,12 +59,22 @@ function togglePlayground() {
   }
 }
 
-function loadTemplate() {
+async function loadTemplate() {
   const lang = selectedPlaygroundLang();
   const ta = document.getElementById('pg-source');
-  ta.value = PLAYGROUND_TEMPLATES[lang] || PLAYGROUND_TEMPLATES.java;
   const res = document.getElementById('pg-result');
   while (res.firstChild) res.removeChild(res.firstChild);
+  try {
+    const data = await api('GET', '/api/template?lang=' + encodeURIComponent(lang));
+    ta.value = data.source;
+  } catch (e) {
+    // Leave the editor untouched rather than substituting another language's
+    // source — that substitution is the bug this replaced.
+    const err = document.createElement('div');
+    err.className = 'pg-err';
+    err.textContent = 'No template for ' + lang + ': ' + e.message;
+    res.appendChild(err);
+  }
 }
 
 function pgResultAppendLabel(parent, text) {
