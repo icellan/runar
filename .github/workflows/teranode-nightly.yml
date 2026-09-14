@@ -1,0 +1,52 @@
+name: Teranode nightly
+
+# R-216 (CL-GAP-061): the Teranode integration leg lived only in `ci.yml` behind
+# `if: github.event_name == 'workflow_dispatch' && inputs.run_teranode`, so it
+# never ran on push, pull_request or a schedule. Every on-chain claim specific to
+# Teranode — the other production node implementation — was therefore unverified
+# continuously: it held whenever someone last remembered to tick the box.
+#
+# The reason it is opt-in on PRs is sound and unchanged: the compose stack is
+# 10+ microservices plus a ~10k-block pre-mine, which is too heavy to run on
+# every pull request. "Too heavy per PR" and "never runs" are different
+# decisions, though, and only the first one was intended. This workflow gives it
+# the nightly cadence the SV Node regtest leg gets per-PR.
+#
+# The `ci.yml` dispatch leg stays as-is for ad-hoc investigation; this one adds
+# the unattended schedule. Scheduled for 03:00 UTC rather than midnight so it
+# does not contend with `fuzzer-nightly.yml` for runners.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  # R-217: least privilege. Checks out, builds and runs an integration suite.
+  contents: read
+
+jobs:
+  integration-teranode:
+    name: Integration Tests (Teranode — nightly)
+    runs-on: ubuntu-latest
+    # The compose stack plus the pre-mine dominates; the Go suite itself is
+    # minutes. Bounded so a hung node fails the run instead of burning the
+    # job's default six hours.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - run: pnpm install --frozen-lockfile
+      - name: Start Teranode + run Go integration suite (NODE_TYPE=teranode)
+        run: pnpm run integration:teranode:run
+      - name: Stop Teranode
+        if: always()
+        run: cd integration && ./teranode.sh stop
