@@ -93,7 +93,7 @@ type LogEntry struct {
 	Type    string `json:"type"`
 }
 
-var game = &GameState{Phase: "init"}
+
 
 func main() {
 	port := os.Getenv("PORT")
@@ -150,6 +150,9 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 }
 
 func handleInit(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -242,12 +245,18 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleState(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	game.mu.Lock()
 	defer game.mu.Unlock()
 	jsonResponse(w, game)
 }
 
 func handleNewRound(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -283,6 +292,9 @@ func handleNewRound(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleBet(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -343,7 +355,7 @@ func handleBet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if game.AliceBet != "" && game.BobBet != "" {
-		if err := deployContract(); err != nil {
+		if err := deployContract(game); err != nil {
 			jsonError(w, fmt.Sprintf("deploy contract: %v", err), 500)
 			return
 		}
@@ -352,7 +364,9 @@ func handleBet(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, game)
 }
 
-func deployContract() error {
+// deployContract builds and broadcasts the contract funding tx for ONE
+// visitor's game (R-152: it used to reach for the package-level singleton).
+func deployContract(game *GameState) error {
 	scriptHex, _, err := compilePriceBet(game.Lang, game.Alice.PubKeyHex, game.Bob.PubKeyHex, game.Threshold)
 	if err != nil {
 		return fmt.Errorf("compile: %w", err)
@@ -411,6 +425,9 @@ func deployContract() error {
 }
 
 func handleReveal(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -519,6 +536,9 @@ func handleReveal(w http.ResponseWriter, r *http.Request) {
 // { "lang": "<key>" }. Also serves GET to report the current selection and
 // the full set of supported languages (useful for populating the UI).
 func handleLang(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	switch r.Method {
 	case "GET":
 		game.mu.Lock()
