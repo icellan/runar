@@ -426,12 +426,64 @@ use super::dce::eliminate_dead_bindings_method;
 // Method optimizer
 // ---------------------------------------------------------------------------
 
+/// R-221: rewrite to a FIXPOINT, not once.
+///
+/// The peers loop — Go's `OptimizeEC` runs `for changed { ... }`, Python's
+/// `_optimize_method` runs `while changed:`, and Ruby, Zig and Java do the same
+/// — because one rule's output routinely enables another's. This tier applied
+/// the rules in a single pass, so it stopped one rewrite short of the peers
+/// whenever that happened.
+///
+/// Measured on `ecAdd(ecMulGen(N-7), ecMulGen(7n))`, fold-ON, the shipped
+/// default. Rule 10 reduces the two scalars to `(N-7) + 7 mod N` = 0, and Rule 5
+/// then reduces `ecMulGen(0)` to the infinity-point constant. Five tiers emitted
+/// that constant; this one emitted `ecMulGen(0)` — an extra 256-step ladder, and
+/// a script 849002 hex chars (~425 KB) larger than every peer's:
+///
+/// ```text
+/// go python ruby java zig   1699920 hexchars   sha a609b3e20c
+/// rust                      2548922 hexchars   sha f1ca9484f1
+/// ```
+///
+/// A cross-tier byte divergence in the default mode, which is exactly what the
+/// fold-ON parity gate exists to prevent; no conformance fixture happened to
+/// carry a scalar pair that summed to 0 mod N.
 fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
+    let mut body = method.body.clone();
+    let mut changed = false;
+
+    // Same cap-free shape as the Go tier: every rule strictly reduces the
+    // number of EC calls or replaces a call with a constant, so the loop
+    // terminates.
+    loop {
+        let (next, pass_changed) = optimize_method_ec_once(&body);
+        body = next;
+        if !pass_changed {
+            break;
+        }
+        changed = true;
+    }
+
+    if !changed {
+        return (method.clone(), false);
+    }
+
+    (ANFMethod {
+        name: method.name.clone(),
+        params: method.params.clone(),
+        body,
+        is_public: method.is_public,
+        sighash_type: method.sighash_type,
+    }, true)
+}
+
+/// One rewrite pass over `body`. Returns the new body and whether it changed.
+fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
     let mut value_map: ValueMap = HashMap::new();
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 
-    for binding in &method.body {
+    for binding in body {
         // Register binding value for lookups
         value_map.insert(binding.name.clone(), binding.value.clone());
 
@@ -457,17 +509,7 @@ fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
         }
     }
 
-    if !changed {
-        return (method.clone(), false);
-    }
-
-    (ANFMethod {
-        name: method.name.clone(),
-        params: method.params.clone(),
-        body: result,
-        is_public: method.is_public,
-        sighash_type: method.sighash_type,
-    }, true)
+    (result, changed)
 }
 
 // ---------------------------------------------------------------------------
