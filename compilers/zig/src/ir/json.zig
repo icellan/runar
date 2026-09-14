@@ -44,6 +44,13 @@ const ParseError = error{
     // every later PICK/ROLL depth in the method is off by one. Distinct error
     // name because Zig's IR loader carries no message payload.
     SuperOutsideConstructor,
+    // N-131: a number written in FLOAT SYNTAX anywhere in the document. The
+    // ANF IR has no float-typed field, so this is never a legal payload; the
+    // name says "float", not "InvalidConstValue", because the offending token
+    // is frequently nowhere near a const (loop.step and raw_script.out_arity
+    // are two of the shapes this tier used to accept) and Zig's IR loader
+    // carries no message payload, so the error name is the whole diagnostic.
+    FloatNotAllowedInIR,
 };
 
 const max_parse_depth: u32 = 256;
@@ -132,6 +139,64 @@ fn assertIRNestingUnderLimit(data: []const u8) ParseError!void {
     }
 }
 
+/// Walks a parsed JSON document and returns ParseError.FloatNotAllowedInIR the
+/// first time a number written in FLOAT SYNTAX appears. N-131.
+///
+/// # Why this is a rejection at all
+///
+/// The ANF IR has no float-typed field. The schema
+/// (`packages/runar-ir-schema/src/schemas/anf-ir.schema.json`) types
+/// `loop.count`, `loop.step` and the `raw_script` arities as `integer`, and
+/// `loop.start` / `load_const.value` as integer-or-string; a value too large
+/// for a native integer is written as a decimal string with an `n` suffix.
+/// What the six `--ir` tiers did with a float was therefore unspecified, and
+/// they disagreed in emitted BYTES rather than in diagnostics: `{"start":1e30}`
+/// produced three different answers across the tiers.
+///
+/// This tier's share of that was the quiet one. N-115 stopped the six
+/// `@intFromFloat` sites from ABORTING, and deliberately left truncation
+/// alone -- "tightening it is a separate cross-tier decision". This is that
+/// decision. Until now `{"count":3.5}` unrolled three bodies and
+/// `{"out_arity":1.0}` compiled clean, in both cases while five peers refused
+/// the same file.
+///
+/// # Why the rule is lexical, and why the walk is generic
+///
+/// `1.0` and `1e2` name integers, so a value-based rule would admit them --
+/// and a value-based rule is exactly what this tier already had, which is how
+/// `{"out_arity":1.0}` got through. Go and Java, the two tiers that were
+/// already right, refuse float syntax outright, so converging on them means
+/// taking the syntactic rule. `std.json` classifies the token, not the value:
+/// `1.0`, `1e2` and `3.5` all arrive as `.float`, `5` as `.integer`. So the
+/// parser has already applied the rule and this walk only acts on it.
+///
+/// Walking the GENERIC document rather than checking named fields is the
+/// point. The six `.float` arms in this file were each written for one field,
+/// and the two fields nobody wrote an arm for -- `loop.step` and the
+/// `raw_script` arities -- are among the ones that diverged.
+///
+/// `.number_string` is the arm `std.json` uses when a number is kept
+/// unparsed; it is refused on the same syntactic test, so the rule does not
+/// depend on which representation the parser chose.
+fn assertNoJSONFloats(value: std.json.Value) ParseError!void {
+    switch (value) {
+        .float => return ParseError.FloatNotAllowedInIR,
+        .number_string => |s| {
+            for (s) |c| {
+                if (c == '.' or c == 'e' or c == 'E') return ParseError.FloatNotAllowedInIR;
+            }
+        },
+        .object => |obj| {
+            var it = obj.iterator();
+            while (it.next()) |entry| try assertNoJSONFloats(entry.value_ptr.*);
+        },
+        .array => |arr| {
+            for (arr.items) |item| try assertNoJSONFloats(item);
+        },
+        else => {},
+    }
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -154,6 +219,9 @@ pub fn parseANFProgram(allocator: std.mem.Allocator, json_source: []const u8) !t
     defer parsed.deinit();
 
     const root = parsed.value;
+    // N-131: refuse float syntax at the door, before any field-specific
+    // decoding. See assertNoJSONFloats.
+    try assertNoJSONFloats(root);
     return try parseProgram(allocator, root);
 }
 

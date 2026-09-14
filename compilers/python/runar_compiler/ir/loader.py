@@ -79,8 +79,11 @@ def load_ir(source: str) -> ANFProgram:
     BEFORE :func:`json.loads` runs. BUG-008 follow-up.
     """
     from .input_limits import (
+        IRFloatValueError,
         assert_ir_bytes_under_limit,
         assert_ir_nesting_under_limit,
+        reject_json_constant,
+        reject_json_float,
     )
 
     # DoS-bound guards run before json.loads so a malicious payload
@@ -89,8 +92,19 @@ def load_ir(source: str) -> ANFProgram:
     assert_ir_bytes_under_limit(source)
     assert_ir_nesting_under_limit(source)
 
+    # N-131: `parse_float` / `parse_constant` refuse a number written in
+    # float syntax DURING the parse, so no float is ever constructed. The
+    # narrowing that follows (`int()` in decode_constants, `range()` in stack
+    # lowering) used to be where a float surfaced, as a TypeError reported as
+    # "this is a compiler bug" — or, for `{"step":1.5}`, not at all.
     try:
-        d = json.loads(source)
+        d = json.loads(
+            source,
+            parse_float=reject_json_float,
+            parse_constant=reject_json_constant,
+        )
+    except IRFloatValueError as exc:
+        raise ValueError(str(exc)) from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid IR JSON: {exc}") from exc
 

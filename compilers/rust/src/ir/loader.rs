@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::{ANFBinding, ANFProgram, ANFValue};
 use super::input_limits::{
-    assert_ir_bytes_under_limit, assert_ir_nesting_under_limit,
+    assert_ir_bytes_under_limit, assert_ir_nesting_under_limit, assert_no_json_floats,
 };
 
 /// Load an ANF IR program from a JSON file on disk.
@@ -33,6 +33,12 @@ pub fn load_ir_from_str(json_str: &str) -> Result<ANFProgram, String> {
     if let Some(e) = assert_ir_nesting_under_limit(json_str.as_bytes()) {
         return Err(e.to_string());
     }
+    // N-131: refuse float syntax BEFORE serde runs. Past this line the
+    // f64 -> integer narrowing has already happened and the original token
+    // is gone; `1e50` in a `load_const` saturated to i128::MAX here.
+    if let Some(e) = assert_no_json_floats(json_str.as_bytes()) {
+        return Err(e.to_string());
+    }
     let program: ANFProgram = serde_json::from_str(json_str)
         .map_err(|e| describe_ir_parse_error(&e))?;
     validate_ir(&program)?;
@@ -52,6 +58,11 @@ pub fn load_ir_from_str_typed(
     if let Some(e) = assert_ir_nesting_under_limit(json_str.as_bytes()) {
         return Err(IRLoaderError::Nesting(e));
     }
+    // N-131 — see load_ir_from_str. Both entry points are the trust boundary;
+    // guarding one would leave the other open.
+    if let Some(e) = assert_no_json_floats(json_str.as_bytes()) {
+        return Err(IRLoaderError::Float(e));
+    }
     serde_json::from_str::<ANFProgram>(json_str)
         .map_err(|e| IRLoaderError::Other(describe_ir_parse_error(&e)))
         .and_then(|p| {
@@ -66,6 +77,8 @@ pub fn load_ir_from_str_typed(
 pub enum IRLoaderError {
     Size(super::input_limits::IRSizeExceededError),
     Nesting(super::input_limits::IRNestingExceededError),
+    /// A number written in float syntax. N-131.
+    Float(super::input_limits::IRFloatValueError),
     Other(String),
 }
 
@@ -74,6 +87,7 @@ impl std::fmt::Display for IRLoaderError {
         match self {
             IRLoaderError::Size(e) => write!(f, "{}", e),
             IRLoaderError::Nesting(e) => write!(f, "{}", e),
+            IRLoaderError::Float(e) => write!(f, "{}", e),
             IRLoaderError::Other(s) => f.write_str(s),
         }
     }

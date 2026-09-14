@@ -77,6 +77,16 @@ module RunarCompiler
         raise ArgumentError, "invalid IR JSON: #{e.message}"
       end
 
+      # N-131: refuse float syntax before anything narrows it. Ruby's own
+      # narrowing was silent in both directions -- Integer("1e30".to_f) is
+      # where {"start":1e30} became 0 -- so the check has to happen on the
+      # parsed document, not on whatever survived a to_i.
+      begin
+        InputLimits.assert_no_json_floats(d)
+      rescue InputLimits::IRFloatValueError => e
+        raise ArgumentError, e.message
+      end
+
       program = anf_program_from_hash(d)
 
       # Decode typed constant values from raw JSON

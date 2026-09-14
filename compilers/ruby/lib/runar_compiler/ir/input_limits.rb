@@ -90,6 +90,57 @@ module RunarCompiler
           end
         end
       end
+
+      # Raised when an IR JSON payload contains a number written in float
+      # syntax. N-131.
+      #
+      # The ANF IR has no float-typed field. The schema
+      # (packages/runar-ir-schema/src/schemas/anf-ir.schema.json) types
+      # loop.count, loop.step and the raw_script arities as +integer+, and
+      # loop.start / load_const.value as integer-or-string; an oversize value
+      # is written as a decimal string with an +n+ suffix. So what the six
+      # --ir tiers did with a float was unspecified, and they disagreed in
+      # emitted BYTES rather than in diagnostics. This tier was the worst of
+      # them: it read {"start":1e30} as start = 0 and emitted a script for a
+      # loop the IR did not describe, while rust and python read the same
+      # field as 1e30.
+      #
+      # The rule is LEXICAL -- float syntax, not fractional value -- so 1.0
+      # and 1e2 are refused too. That is what go and java, the two tiers
+      # already correct here, do, and it is the line every tier's JSON parser
+      # already draws at the token rather than the value.
+      class IRFloatValueError < StandardError
+        attr_reader :token
+
+        def initialize(token:)
+          @token = token
+          super(
+            "IR JSON contains a floating-point number (#{token}); every " \
+            "numeric field in the ANF IR is an integer (write an oversize " \
+            "value as a decimal string with an `n` suffix)"
+          )
+        end
+      end
+
+      # Walk a parsed JSON document and raise IRFloatValueError the first
+      # time a Float appears. N-131.
+      #
+      # Ruby's JSON parser classifies a number token lexically -- 1.0, 1e2
+      # and 3.5 all arrive as Float, 5 as Integer -- so the parser has
+      # already applied exactly the rule, and this walk only has to act on
+      # it. Walking the GENERIC document rather than checking named fields is
+      # the point: the fields nobody thought to name (loop.step,
+      # raw_script.out_arity) are precisely the ones that diverged.
+      def self.assert_no_json_floats(value)
+        case value
+        when Float
+          raise IRFloatValueError.new(token: value.to_s)
+        when Hash
+          value.each_value { |v| assert_no_json_floats(v) }
+        when Array
+          value.each { |v| assert_no_json_floats(v) }
+        end
+      end
     end
   end
 end
