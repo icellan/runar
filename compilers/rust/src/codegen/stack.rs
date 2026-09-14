@@ -6106,7 +6106,16 @@ fn method_uses_check_preimage_rec(
 /// continuation outputs need the _codePart implicit parameter.
 fn method_uses_code_part(bindings: &[ANFBinding]) -> bool {
     bindings.iter().any(|b| match &b.value {
-        ANFValue::AddOutput { .. } | ANFValue::AddRawOutput { .. } => true,
+        // R-287: `AddDataOutput` belongs here too. The five non-TS/Rust tiers
+        // already listed it; from source the omission was invisible because
+        // `continuation_shape` makes `has_data_output` imply a continuation,
+        // so the `computeStateOutput` arm below always fired first. The `--ir`
+        // front door carries no such coupling, and an ANF program whose only
+        // trigger is a data output compiled to a different script here than in
+        // Go / Python / Ruby / Java / Zig.
+        ANFValue::AddOutput { .. }
+        | ANFValue::AddRawOutput { .. }
+        | ANFValue::AddDataOutput { .. } => true,
         ANFValue::Call { func, .. } if func == "computeStateOutput" || func == "computeStateOutputHash" => true,
         ANFValue::If { then, else_branch, .. } => method_uses_code_part(then) || method_uses_code_part(else_branch),
         ANFValue::Loop { body, .. } => method_uses_code_part(body),

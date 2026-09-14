@@ -6255,11 +6255,16 @@ fn methodUsesCodePart(bindings: []const types.ANFBinding) bool {
     for (bindings) |binding| {
         switch (binding.value) {
             .add_output, .add_raw_output, .add_data_output => return true,
+            // R-287: `buildChangeOutput` / `buildStateOutput` used to be listed
+            // here and in no other tier. Neither reads `_codePart` — the change
+            // output is a plain P2PKH built from a pubkey hash and an amount —
+            // and both only ever appear beside the `computeStateOutput` call
+            // that already trips this predicate, so dropping them moves no
+            // source-derived byte. On the `--ir` front door, where that
+            // coupling does not hold, keeping them made Zig the odd tier out.
             .call => |call| {
                 if (std.mem.eql(u8, call.func, "computeStateOutput") or
-                    std.mem.eql(u8, call.func, "computeStateOutputHash") or
-                    std.mem.eql(u8, call.func, "buildChangeOutput") or
-                    std.mem.eql(u8, call.func, "buildStateOutput"))
+                    std.mem.eql(u8, call.func, "computeStateOutputHash"))
                 {
                     return true;
                 }

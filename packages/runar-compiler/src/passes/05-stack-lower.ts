@@ -6356,7 +6356,17 @@ function methodReadsVarLenState(
 
 function methodUsesCodePart(bindings: ANFBinding[]): boolean {
   for (const b of bindings) {
-    if (b.value.kind === 'add_output' || b.value.kind === 'add_raw_output') return true;
+    // R-287: `add_data_output` belongs here too. The five non-TS/Rust tiers
+    // already listed it; from source the omission was invisible because
+    // `continuationShape` makes `hasDataOutput` imply a continuation, so the
+    // `computeStateOutput` clause below always fired first. The `--ir` front
+    // door carries no such coupling, and an ANF program whose only trigger is
+    // a data output compiled to a different script here than in Go / Python /
+    // Ruby / Java / Zig. `tests/r287-code-part-predicate-parity.test.ts` pins
+    // all seven lists together.
+    if (b.value.kind === 'add_output'
+        || b.value.kind === 'add_raw_output'
+        || b.value.kind === 'add_data_output') return true;
     // Single-output stateful continuation uses computeStateOutput/computeStateOutputHash
     if (b.value.kind === 'call' && (b.value.func === 'computeStateOutput' || b.value.func === 'computeStateOutputHash')) return true;
     // Recurse into if-else branches and loops
