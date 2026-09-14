@@ -769,7 +769,7 @@ const LowerCtx = struct {
                 .array_literal => continue,
                 else => {},
             }
-            self.scanValueForRefs(binding.value, idx, &array_elems);
+            try self.scanValueForRefs(binding.value, idx, &array_elems);
         }
     }
 
@@ -778,11 +778,11 @@ const LowerCtx = struct {
         name: []const u8,
         idx: usize,
         array_elems: *const std.StringHashMapUnmanaged([]const []const u8),
-    ) void {
-        self.last_uses.put(self.allocator, name, idx) catch return;
+    ) Allocator.Error!void {
+        try self.last_uses.put(self.allocator, name, idx);
         if (array_elems.get(name)) |elems| {
             for (elems) |e| {
-                self.last_uses.put(self.allocator, e, idx) catch return;
+                try self.last_uses.put(self.allocator, e, idx);
             }
         }
     }
@@ -792,100 +792,100 @@ const LowerCtx = struct {
         value: types.ANFValue,
         idx: usize,
         array_elems: *const std.StringHashMapUnmanaged([]const []const u8),
-    ) void {
+    ) Allocator.Error!void {
         switch (value) {
             .load_param => |lp| {
-                self.putLastUseExpanding(lp.name, idx, array_elems);
+                try self.putLastUseExpanding(lp.name, idx, array_elems);
             },
             .load_prop, .get_state_script => {},
             .load_const => |lc| {
                 switch (lc.value) {
                     .string => |s| {
                         if (std.mem.startsWith(u8, s, "@ref:")) {
-                            self.putLastUseExpanding(s[5..], idx, array_elems);
+                            try self.putLastUseExpanding(s[5..], idx, array_elems);
                         }
                     },
                     else => {},
                 }
             },
             .bin_op => |bop| {
-                self.putLastUseExpanding(bop.left, idx, array_elems);
-                self.putLastUseExpanding(bop.right, idx, array_elems);
+                try self.putLastUseExpanding(bop.left, idx, array_elems);
+                try self.putLastUseExpanding(bop.right, idx, array_elems);
             },
             .unary_op => |uop| {
-                self.putLastUseExpanding(uop.operand, idx, array_elems);
+                try self.putLastUseExpanding(uop.operand, idx, array_elems);
             },
             .call => |c| {
                 for (c.args) |arg| {
-                    self.putLastUseExpanding(arg, idx, array_elems);
+                    try self.putLastUseExpanding(arg, idx, array_elems);
                 }
             },
             .method_call => |mc| {
                 if (mc.object.len > 0) {
-                    self.putLastUseExpanding(mc.object, idx, array_elems);
+                    try self.putLastUseExpanding(mc.object, idx, array_elems);
                 }
                 for (mc.args) |arg| {
-                    self.putLastUseExpanding(arg, idx, array_elems);
+                    try self.putLastUseExpanding(arg, idx, array_elems);
                 }
             },
             .@"if" => |ie| {
-                self.putLastUseExpanding(ie.cond, idx, array_elems);
+                try self.putLastUseExpanding(ie.cond, idx, array_elems);
                 for (ie.then) |binding| {
-                    self.scanValueForRefs(binding.value, idx, array_elems);
+                    try self.scanValueForRefs(binding.value, idx, array_elems);
                 }
                 for (ie.@"else") |binding| {
-                    self.scanValueForRefs(binding.value, idx, array_elems);
+                    try self.scanValueForRefs(binding.value, idx, array_elems);
                 }
             },
             .loop => |lp| {
                 for (lp.body) |binding| {
-                    self.scanValueForRefs(binding.value, idx, array_elems);
+                    try self.scanValueForRefs(binding.value, idx, array_elems);
                 }
             },
             .assert => |a| {
-                self.putLastUseExpanding(a.value, idx, array_elems);
+                try self.putLastUseExpanding(a.value, idx, array_elems);
             },
             .update_prop => |up| {
-                self.putLastUseExpanding(up.value, idx, array_elems);
+                try self.putLastUseExpanding(up.value, idx, array_elems);
             },
             .check_preimage => |cp| {
-                self.putLastUseExpanding(cp.preimage, idx, array_elems);
+                try self.putLastUseExpanding(cp.preimage, idx, array_elems);
             },
             .deserialize_state => |ds| {
-                self.putLastUseExpanding(ds.preimage, idx, array_elems);
+                try self.putLastUseExpanding(ds.preimage, idx, array_elems);
             },
             .add_output => |ao| {
                 if (ao.satoshis.len > 0) {
-                    self.putLastUseExpanding(ao.satoshis, idx, array_elems);
+                    try self.putLastUseExpanding(ao.satoshis, idx, array_elems);
                 }
                 if (ao.preimage.len > 0) {
-                    self.putLastUseExpanding(ao.preimage, idx, array_elems);
+                    try self.putLastUseExpanding(ao.preimage, idx, array_elems);
                 }
                 for (ao.state_values) |sv| {
                     if (sv.len > 0) {
-                        self.putLastUseExpanding(sv, idx, array_elems);
+                        try self.putLastUseExpanding(sv, idx, array_elems);
                     }
                 }
                 for (ao.state_refs) |sr| {
                     if (sr.len > 0) {
-                        self.putLastUseExpanding(sr, idx, array_elems);
+                        try self.putLastUseExpanding(sr, idx, array_elems);
                     }
                 }
             },
             .add_raw_output => |aro| {
                 if (aro.satoshis.len > 0) {
-                    self.putLastUseExpanding(aro.satoshis, idx, array_elems);
+                    try self.putLastUseExpanding(aro.satoshis, idx, array_elems);
                 }
                 if (aro.script_bytes.len > 0) {
-                    self.putLastUseExpanding(aro.script_bytes, idx, array_elems);
+                    try self.putLastUseExpanding(aro.script_bytes, idx, array_elems);
                 }
             },
             .add_data_output => |ado| {
                 if (ado.satoshis.len > 0) {
-                    self.putLastUseExpanding(ado.satoshis, idx, array_elems);
+                    try self.putLastUseExpanding(ado.satoshis, idx, array_elems);
                 }
                 if (ado.script_bytes.len > 0) {
-                    self.putLastUseExpanding(ado.script_bytes, idx, array_elems);
+                    try self.putLastUseExpanding(ado.script_bytes, idx, array_elems);
                 }
             },
             .array_literal => {

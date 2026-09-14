@@ -454,7 +454,7 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
         ctor_ctx.diagnostic = diag;
         defer ctor_ctx.deinit();
         for (contract.constructor.params) |param| {
-            if (isByteType(param.type_info)) ctor_ctx.markByteTyped(param.name);
+            if (isByteType(param.type_info)) try ctor_ctx.markByteTyped(param.name);
         }
         try lowerConstructorBody(&ctor_ctx, contract.constructor);
         const bindings = try ctor_ctx.bindings.toOwnedSlice(allocator);
@@ -485,8 +485,8 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
         // Use the method's source location as default for all bindings in the method.
         method_ctx.current_source_loc = method.source_loc;
         for (method.params) |param| {
-            method_ctx.addParam(param.name);
-            if (isByteType(param.type_info)) method_ctx.markByteTyped(param.name);
+            try method_ctx.addParam(param.name);
+            if (isByteType(param.type_info)) try method_ctx.markByteTyped(param.name);
         }
 
         // Issue #123: a non-default @sighash mode drives the OP_PUSH_TX binding
@@ -675,15 +675,15 @@ fn lowerStatefulPublicMethod(
 
     // Register implicit parameters
     if (needs_change_output) {
-        ctx.addParam("_changePKH");
-        ctx.addParam("_changeAmount");
-        ctx.markByteTyped("_changePKH");
+        try ctx.addParam("_changePKH");
+        try ctx.addParam("_changeAmount");
+        try ctx.markByteTyped("_changePKH");
     }
     if (needs_new_amount) {
-        ctx.addParam("_newAmount");
+        try ctx.addParam("_newAmount");
     }
-    ctx.addParam("txPreimage");
-    ctx.markByteTyped("txPreimage");
+    try ctx.addParam("txPreimage");
+    try ctx.markByteTyped("txPreimage");
 
     // Issue #123: the declared per-method sighash mode (default ALL|FORKID).
     // Drives BOTH the OP_PUSH_TX binding flag (so the derived sig re-computes
@@ -780,13 +780,13 @@ fn lowerStatefulPublicMethod(
             .left = change_amount_ref,
             .right = zero_ref,
         } });
-        var change_then_ctx = ctx.subContext();
+        var change_then_ctx = try ctx.subContext();
         _ = try change_then_ctx.emit(.{ .call = .{
             .func = "buildChangeOutput",
             .args = try change_then_ctx.allocSlice(&.{ change_pkh_ref, change_amount_ref }),
         } });
         ctx.syncCounter(&change_then_ctx);
-        var change_else_ctx = ctx.subContext();
+        var change_else_ctx = try ctx.subContext();
         _ = try change_else_ctx.emit(makeLoadConstString(change_else_ctx.allocator, ""));
         ctx.syncCounter(&change_else_ctx);
         const change_if = try ctx.allocator.create(types.ANFIf);
@@ -913,14 +913,14 @@ const MethodScope = struct {
         name: []const u8,
         type_info: RunarType,
         type_name: []const u8,
-    ) void {
+    ) Allocator.Error!void {
         if (self.auto_injected_set.contains(name)) return;
-        self.auto_injected_set.put(allocator, name, {}) catch return;
-        self.auto_injected_params.append(allocator, .{
+        try self.auto_injected_set.put(allocator, name, {});
+        try self.auto_injected_params.append(allocator, .{
             .name = name,
             .type_info = type_info,
             .type_name = type_name,
-        }) catch {};
+        });
     }
 
     fn deinit(self: *MethodScope, allocator: Allocator) void {
@@ -1021,40 +1021,40 @@ const LowerCtx = struct {
         try self.bindings.append(self.allocator, ANFBinding{ .name = name, .value = value, .source_loc = self.current_source_loc });
     }
 
-    fn addLocal(self: *LowerCtx, name: []const u8) void {
-        self.local_names.put(self.allocator, name, {}) catch {};
+    fn addLocal(self: *LowerCtx, name: []const u8) Allocator.Error!void {
+        try self.local_names.put(self.allocator, name, {});
     }
 
     fn isLocal(self: *const LowerCtx, name: []const u8) bool {
         return self.local_names.get(name) != null;
     }
 
-    fn addParam(self: *LowerCtx, name: []const u8) void {
-        self.param_names.put(self.allocator, name, {}) catch {};
+    fn addParam(self: *LowerCtx, name: []const u8) Allocator.Error!void {
+        try self.param_names.put(self.allocator, name, {});
     }
 
-    fn markByteTyped(self: *LowerCtx, name: []const u8) void {
-        self.local_byte_vars.put(self.allocator, name, {}) catch {};
+    fn markByteTyped(self: *LowerCtx, name: []const u8) Allocator.Error!void {
+        try self.local_byte_vars.put(self.allocator, name, {});
     }
 
     fn isParam(self: *const LowerCtx, name: []const u8) bool {
         return self.param_names.get(name) != null;
     }
 
-    fn setLocalAlias(self: *LowerCtx, local_name: []const u8, binding_name: []const u8) void {
-        self.local_aliases.put(self.allocator, local_name, binding_name) catch {};
+    fn setLocalAlias(self: *LowerCtx, local_name: []const u8, binding_name: []const u8) Allocator.Error!void {
+        try self.local_aliases.put(self.allocator, local_name, binding_name);
     }
 
     fn getLocalAlias(self: *const LowerCtx, local_name: []const u8) ?[]const u8 {
         return self.local_aliases.get(local_name);
     }
 
-    fn pushParamAlias(self: *LowerCtx, name: []const u8, alias_ref: []const u8) void {
-        const gop = self.param_alias_stack.getOrPut(self.allocator, name) catch return;
+    fn pushParamAlias(self: *LowerCtx, name: []const u8, alias_ref: []const u8) Allocator.Error!void {
+        const gop = try self.param_alias_stack.getOrPut(self.allocator, name);
         if (!gop.found_existing) {
             gop.value_ptr.* = .empty;
         }
-        gop.value_ptr.append(self.allocator, alias_ref) catch {};
+        try gop.value_ptr.append(self.allocator, alias_ref);
     }
 
     fn popParamAlias(self: *LowerCtx, name: []const u8) void {
@@ -1085,8 +1085,8 @@ const LowerCtx = struct {
         return methodHasAddOutput(m, self.contract) or methodHasAddDataOutput(m, self.contract);
     }
 
-    fn addOutputRef(self: *LowerCtx, ref: []const u8) void {
-        self.add_output_refs.append(self.allocator, ref) catch {};
+    fn addOutputRef(self: *LowerCtx, ref: []const u8) Allocator.Error!void {
+        try self.add_output_refs.append(self.allocator, ref);
     }
 
     fn getAddOutputRefs(self: *const LowerCtx) []const []const u8 {
@@ -1096,8 +1096,8 @@ const LowerCtx = struct {
     /// Track an addDataOutput binding ref — kept separate from state output
     /// refs so the continuation-hash composition can concatenate data
     /// outputs after state outputs and before the change output.
-    fn addDataOutputRef(self: *LowerCtx, ref: []const u8) void {
-        self.add_data_output_refs.append(self.allocator, ref) catch {};
+    fn addDataOutputRef(self: *LowerCtx, ref: []const u8) Allocator.Error!void {
+        try self.add_data_output_refs.append(self.allocator, ref);
     }
 
     fn getAddDataOutputRefs(self: *const LowerCtx) []const []const u8 {
@@ -1111,7 +1111,7 @@ const LowerCtx = struct {
         return false;
     }
 
-    fn subContext(self: *LowerCtx) LowerCtx {
+    fn subContext(self: *LowerCtx) Allocator.Error!LowerCtx {
         var sub = LowerCtx.init(self.allocator, self.contract);
         sub.counter = self.counter;
         // #123: nested manual checkPreimage inherits the method's mode.
@@ -1128,22 +1128,22 @@ const LowerCtx = struct {
         // Copy local names
         var local_it = self.local_names.iterator();
         while (local_it.next()) |entry| {
-            sub.local_names.put(self.allocator, entry.key_ptr.*, {}) catch {};
+            try sub.local_names.put(self.allocator, entry.key_ptr.*, {});
         }
         // Copy param names
         var param_it = self.param_names.iterator();
         while (param_it.next()) |entry| {
-            sub.param_names.put(self.allocator, entry.key_ptr.*, {}) catch {};
+            try sub.param_names.put(self.allocator, entry.key_ptr.*, {});
         }
         // Copy local aliases
         var alias_it = self.local_aliases.iterator();
         while (alias_it.next()) |entry| {
-            sub.local_aliases.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*) catch {};
+            try sub.local_aliases.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
         // Copy local byte vars
         var byte_it = self.local_byte_vars.iterator();
         while (byte_it.next()) |entry| {
-            sub.local_byte_vars.put(self.allocator, entry.key_ptr.*, {}) catch {};
+            try sub.local_byte_vars.put(self.allocator, entry.key_ptr.*, {});
         }
         // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
         // pushes the caller's argument refs onto the CURRENT context before
@@ -1158,8 +1158,8 @@ const LowerCtx = struct {
         var pa_it = self.param_alias_stack.iterator();
         while (pa_it.next()) |entry| {
             var copy: std.ArrayListUnmanaged([]const u8) = .empty;
-            copy.appendSlice(self.allocator, entry.value_ptr.items) catch {};
-            sub.param_alias_stack.put(self.allocator, entry.key_ptr.*, copy) catch {};
+            try copy.appendSlice(self.allocator, entry.value_ptr.items);
+            try sub.param_alias_stack.put(self.allocator, entry.key_ptr.*, copy);
         }
         return sub;
     }
@@ -1213,8 +1213,8 @@ const LowerCtx = struct {
     /// Record an intent-intrinsic-injected witness param on the per-method
     /// scope, so a call inside a nested block registers where the method's ABI
     /// augmentation will read it.
-    fn recordAutoInjectedParam(self: *LowerCtx, name: []const u8, type_info: RunarType, type_name: []const u8) void {
-        self.methodScope().recordAutoInjectedParam(self.allocator, name, type_info, type_name);
+    fn recordAutoInjectedParam(self: *LowerCtx, name: []const u8, type_info: RunarType, type_name: []const u8) Allocator.Error!void {
+        try self.methodScope().recordAutoInjectedParam(self.allocator, name, type_info, type_name);
     }
 
     /// Allocate a slice of string refs on the arena allocator.
@@ -1373,22 +1373,22 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
     switch (stmt) {
         .const_decl => |decl| {
             const value_ref = try lowerExprToRef(ctx, decl.value);
-            ctx.addLocal(decl.name);
+            try ctx.addLocal(decl.name);
             if (isByteTypedExpr(decl.value, ctx)) {
-                ctx.local_byte_vars.put(ctx.allocator, decl.name, {}) catch {};
+                try ctx.local_byte_vars.put(ctx.allocator, decl.name, {});
             }
             try ctx.emitNamed(decl.name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
         },
         .let_decl => |decl| {
             if (decl.value) |val| {
                 const value_ref = try lowerExprToRef(ctx, val);
-                ctx.addLocal(decl.name);
+                try ctx.addLocal(decl.name);
                 if (isByteTypedExpr(val, ctx)) {
-                    ctx.local_byte_vars.put(ctx.allocator, decl.name, {}) catch {};
+                    try ctx.local_byte_vars.put(ctx.allocator, decl.name, {});
                 }
                 try ctx.emitNamed(decl.name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
-                ctx.addLocal(decl.name);
+                try ctx.addLocal(decl.name);
                 _ = try ctx.emit(makeLoadConstInt(0));
             }
         },
@@ -1451,12 +1451,12 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
     const cond_ref = try lowerExprToRef(ctx, condition);
 
     // Lower then-block
-    var then_ctx = ctx.subContext();
+    var then_ctx = try ctx.subContext();
     try lowerStatementsWithReads(&then_ctx, then_body, reads_after);
     ctx.syncCounter(&then_ctx);
 
     // Lower else-block
-    var else_ctx = ctx.subContext();
+    var else_ctx = try ctx.subContext();
     if (else_body) |eb| {
         try lowerStatementsWithReads(&else_ctx, eb, reads_after);
     }
@@ -1645,9 +1645,9 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
         // was incorrectly forced onto the multi-output path,
         // dropping the canonical state continuation.
         if (branch_has_state_output) {
-            ctx.addOutputRef(if_name);
+            try ctx.addOutputRef(if_name);
         } else {
-            ctx.addDataOutputRef(if_name);
+            try ctx.addDataOutputRef(if_name);
         }
     }
 
@@ -1659,7 +1659,7 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
         const then_last = if_val.then[if_val.then.len - 1];
         const else_last = if_val.@"else"[if_val.@"else".len - 1];
         if (std.mem.eql(u8, then_last.name, else_last.name) and ctx.isLocal(then_last.name)) {
-            ctx.setLocalAlias(then_last.name, if_name);
+            try ctx.setLocalAlias(then_last.name, if_name);
         }
     }
 }
@@ -1836,7 +1836,7 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
         try collectStatementReads(ctx, s, &body_reads);
     }
 
-    var body_ctx = ctx.subContext();
+    var body_ctx = try ctx.subContext();
     try lowerStatementsWithReads(&body_ctx, for_s.body, &body_reads);
     ctx.syncCounter(&body_ctx);
 
@@ -2150,8 +2150,8 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
             else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
         };
         const param_name = try std.fmt.allocPrint(ctx.allocator, "_prevOutScript_{d}", .{idx});
-        ctx.recordAutoInjectedParam(param_name, .byte_string, "ByteString");
-        ctx.addParam(param_name);
+        try ctx.recordAutoInjectedParam(param_name, .byte_string, "ByteString");
+        try ctx.addParam(param_name);
         const witness_ref = try ctx.emit(.{ .load_param = .{ .name = param_name } });
         const expected_hash_ref = try lowerExprToRef(ctx, c.args[1]);
 
@@ -2207,8 +2207,8 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
             else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
         };
 
-        ctx.recordAutoInjectedParam("_serialisedOutputs", .byte_string, "ByteString");
-        ctx.addParam("_serialisedOutputs");
+        try ctx.recordAutoInjectedParam("_serialisedOutputs", .byte_string, "ByteString");
+        try ctx.addParam("_serialisedOutputs");
 
         // Emit the hashOutputs(preimage) check exactly once per method.
         if (!ctx.methodScope().did_emit_hash_outputs_check) {
@@ -2325,7 +2325,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
                 .state_values = if (arg_refs.len > 1) arg_refs[1..] else &.{},
                 .preimage = "",
             } });
-            ctx.addOutputRef(ref);
+            try ctx.addOutputRef(ref);
             return ref;
         }
     }
@@ -2338,7 +2338,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
                 .satoshis = arg_refs[0],
                 .script_bytes = arg_refs[1],
             } });
-            ctx.addOutputRef(ref);
+            try ctx.addOutputRef(ref);
             return ref;
         }
     }
@@ -2353,7 +2353,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
                 .satoshis = arg_refs[0],
                 .script_bytes = arg_refs[1],
             } });
-            ctx.addDataOutputRef(ref);
+            try ctx.addDataOutputRef(ref);
             return ref;
         }
     }
@@ -2427,8 +2427,8 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     var i: usize = 0;
     while (i < n) : (i += 1) {
         const param_name = method.params[i].name;
-        ctx.pushParamAlias(param_name, arg_refs[i]);
-        aliased_params.append(ctx.allocator, param_name) catch {};
+        try ctx.pushParamAlias(param_name, arg_refs[i]);
+        try aliased_params.append(ctx.allocator, param_name);
     }
 
     const start_index = ctx.bindings.items.len;
@@ -2479,11 +2479,11 @@ fn lowerTernaryArm(ctx: *LowerCtx, e: Expression) LowerError!void {
 fn lowerTernaryExpr(ctx: *LowerCtx, t: *const types.Ternary) LowerError![]const u8 {
     const cond_ref = try lowerExprToRef(ctx, t.condition);
 
-    var then_ctx = ctx.subContext();
+    var then_ctx = try ctx.subContext();
     try lowerTernaryArm(&then_ctx, t.then_expr);
     ctx.syncCounter(&then_ctx);
 
-    var else_ctx = ctx.subContext();
+    var else_ctx = try ctx.subContext();
     try lowerTernaryArm(&else_ctx, t.else_expr);
     ctx.syncCounter(&else_ctx);
 
@@ -3947,7 +3947,7 @@ test "explicit this.x resolves to load_prop even when x is a registered param (#
     }
 
     // A method param named `balance` shadows the mutable property `balance`.
-    ctx.addParam("balance");
+    try ctx.addParam("balance");
 
     // Bare identifier `balance` -> load_param (the witness value).
     const id_ref = try lowerIdentifier(&ctx, "balance");
@@ -4317,7 +4317,7 @@ test "sub_context shares counter" {
     try std.testing.expectEqual(@as(u32, 2), ctx.counter);
 
     // Sub-context starts where parent left off
-    var sub = ctx.subContext();
+    var sub = try ctx.subContext();
     const t2 = try sub.freshTemp();
     defer allocator.free(t2);
 
