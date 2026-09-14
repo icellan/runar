@@ -55,19 +55,24 @@ frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`) unless a row says otherwise
 
 ### Examples that exist only under `ts/` (R-195)
 
-Two contract directories have no counterpart in any other tree. Measured, not
+Three contract directories have no counterpart in any other tree. Measured, not
 remembered — `examples/ts/*/` compared against the eight peer trees:
 
 | Directory | Contracts | Why it is TS-only |
 |---|---|---|
 | `companion-verifier/` | `CompanionVerifier`, `AttributedToken` | A two-input CROSS-CONTRACT covenant: two contracts in one directory, spent together in a single transaction. It does not fit the one-contract-per-directory shape the other trees use, and neither `runStatefulSpend` nor the sdk-output driver protocol can compose a two-input spend — see [testing-guide.md](../docs/testing-guide.md) "UNCOVERED", which carries its close plan. The pattern itself is documented in [cross-covenant-pattern.md](../docs/cross-covenant-pattern.md). |
+| `compiler-directives/` | `Directives` | The ONLY one of the three that is TS-only because the other tiers genuinely cannot take it. `@embedAlways` and `@sighash` are read from comments on the `.runar.ts` surface alone, and the other eight parsers REJECT a source carrying either — deliberately, because silently dropping a directive would change DCE or signing semantics without saying so. A `.runar.py` translation of this contract is a parse error by design, so there is nothing to port. Added by R-209, which found both directives had zero example usage anywhere in the repo. |
 | `nested-if-multi-reassign/` | `StackTrackerRepro` | A REGRESSION REPRO for issue #34 (the ANF parameter-type lookup that searched every method's parameters, lowering `1n + x` to OP_CAT instead of OP_ADD). It pins a defect that lived in one pass of one tier; a translation into eight more surfaces would exercise eight more parsers on a contract whose point is what happens AFTER parsing. Its test (added by R-106) asserts the ANF node, a concrete spend, and interpreter/ScriptVM agreement on that spend. |
 
-Neither is TS-only because of anything the OTHER TIERS cannot do. Both compile
-in all seven tiers today from their `.runar.ts` source — verified by compiling
-`CompanionVerifier`, `AttributedToken` and `StackTrackerRepro` with the go,
-rust and java compilers and getting byte-identical hex. What is missing is the
-eight SURFACE translations, not seven tiers of support.
+The first two are NOT TS-only because of anything the other tiers cannot do.
+Both compile in all seven tiers today from their `.runar.ts` source — verified
+by compiling `CompanionVerifier`, `AttributedToken` and `StackTrackerRepro` with
+the go, rust and java compilers and getting byte-identical hex. What is missing
+there is the eight SURFACE translations, not seven tiers of support.
+
+`compiler-directives/` is the exception, and the only entry whose TS-only status
+is permanent: the directives it demonstrates are defined to exist on one
+surface.
 
 `tests/r195-ts-only-examples.test.ts` keeps this list honest: a new
 TypeScript-only example that is not listed here fails the suite.

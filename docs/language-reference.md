@@ -718,6 +718,76 @@ The BSV node default is `DEFAULT_MAX_SCRIPT_SIZE_POLICY_AFTER_GENESIS = 500 * ON
 
 ---
 
+## Compiler Directives
+
+Two comment directives change what the compiler emits. Both are read **only on
+the `.runar.ts` surface** — the other eight parsers reject a source carrying
+either one rather than ignoring it, because silently dropping a directive would
+change signing or dead-code semantics without saying so.
+
+### `@embedAlways`
+
+A readonly property that no method body references is eliminated: its
+`load_prop` is dead, so no constructor slot is emitted and the value never
+reaches the locking script. That is usually what you want, and wrong for
+deploy-time metadata you intend to read back off the script later.
+
+```typescript
+class Directives extends SmartContract {
+  readonly ownerPKH: Addr;
+
+  /** @embedAlways */
+  readonly deployTag: ByteString;
+  ...
+}
+```
+
+Without the directive the compiler emits a warning naming it:
+
+```
+warning: readonly field 'deployTag' is not referenced in any method body
+and was eliminated by DCE; annotate it /** @embedAlways */ to preserve it
+in the on-chain script
+```
+
+The effect is visible in the artifact's `constructorSlots` — the byte offsets
+deploy-time values are spliced into — and **not** in `abi.constructor.params`,
+which lists the declared signature and keeps the parameter either way:
+
+| | `constructorSlots` |
+|---|---|
+| with `@embedAlways` | `["deployTag", "ownerPKH", "ownerPKH"]` |
+| without | `["ownerPKH", "ownerPKH"]` |
+
+So the constructor still takes the argument; the value just never reaches the
+script.
+
+### `@sighash`
+
+A public method's auto-injected covenant — and the preimage the SDK builds for
+it — commits to `ALL|FORKID` (`0x41`) by default. `@sighash` declares a
+different BIP-143 mode for that method alone.
+
+```typescript
+/** @sighash SINGLE|FORKID */
+public spendSingle(sig: Sig, pubKey: PubKey) { ... }
+```
+
+Exactly one base type must appear — `ALL` (`0x01`), `NONE` (`0x02`) or `SINGLE`
+(`0x03`) — and `FORKID` (`0x40`) and `ANYONECANPAY` (`0x80`) are modifiers. The
+combined value is published on the method's ABI entry as `sigHashType`; the
+default is omitted rather than written out, so a method with no directive has no
+`sigHashType` field.
+
+`SINGLE|FORKID` commits to only the output at the same index as the input being
+signed, which is what lets one party fix their own output and leave the rest of
+the transaction open for a counterparty to complete.
+
+Worked example, with both directives and their falsifications:
+[`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/).
+
+---
+
 ## Disallowed Features
 
 The following TypeScript features are explicitly excluded from Rúnar, with rationale:

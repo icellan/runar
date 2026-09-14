@@ -52,9 +52,18 @@ describe('R-195: every TypeScript-only example is documented as one', () => {
     ).toEqual([]);
   });
 
-  it('still finds the two known ones, so the detector is not vacuous', () => {
+  it('still finds the known ones, so the detector is not vacuous', () => {
     // If this ever goes empty because the scan broke, the test above would
     // pass for the wrong reason.
-    expect(tsOnlyExamples()).toEqual(['companion-verifier', 'nested-if-multi-reassign']);
+    //
+    // `compiler-directives` joined the set in R-209: `@embedAlways` and
+    // `@sighash` are read on the `.runar.ts` surface only — the other eight
+    // parsers reject a source carrying either — so unlike the other two its
+    // TS-only status is permanent rather than pending a translation.
+    expect(tsOnlyExamples()).toEqual([
+      'companion-verifier',
+      'compiler-directives',
+      'nested-if-multi-reassign',
+    ]);
   });
 });
