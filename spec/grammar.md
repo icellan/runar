@@ -600,8 +600,16 @@ BuiltinFunction_Hash
     | 'ripemd160'          /* ripemd160(data: ByteString): Ripemd160 */
     | 'hash160'            /* hash160(data: ByteString): Ripemd160 -- SHA-256 then RIPEMD-160 */
     | 'hash256'            /* hash256(data: ByteString): Sha256 -- double SHA-256 */
+    | 'sha256Compress'     /* sha256Compress(state: ByteString, block: ByteString): ByteString */
+    | 'sha256Finalize'     /* sha256Finalize(state: ByteString, remaining: ByteString, msgBitLen: bigint): ByteString */
+    | 'blake3Compress'     /* blake3Compress(state: ByteString, block: ByteString): ByteString */
+    | 'blake3Hash'         /* blake3Hash(data: ByteString): ByteString */
     ;
 ```
+
+`sha256Compress` / `sha256Finalize` expose the SHA-256 compression function so a
+contract can verify a digest over data it never holds in full. BLAKE3 is
+single-block (0–64 B) — see `docs/language-reference.md`.
 
 ### Signature Verification
 
@@ -642,7 +650,28 @@ BuiltinFunction_EC
     | 'ecPointX'           /* ecPointX(p: Point): bigint */
     | 'ecPointY'           /* ecPointY(p: Point): bigint */
     ;
+
+BuiltinFunction_NistEC
+    = 'p256Add'                /* p256Add(a: P256Point, b: P256Point): P256Point */
+    | 'p256Mul'                /* p256Mul(p: P256Point, k: bigint): P256Point */
+    | 'p256MulGen'             /* p256MulGen(k: bigint): P256Point */
+    | 'p256Negate'             /* p256Negate(p: P256Point): P256Point */
+    | 'p256OnCurve'            /* p256OnCurve(p: P256Point): boolean */
+    | 'p256EncodeCompressed'   /* p256EncodeCompressed(p: P256Point): ByteString */
+    | 'p384Add'                /* p384Add(a: P384Point, b: P384Point): P384Point */
+    | 'p384Mul'                /* p384Mul(p: P384Point, k: bigint): P384Point */
+    | 'p384MulGen'             /* p384MulGen(k: bigint): P384Point */
+    | 'p384Negate'             /* p384Negate(p: P384Point): P384Point */
+    | 'p384OnCurve'            /* p384OnCurve(p: P384Point): boolean */
+    | 'p384EncodeCompressed'   /* p384EncodeCompressed(p: P384Point): ByteString */
+    | 'verifyECDSA_P256'       /* verifyECDSA_P256(msgHash: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifyECDSA_P384'       /* verifyECDSA_P384(msgHash: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    ;
 ```
+
+The NIST curves are a separate production because they carry a separate script
+-size warning: a single `verifyECDSA_P256` call exceeds the BSV default
+`maxscriptsizepolicy` on its own. See `docs/language-reference.md`.
 
 ### Byte-String Operations
 
@@ -727,6 +756,13 @@ BuiltinFunction_State
     = 'addOutput'          /* this.addOutput(satoshis: bigint, ...stateValues): void */
     | 'addRawOutput'       /* this.addRawOutput(satoshis: bigint, scriptBytes: ByteString): void */
     | 'addDataOutput'      /* this.addDataOutput(satoshis: bigint, scriptBytes: ByteString): void */
+    | 'buildChangeOutput'  /* buildChangeOutput(changePKH: ByteString, changeAmount: bigint): ByteString */
+    ;
+
+BuiltinFunction_Intent
+    = 'requireOutputP2PKH'      /* requireOutputP2PKH(outputIndex: bigint, pubKeyHash: ByteString, amount: bigint): void */
+    | 'extractPrevOutputScript' /* extractPrevOutputScript(inputIndex: bigint, expectedHash: ByteString): ByteString */
+    | 'currentBlockHeight'      /* currentBlockHeight(): bigint */
     ;
 ```
 
@@ -753,13 +789,57 @@ BuiltinFunction
     | BuiltinFunction_Sig
     | BuiltinFunction_PQ
     | BuiltinFunction_EC
+    | BuiltinFunction_NistEC
     | BuiltinFunction_Bytes
     | BuiltinFunction_Conv
     | BuiltinFunction_Math
     | BuiltinFunction_Preimage
     | BuiltinFunction_State
+    | BuiltinFunction_Intent
     ;
 ```
+
+**What "complete" excludes.** The productions above cover every builtin that is
+part of the Rúnar language in ALL SEVEN tiers. They deliberately do not list the
+EVM/STARK proof-system primitives — BabyBear (`bb*`), KoalaBear (`kb*`), BN254
+(`bn254*`) and Merkle (`merkleRoot*`), 35 names in total — which are **Go-only by
+project policy** (see CLAUDE.md). Those ship Stack-IR codegen in the Go
+reference compiler alone, their fixtures carry an explicit `"compilers": ["go"]`
+allowlist, and they are not a conformance target for the other six tiers. A
+contract that calls one is not portable Rúnar, so the language grammar does not
+define it.
+
+`tests/r200-grammar-lists-every-builtin.test.ts` enforces exactly that split: it
+reads the type checker's own tables and requires every non-Go-only builtin to
+appear here.
+
+**Intent intrinsics.** The three in `BuiltinFunction_Intent` are cross-tier
+compiler intrinsics, not library calls: each lowers to an auto-injected witness
+parameter plus the assertions that bind it to the spending transaction.
+
+`requireOutputP2PKH(i, pubKeyHash, amount)` asserts that output `i` of the
+spending transaction is a standard 34-byte P2PKH paying `amount` to
+`pubKeyHash`. It injects `_serialisedOutputs` and commits it to the preimage's
+`hashOutputs` once per control-flow path. **`i` must be an integer literal**, and
+the byte offsets it reads assume every output in the set is exactly 34 bytes —
+so the type checker refuses a method that also calls `addDataOutput` (a
+variable-length OP_RETURN breaks the stride) or `addOutput` / `addRawOutput` (a
+state-continuation output is never 34 bytes). See R-300.
+
+`extractPrevOutputScript(i, expectedHash)` returns the locking script of the
+transaction's input `i`, injecting `_prevOutScript_<i>` as a witness parameter
+and asserting its hash. **`i` must be an integer literal** — the parameter name
+is built from it at compile time.
+
+`currentBlockHeight()` is a source-level desugar to
+`extractLocktime(this.txPreimage)`, so it is valid only where that preimage
+exists — inside a `StatefulSmartContract` method.
+
+The cross-covenant pattern these compose into is documented in
+[`docs/cross-covenant-pattern.md`](../docs/cross-covenant-pattern.md), and the
+directives that change what a covenant commits to are in
+[`docs/language-reference.md`](../docs/language-reference.md) under "Compiler
+Directives".
 
 ---
 
