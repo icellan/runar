@@ -205,6 +205,21 @@ class _ValidationContext:
                         f"property type 'void' is not valid at {loc.file}:{loc.line}",
                         loc=loc,
                     )
+                else:
+                    # R-246: any other unrecognised primitive name used to fall
+                    # through in silence, while the identical name arriving as a
+                    # CustomType is refused below. One property, two spellings,
+                    # two answers. No parser in this tier produces a
+                    # PrimitiveType with an unknown name today — they all map an
+                    # unrecognised name to CustomType — but validate() takes an
+                    # AST, and a pass that synthesises a property (the
+                    # fixed-array expansion synthesises several) is one refactor
+                    # away from building the node this branch dropped.
+                    self._add_error(
+                        f"unsupported type '{t.name}' in property declaration "
+                        f"at {loc.file}:{loc.line}",
+                        loc=loc,
+                    )
         elif isinstance(t, FixedArrayType):
             if t.length <= 0:
                 self._add_error(
