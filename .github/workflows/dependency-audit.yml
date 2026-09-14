@@ -158,7 +158,17 @@ jobs:
   # Advisory Database's Maven ecosystem — the primary advisory source for
   # JVM dependencies) headlessly, with no API key required.
   #
-  # Both Gradle projects enable dependencyLocking and commit gradle.lockfile.
+  # R-210: EVERY Gradle project in the repo enables dependencyLocking and commits
+  # a gradle.lockfile, and every one of those lockfiles is scanned below. This
+  # comment used to say there were two of them, written when that was true;
+  # there are seven, and the other five had no lock state, so the audit was
+  # scanning 2/7 while describing itself as complete. The exposure was narrower
+  # than that ratio suggests — the five add JUnit on top of a `runar-java` graph
+  # that was already scanned — but a new third-party dependency in any of them
+  # would have been invisible. `tests/r210-gradle-dependency-locking.test.ts`
+  # asserts the invariant, so a project added later is caught rather than
+  # silently unscanned.
+  #
   # With lock state present, Gradle fails any normal build (compile/test in
   # ci.yml) if build.gradle.kts dependency versions change without
   # regenerating the lockfile (`gradle dependencies --write-locks`), so the
@@ -182,6 +192,16 @@ jobs:
         run: osv-scanner scan --lockfile compilers/java/gradle.lockfile
       - name: Scan packages/runar-java
         run: osv-scanner scan --lockfile packages/runar-java/gradle.lockfile
+      - name: Scan integration/java
+        run: osv-scanner scan --lockfile integration/java/gradle.lockfile
+      - name: Scan examples/java
+        run: osv-scanner scan --lockfile examples/java/gradle.lockfile
+      - name: Scan examples/end2end-example/java
+        run: osv-scanner scan --lockfile examples/end2end-example/java/gradle.lockfile
+      - name: Scan conformance/anf-interpreter/drivers/java
+        run: osv-scanner scan --lockfile conformance/anf-interpreter/drivers/java/gradle.lockfile
+      - name: Scan conformance/sdk-output/tools/java-driver
+        run: osv-scanner scan --lockfile conformance/sdk-output/tools/java-driver/gradle.lockfile
 
   # ---------------------------------------------------------------------------
   # Ruby - bundler-audit (rubysec). Runs against every Gemfile in the repo
