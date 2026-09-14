@@ -151,11 +151,11 @@ When adding a new ANF IR node (like `add_output`), update ALL of these:
 - `compilers/python/runar_compiler/frontend/anf_lower.py` — emit the new node
 - `compilers/python/runar_compiler/codegen/stack.py` — add to `collect_refs` + `lower_binding` dispatch
 - `compilers/zig/src/ir/types.zig` — add to ANF value types
-- `compilers/zig/src/frontend/anf_lower.zig` — emit the new node
-- `compilers/zig/src/codegen/stack.zig` — add to `collectRefs` + `lowerBinding` dispatch
-- `compilers/ruby/lib/ir/types.rb` — add to ANF value types
-- `compilers/ruby/lib/frontend/anf_lower.rb` — emit the new node
-- `compilers/ruby/lib/codegen/stack.rb` — add to `collect_refs` + `lower_binding` dispatch
+- `compilers/zig/src/passes/anf_lower.zig` — emit the new node
+- `compilers/zig/src/passes/stack_lower.zig` — add to `collectRefs` + `lowerBinding` dispatch
+- `compilers/ruby/lib/runar_compiler/ir/types.rb` — add to ANF value types
+- `compilers/ruby/lib/runar_compiler/frontend/anf_lower.rb` — emit the new node
+- `compilers/ruby/lib/runar_compiler/codegen/stack.rb` — add to `collect_refs` + `lower_binding` dispatch
 - `compilers/java/src/main/java/runar/compiler/ir/anf/` — add a new ANF node class (e.g. `AddOutput.java`) and add it to the `AnfValue` sealed interface
 - `compilers/java/src/main/java/runar/compiler/passes/AnfLower.java` — emit the new node
 - `compilers/java/src/main/java/runar/compiler/passes/StackLower.java` — handle in the `lowerBinding` dispatch + `collectRefs`
@@ -166,7 +166,7 @@ When adding a new frontend format parser:
 - Add the parser file in `packages/runar-compiler/src/passes/01-parse-{format}.ts`
 - Add dispatch case in `01-parse.ts` based on file extension
 - Export from `packages/runar-compiler/src/index.ts`
-- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`), Rust (`compilers/rust/src/frontend/parser_{format}.rs`), Python (`compilers/python/runar_compiler/frontend/parser_{format}.py`), Zig (`compilers/zig/src/frontend/parser_{format}.zig`), Ruby (`compilers/ruby/lib/frontend/parser_{format}.rb`), and Java (`compilers/java/src/main/java/runar/compiler/frontend/{Format}Parser.java` — the existing Java surface parser is `JavaParser.java`; add a peer for the new format)
+- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`), Rust (`compilers/rust/src/frontend/parser_{format}.rs`), Python (`compilers/python/runar_compiler/frontend/parser_{format}.py`), Zig (`compilers/zig/src/passes/parse_{format}.zig`), Ruby (`compilers/ruby/lib/runar_compiler/frontend/parser_{format}.rb`), and Java (`compilers/java/src/main/java/runar/compiler/frontend/{Format}Parser.java` — the existing Java surface parser is `JavaParser.java`; add a peer for the new format)
 - Add dispatch in Go `ParseSource()`, Rust `parse_source()`, Python `parse_source()`, Zig `parseSource()`, and Ruby `parse_source()`. For Java, add a case in `compilers/java/src/main/java/runar/compiler/Cli.java#compileSource` (or a new `ParserDispatch.java` helper if the cross-format dispatcher has landed by then — today `Cli` calls `JavaParser.parse` directly)
 - Auto-generated constructors MUST include `super()` as the first statement
 - Type names must map to Rúnar primitives (e.g., `int` → `bigint`, `Int` → `bigint`)
@@ -338,7 +338,7 @@ Key SDK concepts:
 - `this.addRawOutput(satoshis, scriptBytes)` creates outputs with arbitrary script bytes (not stateful continuations)
 - OP_CODESEPARATOR is automatically inserted for stateful contracts; artifact includes `codeSeparatorIndex` and `codeSeparatorIndices` fields
 - Post-quantum signature verification (experimental): `verifyWOTS` (one-time, ~10 KB script), `verifySLHDSA_SHA2_*` (6 FIPS 205 parameter sets, 200-900 KB scripts)
-- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/codegen/slh_dsa.zig` (Zig), `compilers/ruby/lib/codegen/slh_dsa.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java` (Java)
-- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python), `compilers/zig/src/codegen/ec.zig` (Zig), `compilers/ruby/lib/codegen/ec.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Ec.java` (Java)
-- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python), `compilers/zig/src/codegen/sha256.zig` (Zig), `compilers/ruby/lib/codegen/sha256.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Sha256.java` (Java)
+- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/passes/helpers/pq_emitters.zig` (Zig), `compilers/ruby/lib/runar_compiler/codegen/slh_dsa.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java` (Java)
+- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python), `compilers/zig/src/passes/helpers/ec_emitters.zig` (Zig), `compilers/ruby/lib/runar_compiler/codegen/ec.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Ec.java` (Java)
+- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python), `compilers/zig/src/passes/helpers/sha256_emitters.zig` (Zig), `compilers/ruby/lib/runar_compiler/codegen/sha256.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Sha256.java` (Java)
 - NIST P-256 / P-384 codegen (`compilers/java/src/main/java/runar/compiler/codegen/P256P384.java`) and Blake3 codegen (`compilers/java/src/main/java/runar/compiler/codegen/Blake3.java`) ship alongside their 6 peer-compiler equivalents. WOTS+ (`Wots.java`) and Rabin (`Rabin.java`) codegen modules also ship for the Java tier.
