@@ -335,6 +335,21 @@ public final class AnfLoader {
      */
     private static int loopCount(Object v) {
         int count = asInt(v, "loop count");
+        // N-117 — the OTHER half of the same bound. `asInt` only rejects a
+        // count whose bitLength exceeds 31, which -3 passes cleanly, and the
+        // ceiling check below is a `>` so it never looks downward. StackLower's
+        // `for (int i = 0; i < count; i++)` then runs zero iterations and the
+        // loop body is silently DELETED from the emitted script — this tier
+        // answered 00009c77 (OP_0 OP_0 OP_NUMEQUAL OP_NIP) for IR whose other
+        // six tiers all refuse it, comparing a constant 0 against a constructor
+        // slot: anyone-can-spend when that slot is 0, unspendable otherwise.
+        //
+        // Go (`compilers/go/ir/loader.go`) checks both bounds and its sentence
+        // is reused here, minus the method / binding names this loader does not
+        // have in scope.
+        if (count < 0) {
+            throw new RuntimeException("has negative loop count " + count);
+        }
         if (count > Loop.MAX_LOOP_COUNT) {
             throw new RuntimeException(
                 "has loop count " + count + " exceeding maximum " + Loop.MAX_LOOP_COUNT
