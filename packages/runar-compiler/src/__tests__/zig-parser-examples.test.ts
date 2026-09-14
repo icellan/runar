@@ -54,6 +54,14 @@ const ZIG_PORT_PENDING: readonly string[] = [
   // Port these alongside that fix.
   'companion-verifier/AttributedToken.runar.zig',
   'companion-verifier/CompanionVerifier.runar.zig',
+  // NOT pending — permanently TS-only, unlike every other entry here. R-209
+  // added this example for the `@embedAlways` and `@sighash` comment
+  // directives, and both are read on the `.runar.ts` surface ALONE: the other
+  // eight parsers REJECT a source carrying either, deliberately, because
+  // silently dropping a directive would change DCE or signing semantics without
+  // saying so. A `.runar.zig` translation is a parse error by design, so there
+  // is nothing to port and nothing to track. See examples/README.md.
+  'compiler-directives/Directives.runar.zig',
 ];
 
 describe('Zig parser: example inventory', () => {
